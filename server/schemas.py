@@ -220,6 +220,20 @@ class ReceiptSettlementRequest(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReceiptCompanyCoverageRequest(BaseModel):
+    """Admin-funded reduction of an unpaid customer's receipt liability.
+
+    The amount is integer USD cents.  This operation deliberately does not
+    represent a customer payment and therefore must not change the receipt's
+    paid/collected provenance.
+    """
+
+    amountMinorUSD: int = Field(gt=0, le=1_000_000_000)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedLastModified: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class AdMutationRequest(BaseModel):
     """Create/update an ad and its receipt funding in one transaction."""
 
@@ -231,7 +245,11 @@ class AdMutationRequest(BaseModel):
 
 
 class AdStopRequest(BaseModel):
-    """Server-authoritative ad stop/re-stop request, expressed in USD cents."""
+    """Server-authoritative ad stop/re-stop request, expressed in USD cents.
+
+    ``spentMinorUSD`` is the operator-confirmed final spend.  For a linked Meta
+    ad it may intentionally differ from the provider's raw ``metaSpendMinor``.
+    """
 
     spentMinorUSD: int = Field(ge=0, le=1_000_000_000)
     customerInformed: bool = False
@@ -394,13 +412,22 @@ class ReceiptSettlementResponse(BaseModel):
     replayed: bool = False
 
 
+class ReceiptCompanyCoverageResponse(BaseModel):
+    coverage: EntityResponse
+    updatedReceipts: list[EntityResponse] = Field(default_factory=list)
+    updatedAds: list[EntityResponse] = Field(default_factory=list)
+    replayed: bool = False
+
+
 class AdMutationResponse(BaseModel):
     ad: EntityResponse
+    updatedReceipts: list[EntityResponse] = Field(default_factory=list)
     replayed: bool = False
 
 
 class AdStopResponse(BaseModel):
     ad: EntityResponse
+    updatedReceipts: list[EntityResponse] = Field(default_factory=list)
     replayed: bool = False
 
 

@@ -56,32 +56,32 @@ function stopAd(id) {
   const customer = state.customers.find(c => c.id === ad.customerId);
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
-  // A Meta-linked ad's spend comes straight from Meta's own synced numbers —
-  // no typing, no guessing; the remaining amount follows automatically. Falls
-  // back to manual entry when the ad is not linked, never synced, uses a
-  // non-USD account, or Meta reports MORE than the recorded budget (that
-  // mismatch must be resolved by editing the ad, not hidden here).
+  // Start with Meta's latest spend when it is trustworthy, but keep the final
+  // amount editable. Meta can continue charging briefly after an ad is paused
+  // and the owner may have a later statement that is more accurate than the
+  // last sync. The amount explicitly saved here is the final accounting value.
   const metaSpendUSD = metaAdRealSpendUSD(ad);
-  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
-  const initialSpentUSD = metaSpendAuto ? metaSpendUSD : currentSpentUSD;
+  const frozenFinalSpendUSD = getFrozenFinalAdSpendUSD(ad);
+  const finalSpendFrozen = frozenFinalSpendUSD !== null;
+  const manualSpentOverride = ad.manualSpentOverride === true;
+  const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
+  const initialSpentUSD = finalSpendFrozen ? frozenFinalSpendUSD : (metaSpendAuto ? metaSpendUSD : currentSpentUSD);
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
   // The checkbox must describe the remainder ACTUALLY on screen. A saved
   // confirmation for a DIFFERENT remainder (a later Meta sync reported more
-  // spend) must not render as "already informed" — and because the Meta value
-  // makes the spend input readonly, the input listener that normally resets
-  // this control can never fire. So decide the honest state up front, exactly
+  // spend) must not render as "already informed". Decide the honest initial
+  // state up front, before the user has a chance to correct the amount, exactly
   // as syncAdCustomerInformedControl would.
   const initialConfirmation = getAdCustomerConfirmationState(ad, initialSpentUSD, adAmountUSD);
   const informedApplies = initialConfirmation.existingConfirmationApplies;
   const staleConfirmation = alreadyInformed && !informedApplies;
   const previousRemaining = isAlreadyStopped ? (adAmountUSD - currentSpentUSD) : 0;
   
-  // Calculate current remaining from receipt allocations
-  let totalAllocated = 0;
-  if (Array.isArray(ad.receiptAllocations)) {
-    totalAllocated = ad.receiptAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
-  }
+  // Count both paid funding and customer-debt funding. mergedPaidAllocations is
+  // only a compatibility mirror of receiptAllocations and must not be counted
+  // a second time.
+  const totalAllocated = getAdCommittedFundingTotalUSD(ad);
   
   const modalHTML = `
     <div id="stop-ad-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
@@ -119,8 +119,8 @@ function stopAd(id) {
           ` : ''}
           
           <div>
-            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              ${isAr ? 'المبلغ المصروف (دولار) *' : 'Amount Spent (USD) *'}
+            <label for="stop-ad-spent" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+              ${isAr ? 'المصروف الفعلي النهائي (دولار) *' : 'Final amount spent (USD) *'}
             </label>
             <input
               type="text"
@@ -128,12 +128,15 @@ function stopAd(id) {
               id="stop-ad-spent"
               value="${initialSpentUSD.toFixed(2)}"
               max="${adAmountUSD}"
-              ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this)"
-              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}"
+              aria-describedby="stop-ad-spent-help"
+              oninput="sanitizeMoneyInput(this)"
+              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500"
               placeholder="0.00"
             />
-            <p class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : 'text-slate-500'}">${metaSpendAuto
-              ? (isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`)
+            <p id="stop-ad-spent-help" class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : (manualSpentOverride ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500')}">${manualSpentOverride
+              ? (isAr ? `هذا هو التصحيح النهائي المحفوظ: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (تعرض Meta الآن $${metaSpendUSD.toFixed(2)}).`}` : `This is the saved final correction: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (Meta currently reports $${metaSpendUSD.toFixed(2)}).`}`)
+              : metaSpendAuto
+              ? (isAr ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه قبل الحفظ إذا كان المبلغ النهائي في Facebook مختلفاً.` : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if Facebook's final amount is different.`)
               : (isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad'))}</p>
           </div>
           
@@ -207,6 +210,7 @@ function stopAd(id) {
   const remainingDisplay = document.getElementById('stop-ad-remaining');
   const informedInput = document.getElementById('stop-ad-customer-informed');
   const informedHelp = document.getElementById('stop-ad-customer-informed-help');
+  const spentHelp = document.getElementById('stop-ad-spent-help');
   
   if (spentInput && spentDisplay && remainingDisplay) {
     spentInput.addEventListener('input', function() {
@@ -221,6 +225,19 @@ function stopAd(id) {
       const remaining = Math.max(adAmountUSD - spent, 0);
       spentDisplay.textContent = '$' + spent.toFixed(2);
       remainingDisplay.textContent = '$' + remaining.toFixed(2);
+      if (metaSpendAuto && spentHelp) {
+        const manuallyCorrected = Math.abs(spent - metaSpendUSD) > 0.005;
+        spentHelp.className = `text-xs mt-1 font-bold ${manuallyCorrected
+          ? 'text-amber-700 dark:text-amber-300'
+          : 'text-blue-700 dark:text-blue-300'}`;
+        spentHelp.textContent = manuallyCorrected
+          ? (isAr
+              ? `تصحيح يدوي: $${spent.toFixed(2)}. أبلغت Meta بمبلغ $${metaSpendUSD.toFixed(2)}، وسيستخدم النظام المبلغ الذي تحفظه للرصيد النهائي.`
+              : `Manual correction: $${spent.toFixed(2)}. Meta reported $${metaSpendUSD.toFixed(2)}; the amount you save will be used for the final balance.`)
+          : (isAr
+              ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه إذا لزم الأمر.`
+              : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). You can correct it if needed.`);
+      }
       const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
       if (informedHelp) {
         informedHelp.textContent = confirmation.existingConfirmationApplies && ad.remainingCustomerInformedAt
@@ -377,9 +394,12 @@ async function confirmStopAd(id, source = 'modal') {
           idempotencyKey: attempt.idempotencyKey,
           expectedLastModified: attempt.expectedLastModified
         });
-        const [savedAd] = applyValidatedServerEntityBatch([
+        const stopEntities = [
+          ...(response.updatedReceipts || []).map(entity => ({ collection: 'receipts', entity })),
           { collection: 'ads', entity: response.ad }
-        ], 'adStop');
+        ];
+        const appliedEntities = applyValidatedServerEntityBatch(stopEntities, 'adStop');
+        const savedAd = appliedEntities[appliedEntities.length - 1];
         if (!savedAd) throw new Error('Invalid ad stop response');
         completeAdStopAttempt(attempt);
         document.getElementById('stop-ad-modal')?.remove();
@@ -549,6 +569,10 @@ async function confirmStopAd(id, source = 'modal') {
   // Update ad status and spent amount
   ad.status = 'Stopped';
   ad.spentUSD = spentUSD;
+  // Local/offline mode mirrors the server contract: once a staff member
+  // explicitly confirms this final amount, future Meta sync values remain a
+  // comparison value and must not silently replace the accounting correction.
+  ad.manualSpentOverride = true;
   if (!ad.stoppedAt) {
     ad.stoppedAt = new Date().toISOString();
   }

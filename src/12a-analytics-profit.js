@@ -36,6 +36,8 @@ function analyticsLocalDateISO(value = new Date()) {
 
 function getAdActualSpendUSD(ad) {
   if (!ad || ad._deleted) return 0;
+  const frozenFinalSpend = getFrozenFinalAdSpendUSD(ad);
+  if (frozenFinalSpend !== null) return frozenFinalSpend;
   const metaMinor = Number(ad.metaSpendMinor);
   if (ad.metaAdId && Number.isFinite(metaMinor) && metaMinor >= 0) {
     return Math.max(0, metaMinor / 100);

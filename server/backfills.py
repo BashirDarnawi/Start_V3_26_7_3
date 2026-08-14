@@ -13,8 +13,31 @@ from sqlalchemy import text
 
 from .db import db_conn, get_engine, json_dumps, json_loads
 from .operations import financial_period_is_closed
+from .startup_financial_scan import active_row_batches
 
 _FALLBACK_LOCK = threading.Lock()
+_BACKFILL_SCAN_BATCH_SIZE = 128
+
+
+def _row_batches(conn: Any, collection: str):
+    yield from active_row_batches(
+        conn,
+        collection,
+        dialect=str(conn.engine.dialect.name or ""),
+        batch_size=_BACKFILL_SCAN_BATCH_SIZE,
+        include_deleted=True,
+    )
+
+
+def _lock_full_row(conn: Any, collection: str, entity_id: str) -> Any | None:
+    postgres = str(conn.engine.dialect.name or "") == "postgresql"
+    return conn.execute(
+        text(
+            "SELECT id,data_json,deleted FROM entities WHERE type=:type AND id=:id"
+            + (" FOR UPDATE" if postgres else "")
+        ),
+        {"type": collection, "id": entity_id},
+    ).mappings().first()
 
 
 def sanitize_str(value, max_length: int = 10000) -> str:
@@ -50,46 +73,110 @@ def backfill_customer_names(sqlite_financial_lock=None) -> int:
     try:
         with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else (sqlite_financial_lock or _FALLBACK_LOCK)), db_conn() as conn:
             customer_names: dict[str, str] = {}
-            for row in conn.execute(
-                text("SELECT id, data_json FROM entities WHERE type = 'customers'")
-            ).mappings().all():
-                cdata = json_loads(row.get("data_json") or "{}") or {}
-                if isinstance(cdata, dict):
-                    nm = cdata.get("name")
-                    if isinstance(nm, str) and nm.strip():
-                        customer_names[str(row["id"])] = sanitize_str(nm)[:120]
+            for batch in _row_batches(conn, "customers"):
+                for row in batch:
+                    cdata = json_loads(row.get("data_json") or "{}") or {}
+                    if isinstance(cdata, dict):
+                        nm = cdata.get("name")
+                        if isinstance(nm, str) and nm.strip():
+                            customer_names[str(row["id"])] = sanitize_str(nm)[:120]
             if not customer_names:
                 return 0
             for etype in ("receipts", "ads"):
-                rows = conn.execute(
-                    text("SELECT id, data_json FROM entities WHERE type = :t" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
-                    {"t": etype},
-                ).mappings().all()
-                for row in rows:
-                    data = json_loads(row.get("data_json") or "{}") or {}
-                    if not isinstance(data, dict):
-                        continue
-                    existing_name = data.get("customerName")
-                    if isinstance(existing_name, str) and existing_name.strip():
-                        continue
-                    cid = sanitize_str(str(data.get("customerId") or ""))[:80]
-                    if not cid:
-                        continue
-                    name = customer_names.get(cid)
-                    if not name:
-                        continue
-                    if financial_period_is_closed(etype, data, conn=conn): continue
-                    data["customerName"] = name
-                    conn.execute(
-                        text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
-                        {"d": json_dumps(data), "t": etype, "id": str(row["id"])},
-                    )
-                    stamped += 1
+                for batch in _row_batches(conn, etype):
+                    for discovery_row in batch:
+                        discovery = json_loads(discovery_row.get("data_json") or "{}") or {}
+                        if not isinstance(discovery, dict):
+                            continue
+                        existing_name = discovery.get("customerName")
+                        if isinstance(existing_name, str) and existing_name.strip():
+                            continue
+                        cid = sanitize_str(str(discovery.get("customerId") or ""))[:80]
+                        if not cid or cid not in customer_names:
+                            continue
+
+                        # The discovery row has inline media stripped. Re-read
+                        # only a genuine candidate under the original lock and
+                        # recheck it before writing, so photos are never erased.
+                        row = _lock_full_row(conn, etype, str(discovery_row["id"]))
+                        if not row:
+                            continue
+                        data = json_loads(row.get("data_json") or "{}") or {}
+                        if not isinstance(data, dict):
+                            continue
+                        existing_name = data.get("customerName")
+                        if isinstance(existing_name, str) and existing_name.strip():
+                            continue
+                        cid = sanitize_str(str(data.get("customerId") or ""))[:80]
+                        name = customer_names.get(cid)
+                        if not name or financial_period_is_closed(etype, data, conn=conn):
+                            continue
+                        data["customerName"] = name
+                        conn.execute(
+                            text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                            {"d": json_dumps(data), "t": etype, "id": str(row["id"])},
+                        )
+                        stamped += 1
         if stamped:
             print(f"[albayan] Backfilled customerName on {stamped} receipts/ads")
     except Exception as e:
         print(f"[albayan] customerName backfill skipped/failed: {type(e).__name__}: {e}")
     return stamped
+
+
+def _retarget_relink_data(data: dict[str, Any]) -> bool:
+    refund_type = str(data.get("refundType") or "")
+    if refund_type and refund_type != "None":
+        return False
+    live_ids = {
+        str(entry.get("receiptId") or "")
+        for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
+        for entry in (data.get(field) or [])
+        if isinstance(entry, dict) and entry.get("receiptId")
+    }
+    live_ids.discard("")
+    if len(live_ids) != 1:
+        return False
+    replacement = next(iter(live_ids))
+    changed = False
+
+    def retarget(rows_value: Any) -> Any:
+        nonlocal changed
+        if not isinstance(rows_value, list):
+            return rows_value
+        result = []
+        for entry in rows_value:
+            if (
+                isinstance(entry, dict)
+                and entry.get("receiptId")
+                and str(entry["receiptId"]) != replacement
+            ):
+                changed = True
+                result.append({**entry, "receiptId": replacement})
+            else:
+                result.append(entry)
+        return result
+
+    for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
+        baseline = data.get(baseline_name)
+        if isinstance(baseline, list):
+            data[baseline_name] = retarget(baseline)
+        elif isinstance(baseline, dict):
+            data[baseline_name] = {
+                key: retarget(value) for key, value in baseline.items()
+            }
+    stop_baseline = data.get("stopAllocationBaseline")
+    if isinstance(stop_baseline, dict):
+        next_baseline = dict(stop_baseline)
+        for key, value in stop_baseline.items():
+            if isinstance(value, list):
+                next_baseline[key] = retarget(value)
+        legacy_id = str(next_baseline.get("dueLegacyReceiptId") or "")
+        if legacy_id and legacy_id != replacement:
+            next_baseline["dueLegacyReceiptId"] = replacement
+            changed = True
+        data["stopAllocationBaseline"] = next_baseline
+    return changed
 
 
 def backfill_relink_baselines(sqlite_financial_lock=None) -> int:
@@ -114,76 +201,31 @@ def backfill_relink_baselines(sqlite_financial_lock=None) -> int:
     repaired = 0
     try:
         with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else (sqlite_financial_lock or _FALLBACK_LOCK)), db_conn() as conn:
-            rows = conn.execute(
-                text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else ""))
-            ).mappings().all()
-            for row in rows:
-                data = json_loads(row.get("data_json") or "{}") or {}
-                if not isinstance(data, dict):
-                    continue
-                if financial_period_is_closed("ads", data, conn=conn): continue
-                refund_type = str(data.get("refundType") or "")
-                if refund_type and refund_type != "None":
-                    continue
-                live_ids = {
-                    str(entry.get("receiptId") or "")
-                    for field in ("receiptAllocations", "dueAllocations", "mergedPaidAllocations")
-                    for entry in (data.get(field) or [])
-                    if isinstance(entry, dict) and entry.get("receiptId")
-                }
-                live_ids.discard("")
-                if len(live_ids) != 1:
-                    continue
-                replacement = next(iter(live_ids))
+            for batch in _row_batches(conn, "ads"):
+                for discovery_row in batch:
+                    discovery = json_loads(discovery_row.get("data_json") or "{}") or {}
+                    if not isinstance(discovery, dict) or not _retarget_relink_data(discovery):
+                        continue
 
-                changed = False
-
-                def _retarget(rows_value: Any) -> Any:
-                    nonlocal changed
-                    if not isinstance(rows_value, list):
-                        return rows_value
-                    out = []
-                    for entry in rows_value:
-                        if (
-                            isinstance(entry, dict)
-                            and entry.get("receiptId")
-                            and str(entry["receiptId"]) != replacement
-                        ):
-                            changed = True
-                            out.append({**entry, "receiptId": replacement})
-                        else:
-                            out.append(entry)
-                    return out
-
-                for baseline_name in ("refundAllocationBaseline", "refundDueBaseline"):
-                    baseline = data.get(baseline_name)
-                    if isinstance(baseline, list):
-                        data[baseline_name] = _retarget(baseline)
-                    elif isinstance(baseline, dict):
-                        data[baseline_name] = {
-                            key: _retarget(value) for key, value in baseline.items()
-                        }
-                stop_baseline = data.get("stopAllocationBaseline")
-                if isinstance(stop_baseline, dict):
-                    next_baseline = dict(stop_baseline)
-                    for key, value in stop_baseline.items():
-                        if isinstance(value, list):
-                            next_baseline[key] = _retarget(value)
-                    legacy_id = str(next_baseline.get("dueLegacyReceiptId") or "")
-                    if legacy_id and legacy_id != replacement:
-                        next_baseline["dueLegacyReceiptId"] = replacement
-                        changed = True
-                    data["stopAllocationBaseline"] = next_baseline
-                if not changed:
-                    continue
-                conn.execute(
-                    text("UPDATE entities SET data_json = :d WHERE type = 'ads' AND id = :id"),
-                    {"d": json_dumps(data), "id": str(row["id"])},
-                )
-                repaired += 1
+                    # Discovery is media-free. Lock and recompute against the
+                    # one authoritative full row before persisting a change.
+                    row = _lock_full_row(conn, "ads", str(discovery_row["id"]))
+                    if not row or bool(row.get("deleted")):
+                        continue
+                    data = json_loads(row.get("data_json") or "{}") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    if not _retarget_relink_data(data):
+                        continue
+                    if financial_period_is_closed("ads", data, conn=conn):
+                        continue
+                    conn.execute(
+                        text("UPDATE entities SET data_json = :d WHERE type = 'ads' AND id = :id"),
+                        {"d": json_dumps(data), "id": str(row["id"])},
+                    )
+                    repaired += 1
         if repaired:
             print(f"[albayan] Retargeted stale relink baselines on {repaired} ads")
     except Exception as e:
         print(f"[albayan] relink-baseline backfill skipped/failed: {type(e).__name__}: {e}")
     return repaired
-

@@ -13,6 +13,7 @@
     "09-api-auth.js",
     "10-live-sync.js",
     "11-routing-cloud.js",
+    "11b-ad-final-spend.js",
     "12-views.js",
     "12c-services-wallet.js",
     "12a-analytics-profit.js",

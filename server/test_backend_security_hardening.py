@@ -2427,7 +2427,7 @@ class TestReceiptAndAdTransactions:
 
         def spend(index):
             try:
-                ad, replayed = _ad_mutation_atomic(
+                ad, _updated_receipts, replayed = _ad_mutation_atomic(
                     actor,
                     AdMutationRequest(
                         action="create",
@@ -2526,6 +2526,163 @@ class TestReceiptAndAdTransactions:
             cookies=actors["admin"],
         )
         assert generic.status_code == 405
+
+    def test_manual_final_spend_survives_later_meta_sync(self, actors):
+        from server.meta_ads import apply_meta_snapshot
+
+        self._customer("fin_manual_spend_customer", actors)
+        self._receipt(
+            "fin_manual_spend_receipt",
+            "fin_manual_spend_customer",
+            25,
+            actors,
+        )
+        created = self._mutate_ad(
+            "fin_manual_spend_ad",
+            "fin-manual-spend-create-001",
+            {
+                "customerId": "fin_manual_spend_customer",
+                "paymentStatus": "paid",
+                "exchangeRate": 5,
+                "receiptAllocations": [
+                    {
+                        "receiptId": "fin_manual_spend_receipt",
+                        "amountUSD": 25,
+                    }
+                ],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        meta_ad_id = "987654321098765"
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='ads' AND id=:id"
+                ),
+                {"id": "fin_manual_spend_ad"},
+            ).mappings().first()
+            assert row is not None
+            linked_data = json.loads(row["data_json"])
+            linked_data.update(
+                {
+                    "metaAdId": meta_ad_id,
+                    "metaAdName": "Manual final spend test",
+                    "metaCurrency": "USD",
+                    "metaSpend": 22.5,
+                    "metaSpendMinor": 2250,
+                    "metaLinkState": "linked",
+                }
+            )
+            linked_version = int(row["last_modified"]) + 1
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='ads' AND id=:id"
+                ),
+                {
+                    "id": "fin_manual_spend_ad",
+                    "data": json_dumps(linked_data),
+                    "modified": linked_version,
+                },
+            )
+
+        stop_payload = {
+            "spentMinorUSD": 2000,
+            "idempotencyKey": "fin-manual-spend-stop-001",
+            "expectedLastModified": linked_version,
+        }
+        stopped = client.post(
+            "/api/ads/fin_manual_spend_ad/stop",
+            json=stop_payload,
+            cookies=actors["admin"],
+        )
+        replay = client.post(
+            "/api/ads/fin_manual_spend_ad/stop",
+            json=stop_payload,
+            cookies=actors["admin"],
+        )
+        assert stopped.status_code == replay.status_code == 200
+        assert replay.json()["replayed"] is True
+        stopped_entity = stopped.json()["ad"]
+        stopped_data = stopped_entity["data"]
+        assert stopped_data["status"] == "Stopped"
+        assert stopped_data["spentUSD"] == 20
+        assert stopped_data["manualSpentOverride"] is True
+        assert stopped_data["finalSpendConfirmedAt"]
+        assert (
+            stopped_data["finalSpendConfirmedBy"]
+            == actors["admin_user"]["id"]
+        )
+        assert stopped_data["finalSpendMetaMinorAtConfirmation"] == 2250
+        assert stopped_data["finalSpendMetaCurrencyAtConfirmation"] == "USD"
+        assert stopped_data["metaSpend"] == 22.5
+        assert stopped_data["metaSpendMinor"] == 2250
+        assert stopped_data["editHistory"][-1]["changes"] == [
+            {
+                "field": "Final Spend (USD)",
+                "from": "$22.50 Meta",
+                "to": "$20.00 manually confirmed",
+            }
+        ]
+        assert (
+            replay.json()["ad"]["data"]["finalSpendConfirmedAt"]
+            == stopped_data["finalSpendConfirmedAt"]
+        )
+        assert (
+            replay.json()["ad"]["data"]["editHistory"]
+            == stopped_data["editHistory"]
+        )
+
+        forged_marker = client.patch(
+            "/api/collections/ads/fin_manual_spend_ad",
+            json={"data": {"manualSpentOverride": False}},
+            cookies=actors["admin"],
+        )
+        assert forged_marker.status_code == 405
+
+        with db_conn() as conn:
+            audit_row = conn.execute(
+                text(
+                    "SELECT metadata_json FROM audit_logs "
+                    "WHERE resource_type='ads' AND resource_id=:id "
+                    "AND action='stop' ORDER BY ts DESC LIMIT 1"
+                ),
+                {"id": "fin_manual_spend_ad"},
+            ).mappings().first()
+        assert audit_row is not None
+        audit_metadata = json.loads(audit_row["metadata_json"])
+        assert audit_metadata["manualSpentOverride"] is True
+        assert audit_metadata["manualDiffersFromMeta"] is True
+        assert audit_metadata["metaSpendAtConfirmation"] == 22.5
+        assert audit_metadata["metaCurrencyAtConfirmation"] == "USD"
+
+        synced, sync_replayed, _changes = apply_meta_snapshot(
+            "fin_manual_spend_ad",
+            {
+                "metaAdId": meta_ad_id,
+                "metaCurrency": "USD",
+                "metaSpend": 24,
+                "metaSpendMinor": 2400,
+                "metaLinkState": "linked",
+                "metaSyncedAt": "2026-08-06T00:00:00Z",
+            },
+            actor_id=None,
+            actor_name="Meta automatic sync",
+            expected_last_modified=stopped_entity["lastModified"],
+            operation_id="fin-manual-spend-sync-001",
+            action="sync",
+        )
+        assert sync_replayed is False
+        synced_data = synced["data"]
+        assert synced_data["metaSpend"] == 24
+        assert synced_data["metaSpendMinor"] == 2400
+        assert synced_data["spentUSD"] == 20
+        assert synced_data["manualSpentOverride"] is True
+        assert synced_data["finalSpendMetaMinorAtConfirmation"] == 2250
+        assert synced_data["finalSpendMetaCurrencyAtConfirmation"] == "USD"
 
     def test_finished_ad_reconciliation_records_customer_notification_once(self, actors):
         self._customer("fin_reconcile_customer", actors)
@@ -3483,6 +3640,1426 @@ class TestReceiptAndAdTransactions:
         assert settled_data["dueAllocations"] == []
         assert settled_data["dueAmountToUseUSD"] == 0
 
+    def test_in_shop_mixed_funding_atomically_grows_zero_value_unpaid_receipt(self, actors):
+        """Only the exact paid-credit shortfall may become new receipt debt."""
+        customer_id = "fin_exact_split_customer"
+        paid_receipt_id = "fin_exact_split_B31"
+        unpaid_receipt_id = "fin_exact_split_B71"
+        ad_id = "fin_exact_split_ad"
+        idempotency_key = "fin-exact-split-create-001"
+        self._customer(customer_id, actors)
+        self._receipt(
+            paid_receipt_id,
+            customer_id,
+            29.48,
+            actors,
+            amountLocal=278.29,
+            exchangeRate=9.44,
+        )
+        unpaid = self._receipt(
+            unpaid_receipt_id,
+            customer_id,
+            0,
+            actors,
+            amountLocal=0,
+            debtAmountUSD=0,
+            debtAmountLocal=0,
+            exchangeRate=9.44,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+        request_data = {
+            "customerId": customer_id,
+            "paymentStatus": "not_paid",
+            "collectionMethod": "in_shop",
+            "exchangeRate": 9.44,
+            "receiptId": unpaid_receipt_id,
+            "receiptAllocations": [
+                {"receiptId": paid_receipt_id, "amountUSD": 29.48}
+            ],
+            "mergedPaidAllocations": [],
+            "dueAllocations": [
+                {"receiptId": unpaid_receipt_id, "amountUSD": 0.52}
+            ],
+            "unpaidReceiptDebtIncrease": {
+                "receiptId": unpaid_receipt_id,
+                "amountUSD": 0.52,
+                "expectedLastModified": unpaid["lastModified"],
+            },
+        }
+
+        created = self._mutate_ad(
+            ad_id, idempotency_key, request_data, actors
+        )
+        assert created.status_code == 200, created.text
+        created_body = created.json()
+        assert created_body["replayed"] is False
+        ad_data = created_body["ad"]["data"]
+        assert ad_data["amountUSD"] == 30.0
+        assert ad_data["amountLocal"] == 283.2
+        assert ad_data["paymentStatus"] == "not_paid"
+        assert ad_data["isPaid"] is False
+        assert ad_data["collectionMethod"] == "in_shop"
+        assert ad_data["receiptId"] == unpaid_receipt_id
+        assert ad_data["fundingReceiptId"] == paid_receipt_id
+        assert ad_data["receiptAllocations"] == [
+            {"receiptId": paid_receipt_id, "amountUSD": 29.48}
+        ]
+        assert ad_data["dueAllocations"] == [
+            {"receiptId": unpaid_receipt_id, "amountUSD": 0.52}
+        ]
+        assert ad_data["dueAmountToUseUSD"] == 0.52
+
+        assert len(created_body["updatedReceipts"]) == 1
+        changed_receipt = created_body["updatedReceipts"][0]
+        assert changed_receipt["id"] == unpaid_receipt_id
+        changed_data = changed_receipt["data"]
+        assert changed_data["amountUSD"] == 0.52
+        assert changed_data["amountLocal"] == 4.91
+        assert changed_data["exchangeRate"] == 9.44
+        assert changed_data["status"] == "Not Paid"
+        assert changed_data["isPaid"] is False
+        assert changed_data["customerId"] == customer_id
+        first_history = list(changed_data.get("editHistory") or [])
+        assert len(first_history) == 1
+
+        persisted = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        )
+        assert persisted.status_code == 200, persisted.text
+        persisted_data = persisted.json()["data"]
+        assert persisted_data["amountUSD"] == 0.52
+        assert persisted_data["amountLocal"] == 4.91
+        assert persisted_data.get("editHistory") == first_history
+
+        # Retrying the exact request must replay the original transaction. It
+        # must not turn $0.52 into $1.04 or append the same history twice.
+        replayed = self._mutate_ad(
+            ad_id, idempotency_key, request_data, actors
+        )
+        assert replayed.status_code == 200, replayed.text
+        replayed_body = replayed.json()
+        assert replayed_body["replayed"] is True
+        assert len(replayed_body["updatedReceipts"]) == 1
+        replayed_receipt = replayed_body["updatedReceipts"][0]
+        assert replayed_receipt["id"] == unpaid_receipt_id
+        assert replayed_receipt["lastModified"] == changed_receipt["lastModified"]
+        assert replayed_receipt["data"]["amountUSD"] == 0.52
+        assert replayed_receipt["data"]["amountLocal"] == 4.91
+        assert replayed_receipt["data"].get("editHistory") == first_history
+
+        after_replay = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        )
+        assert after_replay.status_code == 200, after_replay.text
+        assert after_replay.json()["data"]["amountUSD"] == 0.52
+        assert after_replay.json()["data"].get("editHistory") == first_history
+
+    def test_zero_value_unpaid_receipt_growth_requires_exact_atomic_instruction(self, actors):
+        customer_id = "fin_exact_split_reject_customer"
+        paid_receipt_id = "fin_exact_split_reject_B31"
+        unpaid_receipt_id = "fin_exact_split_reject_B71"
+        self._customer(customer_id, actors)
+        self._receipt(
+            paid_receipt_id,
+            customer_id,
+            29.48,
+            actors,
+            amountLocal=278.29,
+            exchangeRate=9.44,
+        )
+        unpaid = self._receipt(
+            unpaid_receipt_id,
+            customer_id,
+            0,
+            actors,
+            amountLocal=0,
+            debtAmountUSD=0,
+            debtAmountLocal=0,
+            exchangeRate=9.44,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+        base_data = {
+            "customerId": customer_id,
+            "paymentStatus": "not_paid",
+            "collectionMethod": "in_shop",
+            "exchangeRate": 9.44,
+            "receiptId": unpaid_receipt_id,
+            "receiptAllocations": [
+                {"receiptId": paid_receipt_id, "amountUSD": 29.48}
+            ],
+            "mergedPaidAllocations": [],
+            "dueAllocations": [
+                {"receiptId": unpaid_receipt_id, "amountUSD": 0.52}
+            ],
+        }
+
+        missing = self._mutate_ad(
+            "fin_exact_split_missing_instruction_ad",
+            "fin-exact-split-missing-001",
+            base_data,
+            actors,
+        )
+        assert missing.status_code in {400, 409}, missing.text
+
+        after_missing = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        )
+        assert after_missing.status_code == 200, after_missing.text
+        assert after_missing.json()["data"]["amountUSD"] == 0
+        assert after_missing.json()["data"]["amountLocal"] == 0
+        assert not (after_missing.json()["data"].get("editHistory") or [])
+        missing_ad = client.get(
+            "/api/collections/ads/fin_exact_split_missing_instruction_ad",
+            cookies=actors["admin"],
+        )
+        assert missing_ad.status_code == 404
+
+        mismatched_data = {
+            **base_data,
+            "unpaidReceiptDebtIncrease": {
+                "receiptId": unpaid_receipt_id,
+                "amountUSD": 0.51,
+                "expectedLastModified": unpaid["lastModified"],
+            },
+        }
+        mismatched = self._mutate_ad(
+            "fin_exact_split_mismatched_instruction_ad",
+            "fin-exact-split-mismatch-001",
+            mismatched_data,
+            actors,
+        )
+        assert mismatched.status_code in {400, 409}, mismatched.text
+
+        after_mismatch = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        )
+        assert after_mismatch.status_code == 200, after_mismatch.text
+        assert after_mismatch.json()["data"]["amountUSD"] == 0
+        assert after_mismatch.json()["data"]["amountLocal"] == 0
+        assert not (after_mismatch.json()["data"].get("editHistory") or [])
+        mismatched_ad = client.get(
+            "/api/collections/ads/fin_exact_split_mismatched_instruction_ad",
+            cookies=actors["admin"],
+        )
+        assert mismatched_ad.status_code == 404
+
+    def test_reusable_in_shop_receipt_tracks_live_due_and_reconciles_replacement(self, actors):
+        """Server-grown debt follows live due rows, including decreases and moves."""
+        customer_id = "fin_reusable_shop_customer"
+        paid_receipt_id = "fin_reusable_shop_paid"
+        first_unpaid_id = "fin_reusable_shop_unpaid_1"
+        second_unpaid_id = "fin_reusable_shop_unpaid_2"
+        self._customer(customer_id, actors)
+        self._receipt(
+            paid_receipt_id,
+            customer_id,
+            100,
+            actors,
+            amountLocal=944,
+            exchangeRate=9.44,
+        )
+        first_unpaid = self._receipt(
+            first_unpaid_id,
+            customer_id,
+            0,
+            actors,
+            amountLocal=0,
+            debtAmountUSD=0,
+            debtAmountLocal=0,
+            exchangeRate=9.44,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+        second_unpaid = self._receipt(
+            second_unpaid_id,
+            customer_id,
+            0,
+            actors,
+            amountLocal=0,
+            debtAmountUSD=0,
+            debtAmountLocal=0,
+            exchangeRate=9.44,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+
+        def mixed_data(unpaid_id, paid_amount, due_amount, instruction=None):
+            data = {
+                "customerId": customer_id,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 9.44,
+                "receiptId": unpaid_id,
+                "receiptAllocations": [
+                    {"receiptId": paid_receipt_id, "amountUSD": paid_amount}
+                ],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": unpaid_id, "amountUSD": due_amount}
+                ],
+            }
+            if instruction is not None:
+                data["unpaidReceiptDebtIncrease"] = instruction
+            return data
+
+        first_request = mixed_data(
+            first_unpaid_id,
+            29.48,
+            0.52,
+            {
+                "receiptId": first_unpaid_id,
+                "amountUSD": 0.52,
+                "expectedLastModified": first_unpaid["lastModified"],
+            },
+        )
+        first = self._mutate_ad(
+            "fin_reusable_shop_ad_1",
+            "fin-reusable-shop-create-001",
+            first_request,
+            actors,
+        )
+        assert first.status_code == 200, first.text
+        first_body = first.json()
+        assert first_body["ad"]["data"]["amountUSD"] == 30.0
+        assert first_body["updatedReceipts"][0]["data"]["amountUSD"] == 0.52
+        assert first_body["updatedReceipts"][0]["data"]["amountLocal"] == 4.91
+        first_growth_version = first_body["updatedReceipts"][0]["lastModified"]
+        assert len(first_body["updatedReceipts"][0]["data"].get("editHistory") or []) == 1
+
+        first_replay = self._mutate_ad(
+            "fin_reusable_shop_ad_1",
+            "fin-reusable-shop-create-001",
+            first_request,
+            actors,
+        )
+        assert first_replay.status_code == 200, first_replay.text
+        assert first_replay.json()["replayed"] is True
+        assert first_replay.json()["updatedReceipts"][0]["lastModified"] == first_growth_version
+        assert len(first_replay.json()["updatedReceipts"][0]["data"].get("editHistory") or []) == 1
+
+        # A different mutation key is not a replay. Its receipt version must be
+        # current before another $0.75 can be appended to the same debt pot.
+        stale_second_request = mixed_data(
+            first_unpaid_id,
+            9.25,
+            0.75,
+            {
+                "receiptId": first_unpaid_id,
+                "amountUSD": 0.75,
+                "expectedLastModified": first_unpaid["lastModified"],
+            },
+        )
+        stale_second = self._mutate_ad(
+            "fin_reusable_shop_ad_2",
+            "fin-reusable-shop-create-002-stale",
+            stale_second_request,
+            actors,
+        )
+        assert stale_second.status_code == 409, stale_second.text
+        assert client.get(
+            "/api/collections/ads/fin_reusable_shop_ad_2",
+            cookies=actors["admin"],
+        ).status_code == 404
+
+        second_request = mixed_data(
+            first_unpaid_id,
+            9.25,
+            0.75,
+            {
+                "receiptId": first_unpaid_id,
+                "amountUSD": 0.75,
+                "expectedLastModified": first_growth_version,
+            },
+        )
+        second = self._mutate_ad(
+            "fin_reusable_shop_ad_2",
+            "fin-reusable-shop-create-002",
+            second_request,
+            actors,
+        )
+        assert second.status_code == 200, second.text
+        second_body = second.json()
+        assert second_body["ad"]["data"]["amountUSD"] == 10.0
+        cumulative = second_body["updatedReceipts"][0]
+        assert cumulative["data"]["amountUSD"] == 1.27
+        assert cumulative["data"]["amountLocal"] == 11.99
+        assert len(cumulative["data"].get("editHistory") or []) == 2
+        cumulative_version = cumulative["lastModified"]
+
+        second_replay = self._mutate_ad(
+            "fin_reusable_shop_ad_2",
+            "fin-reusable-shop-create-002",
+            second_request,
+            actors,
+        )
+        assert second_replay.status_code == 200, second_replay.text
+        assert second_replay.json()["replayed"] is True
+        assert second_replay.json()["updatedReceipts"][0]["lastModified"] == cumulative_version
+        assert second_replay.json()["updatedReceipts"][0]["data"]["amountUSD"] == 1.27
+        assert len(second_replay.json()["updatedReceipts"][0]["data"].get("editHistory") or []) == 2
+
+        # Adding paid funding reduces the customer's current unpaid debt in the
+        # same transaction; it is not retained as historical reusable credit.
+        reduced = self._mutate_ad(
+            "fin_reusable_shop_ad_2",
+            "fin-reusable-shop-update-002-reduce",
+            mixed_data(first_unpaid_id, 9.75, 0.25),
+            actors,
+            action="update",
+            expectedLastModified=second_body["ad"]["lastModified"],
+        )
+        assert reduced.status_code == 200, reduced.text
+        reduced_receipt = reduced.json()["updatedReceipts"][0]
+        assert reduced_receipt["id"] == first_unpaid_id
+        assert reduced_receipt["data"]["amountUSD"] == 0.77
+        assert reduced_receipt["data"]["amountLocal"] == 7.27
+        assert len(reduced_receipt["data"].get("editHistory") or []) == 3
+        reduced_version = reduced_receipt["lastModified"]
+        assert reduced.json()["ad"]["data"]["amountUSD"] == 10.0
+
+        # A new ad creates new debt again, protected by the receipt version.
+        reused = self._mutate_ad(
+            "fin_reusable_shop_ad_3",
+            "fin-reusable-shop-create-003",
+            mixed_data(
+                first_unpaid_id,
+                4.50,
+                0.50,
+                {
+                    "receiptId": first_unpaid_id,
+                    "amountUSD": 0.50,
+                    "expectedLastModified": reduced_version,
+                },
+            ),
+            actors,
+        )
+        assert reused.status_code == 200, reused.text
+        assert reused.json()["updatedReceipts"][0]["data"]["amountUSD"] == 1.27
+        assert reused.json()["ad"]["data"]["amountUSD"] == 5.0
+        first_after_reuse = client.get(
+            f"/api/collections/receipts/{first_unpaid_id}",
+            cookies=actors["admin"],
+        ).json()
+        assert first_after_reuse["lastModified"] == reused.json()["updatedReceipts"][0]["lastModified"]
+        assert first_after_reuse["data"]["amountUSD"] == 1.27
+        assert len(first_after_reuse["data"].get("editHistory") or []) == 4
+
+        # Replacing the due receipt shrinks the old ledger and grows the new
+        # ledger atomically. Both changed rows are returned and replayed.
+        replacement_request = mixed_data(
+            second_unpaid_id,
+            4.50,
+            0.50,
+            {
+                "receiptId": second_unpaid_id,
+                "amountUSD": 0.50,
+                "expectedLastModified": second_unpaid["lastModified"],
+            },
+        )
+        replaced = self._mutate_ad(
+            "fin_reusable_shop_ad_3",
+            "fin-reusable-shop-update-003-replace",
+            replacement_request,
+            actors,
+            action="update",
+            expectedLastModified=reused.json()["ad"]["lastModified"],
+        )
+        assert replaced.status_code == 200, replaced.text
+        replaced_receipts = {
+            row["id"]: row for row in replaced.json()["updatedReceipts"]
+        }
+        assert set(replaced_receipts) == {first_unpaid_id, second_unpaid_id}
+        released = replaced_receipts[first_unpaid_id]
+        assert released["data"]["amountUSD"] == 0.77
+        assert released["data"]["amountLocal"] == 7.27
+        assert len(released["data"].get("editHistory") or []) == 5
+        replacement = replaced_receipts[second_unpaid_id]
+        assert replacement["id"] == second_unpaid_id
+        assert replacement["data"]["amountUSD"] == 0.50
+        assert replacement["data"]["amountLocal"] == 4.72
+        assert len(replacement["data"].get("editHistory") or []) == 1
+        replacement_version = replacement["lastModified"]
+
+        replaced_replay = self._mutate_ad(
+            "fin_reusable_shop_ad_3",
+            "fin-reusable-shop-update-003-replace",
+            replacement_request,
+            actors,
+            action="update",
+            expectedLastModified=reused.json()["ad"]["lastModified"],
+        )
+        assert replaced_replay.status_code == 200, replaced_replay.text
+        assert replaced_replay.json()["replayed"] is True
+        replay_receipts = {
+            row["id"]: row for row in replaced_replay.json()["updatedReceipts"]
+        }
+        assert replay_receipts[first_unpaid_id]["lastModified"] == released["lastModified"]
+        assert replay_receipts[second_unpaid_id]["lastModified"] == replacement_version
+        assert len(replay_receipts[first_unpaid_id]["data"].get("editHistory") or []) == 5
+        assert len(replay_receipts[second_unpaid_id]["data"].get("editHistory") or []) == 1
+
+        # Fully paying the ad removes its unpaid debt instead of leaving a
+        # reusable historical amount behind.
+        paid_replacement = self._mutate_ad(
+            "fin_reusable_shop_ad_3",
+            "fin-reusable-shop-update-003-paid",
+            {
+                "customerId": customer_id,
+                "paymentStatus": "paid",
+                "collectionMethod": "",
+                "receiptId": "",
+                "receiptAllocations": [
+                    {"receiptId": paid_receipt_id, "amountUSD": 5.0}
+                ],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [],
+                "exchangeRate": 9.44,
+            },
+            actors,
+            action="update",
+            expectedLastModified=replaced.json()["ad"]["lastModified"],
+        )
+        assert paid_replacement.status_code == 200, paid_replacement.text
+        zeroed = paid_replacement.json()["updatedReceipts"][0]
+        assert zeroed["id"] == second_unpaid_id
+        assert zeroed["data"]["amountUSD"] == 0
+        assert zeroed["data"]["amountLocal"] == 0
+        assert len(zeroed["data"].get("editHistory") or []) == 2
+        assert paid_replacement.json()["ad"]["data"]["paymentStatus"] == "paid"
+
+        reused_after_removal = self._mutate_ad(
+            "fin_reusable_shop_ad_4",
+            "fin-reusable-shop-create-004",
+            mixed_data(
+                second_unpaid_id,
+                4.50,
+                0.50,
+                {
+                    "receiptId": second_unpaid_id,
+                    "amountUSD": 0.50,
+                    "expectedLastModified": zeroed["lastModified"],
+                },
+            ),
+            actors,
+        )
+        assert reused_after_removal.status_code == 200, reused_after_removal.text
+        regrown = reused_after_removal.json()["updatedReceipts"][0]
+        assert regrown["id"] == second_unpaid_id
+        assert regrown["data"]["amountUSD"] == 0.50
+        second_after_reuse = client.get(
+            f"/api/collections/receipts/{second_unpaid_id}",
+            cookies=actors["admin"],
+        ).json()
+        assert second_after_reuse["lastModified"] == regrown["lastModified"]
+        assert second_after_reuse["data"]["amountUSD"] == 0.50
+        assert len(second_after_reuse["data"].get("editHistory") or []) == 3
+
+    def test_reusable_unpaid_receipt_preserves_genuine_manual_debt_floor(self, actors):
+        """Only server-grown debt is released when paid funding increases."""
+        customer_id = "fin_manual_debt_floor_customer"
+        paid_receipt_id = "fin_manual_debt_floor_paid"
+        unpaid_receipt_id = "fin_manual_debt_floor_unpaid"
+        ad_id = "fin_manual_debt_floor_ad"
+        self._customer(customer_id, actors)
+        self._receipt(
+            paid_receipt_id,
+            customer_id,
+            100,
+            actors,
+            amountLocal=1000,
+            exchangeRate=10,
+        )
+        unpaid = self._receipt(
+            unpaid_receipt_id,
+            customer_id,
+            20,
+            actors,
+            amountLocal=200,
+            exchangeRate=10,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+
+        def mixed_data(paid_amount, due_amount, instruction=None):
+            data = {
+                "customerId": customer_id,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 10,
+                "receiptId": unpaid_receipt_id,
+                "receiptAllocations": [
+                    {"receiptId": paid_receipt_id, "amountUSD": paid_amount}
+                ],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": unpaid_receipt_id, "amountUSD": due_amount}
+                ],
+            }
+            if instruction is not None:
+                data["unpaidReceiptDebtIncrease"] = instruction
+            return data
+
+        # The receipt already contained $20 of genuine manual debt. A $10 ad
+        # allocation uses that capacity without changing or reclassifying it.
+        created = self._mutate_ad(
+            ad_id,
+            "fin-manual-debt-floor-create-001",
+            mixed_data(5, 10),
+            actors,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["updatedReceipts"] == []
+
+        # Growing live allocations past the manual floor changes only the
+        # exact $5 excess and records the original $20 baseline in history.
+        grown = self._mutate_ad(
+            ad_id,
+            "fin-manual-debt-floor-grow-001",
+            mixed_data(
+                5,
+                25,
+                {
+                    "receiptId": unpaid_receipt_id,
+                    "amountUSD": 5,
+                    "expectedLastModified": unpaid["lastModified"],
+                },
+            ),
+            actors,
+            action="update",
+            expectedLastModified=created.json()["ad"]["lastModified"],
+        )
+        assert grown.status_code == 200, grown.text
+        grown_receipt = grown.json()["updatedReceipts"][0]
+        assert grown_receipt["id"] == unpaid_receipt_id
+        assert grown_receipt["data"]["amountUSD"] == 25
+        assert grown_receipt["data"]["amountLocal"] == 250
+        assert len(grown_receipt["data"].get("editHistory") or []) == 1
+
+        # Adding more paid credit drops live due to $10. The server releases
+        # its $5 growth automatically, but never erases the original $20 debt.
+        reduced = self._mutate_ad(
+            ad_id,
+            "fin-manual-debt-floor-reduce-001",
+            mixed_data(20, 10),
+            actors,
+            action="update",
+            expectedLastModified=grown.json()["ad"]["lastModified"],
+        )
+        assert reduced.status_code == 200, reduced.text
+        reduced_receipt = reduced.json()["updatedReceipts"][0]
+        assert reduced_receipt["id"] == unpaid_receipt_id
+        assert reduced_receipt["data"]["amountUSD"] == 20
+        assert reduced_receipt["data"]["amountLocal"] == 200
+        assert len(reduced_receipt["data"].get("editHistory") or []) == 2
+
+    def test_legacy_helper_overgrowth_repairs_to_live_due_on_next_save(self, actors):
+        """Historical helper growth cannot remain above current allocations."""
+        customer_id = "fin_legacy_overgrowth_customer"
+        paid_receipt_id = "fin_legacy_overgrowth_paid"
+        unpaid_receipt_id = "fin_legacy_overgrowth_unpaid"
+        ad_id = "fin_legacy_overgrowth_ad"
+        self._customer(customer_id, actors)
+        self._receipt(
+            paid_receipt_id,
+            customer_id,
+            100,
+            actors,
+            amountLocal=950,
+            exchangeRate=9.5,
+        )
+        self._receipt(
+            unpaid_receipt_id,
+            customer_id,
+            50.52,
+            actors,
+            amountLocal=479.94,
+            exchangeRate=9.5,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+        mixed_data = {
+            "customerId": customer_id,
+            "paymentStatus": "not_paid",
+            "collectionMethod": "in_shop",
+            "exchangeRate": 9.5,
+            "receiptId": unpaid_receipt_id,
+            "receiptAllocations": [
+                {"receiptId": paid_receipt_id, "amountUSD": 19.86}
+            ],
+            "mergedPaidAllocations": [],
+            "dueAllocations": [
+                {"receiptId": unpaid_receipt_id, "amountUSD": 30.14}
+            ],
+        }
+
+        # First reproduce the legacy state: the live ad only needs $30.14,
+        # while the receipt still contains the helper's historical $50.52.
+        created = self._mutate_ad(
+            ad_id,
+            "fin-legacy-overgrowth-create-001",
+            mixed_data,
+            actors,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["updatedReceipts"] == []
+
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": unpaid_receipt_id},
+            ).mappings().first()
+            legacy = json.loads(row["data_json"])
+            legacy["editHistory"] = [
+                {
+                    "editedAt": "2026-08-04T09:54:58Z",
+                    "editedBy": "System",
+                    "changes": [
+                        {
+                            "field": "Amount (USD)",
+                            "from": "$0.00",
+                            "to": "$50.52",
+                        },
+                        {
+                            "field": "Amount (LYD)",
+                            "from": "0.00 LYD",
+                            "to": "479.94 LYD",
+                        },
+                        {"field": "Funding Ad", "from": "-", "to": ad_id},
+                    ],
+                }
+            ]
+            legacy["editCount"] = 1
+            modified = int(row["last_modified"]) + 1
+            legacy["_lastModified"] = modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {
+                    "data": json_dumps(legacy),
+                    "modified": modified,
+                    "receipt_id": unpaid_receipt_id,
+                },
+            )
+
+        repaired = self._mutate_ad(
+            ad_id,
+            "fin-legacy-overgrowth-repair-001",
+            mixed_data,
+            actors,
+            action="update",
+            expectedLastModified=created.json()["ad"]["lastModified"],
+        )
+        assert repaired.status_code == 200, repaired.text
+        repaired_receipt = repaired.json()["updatedReceipts"][0]
+        assert repaired_receipt["id"] == unpaid_receipt_id
+        assert repaired_receipt["data"]["amountUSD"] == 30.14
+        assert repaired_receipt["data"]["amountLocal"] == 286.33
+        assert len(repaired_receipt["data"].get("editHistory") or []) == 2
+
+    def test_startup_backfill_repairs_exact_b71_overgrowth_once(self, actors):
+        """Boot repair heals the reported B71 $50.52 -> $30.14 state once."""
+        from server.main import backfill_repair_legacy_unpaid_receipt_overgrowth
+
+        customer_id = "fin_b71_startup_customer"
+        receipt_id = "fin_b71_startup_unpaid"
+        ad_ids_and_due = (
+            ("fin_b71_startup_ad_20", 20),
+            ("fin_b71_startup_ad_10", 10),
+            ("fin_b71_startup_ad_014", 0.14),
+        )
+        self._customer(customer_id, actors)
+        self._receipt(
+            receipt_id,
+            customer_id,
+            50.52,
+            actors,
+            amountLocal=479.94,
+            exchangeRate=9.5,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+            serialNumber="B71",
+        )
+        for index, (ad_id, due) in enumerate(ad_ids_and_due, start=1):
+            created = self._mutate_ad(
+                ad_id,
+                f"fin-b71-startup-create-{index:03d}",
+                {
+                    "customerId": customer_id,
+                    "paymentStatus": "not_paid",
+                    "collectionMethod": "in_shop",
+                    "exchangeRate": 9.5,
+                    "receiptId": receipt_id,
+                    "receiptAllocations": [],
+                    "mergedPaidAllocations": [],
+                    "dueAllocations": [
+                        {"receiptId": receipt_id, "amountUSD": due}
+                    ],
+                },
+                actors,
+            )
+            assert created.status_code == 200, created.text
+            assert created.json()["updatedReceipts"] == []
+
+        # Recreate the precise legacy helper history that proves $0 was the
+        # genuine manual baseline while the stored managed total reached $50.52.
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+            legacy = json.loads(row["data_json"])
+            legacy["editHistory"] = [
+                {
+                    "editedAt": "2026-08-04T09:54:58Z",
+                    "editedBy": "System",
+                    "changes": [
+                        {
+                            "field": "Amount (USD)",
+                            "from": "$0.00",
+                            "to": "$50.52",
+                        },
+                        {
+                            "field": "Amount (LYD)",
+                            "from": "0.00 LYD",
+                            "to": "479.94 LYD",
+                        },
+                        {
+                            "field": "Funding Ad",
+                            "from": "-",
+                            "to": ad_ids_and_due[0][0],
+                        },
+                    ],
+                }
+            ]
+            legacy["editCount"] = 1
+            modified = int(row["last_modified"]) + 1
+            legacy["_lastModified"] = modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {
+                    "data": json_dumps(legacy),
+                    "modified": modified,
+                    "receipt_id": receipt_id,
+                },
+            )
+
+        stats = backfill_repair_legacy_unpaid_receipt_overgrowth()
+        assert stats["repaired"] >= 1, stats
+        assert stats["failed"] == 0, stats
+
+        with db_conn() as conn:
+            repaired_row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        repaired = json.loads(repaired_row["data_json"])
+        assert repaired["amountUSD"] == 30.14
+        assert repaired["amountLocal"] == 286.33
+        assert len(repaired.get("editHistory") or []) == 2
+        assert repaired["editHistory"][-1]["editedBy"] == "System startup repair"
+        assert any(
+            change.get("field") == "Debt Reconciliation"
+            for change in repaired["editHistory"][-1]["changes"]
+        )
+
+        # A second startup pass is a byte-for-byte no-op: no version churn,
+        # no duplicate audit entry, and no repeated repair count.
+        second = backfill_repair_legacy_unpaid_receipt_overgrowth()
+        assert second["repaired"] == 0, second
+        assert second["failed"] == 0, second
+        with db_conn() as conn:
+            after_second = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        assert after_second["last_modified"] == repaired_row["last_modified"]
+        assert after_second["data_json"] == repaired_row["data_json"]
+
+    def test_not_paid_in_shop_lyd_create_canonicalizes_debt_not_cash(self, actors):
+        """The receipt form's LYD row describes planned debt, not collected cash."""
+        customer_id = "fin_lyd_debt_create_customer"
+        receipt_id = "fin_lyd_debt_create_receipt"
+        self._customer(customer_id, actors)
+        legacy_row = {
+            "method": "Bank Transfer (LYD)",
+            "amount": 446,
+            "rate": 0,
+            "rate2": 11.15,
+        }
+
+        created = client.post(
+            "/api/collections/receipts",
+            json={
+                "id": receipt_id,
+                "data": {
+                    "recordType": "receipt",
+                    "customerId": customer_id,
+                    "status": "Not Paid",
+                    "isPaid": False,
+                    "deliveryStatus": "Office",
+                    "statusDetail": {"notPaidCollection": "office"},
+                    "paymentMethod": "Bank Transfer (LYD)",
+                    "amountUSD": 40,
+                    "amountLocal": 446,
+                    "exchangeRate": 11.15,
+                    "payments": [legacy_row],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert created.status_code == 200, created.text
+        data = created.json()["data"]
+        assert data["status"] == "Not Paid"
+        assert data["isPaid"] is False
+        assert data["amountUSD"] == 40
+        assert data["amountLocal"] == 446
+        assert data["exchangeRate"] == 11.15
+        assert data["paymentMethod"] == "Bank Transfer (LYD)"
+        assert data["payments"] == []
+        # The API schema uses 0.001 as the normalized zero-rate sentinel for
+        # LYD bank-transfer rows. Canonicalization must preserve what reached
+        # the persistence boundary instead of changing the financial values.
+        assert data["plannedPayments"] == [
+            {**legacy_row, "amount": 446.0, "rate": 0.001}
+        ]
+
+        stored = client.get(
+            f"/api/collections/receipts/{receipt_id}", cookies=actors["admin"]
+        )
+        assert stored.status_code == 200, stored.text
+        assert stored.json()["data"] == data
+
+    def test_not_paid_in_shop_create_rejects_ambiguous_payment_evidence(self, actors):
+        """A math mismatch may be genuine payment evidence and cannot be relabeled."""
+        customer_id = "fin_lyd_ambiguous_create_customer"
+        receipt_id = "fin_lyd_ambiguous_create_receipt"
+        self._customer(customer_id, actors)
+        response = client.post(
+            "/api/collections/receipts",
+            json={
+                "id": receipt_id,
+                "data": {
+                    "recordType": "receipt",
+                    "customerId": customer_id,
+                    "status": "Not Paid",
+                    "isPaid": False,
+                    "deliveryStatus": "Office",
+                    "statusDetail": {"notPaidCollection": "office"},
+                    "paymentMethod": "Bank Transfer (LYD)",
+                    "amountUSD": 40,
+                    "amountLocal": 446,
+                    "exchangeRate": 11.15,
+                    "payments": [
+                        {
+                            "method": "Bank Transfer (LYD)",
+                            "amount": 445,
+                            "rate": 0,
+                            "rate2": 11.15,
+                        }
+                    ],
+                },
+            },
+            cookies=actors["admin"],
+        )
+        assert response.status_code in {409, 422}, response.text
+        missing = client.get(
+            f"/api/collections/receipts/{receipt_id}", cookies=actors["admin"]
+        )
+        assert missing.status_code == 404
+
+    def test_startup_backfill_normalizes_exact_legacy_lyd_plan_once(self, actors):
+        """A generic form collectionDate must not hide the exact legacy #5 plan."""
+        from server.main import backfill_normalize_legacy_unpaid_receipt_payment_plans
+
+        customer_id = "fin_lyd_plan_startup_customer"
+        receipt_id = "fin_lyd_plan_startup_receipt"
+        self._customer(customer_id, actors)
+        self._receipt(
+            receipt_id,
+            customer_id,
+            40,
+            actors,
+            amountLocal=446,
+            exchangeRate=11.15,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+            paymentMethod="Bank Transfer (LYD)",
+        )
+
+        legacy_row = {
+            "method": "Bank Transfer (LYD)",
+            "amount": 446,
+            "rate": 0.001,
+            "rate2": 11.15,
+        }
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+            legacy = json.loads(row["data_json"])
+            legacy["payments"] = [legacy_row]
+            legacy.pop("plannedPayments", None)
+            legacy["collectionDate"] = "2026-08-11T19:58:18Z"
+            legacy.pop("editHistory", None)
+            legacy.pop("editCount", None)
+            modified = int(row["last_modified"]) + 1
+            legacy["_lastModified"] = modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {
+                    "data": json_dumps(legacy),
+                    "modified": modified,
+                    "receipt_id": receipt_id,
+                },
+            )
+
+        first = backfill_normalize_legacy_unpaid_receipt_payment_plans()
+        assert first["repaired"] >= 1, first
+        assert first["failed"] == 0, first
+        with db_conn() as conn:
+            repaired_row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        repaired = json.loads(repaired_row["data_json"])
+        assert repaired["payments"] == []
+        assert repaired["plannedPayments"] == [legacy_row]
+        assert repaired["amountUSD"] == 40
+        assert repaired["amountLocal"] == 446
+        assert repaired["exchangeRate"] == 11.15
+        assert repaired["collectionDate"] == "2026-08-11T19:58:18Z"
+        assert repaired["unpaidPaymentPlanNormalization"]["version"] == "unpaid-in-shop-plan-v1"
+        assert repaired["editHistory"][-1]["editedBy"] == "System startup repair"
+
+        second = backfill_normalize_legacy_unpaid_receipt_payment_plans()
+        assert second["repaired"] == 0, second
+        assert second["failed"] == 0, second
+        with db_conn() as conn:
+            after_second = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        assert after_second["last_modified"] == repaired_row["last_modified"]
+        assert after_second["data_json"] == repaired_row["data_json"]
+
+    def test_startup_backfill_preserves_ambiguous_legacy_lyd_payment(self, actors):
+        """A mismatched legacy row may be real payment evidence and stays untouched."""
+        from server.main import backfill_normalize_legacy_unpaid_receipt_payment_plans
+
+        customer_id = "fin_lyd_plan_ambiguous_customer"
+        receipt_id = "fin_lyd_plan_ambiguous_receipt"
+        self._customer(customer_id, actors)
+        self._receipt(
+            receipt_id,
+            customer_id,
+            40,
+            actors,
+            amountLocal=446,
+            exchangeRate=11.15,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+            paymentMethod="Bank Transfer (LYD)",
+        )
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+            legacy = json.loads(row["data_json"])
+            legacy["payments"] = [
+                {
+                    "method": "Bank Transfer (LYD)",
+                    "amount": 445,
+                    "rate": 0.001,
+                    "rate2": 11.15,
+                }
+            ]
+            legacy.pop("plannedPayments", None)
+            legacy.pop("editHistory", None)
+            legacy.pop("editCount", None)
+            modified = int(row["last_modified"]) + 1
+            legacy["_lastModified"] = modified
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data,last_modified=:modified "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {
+                    "data": json_dumps(legacy),
+                    "modified": modified,
+                    "receipt_id": receipt_id,
+                },
+            )
+
+        before_json = json_dumps(legacy)
+        stats = backfill_normalize_legacy_unpaid_receipt_payment_plans()
+        assert stats["repaired"] == 0, stats
+        assert stats["failed"] == 0, stats
+        with db_conn() as conn:
+            after = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        assert after["last_modified"] == modified
+        assert after["data_json"] == before_json
+
+    def test_generic_patch_refuses_unlinked_paid_receipt_to_not_paid(self, actors):
+        """Only the dedicated unsettle action may reverse collected paid money."""
+        customer_id = "fin_paid_plain_patch_customer"
+        receipt_id = "fin_paid_plain_patch_receipt"
+        self._customer(customer_id, actors)
+        paid = self._receipt(
+            receipt_id,
+            customer_id,
+            40,
+            actors,
+            amountLocal=446,
+            exchangeRate=11.15,
+            paymentMethod="Bank Transfer (LYD)",
+            payments=[
+                {
+                    "method": "Bank Transfer (LYD)",
+                    "amount": 446,
+                    "rate": 0,
+                    "rate2": 11.15,
+                }
+            ],
+        )
+        before = paid["data"]
+        patched = client.patch(
+            f"/api/collections/receipts/{receipt_id}",
+            json={
+                "data": {
+                    "status": "Not Paid",
+                    "isPaid": False,
+                    "deliveryStatus": "Office",
+                    "statusDetail": {"notPaidCollection": "office"},
+                },
+                "expectedLastModified": paid["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert patched.status_code == 409, patched.text
+        assert "dedicated receipt debt-conversion action" in patched.text
+        stored = client.get(
+            f"/api/collections/receipts/{receipt_id}", cookies=actors["admin"]
+        )
+        assert stored.status_code == 200, stored.text
+        assert stored.json()["lastModified"] == paid["lastModified"]
+        assert stored.json()["data"] == before
+
+    def test_startup_backfill_preserves_unproven_manual_unpaid_debt(self, actors):
+        """No Funding Ad history means $50.52 may be real manual customer debt."""
+        from server.main import backfill_repair_legacy_unpaid_receipt_overgrowth
+
+        customer_id = "fin_manual_startup_customer"
+        receipt_id = "fin_manual_startup_unpaid"
+        self._customer(customer_id, actors)
+        self._receipt(
+            receipt_id,
+            customer_id,
+            50.52,
+            actors,
+            amountLocal=479.94,
+            exchangeRate=9.5,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+        )
+        created = self._mutate_ad(
+            "fin_manual_startup_ad",
+            "fin-manual-startup-create-001",
+            {
+                "customerId": customer_id,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 9.5,
+                "receiptId": receipt_id,
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": receipt_id, "amountUSD": 30.14}
+                ],
+            },
+            actors,
+        )
+        assert created.status_code == 200, created.text
+
+        with db_conn() as conn:
+            before = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        before_data = json.loads(before["data_json"])
+        assert not any(
+            change.get("field") == "Funding Ad"
+            for event in (before_data.get("editHistory") or [])
+            for change in (event.get("changes") or [])
+        )
+
+        stats = backfill_repair_legacy_unpaid_receipt_overgrowth()
+        assert stats["repaired"] == 0, stats
+        assert stats["failed"] == 0, stats
+        with db_conn() as conn:
+            after = conn.execute(
+                text(
+                    "SELECT data_json,last_modified FROM entities "
+                    "WHERE type='receipts' AND id=:receipt_id"
+                ),
+                {"receipt_id": receipt_id},
+            ).mappings().first()
+        assert after["last_modified"] == before["last_modified"]
+        assert after["data_json"] == before["data_json"]
+        preserved = json.loads(after["data_json"])
+        assert preserved["amountUSD"] == 50.52
+        assert preserved["amountLocal"] == 479.94
+
+    def test_stop_and_restop_reconcile_reusable_unpaid_receipt_to_live_due(self, actors):
+        """A final-spend correction must shrink the helper-managed debt too."""
+        customer_id = "fin_stop_debt_reconcile_customer"
+        paid_receipt_id = "fin_stop_debt_reconcile_paid"
+        unpaid_receipt_id = "fin_stop_debt_reconcile_unpaid"
+        self._customer(customer_id, actors)
+        self._receipt(
+            paid_receipt_id,
+            customer_id,
+            29.48,
+            actors,
+            amountLocal=280.06,
+            exchangeRate=9.5,
+        )
+        unpaid = self._receipt(
+            unpaid_receipt_id,
+            customer_id,
+            0,
+            actors,
+            amountLocal=0,
+            debtAmountUSD=0,
+            debtAmountLocal=0,
+            exchangeRate=9.5,
+            status="Not Paid",
+            isPaid=False,
+            deliveryStatus="Office",
+            statusDetail={"notPaidCollection": "office"},
+            serialNumber="B7104585",
+        )
+
+        def create_due_ad(ad_id, key, due, expected_receipt, paid=0):
+            data = {
+                "customerId": customer_id,
+                "paymentStatus": "not_paid",
+                "collectionMethod": "in_shop",
+                "exchangeRate": 9.5,
+                "receiptId": unpaid_receipt_id,
+                "receiptAllocations": [],
+                "mergedPaidAllocations": [],
+                "dueAllocations": [
+                    {"receiptId": unpaid_receipt_id, "amountUSD": due}
+                ],
+                "unpaidReceiptDebtIncrease": {
+                    "receiptId": unpaid_receipt_id,
+                    "amountUSD": due,
+                    "expectedLastModified": expected_receipt,
+                },
+            }
+            if paid:
+                data["receiptAllocations"] = [
+                    {"receiptId": paid_receipt_id, "amountUSD": paid}
+                ]
+            response = self._mutate_ad(ad_id, key, data, actors)
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        mixed = create_due_ad(
+            "fin_stop_debt_reconcile_mixed",
+            "fin-stop-debt-reconcile-mixed-create-001",
+            0.52,
+            unpaid["lastModified"],
+            paid=29.48,
+        )
+        twenty = create_due_ad(
+            "fin_stop_debt_reconcile_twenty",
+            "fin-stop-debt-reconcile-twenty-create-001",
+            20,
+            mixed["updatedReceipts"][0]["lastModified"],
+        )
+        ten = create_due_ad(
+            "fin_stop_debt_reconcile_ten",
+            "fin-stop-debt-reconcile-ten-create-001",
+            10,
+            twenty["updatedReceipts"][0]["lastModified"],
+        )
+        grown_receipt = ten["updatedReceipts"][0]
+        assert grown_receipt["data"]["amountUSD"] == 30.52
+        assert grown_receipt["data"]["amountLocal"] == 289.94
+
+        stop_payload = {
+            "spentMinorUSD": 2962,
+            "customerInformed": True,
+            "idempotencyKey": "fin-stop-debt-reconcile-stop-001",
+            "expectedLastModified": mixed["ad"]["lastModified"],
+        }
+        stopped = client.post(
+            "/api/ads/fin_stop_debt_reconcile_mixed/stop",
+            json=stop_payload,
+            cookies=actors["admin"],
+        )
+        assert stopped.status_code == 200, stopped.text
+        stopped_data = stopped.json()["ad"]["data"]
+        assert stopped_data["amountUSD"] == 30
+        assert stopped_data["spentUSD"] == 29.62
+        assert stopped_data["receiptAllocations"] == [
+            {"receiptId": paid_receipt_id, "amountUSD": 29.48}
+        ]
+        assert stopped_data["dueAllocations"] == [
+            {"receiptId": unpaid_receipt_id, "amountUSD": 0.14}
+        ]
+        assert stopped_data["stopAllocationBaseline"]["receipt"] == [
+            {"receiptId": paid_receipt_id, "amountUSD": 29.48}
+        ]
+        assert stopped_data["stopAllocationBaseline"]["due"] == [
+            {"receiptId": unpaid_receipt_id, "amountUSD": 0.52}
+        ]
+
+        after_stop = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        )
+        assert after_stop.status_code == 200, after_stop.text
+        after_stop_entity = after_stop.json()
+        assert after_stop_entity["data"]["amountUSD"] == 30.14
+        assert after_stop_entity["data"]["amountLocal"] == 286.33
+        assert stopped.json()["updatedReceipts"] == [after_stop_entity]
+        assert (
+            len(after_stop_entity["data"].get("editHistory") or [])
+            == len(grown_receipt["data"].get("editHistory") or []) + 1
+        )
+
+        # An idempotent retry cannot append another debt reconciliation or
+        # advance the receipt version.
+        replay = client.post(
+            "/api/ads/fin_stop_debt_reconcile_mixed/stop",
+            json=stop_payload,
+            cookies=actors["admin"],
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["replayed"] is True
+        assert replay.json()["updatedReceipts"] == [after_stop_entity]
+        after_replay = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        ).json()
+        assert after_replay["lastModified"] == after_stop_entity["lastModified"]
+        assert after_replay["data"] == after_stop_entity["data"]
+
+        # Re-stopping uses the immutable $30 funding baseline. Increasing and
+        # then decreasing final spend must adjust only this ad's due slice.
+        restopped_up = client.post(
+            "/api/ads/fin_stop_debt_reconcile_mixed/stop",
+            json={
+                "spentMinorUSD": 2980,
+                "customerInformed": True,
+                "idempotencyKey": "fin-stop-debt-reconcile-restop-up-001",
+                "expectedLastModified": stopped.json()["ad"]["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert restopped_up.status_code == 200, restopped_up.text
+        assert restopped_up.json()["ad"]["data"]["amountUSD"] == 30
+        assert restopped_up.json()["ad"]["data"]["spentUSD"] == 29.8
+        after_up = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        ).json()
+        assert after_up["data"]["amountUSD"] == 30.32
+        assert after_up["data"]["amountLocal"] == 288.04
+        assert restopped_up.json()["updatedReceipts"] == [after_up]
+
+        restopped_down = client.post(
+            "/api/ads/fin_stop_debt_reconcile_mixed/stop",
+            json={
+                "spentMinorUSD": 2950,
+                "customerInformed": True,
+                "idempotencyKey": "fin-stop-debt-reconcile-restop-down-001",
+                "expectedLastModified": restopped_up.json()["ad"]["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert restopped_down.status_code == 200, restopped_down.text
+        assert restopped_down.json()["ad"]["data"]["amountUSD"] == 30
+        assert restopped_down.json()["ad"]["data"]["spentUSD"] == 29.5
+        after_down = client.get(
+            f"/api/collections/receipts/{unpaid_receipt_id}",
+            cookies=actors["admin"],
+        ).json()
+        assert after_down["data"]["amountUSD"] == 30.02
+        assert after_down["data"]["amountLocal"] == 285.19
+        assert restopped_down.json()["updatedReceipts"] == [after_down]
+
     def test_mixed_in_shop_reconciliation_releases_debt_before_paid_credit(self, actors):
         self._customer("fin_mixed_stop_customer", actors)
         self._receipt(
@@ -3517,6 +5094,11 @@ class TestReceiptAndAdTransactions:
             actors,
         )
         assert created.status_code == 200, created.text
+        before_receipt = client.get(
+            "/api/collections/receipts/fin_mixed_stop_unpaid",
+            cookies=actors["admin"],
+        ).json()
+        assert not (before_receipt["data"].get("editHistory") or [])
 
         stopped = client.post(
             "/api/ads/fin_mixed_stop_ad/stop",
@@ -3538,6 +5120,17 @@ class TestReceiptAndAdTransactions:
         assert stopped_data["dueAllocations"] == []
         assert stopped_data["dueAmountToUseUSD"] == 0
         assert stopped_data["remainingCustomerInformed"] is True
+        assert stopped.json()["updatedReceipts"] == []
+
+        # This receipt was genuine manual debt, not server-grown debt. The ad
+        # may release its due allocation, but must never erase the $0.37.
+        after_receipt = client.get(
+            "/api/collections/receipts/fin_mixed_stop_unpaid",
+            cookies=actors["admin"],
+        ).json()
+        assert after_receipt["lastModified"] == before_receipt["lastModified"]
+        assert after_receipt["data"] == before_receipt["data"]
+        assert after_receipt["data"]["amountUSD"] == 0.37
 
     def test_unpaid_in_shop_receipt_is_debt_until_exact_paid_settlement(self, actors):
         self._customer("fin_shop_debt_customer", actors)
@@ -7166,8 +8759,8 @@ class TestAdminDeliveryCompletion:
         assert backfill_settle_rowless_driver_receipts() == 0
 
 
-def test_startup_registers_both_healing_backfills():
-    # Deleting either _startup wiring must fail loudly: the money heal runs
+def test_startup_registers_all_healing_backfills():
+    # Deleting any _startup wiring must fail loudly: both money heals run
     # synchronously (DB-only, fast); the Meta page-name pass must run on its
     # own thread so boot can never block on Facebook's network timeouts.
     import inspect
@@ -7176,6 +8769,7 @@ def test_startup_registers_both_healing_backfills():
 
     startup_source = inspect.getsource(main_module._startup)
     assert "backfill_settle_rowless_driver_receipts()" in startup_source
+    assert "backfill_repair_legacy_unpaid_receipt_overgrowth()" in startup_source
     assert "_run_page_name_backfill_quietly" in startup_source
     # Never called inline in the startup hook — that would block boot.
     assert "backfill_placeholder_page_names()" not in startup_source

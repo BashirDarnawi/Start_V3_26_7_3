@@ -267,38 +267,33 @@ function togglePerformanceMode(on) {
 applyPerformanceMode();
 
 // ==========================================
-// WORKSPACE EXPERIENCE MODE
+// WORKSPACE EXPERIENCE
 // ==========================================
-// The same business system serves beginners and power users. "Simple" keeps
-// the everyday search and quick filters visible while advanced filters stay
-// one tap away. "Advanced" keeps every filter expanded. This is deliberately
-// a per-device UI preference: it never changes or migrates business data.
+// Albayan now has one consistent workspace: the complete Advanced view. Keep
+// the compatibility helpers because older cached bundles and inline actions
+// can still call them while a device updates, but never hide business tools.
 const ALBAYAN_EXPERIENCE_MODE_KEY = 'albayan_experience_mode';
 
 function getWorkspaceExperienceMode() {
-  let preference = null;
-  try { preference = localStorage.getItem(ALBAYAN_EXPERIENCE_MODE_KEY); } catch (_) {}
-  return preference === 'advanced' ? 'advanced' : 'simple';
+  return 'advanced';
 }
 
 function isAdvancedWorkspaceMode() {
-  return getWorkspaceExperienceMode() === 'advanced';
+  return true;
 }
 
 function applyWorkspaceExperienceMode() {
-  const advanced = isAdvancedWorkspaceMode();
   try {
+    localStorage.removeItem(ALBAYAN_EXPERIENCE_MODE_KEY);
     if (document.body) {
-      document.body.classList.toggle('workspace-advanced', advanced);
-      document.body.classList.toggle('workspace-simple', !advanced);
+      document.body.classList.add('workspace-advanced');
+      document.body.classList.remove('workspace-simple');
     }
   } catch (_) {}
-  return advanced ? 'advanced' : 'simple';
+  return 'advanced';
 }
 
-function setWorkspaceExperienceMode(mode, options = {}) {
-  const next = mode === 'advanced' ? 'advanced' : 'simple';
-  try { localStorage.setItem(ALBAYAN_EXPERIENCE_MODE_KEY, next); } catch (_) {}
+function setWorkspaceExperienceMode(_mode, options = {}) {
   applyWorkspaceExperienceMode();
 
   // A full shell render refreshes the global header, navigation and every
@@ -309,21 +304,11 @@ function setWorkspaceExperienceMode(mode, options = {}) {
     else if (typeof render === 'function') render();
   }
 
-  if (options.notify !== false && typeof showNotification === 'function' && typeof state !== 'undefined') {
-    const isAr = state.language === 'ar';
-    showNotification(
-      isAr ? 'طريقة عرض مساحة العمل' : 'Workspace View',
-      next === 'advanced'
-        ? (isAr ? 'تم إظهار جميع الأدوات والفلاتر المتقدمة.' : 'All advanced tools and filters are now visible.')
-        : (isAr ? 'تم تفعيل العرض البسيط. الأدوات المتقدمة ما زالت على بُعد ضغطة واحدة.' : 'Simple view is on. Advanced tools remain one tap away.'),
-      'success'
-    );
-  }
-  return next;
+  return 'advanced';
 }
 
 function toggleWorkspaceExperienceMode() {
-  return setWorkspaceExperienceMode(isAdvancedWorkspaceMode() ? 'simple' : 'advanced');
+  return setWorkspaceExperienceMode('advanced');
 }
 
 // Apply before the first app render to avoid controls flashing open and then
@@ -5331,6 +5316,7 @@ const state = {
 
   // Page Filters
   pageSearch: '',
+  pageOwnerFilter: 'all',
   
   // Ad Filters
   adSearch: '',
@@ -6212,10 +6198,12 @@ function migrateOldDataFormats() {
         const isLinkedUnpaidDebt = getAdPaymentState(ad) === 'not_paid'
           && ['driver', 'in_shop'].includes(String(ad.collectionMethod || '').toLowerCase());
         const linkedReceiptId = ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '');
-        if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
+        const hasRecordedSpend = ad.spentUSD !== undefined && ad.spentUSD !== null && ad.spentUSD !== '';
+        const legacyAllocationUSD = Math.max(Number(hasRecordedSpend ? ad.spentUSD : ad.amountUSD) || 0, 0);
+        if (linkedReceiptId && legacyAllocationUSD > 0) {
           ad.receiptAllocations.push({
             receiptId: String(linkedReceiptId),
-            amountUSD: ad.spentUSD || ad.amountUSD || 0
+            amountUSD: legacyAllocationUSD
           });
           changed = true;
         }
@@ -9827,25 +9815,52 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
       throw error;
     }
     const entity = validateServerEntityResponse(collection, entry.entity, `${reason}[${index}]`);
-    return { collection, saved: Security.sanitizeObject(entity.data) };
+    return {
+      collection,
+      saved: Security.sanitizeObject(entity.data),
+      lastModified: Number(entity.lastModified)
+    };
   });
 
-  for (const { collection, saved } of prepared) {
+  const resolved = [];
+  let changed = false;
+  for (const { collection, saved, lastModified } of prepared) {
     const target = state[collection];
     const existingIndex = target.findIndex(row => row && String(row.id) === String(saved.id));
+    const current = existingIndex === -1 ? null : target[existingIndex];
+    const currentLastModified = Number(current?._lastModified);
+    const incomingLastModified = Number.isFinite(lastModified)
+      ? lastModified
+      : Number(saved?._lastModified);
+    const isOlder = current
+      && Number.isFinite(incomingLastModified)
+      && Number.isFinite(currentLastModified)
+      && incomingLastModified < currentLastModified;
+
+    // A slower request can finish after live sync (or another mutation) has
+    // already installed a newer server revision. Never let that delayed reply
+    // roll a repaired receipt/ad back in this tab. Equal revisions remain safe
+    // to apply because idempotent replays may restore omitted inline media.
+    if (isOlder) {
+      resolved.push(current);
+      continue;
+    }
+
     if (existingIndex === -1) target.unshift(saved);
     else target[existingIndex] = saved;
+    resolved.push(saved);
+    changed = true;
     if (_collectionCache[collection]) {
       _collectionCache[collection] = { data: null, timestamp: 0, identity: '' };
     }
     if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(collection);
     markCollectionDirty(collection);
   }
-  if (prepared.length > 0) {
+  if (changed) {
     saveState();
     RenderQueue.schedule(reason);
   }
-  return prepared.map(item => item.saved);
+  return resolved;
 }
 
 async function apiLoadCollectionAll(collection, { forceRefresh = false, includeMedia = false } = {}) {
@@ -10346,8 +10361,25 @@ async function apiMutateAd(payload) {
   const ad = validateServerEntityResponse('ads', response.ad, `${action}.ad`);
   const localAd = (state.ads || []).find(row => row && String(row.id) === String(payload?.adId || ''));
   ad.data = mergeMutationInlineMedia('ads', ad.data, { ...(localAd || {}), ...(payload?.data || {}) });
+  // A Paid + In-Shop or pure unpaid mutation can atomically grow a reusable
+  // unpaid receipt by only the new debt difference. Keep that server-authoritative
+  // receipt result in the same response so the UI never shows the old $0.00
+  // balance after the ad has already committed successfully.
+  const receiptResults = response.updatedReceipts == null ? [] : response.updatedReceipts;
+  if (!Array.isArray(receiptResults)) {
+    const error = new Error('Invalid ad mutation receipt response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedReceipts = receiptResults.map((entity, index) => {
+    const validated = validateServerEntityResponse('receipts', entity, `${action}.updatedReceipts[${index}]`);
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
   return {
     ad,
+    updatedReceipts,
     replayed: response.replayed === true
   };
 }
@@ -10595,8 +10627,25 @@ async function apiStopAd(adId, payload) {
   const ad = validateServerEntityResponse('ads', response.ad, 'stop.ad');
   const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
   ad.data = mergeMutationInlineMedia('ads', ad.data, localAd);
+  // Changing the final spend releases or restores paid and unpaid receipt
+  // funding in the same server transaction. Install those authoritative
+  // receipt envelopes with the ad so the receipt cards never keep showing the
+  // balance from before the stop/reconciliation save.
+  const receiptResults = response.updatedReceipts == null ? [] : response.updatedReceipts;
+  if (!Array.isArray(receiptResults)) {
+    const error = new Error('Invalid ad stop receipt response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedReceipts = receiptResults.map((entity, index) => {
+    const validated = validateServerEntityResponse('receipts', entity, `stop.updatedReceipts[${index}]`);
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
   return {
     ad,
+    updatedReceipts,
     replayed: response.replayed === true
   };
 }
@@ -13929,7 +13978,6 @@ function getCommandPaletteBaseCommands() {
   }
 
   commands.push(
-    { id: 'workspace-mode', label: isAdvancedWorkspaceMode() ? (isAr ? 'استخدام العرض البسيط' : 'Use Simple view') : (isAr ? 'استخدام العرض المتقدم' : 'Use Advanced view'), icon: isAdvancedWorkspaceMode() ? 'sparkles' : 'sliders-horizontal', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleWorkspaceExperienceMode(); } },
     { id: 'dark-mode', label: isAr ? 'تبديل المظهر' : 'Change appearance', icon: 'moon', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleTheme(); } },
     { id: 'language', label: isAr ? 'التبديل إلى الإنجليزية' : 'Switch to Arabic', icon: 'globe', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleLanguage(); } },
     { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Log out', icon: 'log-out', section: isAr ? 'الحساب' : 'Account', action: () => { closeCommandPalette(); handleLogout(); } }
@@ -14364,6 +14412,24 @@ function renderSyncStatus() {
   `;
   
   lucide.createIcons();
+}
+// A saved final ad spend is an accounting fact, while Meta's spend is a live
+// provider reading. Once an ad is terminal (including legacy Stopped records)
+// or a staff member has explicitly confirmed the final amount, later Meta syncs
+// must remain informative only and must not replace the accounting value.
+function hasFrozenFinalAdSpend(ad) {
+  if (!ad || ad._deleted) return false;
+  const rawSpent = ad.spentUSD;
+  if (rawSpent === undefined || rawSpent === null || rawSpent === '') return false;
+  const spentUSD = Number(rawSpent);
+  if (!Number.isFinite(spentUSD) || spentUSD < 0) return false;
+  if (ad.manualSpentOverride === true || !!ad.finalSpendConfirmedAt) return true;
+  const status = String(ad.status || '').trim().toLowerCase();
+  return ['stopped', 'completed', 'canceled', 'cancelled', 'lost', 'archived'].includes(status);
+}
+
+function getFrozenFinalAdSpendUSD(ad) {
+  return hasFrozenFinalAdSpend(ad) ? Math.max(Number(ad.spentUSD), 0) : null;
 }
 // ==========================================
 // VIEW RENDERING FUNCTIONS  
@@ -15643,7 +15709,6 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
 
 function renderWorkspaceTopbar() {
   const isAr = state.language === 'ar';
-  const advanced = isAdvancedWorkspaceMode();
   return `
     <header class="workspace-topbar sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 dark:border-slate-800 dark:bg-slate-950/90">
       <div class="mx-auto flex max-w-7xl items-center gap-4 px-8 py-3">
@@ -15655,10 +15720,6 @@ function renderWorkspaceTopbar() {
           <i data-lucide="search" class="h-4 w-4 text-indigo-500"></i>
           <span class="truncate">${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}</span>
           <kbd>Ctrl K</kbd>
-        </button>
-        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-mode-toggle" title="${isAr ? 'التبديل بين العرض البسيط والمتقدم' : 'Switch between Simple and Advanced view'}">
-          <i data-lucide="${advanced ? 'sliders-horizontal' : 'sparkles'}" class="h-4 w-4"></i>
-          <span>${advanced ? (isAr ? 'متقدم' : 'Advanced') : (isAr ? 'بسيط' : 'Simple')}</span>
         </button>
       </div>
     </header>
@@ -15885,13 +15946,6 @@ function renderSidebar() {
 
         ${renderAlwaysAvailableAccountLinks()}
         
-        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-sidebar-mode w-full min-h-11 flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-bold">
-          <i data-lucide="${isAdvancedWorkspaceMode() ? 'sliders-horizontal' : 'sparkles'}" class="w-4 h-4"></i>
-          <span>${isAdvancedWorkspaceMode()
-            ? (state.language === 'ar' ? 'العرض المتقدم' : 'Advanced view')
-            : (state.language === 'ar' ? 'العرض البسيط' : 'Simple view')}</span>
-        </button>
-
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
@@ -17300,6 +17354,21 @@ function renderReceiptsView() {
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
           const usage = getReceiptUsageStats(receipt, receiptUsageAdIndex);
+          // A Not Paid receipt is customer debt, not paid credit. Use debt
+          // language so mixed paid + unpaid funding is not shown as if both
+          // parts were charged to the customer.
+          const receiptUsageTitle = hasCustomerDebt
+            ? (isArV ? 'الدين المرتبط بالإعلانات من هذا الوصل' : 'Customer debt linked to ads from this receipt')
+            : (isArV ? 'استخدام رصيد الإعلانات من هذا الوصل' : 'Ads credit usage from this receipt');
+          const receiptUsageLabel = hasCustomerDebt
+            ? (isArV ? 'دين الإعلانات' : 'Ad debt')
+            : (isArV ? 'رصيد الإعلانات' : 'Ads credit');
+          const receiptUsedLabel = hasCustomerDebt
+            ? (isArV ? 'مرتبط' : 'linked')
+            : (isArV ? 'مصروف' : 'spent');
+          const receiptRemainingLabel = hasCustomerDebt
+            ? (isArV ? 'غير مخصص' : 'unassigned')
+            : (isArV ? 'متبقي' : 'left');
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
           const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || lastTransfer.toCustomerName || (isArV ? 'غير معروف' : 'Unknown')) : '';
@@ -17307,8 +17376,19 @@ function renderReceiptsView() {
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
           const fxRate = (typeof rawFxRate === 'number' && rawFxRate > 0 && rawFxRate < 1000) ? rawFxRate : 1;
-          const remainingLYD = (usage.remainingUSD || 0) * fxRate;
-          const spentLYD = (usage.usedUSD || 0) * fxRate;
+          // Legacy Driver debt can be linked without allocation rows. In that
+          // case usage.usedUSD intentionally stays zero (it is not paid credit),
+          // but the card must still show the debt that the linked ad represents.
+          const debtFallbackUSD = Array.isArray(collectionTarget.linkedAds) && collectionTarget.linkedAds.length
+            ? Number(collectionTarget.amountUSD || 0)
+            : 0;
+          const displayedUsedUSD = hasCustomerDebt
+            ? (Number(usage.usedUSD || 0) || debtFallbackUSD)
+            : Number(usage.usedUSD || 0);
+          const displayedRemainingUSD = hasCustomerDebt
+            ? Math.max(Number(collectionTarget.amountUSD || 0) - displayedUsedUSD, 0)
+            : Number(usage.remainingUSD || 0);
+          const remainingLYD = displayedRemainingUSD * fxRate;
 
           // Live user name → deleted-user tombstone → the record's own
           // createdByName stamp → Unknown, so the creator's name survives
@@ -17361,9 +17441,9 @@ function renderReceiptsView() {
                       <i data-lucide="user" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium text-slate-700 dark:text-slate-300">${creatorName}</span></span>
                     </span>
-                    <span class="inline-flex items-center gap-1" title="${isArV ? 'استخدام رصيد الإعلانات من هذا الوصل' : 'Ads credit usage from this receipt'}">
+                    <span class="inline-flex items-center gap-1" title="${receiptUsageTitle}">
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
-                      <span>${state.language === 'ar' ? 'رصيد الإعلانات' : 'Ads credit'}: <span class="font-semibold text-emerald-600">$${usage.usedUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'مصروف' : 'spent'} • <span class="font-semibold text-blue-600">$${usage.remainingUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'متبقي' : 'left'} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
+                      <span>${receiptUsageLabel}: <span class="font-semibold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${displayedUsedUSD.toFixed(2)}</span> ${receiptUsedLabel} • <span class="font-semibold text-blue-600">$${displayedRemainingUSD.toFixed(2)}</span> ${receiptRemainingLabel} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
@@ -17627,6 +17707,11 @@ function onPageSearchInput(value) {
   }, 80);
 }
 
+function applyPageOwnerFilter(mode) {
+  state.pageOwnerFilter = mode === 'needs-owner' ? 'needs-owner' : 'all';
+  render();
+}
+
 function updatePagesViewFiltered() {
   if (state.currentView !== 'pages') return;
   const grid = document.getElementById('pages-grid');
@@ -17654,6 +17739,9 @@ function renderPagesView() {
   const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
+  const pageOwnerFilter = state.pageOwnerFilter === 'needs-owner' ? 'needs-owner' : 'all';
+  const pageNeedsOwner = page => getPageCustomerIds(page).length === 0;
+  const needsOwnerCount = allPages.filter(pageNeedsOwner).length;
   // FIRST-wins, matching the Array.find() this replaces in the card loop
   // below (new Map(array.map(...)) would be last-wins). Identical while ids
   // are unique; this only decides which record wins if they ever collide.
@@ -17662,21 +17750,22 @@ function renderPagesView() {
     const key = String(customer.id);
     if (!customersById.has(key)) customersById.set(key, customer);
   });
-  const allFilteredPages = pageSearch
-    ? allPages.filter(page => {
+  const allFilteredPages = allPages.filter(page => {
+        if (pageOwnerFilter === 'needs-owner' && !pageNeedsOwner(page)) return false;
+        if (!pageSearch) return true;
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
         return [page.name, page.category, ownerNames, page.id, page.metaPageId, page.metaPageName]
           .some(value => foldSearchText(value).includes(pageSearch));
-      })
-    : allPages;
+      });
+  const hasPageFilters = !!pageSearch || pageOwnerFilter !== 'all';
   // Reset the reveal limit whenever the SEARCH changes, so a new search starts
   // at its top matches instead of inheriting a huge previous limit. Keyed on
   // the search only: including the result count meant a background Meta sync
   // adding or removing one page silently threw the user back to the first 50
   // rows after they had pressed "Load more" several times.
-  const pagesFilterFingerprint = String(pageSearch);
+  const pagesFilterFingerprint = JSON.stringify([pageSearch, pageOwnerFilter]);
   if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
     _pagesFilterFingerprint = pagesFilterFingerprint;
     _pagesShowLimit = PAGES_PAGE_SIZE;
@@ -17701,7 +17790,7 @@ function renderPagesView() {
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
+          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${hasPageFilters ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${hasPageFilters ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
         <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button type="button" onclick="showPageDuplicates('', this)" class="w-full sm:w-auto min-h-11 border ${duplicatePageGroups.length > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
@@ -17722,15 +17811,22 @@ function renderPagesView() {
           <input id="page-search" type="search" value="${Security.escapeHtml(state.pageSearch || '')}" oninput="onPageSearchInput(this.value)" placeholder="${isAr ? 'ابحث باسم الصفحة أو المالك أو التصنيف...' : 'Search by page, owner or category...'}" autocomplete="off" />
           ${state.pageSearch ? `<button type="button" onclick="state.pageSearch='';render()" aria-label="${isAr ? 'مسح البحث' : 'Clear search'}"><i data-lucide="x" class="h-4 w-4"></i></button>` : ''}
         </div>
+        <div class="smart-filter-chips mt-3" aria-label="${isAr ? 'فلتر مالك الصفحة' : 'Page owner filter'}">
+          <button type="button" onclick="applyPageOwnerFilter('all')" class="smart-filter-chip ${pageOwnerFilter === 'all' ? 'is-active' : ''}" aria-pressed="${pageOwnerFilter === 'all' ? 'true' : 'false'}">${isAr ? 'الكل' : 'All'}</button>
+          <button type="button" onclick="applyPageOwnerFilter('needs-owner')" class="smart-filter-chip ${pageOwnerFilter === 'needs-owner' ? 'is-active is-warning' : ''}" aria-pressed="${pageOwnerFilter === 'needs-owner' ? 'true' : 'false'}">
+            <i data-lucide="user-round-x" class="h-4 w-4"></i>
+            <span>${isAr ? 'يحتاج مالك' : 'Needs owner'} (${needsOwnerCount})</span>
+          </button>
+        </div>
       </div>
 
       <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${pageSearch ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
+        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasPageFilters ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageOwnerFilter === 'needs-owner' && !pageSearch ? (isAr ? 'لا توجد صفحات تحتاج إلى مالك' : 'No pages need an owner') : pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => customersById.get(String(cid)))
             .filter(Boolean);
           const isMetaImportedPage = !!String(p.metaPageId || '').trim();
-          const needsPageOwner = isMetaImportedPage && linkedCustomers.length === 0;
+          const needsPageOwner = pageNeedsOwner(p);
           // Page activity is only authoritative for accounts that can see all
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id, pageSpendIndex) : null;
@@ -19806,14 +19902,21 @@ function getAdReconciliationDisplayState(ad) {
   const hasSavedSpend = ad?.spentUSD !== undefined && ad?.spentUSD !== null && Number.isFinite(parsedSpent);
   const savedSpentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
   const metaSpendUSD = metaAdRealSpendUSD(ad);
-  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
-  const displaySpentUSD = metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null);
+  const frozenFinalSpendUSD = getFrozenFinalAdSpendUSD(ad);
+  const finalSpendFrozen = frozenFinalSpendUSD !== null;
+  const manualSpentOverride = ad?.manualSpentOverride === true;
+  const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
+  const displaySpentUSD = finalSpendFrozen
+    ? frozenFinalSpendUSD
+    : (metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null));
   const informedApplies = displaySpentUSD !== null
     && getAdCustomerConfirmationState(ad, displaySpentUSD, amountUSD).existingConfirmationApplies === true;
   return {
     amountUSD,
     hasSavedSpend,
     savedSpentUSD,
+    finalSpendFrozen,
+    manualSpentOverride,
     metaSpendAuto,
     displaySpentUSD,
     remainingUSD: displaySpentUSD === null ? null : Math.max(amountUSD - displaySpentUSD, 0),
@@ -19849,12 +19952,10 @@ function renderReconciliationView() {
               const safeId = Security.escapeHtml(id);
               const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
               const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
-              // A Meta-linked ad reconciles with Meta's own synced spend —
-              // prefilled and locked, remaining computed automatically.
-              // Manual entry remains for unlinked ads or when Meta reports
-              // more than the recorded budget (a mismatch to fix in the ad).
+              // Start with Meta's synced spend, but keep the final amount
+              // editable. A saved correction remains authoritative later.
               const {
-                amountUSD, hasSavedSpend, metaSpendAuto,
+                amountUSD, hasSavedSpend, finalSpendFrozen, manualSpentOverride, metaSpendAuto,
                 displaySpentUSD, remainingUSD,
                 informedApplies: informed, staleConfirmation
               } = getAdReconciliationDisplayState(ad);
@@ -19915,8 +20016,8 @@ function renderReconciliationView() {
                 <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
                   <div>
                     <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
-                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}" ${canReconcile ? '' : 'disabled'} />
-                    ${metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`}</span></div>` : ''}
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
+                    ${manualSpentOverride ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-amber-700 dark:text-amber-300"><i data-lucide="badge-check" class="h-3 w-3 shrink-0"></i><span>${isAr ? 'هذا هو المصروف النهائي المصحح والمحفوظ. يمكنك تعديله مرة أخرى.' : 'This is the saved corrected final spend. You can edit it again.'}</span></div>` : (metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `معبأ من Meta (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). صححه قبل الحفظ إذا كان المبلغ النهائي مختلفاً.` : `Prefilled from Meta (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if the final amount is different.`}</span></div>` : '')}
                   </div>
                   <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
                     <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
@@ -21137,25 +21238,6 @@ function renderSettingsView() {
         </div>
       </div>
 
-      <!-- Workspace experience -->
-      <div class="glass-panel rounded-2xl p-6">
-        <h2 class="text-xl font-bold mb-2 flex items-center">
-          <i data-lucide="sparkles" class="w-5 h-5 mr-2 text-indigo-500"></i>
-          ${isAr ? 'طريقة عرض مساحة العمل' : 'Workspace experience'}
-        </h2>
-        <p class="mb-4 text-sm text-slate-500">${isAr ? 'العرض البسيط مناسب للعمل اليومي، والعرض المتقدم يُظهر كل الفلاتر والأدوات دائماً. نفس البيانات ونفس الحسابات في الاثنين.' : 'Simple view is best for daily work. Advanced view keeps every filter and tool visible. Both use exactly the same data and calculations.'}</p>
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2" role="group" aria-label="${isAr ? 'اختيار طريقة العرض' : 'Choose workspace experience'}">
-          <button type="button" onclick="setWorkspaceExperienceMode('simple')" class="workspace-experience-choice ${!isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${!isAdvancedWorkspaceMode() ? 'true' : 'false'}">
-            <span class="workspace-experience-icon"><i data-lucide="sparkles" class="h-5 w-5"></i></span>
-            <span class="text-left"><span class="block font-bold">${isAr ? 'بسيط' : 'Simple'}</span><span class="block text-xs text-slate-500">${isAr ? 'الأساسيات أولاً، والمزيد عند الحاجة' : 'Essentials first, more when needed'}</span></span>
-          </button>
-          <button type="button" onclick="setWorkspaceExperienceMode('advanced')" class="workspace-experience-choice ${isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${isAdvancedWorkspaceMode() ? 'true' : 'false'}">
-            <span class="workspace-experience-icon"><i data-lucide="sliders-horizontal" class="h-5 w-5"></i></span>
-            <span class="text-left"><span class="block font-bold">${isAr ? 'متقدم' : 'Advanced'}</span><span class="block text-xs text-slate-500">${isAr ? 'كل الفلاتر والأدوات ظاهرة' : 'All filters and tools stay visible'}</span></span>
-          </button>
-        </div>
-      </div>
-
       <!-- Performance mode (for slow devices) -->
       <div class="glass-panel rounded-2xl p-6">
         <h2 class="text-xl font-bold mb-4 flex items-center">
@@ -21907,6 +21989,8 @@ function analyticsLocalDateISO(value = new Date()) {
 
 function getAdActualSpendUSD(ad) {
   if (!ad || ad._deleted) return 0;
+  const frozenFinalSpend = getFrozenFinalAdSpendUSD(ad);
+  if (frozenFinalSpend !== null) return frozenFinalSpend;
   const metaMinor = Number(ad.metaSpendMinor);
   if (ad.metaAdId && Number.isFinite(metaMinor) && metaMinor >= 0) {
     return Math.max(0, metaMinor / 100);
@@ -31631,7 +31715,14 @@ function receiptExchangeRateForSave(payments, enteredPaymentRows, totalLYD, tota
 // seed; saveReceiptFromModal still drops it from payments[] until money exists.
 function getReceiptFormPayments(receiptData) {
   const data = receiptData && typeof receiptData === 'object' ? receiptData : {};
+  const isPaid = data.status === 'Paid' || data.isPaid === true;
+  const savedPlans = Array.isArray(data.plannedPayments) ? data.plannedPayments : [];
+  // A Not Paid receipt describes how the debt is expected to be collected; it
+  // is not collected cash. Prefer that saved plan when reopening the receipt.
+  if (!isPaid && savedPlans.length > 0) return savedPlans;
   const savedPayments = Array.isArray(data.payments) ? data.payments : [];
+  // Keep older Not Paid receipts editable. Their legacy payment rows are
+  // converted to plannedPayments the next time the receipt is saved.
   if (savedPayments.length > 0) return savedPayments;
 
   const savedMethod = String(data.paymentMethod || '').trim();
@@ -31645,7 +31736,6 @@ function getReceiptFormPayments(receiptData) {
   const statusDetail = data.statusDetail && typeof data.statusDetail === 'object'
     ? data.statusDetail
     : {};
-  const isPaid = data.status === 'Paid' || data.isPaid === true;
 
   return [{
     method,
@@ -32092,6 +32182,13 @@ async function _saveReceiptFromModalInner() {
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
   const status = document.getElementById('receipt-status').value || 'Paid';
+  // Not Paid rows are a collection plan for customer debt, not money already
+  // received. Keeping them separate prevents the ad picker and receipt balance
+  // logic from treating an unpaid bank transfer as collected cash.
+  const plannedPayments = status === 'Not Paid'
+    ? payments.map(payment => ({ ...payment }))
+    : [];
+  const persistedPayments = status === 'Not Paid' ? [] : payments;
   const avgRate = receiptExchangeRateForSave(
     payments,
     enteredPaymentRows,
@@ -32284,7 +32381,7 @@ async function _saveReceiptFromModalInner() {
     if (statusDetail.notPaidCollection === 'delivery') {
       receiptDeliveryStatus = 'Needs Delivery';
       // Get delivery person from the first payment with a delivery person, or from a dedicated field
-      const deliveryPayment = payments.find(p => p.deliveryPersonId);
+      const deliveryPayment = enteredPaymentRows.find(p => p.deliveryPersonId);
       receiptDeliveryPersonId = deliveryPayment?.deliveryPersonId || 
                                 document.getElementById('notpaid-delivery-person')?.value || '';
     } else {
@@ -32299,7 +32396,7 @@ async function _saveReceiptFromModalInner() {
       // Payment already collected by driver; mark as delivered but not necessarily handed to office yet.
       receiptDeliveryStatus = 'Delivered';
       receiptIsReceivedInOffice = false;
-      const deliveryPayment = payments.find(p => p.deliveryPersonId);
+      const deliveryPayment = enteredPaymentRows.find(p => p.deliveryPersonId);
       receiptDeliveryPersonId = statusDetail.paidDeliveryPersonId || deliveryPayment?.deliveryPersonId || '';
     } else {
       receiptDeliveryStatus = 'Office';
@@ -32418,8 +32515,11 @@ async function _saveReceiptFromModalInner() {
     // newly collected, poisoning the liquidity window), an unpaid receipt
     // carries no arrival date at all, and the save that turns it Paid stamps
     // the true payment moment — matching the edit-modal rule in 15-modals.js.
-    collectionDate: (editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''),
-    payments: payments,
+    collectionDate: status === 'Not Paid'
+      ? ''
+      : ((editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
+    plannedPayments: plannedPayments,
+    payments: persistedPayments,
     photos
   };
 
@@ -32449,6 +32549,15 @@ async function _saveReceiptFromModalInner() {
   const customerName = linkedCustomer ? linkedCustomer.name : 'customer';
 
   if (editTarget) {
+    const wasRecordedPaid = String(editTarget.status || '').trim().toLowerCase() === 'paid'
+      || editTarget.isPaid === true;
+    const convertsCollectedReceiptToDebt = wasRecordedPaid && status === 'Not Paid';
+    if (convertsCollectedReceiptToDebt) {
+      const confirmed = window.confirm(isArV
+        ? 'هذا الوصل مسجل كأموال مستلمة. تغييره إلى غير مدفوع سيعكس الدفع إلى دين على العميل، وسيحوّل تمويل الإعلانات المرتبطة بأمان. هل تريد المتابعة؟'
+        : 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?');
+      if (!confirmed) return;
+    }
     // Money already committed cannot be edited away: ads funded from this
     // receipt (including delivery-due funding) plus money transferred to
     // other customers set the floor for the new total. Below it, those
@@ -32494,8 +32603,12 @@ async function _saveReceiptFromModalInner() {
     });
     
     // Track payment changes
-    const oldPayments = oldReceipt.payments || [];
-    const newPayments = receipt.payments || [];
+    const oldPayments = String(oldReceipt.status || '') === 'Not Paid'
+      ? (oldReceipt.plannedPayments || oldReceipt.payments || [])
+      : (oldReceipt.payments || []);
+    const newPayments = status === 'Not Paid'
+      ? (receipt.plannedPayments || [])
+      : (receipt.payments || []);
     if (JSON.stringify(oldPayments) !== JSON.stringify(newPayments)) {
       changes.push({
         field: 'Payments',
@@ -33187,6 +33300,90 @@ function getTempMergeFundingTotalUSD() {
   return Math.round(total * 100) / 100;
 }
 
+// Build one canonical plan for the beginner-facing "paid + unpaid difference"
+// workflow. Keeping this calculation in one place means the preview and the
+// actual action can never disagree about how much is real paid credit and how
+// much must remain as debt on the unpaid receipt.
+function getAdMixedReceiptFundingPlan(customerId) {
+  const cid = String(customerId || '').trim();
+  if (!cid) return { ok: false, reason: 'missing_customer' };
+
+  const requestedRows = (state.tempAdFunding?.allocations || [])
+    .filter(row => row?.receiptId && (parseFloat(row.amountUSD) || 0) > 0);
+  if (!requestedRows.length) return { ok: false, reason: 'missing_paid_rows' };
+
+  let targetTotal = 0;
+  const requestedByReceipt = new Map();
+  for (const requested of requestedRows) {
+    const receiptId = String(requested.receiptId || '').trim();
+    const requestedAmount = Math.round((parseFloat(requested.amountUSD) || 0) * 100) / 100;
+    if (!receiptId || requestedAmount <= 0) continue;
+    targetTotal += requestedAmount;
+
+    const receipt = state.receipts.find(
+      row => row && !row._deleted && String(row.id || '') === receiptId
+    );
+    const receiptStatus = String(receipt?.status || '').trim().toLowerCase();
+    const receiptIsPaid = !!receipt && (receipt.isPaid === true || receiptStatus === 'paid');
+    if (!receiptIsPaid) return { ok: false, reason: 'invalid_paid_receipt' };
+    if (String(receipt.customerId || '') !== cid) {
+      return { ok: false, reason: 'customer_mismatch' };
+    }
+
+    // Aggregate duplicate rows before applying the receipt capacity. The UI
+    // normally prevents duplicates, but stale/offline state must not count the
+    // same paid balance twice.
+    const current = requestedByReceipt.get(receiptId) || { receipt, requestedAmount: 0 };
+    current.requestedAmount += requestedAmount;
+    requestedByReceipt.set(receiptId, current);
+  }
+
+  targetTotal = Math.round(targetTotal * 100) / 100;
+  const paidRows = [];
+  for (const [receiptId, entry] of requestedByReceipt.entries()) {
+    const usage = getReceiptUsageStats(entry.receipt);
+    const available = Math.max(
+      Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receiptId)) * 100) / 100,
+      0
+    );
+    const paidAmount = Math.round(Math.min(entry.requestedAmount, available) * 100) / 100;
+    if (paidAmount > 0.009) {
+      paidRows.push({ receiptId, amountUSD: paidAmount.toFixed(2) });
+    }
+  }
+
+  const paidTotal = Math.round(
+    paidRows.reduce((sum, row) => sum + (parseFloat(row.amountUSD) || 0), 0) * 100
+  ) / 100;
+  const shortfall = Math.round(Math.max(targetTotal - paidTotal, 0) * 100) / 100;
+  return { ok: true, targetTotal, paidRows, paidTotal, shortfall };
+}
+
+function refreshAdMixedReceiptShortfallAction() {
+  const panel = document.getElementById('ad-mixed-receipt-shortfall-panel');
+  const label = document.getElementById('ad-mixed-receipt-shortfall-label');
+  const help = document.getElementById('ad-mixed-receipt-shortfall-help');
+  if (!panel) return;
+
+  const customerId = String(document.getElementById('ad-customer-id')?.value || '').trim();
+  const plan = getAdMixedReceiptFundingPlan(customerId);
+  const shouldShow = !!plan.ok && plan.targetTotal > 0 && plan.shortfall > 0.009;
+  panel.classList.toggle('hidden', !shouldShow);
+  if (!shouldShow) return;
+
+  const isAr = state.language === 'ar';
+  if (label) {
+    label.textContent = isAr
+      ? `استخدم المدفوع $${plan.paidTotal.toFixed(2)} + غير المدفوع $${plan.shortfall.toFixed(2)}`
+      : `Use Paid $${plan.paidTotal.toFixed(2)} + Unpaid $${plan.shortfall.toFixed(2)}`;
+  }
+  if (help) {
+    help.textContent = isAr
+      ? `فقط الفرق $${plan.shortfall.toFixed(2)} سيصبح ديناً على الوصل غير المدفوع.`
+      : `Only the $${plan.shortfall.toFixed(2)} difference becomes debt on the unpaid receipt.`;
+  }
+}
+
 // Beginner-friendly bridge from the Paid form to the canonical mixed-debt
 // flow. Example: the user entered $5 on a paid receipt with only $4.63 left.
 // Keep $4.63 as real paid funding, then visibly switch to Not Paid + In Shop
@@ -33203,9 +33400,8 @@ function startAdMixedReceiptFunding() {
     return;
   }
 
-  const requestedRows = (state.tempAdFunding?.allocations || [])
-    .filter(row => row?.receiptId && (parseFloat(row.amountUSD) || 0) > 0);
-  if (!requestedRows.length) {
+  const plan = getAdMixedReceiptFundingPlan(customerId);
+  if (!plan.ok && plan.reason === 'missing_paid_rows') {
     showNotification(
       isAr ? 'تنبيه' : 'Validation',
       isAr ? 'اختر وصلاً مدفوعاً وأدخل ميزانية الإعلان أولاً.' : 'Choose a paid receipt and enter the ad budget first.',
@@ -33213,37 +33409,19 @@ function startAdMixedReceiptFunding() {
     );
     return;
   }
-
-  let targetTotal = 0;
-  const paidRows = [];
-  for (const requested of requestedRows) {
-    const receipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(requested.receiptId));
-    const requestedAmount = Math.round((parseFloat(requested.amountUSD) || 0) * 100) / 100;
-    targetTotal += requestedAmount;
-    const receiptStatus = String(receipt?.status || '').toLowerCase();
-    const receiptIsPaid = !!receipt && (receipt.isPaid === true || receiptStatus === 'paid');
-    if (!receiptIsPaid || String(receipt.customerId || '') !== customerId) {
-      showNotification(
-        isAr ? 'تنبيه' : 'Validation',
-        isAr ? 'الوصل المدفوع غير صالح أو يخص عميلاً آخر.' : 'The paid receipt is invalid or belongs to another customer.',
-        'error'
-      );
-      return;
-    }
-    const usage = getReceiptUsageStats(receipt);
-    const available = Math.max(
-      Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100,
-      0
+  if (!plan.ok) {
+    const mismatch = plan.reason === 'customer_mismatch';
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr
+        ? (mismatch ? 'الوصل المدفوع يخص عميلاً آخر.' : 'الوصل المدفوع المحدد غير صالح أو لم يعد مدفوعاً.')
+        : (mismatch ? 'The paid receipt belongs to another customer.' : 'The selected paid receipt is invalid or is no longer Paid.'),
+      'error'
     );
-    const paidAmount = Math.min(requestedAmount, available);
-    if (paidAmount > 0.009) {
-      paidRows.push({ receiptId: receipt.id, amountUSD: paidAmount.toFixed(2) });
-    }
+    return;
   }
 
-  targetTotal = Math.round(targetTotal * 100) / 100;
-  const paidTotal = Math.round(paidRows.reduce((sum, row) => sum + Number(row.amountUSD), 0) * 100) / 100;
-  const shortfall = Math.round(Math.max(targetTotal - paidTotal, 0) * 100) / 100;
+  const { targetTotal, paidRows, paidTotal, shortfall } = plan;
   if (targetTotal <= 0 || shortfall <= 0.009) {
     showNotification(
       isAr ? 'الرصيد كافٍ' : 'Paid Balance Is Enough',
@@ -33253,10 +33431,27 @@ function startAdMixedReceiptFunding() {
     return;
   }
 
-  if (!getUnpaidShopReceiptsForCustomer(customerId).length) {
+  const dueUsageById = new Map();
+  const unpaidReceipts = getUnpaidShopReceiptsForCustomer(customerId, dueUsageById, {
+    growableAmountUSD: shortfall
+  });
+  const coveringReceipts = unpaidReceipts.filter(receipt => {
+    const usage = dueUsageById.get(String(receipt.id));
+    const available = getAdDueReceiptEffectiveAvailableUSD(receipt, usage);
+    return available + 0.005 >= shortfall
+      || getReusableUnpaidShopReceiptInfo(receipt, customerId, usage, shortfall).eligible;
+  });
+  if (!coveringReceipts.length) {
+    const hasAnyUnpaidReceipt = unpaidReceipts.length > 0;
     showNotification(
-      isAr ? 'لا يوجد وصل غير مدفوع' : 'No Unpaid Receipt',
-      isAr ? `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.` : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`,
+      isAr ? 'لا يوجد وصل غير مدفوع كافٍ' : 'No Suitable Unpaid Receipt',
+      isAr
+        ? (hasAnyUnpaidReceipt
+            ? `لا يوجد وصل «غير مدفوع - في المحل» لديه رصيد كافٍ لتغطية الفرق $${shortfall.toFixed(2)}. أنشئ وصلاً بالمبلغ الكافي أولاً.`
+            : `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.`)
+        : (hasAnyUnpaidReceipt
+            ? `No eligible “Not Paid - In Shop” receipt can record the $${shortfall.toFixed(2)} difference. Check the receipt status and collection method.`
+            : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`),
       'error'
     );
     return;
@@ -33268,15 +33463,39 @@ function startAdMixedReceiptFunding() {
   setAdPaymentStatus('not_paid');
   setAdCollectionMethod('in_shop');
   reflectMergeFundingUI();
+
+  // If exactly one unpaid receipt can cover the difference, selecting it is
+  // unambiguous and saves the beginner several manual steps. With multiple
+  // suitable receipts we still ask the user which debt receipt to use.
+  let autoSelected = false;
+  const dueReceiptSelect = document.getElementById('ad-temp-receipt-id');
+  if (coveringReceipts.length === 1 && dueReceiptSelect) {
+    const receiptId = String(coveringReceipts[0].id || '');
+    if (receiptId) dueReceiptSelect.value = receiptId;
+    onAdTempReceiptChange(receiptId);
+    const dueInput = document.getElementById('ad-due-amount-to-use');
+    if (dueInput) {
+      dueInput.value = shortfall.toFixed(2);
+      onAdDueAmountChange();
+    }
+    autoSelected = true;
+  }
+
   showNotification(
-    isAr ? 'اختر الوصل غير المدفوع' : 'Select the Unpaid Receipt',
+    isAr ? (autoSelected ? 'التمويل جاهز' : 'اختر الوصل غير المدفوع') : (autoSelected ? 'Funding Ready' : 'Select the Unpaid Receipt'),
     isAr
-      ? `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`
-      : `$${paidTotal.toFixed(2)} will come from paid credit. Now select an unpaid receipt for the $${shortfall.toFixed(2)} difference.`,
+      ? (autoSelected
+          ? `سيُستخدم $${paidTotal.toFixed(2)} من الوصل المدفوع، وسيصبح الفرق $${shortfall.toFixed(2)} ديناً على الوصل غير المدفوع. اضغط حفظ التغييرات.`
+          : `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`)
+      : (autoSelected
+          ? `$${paidTotal.toFixed(2)} uses paid credit and only $${shortfall.toFixed(2)} becomes debt on the unpaid receipt. Press Save Changes.`
+          : `$${paidTotal.toFixed(2)} uses paid credit. Now choose an unpaid receipt for the $${shortfall.toFixed(2)} difference.`),
     'info'
   );
   setTimeout(() => {
-    document.getElementById('ad-temp-receipt-link')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    const targetId = autoSelected ? 'ad-due-amount-section' : 'ad-temp-receipt-link';
+    document.getElementById(targetId)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    if (!autoSelected) document.getElementById('ad-temp-receipt-id')?.focus?.();
   }, 0);
 }
 
@@ -33494,19 +33713,131 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   return status !== 'Canceled' && status !== 'Lost' && status !== 'Destroyed';
 }
 
+// An unpaid In-Shop receipt is a reusable customer-debt ledger. The server can
+// atomically increase its amount when another ad needs more debt than the
+// receipt currently has available. Keep the eligibility checks strict, but do
+// NOT require a zero balance or zero prior usage: those are precisely the
+// receipts that must remain reusable for later ads.
+function getReusableUnpaidShopReceiptInfo(receipt, customerId = '', dueUsageInput = null, requestedUsageUSD = 0) {
+  const notReusable = {
+    eligible: false,
+    growable: false,
+    expectedLastModified: null,
+    totalDebtUSD: 0,
+    usedDebtUSD: 0,
+    availableUSD: 0,
+    requiredGrowthUSD: 0
+  };
+  if (!isServerModeEnabled() || !isUnpaidShopReceipt(receipt, customerId)) return notReusable;
+
+  const detail = receipt?.statusDetail && typeof receipt.statusDetail === 'object'
+    ? receipt.statusDetail
+    : {};
+  const collection = String(detail.notPaidCollection || '').trim().toLowerCase();
+  if (String(receipt.status || '') !== 'Not Paid'
+      || receipt.isPaid !== false
+      || !['office', 'in_shop', 'shop'].includes(collection)
+      || String(receipt.deliveryStatus || '') !== 'Office'
+      || String(receipt.tempReceiptNo || '').trim()) return notReusable;
+
+  const expectedLastModified = Number(receipt?._lastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) return notReusable;
+
+  const readNonNegativeMoney = value => {
+    if (value === undefined || value === null || value === '') return true;
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount >= 0;
+  };
+  if (!readNonNegativeMoney(receipt.amountUSD)
+      || !readNonNegativeMoney(receipt.amountLocal)
+      || !readNonNegativeMoney(receipt.debtAmountUSD)
+      || !readNonNegativeMoney(receipt.debtAmountLocal)) return notReusable;
+
+  const payments = receipt.payments;
+  if (payments !== undefined && payments !== null
+      && (!Array.isArray(payments) || payments.length > 0)) return notReusable;
+
+  const transfers = receipt.transfers;
+  if (transfers !== undefined && transfers !== null
+      && (!Array.isArray(transfers) || transfers.length > 0)) return notReusable;
+  const transferIdentityFields = [
+    'transferFromReceiptId', 'transferFromCustomerId', 'sourceReceiptId',
+    'sourceCustomerId', 'toReceiptId', 'toCustomerId'
+  ];
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  if (receiptType === 'TRANSFER_IN'
+      || receiptType === 'DELIVERY_TEMP'
+      || transferIdentityFields.some(field => String(receipt[field] || '').trim())) return notReusable;
+
+  const exchangeRate = Number(receipt.exchangeRate);
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) return notReusable;
+
+  const dueUsage = dueUsageInput || getDeliveryReceiptDueUsage(receipt);
+  const totalDebtUSD = Number(dueUsage?.totalDueUSD);
+  const usedDebtUSD = Number(dueUsage?.usedDueUSD);
+  const availableUSD = Number(dueUsage?.remainingDueUSD);
+  if (![totalDebtUSD, usedDebtUSD, availableUSD].every(Number.isFinite)
+      || totalDebtUSD < 0 || usedDebtUSD < 0 || availableUSD < 0) return notReusable;
+
+  const requested = normalizeAdDriverBudgetUSD(requestedUsageUSD);
+  const requiredGrowthUSD = Math.round(Math.max(requested - availableUSD, 0) * 100) / 100;
+  return {
+    eligible: true,
+    growable: requiredGrowthUSD > 0.009,
+    expectedLastModified,
+    dueUsage,
+    totalDebtUSD: Math.round(totalDebtUSD * 100) / 100,
+    usedDebtUSD: Math.round(usedDebtUSD * 100) / 100,
+    availableUSD: Math.round(availableUSD * 100) / 100,
+    requiredGrowthUSD
+  };
+}
+
+// During an edit, the current ad's own allocation is temporarily available to
+// that same ad. This mirrors the server's "other committed ads + proposed ad"
+// calculation and prevents an unchanged edit from appearing overdrawn.
+function getCurrentAdDueUsageForReceiptUSD(receiptId, receipt = null) {
+  const rid = String(receiptId || '').trim();
+  if (!rid || !state.modalData?.id) return 0;
+  const existingAd = state.ads.find(ad => ad && String(ad.id || '') === String(state.modalData.id));
+  if (!existingAd) return 0;
+  const explicitDue = Array.isArray(existingAd.dueAllocations)
+    ? existingAd.dueAllocations
+        .filter(allocation => String(allocation?.receiptId || '') === rid)
+        .reduce((sum, allocation) => sum + (parseFloat(allocation?.amountUSD) || 0), 0)
+    : 0;
+  const current = explicitDue > 0
+    ? explicitDue
+    : getAdLegacyDueMirrorUSD(existingAd, rid, receipt?.exchangeRate);
+  return Math.round(Math.max(Number(current) || 0, 0) * 100) / 100;
+}
+
+function getAdDueReceiptEffectiveAvailableUSD(receipt, dueUsageInput = null) {
+  if (!receipt) return 0;
+  const dueUsage = dueUsageInput || getDeliveryReceiptDueUsage(receipt);
+  const remaining = Math.max(Number(dueUsage?.remainingDueUSD) || 0, 0);
+  const currentAdUsage = getCurrentAdDueUsageForReceiptUSD(receipt.id, receipt);
+  return Math.round((remaining + currentAdUsage) * 100) / 100;
+}
+
 // usageOut (optional Map) collects each candidate's due usage so callers that
 // also need it (the option-label builder below) do not recompute it — each
 // getDeliveryReceiptDueUsage call scans all ads, so doubling it made every
 // radio/select tap in the ad form visibly slow on phones with many ads.
-function getUnpaidShopReceiptsForCustomer(customerId, usageOut) {
+function getUnpaidShopReceiptsForCustomer(customerId, usageOut, { growableAmountUSD = 0 } = {}) {
   const cid = String(customerId || '');
   if (!cid) return [];
+  const requestedUsageUSD = normalizeAdDriverBudgetUSD(growableAmountUSD);
   return getVisibleRecords(state.receipts)
     .filter(receipt => isUnpaidShopReceipt(receipt, cid))
     .filter(receipt => {
       const usage = getDeliveryReceiptDueUsage(receipt);
       if (usageOut) usageOut.set(String(receipt.id), usage);
-      return usage.remainingDueUSD > 0.009;
+      // Local mode cannot atomically grow debt, so preserve its old available-
+      // balance rule. Server mode keeps every eligible receipt visible even
+      // after earlier ads have used all of its current capacity.
+      if (!isServerModeEnabled()) return usage.remainingDueUSD > 0.009;
+      return getReusableUnpaidShopReceiptInfo(receipt, cid, usage, requestedUsageUSD).eligible;
     })
     .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
 }
@@ -33562,9 +33893,17 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
     : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
 
+  const mixedTargetUSD = isShop
+    ? normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD)
+    : 0;
+  const mixedShortfallUSD = mixedTargetUSD > 0
+    ? Math.round(Math.max(mixedTargetUSD - getTempMergeFundingTotalUSD(), 0) * 100) / 100
+    : 0;
   const dueUsageById = new Map();
   const receipts = isShop
-    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById)
+    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById, {
+        growableAmountUSD: mixedShortfallUSD
+      })
     : getPendingTempDeliveryReceiptsForCustomer(customerId);
   let current = String(hidden.value || '').trim()
     || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
@@ -33581,11 +33920,34 @@ function refreshAdTempReceiptOptions() {
     ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
     : null;
   const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
+  // Keep strict eligibility, but explain an empty picker. A legacy Not Paid
+  // receipt may still contain collected-cash rows or incomplete collection
+  // metadata; silently showing a blank list makes that safe exclusion look
+  // like a system failure.
+  const sameCustomerUnpaid = isShop
+    ? getVisibleRecords(state.receipts).filter(r =>
+        String(r.customerId || '') === String(customerId)
+        && String(r.status || '') === 'Not Paid'
+        && r.isPaid !== true)
+    : [];
+  const hasReceiptNeedingReview = isShop
+    && receipts.length === 0
+    && sameCustomerUnpaid.length > 0;
+  const emptyReason = isShop && receipts.length === 0
+    ? (hasReceiptNeedingReview
+        ? (isArT
+            ? 'لا يوجد وصل مؤهل. يوجد وصل غير مدفوع قديم يحتاج إلى مراجعة حالته وخطة الدفع من صفحة الوصولات.'
+            : 'No eligible receipt. An existing unpaid receipt needs review in Receipts (status and payment plan).')
+        : (isArT
+            ? 'لا يوجد وصل غير مدفوع في المحل لهذا العميل.'
+            : 'No Not Paid - In Shop receipt exists for this customer.'))
+    : '';
+  select.dataset.emptyReason = emptyReason;
   const extraOption = (linkedReceipt && !linkedIsListed)
     ? (() => {
         const place = String(linkedReceipt.deliveryPlaceName || '').trim();
         const note = isShop
-          ? (isArT ? 'لم يعد غير مدفوع' : 'no longer unpaid')
+          ? (isArT ? 'غير مؤهل لتمويل الدين' : 'not eligible for debt funding')
           : (isArT ? 'غير معلق' : 'no longer pending');
         const optionLabel = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
         return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(optionLabel)}</option>`;
@@ -33599,14 +33961,32 @@ function refreshAdTempReceiptOptions() {
       // Calculate available credit in USD (reuse the usage computed during the
       // shop filter above; the driver path's map is empty, so it falls back).
       const dueUsage = dueUsageById.get(String(r.id)) || getDeliveryReceiptDueUsage(r);
-      const availableUSD = dueUsage.remainingDueUSD;
+      const availableUSD = isShop
+        ? getAdDueReceiptEffectiveAvailableUSD(r, dueUsage)
+        : Math.max(Number(dueUsage.remainingDueUSD) || 0, 0);
+      const reusableInfo = isShop
+        ? getReusableUnpaidShopReceiptInfo(r, customerId, dueUsage, mixedShortfallUSD)
+        : { eligible: false, totalDebtUSD: Number(dueUsage.totalDueUSD) || 0, usedDebtUSD: Number(dueUsage.usedDueUSD) || 0 };
+      const debtIncreaseUSD = reusableInfo.eligible && mixedShortfallUSD > 0.009
+        ? Math.round(Math.max(mixedShortfallUSD - availableUSD, 0) * 100) / 100
+        : 0;
       const place = String(r.deliveryPlaceName || '').trim();
       const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
-      const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+      const growthLabel = debtIncreaseUSD > 0.009
+        ? ` • ${isArT ? 'دين جديد' : 'adds debt'} $${debtIncreaseUSD.toFixed(2)} • ${isArT ? 'الإجمالي الجديد' : 'new total'} $${(reusableInfo.totalDebtUSD + debtIncreaseUSD).toFixed(2)}`
+        : '';
+      const shopBalances = isShop
+        ? ` • ${isArT ? 'إجمالي الدين' : 'debt total'} $${reusableInfo.totalDebtUSD.toFixed(2)} • ${isArT ? 'مخصص' : 'allocated'} $${reusableInfo.usedDebtUSD.toFixed(2)} • ${isArT ? 'متاح' : 'available'} $${availableUSD.toFixed(2)}`
+        : ` • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+      const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''}${shopBalances}${growthLabel}`;
       const selected = String(r.id) === current ? 'selected' : '';
       return `<option value="${r.id}" ${selected}>${Security.escapeHtml(optionLabel)}</option>`;
     })
   ].join('');
+
+  if (emptyReason && !extraOption) {
+    select.innerHTML = `<option value="">${Security.escapeHtml(emptyReason)}</option>`;
+  }
 
   // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
   // pick a receipt on the user's behalf for an ad that is already saved.
@@ -33623,6 +34003,7 @@ function onAdTempReceiptChange(receiptId) {
   const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
   const isShop = collectionMethod === 'in_shop';
   const hidden = document.getElementById('ad-linked-receipt-id');
+  const receiptSelect = document.getElementById('ad-temp-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
   const driverSelect = document.getElementById('ad-delivery-person');
   const dueSection = document.getElementById('ad-due-amount-section');
@@ -33636,13 +34017,14 @@ function onAdTempReceiptChange(receiptId) {
 
   const rid = String(receiptId || '').trim();
   if (!rid) {
-    if (hint) hint.textContent = '';
+    if (hint) hint.textContent = String(receiptSelect?.dataset?.emptyReason || '');
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
     if (dueInput) {
       dueInput.value = '';
       dueInput.dataset.maxDue = '0';
+      dueInput.dataset.debtIncreaseAmount = '0';
       dueInput.dataset.receiptId = '';
     }
     if (isShop && unpaidFinancial) unpaidFinancial.classList.remove('hidden');
@@ -33660,6 +34042,7 @@ function onAdTempReceiptChange(receiptId) {
     if (dueInput) {
       dueInput.value = '';
       dueInput.dataset.maxDue = '0';
+      dueInput.dataset.debtIncreaseAmount = '0';
       dueInput.dataset.receiptId = '';
     }
     renderAdDueReceiptReplacementNotice();
@@ -33674,6 +34057,7 @@ function onAdTempReceiptChange(receiptId) {
     if (dueInput) {
       dueInput.value = '';
       dueInput.dataset.maxDue = '0';
+      dueInput.dataset.debtIncreaseAmount = '0';
       dueInput.dataset.receiptId = '';
     }
   } else {
@@ -33681,45 +34065,49 @@ function onAdTempReceiptChange(receiptId) {
     const fee = Number(r.quotedDeliveryFee ?? 0) || 0;
     const dueLYD = Number(r.debtAmountLocal ?? r.amountLocal ?? 0) || 0;
     
-    // Calculate available credit in USD using the new tracking function
+    // Available capacity includes this ad's old allocation during an edit.
     const dueUsage = getDeliveryReceiptDueUsage(r);
-    let availableUSD = dueUsage.remainingDueUSD;
-    // When EDITING an ad, add back this ad's own due usage so its existing
-    // allocation can be shown and preserved. Without this, editing an ad that
-    // used the receipt's full due credit computed available=$0, skipped the
-    // prefill, and on save wiped the allocation — silently resurrecting the
-    // spent credit and zeroing the ad's budget.
-    if (state.modalData?.id) {
-      const existingAd = state.ads.find(a => a.id === state.modalData.id);
-      if (existingAd) {
-        const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
-          ? existingAd.dueAllocations
-              .filter(a => String(a?.receiptId || '') === rid)
-              .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
-          : 0;
-        availableUSD += explicitDueForReceipt > 0
-          ? explicitDueForReceipt
-          : getAdLegacyDueMirrorUSD(existingAd, rid, r.exchangeRate);
-      }
-    }
+    const availableUSD = getAdDueReceiptEffectiveAvailableUSD(r, dueUsage);
+    const mixedTargetUSD = isShop
+      ? normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD)
+      : 0;
+    const mixedPaidUSD = isShop ? getTempMergeFundingTotalUSD() : 0;
+    const exactShortfallUSD = mixedTargetUSD > 0
+      ? Math.round(Math.max(mixedTargetUSD - mixedPaidUSD, 0) * 100) / 100
+      : 0;
+    const reusableInfo = isShop
+      ? getReusableUnpaidShopReceiptInfo(r, customerId, dueUsage, exactShortfallUSD)
+      : { eligible: false, totalDebtUSD: Number(dueUsage.totalDueUSD) || 0, usedDebtUSD: Number(dueUsage.usedDueUSD) || 0 };
+    const debtIncreaseUSD = reusableInfo.eligible && exactShortfallUSD > 0.009
+      ? Math.round(Math.max(exactShortfallUSD - availableUSD, 0) * 100) / 100
+      : 0;
+    const maxDueUSD = Math.round((availableUSD + debtIncreaseUSD) * 100) / 100;
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
     const budgetRate = document.getElementById('ad-driver-budget-rate');
     if (budgetRate) budgetRate.value = String(exchangeRate);
     updateAdDriverBudgetSummary();
     
     const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArC ? 'وصل بدون رقم' : 'Unnumbered receipt');
+    const projectedDebtUSD = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncreaseUSD;
+    const growthText = debtIncreaseUSD > 0
+      ? ` • ${isArC ? 'دين جديد عند الحفظ' : 'new debt on Save'}: $${debtIncreaseUSD.toFixed(2)} • ${isArC ? 'إجمالي الدين الجديد' : 'new debt total'}: $${projectedDebtUSD.toFixed(2)}`
+      : '';
     const txt = isShop
-      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • $${availableUSD.toFixed(2)}`
+      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • ${isArC ? 'إجمالي الدين' : 'debt total'} $${(Number(reusableInfo.totalDebtUSD) || 0).toFixed(2)} • ${isArC ? 'مخصص' : 'allocated'} $${(Number(reusableInfo.usedDebtUSD) || 0).toFixed(2)} • ${isArC ? 'متاح' : 'available'} $${availableUSD.toFixed(2)}${growthText}`
       : `${receiptNumber}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
     
-    // Show due amount section if there's available credit
-    if (availableUSD > 0.01) {
+    // Reusable In-Shop receipts stay editable even at $0 available: typing a
+    // new unpaid amount grows the debt atomically on Save.
+    if (maxDueUSD > 0.01 || (isShop && reusableInfo.eligible)) {
       if (dueSection) dueSection.classList.remove('hidden');
-      if (dueAvailable) dueAvailable.textContent = `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
+      if (dueAvailable) dueAvailable.textContent = debtIncreaseUSD > 0
+        ? `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} • ${isArC ? 'دين جديد' : 'New debt'}: $${debtIncreaseUSD.toFixed(2)} • ${isArC ? 'الإجمالي الجديد' : 'New total'}: $${projectedDebtUSD.toFixed(2)}`
+        : `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
       if (dueInput) {
         // Store the max due amount in USD for validation
-        dueInput.dataset.maxDue = availableUSD.toString();
+        dueInput.dataset.maxDue = maxDueUSD.toString();
+        dueInput.dataset.debtIncreaseAmount = debtIncreaseUSD.toFixed(2);
         dueInput.dataset.exchangeRate = exchangeRate.toString();
         
         // Check if editing - load existing dueAmountToUseUSD from modalData
@@ -33769,8 +34157,8 @@ function onAdTempReceiptChange(receiptId) {
           // the safer blank default.
           const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
           const paidPart = getTempMergeFundingTotalUSD();
-          const shortfall = target > 0 ? Math.max(target - paidPart, 0) : availableUSD;
-          dueInput.value = isShop ? Math.min(availableUSD, shortfall).toFixed(2) : '';
+          const shortfall = target > 0 ? Math.max(target - paidPart, 0) : maxDueUSD;
+          dueInput.value = isShop ? Math.min(maxDueUSD, shortfall).toFixed(2) : '';
         }
         dueInput.dataset.receiptId = rid;
       }
@@ -33786,6 +34174,7 @@ function onAdTempReceiptChange(receiptId) {
       if (dueInput) {
         dueInput.value = '';
         dueInput.dataset.maxDue = '0';
+        dueInput.dataset.debtIncreaseAmount = '0';
         dueInput.dataset.exchangeRate = exchangeRate.toString();
         dueInput.dataset.receiptId = rid;
       }
@@ -33917,8 +34306,45 @@ function onAdDueAmountChange() {
   const dueInput = document.getElementById('ad-due-amount-to-use');
   if (!dueInput) return;
   
-  const maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
-  let value = parseFloat(dueInput.value) || 0;
+  let maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
+  let value = Math.max(parseFloat(dueInput.value) || 0, 0);
+
+  // An unpaid In-Shop receipt is a reusable debt ledger, not a one-use gift
+  // card. If the user enters more than its currently free capacity, keep the
+  // full proposed allocation and ask the server to grow only the uncovered
+  // difference atomically. This also enables a pure-unpaid ad with no paid
+  // receipt allocation at all.
+  if (document.getElementById('ad-collection-method')?.value === 'in_shop') {
+    const receiptId = String(dueInput.dataset.receiptId || '').trim();
+    const receipt = getVisibleRecords(state.receipts).find(
+      row => String(row?.id || '') === receiptId
+    );
+    if (receipt) {
+      const dueUsage = getDeliveryReceiptDueUsage(receipt);
+      const reusableInfo = getReusableUnpaidShopReceiptInfo(
+        receipt,
+        document.getElementById('ad-customer-id')?.value || '',
+        dueUsage,
+        value
+      );
+      if (reusableInfo.eligible) {
+        const availableUSD = getAdDueReceiptEffectiveAvailableUSD(receipt, dueUsage);
+        const debtIncreaseUSD = Math.round(Math.max(value - availableUSD, 0) * 100) / 100;
+        maxDue = Math.max(maxDue, Math.round((availableUSD + debtIncreaseUSD) * 100) / 100);
+        dueInput.dataset.maxDue = maxDue.toString();
+        dueInput.dataset.debtIncreaseAmount = debtIncreaseUSD.toFixed(2);
+
+        const dueAvailable = document.getElementById('ad-due-available');
+        if (dueAvailable) {
+          const newTotalUSD = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncreaseUSD;
+          const isAr = state.language === 'ar';
+          dueAvailable.textContent = debtIncreaseUSD > 0.009
+            ? `${isAr ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} • ${isAr ? 'دين جديد' : 'New debt'}: $${debtIncreaseUSD.toFixed(2)} • ${isAr ? 'الإجمالي الجديد' : 'New total'}: $${newTotalUSD.toFixed(2)}`
+            : `${isAr ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)}`;
+        }
+      }
+    }
+  }
   
   // Cap at max available
   if (value > maxDue) {
@@ -34076,9 +34502,33 @@ function syncMixedShopReceiptDifference() {
   const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
   const dueInput = document.getElementById('ad-due-amount-to-use');
   if (!dueInput || target <= 0 || !String(dueInput.dataset.receiptId || '').trim()) return;
-  const maxDue = Math.max(parseFloat(dueInput.dataset.maxDue) || 0, 0);
-  const shortfall = Math.max(target - getTempMergeFundingTotalUSD(), 0);
+  const receiptId = String(dueInput.dataset.receiptId || '').trim();
+  const receipt = getVisibleRecords(state.receipts).find(row => String(row.id || '') === receiptId);
+  const shortfall = Math.round(Math.max(target - getTempMergeFundingTotalUSD(), 0) * 100) / 100;
+  const usage = receipt ? getDeliveryReceiptDueUsage(receipt) : null;
+  const reusableInfo = receipt
+    ? getReusableUnpaidShopReceiptInfo(
+        receipt,
+        document.getElementById('ad-customer-id')?.value || '',
+        usage,
+        shortfall
+      )
+    : { eligible: false, totalDebtUSD: 0 };
+  const available = receipt ? getAdDueReceiptEffectiveAvailableUSD(receipt, usage) : 0;
+  const debtIncrease = reusableInfo.eligible
+    ? Math.round(Math.max(shortfall - available, 0) * 100) / 100
+    : 0;
+  const maxDue = Math.round((available + debtIncrease) * 100) / 100;
+  dueInput.dataset.maxDue = maxDue.toString();
+  dueInput.dataset.debtIncreaseAmount = debtIncrease.toFixed(2);
   dueInput.value = Math.min(shortfall, maxDue).toFixed(2);
+  const dueAvailable = document.getElementById('ad-due-available');
+  if (dueAvailable) {
+    const newTotal = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncrease;
+    dueAvailable.textContent = debtIncrease > 0.009
+      ? `Available: $${available.toFixed(2)} • New debt: $${debtIncrease.toFixed(2)} • New total: $${newTotal.toFixed(2)}`
+      : `Available: $${available.toFixed(2)}`;
+  }
   updateAdDueSummary();
   syncShopDueAllocationToFunding();
 }
@@ -35329,6 +35779,8 @@ function renderAdFundingList() {
 function refreshAdFundingSummary() {
   const summary = document.getElementById('ad-funding-summary');
   if (!summary) return;
+
+  refreshAdMixedReceiptShortfallAction();
   
   const allocations = state.tempAdFunding?.allocations || [];
   
@@ -36114,6 +36566,14 @@ function renderModal() {
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
         : Number(adData.amountUSD || 0);
+      // A stopped ad keeps its original budget as immutable history. The final
+      // actual spend is changed only through the atomic stop/reconciliation
+      // flow, which also updates every affected receipt balance.
+      const isStoppedAdEdit = isEdit && String(adData.status || '') === 'Stopped';
+      const stoppedPlannedUSD = Math.max(Number(adData.amountUSD) || 0, 0);
+      const stoppedFinalUSD = getFrozenFinalAdSpendUSD(adData) ?? Math.max(Number(adData.spentUSD) || 0, 0);
+      const stoppedCommittedUSD = getAdCommittedFundingTotalUSD(adData);
+      const stoppedReturnedUSD = Math.max(stoppedPlannedUSD - stoppedFinalUSD, 0);
 
       if (visiblePages.length === 0) {
         modalContent = `
@@ -36172,7 +36632,44 @@ function renderModal() {
                 </div>
               </div>
             ` : ''}
-            
+
+            ${isStoppedAdEdit ? `
+              <div data-section="stopped-ad-accounting" class="rounded-xl border border-orange-200 bg-orange-50 p-4 text-orange-950 dark:border-orange-800 dark:bg-orange-900/20 dark:text-orange-100">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2 font-bold">
+                      <i data-lucide="circle-dollar-sign" class="h-5 w-5 shrink-0"></i>
+                      ${isArAd ? 'الحساب النهائي للإعلان المتوقف' : 'Stopped ad final accounting'}
+                    </div>
+                    <p class="mt-1 text-xs leading-relaxed text-orange-800 dark:text-orange-200">
+                      ${isArAd ? 'الميزانية الأصلية محفوظة كسجل للقراءة فقط. استخدم الزر لتعديل المصروف الفعلي النهائي وتحديث أرصدة الوصولات والدين معاً.' : 'The original planned budget is preserved as read-only history. Use this action to change the final actual spend and update paid and unpaid receipt balances together.'}
+                    </p>
+                  </div>
+                  <button type="button" id="edit-stopped-ad-spend" data-action="edit-stopped-ad-spend" data-ad-id="${Security.escapeHtml(String(adData.id || ''))}" onclick="closeModal(); stopAd(this.dataset.adId)" class="min-h-11 shrink-0 rounded-xl bg-orange-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    <i data-lucide="calculator" class="mr-1 inline h-4 w-4"></i>${isArAd ? 'تعديل المصروف والأرصدة' : 'Edit final spend & balances'}
+                  </button>
+                </div>
+                <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الميزانية الأصلية' : 'Original planned budget'}</div>
+                    <div class="font-bold">$${stoppedPlannedUSD.toFixed(2)}</div>
+                  </div>
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'المصروف الفعلي النهائي' : 'Final actual spend'}</div>
+                    <div class="font-bold text-orange-700 dark:text-orange-300">$${stoppedFinalUSD.toFixed(2)}</div>
+                  </div>
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'تمويل الوصولات الملتزم' : 'Receipt funding committed'}</div>
+                    <div class="font-bold text-blue-700 dark:text-blue-300">$${stoppedCommittedUSD.toFixed(2)}</div>
+                  </div>
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الرصيد المُعاد' : 'Balance returned'}</div>
+                    <div class="font-bold text-emerald-700 dark:text-emerald-300">$${stoppedReturnedUSD.toFixed(2)}</div>
+                  </div>
+                </div>
+              </div>
+            ` : ''}
+
             <!-- SECTION 1: Basic Info -->
             <div class="bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800/30 rounded-xl p-4 space-y-3 border border-slate-200 dark:border-slate-700">
               <div class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
@@ -36440,12 +36937,12 @@ function renderModal() {
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
               </div>
               <div id="ad-funding-change-notice" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-xs font-medium text-blue-800 dark:text-blue-200"></div>
-              <div class="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
-                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
+              <div id="ad-mixed-receipt-shortfall-panel" class="hidden rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
+                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full min-h-11 flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
                   <i data-lucide="split" class="w-4 h-4"></i>
-                  ${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}
+                  <span id="ad-mixed-receipt-shortfall-label">${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}</span>
                 </button>
-                <p class="text-[10px] text-center text-amber-600 dark:text-amber-400">
+                <p id="ad-mixed-receipt-shortfall-help" class="text-[10px] text-center text-amber-600 dark:text-amber-400">
                   ${isArAd ? 'إذا كان رصيد الوصل المدفوع أقل من ميزانية الإعلان، سيبقى الفرق ديناً على العميل.' : 'If paid receipt credit is short, only the difference stays as customer debt.'}
                 </p>
               </div>
@@ -36714,7 +37211,7 @@ function renderModal() {
             </div>`;
             })()}
           </div>
-            
+
             <!-- Customer Linking Section -->
             <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
               <div class="flex items-center space-x-2 mb-3">
@@ -38173,9 +38670,14 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
     };
     if (action === 'update') payload.expectedLastModified = attempt.expectedLastModified;
     const response = await apiMutateAd(payload);
-    const [savedAd] = applyValidatedServerEntityBatch([
+    const updatedReceipts = Array.isArray(response.updatedReceipts)
+      ? response.updatedReceipts
+      : [];
+    const applied = applyValidatedServerEntityBatch([
+      ...updatedReceipts.map(entity => ({ collection: 'receipts', entity })),
       { collection: 'ads', entity: response.ad }
     ], 'adMutation');
+    const savedAd = applied[applied.length - 1];
     if (!savedAd) throw new Error('Invalid ad mutation response');
     completeAdMutationAttempt(attempt);
     return savedAd;
@@ -39024,6 +39526,8 @@ async function handleModalSubmit() {
       let dueAmountToUseUSD = 0;
       let linkedDeliveryReceiptId = '';
       let dueAllocations = [];
+      let unpaidReceiptDebtIncrease = null;
+      let unpaidReceiptEffectiveAvailableUSD = 0;
       if (paymentStatus === 'not_paid' && (collectionMethod === 'driver' || (collectionMethod === 'in_shop' && selectedUnpaidReceiptId))) {
         const linkedReceiptId = selectedUnpaidReceiptId;
         linkedDeliveryReceiptId = collectionMethod === 'driver' ? linkedReceiptId : '';
@@ -39039,35 +39543,39 @@ async function handleModalSubmit() {
           
           // Validate: check if the amount exceeds available credit
           const dueUsage = getDeliveryReceiptDueUsage(linkedReceiptId);
-          const availableUSD = dueUsage.remainingDueUSD;
+          const effectiveAvailable = collectionMethod === 'in_shop'
+            ? getAdDueReceiptEffectiveAvailableUSD(selectedDueReceipt, dueUsage)
+            : Math.max(Number(dueUsage.remainingDueUSD) || 0, 0);
+          unpaidReceiptEffectiveAvailableUSD = effectiveAvailable;
           
-          // If editing an existing ad, add back what this ad already used
-          let currentAdUsage = 0;
-          if (isEdit && state.modalData?.id) {
-            const existingAd = state.ads.find(a => a.id === state.modalData.id);
-            if (existingAd) {
-              const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
-                ? existingAd.dueAllocations
-                    .filter(a => String(a?.receiptId || '') === String(linkedReceiptId))
-                    .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
-                : 0;
-              currentAdUsage = explicitDueForReceipt > 0
-                ? explicitDueForReceipt
-                : getAdLegacyDueMirrorUSD(existingAd, linkedReceiptId, selectedDueReceipt?.exchangeRate);
+          if (dueAmountToUseUSD > effectiveAvailable + 0.005) {
+            const growthInfo = collectionMethod === 'in_shop'
+              ? getReusableUnpaidShopReceiptInfo(
+                  selectedDueReceipt,
+                  customerId,
+                  dueUsage,
+                  dueAmountToUseUSD
+                )
+              : { eligible: false };
+            const requiredGrowthUSD = Math.round(
+              Math.max(dueAmountToUseUSD - effectiveAvailable, 0) * 100
+            ) / 100;
+            if (growthInfo.eligible && requiredGrowthUSD > 0.009) {
+              unpaidReceiptDebtIncrease = {
+                receiptId: String(linkedReceiptId),
+                amountUSD: requiredGrowthUSD,
+                expectedLastModified: growthInfo.expectedLastModified
+              };
+            } else {
+              showNotification(
+                isArSubAd ? 'تنبيه' : 'Validation',
+                isArSubAd
+                  ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
+                  : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
+                'error'
+              );
+              return;
             }
-          }
-          
-          const effectiveAvailable = availableUSD + currentAdUsage;
-          
-          if (dueAmountToUseUSD > effectiveAvailable + 0.01) {
-            showNotification(
-              isArSubAd ? 'تنبيه' : 'Validation',
-              isArSubAd
-                ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
-                : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
-              'error'
-            );
-            return;
           }
           
           // Create due allocation
@@ -39160,6 +39668,24 @@ async function handleModalSubmit() {
       if (isUnpaidShop && selectedUnpaidReceiptId) {
         amountUSD = Math.round((dueAmountToUseUSD + mergedTotal) * 100) / 100;
         const intendedBudget = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+        if (unpaidReceiptDebtIncrease) {
+          const expectedGrowth = Math.round(
+            Math.max(dueAmountToUseUSD - unpaidReceiptEffectiveAvailableUSD, 0) * 100
+          ) / 100;
+          const instructionAmount = Number(unpaidReceiptDebtIncrease.amountUSD) || 0;
+          if (expectedGrowth <= 0.009
+              || instructionAmount > dueAmountToUseUSD + 0.005
+              || Math.abs(instructionAmount - expectedGrowth) > 0.005) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'يجب أن تساوي زيادة الدين الجزء الجديد غير المغطى فقط.'
+                : 'The debt increase must equal only the newly uncovered amount.',
+              'error'
+            );
+            return;
+          }
+        }
         if (intendedBudget > 0 && Math.abs(amountUSD - intendedBudget) > 0.005) {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
@@ -39235,6 +39761,12 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
         mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
+      if (unpaidReceiptDebtIncrease) {
+        // Request-only instruction. The server atomically grows the reusable
+        // unpaid receipt by only the new shortfall and saves the ad; this field
+        // is never stored on the ad.
+        adUpdates.unpaidReceiptDebtIncrease = unpaidReceiptDebtIncrease;
+      }
 
       // Denormalize the customer's display NAME (never phone/contact) so a role
       // that can view ads but not load the customers collection still sees who
@@ -41812,32 +42344,32 @@ function stopAd(id) {
   const customer = state.customers.find(c => c.id === ad.customerId);
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
-  // A Meta-linked ad's spend comes straight from Meta's own synced numbers —
-  // no typing, no guessing; the remaining amount follows automatically. Falls
-  // back to manual entry when the ad is not linked, never synced, uses a
-  // non-USD account, or Meta reports MORE than the recorded budget (that
-  // mismatch must be resolved by editing the ad, not hidden here).
+  // Start with Meta's latest spend when it is trustworthy, but keep the final
+  // amount editable. Meta can continue charging briefly after an ad is paused
+  // and the owner may have a later statement that is more accurate than the
+  // last sync. The amount explicitly saved here is the final accounting value.
   const metaSpendUSD = metaAdRealSpendUSD(ad);
-  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
-  const initialSpentUSD = metaSpendAuto ? metaSpendUSD : currentSpentUSD;
+  const frozenFinalSpendUSD = getFrozenFinalAdSpendUSD(ad);
+  const finalSpendFrozen = frozenFinalSpendUSD !== null;
+  const manualSpentOverride = ad.manualSpentOverride === true;
+  const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
+  const initialSpentUSD = finalSpendFrozen ? frozenFinalSpendUSD : (metaSpendAuto ? metaSpendUSD : currentSpentUSD);
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
   // The checkbox must describe the remainder ACTUALLY on screen. A saved
   // confirmation for a DIFFERENT remainder (a later Meta sync reported more
-  // spend) must not render as "already informed" — and because the Meta value
-  // makes the spend input readonly, the input listener that normally resets
-  // this control can never fire. So decide the honest state up front, exactly
+  // spend) must not render as "already informed". Decide the honest initial
+  // state up front, before the user has a chance to correct the amount, exactly
   // as syncAdCustomerInformedControl would.
   const initialConfirmation = getAdCustomerConfirmationState(ad, initialSpentUSD, adAmountUSD);
   const informedApplies = initialConfirmation.existingConfirmationApplies;
   const staleConfirmation = alreadyInformed && !informedApplies;
   const previousRemaining = isAlreadyStopped ? (adAmountUSD - currentSpentUSD) : 0;
   
-  // Calculate current remaining from receipt allocations
-  let totalAllocated = 0;
-  if (Array.isArray(ad.receiptAllocations)) {
-    totalAllocated = ad.receiptAllocations.reduce((sum, alloc) => sum + (parseFloat(alloc.amountUSD) || 0), 0);
-  }
+  // Count both paid funding and customer-debt funding. mergedPaidAllocations is
+  // only a compatibility mirror of receiptAllocations and must not be counted
+  // a second time.
+  const totalAllocated = getAdCommittedFundingTotalUSD(ad);
   
   const modalHTML = `
     <div id="stop-ad-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
@@ -41875,8 +42407,8 @@ function stopAd(id) {
           ` : ''}
           
           <div>
-            <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-              ${isAr ? 'المبلغ المصروف (دولار) *' : 'Amount Spent (USD) *'}
+            <label for="stop-ad-spent" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+              ${isAr ? 'المصروف الفعلي النهائي (دولار) *' : 'Final amount spent (USD) *'}
             </label>
             <input
               type="text"
@@ -41884,12 +42416,15 @@ function stopAd(id) {
               id="stop-ad-spent"
               value="${initialSpentUSD.toFixed(2)}"
               max="${adAmountUSD}"
-              ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this)"
-              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}"
+              aria-describedby="stop-ad-spent-help"
+              oninput="sanitizeMoneyInput(this)"
+              class="w-full glass-input px-4 py-2 rounded-xl text-lg font-bold focus:ring-2 focus:ring-orange-500"
               placeholder="0.00"
             />
-            <p class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : 'text-slate-500'}">${metaSpendAuto
-              ? (isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`)
+            <p id="stop-ad-spent-help" class="text-xs mt-1 ${metaSpendAuto ? 'font-bold text-blue-700 dark:text-blue-300' : (manualSpentOverride ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500')}">${manualSpentOverride
+              ? (isAr ? `هذا هو التصحيح النهائي المحفوظ: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (تعرض Meta الآن $${metaSpendUSD.toFixed(2)}).`}` : `This is the saved final correction: $${currentSpentUSD.toFixed(2)}${metaSpendUSD === null ? '.' : ` (Meta currently reports $${metaSpendUSD.toFixed(2)}).`}`)
+              : metaSpendAuto
+              ? (isAr ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه قبل الحفظ إذا كان المبلغ النهائي في Facebook مختلفاً.` : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if Facebook's final amount is different.`)
               : (isAlreadyStopped ? (isAr ? 'عدّل المبلغ المصروف لتحديث الرصيد المتبقي' : 'Edit the amount spent to update the remaining balance') : (isAr ? 'أدخل المبلغ الذي تم صرفه فعلياً على هذا الإعلان' : 'Enter how much was actually spent on this ad'))}</p>
           </div>
           
@@ -41963,6 +42498,7 @@ function stopAd(id) {
   const remainingDisplay = document.getElementById('stop-ad-remaining');
   const informedInput = document.getElementById('stop-ad-customer-informed');
   const informedHelp = document.getElementById('stop-ad-customer-informed-help');
+  const spentHelp = document.getElementById('stop-ad-spent-help');
   
   if (spentInput && spentDisplay && remainingDisplay) {
     spentInput.addEventListener('input', function() {
@@ -41977,6 +42513,19 @@ function stopAd(id) {
       const remaining = Math.max(adAmountUSD - spent, 0);
       spentDisplay.textContent = '$' + spent.toFixed(2);
       remainingDisplay.textContent = '$' + remaining.toFixed(2);
+      if (metaSpendAuto && spentHelp) {
+        const manuallyCorrected = Math.abs(spent - metaSpendUSD) > 0.005;
+        spentHelp.className = `text-xs mt-1 font-bold ${manuallyCorrected
+          ? 'text-amber-700 dark:text-amber-300'
+          : 'text-blue-700 dark:text-blue-300'}`;
+        spentHelp.textContent = manuallyCorrected
+          ? (isAr
+              ? `تصحيح يدوي: $${spent.toFixed(2)}. أبلغت Meta بمبلغ $${metaSpendUSD.toFixed(2)}، وسيستخدم النظام المبلغ الذي تحفظه للرصيد النهائي.`
+              : `Manual correction: $${spent.toFixed(2)}. Meta reported $${metaSpendUSD.toFixed(2)}; the amount you save will be used for the final balance.`)
+          : (isAr
+              ? `معبأ من Meta: $${metaSpendUSD.toFixed(2)} (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). يمكنك تصحيحه إذا لزم الأمر.`
+              : `Prefilled from Meta: $${metaSpendUSD.toFixed(2)} (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). You can correct it if needed.`);
+      }
       const confirmation = syncAdCustomerInformedControl(ad, informedInput, spent, adAmountUSD);
       if (informedHelp) {
         informedHelp.textContent = confirmation.existingConfirmationApplies && ad.remainingCustomerInformedAt
@@ -42133,9 +42682,12 @@ async function confirmStopAd(id, source = 'modal') {
           idempotencyKey: attempt.idempotencyKey,
           expectedLastModified: attempt.expectedLastModified
         });
-        const [savedAd] = applyValidatedServerEntityBatch([
+        const stopEntities = [
+          ...(response.updatedReceipts || []).map(entity => ({ collection: 'receipts', entity })),
           { collection: 'ads', entity: response.ad }
-        ], 'adStop');
+        ];
+        const appliedEntities = applyValidatedServerEntityBatch(stopEntities, 'adStop');
+        const savedAd = appliedEntities[appliedEntities.length - 1];
         if (!savedAd) throw new Error('Invalid ad stop response');
         completeAdStopAttempt(attempt);
         document.getElementById('stop-ad-modal')?.remove();
@@ -42305,6 +42857,10 @@ async function confirmStopAd(id, source = 'modal') {
   // Update ad status and spent amount
   ad.status = 'Stopped';
   ad.spentUSD = spentUSD;
+  // Local/offline mode mirrors the server contract: once a staff member
+  // explicitly confirms this final amount, future Meta sync values remain a
+  // comparison value and must not silently replace the accounting correction.
+  ad.manualSpentOverride = true;
   if (!ad.stoppedAt) {
     ad.stoppedAt = new Date().toISOString();
   }

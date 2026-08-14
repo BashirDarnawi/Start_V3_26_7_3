@@ -932,25 +932,52 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
       throw error;
     }
     const entity = validateServerEntityResponse(collection, entry.entity, `${reason}[${index}]`);
-    return { collection, saved: Security.sanitizeObject(entity.data) };
+    return {
+      collection,
+      saved: Security.sanitizeObject(entity.data),
+      lastModified: Number(entity.lastModified)
+    };
   });
 
-  for (const { collection, saved } of prepared) {
+  const resolved = [];
+  let changed = false;
+  for (const { collection, saved, lastModified } of prepared) {
     const target = state[collection];
     const existingIndex = target.findIndex(row => row && String(row.id) === String(saved.id));
+    const current = existingIndex === -1 ? null : target[existingIndex];
+    const currentLastModified = Number(current?._lastModified);
+    const incomingLastModified = Number.isFinite(lastModified)
+      ? lastModified
+      : Number(saved?._lastModified);
+    const isOlder = current
+      && Number.isFinite(incomingLastModified)
+      && Number.isFinite(currentLastModified)
+      && incomingLastModified < currentLastModified;
+
+    // A slower request can finish after live sync (or another mutation) has
+    // already installed a newer server revision. Never let that delayed reply
+    // roll a repaired receipt/ad back in this tab. Equal revisions remain safe
+    // to apply because idempotent replays may restore omitted inline media.
+    if (isOlder) {
+      resolved.push(current);
+      continue;
+    }
+
     if (existingIndex === -1) target.unshift(saved);
     else target[existingIndex] = saved;
+    resolved.push(saved);
+    changed = true;
     if (_collectionCache[collection]) {
       _collectionCache[collection] = { data: null, timestamp: 0, identity: '' };
     }
     if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(collection);
     markCollectionDirty(collection);
   }
-  if (prepared.length > 0) {
+  if (changed) {
     saveState();
     RenderQueue.schedule(reason);
   }
-  return prepared.map(item => item.saved);
+  return resolved;
 }
 
 async function apiLoadCollectionAll(collection, { forceRefresh = false, includeMedia = false } = {}) {
@@ -1423,6 +1450,74 @@ async function apiUnsettleReceipt(payload) {
   };
 }
 
+// Cover part or all of an unpaid in-shop customer debt with company funds.
+// This is deliberately separate from receipt settlement/collection: the
+// server records a business expense and returns every affected receipt/ad in
+// one transaction without converting the receipt to Paid.
+async function apiCreateReceiptCompanyCoverage(payload) {
+  const receiptId = String(payload?.receiptId || '').trim();
+  if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt company coverage id');
+
+  const amountMinorUSD = Number(payload?.amountMinorUSD);
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0) {
+    throw new Error('Company coverage amount must be a positive number of cents');
+  }
+  const expectedLastModified = Number(payload?.expectedLastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const idempotencyKey = String(payload?.idempotencyKey || '').trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 120) {
+    throw new Error('Company coverage idempotency key is invalid');
+  }
+  const reason = String(payload?.reason || '').trim();
+  if (!reason) throw new Error('A business reason is required');
+  if (reason.length > 500) throw new Error('The business reason is too long');
+
+  const identity = getServerSessionIdentity();
+  const response = await withRetry(() => apiJson(
+    `/api/receipts/${encodeURIComponent(receiptId)}/company-coverages`,
+    {
+      method: 'POST',
+      body: { amountMinorUSD, idempotencyKey, expectedLastModified, reason }
+    },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+      || !Array.isArray(response.updatedReceipts) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid company coverage response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const coverage = validateServerEntityResponse(
+    'companyDebtCoverages', response.coverage, 'companyCoverage.coverage'
+  );
+  const updatedReceipts = response.updatedReceipts.map((entity, index) => {
+    const validated = validateServerEntityResponse(
+      'receipts', entity, `companyCoverage.updatedReceipts[${index}]`
+    );
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse(
+      'ads', entity, `companyCoverage.updatedAds[${index}]`
+    );
+    const local = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, local);
+    return validated;
+  });
+  return {
+    coverage,
+    updatedReceipts,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
 // Paid/due/merged allocations change receipt availability, so ad create/edit
 // must cross one server transaction boundary rather than generic collection
 // POST/PATCH calls.
@@ -1451,8 +1546,25 @@ async function apiMutateAd(payload) {
   const ad = validateServerEntityResponse('ads', response.ad, `${action}.ad`);
   const localAd = (state.ads || []).find(row => row && String(row.id) === String(payload?.adId || ''));
   ad.data = mergeMutationInlineMedia('ads', ad.data, { ...(localAd || {}), ...(payload?.data || {}) });
+  // A Paid + In-Shop or pure unpaid mutation can atomically grow a reusable
+  // unpaid receipt by only the new debt difference. Keep that server-authoritative
+  // receipt result in the same response so the UI never shows the old $0.00
+  // balance after the ad has already committed successfully.
+  const receiptResults = response.updatedReceipts == null ? [] : response.updatedReceipts;
+  if (!Array.isArray(receiptResults)) {
+    const error = new Error('Invalid ad mutation receipt response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedReceipts = receiptResults.map((entity, index) => {
+    const validated = validateServerEntityResponse('receipts', entity, `${action}.updatedReceipts[${index}]`);
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
   return {
     ad,
+    updatedReceipts,
     replayed: response.replayed === true
   };
 }
@@ -1700,8 +1812,25 @@ async function apiStopAd(adId, payload) {
   const ad = validateServerEntityResponse('ads', response.ad, 'stop.ad');
   const localAd = (state.ads || []).find(row => row && String(row.id) === safeAdId);
   ad.data = mergeMutationInlineMedia('ads', ad.data, localAd);
+  // Changing the final spend releases or restores paid and unpaid receipt
+  // funding in the same server transaction. Install those authoritative
+  // receipt envelopes with the ad so the receipt cards never keep showing the
+  // balance from before the stop/reconciliation save.
+  const receiptResults = response.updatedReceipts == null ? [] : response.updatedReceipts;
+  if (!Array.isArray(receiptResults)) {
+    const error = new Error('Invalid ad stop receipt response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedReceipts = receiptResults.map((entity, index) => {
+    const validated = validateServerEntityResponse('receipts', entity, `stop.updatedReceipts[${index}]`);
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
   return {
     ad,
+    updatedReceipts,
     replayed: response.replayed === true
   };
 }

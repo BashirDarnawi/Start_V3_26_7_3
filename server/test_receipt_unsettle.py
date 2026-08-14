@@ -794,7 +794,7 @@ class TestUnsettleRefusals:
             cookies=admin,
         )
         assert patched.status_code == 409, patched.text
-        assert "funded or transferred receipt must remain paid" in patched.text
+        assert "dedicated receipt debt-conversion action" in patched.text
         assert _receipt(rid, admin)["data"]["status"] == "Paid"
 
     def test_unfunded_paid_receipt_converts_with_no_ads(self, admin):

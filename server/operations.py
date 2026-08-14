@@ -42,7 +42,16 @@ from .monitoring import get_metrics
 FINANCIAL_CLOSE_COLLECTION = "financialClosures"
 FINANCIAL_PERIOD_COLLECTIONS = frozenset({"receipts", "ads", "dollarPurchases"})
 _PERIOD_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+# V1 was one AES-GCM message containing the entire dump.  Keep its magic so
+# existing backups remain restorable, but write new backups as independently
+# authenticated, bounded-size V2 records.
 _BACKUP_MAGIC = b"ALBAYANBK1"
+_BACKUP_MAGIC_V2 = b"ALBAYANBK2"
+_BACKUP_CHUNK_SIZE = 1024 * 1024
+_BACKUP_MAX_CHUNK_SIZE = 16 * 1024 * 1024
+_BACKUP_NONCE_PREFIX_SIZE = 8
+_BACKUP_NONCE_SIZE = 12
+_BACKUP_TAG_SIZE = 16
 _worker_stop = threading.Event()
 _worker_thread: threading.Thread | None = None
 _backup_process_lock = threading.Lock()
@@ -374,30 +383,174 @@ def _save_close_record(period: str, data: dict[str, Any], user_id: str, conn: An
     return clean
 
 
+def _backup_temp_path(target: Path) -> Path:
+    """Return a same-directory temporary path suitable for atomic replace."""
+    return target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+
+
+def _backup_record_aad(header: bytes, counter_bytes: bytes, length_bytes: bytes) -> bytes:
+    return header + counter_bytes + length_bytes
+
+
+def _backup_counter_bytes(counter: int) -> bytes:
+    if counter < 0 or counter > 0xFFFFFFFF:
+        raise ValueError("Encrypted backup contains too many chunks")
+    return counter.to_bytes(4, "big")
+
+
+def _read_backup_exact(stream: Any, size: int, description: str) -> bytes:
+    data = stream.read(size)
+    if len(data) != size:
+        raise ValueError(f"Truncated Albayan encrypted backup ({description})")
+    return data
+
+
 def _encrypt_backup(source: Path, target: Path, key: bytes) -> int:
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     except ImportError as exc:
         raise RuntimeError("cryptography package is required for encrypted backups") from exc
-    payload = source.read_bytes()
-    nonce = secrets.token_bytes(12)
-    ciphertext = AESGCM(key).encrypt(nonce, payload, _BACKUP_MAGIC)
-    temp_target = target.with_suffix(target.suffix + ".tmp")
-    temp_target.write_bytes(_BACKUP_MAGIC + nonce + ciphertext)
-    os.replace(temp_target, target)
+
+    # The eight random bytes plus a monotonically increasing 32-bit counter
+    # give every record a unique GCM nonce.  A zero-length authenticated final
+    # record prevents a whole-record truncation from looking like a valid EOF.
+    nonce_prefix = secrets.token_bytes(_BACKUP_NONCE_PREFIX_SIZE)
+    chunk_size_bytes = _BACKUP_CHUNK_SIZE.to_bytes(4, "big")
+    header = _BACKUP_MAGIC_V2 + nonce_prefix + chunk_size_bytes
+    cipher = AESGCM(key)
+    temp_target = _backup_temp_path(target)
+    try:
+        with source.open("rb") as source_stream, temp_target.open("xb") as target_stream:
+            target_stream.write(header)
+            counter = 0
+            while True:
+                plaintext = source_stream.read(_BACKUP_CHUNK_SIZE)
+                if not plaintext:
+                    break
+                counter_bytes = _backup_counter_bytes(counter)
+                length_bytes = len(plaintext).to_bytes(4, "big")
+                ciphertext = cipher.encrypt(
+                    nonce_prefix + counter_bytes,
+                    plaintext,
+                    _backup_record_aad(header, counter_bytes, length_bytes),
+                )
+                target_stream.write(length_bytes)
+                target_stream.write(ciphertext)
+                counter += 1
+
+            counter_bytes = _backup_counter_bytes(counter)
+            length_bytes = (0).to_bytes(4, "big")
+            target_stream.write(length_bytes)
+            target_stream.write(
+                cipher.encrypt(
+                    nonce_prefix + counter_bytes,
+                    b"",
+                    _backup_record_aad(header, counter_bytes, length_bytes),
+                )
+            )
+            target_stream.flush()
+            os.fsync(target_stream.fileno())
+        os.replace(temp_target, target)
+    except Exception:
+        temp_target.unlink(missing_ok=True)
+        raise
     return target.stat().st_size
 
 
-def decrypt_backup_file(source: Path, target: Path, key: bytes) -> None:
-    """Used by the restore helper and tests; it never writes into the live DB."""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    payload = source.read_bytes()
-    if not payload.startswith(_BACKUP_MAGIC) or len(payload) < len(_BACKUP_MAGIC) + 13:
+def _decrypt_backup_v1(source_stream: Any, target_stream: Any, key: bytes, source_size: int) -> None:
+    """Stream a legacy one-message AES-GCM backup without loading it whole."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    header_size = len(_BACKUP_MAGIC) + _BACKUP_NONCE_SIZE
+    ciphertext_size = source_size - header_size - _BACKUP_TAG_SIZE
+    if ciphertext_size < 0:
         raise ValueError("Not an Albayan encrypted backup")
-    offset = len(_BACKUP_MAGIC)
-    nonce = payload[offset:offset + 12]
-    plaintext = AESGCM(key).decrypt(nonce, payload[offset + 12:], _BACKUP_MAGIC)
-    target.write_bytes(plaintext)
+    nonce = _read_backup_exact(source_stream, _BACKUP_NONCE_SIZE, "V1 nonce")
+    source_stream.seek(source_size - _BACKUP_TAG_SIZE)
+    tag = _read_backup_exact(source_stream, _BACKUP_TAG_SIZE, "V1 tag")
+    source_stream.seek(header_size)
+
+    decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+    decryptor.authenticate_additional_data(_BACKUP_MAGIC)
+    remaining = ciphertext_size
+    while remaining:
+        encrypted_chunk = _read_backup_exact(
+            source_stream,
+            min(_BACKUP_CHUNK_SIZE, remaining),
+            "V1 ciphertext",
+        )
+        target_stream.write(decryptor.update(encrypted_chunk))
+        remaining -= len(encrypted_chunk)
+    try:
+        target_stream.write(decryptor.finalize())
+    except InvalidTag as exc:
+        raise ValueError("Encrypted backup authentication failed") from exc
+
+
+def _decrypt_backup_v2(source_stream: Any, target_stream: Any, key: bytes) -> None:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce_prefix = _read_backup_exact(
+        source_stream, _BACKUP_NONCE_PREFIX_SIZE, "V2 nonce prefix"
+    )
+    chunk_size_bytes = _read_backup_exact(source_stream, 4, "V2 chunk size")
+    chunk_size = int.from_bytes(chunk_size_bytes, "big")
+    if chunk_size < 1 or chunk_size > _BACKUP_MAX_CHUNK_SIZE:
+        raise ValueError("Invalid Albayan encrypted backup chunk size")
+    header = _BACKUP_MAGIC_V2 + nonce_prefix + chunk_size_bytes
+    cipher = AESGCM(key)
+    counter = 0
+
+    while True:
+        length_bytes = _read_backup_exact(source_stream, 4, "V2 record length")
+        plaintext_size = int.from_bytes(length_bytes, "big")
+        if plaintext_size > chunk_size:
+            raise ValueError("Invalid Albayan encrypted backup record size")
+        encrypted_chunk = _read_backup_exact(
+            source_stream,
+            plaintext_size + _BACKUP_TAG_SIZE,
+            "V2 encrypted record",
+        )
+        counter_bytes = _backup_counter_bytes(counter)
+        try:
+            plaintext = cipher.decrypt(
+                nonce_prefix + counter_bytes,
+                encrypted_chunk,
+                _backup_record_aad(header, counter_bytes, length_bytes),
+            )
+        except InvalidTag as exc:
+            raise ValueError("Encrypted backup authentication failed") from exc
+
+        if plaintext_size == 0:
+            if plaintext or source_stream.read(1):
+                raise ValueError("Invalid trailing data in Albayan encrypted backup")
+            return
+        target_stream.write(plaintext)
+        counter += 1
+
+
+def decrypt_backup_file(source: Path, target: Path, key: bytes) -> None:
+    """Restore V1 or V2 backups through a bounded-memory, atomic write."""
+    temp_target = _backup_temp_path(target)
+    try:
+        with source.open("rb") as source_stream, temp_target.open("xb") as target_stream:
+            source_size = os.fstat(source_stream.fileno()).st_size
+            magic_size = len(_BACKUP_MAGIC)
+            magic = _read_backup_exact(source_stream, magic_size, "magic")
+            if magic == _BACKUP_MAGIC_V2:
+                _decrypt_backup_v2(source_stream, target_stream, key)
+            elif magic == _BACKUP_MAGIC:
+                _decrypt_backup_v1(source_stream, target_stream, key, source_size)
+            else:
+                raise ValueError("Not an Albayan encrypted backup")
+            target_stream.flush()
+            os.fsync(target_stream.fileno())
+        os.replace(temp_target, target)
+    except Exception:
+        temp_target.unlink(missing_ok=True)
+        raise
 
 
 def _dump_database(target: Path) -> None:

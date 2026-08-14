@@ -154,8 +154,8 @@ def get_engine() -> Engine:
             except Exception:
                 return default
 
-        pool_size = _int_env("ALBAYAN_DB_POOL_SIZE", 10, min_v=1, max_v=50)
-        max_overflow = _int_env("ALBAYAN_DB_MAX_OVERFLOW", 20, min_v=0, max_v=100)
+        pool_size = _int_env("ALBAYAN_DB_POOL_SIZE", 3, min_v=1, max_v=50)
+        max_overflow = _int_env("ALBAYAN_DB_MAX_OVERFLOW", 2, min_v=0, max_v=100)
         pool_timeout = _int_env("ALBAYAN_DB_POOL_TIMEOUT", 30, min_v=1, max_v=120)
         pool_recycle = _int_env("ALBAYAN_DB_POOL_RECYCLE", 3600, min_v=60, max_v=24 * 3600)
 

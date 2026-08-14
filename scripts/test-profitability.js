@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+const finalSpendSource = fs.readFileSync(path.join(__dirname, '..', 'src', '11b-ad-final-spend.js'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', '12a-analytics-profit.js'), 'utf8');
 const state = { language: 'en', dollarPurchases: [], ads: [], receipts: [] };
 let admin = true;
@@ -50,6 +51,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(finalSpendSource, sandbox, { filename: 'src/11b-ad-final-spend.js' });
 vm.runInContext(source, sandbox, { filename: 'src/12a-analytics-profit.js' });
 
 let passed = 0;
@@ -63,6 +65,24 @@ function test(name, fn) {
   try { fn(); passed += 1; console.log(`  PASS  ${name}`); }
   catch (error) { failures.push(`${name}: ${error.message}`); console.log(`  FAIL  ${name}\n        ${error.message}`); }
 }
+
+test('legacy stopped spend stays final even when Meta later reports more', () => {
+  near(sandbox.getAdActualSpendUSD({
+    status: 'Stopped', spentUSD: 20, metaAdId: 'legacy-meta', metaSpendMinor: 2400
+  }), 20);
+});
+
+test('active non-final spend continues to use the latest Meta reading', () => {
+  near(sandbox.getAdActualSpendUSD({
+    status: 'Active', spentUSD: 20, metaAdId: 'active-meta', metaSpendMinor: 2400
+  }), 24);
+});
+
+test('an explicitly saved zero remains a valid stopped final spend', () => {
+  near(sandbox.getAdActualSpendUSD({
+    status: 'Stopped', spentUSD: 0, metaAdId: 'zero-meta', metaSpendMinor: 500
+  }), 0);
+});
 
 test('FIFO uses only dollar lots available by the ad observation date', () => {
   const snapshot = sandbox.buildAdProfitabilitySnapshot([

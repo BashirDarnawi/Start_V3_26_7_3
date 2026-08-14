@@ -68,19 +68,18 @@ check('main app exposes semantic mobile shell hooks',
 check('hamburger has accessible drawer state',
   views.includes('aria-controls="app-sidebar"') && views.includes('aria-expanded='));
 
-check('Simple and Advanced workspace modes are persistent shell preferences',
+check('workspace has one complete Advanced experience and no duplicate view switches',
   platform.includes("const ALBAYAN_EXPERIENCE_MODE_KEY = 'albayan_experience_mode';") &&
-  platform.includes("return preference === 'advanced' ? 'advanced' : 'simple';") &&
-  platform.includes("localStorage.setItem(ALBAYAN_EXPERIENCE_MODE_KEY, next)") &&
-  platform.includes("document.body.classList.toggle('workspace-advanced', advanced)") &&
-  platform.includes("document.body.classList.toggle('workspace-simple', !advanced)") &&
+  platform.includes("return 'advanced';") &&
+  platform.includes("document.body.classList.add('workspace-advanced')") &&
+  platform.includes("document.body.classList.remove('workspace-simple')") &&
   views.includes('renderWorkspaceTopbar()') &&
-  views.includes('onclick="toggleWorkspaceExperienceMode()"') &&
-  views.includes("onclick=\"setWorkspaceExperienceMode('simple')\"") &&
-  views.includes("onclick=\"setWorkspaceExperienceMode('advanced')\"") &&
-  css.includes('.workspace-topbar') &&
-  css.includes('.workspace-mode-toggle'));
-check('workspace progressive panels stay accessible in both experience modes',
+  !views.includes('onclick="toggleWorkspaceExperienceMode()"') &&
+  !views.includes("onclick=\"setWorkspaceExperienceMode('simple')\"") &&
+  !views.includes("onclick=\"setWorkspaceExperienceMode('advanced')\"") &&
+  !routing.includes("id: 'workspace-mode'") &&
+  css.includes('.workspace-topbar'));
+check('workspace progressive panels stay accessible in the complete view',
   views.includes('if (isAdvancedWorkspaceMode()) return true;') &&
   views.includes('function renderWorkspaceFilterToggle(view, activeCount = 0)') &&
   views.includes('aria-expanded="${expanded ? \'true\' : \'false\'}"') &&
@@ -88,6 +87,14 @@ check('workspace progressive panels stay accessible in both experience modes',
   ['customers', 'receipts', 'ads', 'audit']
     .every(view => views.includes(`isWorkspaceFilterPanelExpanded('${view}')`)) &&
   css.includes('.workspace-advanced-panel.hidden'));
+check('Pages exposes a phone-safe Needs owner filter that composes with search',
+  stateServices.includes("pageOwnerFilter: 'all'") &&
+  views.includes('function applyPageOwnerFilter(mode)') &&
+  views.includes("mode === 'needs-owner' ? 'needs-owner' : 'all'") &&
+  views.includes("pageOwnerFilter === 'needs-owner' && !pageNeedsOwner(page)") &&
+  views.includes("applyPageOwnerFilter('needs-owner')") &&
+  views.includes("isAr ? 'يحتاج مالك' : 'Needs owner'") &&
+  views.includes('smart-filter-chips mt-3'));
 check('smart search safely discovers permitted customers, receipts, pages, and ads',
   routing.includes('function getCommandPaletteEntityCommands(searchTerm)') &&
   routing.includes('if (rawTerm.length < 2) return [];') &&
@@ -297,9 +304,9 @@ check('legacy In-Shop debt mirrors use one shared reader without turning zero li
   dataAudit.includes("&& String(ad.linkedDeliveryReceiptId || '') === ''") &&
   dataAudit.includes('function getAdLegacyDueMirrorUSD(ad, receiptId, fallbackRate = 0)') &&
   dataAudit.includes("['driver', 'in_shop'].includes(String(ad.collectionMethod || ''))") &&
-  forms.includes('getAdLegacyDueMirrorUSD(existingAd, rid, r.exchangeRate)') &&
+  forms.includes('const availableUSD = getAdDueReceiptEffectiveAvailableUSD(r, dueUsage);') &&
   modals.includes('const selectedDueReceipt = state.receipts.find(') &&
-  modals.includes('getAdLegacyDueMirrorUSD(existingAd, linkedReceiptId, selectedDueReceipt?.exchangeRate)'));
+  modals.includes('getAdDueReceiptEffectiveAvailableUSD(selectedDueReceipt, dueUsage)'));
 check('Edit Ad receipt replacement is explicit, atomic-looking and phone accessible',
   forms.includes('function renderAdPaidReceiptReplacementNotice()') &&
   forms.includes('function renderAdDueReceiptReplacementNotice()') &&
@@ -649,7 +656,8 @@ check('Ads Studio dates and destinations are validated for the phone timezone',
   adsStudio.includes('String(d.startDate) < _adsStudioDateOffset(0)'));
 
 check('receipt edits preserve the saved collection date (liquidity window integrity)',
-  forms.includes("collectionDate: (editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')") &&
+  forms.includes("collectionDate: status === 'Not Paid'") &&
+  forms.includes("((editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''))") &&
   helpers.includes('function getReceiptPaidDate(r)') &&
   helpers.includes('function getLiquiditySnapshot()') &&
   helpers.includes("const paidAt = r?.deliveredAt || r?.collectionDate || r?.createdAt || null;") &&

@@ -845,10 +845,12 @@ function migrateOldDataFormats() {
         const isLinkedUnpaidDebt = getAdPaymentState(ad) === 'not_paid'
           && ['driver', 'in_shop'].includes(String(ad.collectionMethod || '').toLowerCase());
         const linkedReceiptId = ad.fundingReceiptId || (!isLinkedUnpaidDebt ? ad.receiptId : '');
-        if (linkedReceiptId && (ad.amountUSD || ad.spentUSD)) {
+        const hasRecordedSpend = ad.spentUSD !== undefined && ad.spentUSD !== null && ad.spentUSD !== '';
+        const legacyAllocationUSD = Math.max(Number(hasRecordedSpend ? ad.spentUSD : ad.amountUSD) || 0, 0);
+        if (linkedReceiptId && legacyAllocationUSD > 0) {
           ad.receiptAllocations.push({
             receiptId: String(linkedReceiptId),
-            amountUSD: ad.spentUSD || ad.amountUSD || 0
+            amountUSD: legacyAllocationUSD
           });
           changed = true;
         }

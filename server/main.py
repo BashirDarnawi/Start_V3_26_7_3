@@ -78,6 +78,26 @@ from .receipt_references import (
     build_receipt_reference_index as _build_receipt_reference_index,
     receipt_reference_reason as _receipt_reference_reason,
 )
+from .ad_final_spend import confirm_final_ad_spend, final_spend_audit_metadata
+from .unpaid_receipt_growth import (
+    UNPAID_RECEIPT_DEBT_INCREASE_FIELD as _UNPAID_RECEIPT_DEBT_INCREASE_FIELD,
+    parse_unpaid_receipt_debt_increase as _parse_unpaid_receipt_debt_increase,
+    reconcile_unpaid_receipt_debt as _reconcile_unpaid_receipt_debt,
+    reconcile_stopped_unpaid_receipt_debt as _reconcile_stopped_unpaid_receipt_debt,
+    run_legacy_unpaid_receipt_overgrowth_backfill as _run_unpaid_receipt_backfill,
+)
+from .startup_financial_scan import (
+    active_row_batches as _startup_active_row_batches,
+    active_rows_for_receipt as _startup_active_rows_for_receipt,
+    settle_rowless_driver_receipts as _settle_rowless_driver_receipts,
+)
+from .company_debt_coverage import plan_company_debt_coverage as _plan_company_debt_coverage
+from .unpaid_receipt_payment_plan import (
+    canonicalize_unpaid_in_shop_payment_plan as _canonicalize_unpaid_in_shop_payment_plan,
+    enforce_explicit_paid_to_debt_conversion as _enforce_explicit_paid_to_debt_conversion,
+    normalize_receipt_paid_pair as _financial_normalize_receipt_paid_pair,
+    run_legacy_unpaid_receipt_payment_plan_backfill as _run_unpaid_payment_plan_backfill,
+)
 from .auth_limits import (
     _app_exchange_rate_check,
     _app_handoff_rate_check,
@@ -125,6 +145,7 @@ from .financial_core import (
 )
 from .entity_projection import (
     INLINE_MEDIA_FIELDS,
+    _inline_media_sql_projection,
     _project_entity_media,
     _without_inline_media,
     can_include_entity_media,
@@ -169,6 +190,8 @@ from .schemas import (
     PasswordResetRequest,
     ReceiptSettlementRequest,
     ReceiptSettlementResponse,
+    ReceiptCompanyCoverageRequest,
+    ReceiptCompanyCoverageResponse,
     ReceiptTransferRequest,
     ReceiptTransferResponse,
     SetupAdminRequest,
@@ -1335,45 +1358,40 @@ def list_entities(
     # cause a record to be skipped or duplicated. Delta queries keep
     # last_modified ordering (they re-scan by cursor and upsert idempotently).
     order_by = "last_modified ASC, id ASC" if updated_since is not None else "created_at DESC, id DESC"
-    # Ads Studio creatives can be several megabytes each.  Removing them only
-    # after SELECT/JSON decoding still lets a review-queue request materialize
-    # hundreds of megabytes in the API process.  Project that field out in the
-    # database and carry only its count on lightweight list/sync requests.
-    campaign_media_projected = entity_type == "adCampaignRequests" and not include_media
+    # Inline photos can be several megabytes per record. Removing them only
+    # after SELECT/JSON decoding still lets an ordinary list/sync request
+    # materialize hundreds of megabytes in the API process. Project all known
+    # media fields out in the database and carry only their trustworthy count.
+    media_sql_projection = (
+        _inline_media_sql_projection(entity_type, dialect)
+        if not include_media
+        else None
+    )
+    media_projected = media_sql_projection is not None
+    campaign_media_projected = entity_type == "adCampaignRequests" and media_projected
     campaign_reviewer_delta = (
         campaign_media_projected
         and ad_campaign_reviewer_scope
         and updated_since is not None
     )
-    if campaign_media_projected and dialect == "postgresql":
-        campaign_json = "(data_json::jsonb - 'creativeImages')::text"
+    if media_projected:
+        projected_json, media_count_expression = media_sql_projection
         if campaign_reviewer_delta:
-            campaign_json = (
+            projected_json = (
                 "CASE WHEN " + campaign_status_expr +
-                " IN ('Submitted','Approved','Rejected','Stopped') THEN " + campaign_json +
+                " IN ('Submitted','Approved','Rejected','Stopped') THEN " + projected_json +
                 " ELSE '{}' END"
             )
-        select_clause = (
-            f"type, id, {campaign_json} AS data_json, "
-            "deleted, created_at, created_by, last_modified, "
-            "CASE WHEN jsonb_typeof(data_json::jsonb -> 'creativeImages')='array' "
-            "THEN jsonb_array_length(data_json::jsonb -> 'creativeImages') ELSE 0 END AS media_count, "
-            f"{campaign_status_expr} AS campaign_status"
+        campaign_status_column = (
+            f", {campaign_status_expr} AS campaign_status"
+            if campaign_media_projected
+            else ""
         )
-    elif campaign_media_projected:
-        campaign_json = "json_remove(data_json, '$.creativeImages')"
-        if campaign_reviewer_delta:
-            campaign_json = (
-                "CASE WHEN " + campaign_status_expr +
-                " IN ('Submitted','Approved','Rejected','Stopped') THEN " + campaign_json +
-                " ELSE '{}' END"
-            )
         select_clause = (
-            f"type, id, {campaign_json} AS data_json, "
+            f"type, id, {projected_json} AS data_json, "
             "deleted, created_at, created_by, last_modified, "
-            "CASE WHEN json_type(data_json, '$.creativeImages')='array' "
-            "THEN json_array_length(data_json, '$.creativeImages') ELSE 0 END AS media_count, "
-            f"{campaign_status_expr} AS campaign_status"
+            f"{media_count_expression} AS media_count"
+            f"{campaign_status_column}"
         )
     else:
         select_clause = "*"
@@ -1416,10 +1434,10 @@ def list_entities(
                     data["createdBy"] = d.get("created_by")
                 if delivery_person_id is not None:
                     data["deliveryPersonId"] = delivery_person_id
-            elif campaign_media_projected:
+            elif media_projected:
                 # The database projection already removed the bytes.  Preserve
                 # the same transport contract as _without_inline_media without
-                # ever loading the creativeImages array into Python memory.
+                # ever loading the media values into Python memory.
                 data["_mediaOmitted"] = True
                 data["_photoCount"] = max(0, int(d.get("media_count") or 0))
             elif not include_media:
@@ -2229,102 +2247,24 @@ def _bootstrap_first_admin_if_empty():
 
 
 def backfill_settle_rowless_driver_receipts() -> int:
-    """Settle rowless driver-linked ads on receipts paid BEFORE the paid
-    cascade learned this shape (2026-08 fix).
-
-    A modern "Not Paid - driver" ad carries no allocation rows: its money is
-    the cash the driver collects through the linked delivery receipt. The
-    cascade now settles such ads the moment the receipt becomes Paid, but
-    receipts paid before the fix kept their ads unsettled, so the collected
-    cash still read as spendable credit. Re-running the atomic PATCH with no
-    updates re-executes the (fixed) paid cascade with full locking, capacity
-    checks and version bumps so clients delta-sync the healed rows.
-    Idempotent: once settled the rowless gap is 0 and the receipt is never
-    selected again. A receipt whose paid balance is ALREADY fully committed
-    (capacity 0 — settlement could move nothing) is skipped BEFORE any write,
-    so a residue never version-bumps rows on every boot; it is printed for
-    manual follow-up, as are closed-period refusals. Never blocks boot.
-    """
-
-    def _scan_state() -> tuple[dict[str, int], list[dict[str, Any]]]:
-        """One ads-table read: per-receipt rowless gaps + every parsed ad."""
-        with db_conn() as conn:
-            ad_rows = conn.execute(
-                text("SELECT data_json FROM entities WHERE type='ads' AND deleted=false")
-            ).mappings().all()
-        gaps: dict[str, int] = {}
-        ads: list[dict[str, Any]] = []
-        for row in ad_rows:
-            try:
-                ad = json_loads(row["data_json"] or "{}") or {}
-            except Exception:
-                continue
-            if not isinstance(ad, dict) or str(ad.get("recordType") or "") == "receipt":
-                continue
-            ads.append(ad)
-            rid = str(ad.get("linkedDeliveryReceiptId") or ad.get("receiptId") or "")
-            if not rid:
-                continue
-            try:
-                gap = _financial_rowless_driver_gap(ad, rid)
-            except HTTPException:
-                continue  # corrupt stored amount: leave the row for manual review
-            if gap > 0:
-                gaps[rid] = gaps.get(rid, 0) + gap
-        return gaps, ads
-
-    candidates: list[str] = []
-    try:
-        receipt_gaps, parsed_ads = _scan_state()
-        with db_conn() as conn:
-            for rid in sorted(receipt_gaps):
-                rrow = conn.execute(
-                    text("SELECT data_json, deleted FROM entities WHERE type='receipts' AND id=:id"),
-                    {"id": rid},
-                ).mappings().first()
-                if not rrow or bool(rrow["deleted"]):
-                    continue
-                try:
-                    receipt = json_loads(rrow["data_json"] or "{}") or {}
-                except Exception:
-                    continue
-                if not isinstance(receipt, dict) or not _financial_receipt_transferable(receipt):
-                    continue
-                # Mirror of the cascade's implied_cap (paid pot minus transfers
-                # and every explicit commitment): if settlement could move 0
-                # cents, calling the PATCH would only rewrite row versions.
-                try:
-                    capacity = _financial_due_total(receipt) - _financial_outgoing(receipt)
-                    for ad in parsed_ads:
-                        capacity -= _financial_ad_committed(ad, rid)
-                except HTTPException:
-                    continue  # corrupt stored money fields: manual review
-                if capacity <= 0:
-                    print(f"[albayan] rowless-settlement stuck {rid}: paid balance already fully used; needs manual review")
-                    continue
-                candidates.append(rid)
-    except Exception as e:
-        print(f"[albayan] rowless-settlement scan skipped/failed: {type(e).__name__}: {e}")
-        return 0
-
-    healed = 0
-    for rid in candidates:
-        try:
-            before_gap = _scan_state()[0].get(rid, 0)
-            _financial_patch_receipt_atomic({"id": "system"}, rid, {}, None)
-            if _scan_state()[0].get(rid, 0) < before_gap:
-                healed += 1
-            else:
-                print(f"[albayan] rowless-settlement stuck {rid}: cascade settled nothing; needs manual review")
-        except HTTPException as e:
-            print(f"[albayan] rowless-settlement skipped {rid}: {e.status_code} {e.detail}")
-        except Exception as e:
-            print(f"[albayan] rowless-settlement skipped {rid}: {type(e).__name__}: {e}")
-    if healed:
-        print(f"[albayan] Settled rowless driver ads on {healed} paid receipt(s)")
-    return healed
+    return _settle_rowless_driver_receipts(
+        open_transaction=db_conn,
+        row_batches=_financial_active_row_batches,
+        row_data=_financial_row_data,
+        financial_due_total=_financial_due_total,
+        patch_receipt=_financial_patch_receipt_atomic,
+    )
+def backfill_repair_legacy_unpaid_receipt_overgrowth() -> dict[str, int]:
+    return _run_unpaid_receipt_backfill(
+        open_transaction=db_conn, sqlite_guard=_SQLITE_FINANCIAL_LOCK,
+        ctx_factory=_unpaid_receipt_growth_ctx,
+    )
 
 
+def backfill_normalize_legacy_unpaid_receipt_payment_plans() -> dict[str, int]:
+    return _run_unpaid_payment_plan_backfill(
+        open_transaction=db_conn, sqlite_guard=_SQLITE_FINANCIAL_LOCK, ctx_factory=_unpaid_receipt_growth_ctx,
+    )
 def _run_page_name_backfill_quietly() -> None:
     """Thread body for the boot page-name pass: never lets an exception escape."""
     try:
@@ -2384,6 +2324,19 @@ def _startup():
         backfill_settle_rowless_driver_receipts()
     except Exception as e:
         print(f"[albayan] rowless settlement backfill failed: {e}")
+
+    # Normalize the one proven legacy pseudo-payment shape before debt
+    # reconciliation.  Otherwise the reconciliation correctly refuses to
+    # touch a Not Paid receipt that still appears to contain collected money.
+    # Both passes are repair conveniences and must never make boot unhealthy.
+    try:
+        backfill_normalize_legacy_unpaid_receipt_payment_plans()
+    except Exception as e:
+        print(f"[albayan] unpaid payment-plan backfill failed: {e}")
+    try:
+        backfill_repair_legacy_unpaid_receipt_overgrowth()
+    except Exception as e:
+        print(f"[albayan] unpaid receipt overgrowth backfill failed: {e}")
 
     # Give placeholder-named Meta pages their real Facebook name (bounded;
     # also re-runs inside the Meta background worker). On a daemon thread:
@@ -6438,6 +6391,8 @@ def _clothes_patch_shipment_atomic(
 
 RECEIPT_TRANSFER_MUTATION_COLLECTION = "receiptTransferMutations"
 RECEIPT_SETTLEMENT_MUTATION_COLLECTION = "receiptSettlementMutations"
+RECEIPT_COMPANY_COVERAGE_COLLECTION = "receiptCompanyCoverages"
+RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION = "receiptCompanyCoverageMutations"
 AD_FUNDING_MUTATION_COLLECTION = "adFundingMutations"
 AD_STOP_MUTATION_COLLECTION = "adStopMutations"
 CUSTOMER_MERGE_MUTATION_COLLECTION = "customerMergeMutations"
@@ -6445,6 +6400,7 @@ FINANCIAL_MUTATION_COLLECTIONS = frozenset(
     {
         RECEIPT_TRANSFER_MUTATION_COLLECTION,
         RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
+        RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
         AD_FUNDING_MUTATION_COLLECTION,
         AD_STOP_MUTATION_COLLECTION,
         CUSTOMER_MERGE_MUTATION_COLLECTION,
@@ -6462,6 +6418,11 @@ AD_FUNDING_FIELDS = frozenset(
         "initialAmountUSD",
         "spentUSD",
         "stoppedAt",
+        "manualSpentOverride",
+        "finalSpendConfirmedAt",
+        "finalSpendConfirmedBy",
+        "finalSpendMetaMinorAtConfirmation",
+        "finalSpendMetaCurrencyAtConfirmation",
         "stopAllocationBaseline",
         "remainingCustomerInformed",
         "remainingCustomerInformedAt",
@@ -6511,6 +6472,7 @@ RECEIPT_CAPACITY_FIELDS = frozenset(
         "status",
         "isPaid",
         "payments",
+        "plannedPayments",
     }
 )
 
@@ -6639,28 +6601,43 @@ def _financial_active_rows(conn: Any, collection: str) -> list[Any]:
     media_fields = INLINE_MEDIA_FIELDS.get(collection) or ()
     columns = "type,id,data_json,deleted,created_at,created_by,last_modified"
     if media_fields:
-        try:
-            if str(get_engine().dialect.name or "") == "postgresql":
-                stripped = "data_json::jsonb" + "".join(f" - '{f}'" for f in media_fields)
-                data_expr = f"({stripped})::text AS data_json"
-            else:
-                paths = "".join(f", '$.{f}'" for f in media_fields)
-                data_expr = f"json_remove(data_json{paths}) AS data_json"
-            return conn.execute(
-                text(
-                    f"SELECT type,id,{data_expr},deleted,created_at,created_by,last_modified "
-                    "FROM entities WHERE type=:type AND deleted=false"
-                ),
-                {"type": collection},
-            ).mappings().all()
-        except Exception:
-            pass
+        dialect = str(get_engine().dialect.name or "")
+        projection = _inline_media_sql_projection(collection, dialect)
+        if projection is None:
+            raise RuntimeError(
+                f"Inline-media projection is unavailable for database dialect {dialect!r}"
+            )
+        data_expression, _media_count_expression = projection
+        return conn.execute(
+            text(
+                f"SELECT type,id,{data_expression} AS data_json,"
+                "deleted,created_at,created_by,last_modified "
+                "FROM entities WHERE type=:type AND deleted=false"
+            ),
+            {"type": collection},
+        ).mappings().all()
     return conn.execute(
         text(f"SELECT {columns} FROM entities WHERE type=:type AND deleted=false"),
         {"type": collection},
     ).mappings().all()
 
 
+def _financial_active_row_batches(conn: Any, collection: str, *, batch_size: int = 128):
+    return _startup_active_row_batches(
+        conn,
+        collection,
+        dialect=str(get_engine().dialect.name or ""),
+        batch_size=batch_size,
+    )
+
+
+def _financial_active_rows_for_receipt_bounded(conn: Any, receipt_id: str) -> list[Any]:
+    return _startup_active_rows_for_receipt(
+        conn,
+        receipt_id,
+        row_batches=_financial_active_row_batches,
+        row_data=_financial_row_data,
+    )
 def _financial_allocations(raw: Any, field: str, *, allow_empty: bool = True) -> list[dict[str, Any]]:
     if raw is None:
         return []
@@ -6825,6 +6802,41 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     if local > 0 and trusted_rate:
         return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     return usd_minor
+
+
+def _read_company_coverage_state(
+    data: dict[str, Any]
+) -> tuple[int, int, int, int]:
+    """Return ``(grossDebt, coveredBefore, outstandingBefore, outstandingMinorSource).``
+
+    We keep the original customer debt value (`grossDebt`) from the stored
+    receipt capacity and let operator-created fields (`companyCoveredUSD`,
+    `customerOutstandingUSD`) drive the effective debt summary when present.
+    """
+    gross_minor = _financial_due_total(data)
+    covered_minor = _financial_minor(
+        data.get("companyCoveredUSD"),
+        "stored companyCoveredUSD",
+    ) if data.get("companyCoveredUSD") is not None else 0
+    outstanding_stored_minor = (
+        _financial_minor(
+            data.get("customerOutstandingUSD"),
+            "stored customerOutstandingUSD",
+        )
+        if data.get("customerOutstandingUSD") is not None
+        else None
+    )
+    if outstanding_stored_minor is not None:
+        outstanding_minor = outstanding_stored_minor
+        # Keep the two stored summaries internally consistent so a later
+        # coverage run cannot mint a negative or over-reported liability.
+        covered_minor = max(min(covered_minor, gross_minor), 0)
+        outstanding_minor = max(min(outstanding_minor, gross_minor - covered_minor), 0)
+    else:
+        covered_minor = max(min(covered_minor, gross_minor), 0)
+        outstanding_minor = max(gross_minor - covered_minor, 0)
+    source = 1 if data.get("customerOutstandingUSD") is None else 0
+    return gross_minor, covered_minor, outstanding_minor, source
 
 
 def _financial_valid_rate(value: Any) -> Decimal | None:
@@ -8451,22 +8463,48 @@ def _financial_validate_ad_plan(
     )
 
 
+def _unpaid_receipt_growth_ctx() -> dict[str, Any]:
+    return {
+        "validate_entity_id": validate_entity_id, "financial_allocations": _financial_allocations,
+        "financial_due_total": _financial_due_total, "financial_usage": _financial_usage, "financial_ad_due_usage": _financial_ad_due_usage,
+        "financial_valid_rate": _financial_valid_rate, "financial_row_data": _financial_row_data,
+        "user_has_permission": user_has_permission, "receipt_transfer_fields": RECEIPT_TRANSFER_FIELDS,
+        "sanitize_str": sanitize_str, "iso_utc": _iso_utc,
+        "assert_financial_period_open": assert_financial_period_open, "json_dumps": json_dumps,
+        "financial_active_rows": _financial_active_rows, "lock_row": _clothes_lock_row,
+        "financial_active_row_batches": _financial_active_row_batches,
+        "write_row": _clothes_write_row,
+        "postgres": str(get_engine().dialect.name or "") == "postgresql",
+    }
+
+
 def _ad_mutation_atomic(
     actor: dict[str, Any], body: AdMutationRequest
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], list[str], bool]:
     actor_id = validate_entity_id(actor.get("id"))
     ad_id = validate_entity_id(body.adId)
     idem = sanitize_str(body.idempotencyKey, 120)
     clean_request = sanitize_json(body.data or {}) or {}
+    debt_increase = _parse_unpaid_receipt_debt_increase(
+        clean_request.pop(_UNPAID_RECEIPT_DEBT_INCREASE_FIELD, None),
+        _unpaid_receipt_growth_ctx(),
+    )
     if set(clean_request) & META_AD_SERVER_FIELDS:
         raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
     validate_relationship_ids(clean_request, "ad data")
+    request_data_for_hash = dict(clean_request)
+    if debt_increase is not None:
+        request_data_for_hash[_UNPAID_RECEIPT_DEBT_INCREASE_FIELD] = {
+            "receiptId": debt_increase["receiptId"],
+            "amountUSD": debt_increase["amountUSD"],
+            "expectedLastModified": debt_increase["expectedLastModified"],
+        }
     request_hash = _financial_request_hash(
         {
             "action": body.action,
             "adId": ad_id,
             "expectedLastModified": body.expectedLastModified,
-            "data": clean_request,
+            "data": request_data_for_hash,
         }
     )
     postgres = str(get_engine().dialect.name or "") == "postgresql"
@@ -8480,7 +8518,11 @@ def _ad_mutation_atomic(
                 request_hash,
             )
             if prior:
-                return _financial_entity_result(conn, "ads", str(prior.get("adId"))), True
+                return (
+                    _financial_entity_result(conn, "ads", str(prior.get("adId"))),
+                    list(prior.get("updatedReceiptIds") or []),
+                    True,
+                )
 
             initial_row = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
             initial_data = _financial_row_data(initial_row) if initial_row else {}
@@ -8506,6 +8548,8 @@ def _ad_mutation_atomic(
             discovery = dict(initial_data)
             discovery.update(clean_request)
             receipt_ids = _financial_receipt_ids(discovery) | _financial_receipt_ids(initial_data)
+            if debt_increase is not None:
+                receipt_ids.add(str(debt_increase["receiptId"]))
             locked_receipts = _financial_lock_receipts(conn, receipt_ids, postgres=postgres)
             ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
             if body.action == "create":
@@ -8552,6 +8596,27 @@ def _ad_mutation_atomic(
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be edited")
             ad_rows = _financial_active_rows(conn, "ads")
             is_topup = body.action == "update" and "topUps" in clean_request and not is_refund and not is_relink
+            receipt_reconciliations: list[tuple[str, Any, dict[str, Any], Any]] = []
+            if debt_increase is not None and (is_refund or is_relink or is_topup):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Receipt debt cannot be increased during this ad operation",
+                )
+            if not is_refund and not is_relink:
+                receipt_reconciliations = _reconcile_unpaid_receipt_debt(
+                    conn,
+                    actor,
+                    debt_increase,
+                    clean_request,
+                    existing,
+                    locked_receipts=locked_receipts,
+                    ad_rows=ad_rows,
+                    ad_id=ad_id,
+                    ctx=_unpaid_receipt_growth_ctx(),
+                )
+                locked_receipts = dict(locked_receipts)
+                for receipt_id, _row, _data, validation_row in receipt_reconciliations:
+                    locked_receipts[receipt_id] = validation_row
             if is_refund:
                 if existing is None:
                     raise HTTPException(status_code=409, detail="Conflict: ad has changed")
@@ -8663,6 +8728,10 @@ def _ad_mutation_atomic(
             if not customer_row or bool(customer_row["deleted"]):
                 raise HTTPException(status_code=404, detail="Ad customer not found")
 
+            updated_receipt_ids: list[str] = []
+            for receipt_id, receipt_row, receipt_data, _validation_row in receipt_reconciliations:
+                _clothes_write_row(conn, receipt_row, receipt_data)
+                updated_receipt_ids.append(receipt_id)
             if body.action == "create":
                 saved = _insert_entity_in_transaction(conn, "ads", ad_id, saved_data, actor_id)
             else:
@@ -8676,9 +8745,9 @@ def _ad_mutation_atomic(
                 idem,
                 actor_id,
                 request_hash,
-                {"adId": ad_id},
+                {"adId": ad_id, "updatedReceiptIds": updated_receipt_ids},
             )
-            return saved, False
+            return saved, updated_receipt_ids, False
 
 
 def _financial_proportional_plan(
@@ -8865,7 +8934,7 @@ def _financial_ad_reconciliation_ready(ad: dict[str, Any]) -> bool:
 
 def _ad_stop_atomic(
     actor: dict[str, Any], ad_id_raw: str, body: AdStopRequest
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
     actor_id = validate_entity_id(actor.get("id"))
     ad_id = validate_entity_id(ad_id_raw)
     if not user_has_permission(actor, "ads", "stopAd"):
@@ -8892,7 +8961,7 @@ def _ad_stop_atomic(
                 request_hash,
             )
             if prior:
-                return _financial_entity_result(conn, "ads", str(prior.get("adId"))), True
+                return _financial_entity_result(conn, "ads", str(prior.get("adId"))), [_financial_entity_result(conn, "receipts", str(value)) for value in prior.get("updatedReceiptIds", [])], True
             initial = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
             if not initial or bool(initial["deleted"]):
                 raise HTTPException(status_code=404, detail="Ad not found")
@@ -8916,6 +8985,14 @@ def _ad_stop_atomic(
             ):
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be stopped")
             plan = _financial_apply_stop(ad, int(body.spentMinorUSD))
+            plan = confirm_final_ad_spend(
+                plan,
+                ad,
+                actor,
+                int(body.spentMinorUSD),
+                _iso_utc,
+                sanitize_str,
+            )
             amount_minor = _financial_minor(plan.get("amountUSD"), "ad amount")
             new_remaining_minor = max(amount_minor - int(body.spentMinorUSD), 0)
             confirmed_remaining_minor = _financial_confirmed_remaining_minor(ad)
@@ -8944,10 +9021,12 @@ def _ad_stop_atomic(
             else:
                 plan.pop("remainingCustomerInformedAt", None)
                 plan.pop("remainingCustomerInformedBy", None)
+            ad_rows = _financial_active_rows(conn, "ads")
+            updated_receipt_ids = _reconcile_stopped_unpaid_receipt_debt(conn, actor, plan, ad, locked_receipts=locked_receipts, ad_rows=ad_rows, ad_id=ad_id, ctx=_unpaid_receipt_growth_ctx())
             _financial_validate_ad_plan(
                 plan,
                 locked_receipts=locked_receipts,
-                ad_rows=_financial_active_rows(conn, "ads"),
+                ad_rows=ad_rows,
                 current_ad_id=ad_id,
             )
             saved = _clothes_write_row(conn, ad_row, plan)
@@ -8958,9 +9037,9 @@ def _ad_stop_atomic(
                 idem,
                 actor_id,
                 request_hash,
-                {"adId": ad_id},
+                {"adId": ad_id, "updatedReceiptIds": updated_receipt_ids},
             )
-            return saved, False
+            return saved, [_financial_entity_result(conn, "receipts", value) for value in updated_receipt_ids], False
 
 
 def _financial_release_canceled_due(
@@ -9541,41 +9620,6 @@ def _financial_prepare_unpaid_receipt_ad_updates(
     return plans
 
 
-def _financial_normalize_receipt_paid_pair(
-    old: dict[str, Any], updates: dict[str, Any]
-) -> None:
-    """Keep receipt status/isPaid canonical for every generic and dedicated path."""
-    explicit_status = "status" in updates
-    explicit_paid = "isPaid" in updates
-    requested_status = str(updates.get("status") or "") if explicit_status else ""
-    requested_paid = updates.get("isPaid") if explicit_paid else None
-    if explicit_paid and not isinstance(requested_paid, bool):
-        raise HTTPException(status_code=400, detail="Receipt isPaid must be true or false")
-    if explicit_status and explicit_paid:
-        contradictory = (
-            (requested_status == "Paid" and requested_paid is not True)
-            or (requested_status == "Not Paid" and requested_paid is not False)
-        )
-        if contradictory:
-            raise HTTPException(
-                status_code=400,
-                detail="Receipt status and isPaid must agree",
-            )
-    if explicit_status:
-        if requested_status == "Paid":
-            updates["isPaid"] = True
-        elif requested_status == "Not Paid":
-            updates["isPaid"] = False
-    elif explicit_paid:
-        if requested_paid is True:
-            updates["status"] = "Paid"
-        else:
-            old_status = str(old.get("status") or "")
-            updates["status"] = (
-                old_status if old_status in {"Not Paid", "Canceled", "Lost", "Destroyed"} else "Not Paid"
-            )
-
-
 def _financial_patch_receipt_atomic(
     actor: dict[str, Any],
     receipt_id_raw: str,
@@ -9585,6 +9629,8 @@ def _financial_patch_receipt_atomic(
     idempotency_key: str | None = None,
     convert_funding_to_debt: bool = False,
     completion_recorded_by: str | None = None,
+    _startup_bounded_ad_scan: bool = False,
+    _startup_scan_result: dict[str, int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
     receipt_id = validate_entity_id(receipt_id_raw)
     actor_id = validate_entity_id(actor.get("id"))
@@ -9693,6 +9739,12 @@ def _financial_patch_receipt_atomic(
                 clean.pop(key, None)
             if completion_recorded_by: clean["deliveryCompletionRecordedBy"] = completion_recorded_by  # popped above; only the verified completion branch stamps it
             merged.update(clean)
+            _enforce_explicit_paid_to_debt_conversion(
+                old, merged, explicit_conversion=convert_funding_to_debt
+            )
+            merged, _ = _canonicalize_unpaid_in_shop_payment_plan(
+                merged, source="update", now_iso=_iso_utc()
+            )
             assert_financial_period_open("receipts", old, conn=conn)
             assert_financial_period_open("receipts", merged, conn=conn)
             merged_status = str(merged.get("status") or "")
@@ -9714,7 +9766,11 @@ def _financial_patch_receipt_atomic(
                 merged,
                 postgres=postgres,
             )
-            ad_rows = _financial_active_rows(conn, "ads")
+            ad_rows = (
+                _financial_active_rows_for_receipt_bounded(conn, receipt_id)
+                if _startup_bounded_ad_scan
+                else _financial_active_rows(conn, "ads")
+            )
             # Delivery completion money is authoritative only here, after the
             # receipt row is locked and after taking the current ad snapshot.
             # In particular, a historical zero-value D receipt may derive its
@@ -9826,6 +9882,19 @@ def _financial_patch_receipt_atomic(
                     actor_name=sanitize_str(str(actor.get("name") or ""), 120),
                     postgres=postgres,
                 )
+
+            if _startup_scan_result is not None:
+                # Measure the exact locked rows used by this atomic plan. This
+                # preserves the old backfill's "healed only if the gap fell"
+                # result without two race-prone whole-table rescans.
+                gap_before = 0
+                gap_after = 0
+                for ad_row, ad_plan in ad_plans:
+                    old_ad = _financial_row_data(ad_row)
+                    gap_before += _financial_rowless_driver_gap(old_ad, receipt_id)
+                    gap_after += _financial_rowless_driver_gap(ad_plan, receipt_id)
+                _startup_scan_result["gapBefore"] = gap_before
+                _startup_scan_result["gapAfter"] = gap_after
 
             for ad_row, ad_plan in ad_plans:
                 assert_financial_period_open("ads", _financial_row_data(ad_row), conn=conn)
@@ -9983,6 +10052,260 @@ def transfer_receipt_balance(
         transfer=transfer,
         replayed=replayed,
     )
+
+
+@app.post(
+    "/api/receipts/{receipt_id}/company-coverages",
+    response_model=ReceiptCompanyCoverageResponse,
+)
+def cover_receipt_with_company_funds(
+    receipt_id: str,
+    body: ReceiptCompanyCoverageRequest,
+    request: Request,
+    include_media: bool = True,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    """Reduce unpaid in-shop/office receipt liability from internal funds.
+
+    This endpoint never marks a customer payment. It only moves commitment from
+    ``dueAllocations`` to ``companyFundingAllocations`` on linked ads and keeps
+    the remaining customer debt in sync.
+    """
+    require_same_origin(request)
+    receipt_id = validate_entity_id(receipt_id)
+    idem = sanitize_str(body.idempotencyKey, 120)
+    reason = sanitize_str(body.reason, 500)
+    request_hash = _financial_request_hash(
+        {
+            "receiptId": receipt_id,
+            "amountMinorUSD": int(body.amountMinorUSD),
+            "expectedLastModified": int(body.expectedLastModified),
+            "reason": reason,
+        }
+    )
+    actor_id = validate_entity_id(admin.get("id"))
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
+    with guard:
+        with db_conn() as conn:
+            _lock_idempotency_key(
+                conn,
+                idem,
+                postgres=postgres,
+                namespace="receiptCompanyCoverage",
+            )
+            prior = _financial_check_marker(
+                _financial_get_marker(
+                    conn,
+                    RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+                    "receiptCompanyCoverage",
+                    idem,
+                ),
+                actor_id,
+                request_hash,
+            )
+            if prior:
+                coverage = _financial_entity_result(
+                    conn,
+                    RECEIPT_COMPANY_COVERAGE_COLLECTION,
+                    str(prior.get("coverageId") or ""),
+                )
+                updated_receipts = [
+                    _financial_entity_result(
+                        conn, "receipts", str(receipt_id)
+                    )
+                    for receipt_id in (prior.get("updatedReceiptIds") or [])
+                ]
+                updated_ads = [
+                    _financial_entity_result(conn, "ads", str(ad_id))
+                    for ad_id in (prior.get("updatedAdIds") or [])
+                ]
+                return ReceiptCompanyCoverageResponse(
+                    coverage=EntityResponse(**coverage),
+                    updatedReceipts=[EntityResponse(**item) for item in updated_receipts],
+                    updatedAds=[EntityResponse(**item) for item in updated_ads],
+                    replayed=True,
+                )
+
+            row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=postgres)
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Receipt not found")
+
+            existing = _financial_row_data(row)
+            if (
+                str(existing.get("status") or "") != "Not Paid"
+                or existing.get("isPaid") is not False
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Receipt must be unpaid (Not Paid) to apply company coverage",
+                )
+            status_detail = (
+                existing.get("statusDetail")
+                if isinstance(existing.get("statusDetail"), dict)
+                else {}
+            )
+            not_paid_collection = str(
+                status_detail.get("notPaidCollection") or ""
+            ).strip().lower()
+            if not_paid_collection not in {"", "office", "in_shop", "shop"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only in-shop office receipts can be covered by company funds",
+                )
+            if str(existing.get("deliveryStatus") or "").strip() != "Office":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Company coverage is only valid for Office delivery status",
+                )
+            if str(existing.get("receiptType") or "").upper() == "TRANSFER_IN":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Transfer-in receipts cannot be covered by company funds",
+                )
+            if _financial_outgoing(existing):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Receipts with outgoing transfers cannot be company-covered",
+                )
+            if int(row["last_modified"]) != int(body.expectedLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
+
+            customer_id = validate_entity_id(existing.get("customerId"))
+            if not customer_id:
+                raise HTTPException(status_code=409, detail="Receipt must belong to a customer")
+
+            assert_financial_period_open("receipts", existing, conn=conn)
+            gross_minor, covered_before_minor, outstanding_before_minor, _source = (
+                _read_company_coverage_state(existing)
+            )
+            if int(body.amountMinorUSD) > outstanding_before_minor:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Receipt outstanding liability is smaller than requested amount",
+                )
+
+            ad_rows = _financial_active_rows_for_receipt_bounded(conn, receipt_id)
+            candidates = []
+            for ad_row in ad_rows:
+                if bool(ad_row.get("deleted")):
+                    continue
+                ad_data = _financial_row_data(ad_row)
+                if str(ad_data.get("recordType") or "") == "receipt":
+                    continue
+                if _financial_ad_due_usage(ad_data, receipt_id) <= 0:
+                    continue
+                candidates.append((str(ad_row["id"]), ad_data))
+
+            locked_ads = {}
+            locked_ad_rows = []
+            for ad_id, _ in sorted(candidates, key=lambda item: item[0]):
+                ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+                if not ad_row or bool(ad_row["deleted"]):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Linked ad is no longer available",
+                    )
+                locked_ad_rows.append((ad_id, _financial_row_data(ad_row)))
+                locked_ads[ad_id] = ad_row
+
+            plan = _plan_company_debt_coverage(
+                receipt_id,
+                amount_minor=int(body.amountMinorUSD),
+                ads=[
+                    (ad_id, ad_data)
+                    for ad_id, ad_data in sorted(locked_ad_rows, key=lambda item: item[0])
+                ],
+            )
+            updated_ads = []
+            for item in plan.ads:
+                ad_row = locked_ads[str(item.ad_id)]
+                assert_financial_period_open("ads", ad_data if (ad_data := _financial_row_data(ad_row)) else {}, conn=conn)
+                assert_financial_period_open("ads", item.data, conn=conn)
+                updated_ads.append(_clothes_write_row(conn, ad_row, item.data))
+
+            requested_amount_minor = int(body.amountMinorUSD)
+            covered_after_minor = covered_before_minor + requested_amount_minor
+            covered_after_minor = min(covered_after_minor, gross_minor)
+            outstanding_after_minor = max(gross_minor - covered_after_minor, 0)
+            saved_receipt = _financial_row_data(row)
+            saved_receipt.update(existing)
+            saved_receipt["companyCoverageCount"] = (
+                int(saved_receipt.get("companyCoverageCount") or 0) + 1
+            )
+            coverage_timestamp = _iso_utc()
+            saved_receipt["lastCompanyCoverageAt"] = coverage_timestamp
+
+            coverage_id = new_id("receiptCompanyCoverage")
+            coverage_data = {
+                "recordType": "companyDebtCoverage",
+                "receiptId": receipt_id,
+                "customerId": customer_id,
+                "amountMinorUSD": requested_amount_minor,
+                "amountUSD": _financial_usd(requested_amount_minor),
+                "reason": reason,
+                "actorId": actor_id,
+                "grossDebtMinorUSD": gross_minor,
+                "grossDebtUSD": _financial_usd(gross_minor),
+                "companyCoveredBeforeMinorUSD": covered_before_minor,
+                "companyCoveredBeforeUSD": _financial_usd(covered_before_minor),
+                "companyCoveredAfterMinorUSD": covered_after_minor,
+                "companyCoveredAfterUSD": _financial_usd(covered_after_minor),
+                "customerOutstandingBeforeMinorUSD": outstanding_before_minor,
+                "customerOutstandingBeforeUSD": _financial_usd(outstanding_before_minor),
+                "customerOutstandingAfterMinorUSD": outstanding_after_minor,
+                "customerOutstandingAfterUSD": _financial_usd(outstanding_after_minor),
+                "coveredAt": coverage_timestamp,
+                "unassignedAmountMinorUSD": plan.unassigned_minor,
+                "unassignedAmountUSD": _financial_usd(plan.unassigned_minor),
+                "allocations": [
+                    {
+                        "adId": item.ad_id,
+                        "amountMinorUSD": int(item.moved_minor),
+                        "amountUSD": _financial_usd(item.moved_minor),
+                    }
+                    for item in plan.ads
+                ],
+                "customerPayment": False,
+                "countsAsCustomerRevenue": False,
+                "source": "company_funds",
+            }
+
+            saved_receipt["companyCoveredUSD"] = _financial_usd(covered_after_minor)
+            saved_receipt["customerOutstandingUSD"] = _financial_usd(outstanding_after_minor)
+            saved_receipt["lastCompanyCoverageId"] = coverage_id
+            saved_receipt_row = _clothes_write_row(
+                conn, row, saved_receipt
+            )
+            _insert_entity_in_transaction(
+                conn,
+                RECEIPT_COMPANY_COVERAGE_COLLECTION,
+                coverage_id,
+                coverage_data,
+                actor_id,
+            )
+            coverage = _financial_entity_result(
+                conn, RECEIPT_COMPANY_COVERAGE_COLLECTION, coverage_id
+            )
+            _financial_insert_marker(
+                conn,
+                RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+                "receiptCompanyCoverage",
+                idem,
+                actor_id,
+                request_hash,
+                {
+                    "coverageId": coverage_id,
+                    "updatedReceiptIds": [saved_receipt_row["id"]],
+                    "updatedAdIds": [item["id"] for item in updated_ads],
+                },
+            )
+            return ReceiptCompanyCoverageResponse(
+                coverage=EntityResponse(**_project_entity_media_for_user(coverage, admin, include_media)),
+                updatedReceipts=[EntityResponse(**_project_entity_media_for_user(saved_receipt_row, admin, include_media))],
+                updatedAds=[EntityResponse(**_project_entity_media_for_user(item, admin, include_media)) for item in updated_ads],
+                replayed=False,
+            )
 
 
 @app.post(
@@ -10232,13 +10555,28 @@ def mutate_ad_funding(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
-    ad, replayed = _ad_mutation_atomic(user, body)
+    ad, updated_receipt_ids, replayed = _ad_mutation_atomic(user, body)
+    updated_receipts: list[EntityResponse] = []
+    for receipt_id in updated_receipt_ids:
+        receipt = get_entity("receipts", str(receipt_id))
+        if receipt is None or bool(receipt.get("deleted")):
+            raise HTTPException(
+                status_code=409,
+                detail="Updated unpaid receipt is missing",
+            )
+        updated_receipts.append(
+            EntityResponse(
+                **_project_entity_media_for_user(receipt, user, include_media)
+            )
+        )
     if not replayed:
         audit(
             str(user.get("id")), body.action, "ads", ad["id"], f"Ad {body.action}", {}
         )
     return AdMutationResponse(
-        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)),
+        updatedReceipts=updated_receipts,
+        replayed=replayed,
     )
 
 
@@ -10251,7 +10589,7 @@ def stop_ad_atomic(
     user: dict[str, Any] = Depends(current_user),
 ):
     require_same_origin(request)
-    ad, replayed = _ad_stop_atomic(user, ad_id, body)
+    ad, updated_receipts, replayed = _ad_stop_atomic(user, ad_id, body)
     if not replayed:
         saved_data = ad.get("data") if isinstance(ad.get("data"), dict) else {}
         saved_spent = _financial_minor(saved_data.get("spentUSD"), "saved ad spend")
@@ -10266,10 +10604,11 @@ def stop_ad_atomic(
                 "spentUSD": _financial_usd(saved_spent),
                 "remainingUSD": _financial_usd(max(saved_amount - saved_spent, 0)),
                 "customerInformed": saved_data.get("remainingCustomerInformed") is True,
+                **final_spend_audit_metadata(saved_data),
             },
         )
     return AdStopResponse(
-        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), replayed=replayed
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), updatedReceipts=[EntityResponse(**_project_entity_media_for_user(receipt, user, include_media)) for receipt in updated_receipts], replayed=replayed
     )
 
 
@@ -11806,6 +12145,13 @@ def create_collection_item(
         if status_in == "Destroyed":
             data_in["isPaid"] = False
             data_in["receiptType"] = ""
+
+        # ``payments`` is collected money. A Not Paid In-Shop receipt may
+        # carry only a plan. Canonicalize the exact legacy LYD form shape and
+        # reject ambiguous payment evidence before anything reaches storage.
+        data_in, _ = _canonicalize_unpaid_in_shop_payment_plan(
+            data_in, source="create", now_iso=_iso_utc()
+        )
 
         # Persist server-generated/normalized fields
         body_data = data_in

@@ -30,7 +30,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-from .db import db_conn, get_engine, json_dumps, json_loads, now_ms
+from .db import db_conn, get_engine, json_dumps, json_field_sql, json_loads, now_ms
 from .entity_projection import _without_inline_media
 from .operations import assert_financial_period_open
 from .rate_limiter import check_rate_limit
@@ -43,6 +43,7 @@ _GRAPH_VERSION_RE = re.compile(r"^v[0-9]{1,2}\.[0-9]{1,2}$")
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _META_WRITE_LOCK = threading.RLock()
 _META_DISCOVERY_LOCK = threading.Lock()
+_META_DUE_SYNC_LOCK = threading.Lock()
 _META_REMOTE_BACKOFF_LOCK = threading.Lock()
 _META_REMOTE_REQUEST_LOCK = threading.Lock()
 _META_REMOTE_BACKOFF_UNTIL = 0.0
@@ -87,6 +88,27 @@ _META_DISCOVERABLE_EFFECTIVE_STATUSES = (
     "WITH_ISSUES",
     "DISAPPROVED",
 )
+
+
+def _read_capped_response_body(response: httpx.Response, max_bytes: int) -> bytes | None:
+    """Read a streamed HTTP response without ever retaining more than the cap.
+
+    ``None`` means the declared or observed decoded body exceeded the limit.
+    Content-Length is only an early rejection: the running byte count remains
+    authoritative because compressed responses can expand while decoding.
+    """
+    try:
+        declared_length = int(str(response.headers.get("content-length") or "0"))
+    except (TypeError, ValueError, OverflowError):
+        declared_length = 0
+    if declared_length > max_bytes:
+        return None
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        if len(body) + len(chunk) > max_bytes:
+            return None
+        body.extend(chunk)
+    return bytes(body)
 
 
 def _find_regain_minutes(node: Any, depth: int = 0) -> int:
@@ -1091,17 +1113,20 @@ class MetaAdsClient:
                         "User-Agent": "Albayan-Meta-Read-Sync/1.0",
                     },
                 ) as client:
-                    response = client.get(url, params=query)
+                    with client.stream("GET", url, params=query) as response:
+                        response_body = _read_capped_response_body(
+                            response, 6 * 1024 * 1024
+                        )
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
                 _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
                 _META_LAST_REMOTE_REQUEST_AT = _iso_now()
                 raise MetaAdsError("network", "Meta could not be reached. Albayan will retry.", retryable=True)
             _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
             _META_LAST_REMOTE_REQUEST_AT = _iso_now()
-            if len(response.content or b"") > 6 * 1024 * 1024:
+            if response_body is None:
                 raise MetaAdsError("response_too_large", "Meta returned too much data for one synchronization.")
             try:
-                payload = response.json()
+                payload = json.loads(response_body)
             except ValueError:
                 payload = {}
             if not 200 <= response.status_code < 300 or (isinstance(payload, dict) and payload.get("error")):
@@ -1771,8 +1796,17 @@ class MetaAdsClient:
                 ) as web:
                     current_url = iframe_url
                     response = None
+                    response_body = b""
                     for redirect_count in range(4):
-                        response = web.get(current_url)
+                        with web.stream("GET", current_url) as streamed_response:
+                            response_body = _read_capped_response_body(
+                                streamed_response, 3 * 1024 * 1024
+                            )
+                            response = streamed_response
+                        if response_body is None:
+                            log.append("preview:too_large")
+                            response = None
+                            break
                         if response.status_code not in {301, 302, 303, 307, 308}:
                             break
                         if redirect_count >= 3:
@@ -1799,11 +1833,13 @@ class MetaAdsClient:
             if response.status_code != 200:
                 log.append(f"preview:http{int(response.status_code)}")
                 continue
-            if len(response.content or b"") > 3 * 1024 * 1024:
-                log.append("preview:too_large")
-                continue
-            cached_docs.append((ad_format, response.text))
-            yield response.text
+            encoding = response.charset_encoding or "utf-8"
+            try:
+                response_text = response_body.decode(encoding, errors="replace")
+            except LookupError:
+                response_text = response_body.decode("utf-8", errors="replace")
+            cached_docs.append((ad_format, response_text))
+            yield response_text
 
     def get_ad_snapshot(self, ad_id: Any) -> dict[str, Any]:
         ad_id = _meta_id(ad_id, "Meta ad")
@@ -2007,7 +2043,7 @@ class MetaAdsClient:
                     pass
             if (
                 not page_name
-                and _PAGE_NAME_FAILURE_UNTIL.get(page_id, 0.0) <= time.monotonic()
+                and not _page_name_failure_active(page_id)
             ):
                 # Meta hides a brand-new client page from every direct route
                 # while its ad is still in review; the rendered ad preview
@@ -2023,11 +2059,9 @@ class MetaAdsClient:
                 except Exception:
                     page_name = ""
                 if page_name:
-                    _PAGE_NAME_FAILURE_UNTIL.pop(page_id, None)
+                    _forget_page_name_failure(page_id)
                 else:
-                    _PAGE_NAME_FAILURE_UNTIL[page_id] = (
-                        time.monotonic() + _PAGE_NAME_FAILURE_COOLDOWN_SECONDS
-                    )
+                    _remember_page_name_failure(page_id)
         # The Page profile picture is shown beside (never instead of) the ad's
         # own photo in the ads table. Cached per page for this client's
         # lifetime and best-effort: an unreadable avatar must never fail the
@@ -2522,6 +2556,105 @@ def _entity_rows(conn: Any, entity_type: str) -> list[Any]:
     ).mappings().all()
 
 
+def _scalar_entity_rows(
+    conn: Any,
+    entity_type: str,
+    fields: tuple[tuple[str, str], ...],
+    *,
+    where_sql: str = "",
+    order_by_sql: str = "",
+    limit: int | None = None,
+    params: dict[str, Any] | None = None,
+) -> list[Any]:
+    """Read only small top-level JSON fields, never the full entity blob.
+
+    Meta rows can contain base64 photos and long change histories. Recurring
+    discovery/maintenance scans need only a handful of scalar values, so
+    projecting them in SQL prevents those large values from being copied out
+    of the database and materialized as Python dictionaries every pass.
+    """
+    columns = ["id", "created_at", "last_modified"]
+    for field_name, alias in fields:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+            raise ValueError(f"unsafe scalar alias: {alias!r}")
+        columns.append(f"{json_field_sql(field_name)} AS {alias}")
+    query = (
+        f"SELECT {','.join(columns)} FROM entities "
+        "WHERE type=:type AND deleted=false"
+    )
+    if where_sql:
+        query += f" AND ({where_sql})"
+    if order_by_sql:
+        query += f" ORDER BY {order_by_sql}"
+    values = {"type": entity_type, **(params or {})}
+    if limit is not None:
+        query += " LIMIT :_scan_limit"
+        values["_scan_limit"] = max(0, int(limit))
+    return conn.execute(text(query), values).mappings().all()
+
+
+def _entity_by_json_field(
+    conn: Any, entity_type: str, field_name: str, value: str
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Fetch and decode at most one entity selected by a scalar JSON key."""
+    if field_name not in {"metaAdId", "metaPageId"}:
+        raise ValueError(f"unsupported entity lookup field: {field_name!r}")
+    row = conn.execute(
+        text(
+            "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+            "FROM entities WHERE type=:type AND deleted=false AND "
+            f"COALESCE({json_field_sql(field_name)}, '')=:value LIMIT 1"
+        ),
+        {"type": entity_type, "value": value},
+    ).mappings().first()
+    if not row:
+        return None, None
+    data = json_loads(row.get("data_json") or "{}") or {}
+    return (row, data) if isinstance(data, dict) else (None, None)
+
+
+def _entity_by_id(conn: Any, entity_type: str, entity_id: str) -> tuple[Any | None, dict[str, Any] | None]:
+    row = conn.execute(
+        text(
+            "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
+            "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+        ),
+        {"type": entity_type, "id": entity_id},
+    ).mappings().first()
+    if not row:
+        return None, None
+    data = json_loads(row.get("data_json") or "{}") or {}
+    return (row, data) if isinstance(data, dict) else (None, None)
+
+
+def _nonnegative_json_integer_sql(field_name: str) -> str:
+    """Portable, non-throwing integer coercion for scheduler metadata."""
+    value = json_field_sql(field_name)
+    if get_engine().dialect.name == "postgresql":
+        clean = f"BTRIM(COALESCE({value}, ''))"
+        return (
+            f"(CASE WHEN {clean} ~ '^[0-9]+$' "
+            f"THEN CAST({clean} AS NUMERIC) ELSE 0 END)"
+        )
+    clean = f"TRIM(CAST(COALESCE({value}, '') AS TEXT))"
+    return (
+        f"(CASE WHEN {clean}<>'' AND {clean} NOT GLOB '*[^0-9]*' "
+        f"THEN CAST({value} AS INTEGER) ELSE 0 END)"
+    )
+
+
+def _valid_meta_id_sql(field_name: str) -> str:
+    """Portable SQL guard matching the numeric Meta ID validation in Python."""
+    value = json_field_sql(field_name)
+    if get_engine().dialect.name == "postgresql":
+        return f"COALESCE({value}, '') ~ '^[0-9]{{5,40}}$'"
+    clean = f"CAST(COALESCE({value}, '') AS TEXT)"
+    return (
+        f"LENGTH({clean}) BETWEEN 5 AND 40 "
+        f"AND {clean} NOT GLOB '*[^0-9]*'"
+    )
+
+
 def _write_entity_data(conn: Any, row: Any, data: dict[str, Any]) -> dict[str, Any]:
     baseline = int(row["last_modified"])
     modified = max(now_ms(), baseline + 1)
@@ -2596,16 +2729,6 @@ def _insert_internal_entity(
     }
 
 
-def _find_entity_by_meta_id(
-    rows: list[Any], field_name: str, meta_id: str
-) -> tuple[Any | None, dict[str, Any] | None]:
-    for row in rows:
-        data = json_loads(row.get("data_json") or "{}") or {}
-        if isinstance(data, dict) and str(data.get(field_name) or "") == meta_id:
-            return row, data
-    return None, None
-
-
 def _ensure_import_page(
     conn: Any, snapshot: dict[str, Any]
 ) -> tuple[str, str, bool]:
@@ -2614,21 +2737,20 @@ def _ensure_import_page(
         return "", "", False
     meta_name = _clean_text(snapshot.get("metaPageName"), 240)
     meta_category = _clean_text(snapshot.get("metaPageCategory"), 160)
-    rows = _entity_rows(conn, "pages")
-    matched_row, matched_data = _find_entity_by_meta_id(
-        rows, "metaPageId", meta_page_id
+    matched_row, matched_data = _entity_by_json_field(
+        conn, "pages", "metaPageId", meta_page_id
     )
     if matched_row is None and meta_name:
         wanted = _canonical_page_name(meta_name)
+        rows = _scalar_entity_rows(
+            conn, "pages", (("metaPageId", "meta_page_id"), ("name", "page_name"))
+        )
         for row in rows:
-            candidate = json_loads(row.get("data_json") or "{}") or {}
-            if not isinstance(candidate, dict):
-                continue
-            existing_meta_id = str(candidate.get("metaPageId") or "")
+            existing_meta_id = str(row.get("meta_page_id") or "")
             if existing_meta_id and existing_meta_id != meta_page_id:
                 continue
-            if _canonical_page_name(candidate.get("name")) == wanted:
-                matched_row, matched_data = row, candidate
+            if _canonical_page_name(row.get("page_name")) == wanted:
+                matched_row, matched_data = _entity_by_id(conn, "pages", str(row["id"]))
                 break
     if matched_row is not None and isinstance(matched_data, dict):
         updated = dict(matched_data)
@@ -2729,9 +2851,8 @@ def import_meta_ad_draft(snapshot: dict[str, Any]) -> dict[str, Any]:
             # releases it automatically and the external Meta calls have
             # already completed before this short critical section.
             conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('albayan_meta_import'))"))
-        ad_rows = _entity_rows(conn, "ads")
-        existing_row, existing_data = _find_entity_by_meta_id(
-            ad_rows, "metaAdId", meta_ad_id
+        existing_row, existing_data = _entity_by_json_field(
+            conn, "ads", "metaAdId", meta_ad_id
         )
         if existing_row is not None and isinstance(existing_data, dict):
             return _thin_ad_entity(_entity_from_row(existing_row, existing_data))
@@ -3348,11 +3469,14 @@ def _existing_meta_ad_ids() -> set[str]:
     result: set[str] = set()
     with db_conn() as conn:
         rows = conn.execute(
-            text("SELECT data_json FROM entities WHERE type='ads' AND deleted=false")
+            text(
+                f"SELECT {json_field_sql('metaAdId')} AS meta_ad_id "
+                "FROM entities WHERE type='ads' AND deleted=false AND "
+                f"COALESCE({json_field_sql('metaAdId')}, '')<>''"
+            )
         ).mappings().all()
     for row in rows:
-        data = json_loads(row.get("data_json") or "{}") or {}
-        meta_id = str(data.get("metaAdId") or "") if isinstance(data, dict) else ""
+        meta_id = str(row.get("meta_ad_id") or "")
         if _META_ID_RE.fullmatch(meta_id):
             result.add(meta_id)
     return result
@@ -3991,35 +4115,81 @@ def record_meta_sync_failure(
 
 def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
     current = now_ms()
+    safe_limit = max(1, int(limit))
     # While Meta's cooldown is armed every call would fail instantly; pausing
     # the priority repair lane keeps it from burning its one-shot retries.
     backoff_active = _meta_remote_backoff_remaining() > 0
     candidates: list[tuple[int, int, str, dict[str, Any]]] = []
     with db_conn() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT id,data_json,created_at,last_modified FROM entities "
-                "WHERE type='ads' AND deleted=false"
+        fields = (
+            ("metaAdId", "meta_ad_id"),
+            ("metaNextSyncAt", "meta_next_sync_at"),
+            ("metaMediaVersion", "meta_media_version"),
+            ("metaSyncFailureCount", "meta_sync_failure_count"),
+            ("metaMediaRepairVersion", "meta_media_repair_version"),
+            ("metaAdAccountId", "meta_ad_account_id"),
+            ("metaAdSetId", "meta_ad_set_id"),
+            ("metaCampaignId", "meta_campaign_id"),
+            ("metaCreativeId", "meta_creative_id"),
+            ("metaActivityCursorAt", "meta_activity_cursor_at"),
+            ("metaActivityLastCheckedAt", "meta_activity_last_checked_at"),
+            ("metaSyncedAt", "meta_synced_at"),
+            ("metaAdCreatedTime", "meta_ad_created_time"),
+        )
+        valid_id = _valid_meta_id_sql("metaAdId")
+        next_sync_sql = _nonnegative_json_integer_sql("metaNextSyncAt")
+        media_version_sql = _nonnegative_json_integer_sql("metaMediaVersion")
+        failure_count_sql = _nonnegative_json_integer_sql("metaSyncFailureCount")
+        repair_version_sql = _nonnegative_json_integer_sql("metaMediaRepairVersion")
+        repair_sql = (
+            f"{media_version_sql}<:_media_version AND "
+            f"({failure_count_sql}=0 OR {repair_version_sql}<:_media_version)"
+        )
+        query_params = {"_current": current, "_media_version": _META_MEDIA_VERSION}
+        repair_rows = []
+        if not backoff_active:
+            repair_rows = _scalar_entity_rows(
+                conn,
+                "ads",
+                fields,
+                where_sql=f"{valid_id} AND ({repair_sql})",
+                order_by_sql="created_at DESC,id ASC",
+                limit=1,
+                params=query_params,
             )
-        ).mappings().all()
+        due_where = f"{valid_id} AND {next_sync_sql}<=:_current"
+        if not backoff_active:
+            # Other repair candidates intentionally wait for later passes;
+            # one resolver upgrade must never fill the entire API batch.
+            due_where += f" AND NOT ({repair_sql})"
+        due_rows = _scalar_entity_rows(
+            conn,
+            "ads",
+            fields,
+            where_sql=due_where,
+            order_by_sql=f"{next_sync_sql} ASC,id ASC",
+            limit=safe_limit,
+            params=query_params,
+        )
+        rows = repair_rows + due_rows
     for row in rows:
-        data = json_loads(row.get("data_json") or "{}") or {}
-        if not isinstance(data, dict):
-            continue
-        meta_ad_id = str(data.get("metaAdId") or "")
+        meta_ad_id = str(row.get("meta_ad_id") or "")
         if not _META_ID_RE.fullmatch(meta_ad_id):
             continue
-        next_sync = int(data.get("metaNextSyncAt") or 0)
         try:
-            media_version = int(data.get("metaMediaVersion") or 0)
+            next_sync = int(row.get("meta_next_sync_at") or 0)
+        except (TypeError, ValueError, OverflowError):
+            next_sync = 0
+        try:
+            media_version = int(row.get("meta_media_version") or 0)
         except (TypeError, ValueError, OverflowError):
             media_version = 0
         try:
-            failure_count = int(data.get("metaSyncFailureCount") or 0)
+            failure_count = int(row.get("meta_sync_failure_count") or 0)
         except (TypeError, ValueError, OverflowError):
             failure_count = 0
         try:
-            repair_version = int(data.get("metaMediaRepairVersion") or 0)
+            repair_version = int(row.get("meta_media_repair_version") or 0)
         except (TypeError, ValueError, OverflowError):
             repair_version = 0
         # Every resolver upgrade grants ONE immediate repair attempt even to
@@ -4048,14 +4218,14 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
                     "adId": str(row["id"]),
                     "version": int(row["last_modified"]),
                     "metaAdId": meta_ad_id,
-                    "metaAdAccountId": _clean_text(data.get("metaAdAccountId"), 40),
-                    "metaAdSetId": _clean_text(data.get("metaAdSetId"), 40),
-                    "metaCampaignId": _clean_text(data.get("metaCampaignId"), 40),
-                    "metaCreativeId": _clean_text(data.get("metaCreativeId"), 40),
-                    "metaActivityCursorAt": _clean_time(data.get("metaActivityCursorAt")),
-                    "metaActivityLastCheckedAt": _clean_time(data.get("metaActivityLastCheckedAt")),
-                    "metaSyncedAt": _clean_time(data.get("metaSyncedAt")),
-                    "metaAdCreatedTime": _clean_time(data.get("metaAdCreatedTime")),
+                    "metaAdAccountId": _clean_text(row.get("meta_ad_account_id"), 40),
+                    "metaAdSetId": _clean_text(row.get("meta_ad_set_id"), 40),
+                    "metaCampaignId": _clean_text(row.get("meta_campaign_id"), 40),
+                    "metaCreativeId": _clean_text(row.get("meta_creative_id"), 40),
+                    "metaActivityCursorAt": _clean_time(row.get("meta_activity_cursor_at")),
+                    "metaActivityLastCheckedAt": _clean_time(row.get("meta_activity_last_checked_at")),
+                    "metaSyncedAt": _clean_time(row.get("meta_synced_at")),
+                    "metaAdCreatedTime": _clean_time(row.get("meta_ad_created_time")),
                     "needsMediaRepair": needs_media_repair,
                 },
             )
@@ -4072,7 +4242,7 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
                 continue
             repair_added = True
         selected.append(candidate)
-        if len(selected) >= max(1, limit):
+        if len(selected) >= safe_limit:
             break
     return selected
 
@@ -4172,6 +4342,18 @@ def _snapshot_activity_context(
 
 
 def sync_due_meta_ads(limit: int | None = None) -> list[dict[str, Any]]:
+    # The worker, manual endpoint and webhook wake-up can all request this job.
+    # One active pass is sufficient; callers arriving during it return quickly
+    # instead of duplicating snapshots, HTTP bodies and DB entities in memory.
+    if not _META_DUE_SYNC_LOCK.acquire(blocking=False):
+        return []
+    try:
+        return _sync_due_meta_ads_unlocked(limit)
+    finally:
+        _META_DUE_SYNC_LOCK.release()
+
+
+def _sync_due_meta_ads_unlocked(limit: int | None = None) -> list[dict[str, Any]]:
     config = load_meta_ads_config()
     if not config.configured:
         return []
@@ -4247,7 +4429,58 @@ def _is_placeholder_page_name(name: Any, meta_page_id: str) -> bool:
 # deadlines; local sources are still consulted every pass, so a name learned
 # any other way heals the page immediately.
 _PAGE_NAME_FAILURE_COOLDOWN_SECONDS = 3600
+_PAGE_NAME_FAILURE_MAX_ENTRIES = 2_000
 _PAGE_NAME_FAILURE_UNTIL: dict[str, float] = {}
+_PAGE_NAME_FAILURE_LOCK = threading.Lock()
+
+
+def _prune_page_name_failures_locked(now_monotonic: float) -> None:
+    expired = [
+        page_id
+        for page_id, deadline in _PAGE_NAME_FAILURE_UNTIL.items()
+        if deadline <= now_monotonic
+    ]
+    for page_id in expired:
+        _PAGE_NAME_FAILURE_UNTIL.pop(page_id, None)
+    overflow = len(_PAGE_NAME_FAILURE_UNTIL) - _PAGE_NAME_FAILURE_MAX_ENTRIES
+    if overflow > 0:
+        for page_id, _deadline in sorted(
+            _PAGE_NAME_FAILURE_UNTIL.items(), key=lambda item: item[1]
+        )[:overflow]:
+            _PAGE_NAME_FAILURE_UNTIL.pop(page_id, None)
+
+
+def _page_name_failure_active(page_id: str, now_monotonic: float | None = None) -> bool:
+    now_value = time.monotonic() if now_monotonic is None else now_monotonic
+    with _PAGE_NAME_FAILURE_LOCK:
+        deadline = _PAGE_NAME_FAILURE_UNTIL.get(page_id, 0.0)
+        if deadline <= now_value:
+            _PAGE_NAME_FAILURE_UNTIL.pop(page_id, None)
+            return False
+        return True
+
+
+def _remember_page_name_failure(page_id: str, now_monotonic: float | None = None) -> None:
+    now_value = time.monotonic() if now_monotonic is None else now_monotonic
+    with _PAGE_NAME_FAILURE_LOCK:
+        _prune_page_name_failures_locked(now_value)
+        if (
+            page_id not in _PAGE_NAME_FAILURE_UNTIL
+            and len(_PAGE_NAME_FAILURE_UNTIL) >= _PAGE_NAME_FAILURE_MAX_ENTRIES
+        ):
+            oldest_page_id = min(
+                _PAGE_NAME_FAILURE_UNTIL,
+                key=_PAGE_NAME_FAILURE_UNTIL.__getitem__,
+            )
+            _PAGE_NAME_FAILURE_UNTIL.pop(oldest_page_id, None)
+        _PAGE_NAME_FAILURE_UNTIL[page_id] = (
+            now_value + _PAGE_NAME_FAILURE_COOLDOWN_SECONDS
+        )
+
+
+def _forget_page_name_failure(page_id: str) -> None:
+    with _PAGE_NAME_FAILURE_LOCK:
+        _PAGE_NAME_FAILURE_UNTIL.pop(page_id, None)
 
 
 # --- Archiving Facebook images so they outlive the link -------------------
@@ -4272,15 +4505,15 @@ def _archive_meta_image(url: str) -> str:
         return ""
     try:
         with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            response = client.get(clean)
-        if int(response.status_code or 0) != 200:
-            return ""
-        content_type = str(response.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if content_type not in _META_MEDIA_ALLOWED_TYPES:
-            return ""
-        payload = response.content or b""
-        if not payload or len(payload) > _META_MEDIA_MAX_BYTES:
-            return ""
+            with client.stream("GET", clean) as response:
+                if int(response.status_code or 0) != 200:
+                    return ""
+                content_type = str(response.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if content_type not in _META_MEDIA_ALLOWED_TYPES:
+                    return ""
+                payload = _read_capped_response_body(response, _META_MEDIA_MAX_BYTES)
+                if not payload:
+                    return ""
         return f"data:{content_type};base64," + base64.b64encode(payload).decode("ascii")
     except Exception:
         return ""
@@ -4300,26 +4533,45 @@ def archive_meta_media(limit: int = 20) -> int:
     stored = 0
     targets: list[tuple[str, str, str, str, str]] = []  # (type, id, url, data_key, from_key)
     with db_conn() as conn:
-        for row in _entity_rows(conn, "ads"):
-            if len(targets) >= limit:
-                break
-            data = json_loads(row.get("data_json") or "{}") or {}
-            if not isinstance(data, dict) or not _clean_text(data.get("metaAdId"), 40):
-                continue
-            url = _clean_https_url(data.get("metaThumbnailUrl"))
-            if not url or data.get("metaThumbnailArchivedFrom") == url:
+        ad_id_expr = json_field_sql("metaAdId")
+        ad_url_expr = json_field_sql("metaThumbnailUrl")
+        ad_from_expr = json_field_sql("metaThumbnailArchivedFrom")
+        ad_rows = conn.execute(
+            text(
+                f"SELECT id,{ad_url_expr} AS media_url FROM entities "
+                "WHERE type='ads' AND deleted=false "
+                f"AND COALESCE({ad_id_expr}, '')<>'' "
+                f"AND LOWER(COALESCE({ad_url_expr}, '')) LIKE 'https://%' "
+                f"AND COALESCE({ad_from_expr}, '')<>COALESCE({ad_url_expr}, '') "
+                "ORDER BY last_modified ASC LIMIT :limit"
+            ),
+            {"limit": limit},
+        ).mappings().all()
+        for row in ad_rows:
+            url = _clean_https_url(row.get("media_url"))
+            if not url:
                 continue
             targets.append(("ads", str(row["id"]), url, "metaThumbnailData", "metaThumbnailArchivedFrom"))
-        for row in _entity_rows(conn, "pages"):
-            if len(targets) >= limit:
-                break
-            data = json_loads(row.get("data_json") or "{}") or {}
-            if not isinstance(data, dict) or not _clean_text(data.get("metaPageId"), 40):
-                continue
-            url = _clean_https_url(data.get("metaPagePictureUrl"))
-            if not url or data.get("metaPagePictureArchivedFrom") == url:
-                continue
-            targets.append(("pages", str(row["id"]), url, "metaPagePictureData", "metaPagePictureArchivedFrom"))
+        remaining = max(0, limit - len(targets))
+        if remaining:
+            page_id_expr = json_field_sql("metaPageId")
+            page_url_expr = json_field_sql("metaPagePictureUrl")
+            page_from_expr = json_field_sql("metaPagePictureArchivedFrom")
+            page_rows = conn.execute(
+                text(
+                    f"SELECT id,{page_url_expr} AS media_url FROM entities "
+                    "WHERE type='pages' AND deleted=false "
+                    f"AND COALESCE({page_id_expr}, '')<>'' "
+                    f"AND LOWER(COALESCE({page_url_expr}, '')) LIKE 'https://%' "
+                    f"AND COALESCE({page_from_expr}, '')<>COALESCE({page_url_expr}, '') "
+                    "ORDER BY last_modified ASC LIMIT :limit"
+                ),
+                {"limit": remaining},
+            ).mappings().all()
+            for row in page_rows:
+                url = _clean_https_url(row.get("media_url"))
+                if url:
+                    targets.append(("pages", str(row["id"]), url, "metaPagePictureData", "metaPagePictureArchivedFrom"))
 
     skipped = 0
     for entity_type, entity_id, url, data_key, from_key in targets:
@@ -4387,42 +4639,57 @@ def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
     local_names: dict[str, tuple[str, str]] = {}
     ad_meta_ids: dict[str, str] = {}
     with db_conn() as conn:
-        for row in _entity_rows(conn, "pages"):
-            data = json_loads(row.get("data_json") or "{}") or {}
-            if not isinstance(data, dict):
-                continue
-            meta_id = _clean_text(data.get("metaPageId"), 40)
+        page_rows = _scalar_entity_rows(
+            conn,
+            "pages",
+            (
+                ("metaPageId", "meta_page_id"),
+                ("name", "page_name"),
+                ("metaPageName", "meta_page_name"),
+                ("category", "page_category"),
+                ("metaPageCategory", "meta_page_category"),
+            ),
+        )
+        for row in page_rows:
+            meta_id = _clean_text(row.get("meta_page_id"), 40)
             if not _META_ID_RE.fullmatch(meta_id):
                 continue
-            name = _clean_text(data.get("name"), 240)
-            meta_name = _clean_text(data.get("metaPageName"), 240)
+            name = _clean_text(row.get("page_name"), 240)
+            meta_name = _clean_text(row.get("meta_page_name"), 240)
             if not _is_placeholder_page_name(name, meta_id):
-                local_names.setdefault(meta_id, (name, _clean_text(data.get("category"), 160)))
+                local_names.setdefault(meta_id, (name, _clean_text(row.get("page_category"), 160)))
             elif meta_name and not _is_placeholder_page_name(meta_name, meta_id):
                 local_names.setdefault(
-                    meta_id, (meta_name, _clean_text(data.get("metaPageCategory"), 160))
+                    meta_id, (meta_name, _clean_text(row.get("meta_page_category"), 160))
                 )
             if _is_placeholder_page_name(name, meta_id):
                 placeholder_ids.append(meta_id)
         if placeholder_ids:
             wanted = set(placeholder_ids)
-            for row in _entity_rows(conn, "ads"):
-                data = json_loads(row.get("data_json") or "{}") or {}
-                if not isinstance(data, dict):
-                    continue
-                meta_id = _clean_text(data.get("metaPageId"), 40)
+            ad_rows = _scalar_entity_rows(
+                conn,
+                "ads",
+                (
+                    ("metaPageId", "meta_page_id"),
+                    ("metaAdId", "meta_ad_id"),
+                    ("metaPageName", "meta_page_name"),
+                    ("metaPageCategory", "meta_page_category"),
+                ),
+            )
+            for row in ad_rows:
+                meta_id = _clean_text(row.get("meta_page_id"), 40)
                 if meta_id not in wanted:
                     continue
-                ad_ref = _clean_text(data.get("metaAdId"), 40)
+                ad_ref = _clean_text(row.get("meta_ad_id"), 40)
                 if _META_ID_RE.fullmatch(ad_ref):
                     ad_meta_ids.setdefault(meta_id, ad_ref)
                 if meta_id in local_names:
                     continue
-                meta_name = _clean_text(data.get("metaPageName"), 240)
+                meta_name = _clean_text(row.get("meta_page_name"), 240)
                 if meta_name and not _is_placeholder_page_name(meta_name, meta_id):
                     local_names[meta_id] = (
                         meta_name,
-                        _clean_text(data.get("metaPageCategory"), 160),
+                        _clean_text(row.get("meta_page_category"), 160),
                     )
     if not placeholder_ids:
         return 0
@@ -4447,7 +4714,7 @@ def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
     # throttle budget on every periodic pass.
     now_monotonic = time.monotonic()
     attemptable = [
-        mid for mid in missing if _PAGE_NAME_FAILURE_UNTIL.get(mid, 0.0) <= now_monotonic
+        mid for mid in missing if not _page_name_failure_active(mid, now_monotonic)
     ]
     if attemptable:
         config = load_meta_ads_config()
@@ -4507,9 +4774,7 @@ def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
                     # Only a page whose sources were genuinely tried earns a
                     # cooldown — running out of per-pass budget must not
                     # silence untried pages for an hour.
-                    _PAGE_NAME_FAILURE_UNTIL[mid] = (
-                        now_monotonic + _PAGE_NAME_FAILURE_COOLDOWN_SECONDS
-                    )
+                    _remember_page_name_failure(mid, now_monotonic)
 
     if not resolved:
         return 0
@@ -4527,7 +4792,7 @@ def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
                 # (each page gets its own transaction for the same reason).
                 print(f"[albayan] page-name write skipped for {mid}: {type(e).__name__}")
                 continue
-            _PAGE_NAME_FAILURE_UNTIL.pop(mid, None)
+            _forget_page_name_failure(mid)
             if local_name == name:
                 renamed += 1
     if renamed:
@@ -4800,9 +5065,7 @@ def create_meta_ads_router(
             else:
                 sources["adPreview"] = {"error": "no_imported_ad_for_page"}
 
-        report["cooldownActive"] = (
-            _PAGE_NAME_FAILURE_UNTIL.get(mid, 0.0) > time.monotonic()
-        )
+        report["cooldownActive"] = _page_name_failure_active(mid)
         applied = ""
         for candidate in (local_name, partner_name, directory_name, direct_name, preview_name):
             candidate = _clean_text(candidate, 240)
@@ -4814,7 +5077,7 @@ def create_meta_ads_router(
                 _, stored_name, _created = _ensure_import_page(
                     conn, {"metaPageId": mid, "metaPageName": applied}
                 )
-            _PAGE_NAME_FAILURE_UNTIL.pop(mid, None)
+            _forget_page_name_failure(mid)
             report["applied"] = stored_name == applied
             report["appliedName"] = applied
         else:

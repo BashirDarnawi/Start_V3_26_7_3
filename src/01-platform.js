@@ -267,38 +267,33 @@ function togglePerformanceMode(on) {
 applyPerformanceMode();
 
 // ==========================================
-// WORKSPACE EXPERIENCE MODE
+// WORKSPACE EXPERIENCE
 // ==========================================
-// The same business system serves beginners and power users. "Simple" keeps
-// the everyday search and quick filters visible while advanced filters stay
-// one tap away. "Advanced" keeps every filter expanded. This is deliberately
-// a per-device UI preference: it never changes or migrates business data.
+// Albayan now has one consistent workspace: the complete Advanced view. Keep
+// the compatibility helpers because older cached bundles and inline actions
+// can still call them while a device updates, but never hide business tools.
 const ALBAYAN_EXPERIENCE_MODE_KEY = 'albayan_experience_mode';
 
 function getWorkspaceExperienceMode() {
-  let preference = null;
-  try { preference = localStorage.getItem(ALBAYAN_EXPERIENCE_MODE_KEY); } catch (_) {}
-  return preference === 'advanced' ? 'advanced' : 'simple';
+  return 'advanced';
 }
 
 function isAdvancedWorkspaceMode() {
-  return getWorkspaceExperienceMode() === 'advanced';
+  return true;
 }
 
 function applyWorkspaceExperienceMode() {
-  const advanced = isAdvancedWorkspaceMode();
   try {
+    localStorage.removeItem(ALBAYAN_EXPERIENCE_MODE_KEY);
     if (document.body) {
-      document.body.classList.toggle('workspace-advanced', advanced);
-      document.body.classList.toggle('workspace-simple', !advanced);
+      document.body.classList.add('workspace-advanced');
+      document.body.classList.remove('workspace-simple');
     }
   } catch (_) {}
-  return advanced ? 'advanced' : 'simple';
+  return 'advanced';
 }
 
-function setWorkspaceExperienceMode(mode, options = {}) {
-  const next = mode === 'advanced' ? 'advanced' : 'simple';
-  try { localStorage.setItem(ALBAYAN_EXPERIENCE_MODE_KEY, next); } catch (_) {}
+function setWorkspaceExperienceMode(_mode, options = {}) {
   applyWorkspaceExperienceMode();
 
   // A full shell render refreshes the global header, navigation and every
@@ -309,21 +304,11 @@ function setWorkspaceExperienceMode(mode, options = {}) {
     else if (typeof render === 'function') render();
   }
 
-  if (options.notify !== false && typeof showNotification === 'function' && typeof state !== 'undefined') {
-    const isAr = state.language === 'ar';
-    showNotification(
-      isAr ? 'طريقة عرض مساحة العمل' : 'Workspace View',
-      next === 'advanced'
-        ? (isAr ? 'تم إظهار جميع الأدوات والفلاتر المتقدمة.' : 'All advanced tools and filters are now visible.')
-        : (isAr ? 'تم تفعيل العرض البسيط. الأدوات المتقدمة ما زالت على بُعد ضغطة واحدة.' : 'Simple view is on. Advanced tools remain one tap away.'),
-      'success'
-    );
-  }
-  return next;
+  return 'advanced';
 }
 
 function toggleWorkspaceExperienceMode() {
-  return setWorkspaceExperienceMode(isAdvancedWorkspaceMode() ? 'simple' : 'advanced');
+  return setWorkspaceExperienceMode('advanced');
 }
 
 // Apply before the first app render to avoid controls flashing open and then

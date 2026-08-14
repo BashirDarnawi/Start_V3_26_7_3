@@ -1409,7 +1409,14 @@ function receiptExchangeRateForSave(payments, enteredPaymentRows, totalLYD, tota
 // seed; saveReceiptFromModal still drops it from payments[] until money exists.
 function getReceiptFormPayments(receiptData) {
   const data = receiptData && typeof receiptData === 'object' ? receiptData : {};
+  const isPaid = data.status === 'Paid' || data.isPaid === true;
+  const savedPlans = Array.isArray(data.plannedPayments) ? data.plannedPayments : [];
+  // A Not Paid receipt describes how the debt is expected to be collected; it
+  // is not collected cash. Prefer that saved plan when reopening the receipt.
+  if (!isPaid && savedPlans.length > 0) return savedPlans;
   const savedPayments = Array.isArray(data.payments) ? data.payments : [];
+  // Keep older Not Paid receipts editable. Their legacy payment rows are
+  // converted to plannedPayments the next time the receipt is saved.
   if (savedPayments.length > 0) return savedPayments;
 
   const savedMethod = String(data.paymentMethod || '').trim();
@@ -1423,7 +1430,6 @@ function getReceiptFormPayments(receiptData) {
   const statusDetail = data.statusDetail && typeof data.statusDetail === 'object'
     ? data.statusDetail
     : {};
-  const isPaid = data.status === 'Paid' || data.isPaid === true;
 
   return [{
     method,
@@ -1870,6 +1876,13 @@ async function _saveReceiptFromModalInner() {
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
   const status = document.getElementById('receipt-status').value || 'Paid';
+  // Not Paid rows are a collection plan for customer debt, not money already
+  // received. Keeping them separate prevents the ad picker and receipt balance
+  // logic from treating an unpaid bank transfer as collected cash.
+  const plannedPayments = status === 'Not Paid'
+    ? payments.map(payment => ({ ...payment }))
+    : [];
+  const persistedPayments = status === 'Not Paid' ? [] : payments;
   const avgRate = receiptExchangeRateForSave(
     payments,
     enteredPaymentRows,
@@ -2062,7 +2075,7 @@ async function _saveReceiptFromModalInner() {
     if (statusDetail.notPaidCollection === 'delivery') {
       receiptDeliveryStatus = 'Needs Delivery';
       // Get delivery person from the first payment with a delivery person, or from a dedicated field
-      const deliveryPayment = payments.find(p => p.deliveryPersonId);
+      const deliveryPayment = enteredPaymentRows.find(p => p.deliveryPersonId);
       receiptDeliveryPersonId = deliveryPayment?.deliveryPersonId || 
                                 document.getElementById('notpaid-delivery-person')?.value || '';
     } else {
@@ -2077,7 +2090,7 @@ async function _saveReceiptFromModalInner() {
       // Payment already collected by driver; mark as delivered but not necessarily handed to office yet.
       receiptDeliveryStatus = 'Delivered';
       receiptIsReceivedInOffice = false;
-      const deliveryPayment = payments.find(p => p.deliveryPersonId);
+      const deliveryPayment = enteredPaymentRows.find(p => p.deliveryPersonId);
       receiptDeliveryPersonId = statusDetail.paidDeliveryPersonId || deliveryPayment?.deliveryPersonId || '';
     } else {
       receiptDeliveryStatus = 'Office';
@@ -2196,8 +2209,11 @@ async function _saveReceiptFromModalInner() {
     // newly collected, poisoning the liquidity window), an unpaid receipt
     // carries no arrival date at all, and the save that turns it Paid stamps
     // the true payment moment — matching the edit-modal rule in 15-modals.js.
-    collectionDate: (editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''),
-    payments: payments,
+    collectionDate: status === 'Not Paid'
+      ? ''
+      : ((editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
+    plannedPayments: plannedPayments,
+    payments: persistedPayments,
     photos
   };
 
@@ -2227,6 +2243,15 @@ async function _saveReceiptFromModalInner() {
   const customerName = linkedCustomer ? linkedCustomer.name : 'customer';
 
   if (editTarget) {
+    const wasRecordedPaid = String(editTarget.status || '').trim().toLowerCase() === 'paid'
+      || editTarget.isPaid === true;
+    const convertsCollectedReceiptToDebt = wasRecordedPaid && status === 'Not Paid';
+    if (convertsCollectedReceiptToDebt) {
+      const confirmed = window.confirm(isArV
+        ? 'هذا الوصل مسجل كأموال مستلمة. تغييره إلى غير مدفوع سيعكس الدفع إلى دين على العميل، وسيحوّل تمويل الإعلانات المرتبطة بأمان. هل تريد المتابعة؟'
+        : 'This receipt is recorded as collected money. Changing it to Not Paid will reverse the payment into customer debt and safely move any linked ad funding. Continue?');
+      if (!confirmed) return;
+    }
     // Money already committed cannot be edited away: ads funded from this
     // receipt (including delivery-due funding) plus money transferred to
     // other customers set the floor for the new total. Below it, those
@@ -2272,8 +2297,12 @@ async function _saveReceiptFromModalInner() {
     });
     
     // Track payment changes
-    const oldPayments = oldReceipt.payments || [];
-    const newPayments = receipt.payments || [];
+    const oldPayments = String(oldReceipt.status || '') === 'Not Paid'
+      ? (oldReceipt.plannedPayments || oldReceipt.payments || [])
+      : (oldReceipt.payments || []);
+    const newPayments = status === 'Not Paid'
+      ? (receipt.plannedPayments || [])
+      : (receipt.payments || []);
     if (JSON.stringify(oldPayments) !== JSON.stringify(newPayments)) {
       changes.push({
         field: 'Payments',
@@ -2965,6 +2994,90 @@ function getTempMergeFundingTotalUSD() {
   return Math.round(total * 100) / 100;
 }
 
+// Build one canonical plan for the beginner-facing "paid + unpaid difference"
+// workflow. Keeping this calculation in one place means the preview and the
+// actual action can never disagree about how much is real paid credit and how
+// much must remain as debt on the unpaid receipt.
+function getAdMixedReceiptFundingPlan(customerId) {
+  const cid = String(customerId || '').trim();
+  if (!cid) return { ok: false, reason: 'missing_customer' };
+
+  const requestedRows = (state.tempAdFunding?.allocations || [])
+    .filter(row => row?.receiptId && (parseFloat(row.amountUSD) || 0) > 0);
+  if (!requestedRows.length) return { ok: false, reason: 'missing_paid_rows' };
+
+  let targetTotal = 0;
+  const requestedByReceipt = new Map();
+  for (const requested of requestedRows) {
+    const receiptId = String(requested.receiptId || '').trim();
+    const requestedAmount = Math.round((parseFloat(requested.amountUSD) || 0) * 100) / 100;
+    if (!receiptId || requestedAmount <= 0) continue;
+    targetTotal += requestedAmount;
+
+    const receipt = state.receipts.find(
+      row => row && !row._deleted && String(row.id || '') === receiptId
+    );
+    const receiptStatus = String(receipt?.status || '').trim().toLowerCase();
+    const receiptIsPaid = !!receipt && (receipt.isPaid === true || receiptStatus === 'paid');
+    if (!receiptIsPaid) return { ok: false, reason: 'invalid_paid_receipt' };
+    if (String(receipt.customerId || '') !== cid) {
+      return { ok: false, reason: 'customer_mismatch' };
+    }
+
+    // Aggregate duplicate rows before applying the receipt capacity. The UI
+    // normally prevents duplicates, but stale/offline state must not count the
+    // same paid balance twice.
+    const current = requestedByReceipt.get(receiptId) || { receipt, requestedAmount: 0 };
+    current.requestedAmount += requestedAmount;
+    requestedByReceipt.set(receiptId, current);
+  }
+
+  targetTotal = Math.round(targetTotal * 100) / 100;
+  const paidRows = [];
+  for (const [receiptId, entry] of requestedByReceipt.entries()) {
+    const usage = getReceiptUsageStats(entry.receipt);
+    const available = Math.max(
+      Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receiptId)) * 100) / 100,
+      0
+    );
+    const paidAmount = Math.round(Math.min(entry.requestedAmount, available) * 100) / 100;
+    if (paidAmount > 0.009) {
+      paidRows.push({ receiptId, amountUSD: paidAmount.toFixed(2) });
+    }
+  }
+
+  const paidTotal = Math.round(
+    paidRows.reduce((sum, row) => sum + (parseFloat(row.amountUSD) || 0), 0) * 100
+  ) / 100;
+  const shortfall = Math.round(Math.max(targetTotal - paidTotal, 0) * 100) / 100;
+  return { ok: true, targetTotal, paidRows, paidTotal, shortfall };
+}
+
+function refreshAdMixedReceiptShortfallAction() {
+  const panel = document.getElementById('ad-mixed-receipt-shortfall-panel');
+  const label = document.getElementById('ad-mixed-receipt-shortfall-label');
+  const help = document.getElementById('ad-mixed-receipt-shortfall-help');
+  if (!panel) return;
+
+  const customerId = String(document.getElementById('ad-customer-id')?.value || '').trim();
+  const plan = getAdMixedReceiptFundingPlan(customerId);
+  const shouldShow = !!plan.ok && plan.targetTotal > 0 && plan.shortfall > 0.009;
+  panel.classList.toggle('hidden', !shouldShow);
+  if (!shouldShow) return;
+
+  const isAr = state.language === 'ar';
+  if (label) {
+    label.textContent = isAr
+      ? `استخدم المدفوع $${plan.paidTotal.toFixed(2)} + غير المدفوع $${plan.shortfall.toFixed(2)}`
+      : `Use Paid $${plan.paidTotal.toFixed(2)} + Unpaid $${plan.shortfall.toFixed(2)}`;
+  }
+  if (help) {
+    help.textContent = isAr
+      ? `فقط الفرق $${plan.shortfall.toFixed(2)} سيصبح ديناً على الوصل غير المدفوع.`
+      : `Only the $${plan.shortfall.toFixed(2)} difference becomes debt on the unpaid receipt.`;
+  }
+}
+
 // Beginner-friendly bridge from the Paid form to the canonical mixed-debt
 // flow. Example: the user entered $5 on a paid receipt with only $4.63 left.
 // Keep $4.63 as real paid funding, then visibly switch to Not Paid + In Shop
@@ -2981,9 +3094,8 @@ function startAdMixedReceiptFunding() {
     return;
   }
 
-  const requestedRows = (state.tempAdFunding?.allocations || [])
-    .filter(row => row?.receiptId && (parseFloat(row.amountUSD) || 0) > 0);
-  if (!requestedRows.length) {
+  const plan = getAdMixedReceiptFundingPlan(customerId);
+  if (!plan.ok && plan.reason === 'missing_paid_rows') {
     showNotification(
       isAr ? 'تنبيه' : 'Validation',
       isAr ? 'اختر وصلاً مدفوعاً وأدخل ميزانية الإعلان أولاً.' : 'Choose a paid receipt and enter the ad budget first.',
@@ -2991,37 +3103,19 @@ function startAdMixedReceiptFunding() {
     );
     return;
   }
-
-  let targetTotal = 0;
-  const paidRows = [];
-  for (const requested of requestedRows) {
-    const receipt = state.receipts.find(r => r && !r._deleted && String(r.id) === String(requested.receiptId));
-    const requestedAmount = Math.round((parseFloat(requested.amountUSD) || 0) * 100) / 100;
-    targetTotal += requestedAmount;
-    const receiptStatus = String(receipt?.status || '').toLowerCase();
-    const receiptIsPaid = !!receipt && (receipt.isPaid === true || receiptStatus === 'paid');
-    if (!receiptIsPaid || String(receipt.customerId || '') !== customerId) {
-      showNotification(
-        isAr ? 'تنبيه' : 'Validation',
-        isAr ? 'الوصل المدفوع غير صالح أو يخص عميلاً آخر.' : 'The paid receipt is invalid or belongs to another customer.',
-        'error'
-      );
-      return;
-    }
-    const usage = getReceiptUsageStats(receipt);
-    const available = Math.max(
-      Math.round(((usage.remainingUSD || 0) + getEditingAdExistingAllocationUSD(receipt.id)) * 100) / 100,
-      0
+  if (!plan.ok) {
+    const mismatch = plan.reason === 'customer_mismatch';
+    showNotification(
+      isAr ? 'تنبيه' : 'Validation',
+      isAr
+        ? (mismatch ? 'الوصل المدفوع يخص عميلاً آخر.' : 'الوصل المدفوع المحدد غير صالح أو لم يعد مدفوعاً.')
+        : (mismatch ? 'The paid receipt belongs to another customer.' : 'The selected paid receipt is invalid or is no longer Paid.'),
+      'error'
     );
-    const paidAmount = Math.min(requestedAmount, available);
-    if (paidAmount > 0.009) {
-      paidRows.push({ receiptId: receipt.id, amountUSD: paidAmount.toFixed(2) });
-    }
+    return;
   }
 
-  targetTotal = Math.round(targetTotal * 100) / 100;
-  const paidTotal = Math.round(paidRows.reduce((sum, row) => sum + Number(row.amountUSD), 0) * 100) / 100;
-  const shortfall = Math.round(Math.max(targetTotal - paidTotal, 0) * 100) / 100;
+  const { targetTotal, paidRows, paidTotal, shortfall } = plan;
   if (targetTotal <= 0 || shortfall <= 0.009) {
     showNotification(
       isAr ? 'الرصيد كافٍ' : 'Paid Balance Is Enough',
@@ -3031,10 +3125,27 @@ function startAdMixedReceiptFunding() {
     return;
   }
 
-  if (!getUnpaidShopReceiptsForCustomer(customerId).length) {
+  const dueUsageById = new Map();
+  const unpaidReceipts = getUnpaidShopReceiptsForCustomer(customerId, dueUsageById, {
+    growableAmountUSD: shortfall
+  });
+  const coveringReceipts = unpaidReceipts.filter(receipt => {
+    const usage = dueUsageById.get(String(receipt.id));
+    const available = getAdDueReceiptEffectiveAvailableUSD(receipt, usage);
+    return available + 0.005 >= shortfall
+      || getReusableUnpaidShopReceiptInfo(receipt, customerId, usage, shortfall).eligible;
+  });
+  if (!coveringReceipts.length) {
+    const hasAnyUnpaidReceipt = unpaidReceipts.length > 0;
     showNotification(
-      isAr ? 'لا يوجد وصل غير مدفوع' : 'No Unpaid Receipt',
-      isAr ? `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.` : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`,
+      isAr ? 'لا يوجد وصل غير مدفوع كافٍ' : 'No Suitable Unpaid Receipt',
+      isAr
+        ? (hasAnyUnpaidReceipt
+            ? `لا يوجد وصل «غير مدفوع - في المحل» لديه رصيد كافٍ لتغطية الفرق $${shortfall.toFixed(2)}. أنشئ وصلاً بالمبلغ الكافي أولاً.`
+            : `أنشئ وصلاً «غير مدفوع - في المحل» لهذا العميل لتغطية الفرق $${shortfall.toFixed(2)}.`)
+        : (hasAnyUnpaidReceipt
+            ? `No eligible “Not Paid - In Shop” receipt can record the $${shortfall.toFixed(2)} difference. Check the receipt status and collection method.`
+            : `Create a “Not Paid - In Shop” receipt for this customer to cover the $${shortfall.toFixed(2)} difference.`),
       'error'
     );
     return;
@@ -3046,15 +3157,39 @@ function startAdMixedReceiptFunding() {
   setAdPaymentStatus('not_paid');
   setAdCollectionMethod('in_shop');
   reflectMergeFundingUI();
+
+  // If exactly one unpaid receipt can cover the difference, selecting it is
+  // unambiguous and saves the beginner several manual steps. With multiple
+  // suitable receipts we still ask the user which debt receipt to use.
+  let autoSelected = false;
+  const dueReceiptSelect = document.getElementById('ad-temp-receipt-id');
+  if (coveringReceipts.length === 1 && dueReceiptSelect) {
+    const receiptId = String(coveringReceipts[0].id || '');
+    if (receiptId) dueReceiptSelect.value = receiptId;
+    onAdTempReceiptChange(receiptId);
+    const dueInput = document.getElementById('ad-due-amount-to-use');
+    if (dueInput) {
+      dueInput.value = shortfall.toFixed(2);
+      onAdDueAmountChange();
+    }
+    autoSelected = true;
+  }
+
   showNotification(
-    isAr ? 'اختر الوصل غير المدفوع' : 'Select the Unpaid Receipt',
+    isAr ? (autoSelected ? 'التمويل جاهز' : 'اختر الوصل غير المدفوع') : (autoSelected ? 'Funding Ready' : 'Select the Unpaid Receipt'),
     isAr
-      ? `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`
-      : `$${paidTotal.toFixed(2)} will come from paid credit. Now select an unpaid receipt for the $${shortfall.toFixed(2)} difference.`,
+      ? (autoSelected
+          ? `سيُستخدم $${paidTotal.toFixed(2)} من الوصل المدفوع، وسيصبح الفرق $${shortfall.toFixed(2)} ديناً على الوصل غير المدفوع. اضغط حفظ التغييرات.`
+          : `سيُستخدم $${paidTotal.toFixed(2)} من المدفوع. اختر الآن وصلاً غير مدفوع للفرق $${shortfall.toFixed(2)}.`)
+      : (autoSelected
+          ? `$${paidTotal.toFixed(2)} uses paid credit and only $${shortfall.toFixed(2)} becomes debt on the unpaid receipt. Press Save Changes.`
+          : `$${paidTotal.toFixed(2)} uses paid credit. Now choose an unpaid receipt for the $${shortfall.toFixed(2)} difference.`),
     'info'
   );
   setTimeout(() => {
-    document.getElementById('ad-temp-receipt-link')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    const targetId = autoSelected ? 'ad-due-amount-section' : 'ad-temp-receipt-link';
+    document.getElementById(targetId)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    if (!autoSelected) document.getElementById('ad-temp-receipt-id')?.focus?.();
   }, 0);
 }
 
@@ -3272,19 +3407,131 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   return status !== 'Canceled' && status !== 'Lost' && status !== 'Destroyed';
 }
 
+// An unpaid In-Shop receipt is a reusable customer-debt ledger. The server can
+// atomically increase its amount when another ad needs more debt than the
+// receipt currently has available. Keep the eligibility checks strict, but do
+// NOT require a zero balance or zero prior usage: those are precisely the
+// receipts that must remain reusable for later ads.
+function getReusableUnpaidShopReceiptInfo(receipt, customerId = '', dueUsageInput = null, requestedUsageUSD = 0) {
+  const notReusable = {
+    eligible: false,
+    growable: false,
+    expectedLastModified: null,
+    totalDebtUSD: 0,
+    usedDebtUSD: 0,
+    availableUSD: 0,
+    requiredGrowthUSD: 0
+  };
+  if (!isServerModeEnabled() || !isUnpaidShopReceipt(receipt, customerId)) return notReusable;
+
+  const detail = receipt?.statusDetail && typeof receipt.statusDetail === 'object'
+    ? receipt.statusDetail
+    : {};
+  const collection = String(detail.notPaidCollection || '').trim().toLowerCase();
+  if (String(receipt.status || '') !== 'Not Paid'
+      || receipt.isPaid !== false
+      || !['office', 'in_shop', 'shop'].includes(collection)
+      || String(receipt.deliveryStatus || '') !== 'Office'
+      || String(receipt.tempReceiptNo || '').trim()) return notReusable;
+
+  const expectedLastModified = Number(receipt?._lastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) return notReusable;
+
+  const readNonNegativeMoney = value => {
+    if (value === undefined || value === null || value === '') return true;
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount >= 0;
+  };
+  if (!readNonNegativeMoney(receipt.amountUSD)
+      || !readNonNegativeMoney(receipt.amountLocal)
+      || !readNonNegativeMoney(receipt.debtAmountUSD)
+      || !readNonNegativeMoney(receipt.debtAmountLocal)) return notReusable;
+
+  const payments = receipt.payments;
+  if (payments !== undefined && payments !== null
+      && (!Array.isArray(payments) || payments.length > 0)) return notReusable;
+
+  const transfers = receipt.transfers;
+  if (transfers !== undefined && transfers !== null
+      && (!Array.isArray(transfers) || transfers.length > 0)) return notReusable;
+  const transferIdentityFields = [
+    'transferFromReceiptId', 'transferFromCustomerId', 'sourceReceiptId',
+    'sourceCustomerId', 'toReceiptId', 'toCustomerId'
+  ];
+  const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
+  if (receiptType === 'TRANSFER_IN'
+      || receiptType === 'DELIVERY_TEMP'
+      || transferIdentityFields.some(field => String(receipt[field] || '').trim())) return notReusable;
+
+  const exchangeRate = Number(receipt.exchangeRate);
+  if (!Number.isFinite(exchangeRate) || exchangeRate <= 0) return notReusable;
+
+  const dueUsage = dueUsageInput || getDeliveryReceiptDueUsage(receipt);
+  const totalDebtUSD = Number(dueUsage?.totalDueUSD);
+  const usedDebtUSD = Number(dueUsage?.usedDueUSD);
+  const availableUSD = Number(dueUsage?.remainingDueUSD);
+  if (![totalDebtUSD, usedDebtUSD, availableUSD].every(Number.isFinite)
+      || totalDebtUSD < 0 || usedDebtUSD < 0 || availableUSD < 0) return notReusable;
+
+  const requested = normalizeAdDriverBudgetUSD(requestedUsageUSD);
+  const requiredGrowthUSD = Math.round(Math.max(requested - availableUSD, 0) * 100) / 100;
+  return {
+    eligible: true,
+    growable: requiredGrowthUSD > 0.009,
+    expectedLastModified,
+    dueUsage,
+    totalDebtUSD: Math.round(totalDebtUSD * 100) / 100,
+    usedDebtUSD: Math.round(usedDebtUSD * 100) / 100,
+    availableUSD: Math.round(availableUSD * 100) / 100,
+    requiredGrowthUSD
+  };
+}
+
+// During an edit, the current ad's own allocation is temporarily available to
+// that same ad. This mirrors the server's "other committed ads + proposed ad"
+// calculation and prevents an unchanged edit from appearing overdrawn.
+function getCurrentAdDueUsageForReceiptUSD(receiptId, receipt = null) {
+  const rid = String(receiptId || '').trim();
+  if (!rid || !state.modalData?.id) return 0;
+  const existingAd = state.ads.find(ad => ad && String(ad.id || '') === String(state.modalData.id));
+  if (!existingAd) return 0;
+  const explicitDue = Array.isArray(existingAd.dueAllocations)
+    ? existingAd.dueAllocations
+        .filter(allocation => String(allocation?.receiptId || '') === rid)
+        .reduce((sum, allocation) => sum + (parseFloat(allocation?.amountUSD) || 0), 0)
+    : 0;
+  const current = explicitDue > 0
+    ? explicitDue
+    : getAdLegacyDueMirrorUSD(existingAd, rid, receipt?.exchangeRate);
+  return Math.round(Math.max(Number(current) || 0, 0) * 100) / 100;
+}
+
+function getAdDueReceiptEffectiveAvailableUSD(receipt, dueUsageInput = null) {
+  if (!receipt) return 0;
+  const dueUsage = dueUsageInput || getDeliveryReceiptDueUsage(receipt);
+  const remaining = Math.max(Number(dueUsage?.remainingDueUSD) || 0, 0);
+  const currentAdUsage = getCurrentAdDueUsageForReceiptUSD(receipt.id, receipt);
+  return Math.round((remaining + currentAdUsage) * 100) / 100;
+}
+
 // usageOut (optional Map) collects each candidate's due usage so callers that
 // also need it (the option-label builder below) do not recompute it — each
 // getDeliveryReceiptDueUsage call scans all ads, so doubling it made every
 // radio/select tap in the ad form visibly slow on phones with many ads.
-function getUnpaidShopReceiptsForCustomer(customerId, usageOut) {
+function getUnpaidShopReceiptsForCustomer(customerId, usageOut, { growableAmountUSD = 0 } = {}) {
   const cid = String(customerId || '');
   if (!cid) return [];
+  const requestedUsageUSD = normalizeAdDriverBudgetUSD(growableAmountUSD);
   return getVisibleRecords(state.receipts)
     .filter(receipt => isUnpaidShopReceipt(receipt, cid))
     .filter(receipt => {
       const usage = getDeliveryReceiptDueUsage(receipt);
       if (usageOut) usageOut.set(String(receipt.id), usage);
-      return usage.remainingDueUSD > 0.009;
+      // Local mode cannot atomically grow debt, so preserve its old available-
+      // balance rule. Server mode keeps every eligible receipt visible even
+      // after earlier ads have used all of its current capacity.
+      if (!isServerModeEnabled()) return usage.remainingDueUSD > 0.009;
+      return getReusableUnpaidShopReceiptInfo(receipt, cid, usage, requestedUsageUSD).eligible;
     })
     .sort((a, b) => new Date(b.createdAt || b.startDate || 0) - new Date(a.createdAt || a.startDate || 0));
 }
@@ -3340,9 +3587,17 @@ function refreshAdTempReceiptOptions() {
     ? (isArT ? 'ميزانية الإعلان (USD)' : 'Ad Budget (USD)')
     : (isArT ? 'الصرف المخطط (USD)' : 'Planned Spend (USD)');
 
+  const mixedTargetUSD = isShop
+    ? normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD)
+    : 0;
+  const mixedShortfallUSD = mixedTargetUSD > 0
+    ? Math.round(Math.max(mixedTargetUSD - getTempMergeFundingTotalUSD(), 0) * 100) / 100
+    : 0;
   const dueUsageById = new Map();
   const receipts = isShop
-    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById)
+    ? getUnpaidShopReceiptsForCustomer(customerId, dueUsageById, {
+        growableAmountUSD: mixedShortfallUSD
+      })
     : getPendingTempDeliveryReceiptsForCustomer(customerId);
   let current = String(hidden.value || '').trim()
     || String(state.modalData?.linkedDeliveryReceiptId || state.modalData?.receiptId || '').trim();
@@ -3359,11 +3614,34 @@ function refreshAdTempReceiptOptions() {
     ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
     : null;
   const linkedIsListed = !!linkedReceipt && receipts.some(r => String(r.id) === current);
+  // Keep strict eligibility, but explain an empty picker. A legacy Not Paid
+  // receipt may still contain collected-cash rows or incomplete collection
+  // metadata; silently showing a blank list makes that safe exclusion look
+  // like a system failure.
+  const sameCustomerUnpaid = isShop
+    ? getVisibleRecords(state.receipts).filter(r =>
+        String(r.customerId || '') === String(customerId)
+        && String(r.status || '') === 'Not Paid'
+        && r.isPaid !== true)
+    : [];
+  const hasReceiptNeedingReview = isShop
+    && receipts.length === 0
+    && sameCustomerUnpaid.length > 0;
+  const emptyReason = isShop && receipts.length === 0
+    ? (hasReceiptNeedingReview
+        ? (isArT
+            ? 'لا يوجد وصل مؤهل. يوجد وصل غير مدفوع قديم يحتاج إلى مراجعة حالته وخطة الدفع من صفحة الوصولات.'
+            : 'No eligible receipt. An existing unpaid receipt needs review in Receipts (status and payment plan).')
+        : (isArT
+            ? 'لا يوجد وصل غير مدفوع في المحل لهذا العميل.'
+            : 'No Not Paid - In Shop receipt exists for this customer.'))
+    : '';
+  select.dataset.emptyReason = emptyReason;
   const extraOption = (linkedReceipt && !linkedIsListed)
     ? (() => {
         const place = String(linkedReceipt.deliveryPlaceName || '').trim();
         const note = isShop
-          ? (isArT ? 'لم يعد غير مدفوع' : 'no longer unpaid')
+          ? (isArT ? 'غير مؤهل لتمويل الدين' : 'not eligible for debt funding')
           : (isArT ? 'غير معلق' : 'no longer pending');
         const optionLabel = `${linkedReceipt.tempReceiptNo || linkedReceipt.serialNumber || linkedReceipt.id.slice(0, 8)}${place ? ' • ' + place : ''} • (${note})`;
         return `<option value="${linkedReceipt.id}" selected>${Security.escapeHtml(optionLabel)}</option>`;
@@ -3377,14 +3655,32 @@ function refreshAdTempReceiptOptions() {
       // Calculate available credit in USD (reuse the usage computed during the
       // shop filter above; the driver path's map is empty, so it falls back).
       const dueUsage = dueUsageById.get(String(r.id)) || getDeliveryReceiptDueUsage(r);
-      const availableUSD = dueUsage.remainingDueUSD;
+      const availableUSD = isShop
+        ? getAdDueReceiptEffectiveAvailableUSD(r, dueUsage)
+        : Math.max(Number(dueUsage.remainingDueUSD) || 0, 0);
+      const reusableInfo = isShop
+        ? getReusableUnpaidShopReceiptInfo(r, customerId, dueUsage, mixedShortfallUSD)
+        : { eligible: false, totalDebtUSD: Number(dueUsage.totalDueUSD) || 0, usedDebtUSD: Number(dueUsage.usedDueUSD) || 0 };
+      const debtIncreaseUSD = reusableInfo.eligible && mixedShortfallUSD > 0.009
+        ? Math.round(Math.max(mixedShortfallUSD - availableUSD, 0) * 100) / 100
+        : 0;
       const place = String(r.deliveryPlaceName || '').trim();
       const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArT ? 'وصل بدون رقم' : 'Unnumbered receipt');
-      const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''} • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+      const growthLabel = debtIncreaseUSD > 0.009
+        ? ` • ${isArT ? 'دين جديد' : 'adds debt'} $${debtIncreaseUSD.toFixed(2)} • ${isArT ? 'الإجمالي الجديد' : 'new total'} $${(reusableInfo.totalDebtUSD + debtIncreaseUSD).toFixed(2)}`
+        : '';
+      const shopBalances = isShop
+        ? ` • ${isArT ? 'إجمالي الدين' : 'debt total'} $${reusableInfo.totalDebtUSD.toFixed(2)} • ${isArT ? 'مخصص' : 'allocated'} $${reusableInfo.usedDebtUSD.toFixed(2)} • ${isArT ? 'متاح' : 'available'} $${availableUSD.toFixed(2)}`
+        : ` • $${availableUSD.toFixed(2)} ${isArT ? 'متاح' : 'available'}`;
+      const optionLabel = `${receiptNumber}${place ? ' • ' + place : ''}${shopBalances}${growthLabel}`;
       const selected = String(r.id) === current ? 'selected' : '';
       return `<option value="${r.id}" ${selected}>${Security.escapeHtml(optionLabel)}</option>`;
     })
   ].join('');
+
+  if (emptyReason && !extraOption) {
+    select.innerHTML = `<option value="">${Security.escapeHtml(emptyReason)}</option>`;
+  }
 
   // Auto-suggest the newest pending receipt — but ONLY for a NEW ad. Never
   // pick a receipt on the user's behalf for an ad that is already saved.
@@ -3401,6 +3697,7 @@ function onAdTempReceiptChange(receiptId) {
   const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
   const isShop = collectionMethod === 'in_shop';
   const hidden = document.getElementById('ad-linked-receipt-id');
+  const receiptSelect = document.getElementById('ad-temp-receipt-id');
   const hint = document.getElementById('ad-temp-receipt-hint');
   const driverSelect = document.getElementById('ad-delivery-person');
   const dueSection = document.getElementById('ad-due-amount-section');
@@ -3414,13 +3711,14 @@ function onAdTempReceiptChange(receiptId) {
 
   const rid = String(receiptId || '').trim();
   if (!rid) {
-    if (hint) hint.textContent = '';
+    if (hint) hint.textContent = String(receiptSelect?.dataset?.emptyReason || '');
     if (driverSelect) driverSelect.disabled = false;
     if (dueSection) dueSection.classList.add('hidden');
     if (mergeToggle) mergeToggle.classList.add('hidden');
     if (dueInput) {
       dueInput.value = '';
       dueInput.dataset.maxDue = '0';
+      dueInput.dataset.debtIncreaseAmount = '0';
       dueInput.dataset.receiptId = '';
     }
     if (isShop && unpaidFinancial) unpaidFinancial.classList.remove('hidden');
@@ -3438,6 +3736,7 @@ function onAdTempReceiptChange(receiptId) {
     if (dueInput) {
       dueInput.value = '';
       dueInput.dataset.maxDue = '0';
+      dueInput.dataset.debtIncreaseAmount = '0';
       dueInput.dataset.receiptId = '';
     }
     renderAdDueReceiptReplacementNotice();
@@ -3452,6 +3751,7 @@ function onAdTempReceiptChange(receiptId) {
     if (dueInput) {
       dueInput.value = '';
       dueInput.dataset.maxDue = '0';
+      dueInput.dataset.debtIncreaseAmount = '0';
       dueInput.dataset.receiptId = '';
     }
   } else {
@@ -3459,45 +3759,49 @@ function onAdTempReceiptChange(receiptId) {
     const fee = Number(r.quotedDeliveryFee ?? 0) || 0;
     const dueLYD = Number(r.debtAmountLocal ?? r.amountLocal ?? 0) || 0;
     
-    // Calculate available credit in USD using the new tracking function
+    // Available capacity includes this ad's old allocation during an edit.
     const dueUsage = getDeliveryReceiptDueUsage(r);
-    let availableUSD = dueUsage.remainingDueUSD;
-    // When EDITING an ad, add back this ad's own due usage so its existing
-    // allocation can be shown and preserved. Without this, editing an ad that
-    // used the receipt's full due credit computed available=$0, skipped the
-    // prefill, and on save wiped the allocation — silently resurrecting the
-    // spent credit and zeroing the ad's budget.
-    if (state.modalData?.id) {
-      const existingAd = state.ads.find(a => a.id === state.modalData.id);
-      if (existingAd) {
-        const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
-          ? existingAd.dueAllocations
-              .filter(a => String(a?.receiptId || '') === rid)
-              .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
-          : 0;
-        availableUSD += explicitDueForReceipt > 0
-          ? explicitDueForReceipt
-          : getAdLegacyDueMirrorUSD(existingAd, rid, r.exchangeRate);
-      }
-    }
+    const availableUSD = getAdDueReceiptEffectiveAvailableUSD(r, dueUsage);
+    const mixedTargetUSD = isShop
+      ? normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD)
+      : 0;
+    const mixedPaidUSD = isShop ? getTempMergeFundingTotalUSD() : 0;
+    const exactShortfallUSD = mixedTargetUSD > 0
+      ? Math.round(Math.max(mixedTargetUSD - mixedPaidUSD, 0) * 100) / 100
+      : 0;
+    const reusableInfo = isShop
+      ? getReusableUnpaidShopReceiptInfo(r, customerId, dueUsage, exactShortfallUSD)
+      : { eligible: false, totalDebtUSD: Number(dueUsage.totalDueUSD) || 0, usedDebtUSD: Number(dueUsage.usedDueUSD) || 0 };
+    const debtIncreaseUSD = reusableInfo.eligible && exactShortfallUSD > 0.009
+      ? Math.round(Math.max(exactShortfallUSD - availableUSD, 0) * 100) / 100
+      : 0;
+    const maxDueUSD = Math.round((availableUSD + debtIncreaseUSD) * 100) / 100;
     const exchangeRate = dueUsage.exchangeRate || state.defaultExchangeRate || 1;
     const budgetRate = document.getElementById('ad-driver-budget-rate');
     if (budgetRate) budgetRate.value = String(exchangeRate);
     updateAdDriverBudgetSummary();
     
     const receiptNumber = r.tempReceiptNo || r.serialNumber || r.finalReceiptNo || (isArC ? 'وصل بدون رقم' : 'Unnumbered receipt');
+    const projectedDebtUSD = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncreaseUSD;
+    const growthText = debtIncreaseUSD > 0
+      ? ` • ${isArC ? 'دين جديد عند الحفظ' : 'new debt on Save'}: $${debtIncreaseUSD.toFixed(2)} • ${isArC ? 'إجمالي الدين الجديد' : 'new debt total'}: $${projectedDebtUSD.toFixed(2)}`
+      : '';
     const txt = isShop
-      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • $${availableUSD.toFixed(2)}`
+      ? `${receiptNumber} • ${isArC ? 'وصل غير مدفوع في المحل' : 'Unpaid In-Shop receipt'} • ${isArC ? 'إجمالي الدين' : 'debt total'} $${(Number(reusableInfo.totalDebtUSD) || 0).toFixed(2)} • ${isArC ? 'مخصص' : 'allocated'} $${(Number(reusableInfo.usedDebtUSD) || 0).toFixed(2)} • ${isArC ? 'متاح' : 'available'} $${availableUSD.toFixed(2)}${growthText}`
       : `${receiptNumber}${r.finalReceiptNo || r.serialNumber ? ` → ${r.finalReceiptNo || r.serialNumber}` : ''}${place ? ` • ${place}` : ''} • ${isArC ? 'الرسوم المتفق عليها' : 'Quoted fee'} ${fee.toFixed(0)} LYD`;
     if (hint) hint.textContent = txt;
     
-    // Show due amount section if there's available credit
-    if (availableUSD > 0.01) {
+    // Reusable In-Shop receipts stay editable even at $0 available: typing a
+    // new unpaid amount grows the debt atomically on Save.
+    if (maxDueUSD > 0.01 || (isShop && reusableInfo.eligible)) {
       if (dueSection) dueSection.classList.remove('hidden');
-      if (dueAvailable) dueAvailable.textContent = `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
+      if (dueAvailable) dueAvailable.textContent = debtIncreaseUSD > 0
+        ? `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} • ${isArC ? 'دين جديد' : 'New debt'}: $${debtIncreaseUSD.toFixed(2)} • ${isArC ? 'الإجمالي الجديد' : 'New total'}: $${projectedDebtUSD.toFixed(2)}`
+        : `${isArC ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} (${(availableUSD * exchangeRate).toFixed(0)} LYD)`;
       if (dueInput) {
         // Store the max due amount in USD for validation
-        dueInput.dataset.maxDue = availableUSD.toString();
+        dueInput.dataset.maxDue = maxDueUSD.toString();
+        dueInput.dataset.debtIncreaseAmount = debtIncreaseUSD.toFixed(2);
         dueInput.dataset.exchangeRate = exchangeRate.toString();
         
         // Check if editing - load existing dueAmountToUseUSD from modalData
@@ -3547,8 +3851,8 @@ function onAdTempReceiptChange(receiptId) {
           // the safer blank default.
           const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
           const paidPart = getTempMergeFundingTotalUSD();
-          const shortfall = target > 0 ? Math.max(target - paidPart, 0) : availableUSD;
-          dueInput.value = isShop ? Math.min(availableUSD, shortfall).toFixed(2) : '';
+          const shortfall = target > 0 ? Math.max(target - paidPart, 0) : maxDueUSD;
+          dueInput.value = isShop ? Math.min(maxDueUSD, shortfall).toFixed(2) : '';
         }
         dueInput.dataset.receiptId = rid;
       }
@@ -3564,6 +3868,7 @@ function onAdTempReceiptChange(receiptId) {
       if (dueInput) {
         dueInput.value = '';
         dueInput.dataset.maxDue = '0';
+        dueInput.dataset.debtIncreaseAmount = '0';
         dueInput.dataset.exchangeRate = exchangeRate.toString();
         dueInput.dataset.receiptId = rid;
       }
@@ -3695,8 +4000,45 @@ function onAdDueAmountChange() {
   const dueInput = document.getElementById('ad-due-amount-to-use');
   if (!dueInput) return;
   
-  const maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
-  let value = parseFloat(dueInput.value) || 0;
+  let maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
+  let value = Math.max(parseFloat(dueInput.value) || 0, 0);
+
+  // An unpaid In-Shop receipt is a reusable debt ledger, not a one-use gift
+  // card. If the user enters more than its currently free capacity, keep the
+  // full proposed allocation and ask the server to grow only the uncovered
+  // difference atomically. This also enables a pure-unpaid ad with no paid
+  // receipt allocation at all.
+  if (document.getElementById('ad-collection-method')?.value === 'in_shop') {
+    const receiptId = String(dueInput.dataset.receiptId || '').trim();
+    const receipt = getVisibleRecords(state.receipts).find(
+      row => String(row?.id || '') === receiptId
+    );
+    if (receipt) {
+      const dueUsage = getDeliveryReceiptDueUsage(receipt);
+      const reusableInfo = getReusableUnpaidShopReceiptInfo(
+        receipt,
+        document.getElementById('ad-customer-id')?.value || '',
+        dueUsage,
+        value
+      );
+      if (reusableInfo.eligible) {
+        const availableUSD = getAdDueReceiptEffectiveAvailableUSD(receipt, dueUsage);
+        const debtIncreaseUSD = Math.round(Math.max(value - availableUSD, 0) * 100) / 100;
+        maxDue = Math.max(maxDue, Math.round((availableUSD + debtIncreaseUSD) * 100) / 100);
+        dueInput.dataset.maxDue = maxDue.toString();
+        dueInput.dataset.debtIncreaseAmount = debtIncreaseUSD.toFixed(2);
+
+        const dueAvailable = document.getElementById('ad-due-available');
+        if (dueAvailable) {
+          const newTotalUSD = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncreaseUSD;
+          const isAr = state.language === 'ar';
+          dueAvailable.textContent = debtIncreaseUSD > 0.009
+            ? `${isAr ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)} • ${isAr ? 'دين جديد' : 'New debt'}: $${debtIncreaseUSD.toFixed(2)} • ${isAr ? 'الإجمالي الجديد' : 'New total'}: $${newTotalUSD.toFixed(2)}`
+            : `${isAr ? 'المتاح' : 'Available'}: $${availableUSD.toFixed(2)}`;
+        }
+      }
+    }
+  }
   
   // Cap at max available
   if (value > maxDue) {
@@ -3854,9 +4196,33 @@ function syncMixedShopReceiptDifference() {
   const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
   const dueInput = document.getElementById('ad-due-amount-to-use');
   if (!dueInput || target <= 0 || !String(dueInput.dataset.receiptId || '').trim()) return;
-  const maxDue = Math.max(parseFloat(dueInput.dataset.maxDue) || 0, 0);
-  const shortfall = Math.max(target - getTempMergeFundingTotalUSD(), 0);
+  const receiptId = String(dueInput.dataset.receiptId || '').trim();
+  const receipt = getVisibleRecords(state.receipts).find(row => String(row.id || '') === receiptId);
+  const shortfall = Math.round(Math.max(target - getTempMergeFundingTotalUSD(), 0) * 100) / 100;
+  const usage = receipt ? getDeliveryReceiptDueUsage(receipt) : null;
+  const reusableInfo = receipt
+    ? getReusableUnpaidShopReceiptInfo(
+        receipt,
+        document.getElementById('ad-customer-id')?.value || '',
+        usage,
+        shortfall
+      )
+    : { eligible: false, totalDebtUSD: 0 };
+  const available = receipt ? getAdDueReceiptEffectiveAvailableUSD(receipt, usage) : 0;
+  const debtIncrease = reusableInfo.eligible
+    ? Math.round(Math.max(shortfall - available, 0) * 100) / 100
+    : 0;
+  const maxDue = Math.round((available + debtIncrease) * 100) / 100;
+  dueInput.dataset.maxDue = maxDue.toString();
+  dueInput.dataset.debtIncreaseAmount = debtIncrease.toFixed(2);
   dueInput.value = Math.min(shortfall, maxDue).toFixed(2);
+  const dueAvailable = document.getElementById('ad-due-available');
+  if (dueAvailable) {
+    const newTotal = (Number(reusableInfo.totalDebtUSD) || 0) + debtIncrease;
+    dueAvailable.textContent = debtIncrease > 0.009
+      ? `Available: $${available.toFixed(2)} • New debt: $${debtIncrease.toFixed(2)} • New total: $${newTotal.toFixed(2)}`
+      : `Available: $${available.toFixed(2)}`;
+  }
   updateAdDueSummary();
   syncShopDueAllocationToFunding();
 }
@@ -5107,6 +5473,8 @@ function renderAdFundingList() {
 function refreshAdFundingSummary() {
   const summary = document.getElementById('ad-funding-summary');
   if (!summary) return;
+
+  refreshAdMixedReceiptShortfallAction();
   
   const allocations = state.tempAdFunding?.allocations || [];
   

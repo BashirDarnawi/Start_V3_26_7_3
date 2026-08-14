@@ -149,7 +149,7 @@ def test_ad_update_preserves_authoritative_db_creator_in_legacy_payload():
             created_by=owner_id,
         )
 
-    saved, replayed = _ad_mutation_atomic(
+    saved, _updated_receipts, replayed = _ad_mutation_atomic(
         {"id": editor_id, "role": "Admin", "permissions": {}},
         AdMutationRequest(
             action="update",
@@ -182,7 +182,7 @@ def test_ad_update_keeps_truly_creatorless_legacy_record_unknown():
             created_by=None,
         )
 
-    saved, replayed = _ad_mutation_atomic(
+    saved, _updated_receipts, replayed = _ad_mutation_atomic(
         {"id": editor_id, "role": "Admin", "permissions": {}},
         AdMutationRequest(
             action="update",

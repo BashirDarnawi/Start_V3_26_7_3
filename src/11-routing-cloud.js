@@ -589,7 +589,6 @@ function getCommandPaletteBaseCommands() {
   }
 
   commands.push(
-    { id: 'workspace-mode', label: isAdvancedWorkspaceMode() ? (isAr ? 'استخدام العرض البسيط' : 'Use Simple view') : (isAr ? 'استخدام العرض المتقدم' : 'Use Advanced view'), icon: isAdvancedWorkspaceMode() ? 'sparkles' : 'sliders-horizontal', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleWorkspaceExperienceMode(); } },
     { id: 'dark-mode', label: isAr ? 'تبديل المظهر' : 'Change appearance', icon: 'moon', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleTheme(); } },
     { id: 'language', label: isAr ? 'التبديل إلى الإنجليزية' : 'Switch to Arabic', icon: 'globe', section: isAr ? 'التفضيلات' : 'Preferences', action: () => { closeCommandPalette(); toggleLanguage(); } },
     { id: 'logout', label: isAr ? 'تسجيل الخروج' : 'Log out', icon: 'log-out', section: isAr ? 'الحساب' : 'Account', action: () => { closeCommandPalette(); handleLogout(); } }

@@ -776,6 +776,7 @@ const state = {
 
   // Page Filters
   pageSearch: '',
+  pageOwnerFilter: 'all',
   
   // Ad Filters
   adSearch: '',

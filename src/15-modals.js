@@ -411,6 +411,14 @@ function renderModal() {
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
         : Number(adData.amountUSD || 0);
+      // A stopped ad keeps its original budget as immutable history. The final
+      // actual spend is changed only through the atomic stop/reconciliation
+      // flow, which also updates every affected receipt balance.
+      const isStoppedAdEdit = isEdit && String(adData.status || '') === 'Stopped';
+      const stoppedPlannedUSD = Math.max(Number(adData.amountUSD) || 0, 0);
+      const stoppedFinalUSD = getFrozenFinalAdSpendUSD(adData) ?? Math.max(Number(adData.spentUSD) || 0, 0);
+      const stoppedCommittedUSD = getAdCommittedFundingTotalUSD(adData);
+      const stoppedReturnedUSD = Math.max(stoppedPlannedUSD - stoppedFinalUSD, 0);
 
       if (visiblePages.length === 0) {
         modalContent = `
@@ -469,7 +477,44 @@ function renderModal() {
                 </div>
               </div>
             ` : ''}
-            
+
+            ${isStoppedAdEdit ? `
+              <div data-section="stopped-ad-accounting" class="rounded-xl border border-orange-200 bg-orange-50 p-4 text-orange-950 dark:border-orange-800 dark:bg-orange-900/20 dark:text-orange-100">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2 font-bold">
+                      <i data-lucide="circle-dollar-sign" class="h-5 w-5 shrink-0"></i>
+                      ${isArAd ? 'الحساب النهائي للإعلان المتوقف' : 'Stopped ad final accounting'}
+                    </div>
+                    <p class="mt-1 text-xs leading-relaxed text-orange-800 dark:text-orange-200">
+                      ${isArAd ? 'الميزانية الأصلية محفوظة كسجل للقراءة فقط. استخدم الزر لتعديل المصروف الفعلي النهائي وتحديث أرصدة الوصولات والدين معاً.' : 'The original planned budget is preserved as read-only history. Use this action to change the final actual spend and update paid and unpaid receipt balances together.'}
+                    </p>
+                  </div>
+                  <button type="button" id="edit-stopped-ad-spend" data-action="edit-stopped-ad-spend" data-ad-id="${Security.escapeHtml(String(adData.id || ''))}" onclick="closeModal(); stopAd(this.dataset.adId)" class="min-h-11 shrink-0 rounded-xl bg-orange-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500">
+                    <i data-lucide="calculator" class="mr-1 inline h-4 w-4"></i>${isArAd ? 'تعديل المصروف والأرصدة' : 'Edit final spend & balances'}
+                  </button>
+                </div>
+                <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الميزانية الأصلية' : 'Original planned budget'}</div>
+                    <div class="font-bold">$${stoppedPlannedUSD.toFixed(2)}</div>
+                  </div>
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'المصروف الفعلي النهائي' : 'Final actual spend'}</div>
+                    <div class="font-bold text-orange-700 dark:text-orange-300">$${stoppedFinalUSD.toFixed(2)}</div>
+                  </div>
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'تمويل الوصولات الملتزم' : 'Receipt funding committed'}</div>
+                    <div class="font-bold text-blue-700 dark:text-blue-300">$${stoppedCommittedUSD.toFixed(2)}</div>
+                  </div>
+                  <div class="rounded-lg bg-white/80 p-2 dark:bg-slate-900/40">
+                    <div class="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">${isArAd ? 'الرصيد المُعاد' : 'Balance returned'}</div>
+                    <div class="font-bold text-emerald-700 dark:text-emerald-300">$${stoppedReturnedUSD.toFixed(2)}</div>
+                  </div>
+                </div>
+              </div>
+            ` : ''}
+
             <!-- SECTION 1: Basic Info -->
             <div class="bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-800/50 dark:to-slate-800/30 rounded-xl p-4 space-y-3 border border-slate-200 dark:border-slate-700">
               <div class="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
@@ -737,12 +782,12 @@ function renderModal() {
                 <div class="text-xs text-slate-400 text-center py-2">${isArAd ? 'اختر صفحة وعميلاً أولاً' : 'Select a page & customer first'}</div>
               </div>
               <div id="ad-funding-change-notice" role="status" aria-live="polite" class="hidden rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2 text-xs font-medium text-blue-800 dark:text-blue-200"></div>
-              <div class="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
-                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
+              <div id="ad-mixed-receipt-shortfall-panel" class="hidden rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-2 space-y-1">
+                <button type="button" onclick="startAdMixedReceiptFunding()" class="w-full min-h-11 flex items-center justify-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:text-amber-800 py-1">
                   <i data-lucide="split" class="w-4 h-4"></i>
-                  ${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}
+                  <span id="ad-mixed-receipt-shortfall-label">${isArAd ? 'استخدام وصل غير مدفوع لتغطية الفرق' : 'Use an Unpaid Receipt for the Difference'}</span>
                 </button>
-                <p class="text-[10px] text-center text-amber-600 dark:text-amber-400">
+                <p id="ad-mixed-receipt-shortfall-help" class="text-[10px] text-center text-amber-600 dark:text-amber-400">
                   ${isArAd ? 'إذا كان رصيد الوصل المدفوع أقل من ميزانية الإعلان، سيبقى الفرق ديناً على العميل.' : 'If paid receipt credit is short, only the difference stays as customer debt.'}
                 </p>
               </div>
@@ -1011,7 +1056,7 @@ function renderModal() {
             </div>`;
             })()}
           </div>
-            
+
             <!-- Customer Linking Section -->
             <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-200 dark:border-blue-800">
               <div class="flex items-center space-x-2 mb-3">
@@ -2470,9 +2515,14 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
     };
     if (action === 'update') payload.expectedLastModified = attempt.expectedLastModified;
     const response = await apiMutateAd(payload);
-    const [savedAd] = applyValidatedServerEntityBatch([
+    const updatedReceipts = Array.isArray(response.updatedReceipts)
+      ? response.updatedReceipts
+      : [];
+    const applied = applyValidatedServerEntityBatch([
+      ...updatedReceipts.map(entity => ({ collection: 'receipts', entity })),
       { collection: 'ads', entity: response.ad }
     ], 'adMutation');
+    const savedAd = applied[applied.length - 1];
     if (!savedAd) throw new Error('Invalid ad mutation response');
     completeAdMutationAttempt(attempt);
     return savedAd;
@@ -3321,6 +3371,8 @@ async function handleModalSubmit() {
       let dueAmountToUseUSD = 0;
       let linkedDeliveryReceiptId = '';
       let dueAllocations = [];
+      let unpaidReceiptDebtIncrease = null;
+      let unpaidReceiptEffectiveAvailableUSD = 0;
       if (paymentStatus === 'not_paid' && (collectionMethod === 'driver' || (collectionMethod === 'in_shop' && selectedUnpaidReceiptId))) {
         const linkedReceiptId = selectedUnpaidReceiptId;
         linkedDeliveryReceiptId = collectionMethod === 'driver' ? linkedReceiptId : '';
@@ -3336,35 +3388,39 @@ async function handleModalSubmit() {
           
           // Validate: check if the amount exceeds available credit
           const dueUsage = getDeliveryReceiptDueUsage(linkedReceiptId);
-          const availableUSD = dueUsage.remainingDueUSD;
+          const effectiveAvailable = collectionMethod === 'in_shop'
+            ? getAdDueReceiptEffectiveAvailableUSD(selectedDueReceipt, dueUsage)
+            : Math.max(Number(dueUsage.remainingDueUSD) || 0, 0);
+          unpaidReceiptEffectiveAvailableUSD = effectiveAvailable;
           
-          // If editing an existing ad, add back what this ad already used
-          let currentAdUsage = 0;
-          if (isEdit && state.modalData?.id) {
-            const existingAd = state.ads.find(a => a.id === state.modalData.id);
-            if (existingAd) {
-              const explicitDueForReceipt = Array.isArray(existingAd.dueAllocations)
-                ? existingAd.dueAllocations
-                    .filter(a => String(a?.receiptId || '') === String(linkedReceiptId))
-                    .reduce((sum, a) => sum + (parseFloat(a?.amountUSD) || 0), 0)
-                : 0;
-              currentAdUsage = explicitDueForReceipt > 0
-                ? explicitDueForReceipt
-                : getAdLegacyDueMirrorUSD(existingAd, linkedReceiptId, selectedDueReceipt?.exchangeRate);
+          if (dueAmountToUseUSD > effectiveAvailable + 0.005) {
+            const growthInfo = collectionMethod === 'in_shop'
+              ? getReusableUnpaidShopReceiptInfo(
+                  selectedDueReceipt,
+                  customerId,
+                  dueUsage,
+                  dueAmountToUseUSD
+                )
+              : { eligible: false };
+            const requiredGrowthUSD = Math.round(
+              Math.max(dueAmountToUseUSD - effectiveAvailable, 0) * 100
+            ) / 100;
+            if (growthInfo.eligible && requiredGrowthUSD > 0.009) {
+              unpaidReceiptDebtIncrease = {
+                receiptId: String(linkedReceiptId),
+                amountUSD: requiredGrowthUSD,
+                expectedLastModified: growthInfo.expectedLastModified
+              };
+            } else {
+              showNotification(
+                isArSubAd ? 'تنبيه' : 'Validation',
+                isArSubAd
+                  ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
+                  : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
+                'error'
+              );
+              return;
             }
-          }
-          
-          const effectiveAvailable = availableUSD + currentAdUsage;
-          
-          if (dueAmountToUseUSD > effectiveAvailable + 0.01) {
-            showNotification(
-              isArSubAd ? 'تنبيه' : 'Validation',
-              isArSubAd
-                ? `صرف الرصيد المستحق ($${dueAmountToUseUSD.toFixed(2)}) يتجاوز المتاح ($${effectiveAvailable.toFixed(2)}).`
-                : `Due credit spend ($${dueAmountToUseUSD.toFixed(2)}) exceeds available ($${effectiveAvailable.toFixed(2)}).`,
-              'error'
-            );
-            return;
           }
           
           // Create due allocation
@@ -3457,6 +3513,24 @@ async function handleModalSubmit() {
       if (isUnpaidShop && selectedUnpaidReceiptId) {
         amountUSD = Math.round((dueAmountToUseUSD + mergedTotal) * 100) / 100;
         const intendedBudget = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
+        if (unpaidReceiptDebtIncrease) {
+          const expectedGrowth = Math.round(
+            Math.max(dueAmountToUseUSD - unpaidReceiptEffectiveAvailableUSD, 0) * 100
+          ) / 100;
+          const instructionAmount = Number(unpaidReceiptDebtIncrease.amountUSD) || 0;
+          if (expectedGrowth <= 0.009
+              || instructionAmount > dueAmountToUseUSD + 0.005
+              || Math.abs(instructionAmount - expectedGrowth) > 0.005) {
+            showNotification(
+              isArSubAd ? 'تنبيه' : 'Validation',
+              isArSubAd
+                ? 'يجب أن تساوي زيادة الدين الجزء الجديد غير المغطى فقط.'
+                : 'The debt increase must equal only the newly uncovered amount.',
+              'error'
+            );
+            return;
+          }
+        }
         if (intendedBudget > 0 && Math.abs(amountUSD - intendedBudget) > 0.005) {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
@@ -3532,6 +3606,12 @@ async function handleModalSubmit() {
         hasMergedPaidFunds: collectionMethod === 'driver' && mergedAllocations.length > 0,
         mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
+      if (unpaidReceiptDebtIncrease) {
+        // Request-only instruction. The server atomically grows the reusable
+        // unpaid receipt by only the new shortfall and saves the ad; this field
+        // is never stored on the ad.
+        adUpdates.unpaidReceiptDebtIncrease = unpaidReceiptDebtIncrease;
+      }
 
       // Denormalize the customer's display NAME (never phone/contact) so a role
       // that can view ads but not load the customers collection still sees who

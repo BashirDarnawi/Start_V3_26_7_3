@@ -684,6 +684,47 @@ check('a page card shows the real Facebook Page ID under its name and category',
   }
 });
 
+check('Pages Needs owner filter finds every ownerless page and composes with search', () => {
+  loginAs(ADMIN);
+  S.language = 'en';
+  const originalPages = S.pages;
+  const originalCustomers = S.customers;
+  const originalSearch = S.pageSearch;
+  const originalOwnerFilter = S.pageOwnerFilter;
+  try {
+    S.customers = [{ id: 'owner_filter_customer', name: 'Linked Customer' }];
+    S.pages = [
+      { id: 'owner_filter_missing', name: 'Owner Needed Page', customerIds: [] },
+      { id: 'owner_filter_modern', name: 'Modern Linked Page', customerIds: ['owner_filter_customer'] },
+      { id: 'owner_filter_legacy', name: 'Legacy Linked Page', customerId: 'owner_filter_customer' }
+    ];
+    S.pageSearch = '';
+    S.pageOwnerFilter = 'needs-owner';
+
+    let html = visible(sandbox.renderPagesView());
+    assert(html.includes('Owner Needed Page'), 'the ownerless page is missing from the filter');
+    assert(!html.includes('Modern Linked Page'), 'a modern linked page appeared as ownerless');
+    assert(!html.includes('Legacy Linked Page'), 'a legacy linked page appeared as ownerless');
+    assert(html.includes('1 of 3 Facebook pages'), 'the filtered page count is incorrect');
+    assert(html.includes('is-active is-warning'), 'the Needs owner chip is not visibly active');
+
+    S.pageSearch = 'does not match';
+    html = visible(sandbox.renderPagesView());
+    assert(html.includes('No pages match your search'), 'search does not compose with the owner filter');
+
+    S.pageSearch = '';
+    S.pageOwnerFilter = 'all';
+    html = visible(sandbox.renderPagesView());
+    assert(html.includes('Owner Needed Page') && html.includes('Modern Linked Page') && html.includes('Legacy Linked Page'),
+      'switching back to All did not restore every page');
+  } finally {
+    S.pages = originalPages;
+    S.customers = originalCustomers;
+    S.pageSearch = originalSearch;
+    S.pageOwnerFilter = originalOwnerFilter;
+  }
+});
+
 check('every duplicate can be merged in one run, and one bad page never blocks the rest', () => {
   loginAs(ADMIN);
   S.language = 'en';
@@ -2199,6 +2240,136 @@ check('reopening a zero-value receipt seeds the saved exchange rate for editing'
   assert(rows[0].deliveryPersonId === 'u-driver', 'assigned driver was not restored');
 });
 
+check('446 LYD at 11.15 remains a $40 unpaid bank-transfer plan, not collected cash', () => {
+  const enteredRows = [{
+    method: 'Bank Transfer (LYD)',
+    amount: 446,
+    rate: 0,
+    rate2: 11.15,
+    collectionType: 'office',
+    deliveryPersonId: ''
+  }];
+  const totalLYD = enteredRows[0].amount;
+  const totalUSD = sandbox.ceilingRound(totalLYD / enteredRows[0].rate2);
+  const savedRate = sandbox.receiptExchangeRateForSave(
+    enteredRows,
+    enteredRows,
+    totalLYD,
+    totalUSD,
+    'Not Paid',
+    null
+  );
+
+  assert(totalUSD === 40, `446/11.15 should create exactly $40.00 debt, got $${totalUSD}`);
+  assert(savedRate === 11.15, `the typed 11.15 rate changed to ${savedRate}`);
+
+  // Exercise the source function directly because this suite normally loads the
+  // generated bundle, while source changes are intentionally rebuilt only once
+  // by the release owner after all parallel fixes have landed.
+  const formsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '14-forms.js'), 'utf8');
+  const functionStart = formsSource.indexOf('function getReceiptFormPayments(receiptData)');
+  const functionEnd = formsSource.indexOf('\n\n// Driver debt', functionStart);
+  assert(functionStart >= 0 && functionEnd > functionStart, 'could not isolate getReceiptFormPayments from source');
+  const sourceSandbox = {};
+  vm.createContext(sourceSandbox);
+  vm.runInContext(
+    `${formsSource.slice(functionStart, functionEnd)}\nthis.readReceiptPlan = getReceiptFormPayments;`,
+    sourceSandbox
+  );
+
+  const reopenedRows = sourceSandbox.readReceiptPlan({
+    status: 'Not Paid',
+    isPaid: false,
+    paymentMethod: 'Bank Transfer (LYD)',
+    exchangeRate: 11.15,
+    amountLocal: 446,
+    amountUSD: 40,
+    plannedPayments: enteredRows,
+    payments: []
+  });
+  assert(reopenedRows.length === 1, 'the saved collection plan was not restored');
+  assert(reopenedRows[0].method === 'Bank Transfer (LYD)', 'the planned bank-transfer method was lost');
+  assert(reopenedRows[0].amount === 446, `the planned 446 LYD amount became ${reopenedRows[0].amount}`);
+  assert(reopenedRows[0].rate2 === 11.15, `the planned rate became ${reopenedRows[0].rate2}`);
+
+  assert(/const persistedPayments = status === 'Not Paid' \? \[\] : payments;/.test(formsSource),
+    'Not Paid receipts must persist payments:[]');
+  assert(/plannedPayments:\s*plannedPayments/.test(formsSource),
+    'Not Paid collection rows were not persisted as plannedPayments');
+  assert(/collectionDate:\s*status === 'Not Paid'[\s\S]*?\?\s*''/.test(formsSource),
+    'Not Paid receipts must clear collectionDate');
+  assert(/convertsCollectedReceiptToDebt[\s\S]*?window\.confirm/.test(formsSource),
+    'Paid to Not Paid must ask before reversing collected money into debt');
+  assert(/if \(!confirmed\) return;/.test(formsSource),
+    'canceling the Paid to Not Paid warning must stop the save');
+});
+
+check('the canonical $40 unpaid LYD receipt remains eligible in the ad picker', () => {
+  const original = {
+    receipts: S.receipts,
+    ads: S.ads,
+    serverMode: S.serverMode
+  };
+  try {
+    S.serverMode = true;
+    S.ads = [];
+    S.receipts = [{
+      id: 'B-lyd-40',
+      customerId: 'customer-lyd-40',
+      recordType: 'receipt',
+      paymentMethod: 'Bank Transfer (LYD)',
+      amountUSD: 40,
+      amountLocal: 446,
+      debtAmountUSD: 40,
+      debtAmountLocal: 446,
+      exchangeRate: 11.15,
+      status: 'Not Paid',
+      isPaid: false,
+      deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' },
+      plannedPayments: [{
+        method: 'Bank Transfer (LYD)', amount: 446, rate: 0, rate2: 11.15,
+        collectionType: 'office', deliveryPersonId: ''
+      }],
+      payments: [],
+      transfers: [],
+      _lastModified: 4461115
+    }];
+
+    const receipt = S.receipts[0];
+    const usage = sandbox.getDeliveryReceiptDueUsage(receipt);
+    const reusable = sandbox.getReusableUnpaidShopReceiptInfo(
+      receipt,
+      'customer-lyd-40',
+      usage,
+      40
+    );
+    assert(reusable.eligible === true, 'the canonical unpaid receipt was rejected by the picker');
+    assert(reusable.totalDebtUSD === 40, `picker read $${reusable.totalDebtUSD} instead of $40 debt`);
+    assert(reusable.availableUSD === 40, `picker exposed $${reusable.availableUSD} instead of $40`);
+
+    const selectable = sandbox.getUnpaidShopReceiptsForCustomer(
+      'customer-lyd-40',
+      new Map(),
+      { growableAmountUSD: 40 }
+    );
+    assert(selectable.some(row => row.id === 'B-lyd-40'),
+      'the exact Bank Transfer (LYD) receipt did not appear in the selector');
+
+    const formsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '14-forms.js'), 'utf8');
+    assert(formsSource.includes('select.dataset.emptyReason = emptyReason;'),
+      'an empty unpaid-receipt picker does not preserve a reason for the user');
+    assert(formsSource.includes('An existing unpaid receipt needs review in Receipts'),
+      'legacy excluded receipts do not explain that they need review');
+    assert(formsSource.includes("hint.textContent = String(receiptSelect?.dataset?.emptyReason || '')"),
+      'the empty-picker reason is not shown beside the selector');
+  } finally {
+    S.receipts = original.receipts;
+    S.ads = original.ads;
+    S.serverMode = original.serverMode;
+  }
+});
+
 check('a Driver ad uses its linked receipt rate ($50 at 9.70 is 485 LYD)', () => {
   S.defaultExchangeRate = 9.5;
   const rate = sandbox.resolveAdExchangeRateForSave({
@@ -2704,12 +2875,17 @@ check('Meta-linked ads take budget, spend and remaining automatically from Meta'
   assert(modalSource.includes('const metaBudgetRaw = metaAdAutoBudgetUSD(adData);'), 'the ad modal budget does not consult Meta');
   assert(modalSource.includes("${metaBudget > 0 ? 'readonly ' : ''}"), 'the Meta budget is not read-only in the ad modal');
 
-  // The Stop Ad dialog prefills the real Meta spend read-only, and keeps
-  // manual entry when Meta reports more than the recorded budget.
+  // The Stop Ad dialog prefills the real Meta spend, but staff can correct the
+  // final amount before saving when Meta's number is not the final charge.
   const stopSource = fs.readFileSync(path.join(__dirname, '..', 'src', '16-actions-io.js'), 'utf8');
   assert(stopSource.includes('const metaSpendUSD = metaAdRealSpendUSD(ad);'), 'the stop dialog does not consult Meta spend');
   assert(stopSource.includes('metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005'), 'the stop dialog lacks the budget-mismatch guard');
-  assert(stopSource.includes("${metaSpendAuto ? 'readonly ' : ''}"), 'the Meta spend is not read-only in the stop dialog');
+  assert(stopSource.includes("aria-describedby=\"stop-ad-spent-help\""), 'the final spend correction field has no explanation');
+  assert(stopSource.includes('Manual correction:'), 'the stop dialog does not explain a corrected Meta amount');
+  assert(!stopSource.includes("${metaSpendAuto ? 'readonly ' : ''}oninput=\"sanitizeMoneyInput(this)\""), 'the Meta spend correction field is locked');
+  assert(stopSource.includes('ad.manualSpentOverride === true'), 'a saved final spend correction does not override later Meta display values');
+  assert(stopSource.includes('getFrozenFinalAdSpendUSD(ad)'), 'a legacy stopped final spend can still be replaced by Meta');
+  assert(stopSource.includes('ad.manualSpentOverride = true;'), 'local mode does not preserve the staff-confirmed final spend correction');
 
   // The reconciliation Save button reads the input id the view actually
   // renders (the old `reconciliation-<id>-spent` lookup never matched, so
@@ -2717,8 +2893,8 @@ check('Meta-linked ads take budget, spend and remaining automatically from Meta'
   assert(stopSource.includes('`reconciliation-spent-${id}`'), 'reconciliation submit reads the wrong input id');
   assert(!stopSource.includes('${inputPrefix}-spent'), 'the broken reconciliation input prefix is back');
 
-  // Reconciliation cards prefill the Meta spend locked, with the remaining
-  // derived from it before any typing.
+  // Reconciliation cards prefill Meta spend while keeping it editable, with
+  // the remaining derived from it before any typing.
   loginAs(ADMIN);
   S.language = 'en';
   S.customers = [{ id: 'meta-recon-customer', name: 'Meta Customer' }];
@@ -2732,9 +2908,72 @@ check('Meta-linked ads take budget, spend and remaining automatically from Meta'
   }];
   const metaHtml = sandbox.renderReconciliationView();
   assert(metaHtml.includes('value="4.68"'), 'Meta spend was not prefilled in reconciliation');
-  assert(metaHtml.includes('readonly'), 'the prefilled Meta spend is not locked');
-  assert(metaHtml.includes('Automatic from Meta'), 'reconciliation does not say the value came from Meta');
+  assert(!/id="reconciliation-spent-meta-recon-ad"[^>]*readonly/.test(metaHtml), 'the prefilled Meta spend cannot be corrected');
+  assert(metaHtml.includes('Prefilled from Meta'), 'reconciliation does not say the value came from Meta');
   assert(metaHtml.includes('$25.32'), 'the remaining was not derived from the Meta spend');
+
+  const corrected = sandbox.getAdReconciliationDisplayState({
+    ...S.ads[0], spentUSD: 3.21, manualSpentOverride: true
+  });
+  assert(corrected.displaySpentUSD === 3.21, 'a saved final correction was replaced by a later Meta value');
+  assert(corrected.remainingUSD === 26.79, 'the corrected final spend did not update the remainder');
+
+  const legacyStopped = sandbox.getAdReconciliationDisplayState({
+    ...S.ads[0], status: 'Stopped', spentUSD: 3.21
+  });
+  assert(legacyStopped.displaySpentUSD === 3.21, 'legacy stopped spend was replaced by a later Meta value');
+  assert(legacyStopped.finalSpendFrozen === true, 'legacy stopped spend was not recognized as final');
+});
+
+check('stopping an ad validates receipt envelopes and installs receipts before the ad', () => {
+  const apiSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-api-auth.js'), 'utf8');
+  const stopSource = fs.readFileSync(path.join(__dirname, '..', 'src', '16-actions-io.js'), 'utf8');
+  const apiBody = apiSource.split('async function apiStopAd(adId, payload) {')[1]
+    ?.split('// Clothes orders and their stock changes must commit together.')[0] || '';
+
+  assert(apiBody.includes('const receiptResults = response.updatedReceipts == null ? [] : response.updatedReceipts;'),
+    'apiStopAd does not read the updated receipt envelopes');
+  assert(apiBody.includes('if (!Array.isArray(receiptResults))'),
+    'apiStopAd accepts a malformed updatedReceipts response');
+  assert(apiBody.includes("validateServerEntityResponse('receipts', entity, `stop.updatedReceipts[${index}]`)"),
+    'apiStopAd does not validate each returned receipt envelope');
+  assert(apiBody.includes('updatedReceipts,'),
+    'apiStopAd drops the validated receipt envelopes from its result');
+
+  const receiptApplyIndex = stopSource.indexOf("...(response.updatedReceipts || []).map(entity => ({ collection: 'receipts', entity }))");
+  const adApplyIndex = stopSource.indexOf("{ collection: 'ads', entity: response.ad }", receiptApplyIndex);
+  const batchApplyIndex = stopSource.indexOf("applyValidatedServerEntityBatch(stopEntities, 'adStop')", adApplyIndex);
+  assert(receiptApplyIndex >= 0, 'confirmStopAd does not include the updated receipts in its local batch');
+  assert(adApplyIndex > receiptApplyIndex, 'confirmStopAd does not put receipt updates before the stopped ad');
+  assert(batchApplyIndex > adApplyIndex, 'confirmStopAd does not apply the receipt-and-ad batch atomically');
+});
+
+check('stopped Edit Ad preserves the original plan and opens an editable final-spend correction', () => {
+  const modalSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+  const stopSource = fs.readFileSync(path.join(__dirname, '..', 'src', '16-actions-io.js'), 'utf8');
+
+  assert(modalSource.includes('data-section="stopped-ad-accounting"'),
+    'Edit Ad has no stopped-accounting summary');
+  assert(modalSource.includes('const stoppedPlannedUSD = Math.max(Number(adData.amountUSD) || 0, 0);'),
+    'the stopped summary does not preserve the original planned budget');
+  assert(modalSource.includes('The original planned budget is preserved as read-only history.'),
+    'the stopped summary does not explain that the original plan is immutable');
+  assert(modalSource.includes('data-action="edit-stopped-ad-spend"'),
+    'Edit Ad has no clear final-spend correction action');
+  assert(modalSource.includes('onclick="closeModal(); stopAd(this.dataset.adId)"'),
+    'the stopped-accounting action does not open the stop/reconciliation dialog');
+
+  const spentInputStart = stopSource.indexOf('id="stop-ad-spent"');
+  const spentInputEnd = stopSource.indexOf('/>', spentInputStart);
+  const spentInput = spentInputStart >= 0 && spentInputEnd > spentInputStart
+    ? stopSource.slice(spentInputStart, spentInputEnd)
+    : '';
+  assert(spentInput.includes('value="${initialSpentUSD.toFixed(2)}"'),
+    'the final-spend input is not prefilled from the resolved Meta/stored value');
+  assert(spentInput.includes('oninput="sanitizeMoneyInput(this)"'),
+    'the final-spend input is not editable');
+  assert(!spentInput.includes('readonly'),
+    'a Meta-prefilled final-spend input is still read-only');
 });
 
 check('an automatic Meta budget never traps an ad whose receipts reserve more', () => {
@@ -2810,6 +3049,49 @@ check('multi-entity server apply validates the whole batch before changing state
   }
   assert(rejected, 'malformed second entity was accepted');
   assert(S.receipts.length === 1 && S.receipts[0].id === 'receipt_original', 'first entity applied before the batch was fully validated');
+});
+
+check('a delayed older server response cannot replace the newer repaired B71 receipt', () => {
+  const originalReceipts = S.receipts;
+  try {
+    S.receipts = [{
+      id: 'B71', amountUSD: 30.14, amountLocal: 286.33,
+      debtAmountUSD: 30.14, debtAmountLocal: 286.33,
+      exchangeRate: 9.5, status: 'Not Paid', isPaid: false,
+      _lastModified: 502
+    }];
+
+    const [resolved] = sandbox.applyValidatedServerEntityBatch([{
+      collection: 'receipts',
+      entity: {
+        id: 'B71', lastModified: 501,
+        data: {
+          id: 'B71', amountUSD: 50.52, amountLocal: 479.94,
+          debtAmountUSD: 50.52, debtAmountLocal: 479.94,
+          exchangeRate: 9.5, status: 'Not Paid', isPaid: false,
+          _lastModified: 501
+        }
+      }
+    }], 'delayedB71Mutation');
+
+    const current = S.receipts.find(receipt => receipt.id === 'B71');
+    assert(Number(current?.amountUSD) === 30.14, `delayed response restored stale $${current?.amountUSD} debt`);
+    assert(Number(current?.debtAmountUSD) === 30.14, 'delayed response restored the stale $50.52 debt amount');
+    assert(Number(current?._lastModified) === 502, 'delayed response replaced the newer B71 server version');
+    assert(resolved === current, 'batch caller received the rejected stale entity instead of current B71');
+
+    const [equalReplay] = sandbox.applyValidatedServerEntityBatch([{
+      collection: 'receipts',
+      entity: {
+        id: 'B71', lastModified: 502,
+        data: { ...current, serverEcho: true, _lastModified: 502 }
+      }
+    }], 'equalB71Replay');
+    assert(equalReplay?.serverEcho === true, 'an equal-version idempotent replay was not applied');
+    assert(S.receipts[0]?.serverEcho === true, 'equal-version replay did not preserve existing batch behavior');
+  } finally {
+    S.receipts = originalReceipts;
+  }
 });
 
 check('first-run UI separates local, token-enabled, and disabled server setup', () => {
@@ -3293,6 +3575,370 @@ check('Paid shortfall action caps paid credit and prepares the exact unpaid diff
   }
 });
 
+check('one suitable unpaid receipt is selected for the exact $29.48 + $0.52 split', () => {
+  const original = {
+    customers: S.customers,
+    receipts: S.receipts,
+    ads: S.ads,
+    modalData: S.modalData,
+    tempAdFunding: S.tempAdFunding,
+    tempMergeFunding: S.tempMergeFunding,
+    tempMixedReceiptTargetUSD: S.tempMixedReceiptTargetUSD,
+    serverMode: S.serverMode,
+    getElementById: sandbox.document.getElementById,
+    setPaymentStatus: sandbox.setAdPaymentStatus,
+    setCollectionMethod: sandbox.setAdCollectionMethod,
+    reflectMergeFundingUI: sandbox.reflectMergeFundingUI,
+    onTempReceiptChange: sandbox.onAdTempReceiptChange,
+    onDueAmountChange: sandbox.onAdDueAmountChange,
+    setTimeout: sandbox.setTimeout
+  };
+  const customer = makeElement();
+  customer.value = 'exact_split_customer';
+  const unpaidSelect = makeElement();
+  const dueInput = makeElement();
+  const nodes = new Map([
+    ['ad-customer-id', customer],
+    ['ad-temp-receipt-id', unpaidSelect],
+    ['ad-due-amount-to-use', dueInput]
+  ]);
+  let selectedStatus = '';
+  let selectedCollection = '';
+  let selectedUnpaidReceipt = '';
+  try {
+    S.customers = [{ id: 'exact_split_customer', name: 'Exact Split Customer' }];
+    S.receipts = [
+      {
+        id: 'B31', customerId: 'exact_split_customer', recordType: 'receipt',
+        amountUSD: 29.48, amountLocal: 278.29, exchangeRate: 9.44,
+        status: 'Paid', isPaid: true, deliveryStatus: 'Office', transfers: []
+      },
+      {
+        id: 'B71', customerId: 'exact_split_customer', recordType: 'receipt',
+        amountUSD: 0, amountLocal: 0, debtAmountUSD: 0, debtAmountLocal: 0,
+        exchangeRate: 9.44, _lastModified: 719944,
+        status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+        statusDetail: { notPaidCollection: 'office' }, transfers: []
+      }
+    ];
+    S.ads = [];
+    S.modalData = null;
+    S.tempAdFunding = {
+      // A stale UI may contain the same receipt twice. It must still count the
+      // real B31 balance once and preserve the intended $30 ad budget.
+      allocations: [
+        { receiptId: 'B31', amountUSD: 20 },
+        { receiptId: 'B31', amountUSD: 10 }
+      ]
+    };
+    S.tempMergeFunding = null;
+    S.tempMixedReceiptTargetUSD = null;
+    // Growing a pristine zero-value debt receipt is deliberately server-only
+    // because the receipt and ad must be updated in one atomic transaction.
+    S.serverMode = true;
+    sandbox.document.getElementById = id => nodes.get(id) || null;
+    sandbox.setAdPaymentStatus = status => { selectedStatus = status; };
+    sandbox.setAdCollectionMethod = method => { selectedCollection = method; };
+    sandbox.reflectMergeFundingUI = () => {};
+    sandbox.onAdTempReceiptChange = receiptId => {
+      selectedUnpaidReceipt = String(receiptId || '');
+      dueInput.dataset.maxDue = '0.52';
+      dueInput.dataset.debtIncreaseAmount = '0.52';
+    };
+    sandbox.onAdDueAmountChange = () => {};
+    sandbox.setTimeout = callback => { callback(); return 1; };
+
+    const plan = sandbox.getAdMixedReceiptFundingPlan('exact_split_customer');
+    assert(plan.ok === true, 'exact split plan was rejected');
+    assert(plan.targetTotal === 30, `intended budget changed to $${plan.targetTotal}`);
+    assert(plan.paidTotal === 29.48, `paid receipt was counted as $${plan.paidTotal}`);
+    assert(plan.shortfall === 0.52, `shortfall was $${plan.shortfall} instead of $0.52`);
+    assert(plan.paidRows.length === 1, 'duplicate B31 rows were not safely consolidated');
+
+    sandbox.startAdMixedReceiptFunding();
+    assert(selectedStatus === 'not_paid', 'mixed funding did not switch the ad to Not Paid');
+    assert(selectedCollection === 'in_shop', 'mixed funding did not select In Shop');
+    assert(selectedUnpaidReceipt === 'B71', 'the pristine zero-value unpaid receipt was not selected');
+    assert(unpaidSelect.value === 'B71', 'the visible unpaid receipt picker was not updated');
+    assert(Number(dueInput.value) === 0.52, `visible unpaid difference was $${dueInput.value}`);
+    assert(Number(dueInput.dataset.maxDue) === 0.52, 'the new debt was not capped to the exact $0.52 shortfall');
+    assert(Number(dueInput.dataset.debtIncreaseAmount) === 0.52, 'the exact receipt debt increase was not recorded');
+    assert(S.tempMixedReceiptTargetUSD === 30, 'the $30 total budget was not preserved');
+    assert(S.tempMergeFunding.allocations.length === 1, 'paid receipt was duplicated in working state');
+    assert(Number(S.tempMergeFunding.allocations[0].amountUSD) === 29.48, 'B31 did not contribute exactly $29.48');
+
+    const request = sandbox.buildServerAdMutationData({
+      paymentStatus: 'not_paid',
+      collectionMethod: 'in_shop',
+      receiptAllocations: [{ receiptId: 'B31', amountUSD: 29.48 }],
+      dueAllocations: [{ receiptId: unpaidSelect.value, amountUSD: Number(dueInput.value) }],
+      unpaidReceiptDebtIncrease: {
+        receiptId: unpaidSelect.value,
+        amountUSD: Number(dueInput.dataset.debtIncreaseAmount),
+        expectedLastModified: S.receipts.find(receipt => receipt.id === unpaidSelect.value)._lastModified
+      }
+    });
+    assert(request.unpaidReceiptDebtIncrease?.receiptId === 'B71', 'outgoing request targets the wrong unpaid receipt');
+    assert(Number(request.unpaidReceiptDebtIncrease?.amountUSD) === 0.52, 'outgoing request lost the exact $0.52 debt increase');
+    assert(Number(request.unpaidReceiptDebtIncrease?.expectedLastModified) === 719944, 'outgoing request lost optimistic concurrency protection');
+  } finally {
+    S.customers = original.customers;
+    S.receipts = original.receipts;
+    S.ads = original.ads;
+    S.modalData = original.modalData;
+    S.tempAdFunding = original.tempAdFunding;
+    S.tempMergeFunding = original.tempMergeFunding;
+    S.tempMixedReceiptTargetUSD = original.tempMixedReceiptTargetUSD;
+    S.serverMode = original.serverMode;
+    sandbox.document.getElementById = original.getElementById;
+    sandbox.setAdPaymentStatus = original.setPaymentStatus;
+    sandbox.setAdCollectionMethod = original.setCollectionMethod;
+    sandbox.reflectMergeFundingUI = original.reflectMergeFundingUI;
+    sandbox.onAdTempReceiptChange = original.onTempReceiptChange;
+    sandbox.onAdDueAmountChange = original.onDueAmountChange;
+    sandbox.setTimeout = original.setTimeout;
+  }
+});
+
+check('a used unpaid shop receipt stays selectable and grows only by the new shortfall', () => {
+  const original = {
+    customers: S.customers,
+    receipts: S.receipts,
+    ads: S.ads,
+    modalData: S.modalData,
+    tempAdFunding: S.tempAdFunding,
+    tempMergeFunding: S.tempMergeFunding,
+    tempMixedReceiptTargetUSD: S.tempMixedReceiptTargetUSD,
+    serverMode: S.serverMode,
+    getElementById: sandbox.document.getElementById,
+    updateBudgetSummary: sandbox.updateAdDriverBudgetSummary,
+    updateDueSummary: sandbox.updateAdDueSummary,
+    reflectMergeFundingUI: sandbox.reflectMergeFundingUI
+  };
+  const customer = makeElement();
+  customer.value = 'reusable_shop_customer';
+  const collection = makeElement();
+  collection.value = 'in_shop';
+  const paymentStatus = makeElement();
+  paymentStatus.value = 'not_paid';
+  const linkedReceipt = makeElement();
+  const dueInput = makeElement();
+  const dueSection = makeElement();
+  const dueAvailable = makeElement();
+  const mergeToggle = makeElement();
+  const unpaidFinancial = makeElement();
+  const hint = makeElement();
+  const nodes = new Map([
+    ['ad-customer-id', customer],
+    ['ad-collection-method', collection],
+    ['ad-payment-status', paymentStatus],
+    ['ad-linked-receipt-id', linkedReceipt],
+    ['ad-due-amount-to-use', dueInput],
+    ['ad-due-amount-section', dueSection],
+    ['ad-due-available', dueAvailable],
+    ['ad-merge-funds-toggle', mergeToggle],
+    ['ad-unpaid-financial', unpaidFinancial],
+    ['ad-temp-receipt-hint', hint]
+  ]);
+  try {
+    S.customers = [{ id: 'reusable_shop_customer', name: 'Reusable Shop Customer' }];
+    S.receipts = [
+      {
+        id: 'B31-reuse', customerId: 'reusable_shop_customer', recordType: 'receipt',
+        amountUSD: 4.25, amountLocal: 40.12, exchangeRate: 9.44,
+        status: 'Paid', isPaid: true, deliveryStatus: 'Office', transfers: []
+      },
+      {
+        id: 'B71-reuse', customerId: 'reusable_shop_customer', recordType: 'receipt',
+        amountUSD: 0.72, amountLocal: 6.80, debtAmountUSD: 0.72, debtAmountLocal: 6.80,
+        exchangeRate: 9.44, _lastModified: 727944,
+        status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+        statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: []
+      }
+    ];
+    // An earlier ad already reserved $0.52, leaving $0.20 of the same receipt.
+    // A new $5 ad has $4.25 paid, so it needs a $0.75 due allocation. Only the
+    // missing $0.55 may be appended to the receipt's debt.
+    S.ads = [{
+      id: 'older_mixed_ad', customerId: 'reusable_shop_customer',
+      paymentStatus: 'not_paid', collectionMethod: 'in_shop',
+      receiptId: 'B71-reuse', linkedDeliveryReceiptId: 'B71-reuse',
+      receiptAllocations: [], mergedPaidAllocations: [],
+      dueAllocations: [{ receiptId: 'B71-reuse', amountUSD: 0.52 }]
+    }];
+    S.modalData = null;
+    S.tempAdFunding = { allocations: [] };
+    S.tempMergeFunding = {
+      enabled: true,
+      allocations: [{ receiptId: 'B31-reuse', amountUSD: 4.25 }]
+    };
+    S.tempMixedReceiptTargetUSD = 5;
+    S.serverMode = true;
+    sandbox.document.getElementById = id => nodes.get(id) || null;
+    sandbox.updateAdDriverBudgetSummary = () => {};
+    sandbox.updateAdDueSummary = () => {};
+    sandbox.reflectMergeFundingUI = () => {};
+
+    const receipt = S.receipts.find(row => row.id === 'B71-reuse');
+    const usage = sandbox.getDeliveryReceiptDueUsage(receipt);
+    assert(Number(usage.totalDueUSD.toFixed(2)) === 0.72, 'receipt debt total was read incorrectly');
+    assert(Number(usage.usedDueUSD.toFixed(2)) === 0.52, 'prior ad usage was not counted');
+    assert(Number(usage.remainingDueUSD.toFixed(2)) === 0.20, 'remaining reusable debt should be $0.20');
+
+    const reuse = sandbox.getReusableUnpaidShopReceiptInfo(
+      receipt,
+      'reusable_shop_customer',
+      usage,
+      0.75
+    );
+    assert(reuse.eligible === true, 'a previously used receipt became ineligible');
+    assert(reuse.growable === true, 'the reusable receipt was not allowed to grow');
+    assert(reuse.availableUSD === 0.20, `available receipt debt was $${reuse.availableUSD}`);
+    assert(reuse.requiredGrowthUSD === 0.55, `receipt tried to grow by $${reuse.requiredGrowthUSD} instead of $0.55`);
+    assert(reuse.expectedLastModified === 727944, 'receipt concurrency version was lost');
+
+    const usageMap = new Map();
+    const selectable = sandbox.getUnpaidShopReceiptsForCustomer(
+      'reusable_shop_customer',
+      usageMap,
+      { growableAmountUSD: 0.75 }
+    );
+    assert(selectable.some(row => row.id === 'B71-reuse'), 'the used receipt disappeared from the selector');
+
+    sandbox.onAdTempReceiptChange('B71-reuse');
+    assert(linkedReceipt.value === 'B71-reuse', 'the selected reusable receipt was not linked');
+    assert(Number(dueInput.value) === 0.75, `the new ad due share was $${dueInput.value} instead of $0.75`);
+    assert(Number(dueInput.dataset.maxDue) === 0.75, `the due input cap was $${dueInput.dataset.maxDue} instead of $0.75`);
+    assert(Number(dueInput.dataset.debtIncreaseAmount) === 0.55, `only $0.55 should be added to receipt debt, got $${dueInput.dataset.debtIncreaseAmount}`);
+    assert(S.tempAdFunding.allocations.length === 1, 'the due allocation was not added to working funding');
+    assert(S.tempAdFunding.allocations[0].receiptId === 'B71-reuse', 'working funding used the wrong receipt');
+    assert(Number(S.tempAdFunding.allocations[0].amountUSD) === 0.75, 'working funding lost the full $0.75 due share');
+
+    const request = sandbox.buildServerAdMutationData({
+      paymentStatus: 'not_paid',
+      collectionMethod: 'in_shop',
+      receiptAllocations: [{ receiptId: 'B31-reuse', amountUSD: 4.25 }],
+      dueAllocations: [{ receiptId: 'B71-reuse', amountUSD: Number(dueInput.value) }],
+      unpaidReceiptDebtIncrease: {
+        receiptId: 'B71-reuse',
+        amountUSD: Number(dueInput.dataset.debtIncreaseAmount),
+        expectedLastModified: reuse.expectedLastModified
+      }
+    });
+    assert(Number(request.unpaidReceiptDebtIncrease?.amountUSD) === 0.55, 'request sent the full due share instead of only its $0.55 growth');
+    assert(Number(request.unpaidReceiptDebtIncrease?.expectedLastModified) === 727944, 'request lost stale-write protection');
+  } finally {
+    S.customers = original.customers;
+    S.receipts = original.receipts;
+    S.ads = original.ads;
+    S.modalData = original.modalData;
+    S.tempAdFunding = original.tempAdFunding;
+    S.tempMergeFunding = original.tempMergeFunding;
+    S.tempMixedReceiptTargetUSD = original.tempMixedReceiptTargetUSD;
+    S.serverMode = original.serverMode;
+    sandbox.document.getElementById = original.getElementById;
+    sandbox.updateAdDriverBudgetSummary = original.updateBudgetSummary;
+    sandbox.updateAdDueSummary = original.updateDueSummary;
+    sandbox.reflectMergeFundingUI = original.reflectMergeFundingUI;
+  }
+});
+
+checkAsync('mixed-funding edit shrinks unpaid debt from the server without sending a fake increase', async () => {
+  const original = {
+    receipts: S.receipts,
+    ads: S.ads,
+    serverMode: S.serverMode,
+    apiMutateAd: sandbox.apiMutateAd
+  };
+  let capturedPayload = null;
+  try {
+    loginAs(ADMIN);
+    S.serverMode = true;
+    S.receipts = [{
+      id: 'B71_reduce', customerId: 'customer_mixed_reduce', recordType: 'receipt',
+      amountUSD: 50.52, amountLocal: 479.94,
+      debtAmountUSD: 50.52, debtAmountLocal: 479.94,
+      exchangeRate: 9.5, status: 'Not Paid', isPaid: false,
+      deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' },
+      _lastModified: 500
+    }];
+    S.ads = [
+      {
+        id: 'ad_other_due', customerId: 'customer_mixed_reduce',
+        paymentStatus: 'not_paid', collectionMethod: 'in_shop',
+        receiptId: 'B71_reduce',
+        receiptAllocations: [],
+        dueAllocations: [{ receiptId: 'B71_reduce', amountUSD: 30 }]
+      },
+      {
+        id: 'ad_mixed_reduce', customerId: 'customer_mixed_reduce',
+        paymentStatus: 'not_paid', collectionMethod: 'in_shop',
+        receiptId: 'B71_reduce',
+        receiptAllocations: [{ receiptId: 'B31_reduce', amountUSD: 9.10 }],
+        dueAllocations: [{ receiptId: 'B71_reduce', amountUSD: 20.52 }],
+        _lastModified: 700
+      }
+    ];
+
+    const request = sandbox.buildServerAdMutationData({
+      customerId: 'customer_mixed_reduce',
+      paymentStatus: 'not_paid',
+      collectionMethod: 'in_shop',
+      receiptId: 'B71_reduce',
+      receiptAllocations: [{ receiptId: 'B31_reduce', amountUSD: 29.48 }],
+      dueAllocations: [{ receiptId: 'B71_reduce', amountUSD: 0.14 }]
+    });
+    assert(
+      !Object.prototype.hasOwnProperty.call(request, 'unpaidReceiptDebtIncrease'),
+      'reducing the unpaid share created a bogus positive debt-increase instruction'
+    );
+
+    sandbox.apiMutateAd = async payload => {
+      capturedPayload = payload;
+      return {
+        updatedReceipts: [{
+          id: 'B71_reduce', lastModified: 501,
+          data: {
+            id: 'B71_reduce', customerId: 'customer_mixed_reduce', recordType: 'receipt',
+            amountUSD: 30.14, amountLocal: 286.33,
+            debtAmountUSD: 30.14, debtAmountLocal: 286.33,
+            exchangeRate: 9.5, status: 'Not Paid', isPaid: false,
+            deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' },
+            _lastModified: 501
+          }
+        }],
+        ad: {
+          id: 'ad_mixed_reduce', lastModified: 701,
+          data: {
+            id: 'ad_mixed_reduce', customerId: 'customer_mixed_reduce',
+            paymentStatus: 'not_paid', collectionMethod: 'in_shop',
+            receiptId: 'B71_reduce',
+            receiptAllocations: [{ receiptId: 'B31_reduce', amountUSD: 29.48 }],
+            dueAllocations: [{ receiptId: 'B71_reduce', amountUSD: 0.14 }],
+            _lastModified: 701
+          }
+        }
+      };
+    };
+
+    await sandbox.saveAdThroughAtomicServer('update', 'ad_mixed_reduce', 700, request);
+    assert(capturedPayload?.action === 'update', 'mixed-funding edit did not use the atomic update endpoint');
+    assert(
+      !Object.prototype.hasOwnProperty.call(capturedPayload?.data || {}, 'unpaidReceiptDebtIncrease'),
+      'the atomic request invented a positive debt increase while the unpaid share was shrinking'
+    );
+    const refreshed = S.receipts.find(receipt => receipt.id === 'B71_reduce');
+    assert(Number(refreshed?.amountUSD) === 30.14, `server-corrected debt was not refreshed locally: $${refreshed?.amountUSD}`);
+    assert(Number(refreshed?.debtAmountUSD) === 30.14, 'the refreshed debt amount did not replace the stale $50.52 value');
+    assert(Number(refreshed?._lastModified) === 501, 'the refreshed receipt server version was lost');
+  } finally {
+    sandbox.apiMutateAd = original.apiMutateAd;
+    S.receipts = original.receipts;
+    S.ads = original.ads;
+    S.serverMode = original.serverMode;
+  }
+});
+
 const SAFE_RECEIPT_PNG = 'data:image/png;base64,iVBORw0KGgo=';
 const SAFE_RECEIPT_JPEG = 'data:image/jpeg;base64,/9j/2Q==';
 
@@ -3431,6 +4077,8 @@ check('zero-value unpaid receipt shows its linked ad debt without inventing rece
   const html = visible(sandbox.renderReceiptsView());
   assert(html.includes('data-receipt-linked-debt="true"'), 'receipt card is missing the linked customer-debt display');
   assert(html.includes('Customer debt'), 'receipt card does not label the amount as customer debt');
+  assert(html.includes('Ad debt') && html.includes('linked') && html.includes('unassigned'),
+    'unpaid receipt usage is still described as paid ad credit');
   assert(html.includes('$50.00') && html.includes('485.00 LYD'),
     'receipt card does not show the linked debt in both currencies');
   assert(html.includes('9.70'), 'receipt card does not show the debt receipt exchange rate');
@@ -3835,6 +4483,31 @@ check('historical unpaid aliases survive migration without becoming paid funding
     S.customers = original.customers;
     S.pages = original.pages;
     S.defaultExchangeRate = original.defaultExchangeRate;
+  }
+});
+
+check('legacy stopped zero spend does not migrate the full planned budget', () => {
+  const original = { ads: S.ads, receipts: S.receipts, customers: S.customers, pages: S.pages };
+  const originalSaveState = sandbox.saveState;
+  const legacy = {
+    id: 'legacy_stopped_zero', recordType: 'ad', status: 'Stopped',
+    amountUSD: 30, spentUSD: 0, receiptId: 'legacy_paid_receipt'
+  };
+  S.ads = [legacy];
+  S.receipts = [];
+  S.customers = [];
+  S.pages = [];
+  sandbox.saveState = () => {};
+  try {
+    sandbox.migrateOldDataFormats();
+    assert(Array.isArray(legacy.receiptAllocations), 'migration did not initialize receipt allocations');
+    assert(legacy.receiptAllocations.length === 0, 'zero final spend migrated the full planned budget');
+  } finally {
+    sandbox.saveState = originalSaveState;
+    S.ads = original.ads;
+    S.receipts = original.receipts;
+    S.customers = original.customers;
+    S.pages = original.pages;
   }
 });
 
@@ -5144,6 +5817,109 @@ checkAsync('Not Paid to Paid waits for one receipt+ads settlement batch with no 
   }
 });
 
+checkAsync('Paid to Not Paid keeps collected money intact until one receipt+ads debt-conversion batch commits', async () => {
+  const originalApiUnsettleReceipt = sandbox.apiUnsettleReceipt;
+  const originalServerMode = S.serverMode;
+  let conversionPayload = null;
+  let finishConversion = null;
+  const plannedBankTransfer = [{
+    method: 'Bank Transfer (LYD)', amount: 446, rate: 0, rate2: 11.15,
+    collectionType: 'office', deliveryPersonId: ''
+  }];
+  try {
+    loginAs(ADMIN);
+    S.serverMode = true;
+    S.receipts = [{
+      id: 'receipt_atomic_debt', customerId: 'customer_atomic_debt',
+      status: 'Paid', isPaid: true,
+      amountUSD: 40, amountLocal: 446, exchangeRate: 11.15,
+      paymentMethod: 'Bank Transfer (LYD)',
+      payments: [{ method: 'Bank Transfer (LYD)', amount: 446, rate: 0, rate2: 11.15 }],
+      plannedPayments: [], collectionDate: '2026-08-12T10:00:00.000Z',
+      _lastModified: 300
+    }];
+    S.ads = [{
+      id: 'ad_atomic_debt', customerId: 'customer_atomic_debt',
+      paymentStatus: 'paid', isPaid: true, amountUSD: 40,
+      receiptId: 'receipt_atomic_debt', fundingReceiptId: 'receipt_atomic_debt',
+      receiptIds: ['receipt_atomic_debt'], linkedDeliveryReceiptId: '',
+      receiptAllocations: [{ receiptId: 'receipt_atomic_debt', amountUSD: 40 }],
+      dueAllocations: [], dueAmountToUseUSD: 0, _lastModified: 400
+    }];
+    sandbox.apiUnsettleReceipt = payload => {
+      conversionPayload = payload;
+      return new Promise(resolve => { finishConversion = resolve; });
+    };
+
+    const saving = sandbox.updateRecord(
+      S.receipts,
+      'receipt_atomic_debt',
+      {
+        status: 'Not Paid', isPaid: false,
+        amountUSD: 40, amountLocal: 446, exchangeRate: 11.15,
+        paymentMethod: 'Bank Transfer (LYD)',
+        plannedPayments: plannedBankTransfer, payments: [], collectionDate: '',
+        statusDetail: { notPaidCollection: 'office' }
+      },
+      300
+    );
+    await Promise.resolve();
+    assert(S.receipts[0].status === 'Paid' && S.receipts[0].payments.length === 1,
+      'collected payment rows were erased before the debt conversion committed');
+    assert(S.ads[0].paymentStatus === 'paid' && S.ads[0].receiptAllocations.length === 1,
+      'linked ad funding changed before the atomic debt-conversion response');
+    assert(conversionPayload?.expectedLastModified === 300,
+      'modal-open receipt version was not sent to the debt conversion');
+    assert(String(conversionPayload?.idempotencyKey || '').length > 0,
+      'debt conversion has no stable idempotency key');
+    assert(Array.isArray(conversionPayload?.data?.payments) && conversionPayload.data.payments.length === 0,
+      'the canonical Not Paid request still contains collected payments');
+    assert(conversionPayload?.data?.plannedPayments?.[0]?.amount === 446,
+      'the Bank Transfer (LYD) collection plan was not sent to the conversion');
+    assert(conversionPayload?.data?.collectionDate === '',
+      'the Not Paid conversion retained a collected date');
+
+    finishConversion({
+      receipt: {
+        id: 'receipt_atomic_debt', lastModified: 301,
+        data: {
+          id: 'receipt_atomic_debt', customerId: 'customer_atomic_debt',
+          status: 'Not Paid', isPaid: false,
+          amountUSD: 40, amountLocal: 446, debtAmountUSD: 40, debtAmountLocal: 446,
+          exchangeRate: 11.15, paymentMethod: 'Bank Transfer (LYD)',
+          plannedPayments: plannedBankTransfer, payments: [], collectionDate: '',
+          statusDetail: { notPaidCollection: 'office' }, _lastModified: 301
+        }
+      },
+      updatedAds: [{
+        id: 'ad_atomic_debt', lastModified: 401,
+        data: {
+          id: 'ad_atomic_debt', customerId: 'customer_atomic_debt',
+          paymentStatus: 'not_paid', isPaid: false, amountUSD: 40,
+          receiptId: 'receipt_atomic_debt', fundingReceiptId: '', receiptIds: [],
+          linkedDeliveryReceiptId: 'receipt_atomic_debt', receiptAllocations: [],
+          dueAllocations: [{ receiptId: 'receipt_atomic_debt', amountUSD: 40 }],
+          dueAmountToUseUSD: 40, collectionMethod: 'in_shop', _lastModified: 401
+        }
+      }],
+      replayed: false
+    });
+    assert(await saving === true, 'debt conversion updateRecord did not report success');
+    assert(S.receipts[0].status === 'Not Paid' && S.receipts[0].payments.length === 0,
+      'authoritative canonical Not Paid receipt was not installed');
+    assert(S.receipts[0].plannedPayments[0].rate2 === 11.15,
+      'authoritative debt receipt lost the 11.15 collection plan rate');
+    assert(S.ads[0].paymentStatus === 'not_paid' && S.ads[0].receiptAllocations.length === 0,
+      'authoritative linked ad did not leave paid funding');
+    assert(S.ads[0].dueAllocations[0].receiptId === 'receipt_atomic_debt',
+      'paid allocation was not reclassified into debt funding');
+  } finally {
+    sandbox.apiUnsettleReceipt = originalApiUnsettleReceipt;
+    S.serverMode = originalServerMode;
+    seedBusinessData();
+  }
+});
+
 console.log('\n=== NEW RECEIPT CUSTOMER WARNINGS: debt and existing balance ===');
 
 function seedReceiptCustomerRiskData() {
@@ -5482,6 +6258,40 @@ check('warning receipt links open one exact permission-scoped receipt', () => {
     S.receiptRecordFilter = '';
     S.adReceiptFilter = '';
   }
+});
+
+check('company debt coverage stays admin-only and applies receipts before ads', () => {
+  const apiSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-api-auth.js'), 'utf8');
+  const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
+  const helpersSource = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
+
+  assert(apiSource.includes('/company-coverages'), 'company coverage API route is missing');
+  assert(apiSource.includes('body: { amountMinorUSD, idempotencyKey, expectedLastModified, reason }'), 'company coverage request body drifted from the server contract');
+
+  const cardGate = viewsSource.indexOf('const canCoverWithCompanyFunds = isCurrentUserAdmin()');
+  assert(cardGate >= 0, 'receipt-card company funds action is not exact-admin gated');
+  const cardAction = viewsSource.indexOf('openCompanyDebtCoverageModal(this.dataset.receiptId, this)', cardGate);
+  assert(cardAction > cardGate, 'receipt-card company funds action is missing');
+
+  const modalStart = helpersSource.indexOf('function openCompanyDebtCoverageModal');
+  const submitStart = helpersSource.indexOf('async function submitCompanyDebtCoverage');
+  const submitEnd = helpersSource.indexOf('// Toggle receipt collected status', submitStart);
+  assert(modalStart >= 0 && submitStart > modalStart && submitEnd > submitStart, 'company coverage modal or submit handler is missing');
+
+  const modalSource = helpersSource.slice(modalStart, submitStart);
+  const submitSource = helpersSource.slice(submitStart, submitEnd);
+  assert(modalSource.includes('if (!isCurrentUserAdmin())'), 'modal open does not recheck exact admin');
+  assert(submitSource.includes('if (!isCurrentUserAdmin())'), 'submit does not recheck exact admin');
+  assert(modalSource.includes('Business expense only') && modalSource.includes('customer payment') && modalSource.includes('revenue'), 'accounting warning is missing');
+  const reasonField = modalSource.slice(modalSource.indexOf('id="company-coverage-reason"'), modalSource.indexOf('</textarea>'));
+  assert(reasonField.includes('required') && reasonField.includes('maxlength="500"'), 'coverage reason is not required and bounded');
+  assert(modalSource.includes('Debt before') && modalSource.includes('Debt after'), 'before/after debt preview is missing');
+
+  const receiptUpdates = submitSource.indexOf("collection: 'receipts'");
+  const adUpdates = submitSource.indexOf("collection: 'ads'");
+  const batchApply = submitSource.indexOf("applyValidatedServerEntityBatch(entityBatch, 'receiptCompanyCoverage')");
+  assert(receiptUpdates >= 0 && adUpdates > receiptUpdates, 'returned receipts are not ordered before returned ads');
+  assert(batchApply > adUpdates, 'coverage response is not applied as one validated client batch');
 });
 
 // ---------- report ----------

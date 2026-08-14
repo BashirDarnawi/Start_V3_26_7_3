@@ -12,6 +12,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
@@ -143,3 +145,17 @@ def test_a_collection_with_no_media_fields_still_loads():
     finally:
         with db_conn() as conn:
             conn.execute(text("DELETE FROM entities WHERE type='customers' AND id='cust_proj'"))
+
+
+def test_projection_error_never_retries_by_loading_full_media_rows():
+    class BrokenConnection:
+        calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("projection query failed")
+
+    conn = BrokenConnection()
+    with pytest.raises(RuntimeError, match="projection query failed"):
+        _financial_active_rows(conn, "ads")
+    assert conn.calls == 1

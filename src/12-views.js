@@ -1276,7 +1276,6 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
 
 function renderWorkspaceTopbar() {
   const isAr = state.language === 'ar';
-  const advanced = isAdvancedWorkspaceMode();
   return `
     <header class="workspace-topbar sticky top-0 z-30 border-b border-slate-200/80 bg-white/90 dark:border-slate-800 dark:bg-slate-950/90">
       <div class="mx-auto flex max-w-7xl items-center gap-4 px-8 py-3">
@@ -1288,10 +1287,6 @@ function renderWorkspaceTopbar() {
           <i data-lucide="search" class="h-4 w-4 text-indigo-500"></i>
           <span class="truncate">${isAr ? 'ابحث عن عميل أو وصل أو صفحة أو إعلان...' : 'Find a customer, receipt, page or ad...'}</span>
           <kbd>Ctrl K</kbd>
-        </button>
-        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-mode-toggle" title="${isAr ? 'التبديل بين العرض البسيط والمتقدم' : 'Switch between Simple and Advanced view'}">
-          <i data-lucide="${advanced ? 'sliders-horizontal' : 'sparkles'}" class="h-4 w-4"></i>
-          <span>${advanced ? (isAr ? 'متقدم' : 'Advanced') : (isAr ? 'بسيط' : 'Simple')}</span>
         </button>
       </div>
     </header>
@@ -1518,13 +1513,6 @@ function renderSidebar() {
 
         ${renderAlwaysAvailableAccountLinks()}
         
-        <button type="button" onclick="toggleWorkspaceExperienceMode()" class="workspace-sidebar-mode w-full min-h-11 flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-bold">
-          <i data-lucide="${isAdvancedWorkspaceMode() ? 'sliders-horizontal' : 'sparkles'}" class="w-4 h-4"></i>
-          <span>${isAdvancedWorkspaceMode()
-            ? (state.language === 'ar' ? 'العرض المتقدم' : 'Advanced view')
-            : (state.language === 'ar' ? 'العرض البسيط' : 'Simple view')}</span>
-        </button>
-
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
@@ -2929,10 +2917,41 @@ function renderReceiptsView() {
           const collectionTarget = getReceiptCollectionTarget(receipt);
           const hasCustomerDebt = receiptDebtType !== 'none'
             && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
+          // Company coverage is an admin-only business-expense action. Prefer
+          // the server's authoritative outstanding amount after prior
+          // coverages; legacy receipts fall back to their computed debt.
+          const savedCompanyOutstandingUSD = Number(receipt.customerOutstandingUSD);
+          const companyCoverableOutstandingUSD = Math.max(
+            receipt.customerOutstandingUSD != null && Number.isFinite(savedCompanyOutstandingUSD)
+              ? savedCompanyOutstandingUSD
+              : (Number(collectionTarget.amountUSD) || 0),
+            0
+          );
+          const companyCoveredUSD = Math.max(Number(receipt.companyCoveredUSD) || 0, 0);
+          const companyCoverageCount = Math.max(Math.trunc(Number(receipt.companyCoverageCount) || 0), 0);
+          const canCoverWithCompanyFunds = isCurrentUserAdmin()
+            && getReceiptPaymentState(receipt) === 'not_paid'
+            && receiptDebtType === 'shop'
+            && companyCoverableOutstandingUSD > 0.005;
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
           const usage = getReceiptUsageStats(receipt, receiptUsageAdIndex);
+          // A Not Paid receipt is customer debt, not paid credit. Use debt
+          // language so mixed paid + unpaid funding is not shown as if both
+          // parts were charged to the customer.
+          const receiptUsageTitle = hasCustomerDebt
+            ? (isArV ? 'الدين المرتبط بالإعلانات من هذا الوصل' : 'Customer debt linked to ads from this receipt')
+            : (isArV ? 'استخدام رصيد الإعلانات من هذا الوصل' : 'Ads credit usage from this receipt');
+          const receiptUsageLabel = hasCustomerDebt
+            ? (isArV ? 'دين الإعلانات' : 'Ad debt')
+            : (isArV ? 'رصيد الإعلانات' : 'Ads credit');
+          const receiptUsedLabel = hasCustomerDebt
+            ? (isArV ? 'مرتبط' : 'linked')
+            : (isArV ? 'مصروف' : 'spent');
+          const receiptRemainingLabel = hasCustomerDebt
+            ? (isArV ? 'غير مخصص' : 'unassigned')
+            : (isArV ? 'متبقي' : 'left');
           const hasTransfers = (receipt.transfers && receipt.transfers.length > 0);
           const lastTransfer = hasTransfers ? receipt.transfers[receipt.transfers.length - 1] : null;
           const lastTransferName = lastTransfer ? (customersById.get(lastTransfer.toCustomerId)?.name || lastTransfer.toCustomerName || (isArV ? 'غير معروف' : 'Unknown')) : '';
@@ -2940,8 +2959,19 @@ function renderReceiptsView() {
           // Defensive: ensure exchange rate is always positive and reasonable
           const rawFxRate = (receipt.exchangeRate || state.defaultExchangeRate || 1);
           const fxRate = (typeof rawFxRate === 'number' && rawFxRate > 0 && rawFxRate < 1000) ? rawFxRate : 1;
-          const remainingLYD = (usage.remainingUSD || 0) * fxRate;
-          const spentLYD = (usage.usedUSD || 0) * fxRate;
+          // Legacy Driver debt can be linked without allocation rows. In that
+          // case usage.usedUSD intentionally stays zero (it is not paid credit),
+          // but the card must still show the debt that the linked ad represents.
+          const debtFallbackUSD = Array.isArray(collectionTarget.linkedAds) && collectionTarget.linkedAds.length
+            ? Number(collectionTarget.amountUSD || 0)
+            : 0;
+          const displayedUsedUSD = hasCustomerDebt
+            ? (Number(usage.usedUSD || 0) || debtFallbackUSD)
+            : Number(usage.usedUSD || 0);
+          const displayedRemainingUSD = hasCustomerDebt
+            ? Math.max(Number(collectionTarget.amountUSD || 0) - displayedUsedUSD, 0)
+            : Number(usage.remainingUSD || 0);
+          const remainingLYD = displayedRemainingUSD * fxRate;
 
           // Live user name → deleted-user tombstone → the record's own
           // createdByName stamp → Unknown, so the creator's name survives
@@ -2994,9 +3024,9 @@ function renderReceiptsView() {
                       <i data-lucide="user" class="w-3 h-3"></i>
                       <span>${state.language === 'ar' ? 'تم الإنشاء بواسطة' : 'Created by'}: <span class="font-medium text-slate-700 dark:text-slate-300">${creatorName}</span></span>
                     </span>
-                    <span class="inline-flex items-center gap-1" title="${isArV ? 'استخدام رصيد الإعلانات من هذا الوصل' : 'Ads credit usage from this receipt'}">
+                    <span class="inline-flex items-center gap-1" title="${receiptUsageTitle}">
                       <i data-lucide="trending-down" class="w-3 h-3"></i>
-                      <span>${state.language === 'ar' ? 'رصيد الإعلانات' : 'Ads credit'}: <span class="font-semibold text-emerald-600">$${usage.usedUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'مصروف' : 'spent'} • <span class="font-semibold text-blue-600">$${usage.remainingUSD.toFixed(2)}</span> ${state.language === 'ar' ? 'متبقي' : 'left'} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
+                      <span>${receiptUsageLabel}: <span class="font-semibold ${hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">$${displayedUsedUSD.toFixed(2)}</span> ${receiptUsedLabel} • <span class="font-semibold text-blue-600">$${displayedRemainingUSD.toFixed(2)}</span> ${receiptRemainingLabel} <span class="text-slate-400">(${remainingLYD.toFixed(2)} LYD)</span></span>
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
@@ -3180,6 +3210,37 @@ function renderReceiptsView() {
               </div>`;
               })()}
 
+              ${(isCurrentUserAdmin() && (canCoverWithCompanyFunds || companyCoverageCount > 0 || companyCoveredUSD > 0.005)) ? `
+                <div class="mb-3 rounded-xl border border-violet-200 bg-violet-50/80 p-3 dark:border-violet-800 dark:bg-violet-900/20">
+                  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 text-sm font-bold text-violet-800 dark:text-violet-200">
+                        <i data-lucide="building-2" class="h-4 w-4 flex-shrink-0"></i>
+                        <span>Company funds debt coverage</span>
+                      </div>
+                      <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                        Customer debt remaining:
+                        <span class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
+                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>Company covered: <span class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
+                      </div>
+                      <p class="mt-1 text-[11px] leading-4 text-violet-700 dark:text-violet-300">
+                        Business expense only &mdash; not a customer payment and not revenue.
+                      </p>
+                    </div>
+                    ${canCoverWithCompanyFunds ? `
+                      <button type="button"
+                        data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}"
+                        onclick="openCompanyDebtCoverageModal(this.dataset.receiptId, this)"
+                        class="inline-flex min-h-11 w-full flex-shrink-0 items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 sm:w-auto"
+                        aria-label="Cover part or all of this customer debt with company funds">
+                        <i data-lucide="landmark" class="h-4 w-4"></i>
+                        <span>Cover with company funds</span>
+                      </button>
+                    ` : ''}
+                  </div>
+                </div>
+              ` : ''}
+
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
                   <div class="flex flex-wrap items-center gap-1.5">
@@ -3260,6 +3321,11 @@ function onPageSearchInput(value) {
   }, 80);
 }
 
+function applyPageOwnerFilter(mode) {
+  state.pageOwnerFilter = mode === 'needs-owner' ? 'needs-owner' : 'all';
+  render();
+}
+
 function updatePagesViewFiltered() {
   if (state.currentView !== 'pages') return;
   const grid = document.getElementById('pages-grid');
@@ -3287,6 +3353,9 @@ function renderPagesView() {
   const pageDisplayNumberById = new Map(allPages.map((page, index) => [String(page.id), allPages.length - index]));
   // foldSearchText on BOTH sides (Arabic digits + unhamza'd spellings).
   const pageSearch = foldSearchText(String(state.pageSearch || '').trim());
+  const pageOwnerFilter = state.pageOwnerFilter === 'needs-owner' ? 'needs-owner' : 'all';
+  const pageNeedsOwner = page => getPageCustomerIds(page).length === 0;
+  const needsOwnerCount = allPages.filter(pageNeedsOwner).length;
   // FIRST-wins, matching the Array.find() this replaces in the card loop
   // below (new Map(array.map(...)) would be last-wins). Identical while ids
   // are unique; this only decides which record wins if they ever collide.
@@ -3295,21 +3364,22 @@ function renderPagesView() {
     const key = String(customer.id);
     if (!customersById.has(key)) customersById.set(key, customer);
   });
-  const allFilteredPages = pageSearch
-    ? allPages.filter(page => {
+  const allFilteredPages = allPages.filter(page => {
+        if (pageOwnerFilter === 'needs-owner' && !pageNeedsOwner(page)) return false;
+        if (!pageSearch) return true;
         const ownerNames = getPageCustomerIds(page)
           .map(customerId => customersById.get(String(customerId))?.name || '')
           .join(' ');
         return [page.name, page.category, ownerNames, page.id, page.metaPageId, page.metaPageName]
           .some(value => foldSearchText(value).includes(pageSearch));
-      })
-    : allPages;
+      });
+  const hasPageFilters = !!pageSearch || pageOwnerFilter !== 'all';
   // Reset the reveal limit whenever the SEARCH changes, so a new search starts
   // at its top matches instead of inheriting a huge previous limit. Keyed on
   // the search only: including the result count meant a background Meta sync
   // adding or removing one page silently threw the user back to the first 50
   // rows after they had pressed "Load more" several times.
-  const pagesFilterFingerprint = String(pageSearch);
+  const pagesFilterFingerprint = JSON.stringify([pageSearch, pageOwnerFilter]);
   if (pagesFilterFingerprint !== _pagesFilterFingerprint) {
     _pagesFilterFingerprint = pagesFilterFingerprint;
     _pagesShowLimit = PAGES_PAGE_SIZE;
@@ -3334,7 +3404,7 @@ function renderPagesView() {
       <div class="page-header flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('pages')}</h1>
-          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${pageSearch ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${pageSearch ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
+          <p id="pages-count" class="text-sm text-slate-500 mt-1">${isAr ? `${allFilteredPages.length}${hasPageFilters ? ` من ${allPages.length}` : ''} صفحة فيسبوك` : `${allFilteredPages.length}${hasPageFilters ? ` of ${allPages.length}` : ''} Facebook pages`}</p>
         </div>
         <div class="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button type="button" onclick="showPageDuplicates('', this)" class="w-full sm:w-auto min-h-11 border ${duplicatePageGroups.length > 0 ? 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-300' : 'border-slate-200 bg-white/60 text-slate-600 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'} px-4 py-2 rounded-xl font-bold flex items-center justify-center gap-2" aria-haspopup="dialog">
@@ -3355,15 +3425,22 @@ function renderPagesView() {
           <input id="page-search" type="search" value="${Security.escapeHtml(state.pageSearch || '')}" oninput="onPageSearchInput(this.value)" placeholder="${isAr ? 'ابحث باسم الصفحة أو المالك أو التصنيف...' : 'Search by page, owner or category...'}" autocomplete="off" />
           ${state.pageSearch ? `<button type="button" onclick="state.pageSearch='';render()" aria-label="${isAr ? 'مسح البحث' : 'Clear search'}"><i data-lucide="x" class="h-4 w-4"></i></button>` : ''}
         </div>
+        <div class="smart-filter-chips mt-3" aria-label="${isAr ? 'فلتر مالك الصفحة' : 'Page owner filter'}">
+          <button type="button" onclick="applyPageOwnerFilter('all')" class="smart-filter-chip ${pageOwnerFilter === 'all' ? 'is-active' : ''}" aria-pressed="${pageOwnerFilter === 'all' ? 'true' : 'false'}">${isAr ? 'الكل' : 'All'}</button>
+          <button type="button" onclick="applyPageOwnerFilter('needs-owner')" class="smart-filter-chip ${pageOwnerFilter === 'needs-owner' ? 'is-active is-warning' : ''}" aria-pressed="${pageOwnerFilter === 'needs-owner' ? 'true' : 'false'}">
+            <i data-lucide="user-round-x" class="h-4 w-4"></i>
+            <span>${isAr ? 'يحتاج مالك' : 'Needs owner'} (${needsOwnerCount})</span>
+          </button>
+        </div>
       </div>
 
       <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${pageSearch ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
+        ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasPageFilters ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageOwnerFilter === 'needs-owner' && !pageSearch ? (isAr ? 'لا توجد صفحات تحتاج إلى مالك' : 'No pages need an owner') : pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => customersById.get(String(cid)))
             .filter(Boolean);
           const isMetaImportedPage = !!String(p.metaPageId || '').trim();
-          const needsPageOwner = isMetaImportedPage && linkedCustomers.length === 0;
+          const needsPageOwner = pageNeedsOwner(p);
           // Page activity is only authoritative for accounts that can see all
           // ads. Money additionally needs the business financial permission.
           const pageStats = canSeePageAds ? getPageSpendSummary(p.id, pageSpendIndex) : null;
@@ -5439,14 +5516,21 @@ function getAdReconciliationDisplayState(ad) {
   const hasSavedSpend = ad?.spentUSD !== undefined && ad?.spentUSD !== null && Number.isFinite(parsedSpent);
   const savedSpentUSD = hasSavedSpend ? Math.max(parsedSpent, 0) : 0;
   const metaSpendUSD = metaAdRealSpendUSD(ad);
-  const metaSpendAuto = metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
-  const displaySpentUSD = metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null);
+  const frozenFinalSpendUSD = getFrozenFinalAdSpendUSD(ad);
+  const finalSpendFrozen = frozenFinalSpendUSD !== null;
+  const manualSpentOverride = ad?.manualSpentOverride === true;
+  const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
+  const displaySpentUSD = finalSpendFrozen
+    ? frozenFinalSpendUSD
+    : (metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null));
   const informedApplies = displaySpentUSD !== null
     && getAdCustomerConfirmationState(ad, displaySpentUSD, amountUSD).existingConfirmationApplies === true;
   return {
     amountUSD,
     hasSavedSpend,
     savedSpentUSD,
+    finalSpendFrozen,
+    manualSpentOverride,
     metaSpendAuto,
     displaySpentUSD,
     remainingUSD: displaySpentUSD === null ? null : Math.max(amountUSD - displaySpentUSD, 0),
@@ -5482,12 +5566,10 @@ function renderReconciliationView() {
               const safeId = Security.escapeHtml(id);
               const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
               const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
-              // A Meta-linked ad reconciles with Meta's own synced spend —
-              // prefilled and locked, remaining computed automatically.
-              // Manual entry remains for unlinked ads or when Meta reports
-              // more than the recorded budget (a mismatch to fix in the ad).
+              // Start with Meta's synced spend, but keep the final amount
+              // editable. A saved correction remains authoritative later.
               const {
-                amountUSD, hasSavedSpend, metaSpendAuto,
+                amountUSD, hasSavedSpend, finalSpendFrozen, manualSpentOverride, metaSpendAuto,
                 displaySpentUSD, remainingUSD,
                 informedApplies: informed, staleConfirmation
               } = getAdReconciliationDisplayState(ad);
@@ -5548,8 +5630,8 @@ function renderReconciliationView() {
                 <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
                   <div>
                     <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
-                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" ${metaSpendAuto ? 'readonly ' : ''}oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold${metaSpendAuto ? ' opacity-80 cursor-not-allowed' : ''}" ${canReconcile ? '' : 'disabled'} />
-                    ${metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `تلقائي من Meta — المصروف الفعلي (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)})` : `Automatic from Meta — the real spend (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)})`}</span></div>` : ''}
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
+                    ${manualSpentOverride ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-amber-700 dark:text-amber-300"><i data-lucide="badge-check" class="h-3 w-3 shrink-0"></i><span>${isAr ? 'هذا هو المصروف النهائي المصحح والمحفوظ. يمكنك تعديله مرة أخرى.' : 'This is the saved corrected final spend. You can edit it again.'}</span></div>` : (metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `معبأ من Meta (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). صححه قبل الحفظ إذا كان المبلغ النهائي مختلفاً.` : `Prefilled from Meta (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if the final amount is different.`}</span></div>` : '')}
                   </div>
                   <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
                     <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
@@ -6767,25 +6849,6 @@ function renderSettingsView() {
             <i data-lucide="user-round-x" class="w-5 h-5"></i>
             <span>${isAr ? 'طلب حذف الحساب' : 'Request Account Deletion'}</span>
           </a>
-        </div>
-      </div>
-
-      <!-- Workspace experience -->
-      <div class="glass-panel rounded-2xl p-6">
-        <h2 class="text-xl font-bold mb-2 flex items-center">
-          <i data-lucide="sparkles" class="w-5 h-5 mr-2 text-indigo-500"></i>
-          ${isAr ? 'طريقة عرض مساحة العمل' : 'Workspace experience'}
-        </h2>
-        <p class="mb-4 text-sm text-slate-500">${isAr ? 'العرض البسيط مناسب للعمل اليومي، والعرض المتقدم يُظهر كل الفلاتر والأدوات دائماً. نفس البيانات ونفس الحسابات في الاثنين.' : 'Simple view is best for daily work. Advanced view keeps every filter and tool visible. Both use exactly the same data and calculations.'}</p>
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2" role="group" aria-label="${isAr ? 'اختيار طريقة العرض' : 'Choose workspace experience'}">
-          <button type="button" onclick="setWorkspaceExperienceMode('simple')" class="workspace-experience-choice ${!isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${!isAdvancedWorkspaceMode() ? 'true' : 'false'}">
-            <span class="workspace-experience-icon"><i data-lucide="sparkles" class="h-5 w-5"></i></span>
-            <span class="text-left"><span class="block font-bold">${isAr ? 'بسيط' : 'Simple'}</span><span class="block text-xs text-slate-500">${isAr ? 'الأساسيات أولاً، والمزيد عند الحاجة' : 'Essentials first, more when needed'}</span></span>
-          </button>
-          <button type="button" onclick="setWorkspaceExperienceMode('advanced')" class="workspace-experience-choice ${isAdvancedWorkspaceMode() ? 'is-selected' : ''}" aria-pressed="${isAdvancedWorkspaceMode() ? 'true' : 'false'}">
-            <span class="workspace-experience-icon"><i data-lucide="sliders-horizontal" class="h-5 w-5"></i></span>
-            <span class="text-left"><span class="block font-bold">${isAr ? 'متقدم' : 'Advanced'}</span><span class="block text-xs text-slate-500">${isAr ? 'كل الفلاتر والأدوات ظاهرة' : 'All filters and tools stay visible'}</span></span>
-          </button>
         </div>
       </div>
 

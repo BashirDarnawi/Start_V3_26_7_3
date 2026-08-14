@@ -508,6 +508,47 @@ def test_real_meta_client_keeps_token_out_of_url_and_redacts_provider_errors(mon
     assert app_secret not in str(raised.value)
 
 
+def test_streamed_response_cap_stops_before_retaining_oversized_body():
+    class _CountingStream(httpx.SyncByteStream):
+        def __init__(self, chunks):
+            self.chunks = chunks
+            self.reads = 0
+
+        def __iter__(self):
+            for chunk in self.chunks:
+                self.reads += 1
+                yield chunk
+
+    declared_stream = _CountingStream([b"must-not-be-read"])
+    declared = httpx.Response(
+        200,
+        headers={"content-length": "100"},
+        stream=declared_stream,
+    )
+    assert meta_ads._read_capped_response_body(declared, 10) is None
+    assert declared_stream.reads == 0
+    declared.close()
+
+    chunked_stream = _CountingStream([b"1234", b"5678", b"unused"])
+    chunked = httpx.Response(200, stream=chunked_stream)
+    assert meta_ads._read_capped_response_body(chunked, 6) is None
+    assert chunked_stream.reads == 2
+    chunked.close()
+
+
+def test_due_sync_job_lock_skips_overlapping_pass_without_blocking(monkeypatch):
+    assert meta_ads._META_DUE_SYNC_LOCK.acquire(blocking=False)
+    try:
+        monkeypatch.setattr(
+            meta_ads,
+            "load_meta_ads_config",
+            lambda: (_ for _ in ()).throw(AssertionError("overlap entered sync body")),
+        )
+        assert meta_ads.sync_due_meta_ads(limit=1) == []
+    finally:
+        meta_ads._META_DUE_SYNC_LOCK.release()
+
+
 def test_real_meta_client_discovers_in_review_ads_and_tolerates_missing_insights(
     monkeypatch,
 ):
@@ -1882,6 +1923,54 @@ def test_old_wrong_thumbnail_is_prioritized_for_one_safe_repair(actors):
             )
 
 
+def test_due_and_existing_id_scans_never_decode_large_entity_blobs(actors, monkeypatch):
+    """The every-minute scheduler must not materialize photos or history."""
+    ad_id = "meta_test_projected_due_scan"
+    meta_id = "888888888888886"
+    _insert_ad(
+        ad_id,
+        actors["admin_id"],
+        metaAdId=meta_id,
+        metaNextSyncAt=0,
+        metaMediaVersion=meta_ads._META_MEDIA_VERSION,
+        metaMediaRepairVersion=meta_ads._META_MEDIA_VERSION,
+        metaSyncFailureCount=0,
+        metaAdAccountId="1613934299308344",
+        metaAdSetId="222222222222222",
+        metaCampaignId="333333333333333",
+        metaCreativeId="777777777777770",
+        metaThumbnailData="data:image/png;base64," + ("A" * 250_000),
+        metaChangeHistory=[{"details": "H" * 20_000} for _ in range(8)],
+    )
+    try:
+        projected_scan = meta_ads._scalar_entity_rows
+        scan_limits = []
+
+        def _record_projected_scan(*args, **kwargs):
+            scan_limits.append(kwargs.get("limit"))
+            return projected_scan(*args, **kwargs)
+
+        monkeypatch.setattr(meta_ads, "_meta_remote_backoff_remaining", lambda: 0)
+        monkeypatch.setattr(meta_ads, "_scalar_entity_rows", _record_projected_scan)
+
+        def _forbid_blob_decode(*_args, **_kwargs):
+            raise AssertionError("recurring Meta scan decoded a full entity blob")
+
+        monkeypatch.setattr(meta_ads, "json_loads", _forbid_blob_decode)
+        assert meta_id in meta_ads._existing_meta_ad_ids()
+        due = {row["adId"]: row for row in meta_ads._due_meta_ads(limit=10_000)}
+        assert due[ad_id]["metaAdId"] == meta_id
+        assert due[ad_id]["metaAdAccountId"] == "1613934299308344"
+        assert due[ad_id]["needsMediaRepair"] is False
+        assert scan_limits == [1, 10_000]
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            )
+
+
 def test_resync_never_erases_resolved_photo_or_page_name(actors):
     ad_id = "meta_test_media_preserve"
     meta_id = "777000111222333"
@@ -2221,6 +2310,52 @@ def test_meta_images_are_archived_into_our_own_rows(actors, monkeypatch):
         stored, _ = _stored_ad(ad_id)
         assert stored["metaThumbnailData"] == photo, "a failed fetch destroyed the archived copy"
         assert stored["metaThumbnailArchivedFrom"] == "https://scontent.xx.fbcdn.net/v/t39/changed_9.jpg"
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            )
+
+
+def test_media_archive_candidate_scan_projects_url_without_decoding_blob(actors, monkeypatch):
+    ad_id = "meta_test_projected_archive_scan"
+    media_url = "https://scontent.xx.fbcdn.net/v/t39/projected.jpg"
+    _insert_ad(
+        ad_id,
+        actors["admin_id"],
+        metaAdId="777000111333445",
+        metaThumbnailUrl=media_url,
+        metaThumbnailData="data:image/png;base64," + ("A" * 250_000),
+        metaChangeHistory=[{"details": "H" * 20_000} for _ in range(8)],
+    )
+    try:
+        # Make this deterministic even if another archive test left an
+        # eligible row in the shared in-memory database.
+        with db_conn() as conn:
+            conn.execute(
+                text("UPDATE entities SET created_at=1,last_modified=1 "
+                     "WHERE type='ads' AND id=:id"),
+                {"id": ad_id},
+            )
+        stored = []
+        monkeypatch.setattr(
+            meta_ads,
+            "_archive_meta_image",
+            lambda _url: "data:image/png;base64,cHJvamVjdGVk",
+        )
+        monkeypatch.setattr(
+            meta_ads,
+            "_store_archived_image",
+            lambda *args: stored.append(args),
+        )
+
+        def _forbid_blob_decode(*_args, **_kwargs):
+            raise AssertionError("media candidate scan decoded a full entity blob")
+
+        monkeypatch.setattr(meta_ads, "json_loads", _forbid_blob_decode)
+        assert meta_ads.archive_meta_media(limit=1) == 1
+        assert stored and stored[0][0:3] == ("ads", ad_id, media_url)
     finally:
         with db_conn() as conn:
             conn.execute(
@@ -2605,6 +2740,24 @@ def test_page_name_backfill_remembers_denied_lookups(actors, configured_meta, mo
     healed, _ = _stored_page_by_meta_id("556600000000004")
     assert healed["name"] == "Named After Retry"
     assert "556600000000004" not in meta_ads._PAGE_NAME_FAILURE_UNTIL
+
+
+def test_page_name_failure_cache_expires_and_remains_bounded():
+    with meta_ads._PAGE_NAME_FAILURE_LOCK:
+        meta_ads._PAGE_NAME_FAILURE_UNTIL.clear()
+        for index in range(meta_ads._PAGE_NAME_FAILURE_MAX_ENTRIES + 50):
+            meta_ads._PAGE_NAME_FAILURE_UNTIL[str(index)] = 10_000.0 + index
+        meta_ads._PAGE_NAME_FAILURE_UNTIL["expired"] = 1.0
+    try:
+        meta_ads._remember_page_name_failure("new-page", now_monotonic=100.0)
+        assert "expired" not in meta_ads._PAGE_NAME_FAILURE_UNTIL
+        assert "new-page" in meta_ads._PAGE_NAME_FAILURE_UNTIL
+        assert len(meta_ads._PAGE_NAME_FAILURE_UNTIL) <= (
+            meta_ads._PAGE_NAME_FAILURE_MAX_ENTRIES
+        )
+    finally:
+        with meta_ads._PAGE_NAME_FAILURE_LOCK:
+            meta_ads._PAGE_NAME_FAILURE_UNTIL.clear()
 
 
 def test_preview_page_name_extraction_accepts_only_json_identity_pairs():

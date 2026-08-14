@@ -35,6 +35,8 @@ COUNTED_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "pages": (),
 }
 
+_SQL_JSON_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
 CONTACT_REDACTED_ENTITY_TYPES = frozenset({"customers", "receipts", "ads"})
 CONTACT_FIELD_MARKERS = (
     "phone",
@@ -97,6 +99,71 @@ def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, A
     lean["_mediaOmitted"] = True
     lean["_photoCount"] = len(seen)
     return lean
+
+
+def _inline_media_sql_projection(
+    entity_type: str,
+    dialect: str,
+    *,
+    json_column: str = "data_json",
+) -> tuple[str, str] | None:
+    """Return SQL expressions for lean JSON and its exact attached-media count.
+
+    The fields are removed by the database so a normal list request never
+    transfers large base64 values into Python.  The count deliberately mirrors
+    :func:`_without_inline_media`: only non-empty strings count, duplicates are
+    counted once, and archived Meta thumbnails are stripped but not counted.
+
+    Only constant application column names are accepted.  Entity media keys
+    come exclusively from the fixed mappings above, never from request data.
+    """
+    fields = INLINE_MEDIA_FIELDS.get(entity_type)
+    if not fields:
+        return None
+    if not _SQL_JSON_COLUMN_RE.fullmatch(str(json_column or "")):
+        raise ValueError("Unsafe JSON column name")
+
+    counted_fields = COUNTED_MEDIA_FIELDS.get(entity_type, fields)
+    dialect_name = str(dialect or "").lower()
+    if dialect_name == "postgresql":
+        stripped = f"{json_column}::jsonb" + "".join(
+            f" - '{field}'" for field in fields
+        )
+        data_expression = f"({stripped})::text"
+        sources = []
+        for field in counted_fields:
+            source = f"{json_column}::jsonb -> '{field}'"
+            normalized_array = (
+                f"CASE WHEN jsonb_typeof({source})='array' THEN {source} "
+                f"WHEN jsonb_typeof({source})='string' "
+                f"THEN jsonb_build_array({source}) ELSE '[]'::jsonb END"
+            )
+            sources.append(
+                "SELECT BTRIM(media_item.item #>> '{}') AS media_value "
+                f"FROM jsonb_array_elements({normalized_array}) AS media_item(item) "
+                "WHERE jsonb_typeof(media_item.item)='string'"
+            )
+    elif dialect_name == "sqlite":
+        paths = "".join(f", '$.{field}'" for field in fields)
+        data_expression = f"json_remove({json_column}{paths})"
+        sources = [
+            "SELECT TRIM(CAST(media_item.value AS TEXT)) AS media_value "
+            f"FROM json_each({json_column}, '$.{field}') AS media_item "
+            "WHERE media_item.type='text'"
+            for field in counted_fields
+        ]
+    else:
+        return None
+
+    if not sources:
+        count_expression = "0"
+    else:
+        union = " UNION ALL ".join(sources)
+        count_expression = (
+            "(SELECT COUNT(DISTINCT media_value) "
+            f"FROM ({union}) AS media_values WHERE media_value <> '')"
+        )
+    return data_expression, count_expression
 
 
 def _project_entity_media(entity: dict[str, Any], include_media: bool) -> dict[str, Any]:
