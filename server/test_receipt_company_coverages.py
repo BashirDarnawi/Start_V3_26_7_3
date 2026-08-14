@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from server.db import db_conn, init_db, json_dumps, now_ms
+from server import company_debt_coverage as coverage_module
 import server.main as main_module
 from server.main import app
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -715,3 +716,269 @@ def test_marker_write_failure_rolls_back_coverage_receipt_and_ads(
     )
     assert retry.status_code == 200, retry.text
     assert retry.json()["replayed"] is False
+
+
+def test_sanitized_blank_reason_is_rejected_without_side_effects(actors):
+    customer_id = "company_cover_blank_reason_customer"
+    receipt_id = "company_cover_blank_reason_receipt"
+    ad_id = "company_cover_blank_reason_ad"
+    _customer(customer_id, actors)
+    receipt = _unpaid_receipt(receipt_id, customer_id, 20, actors)
+    ad = _create_ad(ad_id, customer_id, receipt_id, 20, actors)
+
+    for index, reason in enumerate(("        ", "javascript:alert(1)"), start=1):
+        key = f"company-cover-blank-reason-{index:03d}"
+        rejected = _cover(
+            receipt_id,
+            500,
+            key,
+            receipt["lastModified"],
+            actors["admin"],
+            reason=reason,
+        )
+        assert rejected.status_code == 400, rejected.text
+        assert "reason" in rejected.json()["detail"].lower()
+        _assert_no_coverage_side_effects(receipt_id, key)
+
+    assert _entity("receipts", receipt_id, actors["admin"]) == receipt
+    assert _entity("ads", ad_id, actors["admin"]) == ad
+
+
+def test_coverage_ledger_is_immutable_across_generic_admin_paths(
+    actors, monkeypatch
+):
+    customer_id = "company_cover_immutable_customer"
+    receipt_id = "company_cover_immutable_receipt"
+    ad_id = "company_cover_immutable_ad"
+    _customer(customer_id, actors)
+    receipt = _unpaid_receipt(receipt_id, customer_id, 30, actors)
+    _create_ad(ad_id, customer_id, receipt_id, 30, actors)
+    covered = _cover(
+        receipt_id,
+        500,
+        "company-cover-immutable-001",
+        receipt["lastModified"],
+        actors["admin"],
+    )
+    assert covered.status_code == 200, covered.text
+    coverage = covered.json()["coverage"]
+    coverage_id = coverage["id"]
+    collection = main_module.RECEIPT_COMPANY_COVERAGE_COLLECTION
+    fake_id = "forged_company_coverage_record"
+
+    attempts = (
+        client.post(
+            f"/api/collections/{collection}",
+            json={
+                "id": fake_id,
+                "data": {"recordType": "companyDebtCoverage", "amountUSD": 999},
+            },
+            cookies=actors["admin"],
+        ),
+        client.patch(
+            f"/api/collections/{collection}/{coverage_id}",
+            json={"data": {"amountUSD": 999}},
+            cookies=actors["admin"],
+        ),
+        client.delete(
+            f"/api/collections/{collection}/{coverage_id}",
+            cookies=actors["admin"],
+        ),
+        client.post(
+            "/api/batch/delete",
+            json={"items": [{"collection": collection, "id": coverage_id}]},
+            cookies=actors["admin"],
+        ),
+        client.put(
+            f"/api/admin/collections/{collection}/{fake_id}/restore",
+            json={
+                "data": {"id": fake_id, "recordType": "companyDebtCoverage"},
+                "deleted": False,
+            },
+            cookies=actors["admin"],
+        ),
+    )
+    for response in attempts:
+        assert response.status_code == 405, response.text
+
+    monkeypatch.setattr(main_module, "ENABLE_ONLINE_IMPORT", True)
+    imported = client.post(
+        "/api/admin/import",
+        json={
+            "collections": {
+                collection: [
+                    {"id": fake_id, "recordType": "companyDebtCoverage"}
+                ]
+            }
+        },
+        cookies=actors["admin"],
+    )
+    assert imported.status_code == 405, imported.text
+    assert _entity(collection, coverage_id, actors["admin"]) == coverage
+    assert _typed_rows_containing(collection, fake_id) == []
+
+
+def test_coverage_owned_fields_reject_forgery_and_allow_unchanged_echoes(
+    actors, monkeypatch
+):
+    customer_id = "company_cover_fields_customer"
+    receipt_id = "company_cover_fields_receipt"
+    ad_id = "company_cover_fields_ad"
+    _customer(customer_id, actors)
+    receipt = _unpaid_receipt(receipt_id, customer_id, 50, actors)
+    _create_ad(ad_id, customer_id, receipt_id, 50, actors)
+    covered = _cover(
+        receipt_id,
+        1_000,
+        "company-cover-fields-001",
+        receipt["lastModified"],
+        actors["admin"],
+    )
+    assert covered.status_code == 200, covered.text
+    receipt_before = covered.json()["updatedReceipts"][0]
+    ad_before = covered.json()["updatedAds"][0]
+
+    forged_receipt_values = {
+        "companyCoveredUSD": 999.0,
+        "customerOutstandingUSD": 0.0,
+        "companyCoverageCount": 999,
+        "lastCompanyCoverageAt": "2099-01-01T00:00:00Z",
+        "lastCompanyCoverageId": "forged_company_coverage_id",
+    }
+    for field in coverage_module.RECEIPT_COMPANY_COVERAGE_FIELDS:
+        rejected = client.patch(
+            f"/api/collections/receipts/{receipt_id}",
+            json={
+                "data": {field: forged_receipt_values[field]},
+                "expectedLastModified": receipt_before["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert rejected.status_code == 405, (field, rejected.text)
+
+    forged_ad_values = {
+        "companyFundingAllocations": [],
+        "customerDueUSD": 999.0,
+        "companyFundedUSD": 999.0,
+    }
+    for field in coverage_module.AD_COMPANY_COVERAGE_FIELDS:
+        rejected = client.patch(
+            f"/api/collections/ads/{ad_id}",
+            json={
+                "data": {field: forged_ad_values[field]},
+                "expectedLastModified": ad_before["lastModified"],
+            },
+            cookies=actors["admin"],
+        )
+        assert rejected.status_code == 405, (field, rejected.text)
+
+    assert _entity("receipts", receipt_id, actors["admin"]) == receipt_before
+    assert _entity("ads", ad_id, actors["admin"]) == ad_before
+
+    for collection, entity_id, data in (
+        (
+            "receipts",
+            "company_cover_forged_create_receipt",
+            {"companyCoveredUSD": 500.0},
+        ),
+        (
+            "ads",
+            "company_cover_forged_create_ad",
+            {"companyFundingAllocations": []},
+        ),
+    ):
+        rejected = client.post(
+            f"/api/collections/{collection}",
+            json={"id": entity_id, "data": data},
+            cookies=actors["admin"],
+        )
+        assert rejected.status_code == 405, rejected.text
+
+    receipt_echo = {
+        field: receipt_before["data"][field]
+        for field in coverage_module.RECEIPT_COMPANY_COVERAGE_FIELDS
+    }
+    receipt_echo["note"] = "Unrelated receipt edit"
+    receipt_edit = client.patch(
+        f"/api/collections/receipts/{receipt_id}",
+        json={
+            "data": receipt_echo,
+            "expectedLastModified": receipt_before["lastModified"],
+        },
+        cookies=actors["admin"],
+    )
+    assert receipt_edit.status_code == 200, receipt_edit.text
+    receipt_after = receipt_edit.json()
+    assert receipt_after["data"]["note"] == "Unrelated receipt edit"
+    for field, value in receipt_echo.items():
+        if field != "note":
+            assert receipt_after["data"][field] == value
+
+    ad_echo = {
+        field: ad_before["data"][field]
+        for field in coverage_module.AD_COMPANY_COVERAGE_FIELDS
+    }
+    ad_echo["title"] = "Unrelated ad edit"
+    ad_edit = client.patch(
+        f"/api/collections/ads/{ad_id}",
+        json={
+            "data": ad_echo,
+            "expectedLastModified": ad_before["lastModified"],
+        },
+        cookies=actors["admin"],
+    )
+    assert ad_edit.status_code == 200, ad_edit.text
+    ad_after = ad_edit.json()
+    assert ad_after["data"]["title"] == "Unrelated ad edit"
+    for field, value in ad_echo.items():
+        if field != "title":
+            assert ad_after["data"][field] == value
+
+    settle_smuggle = client.post(
+        f"/api/receipts/{receipt_id}/settle",
+        json={
+            "idempotencyKey": "company-cover-fields-settle-smuggle",
+            "expectedLastModified": receipt_after["lastModified"],
+            "data": {"companyCoveredUSD": 0},
+        },
+        cookies=actors["admin"],
+    )
+    assert settle_smuggle.status_code == 405, settle_smuggle.text
+
+    forged_ad_data = dict(ad_after["data"])
+    forged_ad_data["companyFundedUSD"] = 999.0
+    ad_smuggle = client.post(
+        "/api/ads/mutate",
+        json={
+            "action": "update",
+            "adId": ad_id,
+            "idempotencyKey": "company-cover-fields-ad-smuggle",
+            "expectedLastModified": ad_after["lastModified"],
+            "data": forged_ad_data,
+        },
+        cookies=actors["admin"],
+    )
+    assert ad_smuggle.status_code == 405, ad_smuggle.text
+
+    monkeypatch.setattr(main_module, "ENABLE_ONLINE_IMPORT", True)
+    for collection, entity_id, data in (
+        (
+            "receipts",
+            "company_cover_forged_import_receipt",
+            {"companyCoveredUSD": 500.0},
+        ),
+        (
+            "ads",
+            "company_cover_forged_import_ad",
+            {"companyFundingAllocations": []},
+        ),
+    ):
+        imported = client.post(
+            "/api/admin/import",
+            json={"collections": {collection: [{"id": entity_id, **data}]}},
+            cookies=actors["admin"],
+        )
+        assert imported.status_code == 405, imported.text
+
+    assert _entity("receipts", receipt_id, actors["admin"]) == receipt_after
+    assert _entity("ads", ad_id, actors["admin"]) == ad_after

@@ -10333,6 +10333,74 @@ async function apiUnsettleReceipt(payload) {
   };
 }
 
+// Cover part or all of an unpaid in-shop customer debt with company funds.
+// This is deliberately separate from receipt settlement/collection: the
+// server records a business expense and returns every affected receipt/ad in
+// one transaction without converting the receipt to Paid.
+async function apiCreateReceiptCompanyCoverage(payload) {
+  const receiptId = String(payload?.receiptId || '').trim();
+  if (!Security.isValidRecordId(receiptId)) throw new Error('Invalid receipt company coverage id');
+
+  const amountMinorUSD = Number(payload?.amountMinorUSD);
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0) {
+    throw new Error('Company coverage amount must be a positive number of cents');
+  }
+  const expectedLastModified = Number(payload?.expectedLastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    throw new Error('This receipt is missing its server version. Refresh and try again.');
+  }
+  const idempotencyKey = String(payload?.idempotencyKey || '').trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 120) {
+    throw new Error('Company coverage idempotency key is invalid');
+  }
+  const reason = String(payload?.reason || '').trim();
+  if (!reason) throw new Error('A business reason is required');
+  if (reason.length > 500) throw new Error('The business reason is too long');
+
+  const identity = getServerSessionIdentity();
+  const response = await withRetry(() => apiJson(
+    `/api/receipts/${encodeURIComponent(receiptId)}/company-coverages`,
+    {
+      method: 'POST',
+      body: { amountMinorUSD, idempotencyKey, expectedLastModified, reason }
+    },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+      || !Array.isArray(response.updatedReceipts) || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid company coverage response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const coverage = validateServerEntityResponse(
+    'companyDebtCoverages', response.coverage, 'companyCoverage.coverage'
+  );
+  const updatedReceipts = response.updatedReceipts.map((entity, index) => {
+    const validated = validateServerEntityResponse(
+      'receipts', entity, `companyCoverage.updatedReceipts[${index}]`
+    );
+    const local = (state.receipts || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('receipts', validated.data, local);
+    return validated;
+  });
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse(
+      'ads', entity, `companyCoverage.updatedAds[${index}]`
+    );
+    const local = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, local);
+    return validated;
+  });
+  return {
+    coverage,
+    updatedReceipts,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
 // Paid/due/merged allocations change receipt availability, so ad create/edit
 // must cross one server transaction boundary rather than generic collection
 // POST/PATCH calls.
@@ -16742,6 +16810,18 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
               </button>`
             : '';
           const linkedReceiptCount = linkedReceiptCountByCustomer.get(String(c.id || '')) || 0;
+          // Admin-only: this customer's unpaid in-shop debt receipts that
+          // company funds can cover (user request: start coverage from the
+          // CUSTOMER card, not only from each receipt card). Reuses the
+          // statsIndex receipts bucket so the card render stays one-pass.
+          const coverableDebtReceipts = isCurrentUserAdmin()
+            ? (statsIndex
+                ? (statsIndex.receiptsByCustomer.get(String(c.id || '')) || []).filter(r => _isReceiptEligibleForCompanyCoverage(r))
+                : getCustomerCompanyCoverableReceipts(c.id))
+            : [];
+          const coverableDebtUSD = Math.round(coverableDebtReceipts.reduce(
+            (sum, r) => sum + _getCompanyCoverableOutstandingUSD(r), 0
+          ) * 100) / 100;
           const receiptsLabel = isAr ? `الوصولات ${linkedReceiptCount}` : `Receipts ${linkedReceiptCount}`;
           const linkedReceiptsButton = canSeeReceipts
             ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(isAr ? `عرض ${linkedReceiptCount} من وصولات العميل ${c.name || ''}` : `View ${linkedReceiptCount} receipts linked to ${c.name || 'this customer'}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
@@ -16851,6 +16931,25 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <span class="inline-flex items-center gap-1"><i data-lucide="receipt" class="w-3 h-3"></i>${isAr ? 'دين وصولات غير مدفوعة' : 'Unpaid receipt debt'}</span>
                     <span dir="ltr">${stats.receiptDebtLYD.toFixed(2)} LYD · $${stats.receiptDebtUSD.toFixed(2)}</span>
                   </div>
+                  ` : ''}
+                  ${(stats.companyFundedUSD > 0.005) ? `
+                  <!-- Debt already absorbed by company funds (credited inside Balance; not customer money, not revenue) -->
+                  <div class="mt-2 flex items-center justify-between gap-2 text-[11px] font-bold text-violet-700 dark:text-violet-300">
+                    <span class="inline-flex items-center gap-1"><i data-lucide="landmark" class="w-3 h-3"></i>${isAr ? 'غطته الشركة' : 'Company covered'}</span>
+                    <span dir="ltr">$${stats.companyFundedUSD.toFixed(2)}</span>
+                  </div>
+                  ` : ''}
+                  ${coverableDebtReceipts.length ? `
+                  <!-- Admin-only: cover this customer's unpaid in-shop debt from company funds -->
+                  <button type="button" data-customer-id="${Security.escapeHtml(String(c.id || ''))}"
+                    onclick="openCustomerCompanyDebtCoverage(this.dataset.customerId, this)"
+                    aria-haspopup="dialog"
+                    aria-label="${Security.escapeHtml(isAr ? `سداد دين العميل ${c.name || ''} من أموال الشركة` : `Pay ${c.name || 'this customer'}'s debt from company funds`)}"
+                    class="mt-3 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2">
+                    <i data-lucide="landmark" class="w-4 h-4"></i>
+                    <span>${isAr ? 'سداد الدين من أموال الشركة' : 'Pay debt from company funds'}</span>
+                    <span dir="ltr">($${coverableDebtUSD.toFixed(2)})</span>
+                  </button>
                   ` : ''}
                 </div>
                 `}
@@ -17350,6 +17449,22 @@ function renderReceiptsView() {
           const collectionTarget = getReceiptCollectionTarget(receipt);
           const hasCustomerDebt = receiptDebtType !== 'none'
             && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
+          // Company coverage is an admin-only business-expense action. Prefer
+          // the server's authoritative outstanding amount after prior
+          // coverages; legacy receipts fall back to their computed debt.
+          const savedCompanyOutstandingUSD = Number(receipt.customerOutstandingUSD);
+          const companyCoverableOutstandingUSD = Math.max(
+            receipt.customerOutstandingUSD != null && Number.isFinite(savedCompanyOutstandingUSD)
+              ? savedCompanyOutstandingUSD
+              : (Number(collectionTarget.amountUSD) || 0),
+            0
+          );
+          const companyCoveredUSD = Math.max(Number(receipt.companyCoveredUSD) || 0, 0);
+          const companyCoverageCount = Math.max(Math.trunc(Number(receipt.companyCoverageCount) || 0), 0);
+          const canCoverWithCompanyFunds = isCurrentUserAdmin()
+            && getReceiptPaymentState(receipt) === 'not_paid'
+            && receiptDebtType === 'shop'
+            && companyCoverableOutstandingUSD > 0.005;
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -17626,6 +17741,37 @@ function renderReceiptsView() {
                 ` : ''}
               </div>`;
               })()}
+
+              ${(isCurrentUserAdmin() && (canCoverWithCompanyFunds || companyCoverageCount > 0 || companyCoveredUSD > 0.005)) ? `
+                <div class="mb-3 rounded-xl border border-violet-200 bg-violet-50/80 p-3 dark:border-violet-800 dark:bg-violet-900/20">
+                  <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 text-sm font-bold text-violet-800 dark:text-violet-200">
+                        <i data-lucide="building-2" class="h-4 w-4 flex-shrink-0"></i>
+                        <span>Company funds debt coverage</span>
+                      </div>
+                      <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                        Customer debt remaining:
+                        <span class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
+                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>Company covered: <span class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
+                      </div>
+                      <p class="mt-1 text-[11px] leading-4 text-violet-700 dark:text-violet-300">
+                        Business expense only &mdash; not a customer payment and not revenue.
+                      </p>
+                    </div>
+                    ${canCoverWithCompanyFunds ? `
+                      <button type="button"
+                        data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}"
+                        onclick="openCompanyDebtCoverageModal(this.dataset.receiptId, this)"
+                        class="inline-flex min-h-11 w-full flex-shrink-0 items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 sm:w-auto"
+                        aria-label="Cover part or all of this customer debt with company funds">
+                        <i data-lucide="landmark" class="h-4 w-4"></i>
+                        <span>Cover with company funds</span>
+                      </button>
+                    ` : ''}
+                  </div>
+                </div>
+              ` : ''}
 
               <div class="flex flex-col space-y-2 pt-3 border-t border-slate-200 dark:border-slate-700">
                 <div class="flex justify-between items-center">
@@ -23994,7 +24140,19 @@ function getCustomerStats(customerId, statsIndex = null) {
     const committedUSD = (statsIndex && statsIndex.committedUSDByReceiptId)
       ? (statsIndex.committedUSDByReceiptId.get(String(receipt.id || '')) || 0)
       : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
-    const uncommittedUSD = Math.max(target.debtUSD - committedUSD, 0);
+    // COMPANY COVERAGE: after an admin covers part of this debt from company
+    // funds, the server stores the customer's true remaining liability in
+    // customerOutstandingUSD (gross debt minus every coverage). The gross
+    // target must not be read past that point: coverage also shrinks the
+    // committed due rows, so gross-minus-committed would GROW by the covered
+    // amount and over-report the debt (e.g. $100 debt, company covers $40,
+    // card showed -$140 instead of -$60). Outstanding is server-controlled
+    // (protect_company_coverage_fields) and capped by the gross for safety.
+    const storedOutstanding = Number(receipt.customerOutstandingUSD);
+    const outstandingUSD = receipt.customerOutstandingUSD != null && Number.isFinite(storedOutstanding)
+      ? Math.min(Math.max(storedOutstanding, 0), target.debtUSD)
+      : target.debtUSD;
+    const uncommittedUSD = Math.max(outstandingUSD - committedUSD, 0);
     if (uncommittedUSD <= 0) return;
     receiptDebtUSD += uncommittedUSD;
     // debtLYD/debtUSD is the receipt's own rate (exchangeRate with the
@@ -24005,9 +24163,41 @@ function getCustomerStats(customerId, statsIndex = null) {
   receiptDebtUSD = Math.round(receiptDebtUSD * 100) / 100;
   receiptDebtLYD = Math.round(receiptDebtLYD * 100) / 100;
 
-  // Calculate balance (paid - spent - uncommitted receipt debt)
-  const balanceLYD = totalPaidLYD - totalSpentLYD - receiptDebtLYD;
-  const balanceUSD = totalPaidUSD - totalSpentUSD - receiptDebtUSD;
+  // COMPANY COVERAGE credit for the committed side. When coverage moves a due
+  // row into ad.companyFundingAllocations, the ad's Spent stays the REAL ad
+  // spend (business metric) — but the moved dollars are no longer the
+  // customer's liability. Without this credit the balance would keep charging
+  // the customer for money the company already absorbed. Uncommitted coverage
+  // never lands in these rows (it only shrinks customerOutstandingUSD above),
+  // so each covered dollar is credited exactly once.
+  const customerReceiptIds = new Set(customerReceipts.map(r => String(r.id || '')));
+  const receiptRateById = new Map(customerReceipts.map(r => {
+    const rate = Number(r.exchangeRate || state.defaultExchangeRate || 0);
+    return [String(r.id || ''), Number.isFinite(rate) && rate > 0 ? rate : 0];
+  }));
+  let companyFundedUSD = 0;
+  let companyFundedLYD = 0;
+  customerAds.forEach(ad => {
+    (Array.isArray(ad.companyFundingAllocations) ? ad.companyFundingAllocations : []).forEach(row => {
+      const rowReceiptId = String(row?.receiptId || '');
+      // Only rows funded by THIS customer's receipts: an ad can reference
+      // another customer's receipt in legacy data, and that coverage belongs
+      // to the other customer's card.
+      if (!customerReceiptIds.has(rowReceiptId)) return;
+      const rowUSD = Math.max(parseFloat(row?.amountUSD) || 0, 0);
+      if (rowUSD <= 0) return;
+      companyFundedUSD += rowUSD;
+      // LYD mirror at the funding receipt's own rate — the same rate this
+      // debt used while it sat in receiptDebtLYD before it was covered.
+      companyFundedLYD += rowUSD * (receiptRateById.get(rowReceiptId) || 0);
+    });
+  });
+  companyFundedUSD = Math.round(companyFundedUSD * 100) / 100;
+  companyFundedLYD = Math.round(companyFundedLYD * 100) / 100;
+
+  // Calculate balance (paid - spent - uncommitted receipt debt + company-covered ad funding)
+  const balanceLYD = totalPaidLYD - totalSpentLYD - receiptDebtLYD + companyFundedLYD;
+  const balanceUSD = totalPaidUSD - totalSpentUSD - receiptDebtUSD + companyFundedUSD;
   
   // Legacy balance (for backwards compatibility)
   const totalSpent = totalSpentLYD;
@@ -24036,6 +24226,10 @@ function getCustomerStats(customerId, statsIndex = null) {
     // Uncommitted Not Paid receipt debt (already subtracted from the balances)
     receiptDebtUSD,
     receiptDebtLYD,
+    // Debt absorbed by company funds via ad funding rows (already credited in
+    // the balances; Spent stays real ad spend and Paid stays customer money)
+    companyFundedUSD,
+    companyFundedLYD,
     // Other stats
     lastAdDate,
     totalAds: customerAds.length,
@@ -27410,6 +27604,465 @@ function clearAllReceiptFilters() {
   if (state.currentView === 'receipts') updateUrlForView('receipts', true);
   render();
   lucide.createIcons();
+}
+
+// ==========================================
+// COMPANY FUNDS DEBT COVERAGE (admin only)
+// ==========================================
+// This is intentionally separate from receipt collection. It records a
+// company expense against customer debt, never customer-paid cash or revenue.
+let _companyDebtCoverageDialogState = null;
+
+function _getCompanyCoverableOutstandingUSD(receipt) {
+  if (!receipt || receipt._deleted) return 0;
+  const stored = Number(receipt.customerOutstandingUSD);
+  const fallback = Number(getReceiptCollectionTarget(receipt).amountUSD) || 0;
+  const amount = receipt.customerOutstandingUSD != null && Number.isFinite(stored)
+    ? stored
+    : fallback;
+  return Math.max(Math.round(amount * 100) / 100, 0);
+}
+
+function _isReceiptEligibleForCompanyCoverage(receipt) {
+  return isCurrentUserAdmin()
+    && !!receipt
+    && !receipt._deleted
+    && getReceiptPaymentState(receipt) === 'not_paid'
+    && getReceiptDebtType(receipt) === 'shop'
+    && _getCompanyCoverableOutstandingUSD(receipt) > 0.005;
+}
+
+function _companyCoverageMoney(value) {
+  const amount = Number(value);
+  return `$${(Number.isFinite(amount) ? Math.max(amount, 0) : 0).toFixed(2)}`;
+}
+
+function _companyCoverageFocusable(modal) {
+  return Array.from(modal?.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  ) || []).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
+}
+
+function _handleCompanyDebtCoverageKeydown(event) {
+  const dialogState = _companyDebtCoverageDialogState;
+  const modal = document.getElementById('company-debt-coverage-modal');
+  if (!dialogState || !modal) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeCompanyDebtCoverageModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = _companyCoverageFocusable(modal);
+  if (!focusable.length) {
+    event.preventDefault();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function closeCompanyDebtCoverageModal({ force = false } = {}) {
+  const dialogState = _companyDebtCoverageDialogState;
+  if (dialogState?.busy && !force) return false;
+  if (dialogState?.keyHandler) document.removeEventListener('keydown', dialogState.keyHandler);
+  document.getElementById('company-debt-coverage-modal')?.remove();
+  if (dialogState) {
+    document.body.style.overflow = dialogState.bodyOverflow || '';
+    const opener = dialogState.opener;
+    _companyDebtCoverageDialogState = null;
+    try { opener?.focus?.(); } catch (_) {}
+  }
+  return true;
+}
+
+function openCompanyDebtCoverageModal(receiptId, opener = null) {
+  // Exact-admin check at the action door, even though the receipt card is also
+  // hidden for everyone else. Roles can change while a page is already open.
+  if (!isCurrentUserAdmin()) {
+    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    return false;
+  }
+  const safeReceiptId = String(receiptId || '').trim();
+  const receipt = (state.receipts || []).find(row => row && String(row.id) === safeReceiptId);
+  if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
+    showNotification(
+      'Company coverage unavailable',
+      'This must be an unpaid in-shop customer-debt receipt with an outstanding balance.',
+      'warning'
+    );
+    return false;
+  }
+  const expectedLastModified = Number(receipt._lastModified);
+  if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
+    showNotification('Refresh required', 'This receipt is missing its server version. Refresh and try again.', 'warning');
+    return false;
+  }
+
+  closeCompanyDebtCoverageModal({ force: true });
+  const outstandingMinorUSD = Math.round(_getCompanyCoverableOutstandingUSD(receipt) * 100);
+  const serial = Security.escapeHtml(String(
+    receipt.serialNumber || receipt.finalReceiptNo || receipt.tempReceiptNo || receipt.id
+  ));
+  const customer = (state.customers || []).find(row => row && String(row.id) === String(getReceiptCustomerReferenceId(receipt) || ''));
+  const customerName = Security.escapeHtml(String(customer?.name || receipt.customerName || 'Customer'));
+  const bodyOverflow = document.body.style.overflow;
+  const idempotencyKey = generateId('company_coverage');
+
+  const html = `
+    <div id="company-debt-coverage-modal"
+      class="mobile-dialog-overlay fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-4"
+      role="dialog" aria-modal="true" aria-labelledby="company-coverage-title" aria-describedby="company-coverage-warning"
+      onclick="if(event.target===this) closeCompanyDebtCoverageModal()">
+      <div class="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900"
+        onclick="event.stopPropagation()">
+        <div class="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700 sm:p-5">
+          <div class="min-w-0">
+            <h2 id="company-coverage-title" class="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-white">
+              <i data-lucide="landmark" class="h-5 w-5 flex-shrink-0 text-violet-600"></i>
+              <span>Cover debt with company funds</span>
+            </h2>
+            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; Receipt ${serial}</p>
+          </div>
+          <button type="button" onclick="closeCompanyDebtCoverageModal()"
+            class="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:hover:bg-slate-800"
+            aria-label="Close company funds dialog">
+            <i data-lucide="x" class="h-5 w-5"></i>
+          </button>
+        </div>
+
+        <form class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5" onsubmit="event.preventDefault(); submitCompanyDebtCoverage()">
+          <div id="company-coverage-warning" class="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm leading-5 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+            <div class="flex gap-2">
+              <i data-lucide="triangle-alert" class="mt-0.5 h-5 w-5 flex-shrink-0"></i>
+              <p><strong>Business expense only.</strong> This does not record a customer payment, does not count as revenue, and does not change this receipt to Paid.</p>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <div class="mb-2 flex items-end justify-between gap-3">
+              <label for="company-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">Company amount (USD)</label>
+              <button type="button" onclick="setCompanyDebtCoverageFullAmount()"
+                class="min-h-11 rounded-xl px-3 text-xs font-bold text-violet-700 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:text-violet-300 dark:hover:bg-violet-950/30">
+                Use full outstanding
+              </button>
+            </div>
+            <div class="relative">
+              <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center font-bold text-slate-500">$</span>
+              <input id="company-coverage-amount" type="text" inputmode="decimal" autocomplete="off"
+                value="${(outstandingMinorUSD / 100).toFixed(2)}"
+                oninput="sanitizeMoneyInput(this, 2); updateCompanyDebtCoveragePreview()"
+                class="min-h-12 w-full rounded-xl border border-slate-300 bg-white py-3 pl-8 pr-3 text-base font-bold text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"
+                aria-describedby="company-coverage-amount-help company-coverage-validation" required>
+            </div>
+            <p id="company-coverage-amount-help" class="mt-1 text-xs text-slate-500 dark:text-slate-400">You may cover part or all of the current customer debt.</p>
+          </div>
+
+          <div class="mt-4">
+            <label for="company-coverage-reason" class="text-sm font-bold text-slate-800 dark:text-slate-100">Business reason <span class="text-rose-600">*</span></label>
+            <textarea id="company-coverage-reason" rows="3" maxlength="500" required
+              oninput="updateCompanyDebtCoveragePreview()"
+              placeholder="Example: Company goodwill adjustment approved by manager"
+              class="mt-2 min-h-24 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"></textarea>
+          </div>
+
+          <div class="mt-4 rounded-xl border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-800 dark:bg-violet-950/30">
+            <h3 class="text-sm font-bold text-violet-900 dark:text-violet-100">Before and after</h3>
+            <dl class="mt-2 grid grid-cols-3 gap-2 text-center">
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Debt before</dt><dd id="company-coverage-before" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Company covers</dt><dd id="company-coverage-applied" class="mt-1 text-sm font-bold text-violet-700 dark:text-violet-300"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Debt after</dt><dd id="company-coverage-after" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+            </dl>
+          </div>
+          <p id="company-coverage-validation" class="mt-3 min-h-5 text-sm font-medium text-rose-600" role="alert" aria-live="polite"></p>
+        </form>
+
+        <div class="flex flex-shrink-0 flex-col-reverse gap-2 border-t border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 sm:flex-row sm:justify-end">
+          <button id="company-coverage-cancel" type="button" onclick="closeCompanyDebtCoverageModal()"
+            class="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">Cancel</button>
+          <button id="company-coverage-submit" type="button" onclick="submitCompanyDebtCoverage()"
+            class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
+            <i data-lucide="landmark" class="h-4 w-4"></i><span>Confirm company expense</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', html);
+  _companyDebtCoverageDialogState = {
+    receiptId: safeReceiptId,
+    expectedLastModified,
+    outstandingMinorUSD,
+    idempotencyKey,
+    opener: opener || document.activeElement,
+    bodyOverflow,
+    busy: false,
+    submitPromise: null,
+    keyHandler: _handleCompanyDebtCoverageKeydown
+  };
+  document.body.style.overflow = 'hidden';
+  document.addEventListener('keydown', _handleCompanyDebtCoverageKeydown);
+  updateCompanyDebtCoveragePreview();
+  const amountInput = document.getElementById('company-coverage-amount');
+  try { amountInput?.focus(); amountInput?.select(); } catch (_) {}
+  try { if (typeof IconQueue !== 'undefined') IconQueue.schedule(document.getElementById('company-debt-coverage-modal')); } catch (_) {}
+  return true;
+}
+
+function setCompanyDebtCoverageFullAmount() {
+  const dialogState = _companyDebtCoverageDialogState;
+  const input = document.getElementById('company-coverage-amount');
+  if (!dialogState || !input || dialogState.busy) return;
+  input.value = (dialogState.outstandingMinorUSD / 100).toFixed(2);
+  updateCompanyDebtCoveragePreview();
+  input.focus();
+}
+
+function updateCompanyDebtCoveragePreview() {
+  const dialogState = _companyDebtCoverageDialogState;
+  const modal = document.getElementById('company-debt-coverage-modal');
+  if (!dialogState || !modal) return false;
+  const amountInput = modal.querySelector('#company-coverage-amount');
+  const reasonInput = modal.querySelector('#company-coverage-reason');
+  const submit = modal.querySelector('#company-coverage-submit');
+  const cancel = modal.querySelector('#company-coverage-cancel');
+  const validation = modal.querySelector('#company-coverage-validation');
+  const amount = Number(String(amountInput?.value || '').trim());
+  const amountMinorUSD = Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+  const reason = String(reasonInput?.value || '').trim();
+  const remainingMinorUSD = Math.max(dialogState.outstandingMinorUSD - Math.max(amountMinorUSD, 0), 0);
+
+  modal.querySelector('#company-coverage-before').textContent = _companyCoverageMoney(dialogState.outstandingMinorUSD / 100);
+  modal.querySelector('#company-coverage-applied').textContent = _companyCoverageMoney(Math.max(amountMinorUSD, 0) / 100);
+  modal.querySelector('#company-coverage-after').textContent = _companyCoverageMoney(remainingMinorUSD / 100);
+
+  let message = '';
+  if (!amountMinorUSD) message = 'Enter an amount greater than $0.00.';
+  else if (amountMinorUSD > dialogState.outstandingMinorUSD) message = 'The amount cannot be more than the current outstanding debt.';
+  else if (!reason) message = 'A business reason is required.';
+  else if (reason.length > 500) message = 'The business reason must be 500 characters or fewer.';
+  validation.textContent = message;
+  if (submit) submit.disabled = !!message || dialogState.busy;
+  if (amountInput) amountInput.disabled = dialogState.busy;
+  if (reasonInput) reasonInput.disabled = dialogState.busy;
+  if (cancel) cancel.disabled = dialogState.busy;
+  return !message;
+}
+
+async function submitCompanyDebtCoverage() {
+  const dialogState = _companyDebtCoverageDialogState;
+  if (!dialogState) return false;
+  if (dialogState.submitPromise) return dialogState.submitPromise;
+
+  // Exact-admin check again at commit time. Never trust a button rendered by
+  // an older session/role snapshot.
+  if (!isCurrentUserAdmin()) {
+    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    closeCompanyDebtCoverageModal({ force: true });
+    return false;
+  }
+  const receipt = (state.receipts || []).find(row => row && String(row.id) === dialogState.receiptId);
+  if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
+    showNotification('Receipt changed', 'This receipt is no longer eligible for company coverage.', 'warning');
+    closeCompanyDebtCoverageModal({ force: true });
+    return false;
+  }
+  const currentLastModified = Number(receipt._lastModified);
+  const currentOutstandingMinorUSD = Math.round(_getCompanyCoverableOutstandingUSD(receipt) * 100);
+  if (!Number.isSafeInteger(currentLastModified) || currentLastModified !== dialogState.expectedLastModified
+      || currentOutstandingMinorUSD !== dialogState.outstandingMinorUSD) {
+    showNotification('Receipt changed', 'Refresh the receipt and review the current balance before trying again.', 'warning');
+    closeCompanyDebtCoverageModal({ force: true });
+    return false;
+  }
+  if (!updateCompanyDebtCoveragePreview()) return false;
+
+  const modal = document.getElementById('company-debt-coverage-modal');
+  const amount = Number(String(modal?.querySelector('#company-coverage-amount')?.value || '').trim());
+  const amountMinorUSD = Math.round(amount * 100);
+  const reason = String(modal?.querySelector('#company-coverage-reason')?.value || '').trim();
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0 || amountMinorUSD > currentOutstandingMinorUSD
+      || !reason || reason.length > 500) {
+    updateCompanyDebtCoveragePreview();
+    return false;
+  }
+
+  dialogState.busy = true;
+  updateCompanyDebtCoveragePreview();
+  const requestPromise = (async () => {
+    try {
+      const response = await apiCreateReceiptCompanyCoverage({
+        receiptId: dialogState.receiptId,
+        amountMinorUSD,
+        idempotencyKey: dialogState.idempotencyKey,
+        expectedLastModified: dialogState.expectedLastModified,
+        reason
+      });
+      const targetReturned = (response.updatedReceipts || []).some(
+        entity => String(entity?.id || '') === dialogState.receiptId
+      );
+      if (!targetReturned) throw new Error('The server did not return the updated receipt. Refresh and try again.');
+
+      // applyValidatedServerEntityBatch validates the whole batch first, then
+      // updates state and renders once. Receipt envelopes deliberately precede
+      // ad envelopes so linked ad projections never render against stale debt.
+      const entityBatch = [
+        ...(response.updatedReceipts || []).map(entity => ({ collection: 'receipts', entity })),
+        ...(response.updatedAds || []).map(entity => ({ collection: 'ads', entity }))
+      ];
+      const applied = applyValidatedServerEntityBatch(entityBatch, 'receiptCompanyCoverage');
+      if (applied.length !== entityBatch.length) throw new Error('The company coverage response was incomplete. Refresh and verify the receipt.');
+
+      closeCompanyDebtCoverageModal({ force: true });
+      showNotification(
+        response.replayed ? 'Company coverage confirmed' : 'Company funds applied',
+        `${_companyCoverageMoney(amountMinorUSD / 100)} was recorded as a business expense. The receipt remains Not Paid.`,
+        'success'
+      );
+      return response;
+    } catch (error) {
+      const message = error?.status === 409
+        ? describe409(error, 'This receipt changed on another device. Refresh and review its current balance.')
+        : (error?.message || 'Could not apply company funds. Try again.');
+      showNotification('Company coverage failed', message, 'error');
+      if (isVersionConflict409(error)) closeCompanyDebtCoverageModal({ force: true });
+      return false;
+    } finally {
+      const activeState = _companyDebtCoverageDialogState;
+      if (activeState === dialogState) {
+        activeState.busy = false;
+        activeState.submitPromise = null;
+        updateCompanyDebtCoveragePreview();
+      }
+    }
+  })();
+  dialogState.submitPromise = requestPromise;
+  return requestPromise;
+}
+
+// ---- Customer-card entry point for company debt coverage (admin only) ----
+// The receipt card already carries its own "Cover with company funds" button;
+// this lets the admin start from the CUSTOMER card instead (user request).
+// One eligible receipt opens the proven coverage dialog directly; several
+// open a small picker first. No new money path — everything funnels into
+// openCompanyDebtCoverageModal and the one transactional endpoint.
+
+function getCustomerCompanyCoverableReceipts(customerId) {
+  const normalizedId = String(customerId || '');
+  if (!normalizedId) return [];
+  return getVisibleRecords(state.receipts || [])
+    .filter(r => String(r.customerId || '') === normalizedId)
+    .filter(r => _isReceiptEligibleForCompanyCoverage(r));
+}
+
+function _closeCompanyCoverageReceiptPicker() {
+  const picker = document.getElementById('company-coverage-receipt-picker');
+  if (picker) {
+    if (picker._keyHandler) document.removeEventListener('keydown', picker._keyHandler);
+    document.body.style.overflow = picker._bodyOverflow || '';
+    const opener = picker._opener;
+    picker.remove();
+    try { opener?.focus?.(); } catch (_) {}
+  }
+  return true;
+}
+
+function _pickCompanyCoverageReceipt(receiptId) {
+  _closeCompanyCoverageReceiptPicker();
+  return openCompanyDebtCoverageModal(receiptId, null);
+}
+
+function openCustomerCompanyDebtCoverage(customerId, opener = null) {
+  const isAr = state.language === 'ar';
+  // Exact-admin check at the action door — same rule as the receipt-card path.
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access denied',
+      isAr ? 'فقط المدير يمكنه استخدام أموال الشركة.' : 'Only an administrator can use company funds.',
+      'error'
+    );
+    return false;
+  }
+  const eligible = getCustomerCompanyCoverableReceipts(customerId);
+  if (!eligible.length) {
+    showNotification(
+      isAr ? 'لا يوجد دين مؤهل' : 'No eligible debt',
+      isAr
+        ? 'لا توجد وصولات دين محل غير مدفوعة لهذا العميل يمكن تغطيتها من أموال الشركة.'
+        : 'This customer has no unpaid in-shop debt receipts that company funds can cover.',
+      'warning'
+    );
+    return false;
+  }
+  if (eligible.length === 1) {
+    return openCompanyDebtCoverageModal(String(eligible[0].id), opener);
+  }
+
+  _closeCompanyCoverageReceiptPicker();
+  const customer = (state.customers || []).find(row => row && String(row.id) === String(customerId));
+  const customerName = Security.escapeHtml(String(customer?.name || (isAr ? 'العميل' : 'Customer')));
+  const rows = eligible.map(receipt => {
+    const serial = Security.escapeHtml(String(
+      receipt.serialNumber || receipt.finalReceiptNo || receipt.tempReceiptNo || receipt.id
+    ));
+    const outstanding = _getCompanyCoverableOutstandingUSD(receipt);
+    const covered = Math.max(Number(receipt.companyCoveredUSD) || 0, 0);
+    return `
+      <button type="button" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}"
+        onclick="_pickCompanyCoverageReceipt(this.dataset.receiptId)"
+        class="flex min-h-12 w-full items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-violet-400 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:border-slate-700 dark:bg-slate-800 dark:hover:border-violet-500 dark:hover:bg-violet-950/30">
+        <span class="min-w-0">
+          <span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${isAr ? 'وصل' : 'Receipt'} ${serial}</span>
+          ${covered > 0.005 ? `<span class="block text-[11px] text-violet-700 dark:text-violet-300">${isAr ? 'غطت الشركة سابقاً' : 'Company covered before'}: $${covered.toFixed(2)}</span>` : ''}
+        </span>
+        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${outstanding.toFixed(2)}</span>
+      </button>`;
+  }).join('');
+
+  const html = `
+    <div id="company-coverage-receipt-picker"
+      class="mobile-dialog-overlay fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-4"
+      role="dialog" aria-modal="true" aria-labelledby="company-coverage-picker-title"
+      onclick="if(event.target===this) _closeCompanyCoverageReceiptPicker()">
+      <div class="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900"
+        onclick="event.stopPropagation()">
+        <div class="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700">
+          <div class="min-w-0">
+            <h2 id="company-coverage-picker-title" class="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-white">
+              <i data-lucide="landmark" class="h-5 w-5 flex-shrink-0 text-violet-600"></i>
+              <span>${isAr ? 'اختر الوصل المراد تغطيته' : 'Choose which debt to cover'}</span>
+            </h2>
+            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; ${isAr ? 'الدين المتبقي لكل وصل' : 'Remaining debt per receipt'}</p>
+          </div>
+          <button type="button" onclick="_closeCompanyCoverageReceiptPicker()"
+            class="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:hover:bg-slate-800"
+            aria-label="${isAr ? 'إغلاق' : 'Close'}">
+            <i data-lucide="x" class="h-5 w-5"></i>
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-4">${rows}</div>
+      </div>
+    </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', html);
+  const picker = document.getElementById('company-coverage-receipt-picker');
+  picker._bodyOverflow = document.body.style.overflow;
+  picker._opener = opener || document.activeElement;
+  picker._keyHandler = (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); _closeCompanyCoverageReceiptPicker(); }
+  };
+  document.body.style.overflow = 'hidden';
+  document.addEventListener('keydown', picker._keyHandler);
+  try { picker.querySelector('button[data-receipt-id]')?.focus(); } catch (_) {}
+  try { if (typeof IconQueue !== 'undefined') IconQueue.schedule(picker); } catch (_) {}
+  return true;
 }
 
 // Toggle receipt collected status

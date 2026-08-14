@@ -511,6 +511,98 @@ async function main() {
     assert(near(stats.balanceUSD, -50), `total debt must stay $50, not $100: got ${usd(stats.balanceUSD)}`);
   });
 
+  await must('C5. company coverage of an ad-committed debt reduces the balance ONCE ($100 debt, company $40 -> -$60, never -$140)', () => {
+    // Exactly the server shape after POST /api/receipts/{id}/company-coverages
+    // covers $40 of a $100 in-shop debt fully committed to one ad: the due row
+    // shrinks 100->60, a companyFundingAllocations row carries the moved $40,
+    // and the receipt stores outstanding 60 / covered 40. The gross-debt reader
+    // used to ADD the covered $40 back as fresh receipt debt (-$140).
+    resetState();
+    S.defaultExchangeRate = 11;
+    const r = {
+      id: 'receipt_c5', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 100, amountLocal: 1100, exchangeRate: 11,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [],
+      companyCoveredUSD: 40, customerOutstandingUSD: 60, companyCoverageCount: 1
+    };
+    S.receipts.push(r);
+    makeAd({
+      id: 'ad_c5', amountUSD: 100, amountLocal: 1100, spentUSD: 100,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: r.id, receiptAllocations: [],
+      dueAllocations: [{ receiptId: r.id, amountUSD: 60 }], dueAmountToUseUSD: 60,
+      companyFundingAllocations: [{ receiptId: r.id, amountUSD: 40 }],
+      companyFundedUSD: 40, customerDueUSD: 60
+    });
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalSpentUSD, 100), `Spent must stay the REAL ad spend $100, got ${usd(stats.totalSpentUSD)}`);
+    assert(near(stats.totalPaidUSD, 0), `company money must NOT count as customer Paid, got ${usd(stats.totalPaidUSD)}`);
+    assert(near(stats.receiptDebtUSD, 0), `outstanding 60 - committed 60 -> +$0 from the receipt, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.companyFundedUSD, 40), `the moved $40 must be reported as company-funded, got ${usd(stats.companyFundedUSD)}`);
+    assert(near(stats.balanceUSD, -60), `customer owes exactly $60 after the company covered $40, got ${usd(stats.balanceUSD)}`);
+    assert(near(stats.balanceLYD, -660), `LYD mirror must be -660.00 at rate 11, got ${stats.balanceLYD}`);
+  });
+
+  await must('C5b. company coverage of an UNCOMMITTED plain debt shrinks the receipt debt itself (no double credit)', () => {
+    // No ads at all: the coverage is "unassigned" — the server only lowers
+    // customerOutstandingUSD (100 -> 60). No companyFundingAllocations row
+    // exists, so no credit may be added on top (that would double-count).
+    resetState();
+    S.defaultExchangeRate = 11;
+    S.receipts.push({
+      id: 'receipt_c5b', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 100, amountLocal: 1100, exchangeRate: 11,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [],
+      companyCoveredUSD: 40, customerOutstandingUSD: 60, companyCoverageCount: 1
+    });
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.receiptDebtUSD, 60), `the remaining outstanding $60 is the receipt debt, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.companyFundedUSD, 0), `no ad rows -> no separate credit, got ${usd(stats.companyFundedUSD)}`);
+    assert(near(stats.balanceUSD, -60), `customer owes exactly $60, got ${usd(stats.balanceUSD)}`);
+    assert(near(stats.balanceLYD, -660), `LYD mirror must be -660.00, got ${stats.balanceLYD}`);
+  });
+
+  await must('C5c. FULL company coverage zeroes the customer balance (outstanding 0 is 0, not "missing")', () => {
+    // customerOutstandingUSD === 0 is falsy — a sloppy `|| fallback` reader
+    // would resurrect the whole gross debt. It must be honored as exactly 0.
+    resetState();
+    S.defaultExchangeRate = 11;
+    const r = {
+      id: 'receipt_c5c', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 100, amountLocal: 1100, exchangeRate: 11,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [],
+      companyCoveredUSD: 100, customerOutstandingUSD: 0, companyCoverageCount: 1
+    };
+    S.receipts.push(r);
+    makeAd({
+      id: 'ad_c5c', amountUSD: 100, amountLocal: 1100, spentUSD: 100,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: r.id, receiptAllocations: [],
+      dueAllocations: [], dueAmountToUseUSD: 0,
+      companyFundingAllocations: [{ receiptId: r.id, amountUSD: 100 }],
+      companyFundedUSD: 100, customerDueUSD: 0
+    });
+
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalSpentUSD, 100), `Spent must stay the real $100 ad spend, got ${usd(stats.totalSpentUSD)}`);
+    assert(near(stats.receiptDebtUSD, 0), `outstanding 0 -> receipt debt $0, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.companyFundedUSD, 100), `the full $100 must be company-funded, got ${usd(stats.companyFundedUSD)}`);
+    assert(near(stats.balanceUSD, 0), `the customer owes NOTHING after full coverage, got ${usd(stats.balanceUSD)}`);
+
+    // The "Has debt" quick filter must release the fully-covered customer.
+    S.customerSearch = '';
+    S.customerSort = 'newest';
+    S.customerFinancialFilter = 'hasDebt';
+    const filtered = sandbox.getFilteredCustomers();
+    assert(!filtered.some(c => String(c.id) === 'c1'), 'a fully-covered customer must leave the Has debt filter');
+    S.customerFinancialFilter = 'all';
+  });
+
   await must('A1. an ad funded $30 from a $100 paid receipt consumes exactly $30', () => {
     resetState();
     const r = paidReceipt('receipt_a1', 100);

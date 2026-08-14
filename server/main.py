@@ -91,7 +91,12 @@ from .startup_financial_scan import (
     active_rows_for_receipt as _startup_active_rows_for_receipt,
     settle_rowless_driver_receipts as _settle_rowless_driver_receipts,
 )
-from .company_debt_coverage import plan_company_debt_coverage as _plan_company_debt_coverage
+from .company_debt_coverage import (
+    RECEIPT_COMPANY_COVERAGE_COLLECTION,
+    RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+    create_company_debt_coverage_router,
+    protect_company_coverage_fields,
+)
 from .unpaid_receipt_payment_plan import (
     canonicalize_unpaid_in_shop_payment_plan as _canonicalize_unpaid_in_shop_payment_plan,
     enforce_explicit_paid_to_debt_conversion as _enforce_explicit_paid_to_debt_conversion,
@@ -190,8 +195,6 @@ from .schemas import (
     PasswordResetRequest,
     ReceiptSettlementRequest,
     ReceiptSettlementResponse,
-    ReceiptCompanyCoverageRequest,
-    ReceiptCompanyCoverageResponse,
     ReceiptTransferRequest,
     ReceiptTransferResponse,
     SetupAdminRequest,
@@ -2011,6 +2014,7 @@ def patch_entity(
             if not isinstance(data, dict):
                 data = {}
             old_data = dict(data)
+            protect_company_coverage_fields(entity_type, upd, old_data)
             data.update(upd)
             if entity_type == "customers":
                 data = _normalize_customer_phone_storage(
@@ -6391,8 +6395,6 @@ def _clothes_patch_shipment_atomic(
 
 RECEIPT_TRANSFER_MUTATION_COLLECTION = "receiptTransferMutations"
 RECEIPT_SETTLEMENT_MUTATION_COLLECTION = "receiptSettlementMutations"
-RECEIPT_COMPANY_COVERAGE_COLLECTION = "receiptCompanyCoverages"
-RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION = "receiptCompanyCoverageMutations"
 AD_FUNDING_MUTATION_COLLECTION = "adFundingMutations"
 AD_STOP_MUTATION_COLLECTION = "adStopMutations"
 CUSTOMER_MERGE_MUTATION_COLLECTION = "customerMergeMutations"
@@ -6400,6 +6402,7 @@ FINANCIAL_MUTATION_COLLECTIONS = frozenset(
     {
         RECEIPT_TRANSFER_MUTATION_COLLECTION,
         RECEIPT_SETTLEMENT_MUTATION_COLLECTION,
+        RECEIPT_COMPANY_COVERAGE_COLLECTION,
         RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
         AD_FUNDING_MUTATION_COLLECTION,
         AD_STOP_MUTATION_COLLECTION,
@@ -6802,41 +6805,6 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     if local > 0 and trusted_rate:
         return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     return usd_minor
-
-
-def _read_company_coverage_state(
-    data: dict[str, Any]
-) -> tuple[int, int, int, int]:
-    """Return ``(grossDebt, coveredBefore, outstandingBefore, outstandingMinorSource).``
-
-    We keep the original customer debt value (`grossDebt`) from the stored
-    receipt capacity and let operator-created fields (`companyCoveredUSD`,
-    `customerOutstandingUSD`) drive the effective debt summary when present.
-    """
-    gross_minor = _financial_due_total(data)
-    covered_minor = _financial_minor(
-        data.get("companyCoveredUSD"),
-        "stored companyCoveredUSD",
-    ) if data.get("companyCoveredUSD") is not None else 0
-    outstanding_stored_minor = (
-        _financial_minor(
-            data.get("customerOutstandingUSD"),
-            "stored customerOutstandingUSD",
-        )
-        if data.get("customerOutstandingUSD") is not None
-        else None
-    )
-    if outstanding_stored_minor is not None:
-        outstanding_minor = outstanding_stored_minor
-        # Keep the two stored summaries internally consistent so a later
-        # coverage run cannot mint a negative or over-reported liability.
-        covered_minor = max(min(covered_minor, gross_minor), 0)
-        outstanding_minor = max(min(outstanding_minor, gross_minor - covered_minor), 0)
-    else:
-        covered_minor = max(min(covered_minor, gross_minor), 0)
-        outstanding_minor = max(gross_minor - covered_minor, 0)
-    source = 1 if data.get("customerOutstandingUSD") is None else 0
-    return gross_minor, covered_minor, outstanding_minor, source
 
 
 def _financial_valid_rate(value: Any) -> Decimal | None:
@@ -7564,6 +7532,7 @@ def _financial_derive_ad(
     """Merge ordinary ad edits, then replace every funding mirror."""
     base = dict(existing or {})
     clean = sanitize_json(requested or {}) or {}
+    protect_company_coverage_fields("ads", clean, existing)
     # ``driverBudgetUSD`` is a request-only source value for a Not Paid +
     # Driver ad. Unlike a paid receipt allocation, this budget may be only
     # partially funded (or completely unfunded) and therefore represents real
@@ -9687,6 +9656,7 @@ def _financial_patch_receipt_atomic(
             if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
                 raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
             old = _financial_row_data(row)
+            protect_company_coverage_fields("receipts", clean, old)
             # A DESTROYED receipt is a locked number: no edit may revive it
             # (only deleting frees the number) and no live receipt may become one.
             if str(old.get("status") or "") == "Destroyed":
@@ -10052,260 +10022,6 @@ def transfer_receipt_balance(
         transfer=transfer,
         replayed=replayed,
     )
-
-
-@app.post(
-    "/api/receipts/{receipt_id}/company-coverages",
-    response_model=ReceiptCompanyCoverageResponse,
-)
-def cover_receipt_with_company_funds(
-    receipt_id: str,
-    body: ReceiptCompanyCoverageRequest,
-    request: Request,
-    include_media: bool = True,
-    admin: dict[str, Any] = Depends(require_admin),
-):
-    """Reduce unpaid in-shop/office receipt liability from internal funds.
-
-    This endpoint never marks a customer payment. It only moves commitment from
-    ``dueAllocations`` to ``companyFundingAllocations`` on linked ads and keeps
-    the remaining customer debt in sync.
-    """
-    require_same_origin(request)
-    receipt_id = validate_entity_id(receipt_id)
-    idem = sanitize_str(body.idempotencyKey, 120)
-    reason = sanitize_str(body.reason, 500)
-    request_hash = _financial_request_hash(
-        {
-            "receiptId": receipt_id,
-            "amountMinorUSD": int(body.amountMinorUSD),
-            "expectedLastModified": int(body.expectedLastModified),
-            "reason": reason,
-        }
-    )
-    actor_id = validate_entity_id(admin.get("id"))
-    postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
-    with guard:
-        with db_conn() as conn:
-            _lock_idempotency_key(
-                conn,
-                idem,
-                postgres=postgres,
-                namespace="receiptCompanyCoverage",
-            )
-            prior = _financial_check_marker(
-                _financial_get_marker(
-                    conn,
-                    RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
-                    "receiptCompanyCoverage",
-                    idem,
-                ),
-                actor_id,
-                request_hash,
-            )
-            if prior:
-                coverage = _financial_entity_result(
-                    conn,
-                    RECEIPT_COMPANY_COVERAGE_COLLECTION,
-                    str(prior.get("coverageId") or ""),
-                )
-                updated_receipts = [
-                    _financial_entity_result(
-                        conn, "receipts", str(receipt_id)
-                    )
-                    for receipt_id in (prior.get("updatedReceiptIds") or [])
-                ]
-                updated_ads = [
-                    _financial_entity_result(conn, "ads", str(ad_id))
-                    for ad_id in (prior.get("updatedAdIds") or [])
-                ]
-                return ReceiptCompanyCoverageResponse(
-                    coverage=EntityResponse(**coverage),
-                    updatedReceipts=[EntityResponse(**item) for item in updated_receipts],
-                    updatedAds=[EntityResponse(**item) for item in updated_ads],
-                    replayed=True,
-                )
-
-            row = _clothes_lock_row(conn, "receipts", receipt_id, postgres=postgres)
-            if not row or bool(row["deleted"]):
-                raise HTTPException(status_code=404, detail="Receipt not found")
-
-            existing = _financial_row_data(row)
-            if (
-                str(existing.get("status") or "") != "Not Paid"
-                or existing.get("isPaid") is not False
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Receipt must be unpaid (Not Paid) to apply company coverage",
-                )
-            status_detail = (
-                existing.get("statusDetail")
-                if isinstance(existing.get("statusDetail"), dict)
-                else {}
-            )
-            not_paid_collection = str(
-                status_detail.get("notPaidCollection") or ""
-            ).strip().lower()
-            if not_paid_collection not in {"", "office", "in_shop", "shop"}:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Only in-shop office receipts can be covered by company funds",
-                )
-            if str(existing.get("deliveryStatus") or "").strip() != "Office":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Company coverage is only valid for Office delivery status",
-                )
-            if str(existing.get("receiptType") or "").upper() == "TRANSFER_IN":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Transfer-in receipts cannot be covered by company funds",
-                )
-            if _financial_outgoing(existing):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Receipts with outgoing transfers cannot be company-covered",
-                )
-            if int(row["last_modified"]) != int(body.expectedLastModified):
-                raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
-
-            customer_id = validate_entity_id(existing.get("customerId"))
-            if not customer_id:
-                raise HTTPException(status_code=409, detail="Receipt must belong to a customer")
-
-            assert_financial_period_open("receipts", existing, conn=conn)
-            gross_minor, covered_before_minor, outstanding_before_minor, _source = (
-                _read_company_coverage_state(existing)
-            )
-            if int(body.amountMinorUSD) > outstanding_before_minor:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Receipt outstanding liability is smaller than requested amount",
-                )
-
-            ad_rows = _financial_active_rows_for_receipt_bounded(conn, receipt_id)
-            candidates = []
-            for ad_row in ad_rows:
-                if bool(ad_row.get("deleted")):
-                    continue
-                ad_data = _financial_row_data(ad_row)
-                if str(ad_data.get("recordType") or "") == "receipt":
-                    continue
-                if _financial_ad_due_usage(ad_data, receipt_id) <= 0:
-                    continue
-                candidates.append((str(ad_row["id"]), ad_data))
-
-            locked_ads = {}
-            locked_ad_rows = []
-            for ad_id, _ in sorted(candidates, key=lambda item: item[0]):
-                ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
-                if not ad_row or bool(ad_row["deleted"]):
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Linked ad is no longer available",
-                    )
-                locked_ad_rows.append((ad_id, _financial_row_data(ad_row)))
-                locked_ads[ad_id] = ad_row
-
-            plan = _plan_company_debt_coverage(
-                receipt_id,
-                amount_minor=int(body.amountMinorUSD),
-                ads=[
-                    (ad_id, ad_data)
-                    for ad_id, ad_data in sorted(locked_ad_rows, key=lambda item: item[0])
-                ],
-            )
-            updated_ads = []
-            for item in plan.ads:
-                ad_row = locked_ads[str(item.ad_id)]
-                assert_financial_period_open("ads", ad_data if (ad_data := _financial_row_data(ad_row)) else {}, conn=conn)
-                assert_financial_period_open("ads", item.data, conn=conn)
-                updated_ads.append(_clothes_write_row(conn, ad_row, item.data))
-
-            requested_amount_minor = int(body.amountMinorUSD)
-            covered_after_minor = covered_before_minor + requested_amount_minor
-            covered_after_minor = min(covered_after_minor, gross_minor)
-            outstanding_after_minor = max(gross_minor - covered_after_minor, 0)
-            saved_receipt = _financial_row_data(row)
-            saved_receipt.update(existing)
-            saved_receipt["companyCoverageCount"] = (
-                int(saved_receipt.get("companyCoverageCount") or 0) + 1
-            )
-            coverage_timestamp = _iso_utc()
-            saved_receipt["lastCompanyCoverageAt"] = coverage_timestamp
-
-            coverage_id = new_id("receiptCompanyCoverage")
-            coverage_data = {
-                "recordType": "companyDebtCoverage",
-                "receiptId": receipt_id,
-                "customerId": customer_id,
-                "amountMinorUSD": requested_amount_minor,
-                "amountUSD": _financial_usd(requested_amount_minor),
-                "reason": reason,
-                "actorId": actor_id,
-                "grossDebtMinorUSD": gross_minor,
-                "grossDebtUSD": _financial_usd(gross_minor),
-                "companyCoveredBeforeMinorUSD": covered_before_minor,
-                "companyCoveredBeforeUSD": _financial_usd(covered_before_minor),
-                "companyCoveredAfterMinorUSD": covered_after_minor,
-                "companyCoveredAfterUSD": _financial_usd(covered_after_minor),
-                "customerOutstandingBeforeMinorUSD": outstanding_before_minor,
-                "customerOutstandingBeforeUSD": _financial_usd(outstanding_before_minor),
-                "customerOutstandingAfterMinorUSD": outstanding_after_minor,
-                "customerOutstandingAfterUSD": _financial_usd(outstanding_after_minor),
-                "coveredAt": coverage_timestamp,
-                "unassignedAmountMinorUSD": plan.unassigned_minor,
-                "unassignedAmountUSD": _financial_usd(plan.unassigned_minor),
-                "allocations": [
-                    {
-                        "adId": item.ad_id,
-                        "amountMinorUSD": int(item.moved_minor),
-                        "amountUSD": _financial_usd(item.moved_minor),
-                    }
-                    for item in plan.ads
-                ],
-                "customerPayment": False,
-                "countsAsCustomerRevenue": False,
-                "source": "company_funds",
-            }
-
-            saved_receipt["companyCoveredUSD"] = _financial_usd(covered_after_minor)
-            saved_receipt["customerOutstandingUSD"] = _financial_usd(outstanding_after_minor)
-            saved_receipt["lastCompanyCoverageId"] = coverage_id
-            saved_receipt_row = _clothes_write_row(
-                conn, row, saved_receipt
-            )
-            _insert_entity_in_transaction(
-                conn,
-                RECEIPT_COMPANY_COVERAGE_COLLECTION,
-                coverage_id,
-                coverage_data,
-                actor_id,
-            )
-            coverage = _financial_entity_result(
-                conn, RECEIPT_COMPANY_COVERAGE_COLLECTION, coverage_id
-            )
-            _financial_insert_marker(
-                conn,
-                RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
-                "receiptCompanyCoverage",
-                idem,
-                actor_id,
-                request_hash,
-                {
-                    "coverageId": coverage_id,
-                    "updatedReceiptIds": [saved_receipt_row["id"]],
-                    "updatedAdIds": [item["id"] for item in updated_ads],
-                },
-            )
-            return ReceiptCompanyCoverageResponse(
-                coverage=EntityResponse(**_project_entity_media_for_user(coverage, admin, include_media)),
-                updatedReceipts=[EntityResponse(**_project_entity_media_for_user(saved_receipt_row, admin, include_media))],
-                updatedAds=[EntityResponse(**_project_entity_media_for_user(item, admin, include_media)) for item in updated_ads],
-                replayed=False,
-            )
 
 
 @app.post(
@@ -12022,6 +11738,7 @@ def create_collection_item(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     generic_data = sanitize_json(body.data or {}) or {}
+    protect_company_coverage_fields(collection, generic_data)
     if collection == "ads" and set(generic_data) & META_AD_SERVER_FIELDS:
         raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
     if collection == "pages" and set(generic_data) & META_PAGE_SERVER_FIELDS:
@@ -13209,6 +12926,7 @@ def admin_bulk_import(
                 continue
             data = sanitize_json(rec) or {}
             data["id"] = rid
+            protect_company_coverage_fields(name, data)
             # A backup obeys the destroyed-receipt shape too: a Destroyed row
             # carrying money would silently hide it from every reader.
             if name == "receipts":
@@ -14301,6 +14019,35 @@ def privacy_anonymize_user(
         {},
     )
     return user_row_to_public(updated)
+
+_COMPANY_DEBT_COVERAGE_CTX = {
+    "validate_entity_id": validate_entity_id,
+    "sanitize_str": sanitize_str,
+    "financial_request_hash": _financial_request_hash,
+    "sqlite_financial_lock": lambda: _SQLITE_FINANCIAL_LOCK,
+    "lock_idempotency_key": _lock_idempotency_key,
+    "financial_check_marker": _financial_check_marker,
+    "financial_get_marker": _financial_get_marker,
+    "financial_entity_result": _financial_entity_result,
+    "clothes_lock_row": _clothes_lock_row,
+    "financial_row_data": _financial_row_data,
+    "financial_due_total": _financial_due_total,
+    "financial_active_rows_for_receipt_bounded": _financial_active_rows_for_receipt_bounded,
+    "clothes_write_row": _clothes_write_row,
+    "iso_utc": _iso_utc,
+    "insert_entity_in_transaction": _insert_entity_in_transaction,
+    # Resolve at request time so test/fault-injection monkeypatches keep working.
+    "financial_insert_marker": lambda *args, **kwargs: _financial_insert_marker(*args, **kwargs),
+    "project_entity_media_for_user": _project_entity_media_for_user,
+}
+app.include_router(
+    create_company_debt_coverage_router(
+        require_admin_dependency=require_admin,
+        require_same_origin=require_same_origin,
+        ctx=_COMPANY_DEBT_COVERAGE_CTX,
+    )
+)
+
 
 _WALLET_PAYMENTS_CTX = {
     "validate_receipt_image": lambda photo: _validate_ad_campaign_image_source(photo)[0],
