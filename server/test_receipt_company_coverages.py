@@ -860,6 +860,7 @@ def test_coverage_owned_fields_reject_forgery_and_allow_unchanged_echoes(
         "companyFundingAllocations": [],
         "customerDueUSD": 999.0,
         "companyFundedUSD": 999.0,
+        "companyDirectCoverageUSD": 999.0,
     }
     for field in coverage_module.AD_COMPANY_COVERAGE_FIELDS:
         rejected = client.patch(
@@ -917,6 +918,7 @@ def test_coverage_owned_fields_reject_forgery_and_allow_unchanged_echoes(
     ad_echo = {
         field: ad_before["data"][field]
         for field in coverage_module.AD_COMPANY_COVERAGE_FIELDS
+        if field in ad_before["data"]
     }
     ad_echo["title"] = "Unrelated ad edit"
     ad_edit = client.patch(

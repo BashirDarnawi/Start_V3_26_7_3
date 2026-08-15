@@ -2318,9 +2318,14 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                 ? (statsIndex.receiptsByCustomer.get(String(c.id || '')) || []).filter(r => _isReceiptEligibleForCompanyCoverage(r))
                 : getCustomerCompanyCoverableReceipts(c.id))
             : [];
-          const coverableDebtUSD = Math.round(coverableDebtReceipts.reduce(
+          // Receipt outstanding (in-shop AND delivery) plus receipt-less
+          // ad-spend debt: the one number the company-funds button offers.
+          const coverableAdDebtUSD = isCurrentUserAdmin()
+            ? getCustomerCoverableAdDebt(c.id).totalUSD
+            : 0;
+          const coverableDebtUSD = Math.round((coverableDebtReceipts.reduce(
             (sum, r) => sum + _getCompanyCoverableOutstandingUSD(r), 0
-          ) * 100) / 100;
+          ) + coverableAdDebtUSD) * 100) / 100;
           const receiptsLabel = isAr ? `الوصولات ${linkedReceiptCount}` : `Receipts ${linkedReceiptCount}`;
           const linkedReceiptsButton = canSeeReceipts
             ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(isAr ? `عرض ${linkedReceiptCount} من وصولات العميل ${c.name || ''}` : `View ${linkedReceiptCount} receipts linked to ${c.name || 'this customer'}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
@@ -2438,8 +2443,8 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <span dir="ltr">$${stats.companyFundedUSD.toFixed(2)}</span>
                   </div>
                   ` : ''}
-                  ${coverableDebtReceipts.length ? `
-                  <!-- Admin-only: cover this customer's unpaid in-shop debt from company funds -->
+                  ${(coverableDebtReceipts.length || coverableAdDebtUSD > 0.005) ? `
+                  <!-- Admin-only: cover this customer's receipt or ad debt from company funds -->
                   <button type="button" data-customer-id="${Security.escapeHtml(String(c.id || ''))}"
                     onclick="openCustomerCompanyDebtCoverage(this.dataset.customerId, this)"
                     aria-haspopup="dialog"
@@ -2948,22 +2953,14 @@ function renderReceiptsView() {
           const collectionTarget = getReceiptCollectionTarget(receipt);
           const hasCustomerDebt = receiptDebtType !== 'none'
             && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
-          // Company coverage is an admin-only business-expense action. Prefer
-          // the server's authoritative outstanding amount after prior
-          // coverages; legacy receipts fall back to their computed debt.
-          const savedCompanyOutstandingUSD = Number(receipt.customerOutstandingUSD);
-          const companyCoverableOutstandingUSD = Math.max(
-            receipt.customerOutstandingUSD != null && Number.isFinite(savedCompanyOutstandingUSD)
-              ? savedCompanyOutstandingUSD
-              : (Number(collectionTarget.amountUSD) || 0),
-            0
-          );
+          // Company coverage is an admin-only business-expense action. The
+          // shared helper prefers the server's authoritative outstanding
+          // amount and nets out cash a driver already collected.
+          const companyCoverableOutstandingUSD = _getCompanyCoverableOutstandingUSD(receipt);
           const companyCoveredUSD = Math.max(Number(receipt.companyCoveredUSD) || 0, 0);
           const companyCoverageCount = Math.max(Math.trunc(Number(receipt.companyCoverageCount) || 0), 0);
           const canCoverWithCompanyFunds = isCurrentUserAdmin()
-            && getReceiptPaymentState(receipt) === 'not_paid'
-            && receiptDebtType === 'shop'
-            && companyCoverableOutstandingUSD > 0.005;
+            && _isReceiptEligibleForCompanyCoverage(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -4471,8 +4468,8 @@ function renderDeliveriesView(logOnly) {
                 </div>
 
                 <div class="text-sm mb-2">
-                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString('en-US')} LYD</span>
-                  <span class="text-xs text-slate-500 ml-2">$${(ad.amountUSD || 0).toFixed(2)}</span>
+                  <span class="font-bold text-emerald-600">${(_deliveryDisplayAmounts(ad).local || 0).toLocaleString('en-US')} LYD</span>
+                  <span class="text-xs text-slate-500 ml-2">$${(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)}</span>
                 </div>
 
                 ${deliveryPerson ? `
@@ -4666,7 +4663,7 @@ async function checkStuckDeliveries() {
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString('en-US')} LYD</span>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(_deliveryDisplayAmounts(d).local || 0).toLocaleString('en-US')} LYD</span>
             <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
@@ -4723,6 +4720,22 @@ function _getCollectedCashLocal(item) {
     if (Number.isFinite(a)) return a;
   }
   return 0;
+}
+
+// Row/tile display money for a delivery item. A debt receipt shows what is
+// LEFT for the customer to hand over (net of company coverage) — a driver
+// reading the gross would demand dollars the company already paid.
+function _deliveryDisplayAmounts(item) {
+  const raw = {
+    local: Number(item?.amountLocal) || 0,
+    usd: Number(item?.amountUSD) || 0
+  };
+  if (!item) return raw;
+  // Ads and ad-based deliveries keep their stored amounts.
+  const isReceiptRecord = (state.receipts || []).some(r => r && r.id === item.id);
+  if (!isReceiptRecord || getReceiptDebtType(item) === 'none') return raw;
+  const target = getReceiptCollectionTarget(item);
+  return { local: target.amountLocal, usd: target.amountUSD };
 }
 
 function _getOutstandingDueLocal(item) {
@@ -4889,6 +4902,14 @@ function showDeliveryDetails(itemId) {
   const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
   const editHandler = isReceipt ? 'editReceipt' : 'editAd';
   const isItemPaid = isReceipt ? ad.isPaid === true : getAdPaymentState(ad) === 'paid';
+  // For an unpaid debt receipt show what is actually LEFT to collect (net of
+  // company coverage), never the gross a driver must no longer demand.
+  const detailDebtTarget = (isReceipt && getReceiptDebtType(ad) !== 'none')
+    ? getReceiptCollectionTarget(ad)
+    : null;
+  const detailAmountLocal = detailDebtTarget ? detailDebtTarget.amountLocal : (ad.amountLocal || 0);
+  const detailAmountUSD = detailDebtTarget ? detailDebtTarget.amountUSD : (ad.amountUSD || 0);
+  const detailCoveredUSD = isReceipt ? Math.max(parseFloat(ad.companyCoveredUSD) || 0, 0) : 0;
   
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -4929,14 +4950,19 @@ function showDeliveryDetails(itemId) {
         <!-- Amount Details -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
-            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</div>
-            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString('en-US')}</div>
+            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (LYD)' : 'To collect (LYD)') : (isAr ? 'المبلغ (LYD)' : 'Amount (LYD)')}</div>
+            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(detailAmountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${isAr ? 'المبلغ (USD)' : 'Amount (USD)'}</div>
-            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(ad.amountUSD || 0).toFixed(2)}</div>
+            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (USD)' : 'To collect (USD)') : (isAr ? 'المبلغ (USD)' : 'Amount (USD)')}</div>
+            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(detailAmountUSD || 0).toFixed(2)}</div>
           </div>
         </div>
+        ${detailCoveredUSD > 0.005 ? `
+        <div class="px-4 py-2 rounded-xl bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-xs font-bold text-violet-700 dark:text-violet-300 flex items-center gap-2">
+          <i data-lucide="landmark" class="w-4 h-4"></i>
+          <span>${isAr ? `غطّت الشركة $${detailCoveredUSD.toFixed(2)} من هذا الدين` : `Company covered $${detailCoveredUSD.toFixed(2)} of this debt`}</span>
+        </div>` : ''}
         
         <!-- Status & Driver -->
         <div class="grid grid-cols-2 gap-3">
@@ -5163,7 +5189,7 @@ function renderDeliveryDashboard() {
                         </div>
                       ` : ''}
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
-                        <span class="text-xs font-bold text-emerald-600">$${Number(ad.amountUSD || 0).toFixed(2)} (${Number(ad.amountLocal || 0).toFixed(0)} LYD)</span>
+                        <span class="text-xs font-bold text-emerald-600">$${Number(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)} (${Number(_deliveryDisplayAmounts(ad).local || 0).toFixed(0)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
                         <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${(() => {

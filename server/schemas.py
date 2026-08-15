@@ -234,6 +234,20 @@ class ReceiptCompanyCoverageRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class CustomerCompanyCoverageRequest(BaseModel):
+    """Admin-funded reduction of a customer's receipt-less ad-spend debt.
+
+    The amount is integer USD cents. ``expectedOutstandingMinorUSD`` is the
+    total coverable ad debt the admin saw when confirming — the request is
+    refused if the books changed underneath them.
+    """
+
+    amountMinorUSD: int = Field(gt=0, le=1_000_000_000)
+    idempotencyKey: str = Field(min_length=8, max_length=120)
+    expectedOutstandingMinorUSD: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class AdMutationRequest(BaseModel):
     """Create/update an ad and its receipt funding in one transaction."""
 
@@ -413,6 +427,13 @@ class ReceiptSettlementResponse(BaseModel):
 
 
 class ReceiptCompanyCoverageResponse(BaseModel):
+    coverage: EntityResponse
+    updatedReceipts: list[EntityResponse] = Field(default_factory=list)
+    updatedAds: list[EntityResponse] = Field(default_factory=list)
+    replayed: bool = False
+
+
+class CustomerCompanyCoverageResponse(BaseModel):
     coverage: EntityResponse
     updatedReceipts: list[EntityResponse] = Field(default_factory=list)
     updatedAds: list[EntityResponse] = Field(default_factory=list)

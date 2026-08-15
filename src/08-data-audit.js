@@ -1484,6 +1484,7 @@ function buildReceiptUsageAdIndex(ads = state.ads) {
     add(ad.linkedDeliveryReceiptId);
     if (Array.isArray(ad.receiptAllocations)) ad.receiptAllocations.forEach(a => add(a && a.receiptId));
     if (Array.isArray(ad.dueAllocations)) ad.dueAllocations.forEach(a => add(a && a.receiptId));
+    if (Array.isArray(ad.companyFundingAllocations)) ad.companyFundingAllocations.forEach(a => add(a && a.receiptId));
     ids.forEach(id => {
       const bucket = index.get(id);
       if (bucket) bucket.push(ad);
@@ -1528,6 +1529,7 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
         String(ad.receiptId || '') === receiptId ||
         (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
         (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+        (Array.isArray(ad.companyFundingAllocations) && ad.companyFundingAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
         String(ad.linkedDeliveryReceiptId || '') === receiptId
       )
     );
@@ -1546,6 +1548,12 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
+    // Company-covered rows are pot money too (company paid instead of the
+    // customer). Skipping them would show covered dollars as free again.
+    const companyAllocSum = Array.isArray(ad.companyFundingAllocations)
+      ? ad.companyFundingAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
+      : 0;
+
     // Legacy due mirrors belong to Driver links (linkedDeliveryReceiptId) or
     // Not Paid In-Shop links (receiptId), but only for ROWLESS ads: once any
     // positive due row exists, the writers keep the scalar mirror equal to the
@@ -1557,7 +1565,7 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       : 0;
 
     // Use explicit allocations if available, otherwise fall back to ad spend
-    const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage;
+    const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage + companyAllocSum;
     if (explicitAllocations > 0) {
       return sum + explicitAllocations;
     }
@@ -1578,7 +1586,8 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
     // allocations entirely (no arrays at all).
     const hasAllocationData =
       Array.isArray(ad.receiptAllocations) ||
-      Array.isArray(ad.dueAllocations);
+      Array.isArray(ad.dueAllocations) ||
+      Array.isArray(ad.companyFundingAllocations);
     if (hasAllocationData) {
       return sum;
     }
@@ -1601,7 +1610,12 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   const transfers = receiptObj.transfers || [];
   const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0);
 
-  const totalUSD = receiptObj.amountUSD || 0;
+  // A settled receipt's amountUSD is CUSTOMER cash only; the company-covered
+  // share is equally real pot money (it keeps funding the ads it covered).
+  // Mirrors the server's capacity reader exactly.
+  const isPaidReceipt = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
+  const coveredUSD = isPaidReceipt ? Math.max(parseFloat(receiptObj.companyCoveredUSD) || 0, 0) : 0;
+  const totalUSD = (receiptObj.amountUSD || 0) + coveredUSD;
   const remainingUSD = Math.max(totalUSD - usedUSD - transferredUSD, 0);
 
   const lastUsedAt = fundedAds.length > 0
@@ -1671,6 +1685,7 @@ function getDeliveryReceiptDueUsage(receipt) {
   const receiptId = String(receiptObj.id || '');
   const fundedAds = [];
   let usedDueUSD = 0;
+  let usedCompanyUSD = 0;
   for (const ad of getVisibleRecords(state.ads || [])) {
     if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
     const sumFor = (rows) => (Array.isArray(rows) ? rows : [])
@@ -1679,6 +1694,11 @@ function getDeliveryReceiptDueUsage(receipt) {
 
     const paidRows = sumFor(ad.receiptAllocations);
     const dueRows = sumFor(ad.dueAllocations);
+    // Company-covered rows hold pot money exactly like due rows do — the
+    // server refuses to fund new ads from them. They are tracked SEPARATELY
+    // from usedDueUSD because customer-debt math must not double-net them
+    // (customerOutstandingUSD already excludes covered dollars).
+    const companyRows = sumFor(ad.companyFundingAllocations);
 
     // The legacy mirror only speaks for a ROWLESS ad: once any positive due
     // row exists (for this receipt or another), the scalar is the rows' sum,
@@ -1691,6 +1711,11 @@ function getDeliveryReceiptDueUsage(receipt) {
     const committed = paidRows + dueRows + legacyDue;
     if (committed > 0) {
       usedDueUSD += committed;
+    }
+    if (companyRows > 0) {
+      usedCompanyUSD += companyRows;
+    }
+    if (committed > 0 || companyRows > 0) {
       fundedAds.push(ad);
     }
   }
@@ -1701,11 +1726,14 @@ function getDeliveryReceiptDueUsage(receipt) {
   // cost inside per-keystroke renders on phones.
   const transfers = receiptObj.transfers || [];
   const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0) || 0;
-  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - transferredUSD, 0);
+  const remainingDueUSD = Math.max(
+    totalDueUSD - usedDueUSD - usedCompanyUSD - transferredUSD, 0
+  );
 
   return {
     totalDueUSD,
     usedDueUSD,
+    usedCompanyUSD,
     remainingDueUSD,
     fundedAds,
     exchangeRate

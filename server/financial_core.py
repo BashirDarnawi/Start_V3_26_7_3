@@ -184,10 +184,18 @@ def _financial_ad_general_usage(ad: dict[str, Any], receipt_id: str) -> int:
     """Mirror getReceiptUsageStats, including legacy records."""
     receipt_map = _financial_allocation_map(ad.get("receiptAllocations"))
     receipt_sum = receipt_map.get(receipt_id, 0)
-    explicit = receipt_sum + _financial_ad_due_usage(ad, receipt_id)
+    explicit = (
+        receipt_sum
+        + _financial_ad_due_usage(ad, receipt_id)
+        + _financial_ad_company_usage(ad, receipt_id)
+    )
     if explicit > 0:
         return explicit
-    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
+    if (
+        isinstance(ad.get("receiptAllocations"), list)
+        or isinstance(ad.get("dueAllocations"), list)
+        or isinstance(ad.get("companyFundingAllocations"), list)
+    ):
         return 0
     references = {
         str(ad.get("fundingReceiptId") or ""),
@@ -226,21 +234,48 @@ def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
     )
 
 
-def _financial_ad_explicit_usage(ad: dict[str, Any], receipt_id: str) -> int:
-    """Money this ad EXPLICITLY commits against a receipt, from either pool.
+def _financial_ad_company_usage(ad: dict[str, Any], receipt_id: str) -> int:
+    """Pot money on this receipt that the COMPANY paid for this ad.
 
-    Allocation rows (paid + due) plus the legacy due mirror, which only speaks for an ad
-    that has no due row for this receipt. Unlike _financial_ad_general_usage there is NO
-    whole-ad fallback: that fallback charges a pre-allocation ad's entire spend against any
-    receipt it merely REFERENCES, and a driver-collected ad references its delivery receipt
-    while being funded by the customer's cash, not by the receipt's credit.
+    Company coverage moves an ad's due row into companyFundingAllocations:
+    same dollars in the pot, different payer. If capacity checks ignored this
+    pool, every covered dollar would look free again and could be committed
+    to a second ad while the customer only ever owed it once.
+    """
+    return _financial_allocation_map(ad.get("companyFundingAllocations")).get(receipt_id, 0)
+
+
+def _financial_ad_direct_coverage(ad: dict[str, Any]) -> int:
+    """Company money covering this ad's RECEIPT-LESS spend (customer-level
+    coverage). Not receipt-pot money — never part of any receipt's committed
+    sum — but it counts as provided funding when deciding fully_funded."""
+    if ad.get("companyDirectCoverageUSD") is None:
+        return 0
+    return _financial_minor(
+        ad.get("companyDirectCoverageUSD"), "stored companyDirectCoverageUSD"
+    )
+
+
+def _financial_ad_explicit_usage(ad: dict[str, Any], receipt_id: str) -> int:
+    """Money this ad EXPLICITLY commits against a receipt, from any pool.
+
+    Allocation rows (paid + due + company-funded) plus the legacy due mirror, which only
+    speaks for an ad that has no due row for this receipt. Unlike
+    _financial_ad_general_usage there is NO whole-ad fallback: that fallback charges a
+    pre-allocation ad's entire spend against any receipt it merely REFERENCES, and a
+    driver-collected ad references its delivery receipt while being funded by the
+    customer's cash, not by the receipt's credit.
     """
     paid_rows = _financial_allocation_map(ad.get("receiptAllocations")).get(receipt_id, 0)
     # The due reader covers modern allocation rows plus both historical debt
     # mirrors: driver links used linkedDeliveryReceiptId, while old In-Shop
     # rows used receiptId.  Positive legacy debt is a real commitment; a bare
     # zero-debt link remains provenance only.
-    return paid_rows + _financial_ad_due_usage(ad, receipt_id)
+    return (
+        paid_rows
+        + _financial_ad_due_usage(ad, receipt_id)
+        + _financial_ad_company_usage(ad, receipt_id)
+    )
 
 
 def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
@@ -258,7 +293,11 @@ def _financial_ad_committed(ad: dict[str, Any], receipt_id: str) -> int:
     explicit = _financial_ad_explicit_usage(ad, receipt_id)
     if explicit > 0:
         return explicit
-    if isinstance(ad.get("receiptAllocations"), list) or isinstance(ad.get("dueAllocations"), list):
+    if (
+        isinstance(ad.get("receiptAllocations"), list)
+        or isinstance(ad.get("dueAllocations"), list)
+        or isinstance(ad.get("companyFundingAllocations"), list)
+    ):
         return 0
     if _financial_ad_payment_status(ad) == "not_paid" and str(ad.get("collectionMethod") or "") in {"driver", "in_shop"}:
         return 0

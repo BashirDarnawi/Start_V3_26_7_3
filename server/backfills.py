@@ -124,6 +124,83 @@ def backfill_customer_names(sqlite_financial_lock=None) -> int:
     return stamped
 
 
+def backfill_covered_settled_receipts(sqlite_financial_lock=None) -> int:
+    """Normalize covered receipts settled BEFORE the coverage-aware settle.
+
+    The old settle path left a company-covered receipt's amountUSD at the
+    GROSS debt. Under the new capacity rule (paid capacity = amountUSD +
+    companyCoveredUSD) that shape double-counts the covered dollars as
+    spendable credit, and customer "Paid" totals overstate by the same
+    amount. Exactly that legacy shape — and only it — is detectable:
+    a Paid receipt whose customerOutstandingUSD is still positive (every
+    coverage write sets it; every NEW settle zeroes it).
+
+    Idempotent: the write zeroes customerOutstandingUSD, so a record can
+    never qualify twice. Returns the number of receipts normalized.
+    """
+    fixed = 0
+    try:
+        with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else (sqlite_financial_lock or _FALLBACK_LOCK)), db_conn() as conn:
+            for batch in _row_batches(conn, "receipts"):
+                for discovery_row in batch:
+                    discovery = json_loads(discovery_row.get("data_json") or "{}") or {}
+                    if not isinstance(discovery, dict):
+                        continue
+                    if not (
+                        bool(discovery.get("isPaid"))
+                        or str(discovery.get("status") or "") == "Paid"
+                    ):
+                        continue
+                    try:
+                        covered = float(discovery.get("companyCoveredUSD") or 0)
+                        outstanding = float(discovery.get("customerOutstandingUSD") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if covered <= 0.005 or outstanding <= 0.005:
+                        continue
+
+                    row = _lock_full_row(conn, "receipts", str(discovery_row["id"]))
+                    if not row:
+                        continue
+                    data = json_loads(row.get("data_json") or "{}") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    if not (
+                        bool(data.get("isPaid"))
+                        or str(data.get("status") or "") == "Paid"
+                    ):
+                        continue
+                    try:
+                        covered = float(data.get("companyCoveredUSD") or 0)
+                        outstanding = float(data.get("customerOutstandingUSD") or 0)
+                        amount_usd = float(data.get("amountUSD") or 0)
+                        amount_local = float(data.get("amountLocal") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if covered <= 0.005 or outstanding <= 0.005:
+                        continue
+                    if financial_period_is_closed("receipts", data, conn=conn):
+                        continue
+
+                    new_amount = max(round((amount_usd - covered) * 100) / 100, 0.0)
+                    if amount_usd > 0 and amount_local > 0:
+                        data["amountLocal"] = round(
+                            amount_local * (new_amount / amount_usd) * 100
+                        ) / 100
+                    data["amountUSD"] = new_amount
+                    data["customerOutstandingUSD"] = 0.0
+                    conn.execute(
+                        text("UPDATE entities SET data_json = :d WHERE type = 'receipts' AND id = :id"),
+                        {"d": json_dumps(data), "id": str(row["id"])},
+                    )
+                    fixed += 1
+        if fixed:
+            print(f"[albayan] Normalized {fixed} covered receipt(s) settled before the coverage-aware settle")
+    except Exception as e:
+        print(f"[albayan] covered-settled backfill skipped/failed: {type(e).__name__}: {e}")
+    return fixed
+
+
 def _retarget_relink_data(data: dict[str, Any]) -> bool:
     refund_type = str(data.get("refundType") or "")
     if refund_type and refund_type != "None":

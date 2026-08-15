@@ -8490,6 +8490,7 @@ function buildReceiptUsageAdIndex(ads = state.ads) {
     add(ad.linkedDeliveryReceiptId);
     if (Array.isArray(ad.receiptAllocations)) ad.receiptAllocations.forEach(a => add(a && a.receiptId));
     if (Array.isArray(ad.dueAllocations)) ad.dueAllocations.forEach(a => add(a && a.receiptId));
+    if (Array.isArray(ad.companyFundingAllocations)) ad.companyFundingAllocations.forEach(a => add(a && a.receiptId));
     ids.forEach(id => {
       const bucket = index.get(id);
       if (bucket) bucket.push(ad);
@@ -8534,6 +8535,7 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
         String(ad.receiptId || '') === receiptId ||
         (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
         (Array.isArray(ad.dueAllocations) && ad.dueAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
+        (Array.isArray(ad.companyFundingAllocations) && ad.companyFundingAllocations.some(a => String(a.receiptId || '') === receiptId)) ||
         String(ad.linkedDeliveryReceiptId || '') === receiptId
       )
     );
@@ -8552,6 +8554,12 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
+    // Company-covered rows are pot money too (company paid instead of the
+    // customer). Skipping them would show covered dollars as free again.
+    const companyAllocSum = Array.isArray(ad.companyFundingAllocations)
+      ? ad.companyFundingAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
+      : 0;
+
     // Legacy due mirrors belong to Driver links (linkedDeliveryReceiptId) or
     // Not Paid In-Shop links (receiptId), but only for ROWLESS ads: once any
     // positive due row exists, the writers keep the scalar mirror equal to the
@@ -8563,7 +8571,7 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       : 0;
 
     // Use explicit allocations if available, otherwise fall back to ad spend
-    const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage;
+    const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage + companyAllocSum;
     if (explicitAllocations > 0) {
       return sum + explicitAllocations;
     }
@@ -8584,7 +8592,8 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
     // allocations entirely (no arrays at all).
     const hasAllocationData =
       Array.isArray(ad.receiptAllocations) ||
-      Array.isArray(ad.dueAllocations);
+      Array.isArray(ad.dueAllocations) ||
+      Array.isArray(ad.companyFundingAllocations);
     if (hasAllocationData) {
       return sum;
     }
@@ -8607,7 +8616,12 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   const transfers = receiptObj.transfers || [];
   const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0);
 
-  const totalUSD = receiptObj.amountUSD || 0;
+  // A settled receipt's amountUSD is CUSTOMER cash only; the company-covered
+  // share is equally real pot money (it keeps funding the ads it covered).
+  // Mirrors the server's capacity reader exactly.
+  const isPaidReceipt = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
+  const coveredUSD = isPaidReceipt ? Math.max(parseFloat(receiptObj.companyCoveredUSD) || 0, 0) : 0;
+  const totalUSD = (receiptObj.amountUSD || 0) + coveredUSD;
   const remainingUSD = Math.max(totalUSD - usedUSD - transferredUSD, 0);
 
   const lastUsedAt = fundedAds.length > 0
@@ -8677,6 +8691,7 @@ function getDeliveryReceiptDueUsage(receipt) {
   const receiptId = String(receiptObj.id || '');
   const fundedAds = [];
   let usedDueUSD = 0;
+  let usedCompanyUSD = 0;
   for (const ad of getVisibleRecords(state.ads || [])) {
     if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
     const sumFor = (rows) => (Array.isArray(rows) ? rows : [])
@@ -8685,6 +8700,11 @@ function getDeliveryReceiptDueUsage(receipt) {
 
     const paidRows = sumFor(ad.receiptAllocations);
     const dueRows = sumFor(ad.dueAllocations);
+    // Company-covered rows hold pot money exactly like due rows do — the
+    // server refuses to fund new ads from them. They are tracked SEPARATELY
+    // from usedDueUSD because customer-debt math must not double-net them
+    // (customerOutstandingUSD already excludes covered dollars).
+    const companyRows = sumFor(ad.companyFundingAllocations);
 
     // The legacy mirror only speaks for a ROWLESS ad: once any positive due
     // row exists (for this receipt or another), the scalar is the rows' sum,
@@ -8697,6 +8717,11 @@ function getDeliveryReceiptDueUsage(receipt) {
     const committed = paidRows + dueRows + legacyDue;
     if (committed > 0) {
       usedDueUSD += committed;
+    }
+    if (companyRows > 0) {
+      usedCompanyUSD += companyRows;
+    }
+    if (committed > 0 || companyRows > 0) {
       fundedAds.push(ad);
     }
   }
@@ -8707,11 +8732,14 @@ function getDeliveryReceiptDueUsage(receipt) {
   // cost inside per-keystroke renders on phones.
   const transfers = receiptObj.transfers || [];
   const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0) || 0;
-  const remainingDueUSD = Math.max(totalDueUSD - usedDueUSD - transferredUSD, 0);
+  const remainingDueUSD = Math.max(
+    totalDueUSD - usedDueUSD - usedCompanyUSD - transferredUSD, 0
+  );
 
   return {
     totalDueUSD,
     usedDueUSD,
+    usedCompanyUSD,
     remainingDueUSD,
     fundedAds,
     exchangeRate
@@ -10396,6 +10424,65 @@ async function apiCreateReceiptCompanyCoverage(payload) {
   return {
     coverage,
     updatedReceipts,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
+// Cover a customer's RECEIPT-LESS ad-spend debt with company funds. Mirrors
+// apiCreateReceiptCompanyCoverage, but scoped to the customer: the server
+// spreads the amount across their unfunded ads (companyDirectCoverageUSD) and
+// refuses when the books changed under the admin (expectedOutstandingMinorUSD).
+async function apiCreateCustomerCompanyCoverage(payload) {
+  const customerId = String(payload?.customerId || '').trim();
+  if (!Security.isValidRecordId(customerId)) throw new Error('Invalid customer company coverage id');
+
+  const amountMinorUSD = Number(payload?.amountMinorUSD);
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0) {
+    throw new Error('Company coverage amount must be a positive number of cents');
+  }
+  const expectedOutstandingMinorUSD = Number(payload?.expectedOutstandingMinorUSD);
+  if (!Number.isSafeInteger(expectedOutstandingMinorUSD) || expectedOutstandingMinorUSD < 0) {
+    throw new Error('The customer ad-debt amount is missing. Refresh and try again.');
+  }
+  const idempotencyKey = String(payload?.idempotencyKey || '').trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 120) {
+    throw new Error('Company coverage idempotency key is invalid');
+  }
+  const reason = String(payload?.reason || '').trim();
+  if (!reason) throw new Error('A business reason is required');
+  if (reason.length > 500) throw new Error('The business reason is too long');
+
+  const identity = getServerSessionIdentity();
+  const response = await withRetry(() => apiJson(
+    `/api/customers/${encodeURIComponent(customerId)}/company-coverages`,
+    {
+      method: 'POST',
+      body: { amountMinorUSD, idempotencyKey, expectedOutstandingMinorUSD, reason }
+    },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+      || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid company coverage response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const coverage = validateServerEntityResponse(
+    'companyDebtCoverages', response.coverage, 'customerCompanyCoverage.coverage'
+  );
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse(
+      'ads', entity, `customerCompanyCoverage.updatedAds[${index}]`
+    );
+    const local = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, local);
+    return validated;
+  });
+  return {
+    coverage,
     updatedAds,
     replayed: response.replayed === true
   };
@@ -16819,9 +16906,14 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                 ? (statsIndex.receiptsByCustomer.get(String(c.id || '')) || []).filter(r => _isReceiptEligibleForCompanyCoverage(r))
                 : getCustomerCompanyCoverableReceipts(c.id))
             : [];
-          const coverableDebtUSD = Math.round(coverableDebtReceipts.reduce(
+          // Receipt outstanding (in-shop AND delivery) plus receipt-less
+          // ad-spend debt: the one number the company-funds button offers.
+          const coverableAdDebtUSD = isCurrentUserAdmin()
+            ? getCustomerCoverableAdDebt(c.id).totalUSD
+            : 0;
+          const coverableDebtUSD = Math.round((coverableDebtReceipts.reduce(
             (sum, r) => sum + _getCompanyCoverableOutstandingUSD(r), 0
-          ) * 100) / 100;
+          ) + coverableAdDebtUSD) * 100) / 100;
           const receiptsLabel = isAr ? `الوصولات ${linkedReceiptCount}` : `Receipts ${linkedReceiptCount}`;
           const linkedReceiptsButton = canSeeReceipts
             ? `<button type="button" data-action="view-customer-receipts" data-customer-id="${Security.escapeHtml(String(c.id || ''))}" onclick="openCustomerReceipts(this.dataset.customerId)" aria-label="${Security.escapeHtml(isAr ? `عرض ${linkedReceiptCount} من وصولات العميل ${c.name || ''}` : `View ${linkedReceiptCount} receipts linked to ${c.name || 'this customer'}`)}" class="customer-receipts-button min-h-11 px-3 py-2 bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 rounded-full text-xs font-bold inline-flex items-center gap-1.5 hover:bg-violet-200 dark:hover:bg-violet-900/50 focus:outline-none focus:ring-2 focus:ring-violet-500">
@@ -16939,8 +17031,8 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <span dir="ltr">$${stats.companyFundedUSD.toFixed(2)}</span>
                   </div>
                   ` : ''}
-                  ${coverableDebtReceipts.length ? `
-                  <!-- Admin-only: cover this customer's unpaid in-shop debt from company funds -->
+                  ${(coverableDebtReceipts.length || coverableAdDebtUSD > 0.005) ? `
+                  <!-- Admin-only: cover this customer's receipt or ad debt from company funds -->
                   <button type="button" data-customer-id="${Security.escapeHtml(String(c.id || ''))}"
                     onclick="openCustomerCompanyDebtCoverage(this.dataset.customerId, this)"
                     aria-haspopup="dialog"
@@ -17449,22 +17541,14 @@ function renderReceiptsView() {
           const collectionTarget = getReceiptCollectionTarget(receipt);
           const hasCustomerDebt = receiptDebtType !== 'none'
             && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
-          // Company coverage is an admin-only business-expense action. Prefer
-          // the server's authoritative outstanding amount after prior
-          // coverages; legacy receipts fall back to their computed debt.
-          const savedCompanyOutstandingUSD = Number(receipt.customerOutstandingUSD);
-          const companyCoverableOutstandingUSD = Math.max(
-            receipt.customerOutstandingUSD != null && Number.isFinite(savedCompanyOutstandingUSD)
-              ? savedCompanyOutstandingUSD
-              : (Number(collectionTarget.amountUSD) || 0),
-            0
-          );
+          // Company coverage is an admin-only business-expense action. The
+          // shared helper prefers the server's authoritative outstanding
+          // amount and nets out cash a driver already collected.
+          const companyCoverableOutstandingUSD = _getCompanyCoverableOutstandingUSD(receipt);
           const companyCoveredUSD = Math.max(Number(receipt.companyCoveredUSD) || 0, 0);
           const companyCoverageCount = Math.max(Math.trunc(Number(receipt.companyCoverageCount) || 0), 0);
           const canCoverWithCompanyFunds = isCurrentUserAdmin()
-            && getReceiptPaymentState(receipt) === 'not_paid'
-            && receiptDebtType === 'shop'
-            && companyCoverableOutstandingUSD > 0.005;
+            && _isReceiptEligibleForCompanyCoverage(receipt);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -18972,8 +19056,8 @@ function renderDeliveriesView(logOnly) {
                 </div>
 
                 <div class="text-sm mb-2">
-                  <span class="font-bold text-emerald-600">${(ad.amountLocal || 0).toLocaleString('en-US')} LYD</span>
-                  <span class="text-xs text-slate-500 ml-2">$${(ad.amountUSD || 0).toFixed(2)}</span>
+                  <span class="font-bold text-emerald-600">${(_deliveryDisplayAmounts(ad).local || 0).toLocaleString('en-US')} LYD</span>
+                  <span class="text-xs text-slate-500 ml-2">$${(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)}</span>
                 </div>
 
                 ${deliveryPerson ? `
@@ -19167,7 +19251,7 @@ async function checkStuckDeliveries() {
             </div>
           </div>
           <div class="flex justify-between text-xs">
-            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(d.amountLocal || 0).toLocaleString('en-US')} LYD</span>
+            <span class="text-slate-600 dark:text-slate-400">${isAr ? 'المبلغ' : 'Amount'}: ${(_deliveryDisplayAmounts(d).local || 0).toLocaleString('en-US')} LYD</span>
             <button onclick="navigateTo('deliveries'); this.closest('#app-modal').remove();" class="text-indigo-600 hover:text-indigo-700 font-bold">${isAr ? 'عرض ←' : 'View →'}</button>
           </div>
         </div>
@@ -19224,6 +19308,22 @@ function _getCollectedCashLocal(item) {
     if (Number.isFinite(a)) return a;
   }
   return 0;
+}
+
+// Row/tile display money for a delivery item. A debt receipt shows what is
+// LEFT for the customer to hand over (net of company coverage) — a driver
+// reading the gross would demand dollars the company already paid.
+function _deliveryDisplayAmounts(item) {
+  const raw = {
+    local: Number(item?.amountLocal) || 0,
+    usd: Number(item?.amountUSD) || 0
+  };
+  if (!item) return raw;
+  // Ads and ad-based deliveries keep their stored amounts.
+  const isReceiptRecord = (state.receipts || []).some(r => r && r.id === item.id);
+  if (!isReceiptRecord || getReceiptDebtType(item) === 'none') return raw;
+  const target = getReceiptCollectionTarget(item);
+  return { local: target.amountLocal, usd: target.amountUSD };
 }
 
 function _getOutstandingDueLocal(item) {
@@ -19390,6 +19490,14 @@ function showDeliveryDetails(itemId) {
   const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
   const editHandler = isReceipt ? 'editReceipt' : 'editAd';
   const isItemPaid = isReceipt ? ad.isPaid === true : getAdPaymentState(ad) === 'paid';
+  // For an unpaid debt receipt show what is actually LEFT to collect (net of
+  // company coverage), never the gross a driver must no longer demand.
+  const detailDebtTarget = (isReceipt && getReceiptDebtType(ad) !== 'none')
+    ? getReceiptCollectionTarget(ad)
+    : null;
+  const detailAmountLocal = detailDebtTarget ? detailDebtTarget.amountLocal : (ad.amountLocal || 0);
+  const detailAmountUSD = detailDebtTarget ? detailDebtTarget.amountUSD : (ad.amountUSD || 0);
+  const detailCoveredUSD = isReceipt ? Math.max(parseFloat(ad.companyCoveredUSD) || 0, 0) : 0;
   
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
@@ -19430,14 +19538,19 @@ function showDeliveryDetails(itemId) {
         <!-- Amount Details -->
         <div class="grid grid-cols-2 gap-3">
           <div class="p-4 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-800">
-            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${isAr ? 'المبلغ (LYD)' : 'Amount (LYD)'}</div>
-            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(ad.amountLocal || 0).toLocaleString('en-US')}</div>
+            <div class="text-xs text-emerald-600 dark:text-emerald-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (LYD)' : 'To collect (LYD)') : (isAr ? 'المبلغ (LYD)' : 'Amount (LYD)')}</div>
+            <div class="text-2xl font-black text-emerald-700 dark:text-emerald-300">${(detailAmountLocal || 0).toLocaleString('en-US')}</div>
           </div>
           <div class="p-4 rounded-xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${isAr ? 'المبلغ (USD)' : 'Amount (USD)'}</div>
-            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(ad.amountUSD || 0).toFixed(2)}</div>
+            <div class="text-xs text-blue-600 dark:text-blue-400 font-medium mb-1">${detailDebtTarget ? (isAr ? 'المطلوب تحصيله (USD)' : 'To collect (USD)') : (isAr ? 'المبلغ (USD)' : 'Amount (USD)')}</div>
+            <div class="text-2xl font-black text-blue-700 dark:text-blue-300">$${(detailAmountUSD || 0).toFixed(2)}</div>
           </div>
         </div>
+        ${detailCoveredUSD > 0.005 ? `
+        <div class="px-4 py-2 rounded-xl bg-violet-50 dark:bg-violet-900/20 border border-violet-200 dark:border-violet-800 text-xs font-bold text-violet-700 dark:text-violet-300 flex items-center gap-2">
+          <i data-lucide="landmark" class="w-4 h-4"></i>
+          <span>${isAr ? `غطّت الشركة $${detailCoveredUSD.toFixed(2)} من هذا الدين` : `Company covered $${detailCoveredUSD.toFixed(2)} of this debt`}</span>
+        </div>` : ''}
         
         <!-- Status & Driver -->
         <div class="grid grid-cols-2 gap-3">
@@ -19664,7 +19777,7 @@ function renderDeliveryDashboard() {
                         </div>
                       ` : ''}
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
-                        <span class="text-xs font-bold text-emerald-600">$${Number(ad.amountUSD || 0).toFixed(2)} (${Number(ad.amountLocal || 0).toFixed(0)} LYD)</span>
+                        <span class="text-xs font-bold text-emerald-600">$${Number(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)} (${Number(_deliveryDisplayAmounts(ad).local || 0).toFixed(0)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
                         <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${(() => {
@@ -23861,7 +23974,11 @@ function getAdSpendLYD(ad) {
 // zero-value D receipt and keep the real customer debt on its linked ad. That
 // link is a collection target only: it must NEVER become paid receipt credit
 // or receipt usage (getReceiptUsageStats deliberately remains unchanged).
-function getReceiptCollectionTarget(receipt, ads = state.ads) {
+// GROSS target: the original customer debt with NO company-coverage netting.
+// Only for frozen history writes (debtAmount* at delivery completion) and
+// capacity-style reads. Everything the customer/driver SEES or COLLECTS must
+// use getReceiptCollectionTarget below, which nets out company funds.
+function getReceiptGrossCollectionTarget(receipt, ads = state.ads) {
   const empty = {
     amountUSD: 0,
     amountLocal: 0,
@@ -23948,6 +24065,37 @@ function getReceiptCollectionTarget(receipt, ads = state.ads) {
   }
 
   return finish(amountUSD, amountLocal, linkedAds.length ? 'linked_ads' : 'none', linkedAds);
+}
+
+// The customer's REMAINING share of a receipt debt: gross minus what the
+// company has already covered. This is the one number every collection flow
+// (driver completion, mark-collected, WhatsApp dispatch, CSV, cards) may show
+// or collect — a driver must never demand dollars the company already paid.
+function getReceiptCollectionTarget(receipt, ads = state.ads) {
+  const gross = getReceiptGrossCollectionTarget(receipt, ads);
+  const coveredUSD = Math.max(parseFloat(receipt?.companyCoveredUSD) || 0, 0);
+  // The server-stored outstanding is the exact remaining share: it nets BOTH
+  // company coverage and any cash a driver already collected (Delivered but
+  // UNDERPAID). Prefer it whenever present; fall back to gross minus covered.
+  const storedOutstanding = Number(receipt?.customerOutstandingUSD);
+  const hasStoredOutstanding = receipt?.customerOutstandingUSD != null
+    && Number.isFinite(storedOutstanding);
+  if (!hasStoredOutstanding && !(coveredUSD > 0)) return gross;
+  const netUSDRaw = hasStoredOutstanding
+    ? Math.min(Math.max(storedOutstanding, 0), gross.amountUSD)
+    : Math.max(gross.amountUSD - Math.min(coveredUSD, gross.amountUSD), 0);
+  const netLocalRaw = gross.amountUSD > 0
+    ? netUSDRaw * (gross.amountLocal / gross.amountUSD)
+    : 0;
+  const netUSD = Math.round(netUSDRaw * 100) / 100;
+  const netLocal = Math.round(netLocalRaw * 100) / 100;
+  return {
+    ...gross,
+    amountUSD: netUSD,
+    amountLocal: netLocal,
+    debtUSD: netUSD,
+    debtLYD: netLocal
+  };
 }
 
 // Backward-readable name for receipt-card and reporting call sites.
@@ -24140,14 +24288,15 @@ function getCustomerStats(customerId, statsIndex = null) {
     const committedUSD = (statsIndex && statsIndex.committedUSDByReceiptId)
       ? (statsIndex.committedUSDByReceiptId.get(String(receipt.id || '')) || 0)
       : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
-    // COMPANY COVERAGE: after an admin covers part of this debt from company
-    // funds, the server stores the customer's true remaining liability in
-    // customerOutstandingUSD (gross debt minus every coverage). The gross
-    // target must not be read past that point: coverage also shrinks the
-    // committed due rows, so gross-minus-committed would GROW by the covered
-    // amount and over-report the debt (e.g. $100 debt, company covers $40,
-    // card showed -$140 instead of -$60). Outstanding is server-controlled
-    // (protect_company_coverage_fields) and capped by the gross for safety.
+    // COMPANY COVERAGE: the server stores the customer's true remaining
+    // liability in customerOutstandingUSD (gross minus every coverage, minus
+    // any driver-collected cash). The collection target above is ALSO net of
+    // coverage now, so the two agree; the stored value stays preferred
+    // because it additionally nets collected cash on Delivered receipts.
+    // Without this netting the card over-reported debt (e.g. $100 debt,
+    // company covers $40, card showed -$140 instead of -$60). Outstanding is
+    // server-controlled (protect_company_coverage_fields) and capped for
+    // safety.
     const storedOutstanding = Number(receipt.customerOutstandingUSD);
     const outstandingUSD = receipt.customerOutstandingUSD != null && Number.isFinite(storedOutstanding)
       ? Math.min(Math.max(storedOutstanding, 0), target.debtUSD)
@@ -24178,19 +24327,44 @@ function getCustomerStats(customerId, statsIndex = null) {
   let companyFundedUSD = 0;
   let companyFundedLYD = 0;
   customerAds.forEach(ad => {
+    // CAP at the ad's REAL (status-aware) spend: a stopped/refunded ad may
+    // have spent less than the company covered, and the credit must never
+    // exceed the spend actually charged to this customer above — otherwise
+    // the surplus would appear as phantom positive balance.
+    let creditableUSD = Math.max(getAdSpendUSD(ad), 0);
     (Array.isArray(ad.companyFundingAllocations) ? ad.companyFundingAllocations : []).forEach(row => {
       const rowReceiptId = String(row?.receiptId || '');
       // Only rows funded by THIS customer's receipts: an ad can reference
       // another customer's receipt in legacy data, and that coverage belongs
       // to the other customer's card.
       if (!customerReceiptIds.has(rowReceiptId)) return;
-      const rowUSD = Math.max(parseFloat(row?.amountUSD) || 0, 0);
+      const rowUSD = Math.min(
+        Math.max(parseFloat(row?.amountUSD) || 0, 0),
+        creditableUSD
+      );
       if (rowUSD <= 0) return;
+      creditableUSD -= rowUSD;
       companyFundedUSD += rowUSD;
       // LYD mirror at the funding receipt's own rate — the same rate this
       // debt used while it sat in receiptDebtLYD before it was covered.
       companyFundedLYD += rowUSD * (receiptRateById.get(rowReceiptId) || 0);
     });
+    // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD
+    // is company money against spend that no receipt ever backed. Spent stays
+    // the real ad spend; this credit removes the covered part from the
+    // customer's liability, exactly like the receipt-scoped rows above —
+    // and shares the same real-spend cap.
+    const directUSD = Math.min(
+      Math.max(parseFloat(ad.companyDirectCoverageUSD) || 0, 0),
+      creditableUSD
+    );
+    if (directUSD > 0) {
+      companyFundedUSD += directUSD;
+      const adRate = typeof getAdSpendExchangeRate === 'function'
+        ? (Number(getAdSpendExchangeRate(ad)) || 0)
+        : (Number(ad.exchangeRate || state.defaultExchangeRate) || 0);
+      companyFundedLYD += directUSD * adRate;
+    }
   });
   companyFundedUSD = Math.round(companyFundedUSD * 100) / 100;
   companyFundedLYD = Math.round(companyFundedLYD * 100) / 100;
@@ -27063,7 +27237,11 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     return;
   }
 
+  // NET of company coverage: the driver compares what they collected against
+  // the customer's remaining share only (mirrors the server's completion truth).
   const collectionTarget = getReceiptCollectionTarget(receipt);
+  // The frozen debt history keeps the GROSS pre-coverage debt.
+  const grossCollectionTarget = getReceiptGrossCollectionTarget(receipt);
   const debtLocal = collectionTarget.amountLocal;
   const quoted = Number(receipt.quotedDeliveryFee ?? 0) || 0;
   const debtCmp = compareDebt(debtLocal, collected);
@@ -27105,8 +27283,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     // trackable loss). Old records without this field read as 'customer'.
     deliveryFeePaidBy: feePaidBy,
     driverNotes: notes,
-    debtAmountLocal: receipt.debtAmountLocal ?? debtLocal,
-    debtAmountUSD: receipt.debtAmountUSD ?? collectionTarget.amountUSD,
+    debtAmountLocal: receipt.debtAmountLocal ?? grossCollectionTarget.amountLocal,
+    debtAmountUSD: receipt.debtAmountUSD ?? grossCollectionTarget.amountUSD,
     paymentResult: debtCmp.paymentResult,
     overpaidAmount: debtCmp.overpaidAmount,
     remainingDue: debtCmp.remainingDue,
@@ -27616,19 +27794,28 @@ let _companyDebtCoverageDialogState = null;
 function _getCompanyCoverableOutstandingUSD(receipt) {
   if (!receipt || receipt._deleted) return 0;
   const stored = Number(receipt.customerOutstandingUSD);
-  const fallback = Number(getReceiptCollectionTarget(receipt).amountUSD) || 0;
-  const amount = receipt.customerOutstandingUSD != null && Number.isFinite(stored)
-    ? stored
-    : fallback;
-  return Math.max(Math.round(amount * 100) / 100, 0);
+  if (receipt.customerOutstandingUSD != null && Number.isFinite(stored)) {
+    return Math.max(Math.round(stored * 100) / 100, 0);
+  }
+  // The collection target is already net of company coverage. A Delivered
+  // (UNDERPAID) receipt has additionally received real customer cash — its
+  // amountUSD after completion — which is not outstanding either.
+  let fallback = Number(getReceiptCollectionTarget(receipt).amountUSD) || 0;
+  if (String(receipt.deliveryStatus || '').trim().toLowerCase() === 'delivered') {
+    fallback -= Math.max(parseFloat(receipt.amountUSD) || 0, 0);
+  }
+  return Math.max(Math.round(fallback * 100) / 100, 0);
 }
 
 function _isReceiptEligibleForCompanyCoverage(receipt) {
+  const debtType = getReceiptDebtType(receipt);
   return isCurrentUserAdmin()
     && !!receipt
     && !receipt._deleted
     && getReceiptPaymentState(receipt) === 'not_paid'
-    && getReceiptDebtType(receipt) === 'shop'
+    // In-shop debt AND delivery debt are both coverable; the server collects
+    // only the customer's remaining share after coverage.
+    && (debtType === 'shop' || debtType === 'delivery')
     && _getCompanyCoverableOutstandingUSD(receipt) > 0.005;
 }
 
@@ -27695,7 +27882,7 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
   if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
     showNotification(
       'Company coverage unavailable',
-      'This must be an unpaid in-shop customer-debt receipt with an outstanding balance.',
+      'This must be an unpaid customer-debt receipt (in-shop or delivery) with an outstanding balance.',
       'warning'
     );
     return false;
@@ -27979,6 +28166,343 @@ function _pickCompanyCoverageReceipt(receiptId) {
   return openCompanyDebtCoverageModal(receiptId, null);
 }
 
+function _pickCustomerAdDebtCoverage(customerId) {
+  _closeCompanyCoverageReceiptPicker();
+  return openCustomerAdDebtCoverageModal(customerId, null);
+}
+
+// RECEIPT-LESS ad-spend debt company funds may cover, mirroring the server's
+// coverable_ad_debt_minor exactly: Not Paid, non-driver ads only; a rowless
+// legacy ad that references any receipt is charged against that receipt by
+// the usage fallback and is excluded here. Gap per ad:
+// effective spend − paid rows − due rows − company rows − direct coverage.
+function getCustomerCoverableAdDebt(customerId) {
+  const normalizedId = String(customerId || '');
+  const rows = [];
+  let totalUSD = 0;
+  getVisibleRecords(state.ads || []).forEach(ad => {
+    if (!ad || ad.recordType === 'receipt') return;
+    if (String(ad.customerId || ad.customer || '') !== normalizedId) return;
+    if (getAdPaymentState(ad) !== 'not_paid') return;
+    if (String(ad.collectionMethod || '') === 'driver') return;
+    const hasArrays = Array.isArray(ad.receiptAllocations)
+      || Array.isArray(ad.dueAllocations)
+      || Array.isArray(ad.companyFundingAllocations);
+    if (!hasArrays && (
+      String(ad.fundingReceiptId || '').trim()
+      || String(ad.receiptId || '').trim()
+      || String(ad.linkedDeliveryReceiptId || '').trim()
+    )) return;
+    // STATUS-AWARE spend (getAdSpendUSD) — the same number the customer
+    // card's "Spent" shows. The server's coverable_ad_debt_minor mirrors
+    // this exactly; a pending/paused ad has no coverable debt.
+    const effective = Math.max(getAdSpendUSD(ad), 0);
+    const sumRows = list => (Array.isArray(list) ? list : [])
+      .reduce((s, row) => s + Math.max(Number(row?.amountUSD) || 0, 0), 0);
+    const direct = Math.max(Number(ad.companyDirectCoverageUSD) || 0, 0);
+    const gap = Math.max(
+      effective
+        - sumRows(ad.receiptAllocations)
+        - sumRows(ad.dueAllocations)
+        - sumRows(ad.companyFundingAllocations)
+        - direct,
+      0
+    );
+    const gapUSD = Math.round(gap * 100) / 100;
+    if (gapUSD > 0.005) {
+      rows.push({ ad, gapUSD });
+      totalUSD += gapUSD;
+    }
+  });
+  return { totalUSD: Math.round(totalUSD * 100) / 100, ads: rows };
+}
+
+// ==========================================
+// CUSTOMER-LEVEL AD-DEBT COVERAGE MODAL (admin only)
+// ==========================================
+let _customerAdCoverageDialogState = null;
+
+function _handleCustomerAdCoverageKeydown(event) {
+  const dialogState = _customerAdCoverageDialogState;
+  const modal = document.getElementById('customer-ad-coverage-modal');
+  if (!dialogState || !modal) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeCustomerAdDebtCoverageModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = _companyCoverageFocusable(modal);
+  if (!focusable.length) { event.preventDefault(); return; }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function closeCustomerAdDebtCoverageModal({ force = false } = {}) {
+  const dialogState = _customerAdCoverageDialogState;
+  if (dialogState?.busy && !force) return false;
+  if (dialogState?.keyHandler) document.removeEventListener('keydown', dialogState.keyHandler);
+  document.getElementById('customer-ad-coverage-modal')?.remove();
+  if (dialogState) {
+    document.body.style.overflow = dialogState.bodyOverflow || '';
+    const opener = dialogState.opener;
+    _customerAdCoverageDialogState = null;
+    try { opener?.focus?.(); } catch (_) {}
+  }
+  return true;
+}
+
+function openCustomerAdDebtCoverageModal(customerId, opener = null) {
+  const isAr = state.language === 'ar';
+  if (!isCurrentUserAdmin()) {
+    showNotification(
+      isAr ? 'تم رفض الوصول' : 'Access denied',
+      isAr ? 'فقط المدير يمكنه استخدام أموال الشركة.' : 'Only an administrator can use company funds.',
+      'error'
+    );
+    return false;
+  }
+  const safeCustomerId = String(customerId || '').trim();
+  const adDebt = getCustomerCoverableAdDebt(safeCustomerId);
+  if (!(adDebt.totalUSD > 0.005)) {
+    showNotification(
+      isAr ? 'لا يوجد دين إعلانات' : 'No ad debt',
+      isAr ? 'لا يوجد دين إعلانات بدون وصولات لهذا العميل.' : 'This customer has no receipt-less ad debt to cover.',
+      'warning'
+    );
+    return false;
+  }
+
+  closeCustomerAdDebtCoverageModal({ force: true });
+  const customer = (state.customers || []).find(row => row && String(row.id) === safeCustomerId);
+  const customerName = Security.escapeHtml(String(customer?.name || (isAr ? 'العميل' : 'Customer')));
+  const outstandingMinorUSD = Math.round(adDebt.totalUSD * 100);
+  const bodyOverflow = document.body.style.overflow;
+  const idempotencyKey = generateId('customer_company_coverage');
+
+  const html = `
+    <div id="customer-ad-coverage-modal"
+      class="mobile-dialog-overlay fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-4"
+      role="dialog" aria-modal="true" aria-labelledby="customer-ad-coverage-title" aria-describedby="customer-ad-coverage-warning"
+      onclick="if(event.target===this) closeCustomerAdDebtCoverageModal()">
+      <div class="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-slate-900"
+        onclick="event.stopPropagation()">
+        <div class="flex flex-shrink-0 items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-700 sm:p-5">
+          <div class="min-w-0">
+            <h2 id="customer-ad-coverage-title" class="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-white">
+              <i data-lucide="landmark" class="h-5 w-5 flex-shrink-0 text-violet-600"></i>
+              <span>${isAr ? 'تغطية دين الإعلانات من أموال الشركة' : 'Cover ad debt with company funds'}</span>
+            </h2>
+            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; ${isAr ? 'دين إعلانات بدون وصولات' : 'Receipt-less ad-spend debt'}</p>
+          </div>
+          <button type="button" onclick="closeCustomerAdDebtCoverageModal()"
+            class="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:hover:bg-slate-800"
+            aria-label="${isAr ? 'إغلاق' : 'Close company funds dialog'}">
+            <i data-lucide="x" class="h-5 w-5"></i>
+          </button>
+        </div>
+
+        <form class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5" onsubmit="event.preventDefault(); submitCustomerAdDebtCoverage()">
+          <div id="customer-ad-coverage-warning" class="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm leading-5 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+            <div class="flex gap-2">
+              <i data-lucide="triangle-alert" class="mt-0.5 h-5 w-5 flex-shrink-0"></i>
+              <p><strong>${isAr ? 'مصروف تجاري فقط.' : 'Business expense only.'}</strong> ${isAr ? 'هذا ليس دفعة من العميل ولا يُحتسب كإيراد.' : 'This does not record a customer payment and does not count as revenue.'}</p>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <div class="mb-2 flex items-end justify-between gap-3">
+              <label for="customer-ad-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'مبلغ الشركة (USD)' : 'Company amount (USD)'}</label>
+              <button type="button" onclick="setCustomerAdDebtCoverageFullAmount()"
+                class="min-h-11 rounded-xl px-3 text-xs font-bold text-violet-700 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:text-violet-300 dark:hover:bg-violet-950/30">
+                ${isAr ? 'استخدم كامل الدين' : 'Use full outstanding'}
+              </button>
+            </div>
+            <div class="relative">
+              <span class="pointer-events-none absolute inset-y-0 left-3 flex items-center font-bold text-slate-500">$</span>
+              <input id="customer-ad-coverage-amount" type="text" inputmode="decimal" autocomplete="off"
+                value="${(outstandingMinorUSD / 100).toFixed(2)}"
+                oninput="sanitizeMoneyInput(this, 2); updateCustomerAdDebtCoveragePreview()"
+                class="min-h-12 w-full rounded-xl border border-slate-300 bg-white py-3 pl-8 pr-3 text-base font-bold text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"
+                aria-describedby="customer-ad-coverage-validation" required>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <label for="customer-ad-coverage-reason" class="text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'السبب التجاري' : 'Business reason'} <span class="text-rose-600">*</span></label>
+            <textarea id="customer-ad-coverage-reason" rows="3" maxlength="500" required
+              oninput="updateCustomerAdDebtCoveragePreview()"
+              placeholder="${isAr ? 'مثال: تسوية دين إعلانات وافق عليها المدير' : 'Example: Ad-debt settlement approved by manager'}"
+              class="mt-2 min-h-24 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"></textarea>
+          </div>
+
+          <div class="mt-4 rounded-xl border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-800 dark:bg-violet-950/30">
+            <h3 class="text-sm font-bold text-violet-900 dark:text-violet-100">${isAr ? 'قبل وبعد' : 'Before and after'}</h3>
+            <dl class="mt-2 grid grid-cols-3 gap-2 text-center">
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${isAr ? 'الدين قبل' : 'Debt before'}</dt><dd id="customer-ad-coverage-before" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${isAr ? 'تغطي الشركة' : 'Company covers'}</dt><dd id="customer-ad-coverage-applied" class="mt-1 text-sm font-bold text-violet-700 dark:text-violet-300"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${isAr ? 'الدين بعد' : 'Debt after'}</dt><dd id="customer-ad-coverage-after" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+            </dl>
+          </div>
+          <p id="customer-ad-coverage-validation" class="mt-3 min-h-5 text-sm font-medium text-rose-600" role="alert" aria-live="polite"></p>
+        </form>
+
+        <div class="flex flex-shrink-0 flex-col-reverse gap-2 border-t border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 sm:flex-row sm:justify-end">
+          <button id="customer-ad-coverage-cancel" type="button" onclick="closeCustomerAdDebtCoverageModal()"
+            class="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">${isAr ? 'إلغاء' : 'Cancel'}</button>
+          <button id="customer-ad-coverage-submit" type="button" onclick="submitCustomerAdDebtCoverage()"
+            class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
+            <i data-lucide="landmark" class="h-4 w-4"></i><span>${isAr ? 'تأكيد مصروف الشركة' : 'Confirm company expense'}</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', html);
+  _customerAdCoverageDialogState = {
+    customerId: safeCustomerId,
+    outstandingMinorUSD,
+    idempotencyKey,
+    opener: opener || document.activeElement,
+    bodyOverflow,
+    busy: false,
+    submitPromise: null,
+    keyHandler: _handleCustomerAdCoverageKeydown
+  };
+  document.body.style.overflow = 'hidden';
+  document.addEventListener('keydown', _handleCustomerAdCoverageKeydown);
+  updateCustomerAdDebtCoveragePreview();
+  const amountInput = document.getElementById('customer-ad-coverage-amount');
+  try { amountInput?.focus(); amountInput?.select(); } catch (_) {}
+  try { if (typeof IconQueue !== 'undefined') IconQueue.schedule(document.getElementById('customer-ad-coverage-modal')); } catch (_) {}
+  return true;
+}
+
+function setCustomerAdDebtCoverageFullAmount() {
+  const dialogState = _customerAdCoverageDialogState;
+  const input = document.getElementById('customer-ad-coverage-amount');
+  if (!dialogState || !input || dialogState.busy) return;
+  input.value = (dialogState.outstandingMinorUSD / 100).toFixed(2);
+  updateCustomerAdDebtCoveragePreview();
+  input.focus();
+}
+
+function updateCustomerAdDebtCoveragePreview() {
+  const isAr = state.language === 'ar';
+  const dialogState = _customerAdCoverageDialogState;
+  const modal = document.getElementById('customer-ad-coverage-modal');
+  if (!dialogState || !modal) return false;
+  const amountInput = modal.querySelector('#customer-ad-coverage-amount');
+  const reasonInput = modal.querySelector('#customer-ad-coverage-reason');
+  const submit = modal.querySelector('#customer-ad-coverage-submit');
+  const cancel = modal.querySelector('#customer-ad-coverage-cancel');
+  const validation = modal.querySelector('#customer-ad-coverage-validation');
+  const amount = Number(String(amountInput?.value || '').trim());
+  const amountMinorUSD = Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+  const reason = String(reasonInput?.value || '').trim();
+  const remainingMinorUSD = Math.max(dialogState.outstandingMinorUSD - Math.max(amountMinorUSD, 0), 0);
+
+  modal.querySelector('#customer-ad-coverage-before').textContent = _companyCoverageMoney(dialogState.outstandingMinorUSD / 100);
+  modal.querySelector('#customer-ad-coverage-applied').textContent = _companyCoverageMoney(Math.max(amountMinorUSD, 0) / 100);
+  modal.querySelector('#customer-ad-coverage-after').textContent = _companyCoverageMoney(remainingMinorUSD / 100);
+
+  let message = '';
+  if (!amountMinorUSD) message = isAr ? 'أدخل مبلغاً أكبر من $0.00.' : 'Enter an amount greater than $0.00.';
+  else if (amountMinorUSD > dialogState.outstandingMinorUSD) message = isAr ? 'لا يمكن أن يتجاوز المبلغ الدين الحالي.' : 'The amount cannot be more than the current outstanding debt.';
+  else if (!reason) message = isAr ? 'السبب التجاري مطلوب.' : 'A business reason is required.';
+  else if (reason.length > 500) message = isAr ? 'السبب طويل جداً.' : 'The business reason must be 500 characters or fewer.';
+  validation.textContent = message;
+  if (submit) submit.disabled = !!message || dialogState.busy;
+  if (amountInput) amountInput.disabled = dialogState.busy;
+  if (reasonInput) reasonInput.disabled = dialogState.busy;
+  if (cancel) cancel.disabled = dialogState.busy;
+  return !message;
+}
+
+async function submitCustomerAdDebtCoverage() {
+  const isAr = state.language === 'ar';
+  const dialogState = _customerAdCoverageDialogState;
+  if (!dialogState) return false;
+  if (dialogState.submitPromise) return dialogState.submitPromise;
+
+  if (!isCurrentUserAdmin()) {
+    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    closeCustomerAdDebtCoverageModal({ force: true });
+    return false;
+  }
+  // Recompute at commit time: the server refuses stale books, so surface the
+  // mismatch here first with a clear message instead of a raw 409.
+  const currentMinor = Math.round(getCustomerCoverableAdDebt(dialogState.customerId).totalUSD * 100);
+  if (currentMinor !== dialogState.outstandingMinorUSD) {
+    showNotification(
+      isAr ? 'تغيّرت البيانات' : 'Books changed',
+      isAr ? 'تغيّر دين الإعلانات. أعد الفتح وراجع المبلغ الحالي.' : 'The customer ad debt changed. Reopen and review the current amount.',
+      'warning'
+    );
+    closeCustomerAdDebtCoverageModal({ force: true });
+    return false;
+  }
+  if (!updateCustomerAdDebtCoveragePreview()) return false;
+
+  const modal = document.getElementById('customer-ad-coverage-modal');
+  const amount = Number(String(modal?.querySelector('#customer-ad-coverage-amount')?.value || '').trim());
+  const amountMinorUSD = Math.round(amount * 100);
+  const reason = String(modal?.querySelector('#customer-ad-coverage-reason')?.value || '').trim();
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0 || amountMinorUSD > dialogState.outstandingMinorUSD
+      || !reason || reason.length > 500) {
+    updateCustomerAdDebtCoveragePreview();
+    return false;
+  }
+
+  dialogState.busy = true;
+  updateCustomerAdDebtCoveragePreview();
+  const requestPromise = (async () => {
+    try {
+      const response = await apiCreateCustomerCompanyCoverage({
+        customerId: dialogState.customerId,
+        amountMinorUSD,
+        idempotencyKey: dialogState.idempotencyKey,
+        expectedOutstandingMinorUSD: dialogState.outstandingMinorUSD,
+        reason
+      });
+      const entityBatch = (response.updatedAds || []).map(entity => ({ collection: 'ads', entity }));
+      const applied = applyValidatedServerEntityBatch(entityBatch, 'customerCompanyCoverage');
+      if (applied.length !== entityBatch.length) throw new Error('The company coverage response was incomplete. Refresh and verify.');
+
+      closeCustomerAdDebtCoverageModal({ force: true });
+      showNotification(
+        response.replayed ? (isAr ? 'تم تأكيد التغطية' : 'Company coverage confirmed') : (isAr ? 'تم تطبيق أموال الشركة' : 'Company funds applied'),
+        `${_companyCoverageMoney(amountMinorUSD / 100)} ${isAr ? 'سُجّل كمصروف تجاري على دين الإعلانات.' : 'was recorded as a business expense against ad debt.'}`,
+        'success'
+      );
+      return response;
+    } catch (error) {
+      const message = error?.status === 409
+        ? describe409(error, isAr ? 'تغيّرت بيانات العميل على جهاز آخر. أعد المحاولة.' : 'This customer changed on another device. Refresh and review the current debt.')
+        : (error?.message || (isAr ? 'تعذّر تطبيق أموال الشركة. حاول مجدداً.' : 'Could not apply company funds. Try again.'));
+      showNotification(isAr ? 'فشلت التغطية' : 'Company coverage failed', message, 'error');
+      if (isVersionConflict409(error)) closeCustomerAdDebtCoverageModal({ force: true });
+      return false;
+    } finally {
+      const activeState = _customerAdCoverageDialogState;
+      if (activeState === dialogState) {
+        activeState.busy = false;
+        activeState.submitPromise = null;
+        updateCustomerAdDebtCoveragePreview();
+      }
+    }
+  })();
+  dialogState.submitPromise = requestPromise;
+  return requestPromise;
+}
+
 function openCustomerCompanyDebtCoverage(customerId, opener = null) {
   const isAr = state.language === 'ar';
   // Exact-admin check at the action door — same rule as the receipt-card path.
@@ -27991,17 +28515,22 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
     return false;
   }
   const eligible = getCustomerCompanyCoverableReceipts(customerId);
-  if (!eligible.length) {
+  const adDebt = getCustomerCoverableAdDebt(customerId);
+  const hasAdDebt = adDebt.totalUSD > 0.005;
+  if (!eligible.length && !hasAdDebt) {
     showNotification(
       isAr ? 'لا يوجد دين مؤهل' : 'No eligible debt',
       isAr
-        ? 'لا توجد وصولات دين محل غير مدفوعة لهذا العميل يمكن تغطيتها من أموال الشركة.'
-        : 'This customer has no unpaid in-shop debt receipts that company funds can cover.',
+        ? 'لا يوجد لهذا العميل دين وصولات أو دين إعلانات يمكن تغطيته من أموال الشركة.'
+        : 'This customer has no receipt debt or ad debt that company funds can cover.',
       'warning'
     );
     return false;
   }
-  if (eligible.length === 1) {
+  if (!eligible.length && hasAdDebt) {
+    return openCustomerAdDebtCoverageModal(customerId, opener);
+  }
+  if (eligible.length === 1 && !hasAdDebt) {
     return openCompanyDebtCoverageModal(String(eligible[0].id), opener);
   }
 
@@ -28024,7 +28553,16 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
         </span>
         <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${outstanding.toFixed(2)}</span>
       </button>`;
-  }).join('');
+  }).join('') + (hasAdDebt ? `
+      <button type="button" data-customer-id="${Security.escapeHtml(String(customerId || ''))}"
+        onclick="_pickCustomerAdDebtCoverage(this.dataset.customerId)"
+        class="flex min-h-12 w-full items-center justify-between gap-3 rounded-xl border border-violet-300 bg-violet-50/60 px-4 py-3 text-left transition-colors hover:border-violet-500 hover:bg-violet-100 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:border-violet-700 dark:bg-violet-950/20 dark:hover:border-violet-500 dark:hover:bg-violet-950/40">
+        <span class="min-w-0">
+          <span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${isAr ? 'دين إعلانات (بدون وصل)' : 'Ad-spend debt (no receipt)'}</span>
+          <span class="block text-[11px] text-slate-500 dark:text-slate-400">${isAr ? `${adDebt.ads.length} إعلان` : `${adDebt.ads.length} ad${adDebt.ads.length === 1 ? '' : 's'}`}</span>
+        </span>
+        <span class="flex-shrink-0 text-sm font-bold text-rose-600 dark:text-rose-300">$${adDebt.totalUSD.toFixed(2)}</span>
+      </button>` : '');
 
   const html = `
     <div id="company-coverage-receipt-picker"
@@ -41240,7 +41778,8 @@ async function cleanupAdFundingLinks(receiptId) {
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === receiptId || a.linkedDeliveryReceiptId === receiptId || a.fundingReceiptId === receiptId ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === receiptId)) ||
-     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)))
+     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)) ||
+     (Array.isArray(a.companyFundingAllocations) && a.companyFundingAllocations.some(alloc => alloc.receiptId === receiptId)))
     && !a._deleted
   );
   let touched = 0;
@@ -41253,6 +41792,16 @@ async function cleanupAdFundingLinks(receiptId) {
     if (Array.isArray(ad.dueAllocations)) {
       const kept = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
+    }
+    // Company-covered rows die with the receipt too: the coverage audit
+    // record keeps the history, but a dangling row would keep counting in
+    // capacity/funded sums against a receipt that no longer exists. These
+    // rows are SERVER-OWNED (a client PATCH carrying a change is refused),
+    // so in server mode the server strips them in its own delete transaction
+    // and delta-sync reconciles this copy; only local mode edits them here.
+    if (!isServerModeEnabled() && Array.isArray(ad.companyFundingAllocations)) {
+      const kept = ad.companyFundingAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.companyFundingAllocations.length) updates.companyFundingAllocations = kept;
     }
     // The merged-funding mirror too — leaving it stale would let the next ad
     // edit reseed the merge editor from it and re-write an allocation that

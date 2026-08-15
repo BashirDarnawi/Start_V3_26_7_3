@@ -13,11 +13,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import text
 
 from .db import db_conn, get_engine
 
 from .financial_core import (
+    _financial_ad_direct_coverage,
     _financial_ad_due_usage,
+    _financial_ad_payment_status,
     _financial_allocation_map,
     _financial_minor,
     _financial_outgoing,
@@ -26,6 +29,8 @@ from .financial_core import (
 )
 from .operations import assert_financial_period_open
 from .schemas import (
+    CustomerCompanyCoverageRequest,
+    CustomerCompanyCoverageResponse,
     EntityResponse,
     ReceiptCompanyCoverageRequest,
     ReceiptCompanyCoverageResponse,
@@ -49,6 +54,7 @@ AD_COMPANY_COVERAGE_FIELDS = frozenset(
         "companyFundingAllocations",
         "customerDueUSD",
         "companyFundedUSD",
+        "companyDirectCoverageUSD",
     }
 )
 
@@ -158,8 +164,15 @@ def plan_company_debt_coverage(
 def _read_company_coverage_state(
     data: dict[str, Any],
     financial_due_total: Callable[[dict[str, Any]], int],
+    *,
+    collected_minor: int = 0,
 ) -> tuple[int, int, int, int]:
-    """Return ``(grossDebt, coveredBefore, outstandingBefore, source)``."""
+    """Return ``(grossDebt, coveredBefore, outstandingBefore, source)``.
+
+    ``collected_minor`` is customer cash already collected against this debt
+    (a Delivered-but-UNDERPAID receipt). It only shapes the derived fallback;
+    a stored ``customerOutstandingUSD`` already accounts for collection.
+    """
     gross_minor = financial_due_total(data)
     covered_minor = (
         _financial_minor(data.get("companyCoveredUSD"), "stored companyCoveredUSD")
@@ -184,9 +197,108 @@ def _read_company_coverage_state(
         )
     else:
         covered_minor = max(min(covered_minor, gross_minor), 0)
-        outstanding_minor = max(gross_minor - covered_minor, 0)
+        outstanding_minor = max(
+            gross_minor - covered_minor - max(int(collected_minor), 0), 0
+        )
     source = 1 if data.get("customerOutstandingUSD") is None else 0
     return gross_minor, covered_minor, outstanding_minor, source
+
+
+def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
+    """RECEIPT-LESS ad debt that customer-level company coverage may absorb.
+
+    Only a Not Paid, non-driver ad qualifies: a driver ad's debt belongs to
+    its delivery receipt (covered through the receipt flow), and a rowless
+    legacy ad that references any receipt is charged against that receipt by
+    the usage fallback. What remains is spend backed by nothing:
+    ``effective − paid rows − due rows − company rows − direct coverage``.
+    """
+    if str(ad.get("recordType") or "") == "receipt":
+        return 0
+    if _financial_ad_payment_status(ad) != "not_paid":
+        return 0
+    if str(ad.get("collectionMethod") or "") == "driver":
+        return 0
+    has_arrays = (
+        isinstance(ad.get("receiptAllocations"), list)
+        or isinstance(ad.get("dueAllocations"), list)
+        or isinstance(ad.get("companyFundingAllocations"), list)
+    )
+    if not has_arrays and (
+        str(ad.get("fundingReceiptId") or "").strip()
+        or str(ad.get("receiptId") or "").strip()
+        or str(ad.get("linkedDeliveryReceiptId") or "").strip()
+    ):
+        return 0
+    # STATUS-AWARE spend, mirroring the client's getAdSpendUSD to the cent —
+    # the customer card's "Spent" and this coverable figure must be the same
+    # number. A pending/paused ad has spent nothing: covering its un-spent
+    # budget would absorb debt that does not exist (and may never exist).
+    status = str(ad.get("status") or "").strip().lower()
+    if status in {"pending", "paused"}:
+        return 0
+    if status == "stopped" and ad.get("spentUSD") is not None:
+        effective = _financial_minor(ad.get("spentUSD"), "stored ad spend")
+    elif status in {"completed", "canceled", "lost"}:
+        effective = (
+            _financial_minor(ad.get("spentUSD"), "stored ad spend")
+            if ad.get("spentUSD") is not None
+            else _financial_minor(ad.get("amountUSD"), "stored ad amount")
+        )
+    else:
+        effective = _financial_minor(ad.get("amountUSD"), "stored ad amount")
+    paid = sum(_financial_allocation_map(ad.get("receiptAllocations")).values())
+    due = sum(_financial_allocation_map(ad.get("dueAllocations")).values())
+    company = sum(
+        _financial_allocation_map(ad.get("companyFundingAllocations")).values()
+    )
+    direct = _financial_ad_direct_coverage(ad)
+    return max(effective - paid - due - company - direct, 0)
+
+
+def release_company_rows_for_receipt_delete(
+    conn: Any,
+    receipt_id: str,
+    *,
+    ad_rows: list[Any],
+    lock_row: Callable[..., Any],
+    row_data: Callable[[Any], dict[str, Any]],
+    write_row: Callable[..., Any],
+    postgres: bool,
+) -> int:
+    """Release server-owned company rows from ads before a receipt delete.
+
+    The client cleans due/paid rows itself but is refused any edit to the
+    company pool, so the delete transaction must strip those rows here. The
+    coverage audit record keeps the history; a dangling row would keep
+    counting in capacity/funded sums against a receipt that no longer exists.
+    """
+    released = 0
+    for ad_row in ad_rows:
+        ad_data = row_data(ad_row)
+        if str(ad_data.get("recordType") or "") == "receipt":
+            continue
+        if receipt_id not in _financial_allocation_map(
+            ad_data.get("companyFundingAllocations")
+        ):
+            continue
+        locked_ad = lock_row(conn, "ads", str(ad_row["id"]), postgres=postgres)
+        if not locked_ad or bool(locked_ad["deleted"]):
+            continue
+        locked_data = row_data(locked_ad)
+        locked_map = _financial_allocation_map(
+            locked_data.get("companyFundingAllocations")
+        )
+        if locked_map.pop(receipt_id, 0) <= 0:
+            continue
+        next_ad = dict(locked_data)
+        next_ad["companyFundingAllocations"] = _financial_rows_from_allocation_map(
+            locked_map
+        )
+        next_ad["companyFundedUSD"] = _financial_usd(sum(locked_map.values()))
+        write_row(conn, locked_ad, next_ad)
+        released += 1
+    return released
 
 
 def create_company_debt_coverage_router(
@@ -305,15 +417,21 @@ def create_company_debt_coverage_router(
                 not_paid_collection = str(
                     status_detail.get("notPaidCollection") or ""
                 ).strip().lower()
-                if not_paid_collection not in {"", "office", "in_shop", "shop"}:
+                if not_paid_collection not in {"", "office", "in_shop", "shop", "delivery"}:
                     raise HTTPException(
                         status_code=400,
-                        detail="Only in-shop office receipts can be covered by company funds",
+                        detail="This receipt's debt type cannot be covered by company funds",
                     )
-                if str(existing.get("deliveryStatus") or "").strip() != "Office":
+                delivery_status = str(existing.get("deliveryStatus") or "").strip().lower()
+                # A canceled delivery released its debt — there is nothing left
+                # to cover. Every other state is coverable: the completion
+                # truth collects only the customer's remaining share, so
+                # covering before, during, or after (UNDERPAID) a delivery can
+                # never let the same dollars be recovered twice.
+                if delivery_status in {"canceled", "cancelled"}:
                     raise HTTPException(
                         status_code=400,
-                        detail="Company coverage is only valid for Office delivery status",
+                        detail="A canceled delivery has no debt left to cover",
                     )
                 if str(existing.get("receiptType") or "").upper() == "TRANSFER_IN":
                     raise HTTPException(
@@ -338,13 +456,24 @@ def create_company_debt_coverage_router(
                     )
 
                 assert_financial_period_open("receipts", existing, conn=conn)
+                # After a Delivered completion, amountUSD is exactly the
+                # customer cash the driver collected; the frozen debt fields
+                # stay gross. Net that cash out so an UNDERPAID receipt only
+                # offers its true shortfall for coverage.
+                already_collected_minor = (
+                    _financial_minor(existing.get("amountUSD"), "collected receipt amount")
+                    if delivery_status == "delivered"
+                    else 0
+                )
                 (
                     gross_minor,
                     covered_before_minor,
                     outstanding_before_minor,
                     _source,
                 ) = _read_company_coverage_state(
-                    existing, ctx["financial_due_total"]
+                    existing,
+                    ctx["financial_due_total"],
+                    collected_minor=already_collected_minor,
                 )
                 if int(body.amountMinorUSD) > outstanding_before_minor:
                     raise HTTPException(
@@ -407,7 +536,11 @@ def create_company_debt_coverage_router(
                 requested_amount_minor = int(body.amountMinorUSD)
                 covered_after_minor = covered_before_minor + requested_amount_minor
                 covered_after_minor = min(covered_after_minor, gross_minor)
-                outstanding_after_minor = max(gross_minor - covered_after_minor, 0)
+                # Mirror the BEFORE read: cash a driver already collected
+                # (Delivered receipt) is not outstanding either.
+                outstanding_after_minor = max(
+                    gross_minor - covered_after_minor - already_collected_minor, 0
+                )
                 saved_receipt = ctx["financial_row_data"](row)
                 saved_receipt.update(existing)
                 saved_receipt["companyCoverageCount"] = (
@@ -501,6 +634,211 @@ def create_company_debt_coverage_router(
                             )
                         )
                     ],
+                    updatedAds=[
+                        EntityResponse(
+                            **ctx["project_entity_media_for_user"](
+                                item, admin, include_media
+                            )
+                        )
+                        for item in updated_ads
+                    ],
+                    replayed=False,
+                )
+
+    @router.post(
+        "/api/customers/{customer_id}/company-coverages",
+        response_model=CustomerCompanyCoverageResponse,
+    )
+    def cover_customer_ad_debt_with_company_funds(
+        customer_id: str,
+        body: CustomerCompanyCoverageRequest,
+        request: Request,
+        include_media: bool = True,
+        admin: dict[str, Any] = Depends(require_admin_dependency),
+    ):
+        """Absorb a customer's RECEIPT-LESS ad-spend debt from company funds.
+
+        Never a customer payment and never revenue: each covered dollar lands
+        in ``companyDirectCoverageUSD`` on the ad it relieves, with a full
+        audit record. Ads funded by receipts are untouched — their debt is
+        covered through the receipt flow instead.
+        """
+        require_same_origin(request)
+        customer_id = ctx["validate_entity_id"](customer_id)
+        idem = ctx["sanitize_str"](body.idempotencyKey, 120)
+        reason = ctx["sanitize_str"](body.reason, 500)
+        if not reason:
+            raise HTTPException(
+                status_code=400,
+                detail="A business reason is required for company coverage",
+            )
+        request_hash = ctx["financial_request_hash"](
+            {
+                "customerId": customer_id,
+                "amountMinorUSD": int(body.amountMinorUSD),
+                "expectedOutstandingMinorUSD": int(body.expectedOutstandingMinorUSD),
+                "reason": reason,
+            }
+        )
+        actor_id = ctx["validate_entity_id"](admin.get("id"))
+        postgres = str(get_engine().dialect.name or "") == "postgresql"
+        guard = nullcontext() if postgres else ctx["sqlite_financial_lock"]()
+        with guard:
+            with db_conn() as conn:
+                ctx["lock_idempotency_key"](
+                    conn,
+                    idem,
+                    postgres=postgres,
+                    namespace="customerCompanyCoverage",
+                )
+                prior = ctx["financial_check_marker"](
+                    ctx["financial_get_marker"](
+                        conn,
+                        RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+                        "customerCompanyCoverage",
+                        idem,
+                    ),
+                    actor_id,
+                    request_hash,
+                )
+                if prior:
+                    coverage = ctx["financial_entity_result"](
+                        conn,
+                        RECEIPT_COMPANY_COVERAGE_COLLECTION,
+                        str(prior.get("coverageId") or ""),
+                    )
+                    updated_ads = [
+                        ctx["financial_entity_result"](conn, "ads", str(ad_id))
+                        for ad_id in (prior.get("updatedAdIds") or [])
+                    ]
+                    return CustomerCompanyCoverageResponse(
+                        coverage=EntityResponse(**coverage),
+                        updatedAds=[EntityResponse(**item) for item in updated_ads],
+                        replayed=True,
+                    )
+
+                customer_row = ctx["clothes_lock_row"](
+                    conn, "customers", customer_id, postgres=postgres
+                )
+                if not customer_row or bool(customer_row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Customer not found")
+
+                if postgres:
+                    customer_expr = "(data_json::jsonb ->> 'customerId')"
+                else:
+                    customer_expr = "json_extract(data_json, '$.customerId')"
+                ad_id_rows = conn.execute(
+                    text(
+                        "SELECT id FROM entities WHERE type='ads' AND deleted=false "
+                        f"AND {customer_expr} = :customer_id ORDER BY id"
+                    ),
+                    {"customer_id": customer_id},
+                ).mappings().all()
+
+                plans: list[tuple[str, Any, dict[str, Any], int]] = []
+                total_gap_minor = 0
+                for ad_id_row in ad_id_rows:
+                    ad_row = ctx["clothes_lock_row"](
+                        conn, "ads", str(ad_id_row["id"]), postgres=postgres
+                    )
+                    if not ad_row or bool(ad_row["deleted"]):
+                        continue
+                    ad_data = ctx["financial_row_data"](ad_row)
+                    # Re-verify ownership from the LOCKED row — the id list
+                    # was gathered before the lock, and coverage must never
+                    # land on an ad that was just reassigned elsewhere.
+                    if str(ad_data.get("customerId") or "") != customer_id:
+                        continue
+                    gap_minor = coverable_ad_debt_minor(ad_data)
+                    if gap_minor <= 0:
+                        continue
+                    plans.append((str(ad_id_row["id"]), ad_row, ad_data, gap_minor))
+                    total_gap_minor += gap_minor
+
+                if int(body.expectedOutstandingMinorUSD) != total_gap_minor:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Customer ad debt changed; refresh and review the current amount",
+                    )
+                if int(body.amountMinorUSD) > total_gap_minor:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Customer ad debt is smaller than the requested amount",
+                    )
+
+                remaining_minor = int(body.amountMinorUSD)
+                updated_ads = []
+                allocations: list[dict[str, Any]] = []
+                for ad_id, ad_row, ad_data, gap_minor in plans:
+                    if remaining_minor <= 0:
+                        break
+                    applied_minor = min(gap_minor, remaining_minor)
+                    assert_financial_period_open("ads", ad_data, conn=conn)
+                    next_ad = dict(ad_data)
+                    next_ad["companyDirectCoverageUSD"] = _financial_usd(
+                        _financial_ad_direct_coverage(ad_data) + applied_minor
+                    )
+                    updated_ads.append(ctx["clothes_write_row"](conn, ad_row, next_ad))
+                    allocations.append(
+                        {
+                            "adId": ad_id,
+                            "amountMinorUSD": applied_minor,
+                            "amountUSD": _financial_usd(applied_minor),
+                        }
+                    )
+                    remaining_minor -= applied_minor
+
+                requested_amount_minor = int(body.amountMinorUSD)
+                coverage_timestamp = ctx["iso_utc"]()
+                coverage_id = new_id("receiptCompanyCoverage")
+                coverage_data = {
+                    "recordType": "companyDebtCoverage",
+                    "coverageScope": "customer_ads",
+                    "customerId": customer_id,
+                    "amountMinorUSD": requested_amount_minor,
+                    "amountUSD": _financial_usd(requested_amount_minor),
+                    "reason": reason,
+                    "actorId": actor_id,
+                    "adDebtBeforeMinorUSD": total_gap_minor,
+                    "adDebtBeforeUSD": _financial_usd(total_gap_minor),
+                    "adDebtAfterMinorUSD": total_gap_minor - requested_amount_minor,
+                    "adDebtAfterUSD": _financial_usd(
+                        total_gap_minor - requested_amount_minor
+                    ),
+                    "coveredAt": coverage_timestamp,
+                    "allocations": allocations,
+                    "customerPayment": False,
+                    "countsAsCustomerRevenue": False,
+                    "source": "company_funds",
+                }
+                ctx["insert_entity_in_transaction"](
+                    conn,
+                    RECEIPT_COMPANY_COVERAGE_COLLECTION,
+                    coverage_id,
+                    coverage_data,
+                    actor_id,
+                )
+                coverage = ctx["financial_entity_result"](
+                    conn, RECEIPT_COMPANY_COVERAGE_COLLECTION, coverage_id
+                )
+                ctx["financial_insert_marker"](
+                    conn,
+                    RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+                    "customerCompanyCoverage",
+                    idem,
+                    actor_id,
+                    request_hash,
+                    {
+                        "coverageId": coverage_id,
+                        "updatedAdIds": [item["id"] for item in updated_ads],
+                    },
+                )
+                return CustomerCompanyCoverageResponse(
+                    coverage=EntityResponse(
+                        **ctx["project_entity_media_for_user"](
+                            coverage, admin, include_media
+                        )
+                    ),
                     updatedAds=[
                         EntityResponse(
                             **ctx["project_entity_media_for_user"](

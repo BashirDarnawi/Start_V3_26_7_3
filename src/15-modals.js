@@ -4432,7 +4432,8 @@ async function cleanupAdFundingLinks(receiptId) {
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === receiptId || a.linkedDeliveryReceiptId === receiptId || a.fundingReceiptId === receiptId ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === receiptId)) ||
-     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)))
+     (Array.isArray(a.dueAllocations) && a.dueAllocations.some(alloc => alloc.receiptId === receiptId)) ||
+     (Array.isArray(a.companyFundingAllocations) && a.companyFundingAllocations.some(alloc => alloc.receiptId === receiptId)))
     && !a._deleted
   );
   let touched = 0;
@@ -4445,6 +4446,16 @@ async function cleanupAdFundingLinks(receiptId) {
     if (Array.isArray(ad.dueAllocations)) {
       const kept = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
+    }
+    // Company-covered rows die with the receipt too: the coverage audit
+    // record keeps the history, but a dangling row would keep counting in
+    // capacity/funded sums against a receipt that no longer exists. These
+    // rows are SERVER-OWNED (a client PATCH carrying a change is refused),
+    // so in server mode the server strips them in its own delete transaction
+    // and delta-sync reconciles this copy; only local mode edits them here.
+    if (!isServerModeEnabled() && Array.isArray(ad.companyFundingAllocations)) {
+      const kept = ad.companyFundingAllocations.filter(alloc => alloc.receiptId !== receiptId);
+      if (kept.length !== ad.companyFundingAllocations.length) updates.companyFundingAllocations = kept;
     }
     // The merged-funding mirror too — leaving it stale would let the next ad
     // edit reseed the merge editor from it and re-write an allocation that

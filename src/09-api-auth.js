@@ -1518,6 +1518,65 @@ async function apiCreateReceiptCompanyCoverage(payload) {
   };
 }
 
+// Cover a customer's RECEIPT-LESS ad-spend debt with company funds. Mirrors
+// apiCreateReceiptCompanyCoverage, but scoped to the customer: the server
+// spreads the amount across their unfunded ads (companyDirectCoverageUSD) and
+// refuses when the books changed under the admin (expectedOutstandingMinorUSD).
+async function apiCreateCustomerCompanyCoverage(payload) {
+  const customerId = String(payload?.customerId || '').trim();
+  if (!Security.isValidRecordId(customerId)) throw new Error('Invalid customer company coverage id');
+
+  const amountMinorUSD = Number(payload?.amountMinorUSD);
+  if (!Number.isSafeInteger(amountMinorUSD) || amountMinorUSD <= 0) {
+    throw new Error('Company coverage amount must be a positive number of cents');
+  }
+  const expectedOutstandingMinorUSD = Number(payload?.expectedOutstandingMinorUSD);
+  if (!Number.isSafeInteger(expectedOutstandingMinorUSD) || expectedOutstandingMinorUSD < 0) {
+    throw new Error('The customer ad-debt amount is missing. Refresh and try again.');
+  }
+  const idempotencyKey = String(payload?.idempotencyKey || '').trim();
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 120) {
+    throw new Error('Company coverage idempotency key is invalid');
+  }
+  const reason = String(payload?.reason || '').trim();
+  if (!reason) throw new Error('A business reason is required');
+  if (reason.length > 500) throw new Error('The business reason is too long');
+
+  const identity = getServerSessionIdentity();
+  const response = await withRetry(() => apiJson(
+    `/api/customers/${encodeURIComponent(customerId)}/company-coverages`,
+    {
+      method: 'POST',
+      body: { amountMinorUSD, idempotencyKey, expectedOutstandingMinorUSD, reason }
+    },
+    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
+  ), 2, 500);
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)
+      || !Array.isArray(response.updatedAds)) {
+    const error = new Error('Invalid company coverage response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+
+  const coverage = validateServerEntityResponse(
+    'companyDebtCoverages', response.coverage, 'customerCompanyCoverage.coverage'
+  );
+  const updatedAds = response.updatedAds.map((entity, index) => {
+    const validated = validateServerEntityResponse(
+      'ads', entity, `customerCompanyCoverage.updatedAds[${index}]`
+    );
+    const local = (state.ads || []).find(row => row && String(row.id) === String(validated.id));
+    validated.data = mergeMutationInlineMedia('ads', validated.data, local);
+    return validated;
+  });
+  return {
+    coverage,
+    updatedAds,
+    replayed: response.replayed === true
+  };
+}
+
 // Paid/due/merged allocations change receipt availability, so ad create/edit
 // must cross one server transaction boundary rather than generic collection
 // POST/PATCH calls.

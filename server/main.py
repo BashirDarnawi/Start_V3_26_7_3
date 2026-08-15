@@ -66,7 +66,11 @@ SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, now_ms
 from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, normalize_permissions, user_has_permission
-from .backfills import backfill_customer_names, backfill_relink_baselines
+from .backfills import (
+    backfill_covered_settled_receipts,
+    backfill_customer_names,
+    backfill_relink_baselines,
+)
 from .ad_campaign_actions import (
     apply_boost_campaign_fields,
     create_ad_campaign_actions_router,
@@ -96,6 +100,11 @@ from .company_debt_coverage import (
     RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
     create_company_debt_coverage_router,
     protect_company_coverage_fields,
+    release_company_rows_for_receipt_delete,
+)
+from .settlement_truth import (
+    apply_coverage_settlement_truth as _apply_coverage_settlement_truth,
+    apply_delivery_completion_truth as _apply_delivery_completion_truth,
 )
 from .unpaid_receipt_payment_plan import (
     canonicalize_unpaid_in_shop_payment_plan as _canonicalize_unpaid_in_shop_payment_plan,
@@ -132,6 +141,8 @@ from .financial_core import (
     MAX_FINANCIAL_AMOUNT,
     MIN_EXCHANGE_RATE,
     _financial_ad_committed,
+    _financial_ad_company_usage,
+    _financial_ad_direct_coverage,
     _financial_ad_due_usage,
     _financial_ad_effective_amount,
     _financial_ad_explicit_usage,
@@ -2319,6 +2330,7 @@ def _startup():
     try:
         backfill_customer_names(_SQLITE_FINANCIAL_LOCK)
         backfill_relink_baselines(_SQLITE_FINANCIAL_LOCK)
+        backfill_covered_settled_receipts(_SQLITE_FINANCIAL_LOCK)
     except Exception as e:
         print(f"[albayan] customerName backfill failed: {e}")
 
@@ -6753,6 +6765,17 @@ def _financial_validate_combined_capacity(
         committed = _financial_committed_usage(
             ad_rows, rid, exclude_ad_id=current_ad_id
         ) + _financial_outgoing(data)
+        if current_ad_id:
+            # The edited ad's request covers only its paid+due pools; its
+            # company-covered rows are server-preserved and invisible in the
+            # request, so without this they escape the one-pot check and the
+            # covered dollars could be re-promised as fresh customer funding.
+            for ad_row in ad_rows:
+                if str(ad_row.get("id") or "") == current_ad_id:
+                    committed += _financial_ad_company_usage(
+                        _financial_row_data(ad_row), rid
+                    )
+                    break
         if committed + amount > capacity:
             raise HTTPException(
                 status_code=409, detail=f"Insufficient balance on receipt {rid}"
@@ -6770,7 +6793,16 @@ def _financial_due_total(data: dict[str, Any]) -> int:
     legitimately adds real balance; re-reading the stale debt invents it.
     """
     if bool(data.get("isPaid")) or str(data.get("status") or "") == "Paid":
-        return _financial_minor(data.get("amountUSD"), "receipt due amount")
+        # A settled receipt's amountUSD is CUSTOMER cash only. Company-covered
+        # dollars are equally real pot money (they keep funding the ads they
+        # covered), so the pot is their sum — otherwise settling a covered
+        # receipt would make its own committed allocations exceed capacity.
+        covered_minor = (
+            _financial_minor(data.get("companyCoveredUSD"), "stored companyCoveredUSD")
+            if data.get("companyCoveredUSD") is not None
+            else 0
+        )
+        return _financial_minor(data.get("amountUSD"), "receipt due amount") + covered_minor
     status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
     not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
     # An office receipt already records its promised credit directly in USD.
@@ -7019,85 +7051,17 @@ def _financial_apply_delivery_completion_truth(
     merged: dict[str, Any],
     ad_rows: list[Any],
 ) -> None:
-    """Recompute delivery money from locked receipt/ad state before persistence."""
-    if (
-        str(merged.get("deliveryStatus") or "").strip() != "Delivered"
-        or str(old.get("deliveryStatus") or "").strip() == "Delivered"
-    ):
-        return
-
-    target = _financial_delivery_collection_target(receipt_id, old, ad_rows)
-    debt_usd = int(target["usdMinor"])
-    debt_local = int(target["localMinor"])
-    collected_local = _financial_minor(
-        merged.get("amountCollectedFromCustomer"),
-        "amountCollectedFromCustomer",
+    """Recompute delivery money before persistence (see settlement_truth.py)."""
+    _apply_delivery_completion_truth(
+        receipt_id,
+        old,
+        merged,
+        ad_rows,
+        delivery_collection_target=_financial_delivery_collection_target,
+        valid_rate=_financial_valid_rate,
+        overpay_abs_local=_DELIVERY_OVERPAY_ABS_LOCAL,
+        overpay_ratio=_DELIVERY_OVERPAY_RATIO,
     )
-
-    over_local = collected_local - debt_local
-    over_abs_minor = int(
-        (Decimal(str(_DELIVERY_OVERPAY_ABS_LOCAL)) * Decimal(100)).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
-    )
-    debt_ceiling = int(
-        (Decimal(debt_local) * Decimal(str(_DELIVERY_OVERPAY_RATIO))).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
-    )
-    if over_local > over_abs_minor and collected_local > debt_ceiling:
-        raise HTTPException(
-            status_code=400,
-            detail="Collected amount far exceeds the delivery debt; office confirmation required",
-        )
-
-    diff = collected_local - debt_local
-    if diff == 0:
-        payment_result = "PAID_EXACT"
-        overpaid = 0
-        remaining_due = 0
-    elif diff > 0:
-        payment_result = "OVERPAID"
-        overpaid = diff
-        remaining_due = 0
-    else:
-        payment_result = "UNDERPAID"
-        overpaid = 0
-        remaining_due = -diff
-
-    trusted_rate: Decimal | None = None
-    if target["source"] == "linked_ads" and debt_usd > 0 and debt_local > 0:
-        trusted_rate = Decimal(debt_local) / Decimal(debt_usd)
-    if trusted_rate is None:
-        trusted_rate = _financial_valid_rate(old.get("exchangeRate"))
-    if trusted_rate is None and debt_usd > 0 and debt_local > 0:
-        trusted_rate = Decimal(debt_local) / Decimal(debt_usd)
-
-    if trusted_rate:
-        collected_usd = int(
-            (Decimal(collected_local) / trusted_rate).quantize(
-                Decimal("1"), rounding=ROUND_HALF_UP
-            )
-        )
-    else:
-        # Preserve the historical no-rate behavior without ever treating LYD as USD.
-        collected_usd = debt_usd
-
-    merged["debtAmountUSD"] = _financial_usd(debt_usd)
-    merged["debtAmountLocal"] = _financial_usd(debt_local)
-    merged["amountUSD"] = _financial_usd(collected_usd)
-    merged["amountLocal"] = _financial_usd(collected_local)
-    if target["source"] == "linked_ads" and trusted_rate:
-        merged["exchangeRate"] = float(trusted_rate)
-    merged["paymentResult"] = payment_result
-    merged["overpaidAmount"] = _financial_usd(overpaid)
-    merged["remainingDue"] = _financial_usd(remaining_due)
-    if remaining_due == 0:
-        merged["status"] = "Paid"
-        merged["isPaid"] = True
-    else:
-        merged["status"] = "Not Paid"
-        merged["isPaid"] = False
 
 
 def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
@@ -7655,13 +7619,22 @@ def _financial_derive_ad(
             original_budget_minor = _financial_minor(
                 existing.get("amountUSD"), "existing unpaid ad budget"
             )
+            # Company-covered dollars were already provided by the business —
+            # demanding them again here would recover the same money from the
+            # customer a second time. The customer settles only their share.
+            company_covered_minor = sum(
+                _financial_allocation_map(
+                    existing.get("companyFundingAllocations")
+                ).values()
+            ) + _financial_ad_direct_coverage(existing)
+            required_minor = max(original_budget_minor - company_covered_minor, 0)
             # Old production rows could be saved with a zero amount because the
             # UI had no independent budget field. Do not trap those rows: their
             # first Paid conversion is also their repair path.
-            if original_budget_minor > 0 and amount_minor != original_budget_minor:
+            if original_budget_minor > 0 and amount_minor != required_minor:
                 raise HTTPException(
                     status_code=400,
-                    detail="Paid receipt funding must exactly settle the original unpaid ad amount",
+                    detail="Paid receipt funding must exactly settle the customer's share of the unpaid ad amount",
                 )
         linked_id = ""
         collection_method = ""
@@ -9121,7 +9094,12 @@ def _financial_reclassify_ad_for_paid_receipt(
         # far as the cash). Only the MODERN allocation-array shape qualifies —
         # legacy no-ledger amounts are unreliable and would mint money (same
         # rule as _financial_rowless_driver_gap).
-        gap = _financial_ad_effective_amount(ad) - sum(paid_map.values())
+        gap = (
+            _financial_ad_effective_amount(ad)
+            - sum(paid_map.values())
+            - sum(_financial_allocation_map(ad.get("companyFundingAllocations")).values())
+            - _financial_ad_direct_coverage(ad)
+        )
         moved_minor = max(min(gap, implied_cap), 0)
     # The direct mirror fallback likewise only speaks for rowless ads: with
     # due rows surviving for other receipts, the scalar is their sum and
@@ -9173,7 +9151,13 @@ def _financial_reclassify_ad_for_paid_receipt(
         # explicit due allocation (or legacy mirror) can become paid funding.
         next_paid = dict(paid_map)
         next_paid[receipt_id] = next_paid.get(receipt_id, 0) + moved_minor
-        total_after = sum(next_paid.values()) + sum(due_map.values())
+        # Company-covered dollars are already-provided funding: without them a
+        # partially covered ad could never reach fully_funded and would stay
+        # not_paid forever after the customer settled their share.
+        company_funded = sum(
+            _financial_allocation_map(ad.get("companyFundingAllocations")).values()
+        ) + _financial_ad_direct_coverage(ad)
+        total_after = sum(next_paid.values()) + sum(due_map.values()) + company_funded
         target_minor = _financial_ad_effective_amount(ad)
         if total_after > target_minor:
             raise HTTPException(
@@ -9749,6 +9733,7 @@ def _financial_patch_receipt_atomic(
             _financial_apply_delivery_completion_truth(
                 receipt_id, old, merged, ad_rows
             )
+            _apply_coverage_settlement_truth(old, merged)
             canceled_due_source = (
                 (
                     str(merged.get("deliveryStatus") or "") == "Canceled"
@@ -9772,7 +9757,15 @@ def _financial_patch_receipt_atomic(
             # _financial_ad_due_usage.
             general_used = _financial_committed_usage(ad_rows, receipt_id)
             due_used = _financial_usage(ad_rows, receipt_id, due=True)
-            primary_used = max(general_used - due_used, 0)
+            # Company-covered rows are neither paid-pool nor due-pool customer
+            # funding: they may sit on a Not Paid receipt without forcing it
+            # to stay Paid. Only real customer paid-pool money is "primary".
+            company_used = sum(
+                _financial_ad_company_usage(_financial_row_data(row), receipt_id)
+                for row in ad_rows
+                if str(_financial_row_data(row).get("recordType") or "") != "receipt"
+            )
+            primary_used = max(general_used - due_used - company_used, 0)
             outgoing = _financial_outgoing(old)
             # ONE capacity, same function the readers use: amountUSD once collected, else the
             # debt the driver will collect (_financial_due_total). Measuring commitments
@@ -9972,6 +9965,15 @@ def _financial_delete_receipt_atomic(receipt_id_raw: str) -> dict[str, Any]:
             reason = _financial_receipt_reference_reason(conn, receipt_id, data)
             if reason:
                 raise HTTPException(status_code=409, detail=f"Receipt cannot be deleted while linked to {reason}")
+            release_company_rows_for_receipt_delete(
+                conn,
+                receipt_id,
+                ad_rows=_financial_active_rows_for_receipt_bounded(conn, receipt_id),
+                lock_row=_clothes_lock_row,
+                row_data=_financial_row_data,
+                write_row=_clothes_write_row,
+                postgres=postgres,
+            )
             return _clothes_write_row(conn, row, data, deleted=True)
 
 

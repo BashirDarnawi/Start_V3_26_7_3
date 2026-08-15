@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from .financial_core import (
+    _financial_ad_company_usage,
     _financial_ad_due_usage,
     _financial_ad_payment_status,
     _financial_allocation_map,
@@ -483,12 +484,25 @@ def reconcile_unpaid_receipt_debt(
             raise HTTPException(status_code=404, detail="Unpaid receipt not found")
         receipt = financial_row_data(row)
         current_minor = financial_due_total(receipt)
+        # Company-covered rows are pot money the customer no longer owes but
+        # the receipt still promises. Without them, coverage (which moves due
+        # rows into the company pool) would read as vanished commitments and
+        # silently shrink a derived receipt on the next reconcile.
+        company_minor = sum(
+            _financial_ad_company_usage(financial_row_data(ad_row), receipt_id)
+            for ad_row in ad_rows
+            if not (
+                existing_ad is not None
+                and str(ad_row.get("id") or "") == ad_id
+            )
+            and str(financial_row_data(ad_row).get("recordType") or "") != "receipt"
+        ) + _financial_ad_company_usage(proposed_ad, receipt_id)
         outstanding_minor = financial_usage(
             ad_rows,
             receipt_id,
             due=True,
             exclude_ad_id=ad_id if existing_ad is not None else None,
-        ) + proposed_due_by_receipt.get(receipt_id, 0)
+        ) + proposed_due_by_receipt.get(receipt_id, 0) + company_minor
         target_minor = max(
             _manual_debt_base_minor(receipt, current_minor), outstanding_minor
         )
