@@ -101,7 +101,6 @@ from .company_debt_coverage import (
     create_company_debt_coverage_router,
     protect_company_coverage_fields,
     release_company_rows_for_receipt_delete,
-    scan_legacy_link_coverage_gap,
 )
 from .settlement_truth import (
     apply_coverage_settlement_truth as _apply_coverage_settlement_truth,
@@ -2662,20 +2661,6 @@ def admin_data_integrity(admin: dict[str, Any] = Depends(require_admin)):
     from .data_integrity import scan_database
 
     return scan_database(issue_limit=200)
-
-
-@app.get("/api/admin/company-coverage/legacy-link-gap-scan")
-def admin_company_coverage_legacy_link_gap_scan(
-    admin: dict[str, Any] = Depends(require_admin),
-):
-    """Read-only headcount of real customer debt currently invisible to both
-    company-fund coverage paths (a legacy-linked ad whose funding receipt has
-    itself stopped tracking debt). Changes nothing; sizes the gap before any
-    fix to coverable_ad_debt_minor."""
-    with db_conn() as conn:
-        return scan_legacy_link_coverage_gap(
-            conn, financial_due_total=_financial_due_total
-        )
 
 
 # ==========================================

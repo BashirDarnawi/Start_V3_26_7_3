@@ -1004,4 +1004,17 @@ def create_company_debt_coverage_router(
                     replayed=False,
                 )
 
+    @router.get("/api/admin/company-coverage/legacy-link-gap-scan")
+    def admin_company_coverage_legacy_link_gap_scan(
+        admin: dict[str, Any] = Depends(require_admin_dependency),
+    ):
+        """Read-only headcount of real customer debt currently invisible to
+        both company-fund coverage paths (a legacy-linked ad whose funding
+        receipt has itself stopped tracking debt). Changes nothing; sizes
+        the gap before any change to coverable_ad_debt_minor itself."""
+        with db_conn() as conn:
+            return scan_legacy_link_coverage_gap(
+                conn, financial_due_total=ctx["financial_due_total"]
+            )
+
     return router
