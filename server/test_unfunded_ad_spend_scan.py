@@ -303,6 +303,143 @@ def test_debt_the_button_already_offers_lands_in_the_coverable_bucket(admin):
     assert round(result["notOfferedButRealDebtUSD"] - before_real, 2) == 0.0
 
 
+def _driver_ad_detail(receipt: dict | None, spend: float, funded: float):
+    """Run the REAL eligibility rule for a driver ad against a linked receipt."""
+    from server.company_debt_coverage import coverable_ad_debt_detail
+
+    ad = {
+        "recordType": "ad",
+        "status": "Active",
+        "paymentStatus": "not_paid",
+        "isPaid": False,
+        "collectionMethod": "driver",
+        "linkedDeliveryReceiptId": "drv_receipt",
+        "amountUSD": spend,
+        "receiptAllocations": (
+            [{"receiptId": "drv_receipt", "amountUSD": funded}] if funded else []
+        ),
+    }
+    return coverable_ad_debt_detail(
+        ad, receipt_lookup=lambda rid: receipt if rid == "drv_receipt" else None
+    )
+
+
+def test_driver_debt_becomes_coverable_once_its_delivery_is_settled(admin):
+    """Lole Loleta's real production shape: a driver ad for $77.70 whose
+    delivery receipt is already Paid and closed. The driver will never
+    collect it now, so it is simply uncollected debt."""
+    reason, minor = _driver_ad_detail(
+        {"status": "Paid", "isPaid": True}, 77.70, 0.0
+    )
+    assert reason == "coverable"
+    assert minor == 7770
+
+
+def test_driver_debt_on_a_live_delivery_is_still_excluded(admin):
+    """محمد عون's shape: $40 unfunded on a delivery that has NOT been
+    collected. The driver is still going to collect this at the door, so
+    company funds must not touch it."""
+    reason, minor = _driver_ad_detail(
+        {"status": "Not Paid", "isPaid": False}, 50.0, 10.0
+    )
+    assert reason == "driver_debt_belongs_to_its_delivery_receipt"
+    assert minor == 0
+
+
+def test_canceled_delivery_never_becomes_coverable(admin):
+    """A canceled delivery RELEASED its debt — nothing is owed, so there is
+    nothing to cover. This is why the rule keys on Paid and not merely on
+    'the receipt stopped tracking debt'."""
+    for status in ("Canceled", "Lost", "Destroyed"):
+        reason, minor = _driver_ad_detail({"status": status}, 77.70, 0.0)
+        assert reason == "driver_debt_belongs_to_its_delivery_receipt", status
+        assert minor == 0, status
+
+
+def test_driver_ad_with_an_unresolvable_receipt_stays_excluded(admin):
+    """No lookup, a missing receipt, or a deleted one all read the same:
+    stay conservative and offer nothing."""
+    assert _driver_ad_detail(None, 77.70, 0.0)[1] == 0
+
+    from server.company_debt_coverage import coverable_ad_debt_detail
+
+    ad = {
+        "recordType": "ad",
+        "status": "Active",
+        "paymentStatus": "not_paid",
+        "isPaid": False,
+        "collectionMethod": "driver",
+        "linkedDeliveryReceiptId": "drv_receipt",
+        "amountUSD": 77.70,
+        "receiptAllocations": [],
+    }
+    # No receipt_lookup supplied at all.
+    assert coverable_ad_debt_detail(ad)[0] == (
+        "driver_debt_belongs_to_its_delivery_receipt"
+    )
+
+
+def test_settled_driver_debt_is_offered_end_to_end_on_the_customer_card(admin):
+    """The whole path: a Paid delivery receipt leaves $77.70 unfunded, the
+    customer-level route offers exactly that, and covering it records a
+    company expense without touching the receipt."""
+    _customer("unf_cust11", "Settled Driver Debt")
+    _row(
+        "receipts",
+        "unf_rcpt11",
+        {
+            "recordType": "receipt",
+            "customerId": "unf_cust11",
+            "status": "Paid",
+            "isPaid": True,
+            "amountUSD": 90.0,
+            "amountLocal": 450.0,
+            "exchangeRate": 5,
+            "deliveryStatus": "Delivered",
+        },
+    )
+    _ad(
+        "unf_ad11",
+        "unf_cust11",
+        77.70,
+        collectionMethod="driver",
+        linkedDeliveryReceiptId="unf_rcpt11",
+        receiptAllocations=[],
+    )
+
+    response = client.post(
+        "/api/customers/unf_cust11/company-coverages",
+        json={
+            "amountMinorUSD": 7770,
+            "idempotencyKey": "unf-settled-driver-key",
+            "expectedOutstandingMinorUSD": 7770,
+            "reason": "Company absorbs debt the driver never collected",
+        },
+        cookies=admin,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    saved_ad = payload["updatedAds"][0]["data"]
+    assert float(saved_ad["companyDirectCoverageUSD"]) == 77.70
+    # Still the customer's unpaid ad record; coverage is an expense, not a payment.
+    assert saved_ad["paymentStatus"] == "not_paid"
+    assert payload["coverage"]["data"]["customerPayment"] is False
+    assert payload["coverage"]["data"]["countsAsCustomerRevenue"] is False
+
+    # And the debt is now gone, so nothing further is offered.
+    again = client.post(
+        "/api/customers/unf_cust11/company-coverages",
+        json={
+            "amountMinorUSD": 100,
+            "idempotencyKey": "unf-settled-driver-key-2",
+            "expectedOutstandingMinorUSD": 0,
+            "reason": "second attempt",
+        },
+        cookies=admin,
+    )
+    assert again.status_code == 409, again.text
+
+
 def test_driver_ad_debt_is_bucketed_out_of_the_headline(admin):
     """Driver cash is collected at the door and tracked by the delivery
     receipt, so it is reported but must never inflate the figure a fix is

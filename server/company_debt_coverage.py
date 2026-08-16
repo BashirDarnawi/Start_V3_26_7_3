@@ -277,12 +277,19 @@ def ad_funded_minor(ad: dict[str, Any]) -> int:
     )
 
 
-def coverable_ad_debt_detail(ad: dict[str, Any]) -> tuple[str, int]:
+def coverable_ad_debt_detail(
+    ad: dict[str, Any],
+    *,
+    receipt_lookup: Callable[[str], dict[str, Any] | None] | None = None,
+) -> tuple[str, int]:
     """``(reason, coverable_minor)`` for one ad — the single source of truth.
 
     ``coverable_ad_debt_minor`` is the amount half of this, and the admin
     "why is there no button" diagnostic is the reason half, so the two can
     never drift apart into contradicting each other.
+
+    ``receipt_lookup`` resolves a receipt id to its stored data. Without one
+    every driver ad stays excluded, which is the conservative reading.
     """
     if str(ad.get("recordType") or "") == "receipt":
         return ("not_an_ad", 0)
@@ -290,7 +297,24 @@ def coverable_ad_debt_detail(ad: dict[str, Any]) -> tuple[str, int]:
     if payment_status != "not_paid":
         return (f"ad_marked_{payment_status}", 0)
     if str(ad.get("collectionMethod") or "") == "driver":
-        return ("driver_debt_belongs_to_its_delivery_receipt", 0)
+        # While the delivery is still live this money is the customer's own
+        # cash, which the driver collects at the door and the delivery receipt
+        # accounts for — never ours to cover. Once that receipt has been
+        # COLLECTED AND SETTLED (Paid), the collection path is closed for
+        # good, and whatever the settlement did not fund is simply debt that
+        # was never collected. Deliberately keyed on Paid rather than
+        # "no longer tracks debt": a canceled or lost delivery RELEASED its
+        # debt, so there is nothing left to owe, let alone to cover.
+        delivery_receipt_id = str(
+            ad.get("linkedDeliveryReceiptId") or ad.get("receiptId") or ""
+        ).strip()
+        linked_receipt = (
+            receipt_lookup(delivery_receipt_id)
+            if receipt_lookup and delivery_receipt_id
+            else None
+        )
+        if not linked_receipt or _receipt_payment_state(linked_receipt) != "paid":
+            return ("driver_debt_belongs_to_its_delivery_receipt", 0)
     has_arrays = (
         isinstance(ad.get("receiptAllocations"), list)
         or isinstance(ad.get("dueAllocations"), list)
@@ -311,16 +335,42 @@ def coverable_ad_debt_detail(ad: dict[str, Any]) -> tuple[str, int]:
     return ("coverable", gap)
 
 
-def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
-    """RECEIPT-LESS ad debt that customer-level company coverage may absorb.
+def coverable_ad_debt_minor(
+    ad: dict[str, Any],
+    *,
+    receipt_lookup: Callable[[str], dict[str, Any] | None] | None = None,
+) -> int:
+    """Ad debt that customer-level company coverage may absorb.
 
-    Only a Not Paid, non-driver ad qualifies: a driver ad's debt belongs to
-    its delivery receipt (covered through the receipt flow), and a rowless
-    legacy ad that references any receipt is charged against that receipt by
-    the usage fallback. What remains is spend backed by nothing:
-    ``effective − paid rows − due rows − company rows − direct coverage``.
+    Only a Not Paid ad qualifies. A driver ad's debt belongs to its delivery
+    receipt while that delivery is live, and a rowless legacy ad that
+    references any receipt is charged against that receipt by the usage
+    fallback. What remains is spend backed by nothing:
+    ``effective − paid rows − due rows − company rows − direct coverage
+    − legacy due mirror``.
     """
-    return coverable_ad_debt_detail(ad)[1]
+    return coverable_ad_debt_detail(ad, receipt_lookup=receipt_lookup)[1]
+
+
+def make_receipt_lookup(conn: Any) -> Callable[[str], dict[str, Any] | None]:
+    """Cached id -> receipt data reader for the coverage rules."""
+    cache: dict[str, dict[str, Any] | None] = {}
+
+    def lookup(receipt_id: str) -> dict[str, Any] | None:
+        key = str(receipt_id or "")
+        if key not in cache:
+            row = conn.execute(
+                text(
+                    "SELECT data_json FROM entities WHERE type='receipts' "
+                    "AND id=:id AND deleted=false"
+                ),
+                {"id": key},
+            ).mappings().first()
+            data = json_loads(row["data_json"]) if row and row["data_json"] else None
+            cache[key] = data if isinstance(data, dict) else None
+        return cache[key]
+
+    return lookup
 
 
 def _receipt_payment_state(receipt: dict[str, Any] | None) -> str:
@@ -508,7 +558,7 @@ def scan_unfunded_ad_spend(conn: Any) -> dict[str, Any]:
             )
         ).mappings().all()
     }
-    receipt_states = {}
+    receipts_by_id: dict[str, dict[str, Any]] = {}
     for row in conn.execute(
         text(
             "SELECT id, data_json FROM entities "
@@ -517,7 +567,12 @@ def scan_unfunded_ad_spend(conn: Any) -> dict[str, Any]:
     ).mappings().all():
         receipt = json_loads(row["data_json"]) or {}
         if isinstance(receipt, dict):
-            receipt_states[str(row["id"])] = str(receipt.get("status") or "")
+            receipts_by_id[str(row["id"])] = receipt
+    receipt_states = {
+        rid: str(receipt.get("status") or "")
+        for rid, receipt in receipts_by_id.items()
+    }
+    receipt_lookup = receipts_by_id.get
 
     # A reason only counts as debt the button fails to offer when the money is
     # genuinely still owed AND nothing else already accounts for it. Everything
@@ -558,7 +613,7 @@ def scan_unfunded_ad_spend(conn: Any) -> dict[str, Any]:
         try:
             spend_minor = ad_effective_spend_minor(ad)
             funded_minor = ad_funded_minor(ad)
-            reason = coverable_ad_debt_detail(ad)[0]
+            reason = coverable_ad_debt_detail(ad, receipt_lookup=receipt_lookup)[0]
         except HTTPException:
             unreadable.append(str(row["id"]))
             continue
@@ -676,13 +731,14 @@ def explain_customer_company_coverage(
         {"customer_id": customer_id},
     ).mappings().all()
 
+    receipt_lookup = make_receipt_lookup(conn)
     ads: list[dict[str, Any]] = []
     coverable_total_minor = 0
     for row in ad_rows:
         ad = json_loads(row["data_json"]) or {}
         if not isinstance(ad, dict):
             continue
-        reason, gap_minor = coverable_ad_debt_detail(ad)
+        reason, gap_minor = coverable_ad_debt_detail(ad, receipt_lookup=receipt_lookup)
         coverable_total_minor += gap_minor
         ads.append(
             {
@@ -1240,6 +1296,7 @@ def create_company_debt_coverage_router(
                     {"customer_id": customer_id},
                 ).mappings().all()
 
+                receipt_lookup = make_receipt_lookup(conn)
                 plans: list[tuple[str, Any, dict[str, Any], int]] = []
                 total_gap_minor = 0
                 for ad_id_row in ad_id_rows:
@@ -1254,7 +1311,9 @@ def create_company_debt_coverage_router(
                     # land on an ad that was just reassigned elsewhere.
                     if str(ad_data.get("customerId") or "") != customer_id:
                         continue
-                    gap_minor = coverable_ad_debt_minor(ad_data)
+                    gap_minor = coverable_ad_debt_minor(
+                        ad_data, receipt_lookup=receipt_lookup
+                    )
                     if gap_minor <= 0:
                         continue
                     plans.append((str(ad_id_row["id"]), ad_row, ad_data, gap_minor))

@@ -5080,7 +5080,21 @@ function getCustomerCoverableAdDebt(customerId) {
     if (!ad || ad.recordType === 'receipt') return;
     if (String(ad.customerId || ad.customer || '') !== normalizedId) return;
     if (getAdPaymentState(ad) !== 'not_paid') return;
-    if (String(ad.collectionMethod || '') === 'driver') return;
+    // While the delivery is still live this money is the customer's own cash,
+    // which the driver collects at the door and the delivery receipt accounts
+    // for — never ours to cover. Once that receipt has been COLLECTED AND
+    // SETTLED (Paid), the collection path is closed for good and whatever the
+    // settlement did not fund is debt that was never collected. Keyed on Paid
+    // rather than "no longer tracks debt": a canceled or lost delivery
+    // RELEASED its debt, so nothing is owed there at all. Mirrors the
+    // server's coverable_ad_debt_detail.
+    if (String(ad.collectionMethod || '') === 'driver') {
+      const deliveryReceiptId = String(ad.linkedDeliveryReceiptId || ad.receiptId || '').trim();
+      if (!deliveryReceiptId) return;
+      const linkedReceipt = getVisibleRecords(state.receipts || [])
+        .find(r => r && String(r.id) === deliveryReceiptId);
+      if (!linkedReceipt || getReceiptPaymentState(linkedReceipt) !== 'paid') return;
+    }
     const hasArrays = Array.isArray(ad.receiptAllocations)
       || Array.isArray(ad.dueAllocations)
       || Array.isArray(ad.companyFundingAllocations);
