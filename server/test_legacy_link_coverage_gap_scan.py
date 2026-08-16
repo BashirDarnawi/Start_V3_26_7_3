@@ -247,6 +247,49 @@ def test_scan_excludes_within_capacity_ads(admin):
     assert _delta(before, after) == (0, 0.0)
 
 
+def test_ad_linking_one_receipt_through_two_fields_counts_once(admin):
+    """THE regression that matters: the normal funding flow writes BOTH
+    fundingReceiptId and receiptId with the same id. Counting per-field
+    instead of per-ad reported committed at exactly 2x capacity, which
+    turned ordinary fully-funded receipts into phantom debt — on live data
+    that inflated the reported gap to 139 customers / $8,620."""
+    before = _scan(admin)
+    _customer("gap_cust7")
+    _paid_receipt("gap_rcpt7", "gap_cust7", 100.0)
+    _rowless_ad(
+        "gap_ad7",
+        "gap_cust7",
+        100.0,
+        fundingReceiptId="gap_rcpt7",
+        receiptId="gap_rcpt7",
+    )
+    after = _scan(admin)
+
+    # Committed is the ad's $100 counted ONCE against $100 of capacity, so
+    # there is no gap at all. Counted twice it would report $100 of debt.
+    assert _delta(before, after) == (0, 0.0)
+
+
+def test_ad_linking_one_receipt_through_two_fields_still_reports_real_overage(admin):
+    before = _scan(admin)
+    _customer("gap_cust8")
+    _paid_receipt("gap_rcpt8", "gap_cust8", 60.0)
+    _rowless_ad(
+        "gap_ad8",
+        "gap_cust8",
+        100.0,
+        fundingReceiptId="gap_rcpt8",
+        receiptId="gap_rcpt8",
+    )
+    after = _scan(admin)
+
+    # Dedup must not blind the scan: $100 committed vs $60 capacity is a
+    # genuine $40 shortfall, not $140 of doubled phantom debt.
+    receipt_delta, gap_delta = _delta(before, after)
+    assert receipt_delta == 1
+    assert gap_delta == 40.0
+
+
 def test_scan_shares_overage_across_ads_referencing_the_same_receipt(admin):
     before = _scan(admin)
     _customer("gap_cust6")

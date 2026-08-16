@@ -206,21 +206,20 @@ def _read_company_coverage_state(
     return gross_minor, covered_minor, outstanding_minor, source
 
 
-def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
-    """RECEIPT-LESS ad debt that customer-level company coverage may absorb.
+def coverable_ad_debt_detail(ad: dict[str, Any]) -> tuple[str, int]:
+    """``(reason, coverable_minor)`` for one ad — the single source of truth.
 
-    Only a Not Paid, non-driver ad qualifies: a driver ad's debt belongs to
-    its delivery receipt (covered through the receipt flow), and a rowless
-    legacy ad that references any receipt is charged against that receipt by
-    the usage fallback. What remains is spend backed by nothing:
-    ``effective − paid rows − due rows − company rows − direct coverage``.
+    ``coverable_ad_debt_minor`` is the amount half of this, and the admin
+    "why is there no button" diagnostic is the reason half, so the two can
+    never drift apart into contradicting each other.
     """
     if str(ad.get("recordType") or "") == "receipt":
-        return 0
-    if _financial_ad_payment_status(ad) != "not_paid":
-        return 0
+        return ("not_an_ad", 0)
+    payment_status = _financial_ad_payment_status(ad)
+    if payment_status != "not_paid":
+        return (f"ad_marked_{payment_status}", 0)
     if str(ad.get("collectionMethod") or "") == "driver":
-        return 0
+        return ("driver_debt_belongs_to_its_delivery_receipt", 0)
     has_arrays = (
         isinstance(ad.get("receiptAllocations"), list)
         or isinstance(ad.get("dueAllocations"), list)
@@ -231,14 +230,14 @@ def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
         or str(ad.get("receiptId") or "").strip()
         or str(ad.get("linkedDeliveryReceiptId") or "").strip()
     ):
-        return 0
+        return ("rowless_legacy_ad_charged_to_its_linked_receipt", 0)
     # STATUS-AWARE spend, mirroring the client's getAdSpendUSD to the cent —
     # the customer card's "Spent" and this coverable figure must be the same
     # number. A pending/paused ad has spent nothing: covering its un-spent
     # budget would absorb debt that does not exist (and may never exist).
     status = str(ad.get("status") or "").strip().lower()
     if status in {"pending", "paused"}:
-        return 0
+        return (f"ad_{status}_has_not_spent_yet", 0)
     if status == "stopped" and ad.get("spentUSD") is not None:
         effective = _financial_minor(ad.get("spentUSD"), "stored ad spend")
     elif status in {"completed", "canceled", "lost"}:
@@ -255,7 +254,22 @@ def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
         _financial_allocation_map(ad.get("companyFundingAllocations")).values()
     )
     direct = _financial_ad_direct_coverage(ad)
-    return max(effective - paid - due - company - direct, 0)
+    gap = max(effective - paid - due - company - direct, 0)
+    if gap <= 0:
+        return ("fully_funded_nothing_left_to_cover", 0)
+    return ("coverable", gap)
+
+
+def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
+    """RECEIPT-LESS ad debt that customer-level company coverage may absorb.
+
+    Only a Not Paid, non-driver ad qualifies: a driver ad's debt belongs to
+    its delivery receipt (covered through the receipt flow), and a rowless
+    legacy ad that references any receipt is charged against that receipt by
+    the usage fallback. What remains is spend backed by nothing:
+    ``effective − paid rows − due rows − company rows − direct coverage``.
+    """
+    return coverable_ad_debt_detail(ad)[1]
 
 
 def _receipt_payment_state(receipt: dict[str, Any] | None) -> str:
@@ -340,7 +354,14 @@ def scan_legacy_link_coverage_gap(
         text("SELECT id, data_json FROM entities WHERE type='ads' AND deleted=false")
     ).mappings().all()
 
-    referencing_ads: dict[str, list[dict[str, Any]]] = {}
+    # An ad routinely carries the SAME receipt id in more than one link field
+    # (fundingReceiptId AND receiptId are both written by the normal funding
+    # flow). Keying by ad id makes each receipt's list a genuine SET: appending
+    # per-field instead counted such an ad once per field, reporting committed
+    # totals at exactly 2x capacity and turning ordinary, correctly-funded
+    # receipts into phantom debt. _financial_ad_general_usage already tests all
+    # three fields itself, so one entry per ad is both correct and sufficient.
+    referencing_ads: dict[str, dict[str, dict[str, Any]]] = {}
     for row in ad_rows:
         ad = json_loads(row["data_json"]) or {}
         if not isinstance(ad, dict):
@@ -349,16 +370,18 @@ def scan_legacy_link_coverage_gap(
             continue
         if str(ad.get("collectionMethod") or "") == "driver":
             continue
+        ad_id = str(row["id"])
         for field in ("fundingReceiptId", "receiptId", "linkedDeliveryReceiptId"):
             receipt_id = str(ad.get(field) or "").strip()
             if receipt_id:
-                referencing_ads.setdefault(receipt_id, []).append(ad)
+                referencing_ads.setdefault(receipt_id, {})[ad_id] = ad
 
     affected_customers: set[str] = set()
     total_overage_minor = 0
     all_examples: list[dict[str, Any]] = []
 
-    for receipt_id, ads in referencing_ads.items():
+    for receipt_id, ads_by_id in referencing_ads.items():
+        ads = list(ads_by_id.values())
         row = conn.execute(
             text(
                 "SELECT data_json FROM entities "
@@ -407,6 +430,127 @@ def scan_legacy_link_coverage_gap(
         "totalGapUSD": _financial_usd(total_overage_minor),
         "examples": all_examples[:example_limit],
         "examplesTruncated": len(all_examples) > example_limit,
+    }
+
+
+def explain_customer_company_coverage(
+    conn: Any,
+    customer_id: str,
+    *,
+    financial_due_total: Callable[[dict[str, Any]], int],
+) -> dict[str, Any]:
+    """READ-ONLY: why ONE customer's debt is or is not offered to company funds.
+
+    The headcount answers "how widespread"; this answers "why not this
+    customer", which is the question a missing button actually raises. Every
+    ad reports the exact rule that decided it, straight from
+    ``coverable_ad_debt_detail`` — never a re-implementation that could
+    disagree with the real eligibility check.
+    """
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    customer_expr = (
+        "(data_json::jsonb ->> 'customerId')"
+        if postgres
+        else "json_extract(data_json, '$.customerId')"
+    )
+
+    ad_rows = conn.execute(
+        text(
+            "SELECT id, data_json FROM entities WHERE type='ads' AND deleted=false "
+            f"AND {customer_expr} = :customer_id ORDER BY id"
+        ),
+        {"customer_id": customer_id},
+    ).mappings().all()
+    receipt_rows = conn.execute(
+        text(
+            "SELECT id, data_json FROM entities WHERE type='receipts' "
+            f"AND deleted=false AND {customer_expr} = :customer_id ORDER BY id"
+        ),
+        {"customer_id": customer_id},
+    ).mappings().all()
+
+    ads: list[dict[str, Any]] = []
+    coverable_total_minor = 0
+    for row in ad_rows:
+        ad = json_loads(row["data_json"]) or {}
+        if not isinstance(ad, dict):
+            continue
+        reason, gap_minor = coverable_ad_debt_detail(ad)
+        coverable_total_minor += gap_minor
+        ads.append(
+            {
+                "adId": str(row["id"]),
+                "status": str(ad.get("status") or ""),
+                "paymentStatus": _financial_ad_payment_status(ad),
+                "collectionMethod": str(ad.get("collectionMethod") or ""),
+                "amountUSD": ad.get("amountUSD"),
+                "spentUSD": ad.get("spentUSD"),
+                "hasAllocationArrays": (
+                    isinstance(ad.get("receiptAllocations"), list)
+                    or isinstance(ad.get("dueAllocations"), list)
+                    or isinstance(ad.get("companyFundingAllocations"), list)
+                ),
+                "linkedReceiptIds": [
+                    value
+                    for value in {
+                        str(ad.get("fundingReceiptId") or "").strip(),
+                        str(ad.get("receiptId") or "").strip(),
+                        str(ad.get("linkedDeliveryReceiptId") or "").strip(),
+                    }
+                    if value
+                ],
+                "paidRowsUSD": _financial_usd(
+                    sum(_financial_allocation_map(ad.get("receiptAllocations")).values())
+                ),
+                "dueRowsUSD": _financial_usd(
+                    sum(_financial_allocation_map(ad.get("dueAllocations")).values())
+                ),
+                "companyRowsUSD": _financial_usd(
+                    sum(
+                        _financial_allocation_map(
+                            ad.get("companyFundingAllocations")
+                        ).values()
+                    )
+                ),
+                "companyDirectCoverageUSD": _financial_usd(
+                    _financial_ad_direct_coverage(ad)
+                ),
+                "reason": reason,
+                "coverableUSD": _financial_usd(gap_minor),
+            }
+        )
+
+    receipts: list[dict[str, Any]] = []
+    for row in receipt_rows:
+        receipt = json_loads(row["data_json"]) or {}
+        if not isinstance(receipt, dict):
+            continue
+        tracks_debt = _receipt_still_tracks_debt(receipt)
+        receipts.append(
+            {
+                "receiptId": str(row["id"]),
+                "status": str(receipt.get("status") or ""),
+                "isPaid": receipt.get("isPaid"),
+                "paymentState": _receipt_payment_state(receipt),
+                "receiptType": str(receipt.get("receiptType") or ""),
+                "deliveryStatus": str(receipt.get("deliveryStatus") or ""),
+                "capacityUSD": _financial_usd(financial_due_total(receipt)),
+                "companyCoveredUSD": receipt.get("companyCoveredUSD"),
+                "customerOutstandingUSD": receipt.get("customerOutstandingUSD"),
+                # A receipt only offers the receipt-level button while it is
+                # still an active unpaid debt of its own.
+                "stillTracksDebtSoCoverable": tracks_debt,
+            }
+        )
+
+    return {
+        "customerId": customer_id,
+        "coverableAdDebtUSD": _financial_usd(coverable_total_minor),
+        "coverableReceiptCount": sum(
+            1 for item in receipts if item["stillTracksDebtSoCoverable"]
+        ),
+        "ads": ads,
+        "receipts": receipts,
     }
 
 
@@ -1015,6 +1159,19 @@ def create_company_debt_coverage_router(
         with db_conn() as conn:
             return scan_legacy_link_coverage_gap(
                 conn, financial_due_total=ctx["financial_due_total"]
+            )
+
+    @router.get("/api/admin/company-coverage/customer-explain/{customer_id}")
+    def admin_company_coverage_customer_explain(
+        customer_id: str,
+        admin: dict[str, Any] = Depends(require_admin_dependency),
+    ):
+        """Read-only: the exact rule that decided each of one customer's ads,
+        for diagnosing a missing "pay debt from company funds" button."""
+        customer_id = ctx["validate_entity_id"](customer_id)
+        with db_conn() as conn:
+            return explain_customer_company_coverage(
+                conn, customer_id, financial_due_total=ctx["financial_due_total"]
             )
 
     return router
