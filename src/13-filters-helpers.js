@@ -5051,11 +5051,27 @@ function _pickCustomerAdDebtCoverage(customerId) {
   return openCustomerAdDebtCoverageModal(customerId, null);
 }
 
+// Receipt the scalar dueAmountToUse* mirror speaks for — the exact mirror of
+// the server's _financial_legacy_due_receipt_id, so both sides credit the
+// same legacy funding and neither offers money the other already committed.
+function _legacyDueReceiptIdForAd(ad) {
+  if (!ad) return '';
+  if (getAdPaymentState(ad) === 'not_paid') {
+    const method = String(ad.collectionMethod || '');
+    if (method === 'in_shop') return String(ad.receiptId || '');
+    if (method === 'driver' && !String(ad.linkedDeliveryReceiptId || '')) {
+      return String(ad.receiptId || '');
+    }
+  }
+  return String(ad.linkedDeliveryReceiptId || '');
+}
+
 // RECEIPT-LESS ad-spend debt company funds may cover, mirroring the server's
 // coverable_ad_debt_minor exactly: Not Paid, non-driver ads only; a rowless
 // legacy ad that references any receipt is charged against that receipt by
 // the usage fallback and is excluded here. Gap per ad:
-// effective spend − paid rows − due rows − company rows − direct coverage.
+// effective spend − paid rows − due rows − company rows − direct coverage
+// − the legacy scalar due mirror.
 function getCustomerCoverableAdDebt(customerId) {
   const normalizedId = String(customerId || '');
   const rows = [];
@@ -5080,12 +5096,23 @@ function getCustomerCoverableAdDebt(customerId) {
     const sumRows = list => (Array.isArray(list) ? list : [])
       .reduce((s, row) => s + Math.max(Number(row?.amountUSD) || 0, 0), 0);
     const direct = Math.max(Number(ad.companyDirectCoverageUSD) || 0, 0);
+    // The legacy scalar mirror is REAL provided funding whenever no due row
+    // exists (stopping a legacy ad leaves exactly that shape: dueAllocations
+    // emptied to [] with the surviving amount in dueAmountToUseUSD). Ignoring
+    // it offered company money for dollars already committed against the
+    // receipt — which the receipt-level button could then cover a second
+    // time. Mirrors the server's ad_funded_minor.
+    const dueRowsTotal = sumRows(ad.dueAllocations);
+    const legacyDue = dueRowsTotal > 0
+      ? 0
+      : Math.max(getAdLegacyDueMirrorUSD(ad, _legacyDueReceiptIdForAd(ad)), 0);
     const gap = Math.max(
       effective
         - sumRows(ad.receiptAllocations)
-        - sumRows(ad.dueAllocations)
+        - dueRowsTotal
         - sumRows(ad.companyFundingAllocations)
-        - direct,
+        - direct
+        - legacyDue,
       0
     );
     const gapUSD = Math.round(gap * 100) / 100;

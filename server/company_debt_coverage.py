@@ -24,6 +24,7 @@ from .financial_core import (
     _financial_ad_general_usage,
     _financial_ad_payment_status,
     _financial_allocation_map,
+    _financial_legacy_due_receipt_id,
     _financial_minor,
     _financial_outgoing,
     _financial_rows_from_allocation_map,
@@ -206,6 +207,76 @@ def _read_company_coverage_state(
     return gross_minor, covered_minor, outstanding_minor, source
 
 
+def ad_effective_spend_minor(ad: dict[str, Any]) -> int:
+    """STATUS-AWARE spend, mirroring the client's getAdSpendUSD to the cent —
+    the customer card's "Spent" and every coverage figure must be the same
+    number. A pending/paused ad has spent nothing: covering its un-spent
+    budget would absorb debt that does not exist (and may never exist).
+
+    Branches on KEY PRESENCE, not ``is not None``: the client tests
+    ``!== undefined``, so a stored ``spentUSD: null`` is present-and-zero
+    there. Testing ``is not None`` here instead fell through to amountUSD and
+    invented a whole ad's worth of debt for any row storing an explicit null.
+    """
+    status = str(ad.get("status") or "").strip().lower()
+    if status in {"pending", "paused"}:
+        return 0
+    if status == "stopped" and "spentUSD" in ad:
+        return _financial_minor(ad.get("spentUSD") or 0, "stored ad spend")
+    if status in {"completed", "canceled", "lost"}:
+        return (
+            _financial_minor(ad.get("spentUSD") or 0, "stored ad spend")
+            if "spentUSD" in ad
+            else _financial_minor(ad.get("amountUSD"), "stored ad amount")
+        )
+    return _financial_minor(ad.get("amountUSD"), "stored ad amount")
+
+
+def ad_funded_minor(ad: dict[str, Any]) -> int:
+    """Every dollar already provided for this ad, read through the SAME rules
+    the money model uses — not just the modern allocation arrays.
+
+    A pre-allocation ad records its funding nowhere but (a) the whole-ad
+    fallback, where ``_financial_ad_general_usage`` charges its ENTIRE spend
+    to the receipt it references, or (b) the scalar mirror
+    ``dueAmountToUseUSD/LYD``, which ``_financial_ad_due_usage`` still honours
+    whenever no due row exists. Counting only the arrays reported every such
+    ad as 100% unfunded — the same phantom-debt class as the per-field double
+    count — and, worse, let the customer-level button offer company money for
+    dollars already committed against a receipt, which the receipt-level
+    button could then be asked to cover a second time.
+    """
+    due_rows = _financial_allocation_map(ad.get("dueAllocations"))
+    has_arrays = (
+        isinstance(ad.get("receiptAllocations"), list)
+        or isinstance(ad.get("dueAllocations"), list)
+        or isinstance(ad.get("companyFundingAllocations"), list)
+    )
+    references_receipt = bool(
+        str(ad.get("fundingReceiptId") or "").strip()
+        or str(ad.get("receiptId") or "").strip()
+        or str(ad.get("linkedDeliveryReceiptId") or "").strip()
+    )
+    if not has_arrays and references_receipt:
+        # Whole-ad fallback: the money model already charges this ad's entire
+        # spend to the receipt it references, so nothing is outstanding here.
+        return ad_effective_spend_minor(ad)
+
+    legacy_due = 0
+    if not due_rows:
+        mirror_receipt_id = _financial_legacy_due_receipt_id(ad)
+        if mirror_receipt_id:
+            legacy_due = _financial_ad_due_usage(ad, mirror_receipt_id)
+
+    return (
+        sum(_financial_allocation_map(ad.get("receiptAllocations")).values())
+        + sum(due_rows.values())
+        + sum(_financial_allocation_map(ad.get("companyFundingAllocations")).values())
+        + _financial_ad_direct_coverage(ad)
+        + legacy_due
+    )
+
+
 def coverable_ad_debt_detail(ad: dict[str, Any]) -> tuple[str, int]:
     """``(reason, coverable_minor)`` for one ad — the single source of truth.
 
@@ -231,30 +302,10 @@ def coverable_ad_debt_detail(ad: dict[str, Any]) -> tuple[str, int]:
         or str(ad.get("linkedDeliveryReceiptId") or "").strip()
     ):
         return ("rowless_legacy_ad_charged_to_its_linked_receipt", 0)
-    # STATUS-AWARE spend, mirroring the client's getAdSpendUSD to the cent —
-    # the customer card's "Spent" and this coverable figure must be the same
-    # number. A pending/paused ad has spent nothing: covering its un-spent
-    # budget would absorb debt that does not exist (and may never exist).
     status = str(ad.get("status") or "").strip().lower()
     if status in {"pending", "paused"}:
         return (f"ad_{status}_has_not_spent_yet", 0)
-    if status == "stopped" and ad.get("spentUSD") is not None:
-        effective = _financial_minor(ad.get("spentUSD"), "stored ad spend")
-    elif status in {"completed", "canceled", "lost"}:
-        effective = (
-            _financial_minor(ad.get("spentUSD"), "stored ad spend")
-            if ad.get("spentUSD") is not None
-            else _financial_minor(ad.get("amountUSD"), "stored ad amount")
-        )
-    else:
-        effective = _financial_minor(ad.get("amountUSD"), "stored ad amount")
-    paid = sum(_financial_allocation_map(ad.get("receiptAllocations")).values())
-    due = sum(_financial_allocation_map(ad.get("dueAllocations")).values())
-    company = sum(
-        _financial_allocation_map(ad.get("companyFundingAllocations")).values()
-    )
-    direct = _financial_ad_direct_coverage(ad)
-    gap = max(effective - paid - due - company - direct, 0)
+    gap = max(ad_effective_spend_minor(ad) - ad_funded_minor(ad), 0)
     if gap <= 0:
         return ("fully_funded_nothing_left_to_cover", 0)
     return ("coverable", gap)
@@ -430,6 +481,162 @@ def scan_legacy_link_coverage_gap(
         "totalGapUSD": _financial_usd(total_overage_minor),
         "examples": all_examples[:example_limit],
         "examplesTruncated": len(all_examples) > example_limit,
+    }
+
+
+def scan_unfunded_ad_spend(conn: Any) -> dict[str, Any]:
+    """READ-ONLY: EVERY ad whose real spend exceeds the money provided for it,
+    grouped by the rule that currently decides whether company funds may
+    cover it.
+
+    This is the direct measurement of "how much real customer debt does the
+    button not offer, and why". Unlike the legacy-link scan it makes no
+    assumption about which shape the debt takes: it starts from
+    ``spend − funded > 0`` (the definition of somebody still owing) and lets
+    ``coverable_ad_debt_detail`` name the rule. ``coverable`` in the output is
+    the healthy bucket — debt the button already offers — and doubles as a
+    sanity check that the reader agrees with the live feature.
+
+    Changes nothing; counts only.
+    """
+    customer_names = {
+        str(row["id"]): str((json_loads(row["data_json"]) or {}).get("name") or "")
+        for row in conn.execute(
+            text(
+                "SELECT id, data_json FROM entities "
+                "WHERE type='customers' AND deleted=false"
+            )
+        ).mappings().all()
+    }
+    receipt_states = {}
+    for row in conn.execute(
+        text(
+            "SELECT id, data_json FROM entities "
+            "WHERE type='receipts' AND deleted=false"
+        )
+    ).mappings().all():
+        receipt = json_loads(row["data_json"]) or {}
+        if isinstance(receipt, dict):
+            receipt_states[str(row["id"])] = str(receipt.get("status") or "")
+
+    # A reason only counts as debt the button fails to offer when the money is
+    # genuinely still owed AND nothing else already accounts for it. Everything
+    # else is reported for completeness but kept OUT of the headline, because a
+    # single inflated number is exactly how the previous iteration misled.
+    not_real_debt = {
+        # The driver collects this cash at the door; the delivery receipt
+        # tracks it, and settlement converts it into an explicit allocation.
+        "driver_debt_belongs_to_its_delivery_receipt": (
+            "customer cash still to be collected through the delivery receipt"
+        ),
+        # A deliberate business write-off, not debt awaiting a payment method.
+        "ad_marked_wont_pay": "deliberately written off",
+        # Debt the button ALREADY offers — the healthy bucket, and a live
+        # cross-check that this reader agrees with the real feature.
+        "coverable": "already offered by the button today",
+    }
+
+    totals_minor: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    customers_by_reason: dict[str, set[str]] = {}
+    all_customers: set[str] = set()
+    examples: list[dict[str, Any]] = []
+    unreadable: list[str] = []
+    ads_with_no_customer_id = 0
+
+    for row in conn.execute(
+        text("SELECT id, data_json FROM entities WHERE type='ads' AND deleted=false")
+    ).mappings().all():
+        ad = json_loads(row["data_json"]) or {}
+        if not isinstance(ad, dict):
+            continue
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        # A single corrupt legacy row must not abort the whole survey — those
+        # are precisely the rows this scan exists to find. _financial_minor
+        # raises on negative/non-numeric/over-cap stored values.
+        try:
+            spend_minor = ad_effective_spend_minor(ad)
+            funded_minor = ad_funded_minor(ad)
+            reason = coverable_ad_debt_detail(ad)[0]
+        except HTTPException:
+            unreadable.append(str(row["id"]))
+            continue
+        unfunded_minor = spend_minor - funded_minor
+        if unfunded_minor <= 0:
+            continue
+
+        # customerId only — the live route selects and re-verifies on that
+        # field alone, so anything else could never actually be offered.
+        customer_id = str(ad.get("customerId") or "")
+        if customer_id:
+            customers_by_reason.setdefault(reason, set()).add(customer_id)
+            all_customers.add(customer_id)
+        else:
+            ads_with_no_customer_id += 1
+
+        totals_minor[reason] = totals_minor.get(reason, 0) + unfunded_minor
+        counts[reason] = counts.get(reason, 0) + 1
+
+        linked = [
+            value
+            for value in {
+                str(ad.get("fundingReceiptId") or "").strip(),
+                str(ad.get("receiptId") or "").strip(),
+                str(ad.get("linkedDeliveryReceiptId") or "").strip(),
+            }
+            if value
+        ]
+        examples.append(
+            {
+                "adId": str(row["id"]),
+                "customerId": customer_id,
+                "customerName": customer_names.get(customer_id, ""),
+                "reason": reason,
+                "countsAsUnofferedDebt": reason not in not_real_debt,
+                "adStatus": str(ad.get("status") or ""),
+                "hasAllocationRows": bool(
+                    _financial_allocation_map(ad.get("receiptAllocations"))
+                    or _financial_allocation_map(ad.get("dueAllocations"))
+                    or _financial_allocation_map(ad.get("companyFundingAllocations"))
+                ),
+                "spentUSD": _financial_usd(spend_minor),
+                "fundedUSD": _financial_usd(funded_minor),
+                "unfundedUSD": _financial_usd(unfunded_minor),
+                "linkedReceipts": [
+                    {"receiptId": rid, "status": receipt_states.get(rid, "DELETED_OR_MISSING")}
+                    for rid in linked
+                ],
+            }
+        )
+
+    totals = {
+        reason: {
+            "adCount": counts[reason],
+            "customerCount": len(customers_by_reason.get(reason, set())),
+            "unfundedUSD": _financial_usd(minor),
+            "countsAsUnofferedDebt": reason not in not_real_debt,
+            "note": not_real_debt.get(reason, "real debt the button does not offer"),
+        }
+        for reason, minor in totals_minor.items()
+    }
+    real_debt_minor = sum(
+        minor for reason, minor in totals_minor.items() if reason not in not_real_debt
+    )
+
+    examples.sort(key=lambda item: item["unfundedUSD"], reverse=True)
+    example_limit = 40
+    return {
+        # THE number to scope a fix against: only buckets that are genuinely
+        # owed and genuinely not offered anywhere.
+        "notOfferedButRealDebtUSD": _financial_usd(real_debt_minor),
+        "distinctCustomerCount": len(all_customers),
+        "totalsByReason": totals,
+        "adsWithNoCustomerId": ads_with_no_customer_id,
+        "unreadableAdIds": unreadable[:20],
+        "unreadableAdCount": len(unreadable),
+        "examples": examples[:example_limit],
+        "examplesTruncated": len(examples) > example_limit,
     }
 
 
@@ -1160,6 +1367,16 @@ def create_company_debt_coverage_router(
             return scan_legacy_link_coverage_gap(
                 conn, financial_due_total=ctx["financial_due_total"]
             )
+
+    @router.get("/api/admin/company-coverage/unfunded-ad-spend-scan")
+    def admin_company_coverage_unfunded_ad_spend_scan(
+        admin: dict[str, Any] = Depends(require_admin_dependency),
+    ):
+        """Read-only: every ad whose spend exceeds its funding, grouped by the
+        rule that decides whether company funds may cover it. The direct
+        measure of how much real debt the button does not offer, and why."""
+        with db_conn() as conn:
+            return scan_unfunded_ad_spend(conn)
 
     @router.get("/api/admin/company-coverage/customer-explain/{customer_id}")
     def admin_company_coverage_customer_explain(
