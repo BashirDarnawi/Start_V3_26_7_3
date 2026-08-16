@@ -8,6 +8,7 @@ into the focused router so its behavior remains part of the same API contract.
 
 from __future__ import annotations
 
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
@@ -15,11 +16,12 @@ from typing import Any, Callable, Iterable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from .db import db_conn, get_engine
+from .db import db_conn, get_engine, json_loads
 
 from .financial_core import (
     _financial_ad_direct_coverage,
     _financial_ad_due_usage,
+    _financial_ad_general_usage,
     _financial_ad_payment_status,
     _financial_allocation_map,
     _financial_minor,
@@ -254,6 +256,158 @@ def coverable_ad_debt_minor(ad: dict[str, Any]) -> int:
     )
     direct = _financial_ad_direct_coverage(ad)
     return max(effective - paid - due - company - direct, 0)
+
+
+def _receipt_payment_state(receipt: dict[str, Any] | None) -> str:
+    """Python mirror of the client's getReceiptPaymentState (08-data-audit.js)."""
+    if not receipt:
+        return "unknown"
+    status = re.sub(r"[\s_-]+", "", str(receipt.get("status") or "").strip().lower())
+    if status in {"canceled", "cancelled"}:
+        return "canceled"
+    if status == "destroyed":
+        return "canceled"
+    if status == "lost":
+        return "lost"
+    if status == "paid":
+        return "paid"
+    if status in {"notpaid", "unpaid", "pending"}:
+        return "not_paid"
+    if receipt.get("isPaid") is True:
+        return "paid"
+    if receipt.get("isPaid") is False:
+        return "not_paid"
+    return "unknown"
+
+
+def _receipt_still_tracks_debt(receipt: dict[str, Any] | None) -> bool:
+    """Python mirror of the client's getReceiptDebtType(...) !== 'none'.
+
+    True only while a receipt is itself still an active, unpaid debt (the
+    state the "Unpaid receipt debt" figure and the receipt-level coverage
+    button both key off). False for Paid/Canceled/Lost/Destroyed/TRANSFER_IN
+    receipts and canceled deliveries — i.e. once a receipt reaches this
+    state, nothing else will surface its remaining shortfall as debt.
+    """
+    if not receipt:
+        return False
+    if str(receipt.get("receiptType") or "").strip().upper() == "TRANSFER_IN":
+        return False
+    if _receipt_payment_state(receipt) != "not_paid":
+        return False
+    delivery_status = str(receipt.get("deliveryStatus") or "").strip().lower()
+    if delivery_status in {"canceled", "cancelled"}:
+        return False
+    return True
+
+
+def scan_legacy_link_coverage_gap(
+    conn: Any,
+    *,
+    financial_due_total: Callable[[dict[str, Any]], int],
+) -> dict[str, Any]:
+    """READ-ONLY headcount, using the SAME one-pot rule the rest of the money
+    model already enforces (``committed(receipt) <= capacity(receipt)``):
+    real customer debt currently invisible to both company-fund coverage
+    paths.
+
+    A legacy rowless ad (no receiptAllocations/dueAllocations/
+    companyFundingAllocations arrays) that references a receipt is counted
+    as fully COMMITTED against that receipt's capacity via the whole-ad
+    fallback (``_financial_ad_general_usage``, the same reader every other
+    capacity guard trusts) — never per-dollar, since a rowless ad carries no
+    record of how much of the receipt it actually used. That is fine while
+    the receipt is still an active not-paid debt: ``coverable_ad_debt_minor``
+    correctly leaves the ad alone because the receipt side is still tracking
+    it (via the client's own committed-vs-capacity reads). Once the receipt
+    reaches Paid/Canceled/Lost/Destroyed/TRANSFER_IN (``_receipt_still_tracks_debt``
+    false), that tracking stops — but the ad's commitment against it does
+    not disappear. If the committed total from every ad referencing that
+    receipt exceeds the receipt's own capacity, the difference is real,
+    uncollectable debt that today shows in no "Unpaid receipt debt" line and
+    passes ``coverable_ad_debt_minor``'s legacy-link exclusion untouched.
+
+    Judged per RECEIPT (not per ad) because several rowless ads can share one
+    receipt's pot — judging one ad in isolation could over- or under-state
+    the shared shortfall. Driver-collection ads are excluded: their money is
+    the customer's own cash collected at the door, tracked through the
+    delivery flow, never receipt-pot committed via this fallback.
+
+    Changes nothing — it only counts. This is the sizing step before any
+    change to ``coverable_ad_debt_minor`` itself.
+    """
+    ad_rows = conn.execute(
+        text("SELECT id, data_json FROM entities WHERE type='ads' AND deleted=false")
+    ).mappings().all()
+
+    referencing_ads: dict[str, list[dict[str, Any]]] = {}
+    for row in ad_rows:
+        ad = json_loads(row["data_json"]) or {}
+        if not isinstance(ad, dict):
+            continue
+        if str(ad.get("recordType") or "") == "receipt":
+            continue
+        if str(ad.get("collectionMethod") or "") == "driver":
+            continue
+        for field in ("fundingReceiptId", "receiptId", "linkedDeliveryReceiptId"):
+            receipt_id = str(ad.get(field) or "").strip()
+            if receipt_id:
+                referencing_ads.setdefault(receipt_id, []).append(ad)
+
+    affected_customers: set[str] = set()
+    total_overage_minor = 0
+    all_examples: list[dict[str, Any]] = []
+
+    for receipt_id, ads in referencing_ads.items():
+        row = conn.execute(
+            text(
+                "SELECT data_json FROM entities "
+                "WHERE type='receipts' AND id=:id AND deleted=false"
+            ),
+            {"id": receipt_id},
+        ).mappings().first()
+        if not row or not row["data_json"]:
+            continue
+        receipt = json_loads(row["data_json"])
+        if not isinstance(receipt, dict):
+            continue
+        if _receipt_still_tracks_debt(receipt):
+            continue  # correctly excluded today — receipt path still owns this
+
+        capacity_minor = financial_due_total(receipt)
+        committed_minor = sum(
+            _financial_ad_general_usage(ad, receipt_id) for ad in ads
+        )
+        overage_minor = max(committed_minor - capacity_minor, 0)
+        if overage_minor <= 0:
+            continue
+
+        customer_id = str(receipt.get("customerId") or "")
+        affected_customers.add(customer_id)
+        total_overage_minor += overage_minor
+        all_examples.append(
+            {
+                "receiptId": receipt_id,
+                "customerId": customer_id,
+                "receiptStatus": str(receipt.get("status") or ""),
+                "receiptCapacityUSD": _financial_usd(capacity_minor),
+                "committedByAdsUSD": _financial_usd(committed_minor),
+                "overageUSD": _financial_usd(overage_minor),
+                "adCount": len(ads),
+            }
+        )
+
+    # Largest gaps first — the biggest-dollar cases are what an admin needs
+    # to see, not an arbitrary database scan order.
+    all_examples.sort(key=lambda item: item["overageUSD"], reverse=True)
+    example_limit = 50
+    return {
+        "affectedCustomerCount": len(affected_customers),
+        "affectedReceiptCount": len(all_examples),
+        "totalGapUSD": _financial_usd(total_overage_minor),
+        "examples": all_examples[:example_limit],
+        "examplesTruncated": len(all_examples) > example_limit,
+    }
 
 
 def release_company_rows_for_receipt_delete(
