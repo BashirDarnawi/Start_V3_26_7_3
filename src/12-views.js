@@ -5269,7 +5269,8 @@ async function refreshDeliveryDashboard() {
     return;
   }
 
-  updateSyncIndicator('syncing');
+  // User-initiated: always show feedback, never wait for the slow threshold.
+  updateSyncIndicator('syncing', { immediate: true });
   showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ جلب أحدث البيانات...' : 'Fetching latest data...', 'info');
 
   try {
@@ -5292,7 +5293,7 @@ async function refreshDeliveryDashboard() {
 
     render();
     if (window.lucide) lucide.createIcons();
-    updateSyncIndicator('synced');
+    updateSyncIndicator('synced', { immediate: true });
     showNotification(state.language === 'ar' ? 'تم التحديث' : 'Refreshed', state.language === 'ar' ? 'تم تحديث اللوحة بأحدث البيانات' : 'Dashboard updated with latest data', 'success');
   } catch (e) {
     console.error('Failed to refresh delivery dashboard:', e);

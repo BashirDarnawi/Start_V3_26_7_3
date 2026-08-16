@@ -772,7 +772,37 @@ async function serverLiveSyncTick() {
 // Visual sync indicator. Keep one cancellable hide timer: an older "Synced"
 // timer must never hide a newer "Syncing" or error state.
 let _syncIndicatorHideTimer = null;
-function updateSyncIndicator(status) {
+let _syncIndicatorShowTimer = null;
+// Is a badge actually on screen? A healthy tick must leave nothing behind,
+// and "Synced" may only appear to close out a badge the user already saw.
+let _syncIndicatorVisible = false;
+// The poll runs every 3s. Painting "Syncing…" then "Synced" on EVERY tick
+// left a pill flashing in the corner forever, which reads as a fault — the
+// behavior the owner reported as "sync failed" even while syncing was fine.
+// Routine ticks are now silent: a badge appears only for a genuinely slow
+// sync, a real failure, or a sync the user asked for (immediate: true).
+const SYNC_BADGE_SLOW_MS = 1200;
+
+function updateSyncIndicator(status, { immediate = false } = {}) {
+  if (_syncIndicatorShowTimer) {
+    clearTimeout(_syncIndicatorShowTimer);
+    _syncIndicatorShowTimer = null;
+  }
+  if (status === 'syncing' && !immediate) {
+    // Only a sync slow enough to be worth noticing earns a badge.
+    _syncIndicatorShowTimer = setTimeout(() => {
+      _syncIndicatorShowTimer = null;
+      _paintSyncIndicator('syncing');
+    }, SYNC_BADGE_SLOW_MS);
+    return;
+  }
+  // A background success with nothing on screen stays invisible; with a
+  // badge up (slow sync, or a previous failure) it closes the loop.
+  if (status === 'synced' && !immediate && !_syncIndicatorVisible) return;
+  _paintSyncIndicator(status);
+}
+
+function _paintSyncIndicator(status) {
   let indicator = document.getElementById('sync-status-indicator');
   if (!indicator) {
     // Create indicator if it doesn't exist
@@ -791,6 +821,7 @@ function updateSyncIndicator(status) {
   }
   indicator.dataset.status = String(status || '');
   indicator.onclick = null;
+  _syncIndicatorVisible = true;
 
   switch (status) {
     case 'syncing':
@@ -805,7 +836,10 @@ function updateSyncIndicator(status) {
       // Fade out after 2 seconds
       _syncIndicatorHideTimer = setTimeout(() => {
         _syncIndicatorHideTimer = null;
-        if (indicator?.dataset.status === 'synced') indicator.style.opacity = '0';
+        if (indicator?.dataset.status === 'synced') {
+          indicator.style.opacity = '0';
+          _syncIndicatorVisible = false;
+        }
       }, 2000);
       break;
     case 'error':
@@ -824,7 +858,8 @@ async function manualSyncData() {
     return;
   }
 
-  updateSyncIndicator('syncing');
+  // User-initiated: always show feedback, never wait for the slow threshold.
+  updateSyncIndicator('syncing', { immediate: true });
   showNotification(state.language === 'ar' ? 'جارٍ المزامنة' : 'Syncing', state.language === 'ar' ? 'جارٍ تحديث البيانات من السيرفر...' : 'Refreshing data from server...', 'info');
 
   const syncIdentity = getServerSessionIdentity();
@@ -841,7 +876,7 @@ async function manualSyncData() {
     if (Array.isArray(result?.failed) && result.failed.length > 0) {
       throw new Error(`Failed collections: ${result.failed.map(x => x.collection).filter(Boolean).join(', ')}`);
     }
-    updateSyncIndicator('synced');
+    updateSyncIndicator('synced', { immediate: true });
     showNotification(state.language === 'ar' ? 'تمت المزامنة' : 'Synced', state.language === 'ar' ? 'تم تحديث البيانات بنجاح' : 'Data refreshed successfully', 'success');
     forceFullRender();
   } catch (e) {

@@ -563,9 +563,26 @@ check('sync indicator cancels stale hide timers before every new status',
   liveSync.includes('_syncIndicatorHideTimer = null;') &&
   liveSync.indexOf('clearTimeout(_syncIndicatorHideTimer);') < liveSync.indexOf('switch (status)') &&
   liveSync.includes("indicator.dataset.status = String(status || '');") &&
-  liveSync.includes("if (indicator?.dataset.status === 'synced') indicator.style.opacity = '0';") &&
+  // The fade still applies only while the badge is genuinely still 'synced';
+  // the body grew a visibility reset, so match the guard, not one exact line.
+  liveSync.includes("if (indicator?.dataset.status === 'synced') {") &&
+  liveSync.includes("indicator.style.opacity = '0';") &&
   liveSync.includes('indicator.onclick = null;') &&
   liveSync.includes("indicator.setAttribute('aria-live', 'polite')"));
+// A 3s poll that painted "Syncing…"/"Synced" on every tick left a pill
+// flashing in the corner forever and was read as a failure. Routine ticks
+// must stay silent; only slow syncs, real errors, and user-initiated syncs
+// may paint.
+check('a healthy background sync tick paints no badge at all',
+  liveSync.includes('const SYNC_BADGE_SLOW_MS = 1200;') &&
+  liveSync.includes('function updateSyncIndicator(status, { immediate = false } = {})') &&
+  liveSync.includes("if (status === 'syncing' && !immediate) {") &&
+  liveSync.includes("_paintSyncIndicator('syncing');") &&
+  liveSync.includes("if (status === 'synced' && !immediate && !_syncIndicatorVisible) return;") &&
+  liveSync.includes("updateSyncIndicator('syncing', { immediate: true });") &&
+  liveSync.includes("updateSyncIndicator('synced', { immediate: true });") &&
+  views.includes("updateSyncIndicator('syncing', { immediate: true });") &&
+  views.includes("updateSyncIndicator('synced', { immediate: true });"));
 check('settings exposes public privacy and account-deletion actions',
   views.includes('https://albayanhub.com/privacy') &&
   views.includes('https://albayanhub.com/delete-account') &&

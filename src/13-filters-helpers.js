@@ -1241,8 +1241,17 @@ function getCustomerStats(customerId, statsIndex = null) {
   companyFundedLYD = Math.round(companyFundedLYD * 100) / 100;
 
   // Calculate balance (paid - spent - uncommitted receipt debt + company-covered ad funding)
-  const balanceLYD = totalPaidLYD - totalSpentLYD - receiptDebtLYD + companyFundedLYD;
-  const balanceUSD = totalPaidUSD - totalSpentUSD - receiptDebtUSD + companyFundedUSD;
+  // Money is 2dp. The proportional/derived terms above leave float residue,
+  // so a fully settled customer landed at about -0.0000001: rendered as a RED
+  // "-0.00" and matched the "Has debt" filter (which tests balance < 0)
+  // despite owing nothing. Snap sub-cent noise to a true zero so settled
+  // reads as settled in the card, the colour, the filter and the sort.
+  const snapMoney = value => {
+    const rounded = Math.round(value * 100) / 100;
+    return Object.is(rounded, -0) ? 0 : rounded;
+  };
+  const balanceLYD = snapMoney(totalPaidLYD - totalSpentLYD - receiptDebtLYD + companyFundedLYD);
+  const balanceUSD = snapMoney(totalPaidUSD - totalSpentUSD - receiptDebtUSD + companyFundedUSD);
   
   // Legacy balance (for backwards compatibility)
   const totalSpent = totalSpentLYD;
