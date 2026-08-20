@@ -203,6 +203,21 @@ check('a still-linking Meta draft blocks submit with its own message, bilinguall
   modals.includes('awaitingMetaPageLink') &&
   modals.includes("This ad's Facebook page is being linked automatically. Wait a minute and try again.") &&
   modals.includes('يتم ربط صفحة فيسبوك لهذا الإعلان تلقائياً. انتظر دقيقة ثم أعد المحاولة.'));
+// The owner's requested escape hatch: admins may deliberately re-point an
+// imported ad, but only through a warned flow whose confirmation is a
+// request-only flag — never for employees, never silently, never stored.
+check('changing an imported ad page is an admin-only warned flow',
+  adEditModal.includes('isCurrentUserAdmin() ? `') &&
+  adEditModal.includes('confirmMetaAdPageChange()') &&
+  adEditModal.includes('id="ad-page-override-picker"') &&
+  adEditModal.includes('id="ad-meta-page-override"') &&
+  forms.includes('function confirmMetaAdPageChange()') &&
+  forms.includes('if (!isCurrentUserAdmin()) return;') &&
+  forms.includes('if (!confirm(warning)) return;') &&
+  forms.includes('هذا الإعلان يخص صفحة فيسبوك') &&
+  forms.includes('This ad ran on the Facebook page') &&
+  modals.includes("isServerModeEnabled() && document.getElementById('ad-meta-page-override')?.value === '1'") &&
+  modals.includes('adUpdates.confirmMetaPageOverride = true;'));
 check('ad page dropdown marks Meta-imported pages with a Meta badge',
   adEditModal.includes("String(p.metaPageId || '').trim() ?") &&
   adEditModal.includes('>Meta</span>') &&

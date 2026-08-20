@@ -3146,3 +3146,65 @@ def test_page_guard_ignores_ordinary_ads_and_unchanged_links(actors):
     finally:
         with db_conn() as conn:
             conn.execute(text("DELETE FROM entities WHERE id LIKE 'meta_guard2_%'"))
+
+
+def test_admin_override_allows_a_warned_cross_page_link_employees_never(actors):
+    """The owner's requested escape hatch: an ADMIN who confirmed the warning
+    may deliberately re-point an imported ad across Facebook pages. The flag
+    is request-only (never stored), and employees stay hard-blocked with or
+    without it."""
+    creator = actors["admin_id"]
+    _insert_customer("meta_ovr_customer", creator)
+    _seed_scan_entity("pages", "meta_ovr_page_other", {
+        "name": "Other Business Page", "metaPageId": "999955555555555", "customerIds": [],
+    }, creator)
+    ad_id = "meta_ovr_ad"
+    version = _insert_ad(
+        ad_id, creator,
+        customerId="meta_ovr_customer",
+        metaImportSource="meta_ads",
+        metaPageId="555511111111111",
+        metaPageName="The Real Page",
+        pageId="", pageName="",
+        paymentStatus="not_paid", status="Active",
+        amountUSD=10, amountLocal=97, exchangeRate=9.7,
+        receiptId="", receiptAllocations=[], dueAllocations=[],
+    )
+    try:
+        def _mutate(cookies, key, expected_version, extra):
+            payload = {"pageId": "meta_ovr_page_other", "pageName": "Other Business Page"}
+            payload.update(extra)
+            return client.post(
+                "/api/ads/mutate",
+                json={
+                    "action": "update",
+                    "adId": ad_id,
+                    "idempotencyKey": key,
+                    "expectedLastModified": expected_version,
+                    "data": payload,
+                },
+                cookies=cookies,
+            )
+
+        # An employee with the flag is still refused — the hatch is admin-only.
+        employee = _mutate(actors["employee"], "meta-ovr-emp", version,
+                           {"confirmMetaPageOverride": True})
+        assert employee.status_code == 409, employee.text
+        assert "administrator" in employee.json()["detail"]
+
+        # An admin WITHOUT the flag is refused and pointed at the warned flow.
+        admin_plain = _mutate(actors["admin"], "meta-ovr-plain", version, {})
+        assert admin_plain.status_code == 409, admin_plain.text
+        assert "Change-page" in admin_plain.json()["detail"]
+
+        # An admin WITH the confirmed flag goes through.
+        admin_confirmed = _mutate(actors["admin"], "meta-ovr-ok", version,
+                                  {"confirmMetaPageOverride": True})
+        assert admin_confirmed.status_code == 200, admin_confirmed.text
+        stored, _ = _stored_ad(ad_id)
+        assert stored["pageId"] == "meta_ovr_page_other"
+        # Request-only: the confirmation itself must never be stored.
+        assert "confirmMetaPageOverride" not in stored
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE id LIKE 'meta_ovr_%'"))

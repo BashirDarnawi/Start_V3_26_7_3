@@ -3203,6 +3203,30 @@ function handleAdPageChange(preserveFunding = false) {
   renderAdFundingList();
 }
 
+// Admin-only, deliberately warned: unlock the page picker on a Meta-imported
+// ad. The lock exists because a fast unwarned pick once attached an ad to
+// another business's page; the server still refuses a cross-Facebook-page
+// link unless this confirmed flag rides along with the save.
+function confirmMetaAdPageChange() {
+  if (!isCurrentUserAdmin()) return;
+  const isArM = state.language === 'ar';
+  const adData = state.modalData || {};
+  const fbName = String(adData.metaPageName || '').trim()
+    || `Facebook Page ${String(adData.metaPageId || '').trim()}`;
+  const warning = isArM
+    ? `هذا الإعلان يخص صفحة فيسبوك "${fbName}".\n\nربطه بصفحة أخرى في النظام يغيّر الصفحة التي تُحسب عليها تقارير ومصاريف هذا الإعلان. تابع فقط إذا كنت متأكداً أن هذا ما تريده.\n\nهل تريد المتابعة؟`
+    : `This ad ran on the Facebook page "${fbName}".\n\nLinking it to a different page in the system changes which page this ad's reports and spending count under. Continue only if you are sure this is what you want.\n\nContinue?`;
+  if (!confirm(warning)) return;
+  const overrideFlag = document.getElementById('ad-meta-page-override');
+  if (overrideFlag) overrideFlag.value = '1';
+  document.getElementById('ad-meta-page-locked-display')?.classList.add('hidden');
+  const picker = document.getElementById('ad-page-override-picker');
+  if (picker) picker.classList.remove('hidden');
+  const search = document.getElementById('ad-page-search');
+  try { search?.focus(); } catch (_) {}
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
   if (!Security.isValidRecordId(pageId)) return;

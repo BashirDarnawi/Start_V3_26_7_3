@@ -2617,6 +2617,9 @@ def guard_meta_ad_page_link(
     conn: Any,
     existing: dict[str, Any] | None,
     requested: dict[str, Any] | None,
+    *,
+    actor: dict[str, Any] | None = None,
+    override_confirmed: bool = False,
 ) -> None:
     """Reject linking a Meta-imported ad to a DIFFERENT Facebook page's page.
 
@@ -2628,6 +2631,11 @@ def guard_meta_ad_page_link(
     the page LINK actually changes, so records mislinked before this guard
     still accept unrelated edits — and their repair (re-pointing to the
     matching page) is itself an allowed change.
+
+    ONE deliberate escape hatch, at the owner's request: an ADMIN who has
+    confirmed the warning (the request-only ``confirmMetaPageOverride`` flag)
+    may cross-link anyway — a conscious, warned decision, never a fast
+    accident, and never available to employees at all.
     """
     ad_meta_page_id = _clean_text(
         (requested or {}).get("metaPageId") or (existing or {}).get("metaPageId"),
@@ -2643,16 +2651,28 @@ def guard_meta_ad_page_link(
     if row is None or not isinstance(data, dict):
         raise HTTPException(status_code=404, detail="Ad page not found")
     page_meta_id = _clean_text(data.get("metaPageId"), 40)
-    if page_meta_id and page_meta_id != ad_meta_page_id:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This imported ad ran on Facebook page "
-                f"{ad_meta_page_id}, but the chosen local page belongs to "
-                f"Facebook page {page_meta_id}. Choose the matching page "
-                "or leave the page empty for automatic linking."
-            ),
+    if not page_meta_id or page_meta_id == ad_meta_page_id:
+        return
+    actor_is_admin = (
+        str((actor or {}).get("role") or "").strip().lower() == "admin"
+    )
+    if actor_is_admin and override_confirmed:
+        return
+    if actor_is_admin:
+        detail = (
+            "This imported ad ran on Facebook page "
+            f"{ad_meta_page_id}, but the chosen local page belongs to "
+            f"Facebook page {page_meta_id}. Use the ad form's Change-page "
+            "option to confirm this deliberately."
         )
+    else:
+        detail = (
+            "This imported ad ran on Facebook page "
+            f"{ad_meta_page_id}, but the chosen local page belongs to "
+            f"Facebook page {page_meta_id}. Choose the matching page, leave "
+            "the page empty for automatic linking, or ask an administrator."
+        )
+    raise HTTPException(status_code=409, detail=detail)
 
 
 def _entity_by_id(conn: Any, entity_type: str, entity_id: str) -> tuple[Any | None, dict[str, Any] | None]:

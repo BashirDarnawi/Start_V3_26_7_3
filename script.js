@@ -34786,6 +34786,30 @@ function handleAdPageChange(preserveFunding = false) {
   renderAdFundingList();
 }
 
+// Admin-only, deliberately warned: unlock the page picker on a Meta-imported
+// ad. The lock exists because a fast unwarned pick once attached an ad to
+// another business's page; the server still refuses a cross-Facebook-page
+// link unless this confirmed flag rides along with the save.
+function confirmMetaAdPageChange() {
+  if (!isCurrentUserAdmin()) return;
+  const isArM = state.language === 'ar';
+  const adData = state.modalData || {};
+  const fbName = String(adData.metaPageName || '').trim()
+    || `Facebook Page ${String(adData.metaPageId || '').trim()}`;
+  const warning = isArM
+    ? `هذا الإعلان يخص صفحة فيسبوك "${fbName}".\n\nربطه بصفحة أخرى في النظام يغيّر الصفحة التي تُحسب عليها تقارير ومصاريف هذا الإعلان. تابع فقط إذا كنت متأكداً أن هذا ما تريده.\n\nهل تريد المتابعة؟`
+    : `This ad ran on the Facebook page "${fbName}".\n\nLinking it to a different page in the system changes which page this ad's reports and spending count under. Continue only if you are sure this is what you want.\n\nContinue?`;
+  if (!confirm(warning)) return;
+  const overrideFlag = document.getElementById('ad-meta-page-override');
+  if (overrideFlag) overrideFlag.value = '1';
+  document.getElementById('ad-meta-page-locked-display')?.classList.add('hidden');
+  const picker = document.getElementById('ad-page-override-picker');
+  if (picker) picker.classList.remove('hidden');
+  const search = document.getElementById('ad-page-search');
+  try { search?.focus(); } catch (_) {}
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
 // Select a page in the Add Ad modal (Page-first workflow)
 function selectAdPage(pageId, preserveFunding = false) {
   if (!Security.isValidRecordId(pageId)) return;
@@ -37985,23 +38009,52 @@ function renderModal() {
               <div>
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 ${metaPageLocked ? `
-                <div class="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2">
-                  <span class="truncate">${Security.escapeHtml(
-                    metaLockedPage
-                      ? (metaLockedPage.name || '')
-                      : (String(adData.metaPageName || '').trim() || `Facebook Page ${adMetaPageId}`)
-                  )}</span>
-                  <span class="shrink-0 flex items-center gap-1.5">
-                    <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>
-                    <i data-lucide="${metaLockedPage ? 'lock' : 'loader'}" class="w-3.5 h-3.5 text-slate-400"></i>
-                  </span>
+                <div id="ad-meta-page-locked-display">
+                  <div class="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2">
+                    <span class="truncate">${Security.escapeHtml(
+                      metaLockedPage
+                        ? (metaLockedPage.name || '')
+                        : (String(adData.metaPageName || '').trim() || `Facebook Page ${adMetaPageId}`)
+                    )}</span>
+                    <span class="shrink-0 flex items-center gap-1.5">
+                      <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>
+                      <i data-lucide="${metaLockedPage ? 'lock' : 'loader'}" class="w-3.5 h-3.5 text-slate-400"></i>
+                    </span>
+                  </div>
+                  <div class="mt-1 flex items-center justify-between gap-2">
+                    <p class="text-[11px] text-slate-500">${
+                      metaLockedPage
+                        ? (isArAd ? 'الصفحة مرتبطة تلقائياً من استيراد ميتا ولا يمكن تغييرها.' : 'This page was linked automatically by the Meta import and cannot be changed.')
+                        : (isArAd ? 'يتم ربط صفحة فيسبوك تلقائياً الآن — انتظر قليلاً ثم أعد المحاولة.' : 'The Facebook page is being linked automatically — wait a moment and try again.')
+                    }</p>
+                    ${isCurrentUserAdmin() ? `
+                    <button type="button" onclick="confirmMetaAdPageChange()"
+                      class="shrink-0 text-[11px] font-bold text-amber-700 dark:text-amber-400 hover:underline">
+                      ${isArAd ? 'تغيير الصفحة' : 'Change page'}
+                    </button>
+                    ` : ''}
+                  </div>
                 </div>
-                <p class="text-[11px] text-slate-500 mt-1">${
-                  metaLockedPage
-                    ? (isArAd ? 'الصفحة مرتبطة تلقائياً من استيراد ميتا ولا يمكن تغييرها.' : 'This page was linked automatically by the Meta import and cannot be changed.')
-                    : (isArAd ? 'يتم ربط صفحة فيسبوك تلقائياً الآن — انتظر قليلاً ثم أعد المحاولة.' : 'The Facebook page is being linked automatically — wait a moment and try again.')
-                }</p>
+                <div id="ad-page-override-picker" class="hidden">
+                  <div class="mb-2 rounded-lg border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/40 p-2 text-[11px] leading-4 text-amber-800 dark:text-amber-200">
+                    ${isArAd
+                      ? 'تغيير مقصود: هذا الإعلان يخص صفحة فيسبوك أخرى، وسيُسجل هذا الربط كقرار إداري.'
+                      : 'Deliberate change: this ad belongs to a different Facebook page; this link will be recorded as an admin decision.'}
+                  </div>
+                  <div class="relative">
+                    <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="" autocomplete="off" />
+                    <div id="ad-page-dropdown" class="absolute z-20 mt-1 w-full bg-white dark:bg-slate-800 rounded-lg shadow-xl max-h-48 overflow-y-auto hidden border border-slate-200 dark:border-slate-600">
+                      ${visiblePages.map(p => `
+                        <div class="page-option px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer text-sm flex items-center justify-between gap-2" data-name="${Security.escapeHtml((p.name || '').toLowerCase())}" data-record-action="select-ad-page" data-record-id="${Security.escapeHtml(String(p.id || ''))}">
+                          <span class="truncate">${Security.escapeHtml(p.name || '')}</span>
+                          ${String(p.metaPageId || '').trim() ? '<span class="shrink-0 px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>' : ''}
+                        </div>
+                      `).join('')}
+                    </div>
+                  </div>
+                </div>
                 <input type="hidden" id="ad-page" value="${Security.escapeHtml(String(metaLockedPage?.id || adData.pageId || ''))}" required />
+                <input type="hidden" id="ad-meta-page-override" value="" />
                 ` : `
                 <div class="relative">
                   <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
@@ -41093,6 +41146,12 @@ async function handleModalSubmit() {
         // unpaid receipt by only the new shortfall and saves the ad; this field
         // is never stored on the ad.
         adUpdates.unpaidReceiptDebtIncrease = unpaidReceiptDebtIncrease;
+      }
+      if (isServerModeEnabled() && document.getElementById('ad-meta-page-override')?.value === '1') {
+        // Request-only admin confirmation from the warned Change-page flow;
+        // the server pops it before saving, so it is never stored. Local mode
+        // has no server guard to satisfy, so it must not ride into the record.
+        adUpdates.confirmMetaPageOverride = true;
       }
 
       // Denormalize the customer's display NAME (never phone/contact) so a role

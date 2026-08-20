@@ -8432,6 +8432,8 @@ def _ad_mutation_atomic(
         clean_request.pop(_UNPAID_RECEIPT_DEBT_INCREASE_FIELD, None),
         _unpaid_receipt_growth_ctx(),
     )
+    # Request-only admin confirmation for a warned cross-page re-point; popped so never stored.
+    meta_page_override = clean_request.pop("confirmMetaPageOverride", None) is True
     if set(clean_request) & META_AD_SERVER_FIELDS:
         raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
     validate_relationship_ids(clean_request, "ad data")
@@ -8442,6 +8444,9 @@ def _ad_mutation_atomic(
             "amountUSD": debt_increase["amountUSD"],
             "expectedLastModified": debt_increase["expectedLastModified"],
         }
+    if meta_page_override:
+        # Confirmed vs unconfirmed are different requests; a replay of one must never stand in for the other.
+        request_data_for_hash["confirmMetaPageOverride"] = True
     request_hash = _financial_request_hash(
         {
             "action": body.action,
@@ -8663,7 +8668,7 @@ def _ad_mutation_atomic(
 
             # Completes an accounting-neutral Meta draft and records who did it.
             stamp_import_completion(existing, saved_data, actor_id, conn)
-            guard_meta_ad_page_link(conn, existing, saved_data)
+            guard_meta_ad_page_link(conn, existing, saved_data, actor=actor, override_confirmed=meta_page_override)
 
             # The customer itself must be active; funding receipts were already
             # locked in deterministic order above.
