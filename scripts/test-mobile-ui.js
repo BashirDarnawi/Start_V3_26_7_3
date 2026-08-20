@@ -187,11 +187,22 @@ check('the temporary Meta-only ad-page switch stays a one-line flag',
   adEditModal.includes('const AD_PAGES_META_ONLY_FOR_ADMIN = ') &&
   adEditModal.includes('AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin()') &&
   adEditModal.includes(".filter(p => String(p.metaPageId || '').trim())"));
+// The lock must key on the ad's OWN Facebook identity (metaPageId), not on
+// whether the local page link happens to be resolved in this browser — a
+// fresh import draft has pageId='' until the next sync pass, and an open
+// picker in that window is how an ad got attached to another business's page.
 check('a Meta-linked ad locks its page field instead of offering the picker',
-  adEditModal.includes('const metaPageLocked = isEdit && !!adLinkedPage') &&
-  adEditModal.includes("String(adData.metaAdId || '').trim() !== '' || String(adData.metaImportSource || '').trim() !== ''") &&
+  adEditModal.includes("const adMetaPageId = String(adData.metaPageId || '').trim();") &&
+  adEditModal.includes('const metaPageLocked = isEdit && adIsMetaLinked && (!!metaLockedPage || adMetaPageId !== \'\')') &&
+  adEditModal.includes("String(p.metaPageId || '').trim() === adMetaPageId") &&
   adEditModal.includes('${metaPageLocked ? `') &&
-  adEditModal.includes('data-lucide="lock"'));
+  adEditModal.includes('data-lucide="${metaLockedPage ? \'lock\' : \'loader\'}"') &&
+  adEditModal.includes('being linked automatically') &&
+  adEditModal.includes('يتم ربط صفحة فيسبوك تلقائياً الآن'));
+check('a still-linking Meta draft blocks submit with its own message, bilingually',
+  modals.includes('awaitingMetaPageLink') &&
+  modals.includes("This ad's Facebook page is being linked automatically. Wait a minute and try again.") &&
+  modals.includes('يتم ربط صفحة فيسبوك لهذا الإعلان تلقائياً. انتظر دقيقة ثم أعد المحاولة.'));
 check('ad page dropdown marks Meta-imported pages with a Meta badge',
   adEditModal.includes("String(p.metaPageId || '').trim() ?") &&
   adEditModal.includes('>Meta</span>') &&

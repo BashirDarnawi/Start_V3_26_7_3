@@ -2908,3 +2908,241 @@ def test_page_name_probe_reports_every_source_and_applies_a_found_name(
         "/api/meta-ads/pages/not-a-page-id/name-probe", cookies=actors["admin"]
     )
     assert bad.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Pages consistency scan — the read-only diagnostic behind repairing a
+# wrong page/owner association (an ad completed too fast against the wrong
+# local page, or a Facebook id stamped onto a hand-renamed page).
+# ---------------------------------------------------------------------------
+
+def _seed_scan_entity(entity_type, entity_id, data, creator_id):
+    stamp = now_ms()
+    payload = {"id": entity_id, "_created": stamp, "_lastModified": stamp, "_deleted": False, "createdBy": creator_id}
+    payload.update(data)
+    with db_conn() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                f"VALUES ('{entity_type}',:id,:data,false,:stamp,:creator,:stamp)"
+            ),
+            {"id": entity_id, "data": json_dumps(payload), "stamp": stamp, "creator": creator_id},
+        )
+
+
+def test_pages_consistency_scan_is_admin_only(actors):
+    denied = client.get("/api/meta-ads/pages/consistency-scan", cookies=actors["employee"])
+    assert denied.status_code == 403
+
+
+def test_pages_consistency_scan_reports_every_incident_shape(actors):
+    creator = actors["admin_id"]
+    _seed_scan_entity("customers", "meta_test_scan_cust1", {"name": "Maged Krid", "phones": []}, creator)
+    # The reported production shape: a page named for one business carrying
+    # ANOTHER business's Facebook page id, with an owner attached.
+    _seed_scan_entity("pages", "meta_test_scan_pwrong", {
+        "name": "V-Tech libya", "metaPageId": "108503031999207",
+        "metaPageName": "Correct Arabic Name", "customerIds": ["meta_test_scan_cust1"],
+    }, creator)
+    _seed_scan_entity("pages", "meta_test_scan_pplain", {"name": "Plain Local Page", "customerIds": []}, creator)
+    # A1: meta ad linked to a page that carries NO Facebook id at all.
+    _seed_scan_entity("ads", "meta_test_scan_ad1", {
+        "recordType": "ad", "metaPageId": "108503031999207", "metaPageName": "Correct Arabic Name",
+        "pageId": "meta_test_scan_pplain", "pageName": "Plain Local Page",
+        "metaImportSource": "meta_ads", "customerId": "meta_test_scan_cust1",
+    }, creator)
+    # A2: meta ad whose linked page is stamped with a DIFFERENT Facebook page.
+    _seed_scan_entity("ads", "meta_test_scan_ad2", {
+        "recordType": "ad", "metaPageId": "222200000000001", "metaPageName": "Other Biz",
+        "pageId": "meta_test_scan_pwrong", "pageName": "V-Tech libya",
+        "metaImportSource": "meta_ads",
+    }, creator)
+    # A3: meta ad with no local page linked at all.
+    _seed_scan_entity("ads", "meta_test_scan_ad3", {
+        "recordType": "ad", "metaPageId": "108503031999207", "metaPageName": "Correct Arabic Name",
+        "pageId": "", "metaImportSource": "meta_ads",
+    }, creator)
+    # A4: fully consistent meta ad — must NOT be reported.
+    _seed_scan_entity("ads", "meta_test_scan_ad4", {
+        "recordType": "ad", "metaPageId": "108503031999207", "metaPageName": "Correct Arabic Name",
+        "pageId": "meta_test_scan_pwrong", "pageName": "V-Tech libya",
+        "metaImportSource": "meta_ads",
+    }, creator)
+
+    response = client.get("/api/meta-ads/pages/consistency-scan", cookies=actors["admin"])
+    assert response.status_code == 200, response.text
+    result = response.json()
+
+    reported = {item["adId"]: item for item in result["mismatchedAds"]}
+    assert "meta_test_scan_ad4" not in reported
+    assert reported["meta_test_scan_ad1"]["problem"] == "linked_page_carries_no_facebook_id"
+    assert reported["meta_test_scan_ad2"]["problem"] == "linked_page_is_a_different_facebook_page"
+    assert reported["meta_test_scan_ad3"]["problem"] == "no_local_page_linked"
+
+    # The scan must point straight at the repair: which page ACTUALLY holds
+    # the ad's Facebook id, and who owns it.
+    stamped = reported["meta_test_scan_ad1"]["pagesActuallyStampedWithThisFacebookId"]
+    assert any(p["pageId"] == "meta_test_scan_pwrong" and p["name"] == "V-Tech libya"
+               and p["owners"] == ["Maged Krid"] for p in stamped)
+    assert reported["meta_test_scan_ad1"]["customerName"] == "Maged Krid"
+
+    wrong_page = next(p for p in result["stampedPages"] if p["pageId"] == "meta_test_scan_pwrong")
+    assert wrong_page["owners"] == ["Maged Krid"]
+    assert all(p["pageId"] != "meta_test_scan_pwrong" for p in result["stampedPagesWithNoOwner"])
+
+
+def test_pages_consistency_scan_flags_a_facebook_id_stamped_twice(actors):
+    creator = actors["admin_id"]
+    _seed_scan_entity("pages", "meta_test_scan_pdup1", {
+        "name": "First Stamped", "metaPageId": "333300000000009", "customerIds": [],
+    }, creator)
+    _seed_scan_entity("pages", "meta_test_scan_pdup2", {
+        "name": "Second Stamped", "metaPageId": "333300000000009", "customerIds": [],
+    }, creator)
+
+    response = client.get("/api/meta-ads/pages/consistency-scan", cookies=actors["admin"])
+    assert response.status_code == 200, response.text
+    duplicates = response.json()["duplicateFacebookIdStamps"]
+    assert "333300000000009" in duplicates
+    names = {p["name"] for p in duplicates["333300000000009"]}
+    assert names == {"First Stamped", "Second Stamped"}
+    # Both unowned stamped pages must also surface in the needs-owner list.
+    unowned = {p["pageId"] for p in response.json()["stampedPagesWithNoOwner"]}
+    assert {"meta_test_scan_pdup1", "meta_test_scan_pdup2"} <= unowned
+
+
+# ---------------------------------------------------------------------------
+# Page-link guard — an imported ad may never be attached to a local page that
+# belongs to a DIFFERENT Facebook page (the fast-completion mislink incident).
+# ---------------------------------------------------------------------------
+
+def test_completing_an_imported_ad_onto_another_facebook_pages_page_is_rejected(actors):
+    creator = actors["admin_id"]
+    customer_id = "meta_guard_customer"
+    _insert_customer(customer_id, creator)
+    _seed_scan_entity("pages", "meta_guard_page_right", {
+        "name": "The Real Page", "metaPageId": "555511111111111", "customerIds": [],
+    }, creator)
+    _seed_scan_entity("pages", "meta_guard_page_wrong", {
+        "name": "Somebody Else's Page", "metaPageId": "666622222222222", "customerIds": [],
+    }, creator)
+    _seed_scan_entity("pages", "meta_guard_page_unstamped", {
+        "name": "Plain Hand-Made Page", "customerIds": [],
+    }, creator)
+    ad_id = "meta_guard_ad"
+    version = _insert_ad(
+        ad_id, creator,
+        customerId=customer_id,
+        metaImportState="needs_completion",
+        metaImportSource="meta_ads",
+        metaPageId="555511111111111",
+        metaPageName="The Real Page",
+        pageId="",
+        pageName="",
+        paymentStatus="not_paid",
+        status="Active",
+        amountUSD=10, amountLocal=97, exchangeRate=9.7,
+        receiptId="", receiptAllocations=[], dueAllocations=[],
+    )
+    try:
+        def _mutate(page_id, key, expected_version):
+            return client.post(
+                "/api/ads/mutate",
+                json={
+                    "action": "update",
+                    "adId": ad_id,
+                    "idempotencyKey": key,
+                    "expectedLastModified": expected_version,
+                    "data": {"pageId": page_id, "pageName": "chosen"},
+                },
+                cookies=actors["employee"],
+            )
+
+        # The incident: fast completion onto another business's page. 409,
+        # and the draft must remain untouched (still needs completion).
+        wrong = _mutate("meta_guard_page_wrong", "meta-guard-wrong", version)
+        assert wrong.status_code == 409, wrong.text
+        assert "666622222222222" in wrong.json()["detail"]
+        stored, version = _stored_ad(ad_id)
+        assert stored.get("pageId") == ""
+        assert stored["metaImportState"] == "needs_completion"
+
+        # A page that simply does not exist is a 404, not a silent link.
+        missing = _mutate("meta_guard_page_ghost", "meta-guard-ghost", version)
+        assert missing.status_code == 404, missing.text
+
+        # An unstamped hand-made page is allowed (Meta may not know it yet).
+        ok_unstamped = _mutate("meta_guard_page_unstamped", "meta-guard-unstamped", version)
+        assert ok_unstamped.status_code == 200, ok_unstamped.text
+        stored, version = _stored_ad(ad_id)
+        assert stored["pageId"] == "meta_guard_page_unstamped"
+
+        # And so is the page stamped with the ad's OWN Facebook id.
+        ok_right = _mutate("meta_guard_page_right", "meta-guard-right", version)
+        assert ok_right.status_code == 200, ok_right.text
+        stored, _ = _stored_ad(ad_id)
+        assert stored["pageId"] == "meta_guard_page_right"
+    finally:
+        with db_conn() as conn:
+            conn.execute(
+                text("DELETE FROM entities WHERE id LIKE 'meta_guard_%'")
+            )
+
+
+def test_page_guard_ignores_ordinary_ads_and_unchanged_links(actors):
+    creator = actors["admin_id"]
+    _seed_scan_entity("pages", "meta_guard2_stamped", {
+        "name": "Stamped Page", "metaPageId": "777733333333333", "customerIds": [],
+    }, creator)
+    _insert_customer("meta_guard2_customer", creator)
+
+    # A plain (non-Meta) ad may point anywhere — the guard must not fire.
+    plain_version = _insert_ad(
+        "meta_guard2_plain", creator,
+        customerId="meta_guard2_customer",
+        pageId="", pageName="",
+        paymentStatus="not_paid", status="Active",
+        amountUSD=10, amountLocal=97, exchangeRate=9.7,
+        receiptId="", receiptAllocations=[], dueAllocations=[],
+    )
+    try:
+        moved = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "meta_guard2_plain",
+                "idempotencyKey": "meta-guard2-plain",
+                "expectedLastModified": plain_version,
+                "data": {"pageId": "meta_guard2_stamped", "pageName": "Stamped Page"},
+            },
+            cookies=actors["employee"],
+        )
+        assert moved.status_code == 200, moved.text
+
+        # A mislinked-BEFORE-the-guard imported ad still accepts unrelated
+        # edits: the guard fires only when the page link changes.
+        stuck_version = _insert_ad(
+            "meta_guard2_stuck", creator,
+            customerId="meta_guard2_customer",
+            metaImportSource="meta_ads",
+            metaPageId="888844444444444",
+            pageId="meta_guard2_stamped", pageName="Stamped Page",
+            paymentStatus="not_paid", status="Active",
+            amountUSD=10, amountLocal=97, exchangeRate=9.7,
+            receiptId="", receiptAllocations=[], dueAllocations=[],
+        )
+        note = client.post(
+            "/api/ads/mutate",
+            json={
+                "action": "update",
+                "adId": "meta_guard2_stuck",
+                "idempotencyKey": "meta-guard2-note",
+                "expectedLastModified": stuck_version,
+                "data": {"notes": "unrelated edit on a pre-guard mislink"},
+            },
+            cookies=actors["employee"],
+        )
+        assert note.status_code == 200, note.text
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE id LIKE 'meta_guard2_%'"))

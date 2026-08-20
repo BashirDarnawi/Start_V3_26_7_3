@@ -171,6 +171,7 @@ from .meta_ads import (
     META_AD_SERVER_FIELDS,
     META_PAGE_SERVER_FIELDS,
     create_meta_ads_router,
+    guard_meta_ad_page_link,
     stamp_import_completion,
 )
 from .ad_media import create_ad_media_router
@@ -8662,6 +8663,7 @@ def _ad_mutation_atomic(
 
             # Completes an accounting-neutral Meta draft and records who did it.
             stamp_import_completion(existing, saved_data, actor_id, conn)
+            guard_meta_ad_page_link(conn, existing, saved_data)
 
             # The customer itself must be active; funding receipts were already
             # locked in deterministic order above.

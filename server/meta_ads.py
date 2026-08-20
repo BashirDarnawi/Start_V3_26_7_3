@@ -2613,6 +2613,48 @@ def _entity_by_json_field(
     return (row, data) if isinstance(data, dict) else (None, None)
 
 
+def guard_meta_ad_page_link(
+    conn: Any,
+    existing: dict[str, Any] | None,
+    requested: dict[str, Any] | None,
+) -> None:
+    """Reject linking a Meta-imported ad to a DIFFERENT Facebook page's page.
+
+    The completion form let a fast manual choice attach an imported ad to any
+    local page, and the sync then preserved that choice forever (manual
+    reassignments are deliberately never reverted). Allowed targets: a page
+    stamped with the ad's own Facebook id, or one not stamped at all.
+    Blocked: a page stamped with another Facebook page's id. Fires only when
+    the page LINK actually changes, so records mislinked before this guard
+    still accept unrelated edits — and their repair (re-pointing to the
+    matching page) is itself an allowed change.
+    """
+    ad_meta_page_id = _clean_text(
+        (requested or {}).get("metaPageId") or (existing or {}).get("metaPageId"),
+        40,
+    )
+    if not ad_meta_page_id:
+        return
+    new_page_id = str((requested or {}).get("pageId") or "").strip()
+    old_page_id = str((existing or {}).get("pageId") or "").strip()
+    if not new_page_id or new_page_id == old_page_id:
+        return
+    row, data = _entity_by_id(conn, "pages", new_page_id)
+    if row is None or not isinstance(data, dict):
+        raise HTTPException(status_code=404, detail="Ad page not found")
+    page_meta_id = _clean_text(data.get("metaPageId"), 40)
+    if page_meta_id and page_meta_id != ad_meta_page_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This imported ad ran on Facebook page "
+                f"{ad_meta_page_id}, but the chosen local page belongs to "
+                f"Facebook page {page_meta_id}. Choose the matching page "
+                "or leave the page empty for automatic linking."
+            ),
+        )
+
+
 def _entity_by_id(conn: Any, entity_type: str, entity_id: str) -> tuple[Any | None, dict[str, Any] | None]:
     row = conn.execute(
         text(
@@ -5083,6 +5125,160 @@ def create_meta_ads_router(
         else:
             report["applied"] = False
         return report
+
+    @router.get("/pages/consistency-scan")
+    def meta_pages_consistency_scan(
+        admin: dict[str, Any] = Depends(require_meta_admin),
+    ):
+        """READ-ONLY: every way a local page's Facebook identity can disagree
+        with the ads that carry it. Changes nothing; exists so a mislink is
+        repaired from measured facts instead of a guess.
+
+        Reports: (a) every live page stamped with a metaPageId, with its
+        owners; (b) any Facebook id stamped onto MORE than one page (the
+        by-id lookup used everywhere returns LIMIT 1, so a duplicate stamp is
+        otherwise invisible); (c) every Meta-linked ad whose local page link
+        contradicts its own Facebook page id, with the page that SHOULD hold
+        it; (d) stamped pages with no owner.
+        """
+        with db_conn() as conn:
+            page_rows = _scalar_entity_rows(
+                conn,
+                "pages",
+                (
+                    ("name", "name"),
+                    ("metaPageId", "meta_page_id"),
+                    ("metaPageName", "meta_page_name"),
+                    ("metaImportState", "meta_import_state"),
+                    ("customerIds", "customer_ids_json"),
+                ),
+            )
+            customer_names = {
+                str(row["id"]): _clean_text(row["cname"], 240)
+                for row in _scalar_entity_rows(
+                    conn, "customers", (("name", "cname"),)
+                )
+            }
+            ad_rows = _scalar_entity_rows(
+                conn,
+                "ads",
+                (
+                    ("recordType", "record_type"),
+                    ("pageId", "page_id"),
+                    ("pageName", "page_name"),
+                    ("metaPageId", "meta_page_id"),
+                    ("metaPageName", "meta_page_name"),
+                    ("customerId", "customer_id"),
+                    ("metaAdId", "meta_ad_id"),
+                    ("metaImportCompletedByName", "completed_by"),
+                ),
+                where_sql=(
+                    f"COALESCE({json_field_sql('metaPageId')},'')!='' "
+                    f"OR COALESCE({json_field_sql('metaImportSource')},'')!=''"
+                ),
+            )
+
+        def owner_names(customer_ids_json: Any) -> list[str]:
+            try:
+                parsed = json_loads(customer_ids_json or "[]")
+            except Exception:
+                parsed = None
+            if not isinstance(parsed, list):
+                return []
+            return [
+                customer_names.get(str(cid), f"unknown:{cid}")
+                for cid in parsed
+                if str(cid or "").strip()
+            ]
+
+        pages_by_id: dict[str, dict[str, Any]] = {}
+        pages_by_meta_id: dict[str, list[dict[str, Any]]] = {}
+        for row in page_rows:
+            summary = {
+                "pageId": str(row["id"]),
+                "name": _clean_text(row["name"], 240),
+                "metaPageId": _clean_text(row["meta_page_id"], 40),
+                "metaPageName": _clean_text(row["meta_page_name"], 240),
+                "metaImportState": _clean_text(row["meta_import_state"], 40),
+                "owners": owner_names(row["customer_ids_json"]),
+            }
+            pages_by_id[summary["pageId"]] = summary
+            if summary["metaPageId"]:
+                pages_by_meta_id.setdefault(summary["metaPageId"], []).append(
+                    summary
+                )
+
+        stamped_pages = [
+            page
+            for pages in pages_by_meta_id.values()
+            for page in pages
+        ]
+        duplicate_stamps = {
+            meta_id: pages
+            for meta_id, pages in pages_by_meta_id.items()
+            if len(pages) > 1
+        }
+
+        mismatched_ads: list[dict[str, Any]] = []
+        for row in ad_rows:
+            if _clean_text(row["record_type"], 40) == "receipt":
+                continue
+            ad_meta_page_id = _clean_text(row["meta_page_id"], 40)
+            if not ad_meta_page_id:
+                continue
+            linked_page_id = _clean_text(row["page_id"], 80)
+            linked = pages_by_id.get(linked_page_id)
+            if not linked_page_id:
+                problem = "no_local_page_linked"
+            elif linked is None:
+                problem = "linked_page_missing_or_deleted"
+            elif linked["metaPageId"] == ad_meta_page_id:
+                continue
+            elif not linked["metaPageId"]:
+                problem = "linked_page_carries_no_facebook_id"
+            else:
+                problem = "linked_page_is_a_different_facebook_page"
+            mismatched_ads.append(
+                {
+                    "adId": str(row["id"]),
+                    "problem": problem,
+                    "customerName": customer_names.get(
+                        _clean_text(row["customer_id"], 80), ""
+                    ),
+                    "completedBy": _clean_text(row["completed_by"], 120),
+                    "adFacebookPageId": ad_meta_page_id,
+                    "adFacebookPageName": _clean_text(row["meta_page_name"], 240),
+                    "linkedLocalPage": (
+                        {
+                            "pageId": linked["pageId"],
+                            "name": linked["name"],
+                            "metaPageId": linked["metaPageId"],
+                            "owners": linked["owners"],
+                        }
+                        if linked
+                        else None
+                    ),
+                    "pagesActuallyStampedWithThisFacebookId": [
+                        {
+                            "pageId": page["pageId"],
+                            "name": page["name"],
+                            "owners": page["owners"],
+                        }
+                        for page in pages_by_meta_id.get(ad_meta_page_id, [])
+                    ],
+                }
+            )
+
+        return {
+            "stampedPageCount": len(stamped_pages),
+            "stampedPages": stamped_pages,
+            "duplicateFacebookIdStamps": duplicate_stamps,
+            "mismatchedAds": mismatched_ads,
+            "mismatchedAdCount": len(mismatched_ads),
+            "stampedPagesWithNoOwner": [
+                page for page in stamped_pages if not page["owners"]
+            ],
+        }
 
     @router.get("/webhook")
     def verify_webhook(

@@ -37826,8 +37826,21 @@ function renderModal() {
       // A Meta-linked ad already knows its page (the import linked it). Offering
       // the page picker there only invites a wrong change, so the field locks.
       const adLinkedPage = state.pages.find(p => p && !p._deleted && String(p.id) === String(adData.pageId || ''));
-      const metaPageLocked = isEdit && !!adLinkedPage
-        && (String(adData.metaAdId || '').trim() !== '' || String(adData.metaImportSource || '').trim() !== '');
+      const adIsMetaLinked = String(adData.metaAdId || '').trim() !== ''
+        || String(adData.metaImportSource || '').trim() !== '';
+      // Meta reveals a page's NAME later than its id, so a fresh draft can
+      // carry metaPageId with pageId still empty (the import defers local
+      // linking to the next sync pass). The lock must key on the ad's own
+      // Facebook identity, never on whether this browser happens to have the
+      // local link resolved right now — an open picker in that window is how
+      // an imported ad got attached to another business's page. When the
+      // matching local page already exists (by Facebook id), use it directly.
+      const adMetaPageId = String(adData.metaPageId || '').trim();
+      const metaResolvedPage = (!adLinkedPage && adMetaPageId)
+        ? state.pages.find(p => p && !p._deleted && String(p.metaPageId || '').trim() === adMetaPageId)
+        : null;
+      const metaLockedPage = adLinkedPage || metaResolvedPage || null;
+      const metaPageLocked = isEdit && adIsMetaLinked && (!!metaLockedPage || adMetaPageId !== '');
       const adCreatorDisplayName = adCreator?.name || adData.createdByName || (isImportedMetaDraft ? (isArAd ? 'استيراد Meta التلقائي' : 'Meta automatic import') : (isArAd ? 'غير معروف' : 'Unknown'));
       const adHistoryCount = getAdEditHistoryCount(adData);
       const adPaymentState = getAdPaymentState(adData);
@@ -37973,14 +37986,22 @@ function renderModal() {
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 ${metaPageLocked ? `
                 <div class="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2">
-                  <span class="truncate">${Security.escapeHtml(adLinkedPage.name || '')}</span>
+                  <span class="truncate">${Security.escapeHtml(
+                    metaLockedPage
+                      ? (metaLockedPage.name || '')
+                      : (String(adData.metaPageName || '').trim() || `Facebook Page ${adMetaPageId}`)
+                  )}</span>
                   <span class="shrink-0 flex items-center gap-1.5">
-                    ${String(adLinkedPage.metaPageId || '').trim() ? '<span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>' : ''}
-                    <i data-lucide="lock" class="w-3.5 h-3.5 text-slate-400"></i>
+                    <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>
+                    <i data-lucide="${metaLockedPage ? 'lock' : 'loader'}" class="w-3.5 h-3.5 text-slate-400"></i>
                   </span>
                 </div>
-                <p class="text-[11px] text-slate-500 mt-1">${isArAd ? 'الصفحة مرتبطة تلقائياً من استيراد ميتا ولا يمكن تغييرها.' : 'This page was linked automatically by the Meta import and cannot be changed.'}</p>
-                <input type="hidden" id="ad-page" value="${Security.escapeHtml(String(adData.pageId || ''))}" required />
+                <p class="text-[11px] text-slate-500 mt-1">${
+                  metaLockedPage
+                    ? (isArAd ? 'الصفحة مرتبطة تلقائياً من استيراد ميتا ولا يمكن تغييرها.' : 'This page was linked automatically by the Meta import and cannot be changed.')
+                    : (isArAd ? 'يتم ربط صفحة فيسبوك تلقائياً الآن — انتظر قليلاً ثم أعد المحاولة.' : 'The Facebook page is being linked automatically — wait a moment and try again.')
+                }</p>
+                <input type="hidden" id="ad-page" value="${Security.escapeHtml(String(metaLockedPage?.id || adData.pageId || ''))}" required />
                 ` : `
                 <div class="relative">
                   <input type="text" id="ad-page-search" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm" placeholder="${isArAd ? 'ابحث في الصفحات...' : 'Search pages...'}" oninput="filterAdPages()" onfocus="showAdPageDropdown()" value="${Security.escapeHtml((state.pages.find(p => p.id === adData.pageId)?.name) || '')}" autocomplete="off" />
@@ -37998,7 +38019,7 @@ function renderModal() {
               </div>
               
               <!-- Customer -->
-              <div id="ad-customer-section" class="${adData.pageId ? '' : 'hidden'}">
+              <div id="ad-customer-section" class="${(adData.pageId || metaLockedPage) ? '' : 'hidden'}">
                 <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'العميل' : 'Customer'} <span class="text-slate-400" id="ad-customer-hint">${isArAd ? '(يُختار تلقائياً)' : '(auto-selected)'}</span></label>
                 <div id="ad-customer-display" class="bg-white dark:bg-slate-900 rounded-lg p-2"></div>
                 <input type="hidden" id="ad-customer-id" value="${adData.customerId || ''}" required />
@@ -39770,9 +39791,23 @@ function renderModal() {
       initAdFunding(state.modalData || {});
       // If editing, select the page to populate customer
       const adData = state.modalData || {};
-      if (adData.pageId) {
+      // A Meta draft may know its Facebook page id before the local link is
+      // attached; resolve it here the same way the page field does, so the
+      // customer picker fills from the CORRECT page instead of staying empty.
+      let initAdPageId = String(adData.pageId || '');
+      if (!initAdPageId) {
+        const initMetaPageId = String(adData.metaPageId || '').trim();
+        const initMetaLinked = String(adData.metaAdId || '').trim() !== ''
+          || String(adData.metaImportSource || '').trim() !== '';
+        if (initMetaPageId && initMetaLinked) {
+          const resolved = state.pages.find(p => p && !p._deleted
+            && String(p.metaPageId || '').trim() === initMetaPageId);
+          if (resolved) initAdPageId = String(resolved.id);
+        }
+      }
+      if (initAdPageId) {
         const preserveFunding = state.modalData !== null; // keep existing allocations during edit init
-        selectAdPage(adData.pageId, preserveFunding);
+        selectAdPage(initAdPageId, preserveFunding);
         // If there's already a customer, select it
         if (adData.customerId) {
           selectAdCustomer(adData.customerId, true);
@@ -40581,7 +40616,22 @@ async function handleModalSubmit() {
       // Get page ID
       const pageId = document.getElementById('ad-page')?.value || '';
       if (!pageId) {
-        showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار صفحة' : 'Please select a page', 'error');
+        const modalAd = state.modalData || {};
+        const awaitingMetaPageLink = String(modalAd.metaPageId || '').trim() !== ''
+          && (String(modalAd.metaAdId || '').trim() !== '' || String(modalAd.metaImportSource || '').trim() !== '');
+        if (awaitingMetaPageLink) {
+          // An imported draft must wait for its own Facebook page — offering
+          // a manual pick here is how an ad landed on another business's page.
+          showNotification(
+            isArSubAd ? 'الصفحة قيد الربط' : 'Page still linking',
+            isArSubAd
+              ? 'يتم ربط صفحة فيسبوك لهذا الإعلان تلقائياً. انتظر دقيقة ثم أعد المحاولة.'
+              : "This ad's Facebook page is being linked automatically. Wait a minute and try again.",
+            'warning'
+          );
+        } else {
+          showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار صفحة' : 'Please select a page', 'error');
+        }
         return;
       }
       
