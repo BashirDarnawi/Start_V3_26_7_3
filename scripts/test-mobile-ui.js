@@ -203,6 +203,16 @@ check('a still-linking Meta draft blocks submit with its own message, bilinguall
   modals.includes('awaitingMetaPageLink') &&
   modals.includes("This ad's Facebook page is being linked automatically. Wait a minute and try again.") &&
   modals.includes('يتم ربط صفحة فيسبوك لهذا الإعلان تلقائياً. انتظر دقيقة ثم أعد المحاولة.'));
+// receiptType is server-controlled on edit (any CHANGE is a 405); legacy
+// temp receipts store no type at all, so an edit that recomputes the tag
+// from tempReceiptNo turns into a forbidden ''->DELIVERY_TEMP change and the
+// save fails outright ("Failed to save receipts: Receipt type is
+// server-controlled" — the 2026-08-20 employee incident). Edits must echo
+// the stored type verbatim; only a NEW receipt derives its tag.
+check('a receipt edit echoes its stored type instead of recomputing it',
+  forms.includes('receiptType: editTarget') &&
+  forms.includes("? (editTarget.receiptType || '')") &&
+  forms.includes(": (tempReceiptNo ? 'DELIVERY_TEMP' : (_newReceiptCarried ? 'CARRIED_BALANCE' : ''))"));
 // The owner's requested escape hatch: admins may deliberately re-point an
 // imported ad, but only through a warned flow whose confirmation is a
 // request-only flag — never for employees, never silently, never stored.
