@@ -899,9 +899,14 @@ function renderModal() {
                   <span class="w-5 h-5 rounded-full bg-cyan-600 text-white flex items-center justify-center text-[10px]">6</span>
                   ${isArAd ? 'روابط الإعلان' : 'Ad Links'}
                 </div>
-                <button type="button" onclick="addAdLinkInput('')" class="text-xs bg-cyan-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-cyan-700">
-                  ${isArAd ? '+ إضافة رابط' : '+ Add Link'}
-                </button>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button type="button" onclick="pasteAdLinkFromClipboard()" class="min-h-11 px-3 rounded-lg border border-cyan-300 dark:border-cyan-700 text-xs font-bold text-cyan-700 dark:text-cyan-300 hover:bg-cyan-100 dark:hover:bg-cyan-900/30 flex items-center gap-1.5">
+                    <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArAd ? 'لصق رابط' : 'Paste link'}
+                  </button>
+                  <button type="button" onclick="addAdLinkInput('')" class="min-h-11 px-3 rounded-lg bg-cyan-600 text-white text-xs font-bold hover:bg-cyan-700 flex items-center gap-1.5">
+                    ${isArAd ? '+ إضافة رابط' : '+ Add Link'}
+                  </button>
+                </div>
               </div>
               <div id="ad-links-list" class="space-y-2">
                 ${(adData.adLinks || (adData.adLink ? [adData.adLink] : [''])).map(link => `

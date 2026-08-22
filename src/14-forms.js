@@ -4462,6 +4462,77 @@ function addAdLinkInput(value = '') {
   lucide.createIcons();
 }
 
+// "Paste link" beside "+ Add Link" — the link twin of the photos section's
+// Paste photo button. Reads the copied text (native Capacitor clipboard in
+// the packaged app, navigator.clipboard on the web), accepts only something
+// that is genuinely a web address, fills the first empty link row (adding a
+// row when none is empty), and never adds the same link twice.
+async function pasteAdLinkFromClipboard() {
+  const isArL = state.language === 'ar';
+  let text = '';
+  if (typeof isPackagedMobileApp === 'function' && isPackagedMobileApp()
+      && typeof readNativeClipboardText === 'function') {
+    text = await readNativeClipboardText();
+  }
+  if (!text) {
+    if (!navigator?.clipboard || typeof navigator.clipboard.readText !== 'function') {
+      showNotification(
+        isArL ? 'اللصق غير متاح' : 'Paste unavailable',
+        isArL ? 'اضغط داخل حقل الرابط ثم Ctrl+V.' : 'Click inside a link field and press Ctrl+V instead.',
+        'warning'
+      );
+      return;
+    }
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (_) {
+      // Permission prompts and WebView clipboard restrictions vary by
+      // platform; keyboard paste into the field always keeps working.
+      showNotification(
+        isArL ? 'تم منع الوصول للحافظة' : 'Clipboard blocked',
+        isArL ? 'اسمح بالوصول للحافظة أو اضغط داخل حقل الرابط ثم Ctrl+V.' : 'Allow clipboard access, or click inside a link field and press Ctrl+V.',
+        'warning'
+      );
+      return;
+    }
+  }
+  let url = String(text || '').trim().split(/\s+/)[0] || '';
+  // Accept a copied bare address ("facebook.com/mypage") by assuming https;
+  // anything that still is not a real web address is refused, not saved.
+  if (url && !/^https?:\/\//i.test(url) && /^[\w-]+(\.[\w-]+)+([/?#]|$)/.test(url)) {
+    url = `https://${url}`;
+  }
+  if (!url || !/^https?:\/\/[^\s]+\.[^\s]+/i.test(url)) {
+    showNotification(
+      isArL ? 'لا يوجد رابط منسوخ' : 'No copied link',
+      isArL ? 'انسخ رابطاً أولاً ثم حاول مرة أخرى.' : 'Copy a link first, then try again.',
+      'warning'
+    );
+    return;
+  }
+  const inputs = Array.from(document.querySelectorAll('#ad-links-list .ad-link-input'));
+  if (inputs.some(input => String(input.value || '').trim() === url)) {
+    showNotification(
+      isArL ? 'الرابط موجود' : 'Already added',
+      isArL ? 'هذا الرابط مضاف بالفعل.' : 'This link is already in the list.',
+      'info'
+    );
+    return;
+  }
+  const emptyInput = inputs.find(input => !String(input.value || '').trim());
+  if (emptyInput) {
+    emptyInput.value = url;
+    try { emptyInput.focus(); } catch (_) {}
+  } else {
+    addAdLinkInput(url);
+  }
+  showNotification(
+    isArL ? 'تم لصق الرابط' : 'Link pasted',
+    url,
+    'success'
+  );
+}
+
 function normalizeAdDriverBudgetUSD(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) return 0;

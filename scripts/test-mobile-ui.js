@@ -203,6 +203,20 @@ check('a still-linking Meta draft blocks submit with its own message, bilinguall
   modals.includes('awaitingMetaPageLink') &&
   modals.includes("This ad's Facebook page is being linked automatically. Wait a minute and try again.") &&
   modals.includes('يتم ربط صفحة فيسبوك لهذا الإعلان تلقائياً. انتظر دقيقة ثم أعد المحاولة.'));
+// The Ad Links section offers Paste link the way Photos offers Paste photo:
+// native clipboard in the packaged app, navigator.clipboard on the web,
+// bare-domain tolerated, non-links refused, duplicates refused, bilingual.
+check('ad links offer a clipboard Paste link button with safe fallbacks',
+  adEditModal.includes('pasteAdLinkFromClipboard()') &&
+  adEditModal.includes('لصق رابط') &&
+  adEditModal.includes('Paste link') &&
+  forms.includes('async function pasteAdLinkFromClipboard()') &&
+  forms.includes('readNativeClipboardText') &&
+  forms.includes('navigator.clipboard.readText()') &&
+  forms.includes("url = `https://${url}`;") &&
+  forms.includes('انسخ رابطاً أولاً ثم حاول مرة أخرى.') &&
+  forms.includes('This link is already in the list.') &&
+  nativeServices.includes('async function readNativeClipboardText()'));
 // receiptType is server-controlled on edit (any CHANGE is a 405); legacy
 // temp receipts store no type at all, so an edit that recomputes the tag
 // from tempReceiptNo turns into a forbidden ''->DELIVERY_TEMP change and the

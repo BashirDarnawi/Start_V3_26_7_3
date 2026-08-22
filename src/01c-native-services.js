@@ -169,6 +169,16 @@ async function readNativeClipboardImage() {
   } catch (_) { return null; }
 }
 
+async function readNativeClipboardText() {
+  const clipboard = getCapacitorPlugin('Clipboard');
+  if (!clipboard?.read) return '';
+  try {
+    const result = await clipboard.read();
+    if (String(result?.type || '').toLowerCase().startsWith('image/')) return '';
+    return String(result?.value || '');
+  } catch (_) { return ''; }
+}
+
 async function nativeShareContent({ title = 'Albayan', text = '', url = '' } = {}) {
   const share = getCapacitorPlugin('Share');
   if (share?.share) {

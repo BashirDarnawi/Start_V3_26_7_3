@@ -33769,10 +33769,14 @@ async function _saveReceiptFromModalInner() {
     // A carried "existing balance" receipt is an ordinary Paid receipt that is only
     // TAGGED so its card shows the existing-balance colour/badge; it counts as revenue
     // and funds ads exactly like any other receipt. The tag only applies to a NEW,
-    // non-delivery receipt (an edit keeps whatever type it already had).
-    receiptType: tempReceiptNo
-      ? 'DELIVERY_TEMP'
-      : (editTarget ? (editTarget.receiptType || '') : (_newReceiptCarried ? 'CARRIED_BALANCE' : '')),
+    // non-delivery receipt. An EDIT must echo the STORED type verbatim: the
+    // server 405s any client CHANGE of receiptType, and legacy temp receipts
+    // predate the DELIVERY_TEMP stamp — recomputing the tag from tempReceiptNo
+    // here turned every edit of such a receipt into a forbidden ''→DELIVERY_TEMP
+    // change ("Receipt type is server-controlled"), blocking the save entirely.
+    receiptType: editTarget
+      ? (editTarget.receiptType || '')
+      : (tempReceiptNo ? 'DELIVERY_TEMP' : (_newReceiptCarried ? 'CARRIED_BALANCE' : '')),
     deliveryPlaceName: isTempDelivery ? deliveryPlaceName : (editTarget?.deliveryPlaceName || deliveryPlaceName || ''),
     deliveryInstructions: isTempDelivery ? deliveryInstructions : (editTarget?.deliveryInstructions || deliveryInstructions || ''),
     quotedDeliveryFee: isTempDelivery ? quotedDeliveryFee : (editTarget?.quotedDeliveryFee ?? quotedDeliveryFee),
