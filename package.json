@@ -33,15 +33,15 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@capacitor/android": "^8.4.1",
-    "@capacitor/app": "^8.0.0",
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/app": "^8.1.1",
     "@capacitor/core": "^8.4.1",
-    "@capacitor/ios": "^8.4.1"
+    "@capacitor/ios": "^8.5.0"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.4.1",
-    "@playwright/test": "^1.62.0",
-    "sharp": "^0.35.3",
+    "@capacitor/cli": "^8.5.0",
+    "@playwright/test": "^1.62.1",
+    "sharp": "^0.35.4",
     "tailwindcss": "^3.4.19"
   }
 }
