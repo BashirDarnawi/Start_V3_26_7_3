@@ -1058,6 +1058,16 @@ async function readNativeClipboardImage() {
   } catch (_) { return null; }
 }
 
+async function readNativeClipboardText() {
+  const clipboard = getCapacitorPlugin('Clipboard');
+  if (!clipboard?.read) return '';
+  try {
+    const result = await clipboard.read();
+    if (String(result?.type || '').toLowerCase().startsWith('image/')) return '';
+    return String(result?.value || '');
+  } catch (_) { return ''; }
+}
+
 async function nativeShareContent({ title = 'Albayan', text = '', url = '' } = {}) {
   const share = getCapacitorPlugin('Share');
   if (share?.share) {
@@ -36045,6 +36055,77 @@ function addAdLinkInput(value = '') {
   lucide.createIcons();
 }
 
+// "Paste link" beside "+ Add Link" — the link twin of the photos section's
+// Paste photo button. Reads the copied text (native Capacitor clipboard in
+// the packaged app, navigator.clipboard on the web), accepts only something
+// that is genuinely a web address, fills the first empty link row (adding a
+// row when none is empty), and never adds the same link twice.
+async function pasteAdLinkFromClipboard() {
+  const isArL = state.language === 'ar';
+  let text = '';
+  if (typeof isPackagedMobileApp === 'function' && isPackagedMobileApp()
+      && typeof readNativeClipboardText === 'function') {
+    text = await readNativeClipboardText();
+  }
+  if (!text) {
+    if (!navigator?.clipboard || typeof navigator.clipboard.readText !== 'function') {
+      showNotification(
+        isArL ? 'اللصق غير متاح' : 'Paste unavailable',
+        isArL ? 'اضغط داخل حقل الرابط ثم Ctrl+V.' : 'Click inside a link field and press Ctrl+V instead.',
+        'warning'
+      );
+      return;
+    }
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (_) {
+      // Permission prompts and WebView clipboard restrictions vary by
+      // platform; keyboard paste into the field always keeps working.
+      showNotification(
+        isArL ? 'تم منع الوصول للحافظة' : 'Clipboard blocked',
+        isArL ? 'اسمح بالوصول للحافظة أو اضغط داخل حقل الرابط ثم Ctrl+V.' : 'Allow clipboard access, or click inside a link field and press Ctrl+V.',
+        'warning'
+      );
+      return;
+    }
+  }
+  let url = String(text || '').trim().split(/\s+/)[0] || '';
+  // Accept a copied bare address ("facebook.com/mypage") by assuming https;
+  // anything that still is not a real web address is refused, not saved.
+  if (url && !/^https?:\/\//i.test(url) && /^[\w-]+(\.[\w-]+)+([/?#]|$)/.test(url)) {
+    url = `https://${url}`;
+  }
+  if (!url || !/^https?:\/\/[^\s]+\.[^\s]+/i.test(url)) {
+    showNotification(
+      isArL ? 'لا يوجد رابط منسوخ' : 'No copied link',
+      isArL ? 'انسخ رابطاً أولاً ثم حاول مرة أخرى.' : 'Copy a link first, then try again.',
+      'warning'
+    );
+    return;
+  }
+  const inputs = Array.from(document.querySelectorAll('#ad-links-list .ad-link-input'));
+  if (inputs.some(input => String(input.value || '').trim() === url)) {
+    showNotification(
+      isArL ? 'الرابط موجود' : 'Already added',
+      isArL ? 'هذا الرابط مضاف بالفعل.' : 'This link is already in the list.',
+      'info'
+    );
+    return;
+  }
+  const emptyInput = inputs.find(input => !String(input.value || '').trim());
+  if (emptyInput) {
+    emptyInput.value = url;
+    try { emptyInput.focus(); } catch (_) {}
+  } else {
+    addAdLinkInput(url);
+  }
+  showNotification(
+    isArL ? 'تم لصق الرابط' : 'Link pasted',
+    url,
+    'success'
+  );
+}
+
 function normalizeAdDriverBudgetUSD(value) {
   const amount = Number(value);
   if (!Number.isFinite(amount) || amount <= 0) return 0;
@@ -38359,9 +38440,14 @@ function renderModal() {
                   <span class="w-5 h-5 rounded-full bg-cyan-600 text-white flex items-center justify-center text-[10px]">6</span>
                   ${isArAd ? 'روابط الإعلان' : 'Ad Links'}
                 </div>
-                <button type="button" onclick="addAdLinkInput('')" class="text-xs bg-cyan-600 text-white px-2 py-1 rounded-lg font-medium hover:bg-cyan-700">
-                  ${isArAd ? '+ إضافة رابط' : '+ Add Link'}
-                </button>
+                <div class="flex flex-wrap items-center gap-2">
+                  <button type="button" onclick="pasteAdLinkFromClipboard()" class="min-h-11 px-3 rounded-lg border border-cyan-300 dark:border-cyan-700 text-xs font-bold text-cyan-700 dark:text-cyan-300 hover:bg-cyan-100 dark:hover:bg-cyan-900/30 flex items-center gap-1.5">
+                    <i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isArAd ? 'لصق رابط' : 'Paste link'}
+                  </button>
+                  <button type="button" onclick="addAdLinkInput('')" class="min-h-11 px-3 rounded-lg bg-cyan-600 text-white text-xs font-bold hover:bg-cyan-700 flex items-center gap-1.5">
+                    ${isArAd ? '+ إضافة رابط' : '+ Add Link'}
+                  </button>
+                </div>
               </div>
               <div id="ad-links-list" class="space-y-2">
                 ${(adData.adLinks || (adData.adLink ? [adData.adLink] : [''])).map(link => `
