@@ -129,11 +129,19 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
   const category = String(adPage?.category || ad?.metaPageCategory || '').trim();
   const displayCategory = category && category.toLocaleLowerCase() !== displayName.toLocaleLowerCase() ? category : '';
   if (!pageName && !pageId && !localName) return '<span class="text-xs text-slate-400">-</span>';
+  // The ad's own Facebook page vs the local page it is attached to. When they
+  // disagree, the cell used to print the ad's Facebook id right above ANOTHER
+  // business's page name with no hint — exactly the picture that hid the
+  // wrong-page incident. Flag it so a mislink is visible at a glance.
+  const adFacebookId = String(ad?.metaPageId || '').trim();
+  const linkedFacebookId = String(adPage?.metaPageId || '').trim();
+  const pageMismatch = !!(adFacebookId && linkedFacebookId && adFacebookId !== linkedFacebookId);
   // Layout (user request): the Facebook page ID first, the page NAME directly
   // below it — the ID must appear exactly once.
   return `<div data-role="meta-page-summary">
     ${pageId ? `<div class="break-all font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400" title="${isAr ? 'معرف صفحة فيسبوك' : 'Facebook Page ID'}">#${Security.escapeHtml(pageId)}</div>` : ''}
     <div class="${pageId ? 'mt-0.5 ' : ''}break-words text-sm font-semibold ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}" ${pageName ? '' : `title="${isAr ? 'اسم الصفحة يُحمَّل من Meta تلقائياً' : 'The page name is loading automatically from Meta'}"`}>${Security.escapeHtml(displayName)}</div>
+    ${pageMismatch ? `<div data-role="meta-page-mismatch" class="mt-0.5 inline-block rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? `الإعلان نُشر على صفحة فيسبوك ${Security.escapeHtml(adFacebookId)} لكنه مرتبط بصفحة محلية لصفحة فيسبوك أخرى (${Security.escapeHtml(linkedFacebookId)})` : `This ad ran on Facebook page ${Security.escapeHtml(adFacebookId)} but is attached to a local page of a different Facebook page (${Security.escapeHtml(linkedFacebookId)})`}">${isAr ? 'صفحة غير مطابقة' : 'Page mismatch'}</div>` : ''}
     ${adPageDeleted ? `<div class="mt-0.5 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
     ${displayCategory ? `<div class="text-xs text-slate-500">${Security.escapeHtml(displayCategory)}</div>` : ''}
   </div>`;

@@ -984,3 +984,81 @@ def test_coverage_owned_fields_reject_forgery_and_allow_unchanged_echoes(
 
     assert _entity("receipts", receipt_id, actors["admin"]) == receipt_after
     assert _entity("ads", ad_id, actors["admin"]) == ad_after
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt 2026-08-22: a partially company-covered ad must still stop /
+# reconcile at its REAL spend. _financial_apply_stop built its spend ceiling
+# from the customer's pools only, so after coverage moved $40 of a $100 due
+# row into companyFundingAllocations any stop above the remaining $60 was
+# refused with 409 — forcing under-reported spend and a wrong balance.
+# ---------------------------------------------------------------------------
+
+def _stop(ad_id: str, spent_minor: int, key: str, expected: int, cookies):
+    return client.post(
+        f"/api/ads/{ad_id}/stop",
+        json={
+            "spentMinorUSD": spent_minor,
+            "customerInformed": True,
+            "idempotencyKey": key,
+            "expectedLastModified": expected,
+        },
+        cookies=cookies,
+    )
+
+
+def test_partially_covered_ad_stops_at_its_real_spend(actors):
+    _create("customers", "stopcov_cust1", {"name": "Stop Cov", "phones": ["0911111001"]}, actors["admin"])
+    _create("receipts", "stopcov_r1", {
+        "recordType": "receipt", "customerId": "stopcov_cust1",
+        "amountUSD": 100, "amountLocal": 500, "debtAmountUSD": 100, "debtAmountLocal": 500,
+        "exchangeRate": 5, "status": "Not Paid", "isPaid": False,
+        "deliveryStatus": "Office", "statusDetail": {"notPaidCollection": "office"},
+    }, actors["admin"])
+    ad = _create_ad("stopcov_ad1", "stopcov_cust1", "stopcov_r1", 100, actors)
+    assert float(ad["data"]["amountUSD"]) == 100.0
+
+    receipt = _entity("receipts", "stopcov_r1", actors["admin"])
+    covered = _cover("stopcov_r1", 4000, "stopcov-cover-1", receipt["lastModified"], actors["admin"])
+    assert covered.status_code == 200, covered.text
+    ad_after_cover = _entity("ads", "stopcov_ad1", actors["admin"])
+    assert ad_after_cover["data"]["dueAllocations"] == [{"receiptId": "stopcov_r1", "amountUSD": 60.0}]
+    assert ad_after_cover["data"]["companyFundingAllocations"] == [{"receiptId": "stopcov_r1", "amountUSD": 40.0}]
+
+    # The incident: $80 of real spend against $60 customer + $40 company.
+    stopped = _stop("stopcov_ad1", 8000, "stopcov-stop-80", ad_after_cover["lastModified"], actors["admin"])
+    assert stopped.status_code == 200, stopped.text
+    saved = stopped.json()["ad"]["data"]
+    assert float(saved["spentUSD"]) == 80.0
+    assert saved["status"] == "Stopped"
+    # Company money is consumed FIRST and never re-planned; only the customer's
+    # pool shrinks: 80 spent − 40 company = 40 still promised by the customer,
+    # and the unspent $20 of their debt is released back to the receipt.
+    assert saved["dueAllocations"] == [{"receiptId": "stopcov_r1", "amountUSD": 40.0}]
+    assert saved["companyFundingAllocations"] == [{"receiptId": "stopcov_r1", "amountUSD": 40.0}]
+
+
+def test_partially_covered_ad_can_stop_at_full_budget_but_not_above(actors):
+    _create("customers", "stopcov_cust2", {"name": "Stop Cov 2", "phones": ["0911111002"]}, actors["admin"])
+    _create("receipts", "stopcov_r2", {
+        "recordType": "receipt", "customerId": "stopcov_cust2",
+        "amountUSD": 100, "amountLocal": 500, "debtAmountUSD": 100, "debtAmountLocal": 500,
+        "exchangeRate": 5, "status": "Not Paid", "isPaid": False,
+        "deliveryStatus": "Office", "statusDetail": {"notPaidCollection": "office"},
+    }, actors["admin"])
+    _create_ad("stopcov_ad2", "stopcov_cust2", "stopcov_r2", 100, actors)
+    receipt = _entity("receipts", "stopcov_r2", actors["admin"])
+    assert _cover("stopcov_r2", 4000, "stopcov-cover-2", receipt["lastModified"], actors["admin"]).status_code == 200
+    ad = _entity("ads", "stopcov_ad2", actors["admin"])
+
+    # Above the ad's own budget is still a plain 400, unchanged.
+    too_much = _stop("stopcov_ad2", 10100, "stopcov-stop-101", ad["lastModified"], actors["admin"])
+    assert too_much.status_code == 400, too_much.text
+
+    # Exactly the budget: customer keeps their full $60 share, company its $40.
+    full = _stop("stopcov_ad2", 10000, "stopcov-stop-100", ad["lastModified"], actors["admin"])
+    assert full.status_code == 200, full.text
+    saved = full.json()["ad"]["data"]
+    assert float(saved["spentUSD"]) == 100.0
+    assert saved["dueAllocations"] == [{"receiptId": "stopcov_r2", "amountUSD": 60.0}]
+    assert saved["companyFundingAllocations"] == [{"receiptId": "stopcov_r2", "amountUSD": 40.0}]

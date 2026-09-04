@@ -3208,3 +3208,105 @@ def test_admin_override_allows_a_warned_cross_page_link_employees_never(actors):
     finally:
         with db_conn() as conn:
             conn.execute(text("DELETE FROM entities WHERE id LIKE 'meta_ovr_%'"))
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt 2026-08-22: the page-link guard must also cover the GENERIC ads
+# PATCH route, and the name-only page match must never claim an OWNED page.
+# ---------------------------------------------------------------------------
+
+def test_generic_ads_patch_cannot_cross_link_an_imported_ad(actors):
+    """The guard lived only in /api/ads/mutate. A hand-crafted same-origin
+    PATCH /api/collections/ads/{id} by any Employee with ads.edit re-pointed
+    an imported ad to another Facebook page's local page — bypassing the
+    admin-only warned override entirely."""
+    creator = actors["admin_id"]
+    _insert_customer("meta_gp_customer", creator)
+    _seed_scan_entity("pages", "meta_gp_page_right", {
+        "name": "Right Page", "metaPageId": "121200000000001", "customerIds": [],
+    }, creator)
+    _seed_scan_entity("pages", "meta_gp_page_wrong", {
+        "name": "Wrong Page", "metaPageId": "343400000000002", "customerIds": [],
+    }, creator)
+    ad_id = "meta_gp_ad"
+    version = _insert_ad(
+        ad_id, creator,
+        customerId="meta_gp_customer",
+        metaImportSource="meta_ads",
+        metaPageId="121200000000001",
+        pageId="", pageName="",
+        paymentStatus="not_paid", status="Active",
+        amountUSD=10, amountLocal=97, exchangeRate=9.7,
+        receiptId="", receiptAllocations=[], dueAllocations=[],
+    )
+    try:
+        def _patch(cookies, page_id, expected):
+            return client.patch(
+                f"/api/collections/ads/{ad_id}",
+                json={"data": {"pageId": page_id, "pageName": "x"}, "expectedLastModified": expected},
+                cookies=cookies,
+            )
+
+        employee = _patch(actors["employee"], "meta_gp_page_wrong", version)
+        assert employee.status_code == 409, employee.text
+        assert "343400000000002" in employee.json()["detail"]
+
+        # No override exists on the generic route, even for an admin.
+        admin = _patch(actors["admin"], "meta_gp_page_wrong", version)
+        assert admin.status_code == 409, admin.text
+
+        stored, version = _stored_ad(ad_id)
+        assert stored.get("pageId") == ""
+
+        # The ad's OWN Facebook page stays allowed on the generic route (this
+        # is how the Duplicate-pages merge tool re-points ads).
+        right = _patch(actors["employee"], "meta_gp_page_right", version)
+        assert right.status_code == 200, right.text
+        stored, _ = _stored_ad(ad_id)
+        assert stored["pageId"] == "meta_gp_page_right"
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE id LIKE 'meta_gp_%'"))
+
+
+def test_name_only_page_match_skips_an_owned_page_but_reuses_an_unowned_one(actors):
+    """Two unrelated shops can share a generic name. Stamping the Facebook id
+    onto a same-named page that already has OWNERS would auto-bill the
+    imported ad to that customer; an unowned same-named page is the normal
+    'hand-made before Meta discovered it' case and must still be reused."""
+    creator = actors["admin_id"]
+    _insert_customer("meta_nm_customer", creator)
+    _seed_scan_entity("pages", "meta_nm_owned", {
+        "name": "مطعم الشام", "customerIds": ["meta_nm_customer"],
+    }, creator)
+    _seed_scan_entity("pages", "meta_nm_unowned", {
+        "name": "  Mataam   Beirut ", "customerIds": [],
+    }, creator)
+    try:
+        with meta_ads._META_WRITE_LOCK, db_conn() as conn:
+            owned_page_id, _, owned_created = meta_ads._ensure_import_page(
+                conn, {"metaPageId": "565600000000001", "metaPageName": "مطعم الشام"}
+            )
+            unowned_page_id, _, unowned_created = meta_ads._ensure_import_page(
+                conn, {"metaPageId": "787800000000002", "metaPageName": "mataam beirut"}
+            )
+        # Owned same-name page left alone: a FRESH ownerless page was created.
+        assert owned_created is True
+        assert owned_page_id != "meta_nm_owned"
+        with db_conn() as conn:
+            owned_row = conn.execute(
+                text("SELECT data_json FROM entities WHERE id='meta_nm_owned'")
+            ).mappings().first()
+        assert "metaPageId" not in (json_loads(owned_row["data_json"]) or {})
+        # Unowned same-name page reused and stamped, exactly as before.
+        assert unowned_created is False
+        assert unowned_page_id == "meta_nm_unowned"
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE id LIKE 'meta_nm_%'"))
+            conn.execute(
+                text("DELETE FROM entities WHERE type='pages' AND data_json LIKE '%565600000000001%'")
+            )
+            conn.execute(
+                text("DELETE FROM entities WHERE type='pages' AND data_json LIKE '%787800000000002%'")
+            )

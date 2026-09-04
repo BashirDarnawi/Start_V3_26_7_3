@@ -203,6 +203,50 @@ check('a still-linking Meta draft blocks submit with its own message, bilinguall
   modals.includes('awaitingMetaPageLink') &&
   modals.includes("This ad's Facebook page is being linked automatically. Wait a minute and try again.") &&
   modals.includes('يتم ربط صفحة فيسبوك لهذا الإعلان تلقائياً. انتظر دقيقة ثم أعد المحاولة.'));
+// Bug-hunt 2026-08-22 guards.
+// (1) An office edit of a Delivered / In Progress receipt must echo the
+// driver-owned workflow instead of re-deriving it from the form (that reset
+// finished deliveries to Office and unassigned the driver).
+check('an unchanged-status receipt edit keeps the driver-owned delivery workflow',
+  forms.includes("const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');") &&
+  forms.includes("(storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress')") &&
+  forms.includes('receiptDeliveryStatus = storedDeliveryStatus;') &&
+  forms.includes("receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');"));
+// (2) Live sync fans out through a bounded pool (14 parallel GETs exceeded the
+// server's connection cap and came back as raw 503s = the red badge), records
+// WHY a tick failed, and says so on the badge with RTL-safe margins.
+check('live sync uses a bounded fan-out and the badge says why it failed',
+  liveSync.includes('async function _runWithConcurrency(items, limit, fn)') &&
+  liveSync.includes('_runWithConcurrency(\n    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince\n  )') &&
+  liveSync.includes('_serverLiveSync.lastFailure = {') &&
+  liveSync.includes("(failure.status ? ` (${failure.status})` :") &&
+  !liveSync.includes('rounded-full mr-2"></span>') &&
+  liveSync.includes('rounded-full me-2"></span>'));
+check('the production server allows more connections than one tab fans out',
+  /--limit-concurrency",\s*"64"/.test(read('server/Dockerfile')) &&
+  read('deploy/albayan.service').includes('--limit-concurrency 64'));
+// (3) The imported-ad page lock keys on a LIVE Facebook identity; after an
+// unlink (metaImportSource survives) the picker must reopen.
+check('imported-ad page lock keys on live Facebook identity, not import provenance',
+  adEditModal.includes("const adIsMetaLinked = String(adData.metaAdId || '').trim() !== ''\n        || String(adData.metaPageId || '').trim() !== '';") &&
+  !adEditModal.includes("String(adData.metaImportSource || '').trim() !== '';\n      // Meta reveals"));
+// (4) The ads-table page cell flags an ad attached to a DIFFERENT Facebook
+// page's local page, and the receipt coverage panel is bilingual with LTR money.
+check('ads table flags a page mismatch and the coverage panel is bilingual',
+  metaAds.includes('data-role="meta-page-mismatch"') &&
+  metaAds.includes("isAr ? 'صفحة غير مطابقة' : 'Page mismatch'") &&
+  views.includes("isArV ? 'تغطية الدين من أموال الشركة' : 'Company funds debt coverage'") &&
+  views.includes("isArV ? 'تغطية من أموال الشركة' : 'Cover with company funds'") &&
+  views.includes('<span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>'));
+// (5) Raw server refusals reach users under a bilingual title with a human
+// noun and translated rule text — never "Failed to save receipts: <English>".
+check('server refusal toasts are bilingual and never expose internal collection names',
+  dataAudit.includes('function _serverRefusalToast(action, collectionName, error)') &&
+  dataAudit.includes("['Receipt type is server-controlled', 'نوع الوصل يحدده الخادم ولا يمكن تغييره.']") &&
+  dataAudit.includes("receipts: ['الوصل', 'receipt']") &&
+  !dataAudit.includes("showNotification('Server Error', `Failed to") &&
+  !dataAudit.includes("showNotification('Session Expired',") &&
+  helpers.includes("isAr ? 'غير مسموح' : 'Access denied'"));
 // The Ad Links section offers Paste link the way Photos offers Paste photo:
 // native clipboard in the packaged app, navigator.clipboard on the web,
 // bare-domain tolerated, non-links refused, duplicates refused, bilingual.

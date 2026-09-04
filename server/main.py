@@ -98,6 +98,7 @@ from .startup_financial_scan import (
 from .company_debt_coverage import (
     RECEIPT_COMPANY_COVERAGE_COLLECTION,
     RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+    company_pool_total_minor,
     create_company_debt_coverage_router,
     protect_company_coverage_fields,
     release_company_rows_for_receipt_delete,
@@ -8784,8 +8785,10 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     if legacy_minor and linked_id:
         entries.append(("legacyDue", linked_id, legacy_minor))
     pool_total = sum(entry[2] for entry in entries)
-    if pool_total > 0 and spent_minor > pool_total:
+    company_minor = company_pool_total_minor(ad)  # company money is spend capacity too (never re-planned)
+    if pool_total + company_minor > 0 and spent_minor > pool_total + company_minor:
         raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
+    customer_spent = max(spent_minor - company_minor, 0)  # only the customer's pools shrink on a stop
     is_mixed_shop_debt = (
         _financial_ad_payment_status(ad) == "not_paid"
         and str(ad.get("collectionMethod") or "") == "in_shop"
@@ -8797,7 +8800,7 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
         # that paid portion remains promised on the unpaid receipt.  A
         # proportional split would unnecessarily keep customer debt locked.
         plan: dict[tuple[str, str], int] = {}
-        remaining_spent = spent_minor
+        remaining_spent = customer_spent
         for kind, receipt_id, capacity in entries:
             if kind != "receipt":
                 continue
@@ -8816,7 +8819,7 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
                 detail="Spent amount exceeds the ad's funding baseline",
             )
     else:
-        plan = _financial_proportional_plan(entries, spent_minor)
+        plan = _financial_proportional_plan(entries, customer_spent)
     receipt_plan = [
         {"receiptId": receipt_id, "amountUSD": _financial_usd(plan[("receipt", receipt_id)])}
         for receipt_id in sorted(receipt_map)
@@ -11994,6 +11997,7 @@ def update_collection_item(
                     status_code=405,
                     detail="Ad payment classification requires the transactional ad API",
                 )
+        guard_meta_ad_page_link(None, existing_ad_data, financial_updates, actor=user)  # SECURITY: same page-link rule as /api/ads/mutate, no override here
     if collection == "receipts":
         old_receipt_type = str((existing.get("data") or {}).get("receiptType") or "")
         if set(financial_updates) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):

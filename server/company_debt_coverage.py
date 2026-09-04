@@ -30,6 +30,7 @@ from .financial_core import (
     _financial_rows_from_allocation_map,
     _financial_usd,
 )
+from .meta_ads import _rate_limit_or_429
 from .operations import assert_financial_period_open
 from .schemas import (
     CustomerCompanyCoverageRequest,
@@ -274,6 +275,22 @@ def ad_funded_minor(ad: dict[str, Any]) -> int:
         + sum(_financial_allocation_map(ad.get("companyFundingAllocations")).values())
         + _financial_ad_direct_coverage(ad)
         + legacy_due
+    )
+
+
+def company_pool_total_minor(ad: dict[str, Any]) -> int:
+    """Company money already applied to this ad: covered rows + direct coverage.
+
+    A stop/reconciliation must count it as SPEND CAPACITY — it is real money
+    that paid for the ad — but never re-plan it: the coverage ledger already
+    recorded it as an expense, so only the CUSTOMER's pools shrink when an ad
+    stops below its budget. Ignoring it refused every stop above the
+    customer's remaining share (409 "exceeds the ad's funding baseline"),
+    forcing under-reported spend and a wrong customer balance.
+    """
+    return (
+        sum(_financial_allocation_map(ad.get("companyFundingAllocations")).values())
+        + _financial_ad_direct_coverage(ad)
     )
 
 
@@ -1422,6 +1439,7 @@ def create_company_debt_coverage_router(
         both company-fund coverage paths (a legacy-linked ad whose funding
         receipt has itself stopped tracking debt). Changes nothing; sizes
         the gap before any change to coverable_ad_debt_minor itself."""
+        _rate_limit_or_429(f"coverage-scan:{admin.get('id')}", 30, 60_000)
         with db_conn() as conn:
             return scan_legacy_link_coverage_gap(
                 conn, financial_due_total=ctx["financial_due_total"]
@@ -1434,6 +1452,7 @@ def create_company_debt_coverage_router(
         """Read-only: every ad whose spend exceeds its funding, grouped by the
         rule that decides whether company funds may cover it. The direct
         measure of how much real debt the button does not offer, and why."""
+        _rate_limit_or_429(f"coverage-scan:{admin.get('id')}", 30, 60_000)
         with db_conn() as conn:
             return scan_unfunded_ad_spend(conn)
 
@@ -1444,6 +1463,7 @@ def create_company_debt_coverage_router(
     ):
         """Read-only: the exact rule that decided each of one customer's ads,
         for diagnosing a missing "pay debt from company funds" button."""
+        _rate_limit_or_429(f"coverage-scan:{admin.get('id')}", 30, 60_000)
         customer_id = ctx["validate_entity_id"](customer_id)
         with db_conn() as conn:
             return explain_customer_company_coverage(

@@ -10,7 +10,7 @@ WorkingDirectory=/opt/albayan
 EnvironmentFile=/etc/albayan/albayan.env
 
 # Use a virtualenv installed at /opt/albayan/server/.venv
-ExecStart=/opt/albayan/server/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000 --limit-concurrency 12
+ExecStart=/opt/albayan/server/.venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000 --limit-concurrency 64
 
 Restart=always
 RestartSec=3

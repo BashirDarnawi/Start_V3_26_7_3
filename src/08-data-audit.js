@@ -203,11 +203,11 @@ function addRecord(array, record) {
         saveState();
         // Handle 401 - session expired, prompt re-login
         if (e?.status === 401) {
-          showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+          showNotification(..._sessionExpiredToast(), 'warning');
           // Clear cached session to force re-auth on next action
           _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
         } else {
-          showNotification('Server Error', `Failed to create ${collectionName}: ${e.message || 'Error'}`, 'error');
+          showNotification(..._serverRefusalToast('create', collectionName, e), 'error');
         }
         return false;
       });
@@ -1015,10 +1015,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
           }
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
-            showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+            showNotification(..._sessionExpiredToast(), 'warning');
             _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
           } else {
-            showNotification('Server Error', `Failed to save ${collectionName}: ${e.message || 'Error'}`, 'error');
+            showNotification(..._serverRefusalToast('save', collectionName, e), 'error');
           }
           render();
           return false;
@@ -1063,7 +1063,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           if (idx !== -1) array[idx] = old;
           if (collectionName) markCollectionDirty(collectionName);
           saveState();
-          showNotification('Server Error', `Failed to update user: ${e.message || 'Error'}`, 'error');
+          showNotification(..._serverRefusalToast('save', 'users', e), 'error');
           render();
           return false;
         });
@@ -1130,10 +1130,10 @@ function deleteRecord(array, id, opts) {
           saveState();
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
-            showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+            showNotification(..._sessionExpiredToast(), 'warning');
             _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
           } else {
-            showNotification('Server Error', `Failed to delete ${collectionName}: ${e.message || 'Error'}`, 'error');
+            showNotification(..._serverRefusalToast('delete', collectionName, e), 'error');
           }
           render();
           return false;
@@ -1152,10 +1152,10 @@ function deleteRecord(array, id, opts) {
           saveState();
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
-            showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+            showNotification(..._sessionExpiredToast(), 'warning');
             _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
           } else {
-            showNotification('Server Error', `Failed to delete user: ${e.message || 'Error'}`, 'error');
+            showNotification(..._serverRefusalToast('delete', 'users', e), 'error');
           }
           render();
           return false;
@@ -1766,6 +1766,59 @@ function getReceiptPaymentState(receipt) {
 
 // Delivery identity is independent of whether the customer has already paid.
 // Strong persisted markers come first; deliveryPersonId is only a fallback for
+// Bilingual wrappers for the raw server refusal toasts. The old toasts had an
+// English-only title, exposed the INTERNAL collection name ("receipts") and
+// showed the server's English detail verbatim — that is how "Receipt type is
+// server-controlled" reached an Arabic-speaking employee. Known rule texts
+// are translated; anything unknown is still shown (never hidden), just under
+// a bilingual title and a human noun.
+const _SERVER_REFUSAL_AR = [
+  ['Receipt type is server-controlled', 'نوع الوصل يحدده الخادم ولا يمكن تغييره.'],
+  ['Receipt transfer fields are server-controlled', 'حقول تحويل الوصل يحددها الخادم.'],
+  ['Meta synchronization fields are server-controlled', 'حقول مزامنة ميتا يحددها الخادم.'],
+  ['Meta page identity fields are server-controlled', 'هوية صفحة ميتا يحددها الخادم.'],
+  ['Company coverage fields are server-controlled', 'حقول تغطية الشركة يحددها الخادم.'],
+  ['Ad payment classification requires the transactional ad API', 'تغيير تصنيف دفع الإعلان يتم من نموذج الإعلان فقط.'],
+  ['Ad funding and stopping require the transactional ad API', 'تمويل الإعلان وإيقافه يتمان من نموذج الإعلان فقط.'],
+  ['Ad page not found', 'صفحة الإعلان غير موجودة.'],
+  ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.']
+];
+function _serverRefusalNoun(collectionName) {
+  const isAr = state.language === 'ar';
+  const nouns = {
+    receipts: ['الوصل', 'receipt'], ads: ['الإعلان', 'ad'], customers: ['العميل', 'customer'],
+    pages: ['الصفحة', 'page'], users: ['المستخدم', 'user'], deliveries: ['التوصيل', 'delivery'],
+    clothesProducts: ['المنتج', 'product'], clothesShipments: ['الشحنة', 'shipment'], clothesOrders: ['الطلب', 'order']
+  };
+  const pair = nouns[String(collectionName || '')] || ['السجل', 'record'];
+  return isAr ? pair[0] : pair[1];
+}
+function _serverRefusalToast(action, collectionName, error) {
+  const isAr = state.language === 'ar';
+  const raw = String(error?.message || '').trim();
+  let detail = raw;
+  if (isAr) {
+    const known = _SERVER_REFUSAL_AR.find(([en]) => raw.startsWith(en));
+    if (known) detail = known[1];
+    else if (raw.startsWith('This imported ad ran on Facebook page')) detail = 'هذا الإعلان يخص صفحة فيسبوك أخرى؛ اختر الصفحة المطابقة أو اطلب من المدير تغييرها.';
+  }
+  const noun = _serverRefusalNoun(collectionName);
+  const verbs = { save: ['فشل حفظ', 'Failed to save'], create: ['فشل إنشاء', 'Failed to create'], delete: ['فشل حذف', 'Failed to delete'] };
+  const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];
+  const status = Number(error?.status) || 0;
+  return [
+    isAr ? 'خطأ في الخادم' : 'Server Error',
+    `${verb} ${noun}: ${detail || (isAr ? 'خطأ' : 'Error')}${status >= 500 ? ` (${status})` : ''}`
+  ];
+}
+function _sessionExpiredToast() {
+  const isAr = state.language === 'ar';
+  return [
+    isAr ? 'انتهت الجلسة' : 'Session Expired',
+    isAr ? 'انتهت جلستك. يرجى تسجيل الخروج ثم الدخول مرة أخرى.' : 'Your session has expired. Please log out and log back in.'
+  ];
+}
+
 // older records that predate statusDetail/receiptType.
 function isDeliveryReceiptRecord(receipt) {
   if (!receipt || receipt._deleted) return false;

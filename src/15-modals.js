@@ -394,8 +394,13 @@ function renderModal() {
       // A Meta-linked ad already knows its page (the import linked it). Offering
       // the page picker there only invites a wrong change, so the field locks.
       const adLinkedPage = state.pages.find(p => p && !p._deleted && String(p.id) === String(adData.pageId || ''));
+      // A LIVE Facebook identity (ad id or page id) locks the page.
+      // metaImportSource alone is provenance: it survives an unlink, and the
+      // server guard stops caring once metaPageId is gone — keying on it left
+      // unlinked drafts locked for employees while the server would accept
+      // any page.
       const adIsMetaLinked = String(adData.metaAdId || '').trim() !== ''
-        || String(adData.metaImportSource || '').trim() !== '';
+        || String(adData.metaPageId || '').trim() !== '';
       // Meta reveals a page's NAME later than its id, so a fresh draft can
       // carry metaPageId with pageId still empty (the import defers local
       // linking to the next sync pass). The lock must key on the ad's own
@@ -558,7 +563,7 @@ function renderModal() {
                     <span class="truncate">${Security.escapeHtml(
                       metaLockedPage
                         ? (metaLockedPage.name || '')
-                        : (String(adData.metaPageName || '').trim() || `Facebook Page ${adMetaPageId}`)
+                        : (String(adData.metaPageName || '').trim() || `${isArAd ? 'صفحة فيسبوك' : 'Facebook Page'} ${adMetaPageId}`)
                     )}</span>
                     <span class="shrink-0 flex items-center gap-1.5">
                       <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>
@@ -2400,7 +2405,7 @@ function renderModal() {
       if (!initAdPageId) {
         const initMetaPageId = String(adData.metaPageId || '').trim();
         const initMetaLinked = String(adData.metaAdId || '').trim() !== ''
-          || String(adData.metaImportSource || '').trim() !== '';
+          || String(adData.metaPageId || '').trim() !== '';
         if (initMetaPageId && initMetaLinked) {
           const resolved = state.pages.find(p => p && !p._deleted
             && String(p.metaPageId || '').trim() === initMetaPageId);

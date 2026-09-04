@@ -2100,6 +2100,23 @@ async function _saveReceiptFromModalInner() {
     }
   }
 
+  // The delivery workflow is DRIVER-owned once a mission is underway or done.
+  // The derivation above rebuilds it from the form's status/collection inputs
+  // on EVERY save, so an office edit that touched nothing but the phone
+  // number on a Delivered (or In Progress) receipt silently reset it to
+  // Office, unassigned the driver and cleared the delivery-collected flag.
+  // When the status itself is unchanged, echo the stored workflow verbatim —
+  // the same edit-echo rule that fixed receiptType. A deliberate status
+  // change (e.g. Paid -> Canceled) still runs the derivation.
+  const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
+  if (editTarget && status === String(editTarget.status || '')
+      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress')) {
+    receiptDeliveryStatus = storedDeliveryStatus;
+    receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');
+    receiptIsReceivedInOffice = editTarget.isReceivedInOffice === true;
+    statusDetail.paidDeliveryPersonId = String(editTarget.statusDetail?.paidDeliveryPersonId || editTarget.deliveryPersonId || '');
+  }
+
   // Temp delivery receipt: require assignment-time delivery info
   const deliveryPlaceName = String(document.getElementById('receipt-delivery-place')?.value || '').trim();
   const quotedDeliveryFee = parseFloat(String(document.getElementById('receipt-quoted-delivery-fee')?.value || '').trim()) || 0;
@@ -3216,7 +3233,7 @@ function confirmMetaAdPageChange() {
   const isArM = state.language === 'ar';
   const adData = state.modalData || {};
   const fbName = String(adData.metaPageName || '').trim()
-    || `Facebook Page ${String(adData.metaPageId || '').trim()}`;
+    || `${isArM ? 'صفحة فيسبوك' : 'Facebook Page'} ${String(adData.metaPageId || '').trim()}`;
   const warning = isArM
     ? `هذا الإعلان يخص صفحة فيسبوك "${fbName}".\n\nربطه بصفحة أخرى في النظام يغيّر الصفحة التي تُحسب عليها تقارير ومصاريف هذا الإعلان. تابع فقط إذا كنت متأكداً أن هذا ما تريده.\n\nهل تريد المتابعة؟`
     : `This ad ran on the Facebook page "${fbName}".\n\nLinking it to a different page in the system changes which page this ad's reports and spending count under. Continue only if you are sure this is what you want.\n\nContinue?`;

@@ -525,10 +525,23 @@ async function serverLiveSyncOnce() {
         return { collection, since, records: [], ok: true, forbidden: true };
       }
       anyFetchFailed = true;
+      // Remember WHY, so the badge can say "(503)" instead of nothing and a
+      // future failure is diagnosable without DevTools.
+      _serverLiveSync.lastFailure = {
+        collection,
+        status: Number(e?.status) || 0,
+        message: String(e?.message || '').slice(0, 160),
+        at: Date.now()
+      };
       return { collection, since, records: [], ok: false, forbidden: false };
     }
   };
-  const deltaResults = await Promise.all(deltaCollections.map(safeSince));
+  // Bounded fan-out. Firing all 14 collections at once exceeded the server's
+  // connection cap (uvicorn --limit-concurrency) from a SINGLE tab, and the
+  // excess came back as raw 503s — the real source of the red sync badge.
+  const deltaResults = await _runWithConcurrency(
+    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince
+  );
   const deltaByCollection = new Map(deltaResults.map(result => [result.collection, result]));
   const recordsFor = (name) => deltaByCollection.get(name)?.records || [];
   const adsDelta = recordsFor('ads');
@@ -743,6 +756,22 @@ async function serverLiveSyncOnce() {
   return { ok: !anyFetchFailed };
 }
 
+// Run fn over items with at most `limit` in flight; results keep item order.
+async function _runWithConcurrency(items, limit, fn) {
+  const list = Array.from(items || []);
+  const results = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const index = next++;
+      results[index] = await fn(list[index]);
+    }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, list.length)) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
 async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
@@ -826,12 +855,12 @@ function _paintSyncIndicator(status) {
   switch (status) {
     case 'syncing':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse me-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full me-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
       indicator.style.opacity = '1';
       // Fade out after 2 seconds
       _syncIndicatorHideTimer = setTimeout(() => {
@@ -844,7 +873,14 @@ function _paintSyncIndicator(status) {
       break;
     case 'error':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
+      // Say WHY when we know: "(503)" points straight at the server cap,
+      // "(network)" at the connection. Logical margin (me-) keeps the dot on
+      // the correct side in RTL.
+      const failure = _serverLiveSync.lastFailure;
+      const why = failure
+        ? (failure.status ? ` (${failure.status})` : (state.language === 'ar' ? ' (الشبكة)' : ' (network)'))
+        : '';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full me-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة' + why + ' - اضغط لإعادة المحاولة' : 'Sync failed' + why + ' - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
       break;

@@ -3244,15 +3244,15 @@ function renderReceiptsView() {
                     <div class="min-w-0">
                       <div class="flex items-center gap-2 text-sm font-bold text-violet-800 dark:text-violet-200">
                         <i data-lucide="building-2" class="h-4 w-4 flex-shrink-0"></i>
-                        <span>Company funds debt coverage</span>
+                        <span>${isArV ? 'تغطية الدين من أموال الشركة' : 'Company funds debt coverage'}</span>
                       </div>
                       <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">
-                        Customer debt remaining:
-                        <span class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
-                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>Company covered: <span class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
+                        ${isArV ? 'دين العميل المتبقي:' : 'Customer debt remaining:'}
+                        <span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
+                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>${isArV ? 'غطته الشركة:' : 'Company covered:'} <span dir="ltr" class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
                       </div>
                       <p class="mt-1 text-[11px] leading-4 text-violet-700 dark:text-violet-300">
-                        Business expense only &mdash; not a customer payment and not revenue.
+                        ${isArV ? 'مصروف تجاري فقط — ليس دفعة من العميل وليس إيراداً.' : 'Business expense only &mdash; not a customer payment and not revenue.'}
                       </p>
                     </div>
                     ${canCoverWithCompanyFunds ? `
@@ -3260,9 +3260,9 @@ function renderReceiptsView() {
                         data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}"
                         onclick="openCompanyDebtCoverageModal(this.dataset.receiptId, this)"
                         class="inline-flex min-h-11 w-full flex-shrink-0 items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 sm:w-auto"
-                        aria-label="Cover part or all of this customer debt with company funds">
+                        aria-label="${isArV ? 'تغطية جزء من دين هذا العميل أو كله من أموال الشركة' : 'Cover part or all of this customer debt with company funds'}">
                         <i data-lucide="landmark" class="h-4 w-4"></i>
-                        <span>Cover with company funds</span>
+                        <span>${isArV ? 'تغطية من أموال الشركة' : 'Cover with company funds'}</span>
                       </button>
                     ` : ''}
                   </div>

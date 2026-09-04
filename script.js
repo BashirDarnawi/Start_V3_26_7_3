@@ -7219,11 +7219,11 @@ function addRecord(array, record) {
         saveState();
         // Handle 401 - session expired, prompt re-login
         if (e?.status === 401) {
-          showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+          showNotification(..._sessionExpiredToast(), 'warning');
           // Clear cached session to force re-auth on next action
           _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
         } else {
-          showNotification('Server Error', `Failed to create ${collectionName}: ${e.message || 'Error'}`, 'error');
+          showNotification(..._serverRefusalToast('create', collectionName, e), 'error');
         }
         return false;
       });
@@ -8031,10 +8031,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
           }
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
-            showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+            showNotification(..._sessionExpiredToast(), 'warning');
             _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
           } else {
-            showNotification('Server Error', `Failed to save ${collectionName}: ${e.message || 'Error'}`, 'error');
+            showNotification(..._serverRefusalToast('save', collectionName, e), 'error');
           }
           render();
           return false;
@@ -8079,7 +8079,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           if (idx !== -1) array[idx] = old;
           if (collectionName) markCollectionDirty(collectionName);
           saveState();
-          showNotification('Server Error', `Failed to update user: ${e.message || 'Error'}`, 'error');
+          showNotification(..._serverRefusalToast('save', 'users', e), 'error');
           render();
           return false;
         });
@@ -8146,10 +8146,10 @@ function deleteRecord(array, id, opts) {
           saveState();
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
-            showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+            showNotification(..._sessionExpiredToast(), 'warning');
             _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
           } else {
-            showNotification('Server Error', `Failed to delete ${collectionName}: ${e.message || 'Error'}`, 'error');
+            showNotification(..._serverRefusalToast('delete', collectionName, e), 'error');
           }
           render();
           return false;
@@ -8168,10 +8168,10 @@ function deleteRecord(array, id, opts) {
           saveState();
           // Handle 401 - session expired, prompt re-login
           if (e?.status === 401) {
-            showNotification('Session Expired', 'Your session has expired. Please log out and log back in.', 'warning');
+            showNotification(..._sessionExpiredToast(), 'warning');
             _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
           } else {
-            showNotification('Server Error', `Failed to delete user: ${e.message || 'Error'}`, 'error');
+            showNotification(..._serverRefusalToast('delete', 'users', e), 'error');
           }
           render();
           return false;
@@ -8782,6 +8782,59 @@ function getReceiptPaymentState(receipt) {
 
 // Delivery identity is independent of whether the customer has already paid.
 // Strong persisted markers come first; deliveryPersonId is only a fallback for
+// Bilingual wrappers for the raw server refusal toasts. The old toasts had an
+// English-only title, exposed the INTERNAL collection name ("receipts") and
+// showed the server's English detail verbatim — that is how "Receipt type is
+// server-controlled" reached an Arabic-speaking employee. Known rule texts
+// are translated; anything unknown is still shown (never hidden), just under
+// a bilingual title and a human noun.
+const _SERVER_REFUSAL_AR = [
+  ['Receipt type is server-controlled', 'نوع الوصل يحدده الخادم ولا يمكن تغييره.'],
+  ['Receipt transfer fields are server-controlled', 'حقول تحويل الوصل يحددها الخادم.'],
+  ['Meta synchronization fields are server-controlled', 'حقول مزامنة ميتا يحددها الخادم.'],
+  ['Meta page identity fields are server-controlled', 'هوية صفحة ميتا يحددها الخادم.'],
+  ['Company coverage fields are server-controlled', 'حقول تغطية الشركة يحددها الخادم.'],
+  ['Ad payment classification requires the transactional ad API', 'تغيير تصنيف دفع الإعلان يتم من نموذج الإعلان فقط.'],
+  ['Ad funding and stopping require the transactional ad API', 'تمويل الإعلان وإيقافه يتمان من نموذج الإعلان فقط.'],
+  ['Ad page not found', 'صفحة الإعلان غير موجودة.'],
+  ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.']
+];
+function _serverRefusalNoun(collectionName) {
+  const isAr = state.language === 'ar';
+  const nouns = {
+    receipts: ['الوصل', 'receipt'], ads: ['الإعلان', 'ad'], customers: ['العميل', 'customer'],
+    pages: ['الصفحة', 'page'], users: ['المستخدم', 'user'], deliveries: ['التوصيل', 'delivery'],
+    clothesProducts: ['المنتج', 'product'], clothesShipments: ['الشحنة', 'shipment'], clothesOrders: ['الطلب', 'order']
+  };
+  const pair = nouns[String(collectionName || '')] || ['السجل', 'record'];
+  return isAr ? pair[0] : pair[1];
+}
+function _serverRefusalToast(action, collectionName, error) {
+  const isAr = state.language === 'ar';
+  const raw = String(error?.message || '').trim();
+  let detail = raw;
+  if (isAr) {
+    const known = _SERVER_REFUSAL_AR.find(([en]) => raw.startsWith(en));
+    if (known) detail = known[1];
+    else if (raw.startsWith('This imported ad ran on Facebook page')) detail = 'هذا الإعلان يخص صفحة فيسبوك أخرى؛ اختر الصفحة المطابقة أو اطلب من المدير تغييرها.';
+  }
+  const noun = _serverRefusalNoun(collectionName);
+  const verbs = { save: ['فشل حفظ', 'Failed to save'], create: ['فشل إنشاء', 'Failed to create'], delete: ['فشل حذف', 'Failed to delete'] };
+  const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];
+  const status = Number(error?.status) || 0;
+  return [
+    isAr ? 'خطأ في الخادم' : 'Server Error',
+    `${verb} ${noun}: ${detail || (isAr ? 'خطأ' : 'Error')}${status >= 500 ? ` (${status})` : ''}`
+  ];
+}
+function _sessionExpiredToast() {
+  const isAr = state.language === 'ar';
+  return [
+    isAr ? 'انتهت الجلسة' : 'Session Expired',
+    isAr ? 'انتهت جلستك. يرجى تسجيل الخروج ثم الدخول مرة أخرى.' : 'Your session has expired. Please log out and log back in.'
+  ];
+}
+
 // older records that predate statusDetail/receiptType.
 function isDeliveryReceiptRecord(receipt) {
   if (!receipt || receipt._deleted) return false;
@@ -12436,10 +12489,23 @@ async function serverLiveSyncOnce() {
         return { collection, since, records: [], ok: true, forbidden: true };
       }
       anyFetchFailed = true;
+      // Remember WHY, so the badge can say "(503)" instead of nothing and a
+      // future failure is diagnosable without DevTools.
+      _serverLiveSync.lastFailure = {
+        collection,
+        status: Number(e?.status) || 0,
+        message: String(e?.message || '').slice(0, 160),
+        at: Date.now()
+      };
       return { collection, since, records: [], ok: false, forbidden: false };
     }
   };
-  const deltaResults = await Promise.all(deltaCollections.map(safeSince));
+  // Bounded fan-out. Firing all 14 collections at once exceeded the server's
+  // connection cap (uvicorn --limit-concurrency) from a SINGLE tab, and the
+  // excess came back as raw 503s — the real source of the red sync badge.
+  const deltaResults = await _runWithConcurrency(
+    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince
+  );
   const deltaByCollection = new Map(deltaResults.map(result => [result.collection, result]));
   const recordsFor = (name) => deltaByCollection.get(name)?.records || [];
   const adsDelta = recordsFor('ads');
@@ -12654,6 +12720,22 @@ async function serverLiveSyncOnce() {
   return { ok: !anyFetchFailed };
 }
 
+// Run fn over items with at most `limit` in flight; results keep item order.
+async function _runWithConcurrency(items, limit, fn) {
+  const list = Array.from(items || []);
+  const results = new Array(list.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) {
+      const index = next++;
+      results[index] = await fn(list[index]);
+    }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, list.length)) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
 async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
@@ -12737,12 +12819,12 @@ function _paintSyncIndicator(status) {
   switch (status) {
     case 'syncing':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse mr-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse me-2"></span>' + (state.language === 'ar' ? 'جارٍ المزامنة...' : 'Syncing...');
       indicator.style.opacity = '1';
       break;
     case 'synced':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-emerald-500 rounded-full me-2"></span>' + (state.language === 'ar' ? 'تمت المزامنة' : 'Synced');
       indicator.style.opacity = '1';
       // Fade out after 2 seconds
       _syncIndicatorHideTimer = setTimeout(() => {
@@ -12755,7 +12837,14 @@ function _paintSyncIndicator(status) {
       break;
     case 'error':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
-      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full mr-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة - اضغط لإعادة المحاولة' : 'Sync failed - Tap to retry');
+      // Say WHY when we know: "(503)" points straight at the server cap,
+      // "(network)" at the connection. Logical margin (me-) keeps the dot on
+      // the correct side in RTL.
+      const failure = _serverLiveSync.lastFailure;
+      const why = failure
+        ? (failure.status ? ` (${failure.status})` : (state.language === 'ar' ? ' (الشبكة)' : ' (network)'))
+        : '';
+      indicator.innerHTML = '<span class="inline-block w-2 h-2 bg-rose-500 rounded-full me-2"></span>' + (state.language === 'ar' ? 'فشلت المزامنة' + why + ' - اضغط لإعادة المحاولة' : 'Sync failed' + why + ' - Tap to retry');
       indicator.style.opacity = '1';
       indicator.onclick = () => manualSyncData();
       break;
@@ -17877,15 +17966,15 @@ function renderReceiptsView() {
                     <div class="min-w-0">
                       <div class="flex items-center gap-2 text-sm font-bold text-violet-800 dark:text-violet-200">
                         <i data-lucide="building-2" class="h-4 w-4 flex-shrink-0"></i>
-                        <span>Company funds debt coverage</span>
+                        <span>${isArV ? 'تغطية الدين من أموال الشركة' : 'Company funds debt coverage'}</span>
                       </div>
                       <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">
-                        Customer debt remaining:
-                        <span class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
-                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>Company covered: <span class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
+                        ${isArV ? 'دين العميل المتبقي:' : 'Customer debt remaining:'}
+                        <span dir="ltr" class="font-bold text-rose-600 dark:text-rose-300">$${companyCoverableOutstandingUSD.toFixed(2)}</span>
+                        ${companyCoveredUSD > 0.005 ? `<span class="mx-1 text-slate-400">&bull;</span>${isArV ? 'غطته الشركة:' : 'Company covered:'} <span dir="ltr" class="font-bold text-violet-700 dark:text-violet-300">$${companyCoveredUSD.toFixed(2)}</span>` : ''}
                       </div>
                       <p class="mt-1 text-[11px] leading-4 text-violet-700 dark:text-violet-300">
-                        Business expense only &mdash; not a customer payment and not revenue.
+                        ${isArV ? 'مصروف تجاري فقط — ليس دفعة من العميل وليس إيراداً.' : 'Business expense only &mdash; not a customer payment and not revenue.'}
                       </p>
                     </div>
                     ${canCoverWithCompanyFunds ? `
@@ -17893,9 +17982,9 @@ function renderReceiptsView() {
                         data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}"
                         onclick="openCompanyDebtCoverageModal(this.dataset.receiptId, this)"
                         class="inline-flex min-h-11 w-full flex-shrink-0 items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 sm:w-auto"
-                        aria-label="Cover part or all of this customer debt with company funds">
+                        aria-label="${isArV ? 'تغطية جزء من دين هذا العميل أو كله من أموال الشركة' : 'Cover part or all of this customer debt with company funds'}">
                         <i data-lucide="landmark" class="h-4 w-4"></i>
-                        <span>Cover with company funds</span>
+                        <span>${isArV ? 'تغطية من أموال الشركة' : 'Cover with company funds'}</span>
                       </button>
                     ` : ''}
                   </div>
@@ -28529,7 +28618,11 @@ async function submitCustomerAdDebtCoverage() {
   if (dialogState.submitPromise) return dialogState.submitPromise;
 
   if (!isCurrentUserAdmin()) {
-    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    showNotification(
+      isAr ? 'غير مسموح' : 'Access denied',
+      isAr ? 'المدير فقط يمكنه استخدام أموال الشركة.' : 'Only an administrator can use company funds.',
+      'error'
+    );
     closeCustomerAdDebtCoverageModal({ force: true });
     return false;
   }
@@ -33693,6 +33786,23 @@ async function _saveReceiptFromModalInner() {
     }
   }
 
+  // The delivery workflow is DRIVER-owned once a mission is underway or done.
+  // The derivation above rebuilds it from the form's status/collection inputs
+  // on EVERY save, so an office edit that touched nothing but the phone
+  // number on a Delivered (or In Progress) receipt silently reset it to
+  // Office, unassigned the driver and cleared the delivery-collected flag.
+  // When the status itself is unchanged, echo the stored workflow verbatim —
+  // the same edit-echo rule that fixed receiptType. A deliberate status
+  // change (e.g. Paid -> Canceled) still runs the derivation.
+  const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
+  if (editTarget && status === String(editTarget.status || '')
+      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress')) {
+    receiptDeliveryStatus = storedDeliveryStatus;
+    receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');
+    receiptIsReceivedInOffice = editTarget.isReceivedInOffice === true;
+    statusDetail.paidDeliveryPersonId = String(editTarget.statusDetail?.paidDeliveryPersonId || editTarget.deliveryPersonId || '');
+  }
+
   // Temp delivery receipt: require assignment-time delivery info
   const deliveryPlaceName = String(document.getElementById('receipt-delivery-place')?.value || '').trim();
   const quotedDeliveryFee = parseFloat(String(document.getElementById('receipt-quoted-delivery-fee')?.value || '').trim()) || 0;
@@ -34809,7 +34919,7 @@ function confirmMetaAdPageChange() {
   const isArM = state.language === 'ar';
   const adData = state.modalData || {};
   const fbName = String(adData.metaPageName || '').trim()
-    || `Facebook Page ${String(adData.metaPageId || '').trim()}`;
+    || `${isArM ? 'صفحة فيسبوك' : 'Facebook Page'} ${String(adData.metaPageId || '').trim()}`;
   const warning = isArM
     ? `هذا الإعلان يخص صفحة فيسبوك "${fbName}".\n\nربطه بصفحة أخرى في النظام يغيّر الصفحة التي تُحسب عليها تقارير ومصاريف هذا الإعلان. تابع فقط إذا كنت متأكداً أن هذا ما تريده.\n\nهل تريد المتابعة؟`
     : `This ad ran on the Facebook page "${fbName}".\n\nLinking it to a different page in the system changes which page this ad's reports and spending count under. Continue only if you are sure this is what you want.\n\nContinue?`;
@@ -37935,8 +38045,13 @@ function renderModal() {
       // A Meta-linked ad already knows its page (the import linked it). Offering
       // the page picker there only invites a wrong change, so the field locks.
       const adLinkedPage = state.pages.find(p => p && !p._deleted && String(p.id) === String(adData.pageId || ''));
+      // A LIVE Facebook identity (ad id or page id) locks the page.
+      // metaImportSource alone is provenance: it survives an unlink, and the
+      // server guard stops caring once metaPageId is gone — keying on it left
+      // unlinked drafts locked for employees while the server would accept
+      // any page.
       const adIsMetaLinked = String(adData.metaAdId || '').trim() !== ''
-        || String(adData.metaImportSource || '').trim() !== '';
+        || String(adData.metaPageId || '').trim() !== '';
       // Meta reveals a page's NAME later than its id, so a fresh draft can
       // carry metaPageId with pageId still empty (the import defers local
       // linking to the next sync pass). The lock must key on the ad's own
@@ -38099,7 +38214,7 @@ function renderModal() {
                     <span class="truncate">${Security.escapeHtml(
                       metaLockedPage
                         ? (metaLockedPage.name || '')
-                        : (String(adData.metaPageName || '').trim() || `Facebook Page ${adMetaPageId}`)
+                        : (String(adData.metaPageName || '').trim() || `${isArAd ? 'صفحة فيسبوك' : 'Facebook Page'} ${adMetaPageId}`)
                     )}</span>
                     <span class="shrink-0 flex items-center gap-1.5">
                       <span class="px-2 py-0.5 rounded-md bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 text-[10px] font-bold">Meta</span>
@@ -39941,7 +40056,7 @@ function renderModal() {
       if (!initAdPageId) {
         const initMetaPageId = String(adData.metaPageId || '').trim();
         const initMetaLinked = String(adData.metaAdId || '').trim() !== ''
-          || String(adData.metaImportSource || '').trim() !== '';
+          || String(adData.metaPageId || '').trim() !== '';
         if (initMetaPageId && initMetaLinked) {
           const resolved = state.pages.find(p => p && !p._deleted
             && String(p.metaPageId || '').trim() === initMetaPageId);
@@ -42793,11 +42908,19 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
   const category = String(adPage?.category || ad?.metaPageCategory || '').trim();
   const displayCategory = category && category.toLocaleLowerCase() !== displayName.toLocaleLowerCase() ? category : '';
   if (!pageName && !pageId && !localName) return '<span class="text-xs text-slate-400">-</span>';
+  // The ad's own Facebook page vs the local page it is attached to. When they
+  // disagree, the cell used to print the ad's Facebook id right above ANOTHER
+  // business's page name with no hint — exactly the picture that hid the
+  // wrong-page incident. Flag it so a mislink is visible at a glance.
+  const adFacebookId = String(ad?.metaPageId || '').trim();
+  const linkedFacebookId = String(adPage?.metaPageId || '').trim();
+  const pageMismatch = !!(adFacebookId && linkedFacebookId && adFacebookId !== linkedFacebookId);
   // Layout (user request): the Facebook page ID first, the page NAME directly
   // below it — the ID must appear exactly once.
   return `<div data-role="meta-page-summary">
     ${pageId ? `<div class="break-all font-mono text-[11px] font-semibold text-slate-500 dark:text-slate-400" title="${isAr ? 'معرف صفحة فيسبوك' : 'Facebook Page ID'}">#${Security.escapeHtml(pageId)}</div>` : ''}
     <div class="${pageId ? 'mt-0.5 ' : ''}break-words text-sm font-semibold ${adPageDeleted ? 'text-slate-500 dark:text-slate-400' : 'text-indigo-700 dark:text-indigo-300'}" ${pageName ? '' : `title="${isAr ? 'اسم الصفحة يُحمَّل من Meta تلقائياً' : 'The page name is loading automatically from Meta'}"`}>${Security.escapeHtml(displayName)}</div>
+    ${pageMismatch ? `<div data-role="meta-page-mismatch" class="mt-0.5 inline-block rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? `الإعلان نُشر على صفحة فيسبوك ${Security.escapeHtml(adFacebookId)} لكنه مرتبط بصفحة محلية لصفحة فيسبوك أخرى (${Security.escapeHtml(linkedFacebookId)})` : `This ad ran on Facebook page ${Security.escapeHtml(adFacebookId)} but is attached to a local page of a different Facebook page (${Security.escapeHtml(linkedFacebookId)})`}">${isAr ? 'صفحة غير مطابقة' : 'Page mismatch'}</div>` : ''}
     ${adPageDeleted ? `<div class="mt-0.5 inline-block rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">${isAr ? 'محذوفة' : 'Deleted'}</div>` : ''}
     ${displayCategory ? `<div class="text-xs text-slate-500">${Security.escapeHtml(displayCategory)}</div>` : ''}
   </div>`;

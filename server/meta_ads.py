@@ -2647,6 +2647,13 @@ def guard_meta_ad_page_link(
     old_page_id = str((existing or {}).get("pageId") or "").strip()
     if not new_page_id or new_page_id == old_page_id:
         return
+    if conn is None:
+        # The generic PATCH route has no open transaction; a short read-only
+        # connection is enough to judge the target page.
+        with db_conn() as own_conn:
+            return guard_meta_ad_page_link(
+                own_conn, existing, requested, actor=actor, override_confirmed=override_confirmed
+            )
     row, data = _entity_by_id(conn, "pages", new_page_id)
     if row is None or not isinstance(data, dict):
         raise HTTPException(status_code=404, detail="Ad page not found")
@@ -2805,15 +2812,34 @@ def _ensure_import_page(
     if matched_row is None and meta_name:
         wanted = _canonical_page_name(meta_name)
         rows = _scalar_entity_rows(
-            conn, "pages", (("metaPageId", "meta_page_id"), ("name", "page_name"))
+            conn,
+            "pages",
+            (
+                ("metaPageId", "meta_page_id"),
+                ("name", "page_name"),
+                ("customerIds", "customer_ids_json"),
+            ),
         )
         for row in rows:
             existing_meta_id = str(row.get("meta_page_id") or "")
             if existing_meta_id and existing_meta_id != meta_page_id:
                 continue
-            if _canonical_page_name(row.get("page_name")) == wanted:
-                matched_row, matched_data = _entity_by_id(conn, "pages", str(row["id"]))
-                break
+            if _canonical_page_name(row.get("page_name")) != wanted:
+                continue
+            # A same-named page that already has OWNERS is some customer's
+            # business. Two unrelated shops can share a generic name, and
+            # stamping this Facebook id onto the owned page would auto-bill
+            # the imported ad to that customer. Leave it alone: the import
+            # creates a fresh ownerless page instead, and the Duplicate-pages
+            # tool lets an admin merge the two deliberately if they ARE one.
+            try:
+                owners = json_loads(row.get("customer_ids_json") or "[]")
+            except Exception:
+                owners = None
+            if isinstance(owners, list) and any(str(cid or "").strip() for cid in owners):
+                continue
+            matched_row, matched_data = _entity_by_id(conn, "pages", str(row["id"]))
+            break
     if matched_row is not None and isinstance(matched_data, dict):
         updated = dict(matched_data)
         existing_name = _clean_text(updated.get("name"), 240)
@@ -5161,6 +5187,8 @@ def create_meta_ads_router(
         contradicts its own Facebook page id, with the page that SHOULD hold
         it; (d) stamped pages with no owner.
         """
+        # Full-table read; keep a tight browser tab from hammering it.
+        _rate_limit_or_429(f"meta-scan:{admin.get('id')}", 30, 60_000)
         with db_conn() as conn:
             page_rows = _scalar_entity_rows(
                 conn,

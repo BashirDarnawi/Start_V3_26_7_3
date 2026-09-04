@@ -70,4 +70,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 USER albayan
 
 # Use exec form for proper signal handling
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "12", "--no-server-header"]
+# --limit-concurrency counts EVERY open connection (idle keep-alive included)
+# and answers the excess with a raw 503 before FastAPI ever sees the request —
+# so it never appears in the app's own error metrics. One admin tab's live
+# sync fans out 14 collection GETs per tick; 12 was below a single tab and
+# painted the "Sync failed" badge on healthy servers. 64 leaves room for
+# several tabs/phones while still bounding a runaway client.
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "64", "--no-server-header"]

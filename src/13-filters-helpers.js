@@ -5354,7 +5354,11 @@ async function submitCustomerAdDebtCoverage() {
   if (dialogState.submitPromise) return dialogState.submitPromise;
 
   if (!isCurrentUserAdmin()) {
-    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    showNotification(
+      isAr ? 'غير مسموح' : 'Access denied',
+      isAr ? 'المدير فقط يمكنه استخدام أموال الشركة.' : 'Only an administrator can use company funds.',
+      'error'
+    );
     closeCustomerAdDebtCoverageModal({ force: true });
     return false;
   }
