@@ -86,6 +86,26 @@ def add_jsonb_indexes():
             except Exception as e:
                 print(f"⚠️  Skipped {index_name}: {e}")
 
+    # The Delivery role's poll (every 3s per driver) filters ads/receipts by
+    # deliveryPersonId and customers by a correlated EXISTS over BOTH types in
+    # one query. The per-type partial indexes above cannot serve that
+    # cross-type predicate, so Postgres sequentially scanned — and JSON-parsed,
+    # inline photos included — every ad and receipt row per driver per tick,
+    # exhausting the connection pool under two or three phones. One composite
+    # partial index keyed (type, deliveryPersonId) serves it (verified with
+    # EXPLAIN: Seq Scan -> Bitmap Index Scan). Own connection, so a failure
+    # cannot poison the unique-index pass below.
+    try:
+        with db_conn() as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_entities_type_delivery_person "
+                "ON entities (type, ((data_json::jsonb->>'deliveryPersonId'))) "
+                "WHERE deleted = false"
+            ))
+        print("✅ Created index: idx_entities_type_delivery_person")
+    except Exception as e:
+        print(f"⚠️  Skipped idx_entities_type_delivery_person: {e}")
+
     for index_name, expression, where in unique_indexes:
         sql = f"""
         CREATE UNIQUE INDEX IF NOT EXISTS {index_name}

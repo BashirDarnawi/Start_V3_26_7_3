@@ -347,5 +347,14 @@ def _financial_rowless_driver_gap(ad: dict[str, Any], receipt_id: str) -> int:
     if target is None:
         target = ad.get("amountUSD")
     target_minor = _financial_minor(target, "stored driver ad amount")
-    funded = sum(_financial_allocation_map(ad.get("receiptAllocations")).values())
+    # Company money already applied to this ad is provided funding too: the
+    # coverage ledger recorded it as an expense, so the settle cascade must
+    # never re-plan those dollars as customer cash and discovery must never
+    # re-offer them. Counting only customer rows here wrote company coverage
+    # into receiptAllocations at settle and left phantom debt on the card.
+    funded = (
+        sum(_financial_allocation_map(ad.get("receiptAllocations")).values())
+        + _financial_allocation_map(ad.get("companyFundingAllocations")).get(receipt_id, 0)
+        + _financial_ad_direct_coverage(ad)
+    )
     return max(target_minor - funded, 0)

@@ -6320,3 +6320,60 @@ reportResults().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+// Bug-hunt verification 2026-09-04: a paid-KEEPING edit that touches only the
+// narrow-grant collect/handover fields must take the generic PATCH path
+// (receipts.markCollected), not /settle (receipts.edit); otherwise staff who
+// may only mark collections were 403'd for an action the server permits.
+// A genuine Not Paid -> Paid transition must STILL go through /settle.
+checkAsync('narrow paid-keeping receipt edits use PATCH, real settlements use /settle', async () => {
+  const originalServerMode = sandbox.isServerModeEnabled;
+  const originalSettle = sandbox.apiSettleReceipt;
+  const originalPatch = sandbox.apiPatchEntity;
+  const calls = { settle: 0, patch: 0 };
+  const entityResponse = (id, data) => ({
+    id, data: Object.assign({}, data, { id }), lastModified: 2, createdAt: 1, createdBy: 'u-admin', deleted: false
+  });
+  try {
+    seedBusinessData();
+    loginAs({ id: 'u-collector', name: 'Collector', role: 'Employee',
+      permissions: { receipts: ['view', 'markCollected'] } });
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiSettleReceipt = async (id, updates) => {
+      calls.settle++;
+      const current = S.receipts.find(r => r.id === id) || {};
+      return { receipt: entityResponse(id, Object.assign({}, current, updates, { status: 'Paid', isPaid: true })), updatedAds: [] };
+    };
+    sandbox.apiPatchEntity = async (collection, id, updates) => {
+      calls.patch++;
+      const current = S.receipts.find(r => r.id === id) || {};
+      return entityResponse(id, Object.assign({}, current, updates));
+    };
+
+    S.receipts[0].status = 'Paid';
+    S.receipts[0].isPaid = true;
+    S.receipts[0]._lastModified = 1;
+    await sandbox.updateRecord(S.receipts, S.receipts[0].id, {
+      collected: true, collectedAmount: 500, collectedPayments: [],
+      collectedMatchesReceipt: true, collectedAt: '2026-09-04T00:00:00.000Z', collectedBy: 'u-collector'
+    });
+    assert(calls.patch === 1 && calls.settle === 0,
+      'collect click on a Paid receipt routed to settle=' + calls.settle + ' patch=' + calls.patch);
+
+    calls.settle = 0; calls.patch = 0;
+    // The seed holds one receipt; add an unpaid one for the transition case.
+    S.receipts.push({
+      id: 'r-settle-route-test', customerId: S.receipts[0].customerId,
+      status: 'Not Paid', isPaid: false, amountUSD: 10, amountLocal: 50,
+      exchangeRate: 5, receiptAllocations: [], _lastModified: 1
+    });
+    await sandbox.updateRecord(S.receipts, 'r-settle-route-test', { status: 'Paid', isPaid: true });
+    assert(calls.settle === 1,
+      'a Not Paid -> Paid transition must still use /settle (settle=' + calls.settle + ' patch=' + calls.patch + ')');
+  } finally {
+    sandbox.isServerModeEnabled = originalServerMode;
+    sandbox.apiSettleReceipt = originalSettle;
+    sandbox.apiPatchEntity = originalPatch;
+    seedBusinessData();
+  }
+});

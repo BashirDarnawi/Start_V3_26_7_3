@@ -4680,7 +4680,14 @@ function _getCompanyCoverableOutstandingUSD(receipt) {
   // The collection target is already net of company coverage. A Delivered
   // (UNDERPAID) receipt has additionally received real customer cash — its
   // amountUSD after completion — which is not outstanding either.
-  let fallback = Number(getReceiptCollectionTarget(receipt).amountUSD) || 0;
+  const target = getReceiptCollectionTarget(receipt);
+  // The server sizes receipt-level coverage from the receipt's OWN amount and
+  // debt fields (_financial_due_total). A zero-value delivery receipt whose
+  // debt exists only as linked driver ads has no coverable liability there —
+  // every request 409s — so offer nothing until delivery completion freezes
+  // the debt onto the receipt itself.
+  if (target.source === 'linked_ads') return 0;
+  let fallback = Number(target.amountUSD) || 0;
   if (String(receipt.deliveryStatus || '').trim().toLowerCase() === 'delivered') {
     fallback -= Math.max(parseFloat(receipt.amountUSD) || 0, 0);
   }

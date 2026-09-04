@@ -3310,3 +3310,40 @@ def test_name_only_page_match_skips_an_owned_page_but_reuses_an_unowned_one(acto
             conn.execute(
                 text("DELETE FROM entities WHERE type='pages' AND data_json LIKE '%787800000000002%'")
             )
+
+
+def test_ensure_import_page_takes_a_per_page_advisory_lock_first_on_postgres(actors, monkeypatch):
+    """On Postgres the enrichment path holds only the AD row lock, so two
+    overlapping syncs for two ads of one brand-new Facebook page both missed
+    the page lookup and both inserted — one Facebook id on two pages,
+    invisible because every by-id lookup is LIMIT 1. The page lookup must be
+    preceded by a transaction-scoped advisory lock keyed on the page id."""
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Engine:
+        dialect = _Dialect()
+
+    monkeypatch.setattr(meta_ads, "get_engine", lambda: _Engine())
+
+    class _LockTaken(Exception):
+        pass
+
+    recorded = []
+
+    class _Conn:
+        # Records the very first statement and stops there: the lock must be
+        # the FIRST thing that happens, before any lookup or insert.
+        def execute(self, stmt, params=None):
+            recorded.append((str(stmt), dict(params or {})))
+            raise _LockTaken()
+
+    with pytest.raises(_LockTaken):
+        meta_ads._ensure_import_page(
+            _Conn(), {"metaPageId": "909900000000001", "metaPageName": "Lock Test Page"}
+        )
+    assert len(recorded) == 1
+    sql, params = recorded[0]
+    assert "pg_advisory_xact_lock(hashtext(:k))" in sql
+    assert params == {"k": "albayan_meta_page:909900000000001"}

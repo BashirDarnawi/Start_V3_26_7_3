@@ -2804,6 +2804,17 @@ def _ensure_import_page(
     meta_page_id = _clean_text(snapshot.get("metaPageId"), 40)
     if not _META_ID_RE.fullmatch(meta_page_id):
         return "", "", False
+    # Serialize per Facebook page ACROSS transactions. On Postgres the
+    # enrichment path (apply_meta_snapshot) holds only the AD row lock, so two
+    # overlapping syncs for two ads of one brand-new page both missed the
+    # lookup below and both inserted — one Facebook id on two pages, invisible
+    # because every by-id lookup is LIMIT 1. Transaction-scoped advisory lock;
+    # SQLite callers already serialize through the process lock.
+    if str(get_engine().dialect.name or "") == "postgresql":
+        conn.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+            {"k": f"albayan_meta_page:{meta_page_id}"},
+        )
     meta_name = _clean_text(snapshot.get("metaPageName"), 240)
     meta_category = _clean_text(snapshot.get("metaPageCategory"), 160)
     matched_row, matched_data = _entity_by_json_field(

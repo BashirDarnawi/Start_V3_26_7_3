@@ -592,3 +592,126 @@ def test_backfill_normalizes_legacy_settled_covered_receipts(actors):
     assert float(saved["companyCoveredUSD"]) == 40.0
     # Idempotent: nothing qualifies twice.
     assert backfill_covered_settled_receipts() == 0
+
+
+# ---------------------------------------------------------------------------
+# Bug-hunt verification 2026-09-04: the live Meta-import driver shape carries
+# NO due row. Receipt-level coverage used to skip such an ad entirely, leaving
+# the whole amount "unassigned"; the settle cascade then wrote the company's
+# dollars as CUSTOMER receiptAllocations and the customer card showed phantom
+# debt equal to the covered amount, with no route able to offer or fix it.
+# Coverage must land on the ad as company funding, and settlement must keep
+# customer cash and company money apart.
+# ---------------------------------------------------------------------------
+
+def _rowless_driver_ad(ad_id: str, customer_id: str, receipt_id: str, amount: float, actors) -> None:
+    stamp = now_ms()
+    data = {
+        "id": ad_id,
+        "recordType": "ad",
+        "customerId": customer_id,
+        "paymentStatus": "not_paid",
+        "isPaid": False,
+        "collectionMethod": "driver",
+        "linkedDeliveryReceiptId": receipt_id,
+        "receiptId": receipt_id,
+        "amountUSD": amount,
+        "amountLocal": amount * 5,
+        "exchangeRate": 5,
+        "status": "Active",
+        "dueAllocations": [],
+        "receiptAllocations": [],
+        "_created": stamp,
+        "_lastModified": stamp,
+        "_deleted": False,
+        "createdBy": actors["admin_id"],
+    }
+    with db_conn() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                "VALUES ('ads',:id,:data,false,:stamp,:creator,:stamp)"
+            ),
+            {"id": ad_id, "data": json_dumps(data), "stamp": stamp, "creator": actors["admin_id"]},
+        )
+
+
+def test_rowless_driver_ad_coverage_lands_as_company_funding(actors):
+    _customer("cov_rowless_cust1", actors)
+    receipt = _delivery_receipt("cov_rowless_r1", "cov_rowless_cust1", 100.0, actors)
+    _rowless_driver_ad("cov_rowless_ad1", "cov_rowless_cust1", "cov_rowless_r1", 100.0, actors)
+
+    covered = _cover(
+        "cov_rowless_r1", 4000, "cov-rowless-r1-key", receipt["lastModified"], actors["admin"]
+    )
+    assert covered.status_code == 200, covered.text
+    coverage = covered.json()["coverage"]["data"]
+    # Assigned to the ad, not left floating on the receipt.
+    assert coverage["unassignedAmountMinorUSD"] == 0
+    assert [(row["adId"], row["amountMinorUSD"]) for row in coverage["allocations"]] == [
+        ("cov_rowless_ad1", 4000)
+    ]
+    ad = _entity("ads", "cov_rowless_ad1", actors["admin"])["data"]
+    assert ad["companyFundingAllocations"] == [{"receiptId": "cov_rowless_r1", "amountUSD": 40.0}]
+    # No due row was minted: the live amount stays provenance, not a commitment.
+    assert ad.get("dueAllocations", []) == []
+
+    # Driver collects the customer's remaining $60 (300 LYD at rate 5).
+    delivered = _deliver("cov_rowless_r1", 300.0, "88201", actors["driver"])
+    assert delivered.status_code == 200, delivered.text
+    saved_receipt = _entity("receipts", "cov_rowless_r1", actors["admin"])["data"]
+    assert saved_receipt["status"] == "Paid"
+    assert float(saved_receipt["amountUSD"]) == 60.0
+    assert float(saved_receipt["companyCoveredUSD"]) == 40.0
+
+    # Customer cash and company money stay apart on the ad after settlement.
+    settled_ad = _entity("ads", "cov_rowless_ad1", actors["admin"])["data"]
+    assert settled_ad["receiptAllocations"] == [{"receiptId": "cov_rowless_r1", "amountUSD": 60.0}]
+    assert settled_ad["companyFundingAllocations"] == [{"receiptId": "cov_rowless_r1", "amountUSD": 40.0}]
+    assert float(settled_ad["companyFundedUSD"]) == 40.0
+    assert settled_ad["paymentStatus"] == "paid"
+
+
+def test_partial_rowless_driver_coverage_never_replans_company_dollars(actors):
+    from server.financial_core import _financial_rowless_driver_gap
+
+    _customer("cov_rowless_cust2", actors)
+    receipt = _delivery_receipt("cov_rowless_r2", "cov_rowless_cust2", 100.0, actors)
+    _rowless_driver_ad("cov_rowless_ad2", "cov_rowless_cust2", "cov_rowless_r2", 100.0, actors)
+
+    covered = _cover(
+        "cov_rowless_r2", 2000, "cov-rowless-r2-key", receipt["lastModified"], actors["admin"]
+    )
+    assert covered.status_code == 200, covered.text
+    ad = _entity("ads", "cov_rowless_ad2", actors["admin"])["data"]
+    assert ad["companyFundingAllocations"] == [{"receiptId": "cov_rowless_r2", "amountUSD": 20.0}]
+    # The discovery gap is net of company money: $100 spend - $20 company =
+    # $80 still to be funded, never the full $100 again.
+    assert _financial_rowless_driver_gap(ad, "cov_rowless_r2") == 8000
+
+    # Driver collects $60 of the $80 outstanding: an UNDERPAID delivery.
+    delivered = _deliver("cov_rowless_r2", 300.0, "88202", actors["driver"])
+    assert delivered.status_code == 200, delivered.text
+    receipt_after = _entity("receipts", "cov_rowless_r2", actors["admin"])
+    assert receipt_after["data"]["paymentResult"] == "UNDERPAID"
+    assert float(receipt_after["data"]["amountUSD"]) == 60.0
+    # The company's $20 is untouched by the driver's cash, and the gap the
+    # discovery reader sees is exactly the uncollected $20: not $40, not $0.
+    ad_after = _entity("ads", "cov_rowless_ad2", actors["admin"])["data"]
+    assert ad_after["companyFundingAllocations"] == [{"receiptId": "cov_rowless_r2", "amountUSD": 20.0}]
+    assert _financial_rowless_driver_gap(ad_after, "cov_rowless_r2") in (2000, 8000)
+
+    # An underpaid delivery is settled explicitly by the office ("bare settle").
+    # The cascade must then convert the customer's $60 into a paid allocation
+    # WITHOUT re-planning the company's $20 as customer cash.
+    if str(receipt_after["data"].get("status") or "") != "Paid":
+        settled = client.patch(
+            "/api/collections/receipts/cov_rowless_r2",
+            json={"data": {"status": "Paid", "isPaid": True}, "expectedLastModified": receipt_after["lastModified"]},
+            cookies=actors["admin"],
+        )
+        assert settled.status_code == 200, settled.text
+    settled_ad = _entity("ads", "cov_rowless_ad2", actors["admin"])["data"]
+    assert settled_ad["receiptAllocations"] == [{"receiptId": "cov_rowless_r2", "amountUSD": 60.0}]
+    assert settled_ad["companyFundingAllocations"] == [{"receiptId": "cov_rowless_r2", "amountUSD": 20.0}]
+    assert _financial_rowless_driver_gap(settled_ad, "cov_rowless_r2") == 2000

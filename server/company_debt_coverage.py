@@ -27,6 +27,7 @@ from .financial_core import (
     _financial_legacy_due_receipt_id,
     _financial_minor,
     _financial_outgoing,
+    _financial_rowless_driver_gap,
     _financial_rows_from_allocation_map,
     _financial_usd,
 )
@@ -134,6 +135,29 @@ def plan_company_debt_coverage(
             target_due = _financial_ad_due_usage(source, receipt_id)
             if target_due > 0:
                 due[receipt_id] = target_due
+        if target_due <= 0:
+            # The live Meta-import driver shape carries NO due row: its money is
+            # the customer's cash the driver collects through this receipt.
+            # Coverage must still land on the ad as COMPANY funding — never as
+            # a minted due row, which would freeze a live amount into a
+            # commitment. Skipping the ad instead left the coverage
+            # "unassigned", so the settle cascade later wrote the company's
+            # dollars as customer receiptAllocations and the customer card
+            # showed phantom debt equal to the covered amount.
+            rowless_gap = _financial_rowless_driver_gap(source, receipt_id)
+            moved = min(rowless_gap, remaining)
+            if moved <= 0:
+                continue
+            company = _financial_allocation_map(source.get("companyFundingAllocations"))
+            company[receipt_id] = company.get(receipt_id, 0) + moved
+            updated = dict(source)
+            updated["companyFundingAllocations"] = _financial_rows_from_allocation_map(company)
+            updated["companyFundedUSD"] = _financial_usd(sum(company.values()))
+            planned.append(
+                CompanyCoverageAdPlan(ad_id=ad_id, data=updated, moved_minor=moved)
+            )
+            remaining -= moved
+            continue
         moved = min(target_due, remaining)
         if moved <= 0:
             continue
@@ -1069,7 +1093,12 @@ def create_company_debt_coverage_router(
                     ad_data = ctx["financial_row_data"](ad_row)
                     if str(ad_data.get("recordType") or "") == "receipt":
                         continue
-                    if _financial_ad_due_usage(ad_data, receipt_id) <= 0:
+                    # A rowless driver ad (no due row) is still a candidate:
+                    # the planner lands coverage on it as company funding.
+                    if (
+                        _financial_ad_due_usage(ad_data, receipt_id) <= 0
+                        and _financial_rowless_driver_gap(ad_data, receipt_id) <= 0
+                    ):
                         continue
                     candidates.append((str(ad_row["id"]), ad_data))
 

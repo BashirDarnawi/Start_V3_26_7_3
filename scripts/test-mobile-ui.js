@@ -247,6 +247,21 @@ check('server refusal toasts are bilingual and never expose internal collection 
   !dataAudit.includes("showNotification('Server Error', `Failed to") &&
   !dataAudit.includes("showNotification('Session Expired',") &&
   helpers.includes("isAr ? 'غير مسموح' : 'Access denied'"));
+// Bug-hunt verification round 2 (2026-09-04).
+// A zero-value delivery receipt whose debt lives only on linked driver ads
+// is not coverable server-side (409 every time) — offer nothing.
+check('coverage is not offered for linked-ads-derived delivery debt',
+  helpers.includes("if (target.source === 'linked_ads') return 0;"));
+// A paid-KEEPING edit that touches only collect / delivery-workflow fields
+// must take the generic PATCH path (receipts.markCollected) instead of
+// /settle (receipts.edit), or collect-only staff are 403'd.
+check('narrow paid-keeping receipt edits bypass the settle route',
+  dataAudit.includes('const _RECEIPT_NARROW_GRANT_FIELDS = new Set([') &&
+  dataAudit.includes("'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',") &&
+  dataAudit.includes('const _narrowPaidKeepingEdit = collectionName === \'receipts\'') &&
+  dataAudit.includes("&& (_oldReceiptStatus === 'paid' || old.isPaid === true)") &&
+  dataAudit.includes('&& sanitizedUpdates.status === undefined') &&
+  dataAudit.includes("&& _nextReceiptStatus === 'paid'\n      && !_narrowPaidKeepingEdit;"));
 // The Ad Links section offers Paste link the way Photos offers Paste photo:
 // native clipboard in the packaged app, navigator.clipboard on the web,
 // bare-domain tolerated, non-links refused, duplicates refused, bilingual.
