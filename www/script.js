@@ -7735,8 +7735,29 @@ function updateRecord(array, id, updates, expectedLastModified) {
     // Route EVERY resulting Paid receipt through the cascade endpoint, not only
     // a fresh transition. This repairs old Paid receipts whose ads still carry
     // legacy due rows and returns those repaired ads immediately to the UI.
+    //
+    // EXCEPT a paid-KEEPING edit that touches only the narrow-grant fields the
+    // generic PATCH route authorizes under receipts.markCollected /
+    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + _DELIVERY_WORKFLOW_FIELDS).
+    // /settle demands receipts.edit, so routing a "Mark Collected" or office
+    // hand-over click through it 403'd every staff member holding only the
+    // collect permission — for an action the server itself permits.
+    const _RECEIPT_NARROW_GRANT_FIELDS = new Set([
+      'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',
+      'collectedAt', 'collectedBy', 'isReceivedInOffice', 'receivedInOfficeAt',
+      'officeHandover', 'officeHandoverAt', 'deliveryPersonId', 'deliveryStatus',
+      'acceptedDate', 'deliveryCancelReason', 'deliveryCancelledAt', 'deliveryCancelledBy',
+      'deliveryNotes', '_lastModified'
+    ]);
+    const _narrowPaidKeepingEdit = collectionName === 'receipts'
+      && (_oldReceiptStatus === 'paid' || old.isPaid === true)
+      && sanitizedUpdates.status === undefined
+      && sanitizedUpdates.isPaid === undefined
+      && Object.keys(sanitizedUpdates).length > 0
+      && Object.keys(sanitizedUpdates).every(key => _RECEIPT_NARROW_GRANT_FIELDS.has(key));
     const _settlesReceipt = collectionName === 'receipts'
-      && _nextReceiptStatus === 'paid';
+      && _nextReceiptStatus === 'paid'
+      && !_narrowPaidKeepingEdit;
     const _receiptSettlementKey = _settlesReceipt
       ? Security.generateSecureId('receipt-settlement')
       : '';
@@ -27944,7 +27965,14 @@ function _getCompanyCoverableOutstandingUSD(receipt) {
   // The collection target is already net of company coverage. A Delivered
   // (UNDERPAID) receipt has additionally received real customer cash — its
   // amountUSD after completion — which is not outstanding either.
-  let fallback = Number(getReceiptCollectionTarget(receipt).amountUSD) || 0;
+  const target = getReceiptCollectionTarget(receipt);
+  // The server sizes receipt-level coverage from the receipt's OWN amount and
+  // debt fields (_financial_due_total). A zero-value delivery receipt whose
+  // debt exists only as linked driver ads has no coverable liability there —
+  // every request 409s — so offer nothing until delivery completion freezes
+  // the debt onto the receipt itself.
+  if (target.source === 'linked_ads') return 0;
+  let fallback = Number(target.amountUSD) || 0;
   if (String(receipt.deliveryStatus || '').trim().toLowerCase() === 'delivered') {
     fallback -= Math.max(parseFloat(receipt.amountUSD) || 0, 0);
   }
