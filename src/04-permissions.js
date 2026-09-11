@@ -415,12 +415,14 @@ async function refreshCurrentUserPermissions() {
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
     const currentId = String(state.currentUser.id || '');
+    const requestIdentity = getAuthMeIdentity();
     const beforeAccess = JSON.stringify({
       role: String(state.currentUser.role || '').toLowerCase(),
       permissions: state.currentUser.permissions || {},
       subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
     });
     const me = await apiAuthMe();
+    if (getAuthMeIdentity() !== requestIdentity) return false;
     if (me && String(me.id || '') === currentId) {
       // Role is authorization state too. Copying permissions alone left a
       // demoted Admin permanently Admin in the browser when both maps were
@@ -669,7 +671,7 @@ function getPlansForService(serviceId) {
   return matching;
 }
 
-function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
+function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = '') {
   const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   if (!service) return;
 
@@ -679,7 +681,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
   // Idempotency keys prevent double-charging if the user retries; each plan
   // choice gets its own stable key for this modal session.
   const idem = Security.generateSecureId('idem');
-  state.modalData = { serviceId, serviceName, subscribeToId, idempotencyKey: idem, planIdemKeys: {} };
+  state.modalData = { serviceId, serviceName, subscribeToId, planId: String(planId || ''), idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
   // Fetch the sellable plans, then repaint the open modal with the chooser.
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {

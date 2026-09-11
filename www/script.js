@@ -896,6 +896,7 @@ setupOverlaySurfaceObserver();
 
 const NATIVE_SECURE_PREFIX = 'albayan_secure_v1_';
 const NATIVE_PHOTO_PENDING_KEY = 'albayan_native_photo_pending';
+const NATIVE_PHOTO_MAX_AGE_MS = 10 * 60 * 1000;
 const NATIVE_APP_LOCK_AFTER_MS = 30 * 1000;
 const NATIVE_REMINDER_LIMIT = 50;
 
@@ -903,6 +904,9 @@ let _nativeServicesPromise = null;
 let _nativeViewportFrame = 0;
 let _nativeBackgroundedAt = 0;
 let _nativeUnlockBusy = false;
+// A privacy overlay during a short app switch is not the same as an unmet
+// authentication challenge. Background events must never clear the latter.
+let _nativeAuthenticationRequired = false;
 let _nativeReminderTimer = null;
 let _nativePrefs = {
   ready: false,
@@ -1116,13 +1120,53 @@ async function _nativeCameraResultToFile(result) {
   }
 }
 
+function _nativePhotoEntityId(target) {
+  if (target === 'delivery') return String(document.getElementById('delivery-complete-modal')?.dataset?.receiptId || '');
+  if (target === 'ads-studio') return String(typeof _adsStudioDraft === 'object' ? _adsStudioDraft?.id || '' : '');
+  return String(state.modalData?.id || '');
+}
+
+function _captureNativePhotoContext(target) {
+  return {
+    version: 2, target, createdAt: Date.now(), operationId: generateId('native_photo'),
+    userId: String(state.currentUser?.id || ''),
+    scope: String(getCollectionStorageScope() || ''),
+    entityId: _nativePhotoEntityId(target),
+    sessionIdentity: getServerSessionIdentity(), accessIdentity: getAuthMeIdentity(),
+    pasteContext: capturePhotoPasteContext(target), requiresPending: false
+  };
+}
+
+function _readNativePhotoPending() {
+  try { return JSON.parse(localStorage.getItem(NATIVE_PHOTO_PENDING_KEY) || 'null'); } catch (_) { return null; }
+}
+
+function _clearNativePhotoPending(operationId) {
+  try {
+    if (_readNativePhotoPending()?.operationId === operationId) localStorage.removeItem(NATIVE_PHOTO_PENDING_KEY);
+  } catch (_) {}
+}
+
+function _nativePhotoContextIsCurrent(context) {
+  return !!context?.userId && context.userId === String(state.currentUser?.id || '')
+    && context.sessionIdentity === getServerSessionIdentity()
+    && context.accessIdentity === getAuthMeIdentity()
+    && context.entityId === _nativePhotoEntityId(context.target)
+    && context.pasteContext === capturePhotoPasteContext(context.target)
+    && (!context.requiresPending || _readNativePhotoPending()?.operationId === context.operationId);
+}
+
 async function _deliverNativeCameraResult(result, target, context, attempts = 0) {
   const resolvedTarget = String(target || '');
-  if (context != null && typeof capturePhotoPasteContext === 'function' && attempts === 0 && context !== capturePhotoPasteContext(resolvedTarget)) return false;
+  // Accept the old paste-context argument from callers, but immediately bind it
+  // to the current user/form. All retries retain this exact immutable identity.
+  const guard = context?.version === 2 ? context : _captureNativePhotoContext(resolvedTarget);
+  if (context != null && context?.version !== 2 && context !== guard.pasteContext) return false;
+  if (!_nativePhotoContextIsCurrent(guard)) return false;
   if (typeof _photoPasteTargetIsAvailable === 'function' && !_photoPasteTargetIsAvailable(resolvedTarget)) {
     if (attempts < 40) {
-      setTimeout(() => _deliverNativeCameraResult(result, resolvedTarget, null, attempts + 1), 250);
-      return true;
+      await new Promise(resolve => setTimeout(resolve, 250));
+      return _deliverNativeCameraResult(result, resolvedTarget, guard, attempts + 1);
     }
     showNotification(
       state.language === 'ar' ? 'افتح النموذج مرة أخرى' : 'Open the form again',
@@ -1132,13 +1176,40 @@ async function _deliverNativeCameraResult(result, target, context, attempts = 0)
     return false;
   }
   const file = await _nativeCameraResultToFile(result);
-  if (!file) return false;
+  // Reading a native URI can await an OS/cloud download. The user may already
+  // have logged out or opened another receipt by the time that read finishes.
+  if (!file || !_nativePhotoContextIsCurrent(guard)) return false;
   const routed = typeof _routePastedPhotoFiles === 'function' && _routePastedPhotoFiles(resolvedTarget, [file]);
   if (routed) {
-    try { localStorage.removeItem(NATIVE_PHOTO_PENDING_KEY); } catch (_) {}
+    _clearNativePhotoPending(guard.operationId);
     await nativeHaptic('success');
   }
   return !!routed;
+}
+
+async function _restoreNativeCameraResult(result, pending, attempts = 0) {
+  const age = Date.now() - Number(pending?.createdAt);
+  if (pending?.version !== 2 || !pending.operationId || !pending.userId || !pending.entityId
+      || !Number.isFinite(age) || age < 0 || age > NATIVE_PHOTO_MAX_AGE_MS
+      || _readNativePhotoPending()?.operationId !== pending.operationId) return false;
+  // After Android restores a killed WebView, auth and the original delivery
+  // dialog can take a moment to return. Wait only for the saved owner and record,
+  // never attach to an arbitrary newly opened/unsaved form of the same type.
+  const currentId = String(state.currentUser?.id || '');
+  if (currentId && currentId !== pending.userId) return false;
+  const ready = currentId === pending.userId
+    && String(getCollectionStorageScope() || '') === pending.scope
+    && _photoPasteTargetIsAvailable(pending.target)
+    && _nativePhotoEntityId(pending.target) === pending.entityId;
+  if (!ready) {
+    if (attempts >= 40) return false;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return _restoreNativeCameraResult(result, pending, attempts + 1);
+  }
+  const guard = _captureNativePhotoContext(pending.target);
+  guard.operationId = pending.operationId;
+  guard.requiresPending = true;
+  return _deliverNativeCameraResult(result, pending.target, guard);
 }
 
 async function takeNativePhoto(requestedTarget = '') {
@@ -1155,9 +1226,13 @@ async function takeNativePhoto(requestedTarget = '') {
   if (target === 'delivery' && typeof _flushDeliveryCompletionDraftNow === 'function') {
     _flushDeliveryCompletionDraftNow();
   }
-  const context = typeof capturePhotoPasteContext === 'function' ? capturePhotoPasteContext(target) : null;
+  const context = _captureNativePhotoContext(target);
+  if (!context.userId) return false;
   try {
-    localStorage.setItem(NATIVE_PHOTO_PENDING_KEY, JSON.stringify({ target, createdAt: Date.now() }));
+    // Persist only stable identifiers, never the DOM/draft object or photo data.
+    const { version, createdAt, operationId, userId, scope, entityId } = context;
+    localStorage.setItem(NATIVE_PHOTO_PENDING_KEY, JSON.stringify({ version, target, createdAt, operationId, userId, scope, entityId }));
+    context.requiresPending = true;
   } catch (_) {}
   try {
     const result = await camera.getPhoto({
@@ -1286,11 +1361,13 @@ function removeNativeAppLock() {
 
 async function unlockNativeApp() {
   if (_nativeUnlockBusy) return false;
+  _nativeAuthenticationRequired = true;
   _nativeUnlockBusy = true;
   renderNativeAppLock();
   const ok = await authenticateNativeDevice();
   _nativeUnlockBusy = false;
   if (ok) {
+    _nativeAuthenticationRequired = false;
     removeNativeAppLock();
     await nativeHaptic('success');
   } else {
@@ -1319,7 +1396,10 @@ async function setNativeBiometricLockEnabled(enabled) {
   const saved = await nativeSecureSet('biometric_lock_enabled', next);
   if (!saved) return false;
   _nativePrefs.biometricEnabled = next;
-  if (!next) removeNativeAppLock();
+  if (!next) {
+    _nativeAuthenticationRequired = false;
+    removeNativeAppLock();
+  }
   if (state.currentView === 'settings') render();
   showNotification(
     state.language === 'ar' ? 'تم تحديث حماية الجهاز' : 'Device protection updated',
@@ -1437,6 +1517,7 @@ async function syncNativeSystemBarsTheme() {
 async function initializeNativeSessionProtection() {
   await setupNativeServices();
   if (!isPackagedMobileApp() || !state?.currentUser || !_nativePrefs.biometricEnabled) {
+    _nativeAuthenticationRequired = false;
     removeNativeAppLock();
     queueNativeReminderSync();
     return true;
@@ -1463,7 +1544,10 @@ async function setupNativeServices() {
     }
     await getNativeBiometricInfo(true);
     _nativePrefs.ready = true;
-    if (_nativePrefs.biometricEnabled) renderNativeAppLock();
+    if (_nativePrefs.biometricEnabled) {
+      _nativeAuthenticationRequired = true;
+      renderNativeAppLock();
+    }
 
     const keyboard = getCapacitorPlugin('Keyboard');
     await _addNativeListener(keyboard, 'keyboardWillShow', event => _setNativeKeyboardOpen(true, event?.keyboardHeight));
@@ -1483,7 +1567,8 @@ async function setupNativeServices() {
         return;
       }
       const protectedSession = _nativePrefs.biometricEnabled && state?.currentUser;
-      if (protectedSession && Date.now() - _nativeBackgroundedAt >= NATIVE_APP_LOCK_AFTER_MS) {
+      if (protectedSession && (_nativeAuthenticationRequired || Date.now() - _nativeBackgroundedAt >= NATIVE_APP_LOCK_AFTER_MS)) {
+        _nativeAuthenticationRequired = true;
         renderNativeAppLock();
         unlockNativeApp();
       } else {
@@ -1497,7 +1582,7 @@ async function setupNativeServices() {
       if (event?.pluginId !== 'Camera' || event?.methodName !== 'getPhoto' || !event?.data) return;
       let pending = null;
       try { pending = JSON.parse(localStorage.getItem(NATIVE_PHOTO_PENDING_KEY) || 'null'); } catch (_) {}
-      if (pending?.target) _deliverNativeCameraResult(event.data, pending.target, null);
+      if (pending?.target) _restoreNativeCameraResult(event.data, pending).catch(() => {});
     });
 
     const notifications = getCapacitorPlugin('LocalNotifications');
@@ -3583,12 +3668,14 @@ async function refreshCurrentUserPermissions() {
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
     const currentId = String(state.currentUser.id || '');
+    const requestIdentity = getAuthMeIdentity();
     const beforeAccess = JSON.stringify({
       role: String(state.currentUser.role || '').toLowerCase(),
       permissions: state.currentUser.permissions || {},
       subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
     });
     const me = await apiAuthMe();
+    if (getAuthMeIdentity() !== requestIdentity) return false;
     if (me && String(me.id || '') === currentId) {
       // Role is authorization state too. Copying permissions alone left a
       // demoted Admin permanently Admin in the browser when both maps were
@@ -3837,7 +3924,7 @@ function getPlansForService(serviceId) {
   return matching;
 }
 
-function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
+function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = '') {
   const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   if (!service) return;
 
@@ -3847,7 +3934,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId) {
   // Idempotency keys prevent double-charging if the user retries; each plan
   // choice gets its own stable key for this modal session.
   const idem = Security.generateSecureId('idem');
-  state.modalData = { serviceId, serviceName, subscribeToId, idempotencyKey: idem, planIdemKeys: {} };
+  state.modalData = { serviceId, serviceName, subscribeToId, planId: String(planId || ''), idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
   // Fetch the sellable plans, then repaint the open modal with the chooser.
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
@@ -6126,12 +6213,33 @@ function assertCachedCollectionIdentifiersSafe() {
 // DATA MIGRATION: Normalize old records
 // ==========================================
 // Ensures old data has all required fields so new features work correctly
-function migrateOldDataFormats() {
+const LEGACY_DELIVERY_STATUS_NAMES = Object.freeze({
+  office: 'Office', 'needs delivery': 'Needs Delivery', 'in progress': 'In Progress',
+  delivered: 'Delivered', canceled: 'Canceled', cancelled: 'Canceled'
+});
+
+function migrateOldDataFormats({ records = state, collections = ['receipts', 'ads', 'customers', 'pages'], persist = true, numberRecords = true } = {}) {
   let changed = false;
+  const selected = new Set(collections);
+  const positiveSavedNumber = value => {
+    if (typeof value !== 'number' && typeof value !== 'string') return 0;
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : 0;
+  };
+  const normalizeDeliveryStatus = record => {
+    const key = String(record.deliveryStatus || '').trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+    const normalized = Object.prototype.hasOwnProperty.call(LEGACY_DELIVERY_STATUS_NAMES, key)
+      ? LEGACY_DELIVERY_STATUS_NAMES[key] : null;
+    // An unknown historical status is not proof that a delivery is in Office.
+    if (normalized && normalized !== record.deliveryStatus) {
+      record.deliveryStatus = normalized;
+      changed = true;
+    }
+  };
 
   // Migrate Receipts - ALWAYS process ALL receipts (including old data)
-  if (Array.isArray(state.receipts)) {
-    for (const receipt of state.receipts) {
+  if (selected.has('receipts') && Array.isArray(records.receipts)) {
+    for (const receipt of records.receipts) {
       if (!receipt) continue;
       // Process even deleted records to ensure data consistency
 
@@ -6164,18 +6272,12 @@ function migrateOldDataFormats() {
         changed = true;
       }
 
-      // Fix delivery status - ensure it's a valid status
-      if (receipt.deliveryStatus) {
-        const validStatuses = ['Office', 'Needs Delivery', 'In Progress', 'Delivered', 'Canceled'];
-        if (!validStatuses.includes(receipt.deliveryStatus)) {
-          receipt.deliveryStatus = 'Office';
-          changed = true;
-        }
-      }
+      normalizeDeliveryStatus(receipt);
 
       // Ensure exchangeRate is a number
-      if (receipt.exchangeRate !== undefined && typeof receipt.exchangeRate !== 'number') {
-        receipt.exchangeRate = parseFloat(receipt.exchangeRate) || state.defaultExchangeRate || 1;
+      if (typeof receipt.exchangeRate === 'string' && receipt.exchangeRate.trim()
+          && Number.isFinite(Number(receipt.exchangeRate)) && Number(receipt.exchangeRate) > 0) {
+        receipt.exchangeRate = Number(receipt.exchangeRate);
         changed = true;
       }
 
@@ -6192,8 +6294,8 @@ function migrateOldDataFormats() {
   }
 
   // Migrate Ads - ALWAYS process ALL ads (including old data)
-  if (Array.isArray(state.ads)) {
-    for (const ad of state.ads) {
+  if (selected.has('ads') && Array.isArray(records.ads)) {
+    for (const ad of records.ads) {
       if (!ad) continue;
 
       // Ensure ad has receiptAllocations array
@@ -6231,18 +6333,15 @@ function migrateOldDataFormats() {
       // Ensure dueAllocations array exists
       if (!Array.isArray(ad.dueAllocations)) {
         ad.dueAllocations = [];
-        // Materialize the row from the legacy dueAmountToUse* mirror — the amount the
-        // usage helpers already credit this ad with. It is NOT ad.amountUSD: an ad can
-        // draw only part of its budget from delivery due credit and the rest from a paid
-        // receipt, and writing the whole ad amount here invented due usage that never
-        // happened, over-locking the delivery receipt and disagreeing with the server
-        // (which derives the same number from the mirror). This runs on every live-sync
-        // tick, so the error compounded across devices.
+        changed = true;
+        // Use the recorded due mirror, not the whole ad budget: mixed paid/due
+        // funding must match the server without charging the paid share twice.
         const legacyDueUSD = (() => {
-          const usd = parseFloat(ad.dueAmountToUseUSD) || 0;
+          const usd = positiveSavedNumber(ad.dueAmountToUseUSD);
           if (usd > 0) return usd;
-          const lyd = parseFloat(ad.dueAmountToUseLYD) || 0;
-          const rate = ad.exchangeRate || state.defaultExchangeRate || 1;
+          const lyd = positiveSavedNumber(ad.dueAmountToUseLYD);
+          const rate = positiveSavedNumber(ad.exchangeRate);
+          // Today's workspace rate cannot establish an old ad's USD debt.
           return lyd > 0 && rate > 0 ? lyd / rate : 0;
         })();
         if (ad.linkedDeliveryReceiptId && getAdPaymentState(ad) !== 'paid' && legacyDueUSD > 0) {
@@ -6272,20 +6371,13 @@ function migrateOldDataFormats() {
         changed = true;
       }
 
-      // Fix delivery status
-      if (ad.deliveryStatus) {
-        const validStatuses = ['Office', 'Needs Delivery', 'In Progress', 'Delivered', 'Canceled'];
-        if (!validStatuses.includes(ad.deliveryStatus)) {
-          ad.deliveryStatus = 'Office';
-          changed = true;
-        }
-      }
+      normalizeDeliveryStatus(ad);
     }
   }
 
   // Migrate Customers - ALWAYS process ALL customers
-  if (Array.isArray(state.customers)) {
-    for (const customer of state.customers) {
+  if (selected.has('customers') && Array.isArray(records.customers)) {
+    for (const customer of records.customers) {
       if (!customer) continue;
 
       // Ensure phones is an array
@@ -6307,8 +6399,8 @@ function migrateOldDataFormats() {
   }
 
   // Migrate Pages - ALWAYS process ALL pages
-  if (Array.isArray(state.pages)) {
-    for (const page of state.pages) {
+  if (selected.has('pages') && Array.isArray(records.pages)) {
+    for (const page of records.pages) {
       if (!page) continue;
 
       // Ensure customerIds is an array
@@ -6330,16 +6422,24 @@ function migrateOldDataFormats() {
   }
 
   // Assign sequential numbers to all records
-  assignSequentialNumbers();
+  if (numberRecords) assignSequentialNumbers();
 
-  if (changed) {
-    console.log('[Migration] Data formats updated for ALL records');
-    markAllCollectionsDirty();
+  if (changed && persist) {
+    for (const collection of selected) markCollectionDirty(collection);
     // Save immediately to persist migrations
     saveState();
   }
 
   return changed;
+}
+
+// Local read compatibility only; normalize incoming rows without rescanning
+// unrelated collections. Full contract: docs/DATA_COMPATIBILITY.md.
+function normalizeLegacyCollectionRecords(collection, records) {
+  return migrateOldDataFormats({
+    records: { [collection]: records }, collections: [collection],
+    persist: false, numberRecords: false
+  });
 }
 
 // ==========================================
@@ -6355,8 +6455,9 @@ let _seqNoCache = {
   lastUpdate: 0
 };
 
-function assignSequentialNumbers(force = false) {
+function assignSequentialNumbers(force = false, collections = ['ads', 'receipts', 'customers', 'pages']) {
   const now = Date.now();
+  const selected = new Set(collections);
   // Only recalculate if forced or cache is stale (>5 seconds old)
   if (!force && (now - _seqNoCache.lastUpdate) < 5000 && _seqNoCache.ads !== null) {
     return; // Use cached numbers
@@ -6373,7 +6474,7 @@ function assignSequentialNumbers(force = false) {
   const sortByCreated = (a, b) => getTime(a) - getTime(b);
   
   // Assign numbers to Ads (only if missing or forced)
-  if (Array.isArray(state.ads)) {
+  if (selected.has('ads') && Array.isArray(state.ads)) {
     const visible = getVisibleRecords(state.ads);
     const needsUpdate = force || visible.some(ad => !ad._seqNo);
     if (needsUpdate) {
@@ -6386,7 +6487,7 @@ function assignSequentialNumbers(force = false) {
   }
   
   // Assign numbers to Receipts
-  if (Array.isArray(state.receipts)) {
+  if (selected.has('receipts') && Array.isArray(state.receipts)) {
     const visible = getVisibleRecords(state.receipts);
     const needsUpdate = force || visible.some(r => !r._seqNo);
     if (needsUpdate) {
@@ -6399,7 +6500,7 @@ function assignSequentialNumbers(force = false) {
   }
   
   // Assign numbers to Customers
-  if (Array.isArray(state.customers)) {
+  if (selected.has('customers') && Array.isArray(state.customers)) {
     const visible = getVisibleRecords(state.customers);
     const needsUpdate = force || visible.some(c => !c._seqNo);
     if (needsUpdate) {
@@ -6412,7 +6513,7 @@ function assignSequentialNumbers(force = false) {
   }
   
   // Assign numbers to Pages
-  if (Array.isArray(state.pages)) {
+  if (selected.has('pages') && Array.isArray(state.pages)) {
     const visible = getVisibleRecords(state.pages);
     const needsUpdate = force || visible.some(p => !p._seqNo);
     if (needsUpdate) {
@@ -8389,7 +8490,7 @@ function isCurrentUserAdmin() {
 }
 
 // "Secret ideas" gating (UI only). Non-admin users are kept inside Albayan Manager for now.
-const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'smart-systems', 'service-placeholder', 'wallet']);
+const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet']);
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
@@ -9160,6 +9261,7 @@ async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
       return await fn();
     } catch (e) {
       lastError = e;
+      if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
       const status = e?.status;
       // Don't retry client errors (400, 401, 403, 404, 409) or successful responses
       if (status && status >= 400 && status < 500 && status !== 408) {
@@ -9296,32 +9398,60 @@ async function retryServerDetection() {
   return false;
 }
 
+function getAuthMeIdentity() {
+  // Role/permission updates can happen without a logout or a user-id change.
+  return getServerSessionIdentity() + '|' + _authMeRequestGeneration + '|' + JSON.stringify({
+    role: state.currentUser?.role || '',
+    permissions: state.currentUser?.permissions || {},
+    subscriptions: state.currentUser?.subscriptions || []
+  });
+}
+
 async function apiAuthMe() {
+  const identity = getAuthMeIdentity();
   const now = Date.now();
   
   // Return cached session if fresh (within 10 seconds) - prevents logout on rapid refresh
-  if (_sessionCache.user && (now - _sessionCache.timestamp) < _sessionCache.cacheDurationMs) {
+  if (_sessionCache.identity === identity && _sessionCache.user && (now - _sessionCache.timestamp) < _sessionCache.cacheDurationMs) {
     return _sessionCache.user;
   }
-  
+  // Share simultaneous checks from startup/permissions, but never across users.
+  if (_sessionRequest?.identity === identity) return _sessionRequest.promise;
+  const request = { identity, promise: null };
+  request.promise = _loadAuthMeForIdentity(identity);
+  _sessionRequest = request;
+  try { return await request.promise; }
+  finally { if (_sessionRequest === request) _sessionRequest = null; }
+}
+
+async function _loadAuthMeForIdentity(identity) {
+  const assertCurrent = () => {
+    if (getAuthMeIdentity() !== identity) throw makeSessionChangedError();
+  };
   try {
     // Fast timeout with retry for resilience
     const user = await withRetry(
-      () => apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs: 5000 }),
+      () => {
+        assertCurrent();
+        return apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs: 5000 });
+      },
       2, // 2 retries
       200 // 200ms delay between retries
     );
     
-    // Cache successful session
+    assertCurrent();
+    // Cache successful session only for the identity that initiated it.
     if (user) {
-      _sessionCache = { user, timestamp: now, cacheDurationMs: 10000 };
+      if (state.currentUser?.id && String(user.id || '') !== String(state.currentUser.id)) throw makeSessionChangedError();
+      _sessionCache = { user, timestamp: Date.now(), cacheDurationMs: 10000, identity };
     }
     
     return user;
   } catch (e) {
+    assertCurrent();
     if (e?.status === 401) {
       // Clear cache on explicit 401
-      _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
+      _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' };
       return null;
     }
     // On timeout/network error, use a previously verified in-memory session
@@ -9329,7 +9459,7 @@ async function apiAuthMe() {
     // so mobile startup can show Retry instead of a misleading Login screen.
     if (e?.name === 'AbortError' || e?.message?.includes('timeout')) {
       console.warn('[apiAuthMe] Timeout - using cached session');
-      if (_sessionCache.user) {
+      if (_sessionCache.identity === identity && _sessionCache.user) {
         return _sessionCache.user;
       }
       throw e;
@@ -9615,6 +9745,17 @@ async function apiGetSyncWatermarks() {
     }
     watermarks[collection] = value;
   }
+  // Separate metadata from the cursor map so existing Object.values/JSON
+  // consumers can never mistake a compatibility version for a row timestamp.
+  const compatibilityVersion = payload?.dataCompatibilityVersion;
+  if (compatibilityVersion !== undefined && compatibilityVersion !== null) {
+    if (!Number.isSafeInteger(compatibilityVersion) || compatibilityVersion < 1) {
+      const error = new Error('Invalid data compatibility version');
+      error.code = 'INVALID_SYNC_WATERMARKS';
+      throw error;
+    }
+    Object.defineProperty(watermarks, 'dataCompatibilityVersion', { value: compatibilityVersion });
+  }
   return watermarks;
 }
 
@@ -9623,7 +9764,9 @@ async function apiGetSyncWatermarks() {
 let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' }; // 30 second cache
 
 // Session cache to prevent logout on rapid refresh
-let _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 }; // 10 second cache
+let _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' }; // 10 second cache
+let _sessionRequest = null;
+let _authMeRequestGeneration = 0;
 
 async function apiListUsersForUi() {
   const identity = getServerSessionIdentity();
@@ -10974,10 +11117,11 @@ async function apiSetAdCampaignPublishStatus(campaignId, expectedLastModified, p
 }
 
 // Wallet payment requests (server-authoritative; confirm is admin/gateway).
-async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey) {
+async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey, currency = 'USD') {
+  const safeCurrency = String(currency || 'USD').toUpperCase() === 'LYD' ? 'LYD' : 'USD';
   return withRetry(() => apiJson('/api/wallet/payment-requests', {
     method: 'POST',
-    body: { amountMinor, currency: 'USD', method, idempotencyKey }
+    body: { amountMinor, currency: safeCurrency, method, idempotencyKey }
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
 }
 
@@ -11287,6 +11431,10 @@ async function serverLoadAllData() {
     if (!Number.isNaN(rate)) state.defaultExchangeRate = rate;
   }
 
+  // Login, manual refresh, and permission reloads must all apply legacy shape
+  // compatibility, not only the initial application startup callback.
+  migrateOldDataFormats();
+
   // Users list for UI (delivery assignment, etc.)
   if (loadAborted()) return abortedResult();
   try {
@@ -11389,6 +11537,10 @@ async function serverLoadAllData() {
   // they don't show "All data synchronized successfully" over missing data.
   if (loadAborted()) return abortedResult();
   if (typeof queueNativeReminderSync === 'function') queueNativeReminderSync();
+  if (failed.length === 0 && Number.isSafeInteger(preLoadWatermarks?.dataCompatibilityVersion)) {
+    _serverLiveSync.dataCompatibilityVersion = preLoadWatermarks.dataCompatibilityVersion;
+    _serverLiveSync.lastCompatibilityCheckAt = Date.now();
+  }
   return { failed, forbidden };
 }
 
@@ -12003,6 +12155,8 @@ const _serverLiveSync = {
   // (the server's updated_since window only looks back 15s).
   serverWatermark: 0,
   fullLoadCursorReady: false,
+  dataCompatibilityVersion: null,
+  lastCompatibilityCheckAt: 0,
   collectionCursors: Object.create(null),
   serviceEntitlements: null,
   // Authentication identity and poller lifecycle are deliberately separate.
@@ -12031,6 +12185,8 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.serverWatermark = 0;
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.dataCompatibilityVersion = null;
+  _serverLiveSync.lastCompatibilityCheckAt = 0;
   _serverLiveSync.collectionCursors = Object.create(null);
   _serverLiveSync.serviceEntitlements = null;
   if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
@@ -12169,7 +12325,11 @@ async function clearServerCollectionsForVisibility(collections) {
       _serverLiveSync.collectionCursors[name] = 0;
     }
     if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(name);
-    if (db) {
+  }
+  // Purge every in-memory collection before the first storage await. A slow
+  // IndexedDB write for ads must not leave revoked receipt photos/data visible.
+  if (db) {
+    for (const name of names) {
       const cleared = await saveCollectionToIndexedDB(name, []);
       if (serverSessionIdentityChanged(identity)) return false;
       if (cleared === false) markCollectionDirty(name);
@@ -12262,7 +12422,7 @@ function _deltaRecordVersion(record) {
 // newer server revision (or the equal-revision deletion tie handled below);
 // preserving object identity for normal equal/stale replays also prevents a
 // needless whole-view render every 3s.
-function _shouldApplyDeltaRecord(incoming, current) {
+function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false) {
   const incomingVersion = _deltaRecordVersion(incoming);
   const currentVersion = _deltaRecordVersion(current);
 
@@ -12274,7 +12434,12 @@ function _shouldApplyDeltaRecord(incoming, current) {
     // deletes. In that tie, deletion must win or the active row can survive on
     // this client forever. Replayed tombstones remain no-ops, and an equal-
     // version active record can never resurrect a tombstone.
-    return incoming._deleted === true && current?._deleted !== true;
+    if (incoming._deleted === true && current?._deleted !== true) return true;
+    if (current?._deleted === true && incoming._deleted !== true) return false;
+    // A deployment can improve the read projection without changing stored
+    // accounting or timestamps. Only its one-time compatibility refresh may
+    // accept changed data at the same revision; ordinary polls stay no-ops.
+    return refreshEqualVersion && JSON.stringify(incoming) !== JSON.stringify(current);
   }
   if (incomingVersion !== null) return true;
   if (currentVersion !== null) return false;
@@ -12288,7 +12453,7 @@ function _shouldApplyDeltaRecord(incoming, current) {
   }
 }
 
-function applyServerDelta(collectionName, records) {
+function applyServerDelta(collectionName, records, { refreshEqualVersion = false } = {}) {
   if (!Array.isArray(records) || records.length === 0) return false;
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
   const arr = state[collectionName];
@@ -12315,15 +12480,18 @@ function applyServerDelta(collectionName, records) {
     const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
-      if (!_shouldApplyDeltaRecord(clean, arr[idx])) continue;
+      if (!_shouldApplyDeltaRecord(clean, arr[idx], refreshEqualVersion)) continue;
+      normalizeLegacyCollectionRecords(collectionName, [clean]);
       arr[idx] = clean;                       // update existing in place
       changed = true;
     } else if (newById.has(clean.id)) {
       const stagedIndex = newById.get(clean.id);
-      if (!_shouldApplyDeltaRecord(clean, newOnes[stagedIndex])) continue;
+      if (!_shouldApplyDeltaRecord(clean, newOnes[stagedIndex], refreshEqualVersion)) continue;
+      normalizeLegacyCollectionRecords(collectionName, [clean]);
       newOnes[stagedIndex] = clean;           // duplicate id -> keep newest revision
       changed = true;
     } else {
+      normalizeLegacyCollectionRecords(collectionName, [clean]);
       newById.set(clean.id, newOnes.length);
       newOnes.push(clean);
       changed = true;
@@ -12337,6 +12505,77 @@ function applyServerDelta(collectionName, records) {
     arr.unshift(...newOnes);
   }
   return changed;
+}
+
+function serverCompatibilityRefreshDeferred() {
+  return !!state.activeModal || _savingReceiptInFlight || Array.from(_pendingAdMutationAttempts.values()).some(attempt => attempt?.promise)
+    || _serverUserUpdate.pending.size > 0
+    || !!document.querySelector('[role="dialog"], #delivery-complete-modal');
+}
+
+// Read-only catch-up; acknowledge successful loads in this session only.
+// Persisting a marker could certify a cache whose IndexedDB write failed.
+async function refreshServerDataCompatibility() {
+  if (!isServerModeEnabled() || !state.currentUser || serverCompatibilityRefreshDeferred()) return null;
+  const now = Date.now();
+  if (_serverLiveSync.lastCompatibilityCheckAt && now - _serverLiveSync.lastCompatibilityCheckAt < 60000) return null;
+  _serverLiveSync.lastCompatibilityCheckAt = now;
+  const identity = getServerSessionIdentity();
+  const pollerEpoch = _serverLiveSync.pollerEpoch;
+  const aborted = () => serverSessionIdentityChanged(identity) || pollerEpoch !== _serverLiveSync.pollerEpoch;
+  let watermarks;
+  try { watermarks = await apiGetSyncWatermarks(); }
+  catch (_) { return null; } // Older servers may not support version metadata.
+  if (aborted()) return { aborted: true };
+  const version = watermarks.dataCompatibilityVersion;
+  if (!Number.isSafeInteger(version) || version === _serverLiveSync.dataCompatibilityVersion) return null;
+  const collections = getAuthorizedServerSyncCollections();
+  const accessSnapshot = () => JSON.stringify(getAuthorizedServerSyncCollections().map(name => [name, getServerCollectionVisibilityScope(state.currentUser, name)]));
+  const scope = accessSnapshot();
+  const deferred = () => serverCompatibilityRefreshDeferred() || scope !== accessSnapshot();
+  if (deferred()) {
+    _serverLiveSync.lastCompatibilityCheckAt = 0;
+    return null;
+  }
+  let fetched;
+  try {
+    fetched = await _runWithConcurrency(collections, SERVER_API.liveSyncConcurrency || 4, async collection => ({
+      collection, records: await apiLoadCollectionSince(collection, 0)
+    }));
+  } catch (_) {
+    if (aborted()) return { aborted: true };
+    // Keep the previous version and every current row. Retry on the next
+    // bounded version check, rather than hammering a failing collection.
+    state.serverLastSyncErrorAt = new Date().toISOString();
+    return { ok: false };
+  }
+  if (aborted()) return { aborted: true };
+  if (deferred()) {
+    _serverLiveSync.lastCompatibilityCheckAt = 0;
+    return null;
+  }
+  let changed = false;
+  const changedCollections = [];
+  for (const { collection, records } of fetched) {
+    // Merge instead of replacing: preserve absent unsynced local records and
+    // any newer revision received during this slower full-history request.
+    const collectionChanged = applyServerDelta(collection, records, { refreshEqualVersion: true });
+    changed = collectionChanged || changed;
+    if (collectionChanged) {
+      changedCollections.push(collection);
+      markCollectionDirty(collection);
+    }
+    if (_collectionCache[collection]) _collectionCache[collection] = { data: null, timestamp: 0, identity: '' };
+    _serverLiveSync.collectionCursors[collection] = Number(watermarks[collection]) || 0;
+  }
+  _serverLiveSync.dataCompatibilityVersion = version;
+  if (changed) {
+    assignSequentialNumbers(true, changedCollections);
+    _closeCustomerPagesDialogForStateChange();
+    saveState();
+    RenderQueue.schedule('liveSync(data-compatibility)');
+  }
+  return { ok: true, refreshed: true };
 }
 
 // Customer page spending and the delivery WhatsApp preview are body-mounted
@@ -12366,6 +12605,32 @@ function _closeCustomerPagesDialogForStateChange() {
   return true;
 }
 
+// A scope-narrowing response contains no tombstones for newly hidden rows.
+// Every role transition therefore needs the same purge before a scoped reload,
+// including Delivery -> Employee (whose next tick switches sync strategies).
+async function reloadServerDataForAccessChange(accessBefore, isAborted) {
+  const scopeChanges = getServerVisibilityScopeChanges(accessBefore, state.currentUser);
+  if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
+  _serverLiveSync.lastDeliverySig = null;
+  closeSensitiveAuthenticatedUi();
+  _authMeRequestGeneration += 1;
+  _sessionRequest = null;
+  cancelPendingRequests();
+  invalidateUsersListCache();
+  state.users = [];
+  upsertCurrentUserIntoUsers();
+  await clearServerCollectionsForVisibility(scopeChanges);
+  if (isAborted()) return { aborted: true };
+  if (db) {
+    const usersCleared = await saveCollectionToIndexedDB('users', state.users);
+    if (isAborted()) return { aborted: true };
+    if (usersCleared === false) markCollectionDirty('users');
+    else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete('users');
+  }
+  const result = await serverLoadAllData();
+  return isAborted() ? { aborted: true } : result;
+}
+
 async function serverLiveSyncOnce() {
   if (!isServerModeEnabled()) return { ok: false, skipped: true };
   if (!state.currentUser) return { ok: false, skipped: true };
@@ -12383,6 +12648,10 @@ async function serverLiveSyncOnce() {
     _serverLiveSync.pollerEpoch !== _pollerEpoch
   );
 
+  const compatibilityRefresh = await refreshServerDataCompatibility();
+  if (_syncAborted() || compatibilityRefresh?.aborted) return { ok: false, skipped: true };
+  if (compatibilityRefresh?.ok === false) return { ok: false };
+
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
   // The delivery branch below early-returns before the users/permissions refresh
@@ -12397,17 +12666,21 @@ async function serverLiveSyncOnce() {
     if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
       _serverLiveSync.lastUsersSyncAt = nowMs;
       let accessChanged = false;
+      const accessBefore = Security.sanitizeObject(state.currentUser || {});
       try { accessChanged = await refreshCurrentUserPermissions(); }
       catch (e) { if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] delivery access refresh failed:', e?.message || e); }
       if (_syncAborted()) return { ok: false, skipped: true };
       if (accessChanged) {
-        // roleLower is recomputed next tick and per-collection cursors default to
-        // 0, so the employee/admin branch performs a full catch-up. Reset the
-        // delivery signature and force a render now so the sidebar/landing view
-        // unlock immediately.
-        _serverLiveSync.lastDeliverySig = null;
+        const scopedReload = await reloadServerDataForAccessChange(accessBefore, _syncAborted);
+        if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
+        const reloadFailed = Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0;
+        if (reloadFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+        else {
+          state.serverLastSyncAt = new Date().toISOString();
+          state.serverLastSyncErrorAt = null;
+        }
         if (typeof forceFullRender === 'function') forceFullRender();
-        if (String(state.currentUser.role || '').toLowerCase() !== 'delivery') return { ok: true };
+        return { ok: !reloadFailed };
       }
     }
   }
@@ -12451,20 +12724,15 @@ async function serverLiveSyncOnce() {
     } catch (_) {}
     const changed = (sig === null) || sig !== _serverLiveSync.lastDeliverySig;
     if (changed) {
-      if (Array.isArray(ads)) state.ads = ads;
-      if (Array.isArray(receipts)) state.receipts = receipts;
-      if (Array.isArray(customers)) state.customers = customers;
+      for (const [collection, records] of [['ads', ads], ['receipts', receipts], ['customers', customers]]) {
+        if (!Array.isArray(records)) continue;
+        normalizeLegacyCollectionRecords(collection, records);
+        state[collection] = records;
+      }
       if (sig !== null) _serverLiveSync.lastDeliverySig = sig;
     }
     
-    // Ensure data migration on live sync (only if data changed, and debounced)
-    if (changed) {
-      // Run migration in background (don't block render)
-      setTimeout(() => {
-        migrateOldDataFormats();
-        assignSequentialNumbers(false); // Use cache if available
-      }, 100);
-    }
+    if (changed) assignSequentialNumbers(true, ['ads', 'receipts', 'customers']);
 
     const nextCursor = computeServerCursorFromState();
     _serverLiveSync.cursor = Math.max(_serverLiveSync.cursor || 0, nextCursor);
@@ -12623,13 +12891,11 @@ async function serverLiveSyncOnce() {
     return { ok: !reloadFailed };
   }
   
-  // Ensure data migration on live sync (only if data changed, debounced to not block render)
-  if (changed) {
-    setTimeout(() => {
-      migrateOldDataFormats();
-      assignSequentialNumbers(false); // Use cache if available
-    }, 100);
-  }
+  // Incoming rows were normalized before insertion; never render an old shape
+  // and repair it later in a timer. Unchanged collections need no migration.
+  if (changed) assignSequentialNumbers(true, [
+    ['ads', adsChanged], ['receipts', receiptsChanged], ['customers', customersChanged], ['pages', pagesChanged]
+  ].filter(([, didChange]) => didChange).map(([collection]) => collection));
 
   // Advance only the collection whose request completed. Failed collections
   // retain their own prior cursor and are retried without blocking others.
@@ -12681,38 +12947,9 @@ async function serverLiveSyncOnce() {
       const accessBefore = Security.sanitizeObject(state.currentUser || {});
       const permsChanged = await refreshCurrentUserPermissions();
       if (_syncAborted()) return { ok: false, skipped: true };
-      const scopeChanges = permsChanged
-        ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
-        : [];
       if (permsChanged) {
-        // Permissions moved, so any prior per-collection 403 purge is stale.
-        // Reset the guard so a re-grant-then-re-revoke cycle still purges once.
-        if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
-        // Access revocation can hide pages, ads, balances, or the customer itself.
-        // Close immediately, before cache writes/refetches, so its old authorized
-        // snapshot cannot outlive the newly-scoped state even on a slow network.
-        _closeCustomerPagesDialogForStateChange();
         customerPagesDataChanged = true;
-        // Stop reusing any in-flight/broader snapshot, purge the affected
-        // collections, then perform a fresh server-scoped load. A view->viewOwn
-        // response has no tombstones for rows that became unauthorized, so
-        // merging deltas can never repair this transition safely.
-        cancelPendingRequests();
-        invalidateUsersListCache();
-        // The Admin users list is authorization-scoped too. Keep only the
-        // freshly-authenticated caller until /api/users (or /users/public)
-        // returns the new scope, and replace its persisted cache immediately.
-        state.users = [];
-        upsertCurrentUserIntoUsers();
-        if (db) {
-          const usersCleared = await saveCollectionToIndexedDB('users', state.users);
-          if (_syncAborted()) return { ok: false, skipped: true };
-          if (usersCleared === false) markCollectionDirty('users');
-          else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete('users');
-        }
-        await clearServerCollectionsForVisibility(scopeChanges);
-        if (_syncAborted()) return { ok: false, skipped: true };
-        const scopedReload = await serverLoadAllData();
+        const scopedReload = await reloadServerDataForAccessChange(accessBefore, _syncAborted);
         if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
         if (Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0) anyFetchFailed = true;
         changed = true;
@@ -13516,8 +13753,86 @@ function showSessionTransitionOverlay(message) {
   return overlay;
 }
 
+// Body-mounted dialogs are not descendants of #app. Re-rendering the login
+// page alone cannot remove them. Keep sensitive surfaces/drafts in one teardown
+// path, run synchronously before storage/network waits, and do not restore focus
+// to an old account's button or navigate browser history during teardown.
+const AUTHENTICATED_DIALOG_IDS = Object.freeze([
+  'app-modal', 'duplicate-receipt-warning', 'customer-pages-dialog', 'page-ads-dialog',
+  'page-duplicates-dialog', 'page-merge-dialog', 'merge-all-dialog', 'ad-merge-dialog',
+  'delivery-whatsapp-share-dialog', 'delivery-complete-modal', 'delivery-cancel-modal',
+  'ad-primary-photo-picker', 'receipt-photo-viewer', 'company-debt-coverage-modal',
+  'customer-ad-coverage-modal', 'company-coverage-receipt-picker', 'collect-receipt-modal',
+  'new-receipt-chooser', 'destroyed-receipt-dialog', 'edit-history-modal', 'meta-history-modal',
+  'meta-ad-preview-modal', 'meta-insights-modal', 'meta-ads-modal', 'stop-ad-modal',
+  'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning'
+]);
+
+function closeSensitiveAuthenticatedUi() {
+  _closeCustomerPagesDialogForStateChange();
+  const closers = [
+    () => closeCustomerPagesDialog(false), () => closePageAdsDialog(false),
+    () => closePageDuplicatesDialog(false), () => closePageMergeDialog(false),
+    () => closeMergeAllDialog(false), () => closeAdMergeDialog(false),
+    () => closeDeliveryWhatsAppPrompt(false), () => closeAdPrimaryPhotoPicker(false),
+    () => closeReceiptPhotoViewer(false),
+    () => closeCompanyDebtCoverageModal({ force: true, restoreFocus: false }),
+    () => closeCustomerAdDebtCoverageModal({ force: true, restoreFocus: false }),
+    () => _closeCompanyCoverageReceiptPicker(false),
+    () => closeMetaInsightsModal(), () => closeMetaAdsConnectionModal(),
+    () => closeCommandPalette(), () => closeAnalyticsBreakdown(false), () => closeDollarPurchaseManager(false),
+    () => resetAdsStudioSessionState(), () => resetReceiptCustomerRiskWarningState()
+  ];
+  for (const close of closers) { try { close(); } catch (_) {} }
+  for (const id of AUTHENTICATED_DIALOG_IDS) document.getElementById(id)?.remove();
+  // Also cover auxiliary feature dialogs that use the shared overlay class.
+  document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
+  state.activeModal = null;
+  state.modalData = null;
+  state.tempAdFunding = null;
+  state.tempMergeFunding = null;
+  state.tempMixedReceiptTargetUSD = null;
+  state.tempAdPhotos = [];
+  state.tempReceiptPhotos = [];
+  state.tempAdPrimaryPhotoIndex = 0;
+  state.tempAdPrimaryPhotoDirty = false;
+  state.tempAdPhotosDirty = false;
+  state.tempReceiptPhotosDirty = false;
+  _adPhotoUploadGeneration += 1;
+  _receiptPhotoUploadGeneration += 1;
+  _adPhotoUploadsInFlight = 0;
+  _receiptPhotoUploadsInFlight = 0;
+  _deliveryCompletionOpen = null;
+  _collectReceiptId = '';
+  _collectTargetLYD = 0;
+  _tempCollectPayments = [];
+  clearTimeout(_deliveryDraftSaveTimer);
+  _deliveryDraftSaveTimer = null;
+  _newReceiptCarried = false;
+  tempTopUps = [];
+  if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken += 1;
+  if (typeof _clothesTempPhoto !== 'undefined') _clothesTempPhoto = null;
+  if (typeof _clothesTempVariants !== 'undefined') _clothesTempVariants = [];
+  if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];
+  if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
+  window._newUserAccessPreset = '';
+  document.body.style.overflow = '';
+  try {
+    localStorage.removeItem(NATIVE_PHOTO_PENDING_KEY);
+    // Old delivery drafts were not account-namespaced. Never offer them to the
+    // next signed-in user; normal background/camera restoration keeps them.
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(_DELIVERY_DRAFT_PREFIX)) localStorage.removeItem(key);
+    }
+  } catch (_) {}
+}
+
 function resetAuthenticatedServerCaches() {
-  _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
+  closeSensitiveAuthenticatedUi();
+  _authMeRequestGeneration += 1;
+  _sessionRequest = null;
+  _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' };
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
   for (const key of Object.keys(_collectionCache)) {
     _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
@@ -13561,7 +13876,7 @@ async function wipeAuthenticatedServerDataFromClient() {
   // This helper is also used by the session-expiry path, which does not pass
   // through the normal logout function. Remove body-mounted financial data
   // before clearing auth/state or awaiting IndexedDB writes.
-  _closeCustomerPagesDialogForStateChange();
+  closeSensitiveAuthenticatedUi();
   const collections = Array.isArray(PERSISTED_COLLECTIONS)
     ? PERSISTED_COLLECTIONS
     : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
@@ -13576,7 +13891,7 @@ async function wipeAuthenticatedServerDataFromClient() {
 }
 
 function emergencyFinishClientSignOut(serverMode, expired) {
-  _closeCustomerPagesDialogForStateChange();
+  closeSensitiveAuthenticatedUi();
   try { stopServerLiveSync(); } catch (_) {}
   try { advanceServerSessionEpoch(); } catch (_) {}
   try { cancelPendingRequests(); } catch (_) {}
@@ -13603,7 +13918,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
 async function _handleLogoutOnce() {
   const serverMode = isServerModeEnabled();
   const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'جارٍ تسجيل الخروج...' : 'Signing out...');
-  _closeCustomerPagesDialogForStateChange();
+  closeSensitiveAuthenticatedUi();
   try {
     if (state.currentUser) {
       addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
@@ -13723,7 +14038,9 @@ const VIEW_TO_PATH = {
   'clothes-system': '/clothes-system',
   'ads-studio': '/ads-studio',
   'service-placeholder': '/service',
-  'wallet': '/wallet'
+  'wallet': '/wallet',
+  'plans': '/plans',
+  'charge-wallet': '/charge-wallet'
 };
 
 // Reverse map: path to view
@@ -16083,7 +16400,7 @@ function renderMobileBottomNavigation() {
 
 function renderMainApp(viewHTML = null) {
   const dir = getDir();
-  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
+  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
   
   return `
     <div class="app-shell flex min-h-screen" dir="${dir}">
@@ -16276,9 +16593,15 @@ function renderSidebar() {
 }
 
 function renderView() {
+  // Admin-only tools (Control Center, merge dialogs) live in admin-tools.js;
+  // warm it on the first Admin render so it is ready before the first tap.
+  if (typeof preloadAdminToolsForCurrentUser === 'function') preloadAdminToolsForCurrentUser();
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
-    case 'control-center': return renderControlCenterView();
+    case 'control-center':
+      if (typeof renderControlCenterView === 'function') return renderControlCenterView();
+      ensureAdminToolsLoaded();
+      return renderAdminToolsLoadingState();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system':
       if (typeof renderClothesSystemView === 'function') return renderClothesSystemView();
@@ -16290,6 +16613,8 @@ function renderView() {
       return renderAdsStudioLoadingState();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
+    case 'plans': return renderPlansView();
+    case 'charge-wallet': return renderChargeWalletView();
     case 'analytics': return renderAnalyticsView();
     case 'customers': return renderCustomersView();
     case 'receipts': return renderReceiptsView();
@@ -18413,7 +18738,7 @@ function renderAdsView() {
   // Pairing a hand-made ad with its Meta twin scans every ad, so it is resolved
   // once per render pass instead of once per row (same shape as the deliveries
   // view's collection-target cache).
-  resetAdMergePairCache();
+  if (typeof resetAdMergePairCache === 'function') resetAdMergePairCache();
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
   const isAr = state.language === 'ar';
@@ -18724,7 +19049,7 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
-                        ${renderAdMergeActionButton(ad, isAr)}
+                        ${typeof renderAdMergeActionButton === 'function' ? renderAdMergeActionButton(ad, isAr) : ''}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">
@@ -21824,234 +22149,684 @@ function renderSettingsView() {
   `;
 }
 // ==========================================
-// SERVICES HUB, SMART SYSTEMS AND WALLET SCREENS
+// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS
 // ==========================================
 // Split out of 12-views.js when that module passed its 475 KiB cap.
 // These screens form one product area: the service catalogue, its
-// subscription state, and the wallet that pays for it.
+// subscription state, the plan catalog, and the wallet that pays for it.
+//
+// Design (2026-09 "Albayan Studio" refresh): ONE responsive layout for web,
+// iOS and Android — a centred phone-first column that widens into a grid on
+// desktop. No feature was removed: every old action (coming-soon toast,
+// paywall, theme/language/logout, wallet transfer, admin top-up in local
+// mode, subscription cancel, transactions) still lives on these screens.
+//
+// Money rules are untouched: prices come ONLY from the server plan catalog
+// (`state.subscriptionPlans`), purchases go through SUBSCRIPTIONS.purchasePlan
+// and the server re-reads its own catalog inside the transaction.
+
+// ---------- shared helpers ----------
+
+function hubText(en, ar) {
+  return state.language === 'ar' ? ar : en;
+}
+
+function hubEsc(value) {
+  return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
+}
+
+// Days left on the current user's real subscription rows for a service
+// (null when there is no dated active row — e.g. an Admin, who is granted
+// everything without buying it).
+function hubDaysLeft(serviceId) {
+  const expiry = typeof getSubscriptionExpiryForCurrentUser === 'function'
+    ? getSubscriptionExpiryForCurrentUser(serviceId)
+    : null;
+  if (!expiry) return null;
+  return Math.max(0, Math.ceil((expiry - Date.now()) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
+}
+
+// Server plan that sells exactly this one service (the implicit `svc:<id>`
+// row, or any active single-service plan for it). Null until the catalog is
+// loaded — the hub then shows "Subscribe" instead of inventing a price.
+function hubPlanForService(serviceId) {
+  const sid = String(serviceId || '');
+  const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+  return plans.find(p => p && String(p.id) === `svc:${sid}`)
+    || plans.find(p => p && Array.isArray(p.serviceIds) && p.serviceIds.length === 1 && p.serviceIds[0] === sid)
+    || null;
+}
+
+// "25 LYD" (major units, no trailing zeros for whole numbers) — pills only.
+function hubMoney(minor, currency = 'LYD') {
+  const major = walletFromMinor(Math.max(0, Number(minor) || 0), currency);
+  const text = Number.isInteger(major)
+    ? major.toLocaleString('en-US')
+    : major.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${text} ${walletNormalizeCurrency(currency)}`;
+}
+
+function hubPeriodLabel(durationDays) {
+  const days = Number(durationDays) || 30;
+  if (days === 30 || days === 31) return hubText('/ month', '/ شهر');
+  if (days === 365 || days === 360) return hubText('/ year', '/ سنة');
+  return hubText(`/ ${days} days`, `/ ${days} يوم`);
+}
+
+function hubPriceLabel(serviceId) {
+  const plan = hubPlanForService(serviceId);
+  if (!plan) return '';
+  const price = Math.max(0, Number(plan.priceMinor) || 0);
+  if (price <= 0) return hubText('Free', 'مجاني');
+  return `${hubMoney(price, plan.currency || 'LYD')} ${hubPeriodLabel(plan.durationDays)}`;
+}
+
+// One status object drives every pill on these screens:
+//   coming  -> "Coming soon"
+//   active  -> "Active · N d" (amber "Expires in N d" once ≤ 7 days remain)
+//   admin   -> "Included" (Admin is granted every service)
+//   locked  -> price from the server catalog, or "Subscribe"
+function hubServiceStatus(serviceId) {
+  const sid = String(serviceId || '');
+  const svc = SERVICES[sid] || SMART_SYSTEMS_CHILDREN[sid];
+  if (!svc) return { kind: 'locked', label: hubText('Subscribe', 'اشترك'), tone: 'blue', days: null };
+  if (svc.comingSoon) return { kind: 'coming', label: hubText('Coming soon', 'قريباً'), tone: 'slate', days: null };
+  const required = Array.isArray(svc.requiredSubscriptions) && svc.requiredSubscriptions.length
+    ? svc.requiredSubscriptions
+    : [sid];
+  let days = null;
+  for (const rid of required) {
+    const d = hubDaysLeft(rid);
+    if (d !== null && (days === null || d > days)) days = d;
+  }
+  if (days !== null) {
+    const soon = days <= 7;
+    return {
+      kind: 'active',
+      days,
+      soon,
+      tone: soon ? 'amber' : 'emerald',
+      label: soon
+        ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`)
+        : hubText(`Active · ${days} d`, `نشط · ${days} يوم`)
+    };
+  }
+  if (!svc.requiresSubscription) return { kind: 'admin', label: hubText('Open', 'فتح'), tone: 'emerald', days: null };
+  if (isCurrentUserAdmin()) return { kind: 'admin', label: hubText('Included', 'ضمن حسابك'), tone: 'emerald', days: null };
+  const price = hubPriceLabel(required[0] || sid);
+  return { kind: 'locked', label: price || hubText('Subscribe', 'اشترك'), tone: 'blue', days: null };
+}
+
+function hubPill(label, tone = 'slate', extraClass = '') {
+  const tones = {
+    emerald: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+    amber: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+    rose: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+    blue: 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+  };
+  return `<span class="inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${tones[tone] || tones.slate} ${extraClass}">${label}</span>`;
+}
+
+function hubServiceIcon(service, sizeClass = 'w-11 h-11', iconClass = 'w-5 h-5') {
+  return `<span class="${sizeClass} rounded-2xl bg-gradient-to-br ${hubEsc(service.color || 'from-slate-500 to-slate-600')} flex items-center justify-center text-white shadow-md flex-shrink-0"><i data-lucide="${hubEsc(service.icon || 'box')}" class="${iconClass}"></i></span>`;
+}
+
+function hubBackButton(targetView = 'services-hub') {
+  const isRTL = state.language === 'ar';
+  return `<button type="button" onclick="navigateTo('${hubEsc(targetView)}')" class="touch-target flex h-11 w-11 items-center justify-center rounded-full bg-white/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200" aria-label="${hubText('Back', 'رجوع')}"><i data-lucide="${isRTL ? 'chevron-right' : 'chevron-left'}" class="w-5 h-5"></i></button>`;
+}
+
+function hubPageHeader(title, { backTo = 'services-hub', trailing = '' } = {}) {
+  return `
+    <div class="flex items-center gap-3 mb-5">
+      ${hubBackButton(backTo)}
+      <h1 class="flex-1 min-w-0 truncate text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white">${title}</h1>
+      ${trailing}
+    </div>`;
+}
+
+// Wallet balance card shared by the hub, plans and wallet screens.
+function hubWalletCard({ topUp = true, plansLink = false } = {}) {
+  const uid = String(state.currentUser?.id || '');
+  const balanceMinor = uid ? WALLET.getBalanceMinor(uid, 'LYD') : 0;
+  return `
+    <div class="hub-card flex items-center gap-3 p-3.5 mb-5">
+      <button type="button" onclick="navigateTo('wallet')" class="flex flex-1 min-w-0 items-center gap-3 text-start touch-target">
+        <span class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 flex items-center justify-center flex-shrink-0"><i data-lucide="wallet" class="w-5 h-5"></i></span>
+        <span class="min-w-0">
+          <span class="block text-[11px] text-slate-500 dark:text-slate-400">${hubText('Wallet balance', 'رصيد المحفظة')}</span>
+          <span class="block text-base font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, 'LYD'))}</span>
+        </span>
+      </button>
+      ${plansLink ? `<button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 rounded-full bg-slate-100 dark:bg-slate-800 px-3.5 text-xs font-bold text-slate-700 dark:text-slate-200">${hubText('Plans', 'الباقات')}</button>` : ''}
+      ${topUp ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target min-h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 px-4 text-xs font-bold text-blue-700 dark:text-blue-300">${hubText('Top up', 'شحن')}</button>` : ''}
+    </div>`;
+}
+
+// Load the server plan catalog once per session for price pills. Never
+// authoritative for money — the paywall forces a fresh fetch before buying.
+let _hubPlansRequested = false;
+function hubEnsurePlansLoaded() {
+  if (!isServerModeEnabled() || _hubPlansRequested) return;
+  if (Array.isArray(state.subscriptionPlans) && state.subscriptionPlans.length) return;
+  if (typeof refreshSubscriptionPlans !== 'function') return;
+  _hubPlansRequested = true;
+  refreshSubscriptionPlans().then(() => {
+    if (['services-hub', 'smart-systems', 'plans'].includes(state.currentView)) render();
+  }).catch(() => {});
+}
+
+function hubGreeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return hubText('Good morning', 'صباح الخير');
+  if (hour < 18) return hubText('Good afternoon', 'مساء الخير');
+  return hubText('Good evening', 'مساء الخير');
+}
+
+// ---------- Services Hub ----------
 
 function renderServicesHub() {
   const userName = state.currentUser?.name || 'User';
   const isRTL = state.language === 'ar';
-  const walletBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, WALLET.currency) : 0;
-  const walletBalanceLabel = walletFormatMinor(walletBalanceMinor, WALLET.currency);
+  hubEnsurePlansLoaded();
 
   const hubServices = Object.values(SERVICES)
     .slice()
+    .filter(s => s && s.id && s.id !== 'placeholder_coming_soon')
     .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
 
-  const serviceCards = hubServices.map(service => {
-    if (!service || !service.id) return '';
+  // Smart Systems children that are sold as their own product (clothes, Ads
+  // Studio) show as "your services" rows once bought, so they are one tap away.
+  const ownedChildren = Object.values(SMART_SYSTEMS_CHILDREN)
+    .filter(c => c && !c.comingSoon && Array.isArray(c.requiredSubscriptions) && !c.requiredSubscriptions.includes('smart_systems'))
+    .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
 
-    const serviceName = isRTL ? service.nameAr : service.name;
-    const serviceDesc = isRTL ? service.descriptionAr : service.description;
-    const access = checkServiceAccess(service.id);
-    const disabled = !!service.comingSoon;
+  const activeRows = [];
+  const exploreTiles = [];
+  for (const service of hubServices) {
+    const status = hubServiceStatus(service.id);
+    if (status.kind === 'active') activeRows.push({ service, status, onclick: `handleServiceClick('${hubEsc(service.id)}')` });
+    else exploreTiles.push({ service, status, onclick: `handleServiceClick('${hubEsc(service.id)}')` });
+  }
+  for (const child of ownedChildren) {
+    const status = hubServiceStatus(child.id);
+    if (status.kind === 'active') activeRows.push({ service: child, status, onclick: `handleSmartSystemClick('${hubEsc(child.id)}')` });
+  }
 
+  const chevron = isRTL ? 'chevron-left' : 'chevron-right';
+  const activeHtml = activeRows.map(({ service, status, onclick }) => `
+    <button type="button" onclick="${onclick}" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
+      ${hubServiceIcon(service)}
+      <span class="flex-1 min-w-0">
+        <span class="block truncate text-[15px] font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? service.nameAr : service.name)}</span>
+        <span class="block truncate text-xs text-slate-500 dark:text-slate-400 mt-0.5">${hubEsc(isRTL ? service.descriptionAr : service.description)}</span>
+      </span>
+      ${hubPill(status.label, status.tone)}
+      <i data-lucide="${chevron}" class="w-4 h-4 text-slate-400 flex-shrink-0"></i>
+    </button>`).join('');
+
+  const exploreHtml = exploreTiles.map(({ service, status, onclick }) => {
+    const disabled = status.kind === 'coming';
     return `
-      <button
-        type="button"
-        onclick="handleServiceClick('${service.id}')"
-        class="group relative glass-panel p-6 rounded-2xl ${isRTL ? 'text-right' : 'text-left'} transition-all duration-300 hover:scale-105 hover:shadow-xl ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}"
-        ${disabled ? 'disabled' : ''}
-      >
-        ${disabled ? `
-          <div class="absolute top-3 right-3 px-3 py-1 rounded-full text-[10px] font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
-            ${isRTL ? 'قريباً' : 'Coming Soon'}
-          </div>
-        ` : ''}
-
-        ${access.reason === 'not_subscribed' && !disabled ? `
-          <div class="absolute top-3 right-3">
-            <i data-lucide="lock" class="w-4 h-4 text-amber-500"></i>
-          </div>
-        ` : ''}
-
-        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br ${service.color} flex items-center justify-center mb-4 group-hover:scale-110 transition-transform shadow-lg">
-          <i data-lucide="${service.icon}" class="w-7 h-7 text-white"></i>
-        </div>
-
-        <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-1">${serviceName}</h3>
-        <p class="text-sm text-slate-500 dark:text-slate-400">${serviceDesc}</p>
-
-        ${service.hasChildren ? `
-          <div class="mt-3 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold">
-            <i data-lucide="layers" class="w-3.5 h-3.5"></i>
-            <span>${(service.children?.length || 0)} ${isRTL ? 'أنظمة' : 'systems'}</span>
-          </div>
-        ` : ''}
-        ${service.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(service.id, isRTL) : ''}
-      </button>
-    `;
+      <button type="button" onclick="${onclick}" class="hub-card hub-tile relative overflow-hidden w-full p-4 text-start touch-target ${disabled ? 'opacity-70' : ''}">
+        <i data-lucide="${hubEsc(service.icon || 'box')}" class="hub-tile-watermark" aria-hidden="true"></i>
+        <span class="relative block">
+          ${hubServiceIcon(service)}
+          <span class="mt-3 block truncate text-sm font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? service.nameAr : service.name)}</span>
+          <span class="block truncate text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2.5">${hubEsc(isRTL ? service.descriptionAr : service.description)}</span>
+          <span class="flex flex-wrap items-center gap-1.5">
+            ${hubPill(status.label, status.tone)}
+            ${service.hasChildren ? hubPill(`${(service.children?.length || 0)} ${hubText('systems', 'أنظمة')}`, 'slate') : ''}
+            ${status.kind === 'locked' ? `<i data-lucide="lock" class="w-3.5 h-3.5 text-amber-500"></i>` : ''}
+          </span>
+        </span>
+      </button>`;
   }).join('');
-  
+
   return `
-    <div class="max-w-6xl mx-auto">
-      <!-- Header -->
-      <div class="mb-8 flex items-center justify-between">
-        <div class="flex items-center gap-4">
-          <div class="w-14 h-14 rounded-full bg-gradient-to-br from-pink-400 to-rose-500 flex items-center justify-center text-white text-xl font-bold shadow-lg">
-            ${userName.charAt(0).toUpperCase()}
-          </div>
-          <div>
-            <h1 class="text-2xl font-bold text-slate-800 dark:text-white">
-              ${isRTL ? `مرحبا، ${userName}!` : `Welcome, ${userName}!`}
-            </h1>
-            <p class="text-sm text-slate-500 dark:text-slate-400">
-              ${isRTL ? 'اختر خدمة للبدء' : 'Choose a service to get started'}
-            </p>
-          </div>
+    <div class="hub-shell">
+      <!-- Header: avatar, greeting, quick actions (all pre-existing actions kept) -->
+      <div class="flex items-center gap-3 mb-4">
+        <div class="w-11 h-11 rounded-full alb-gradient-brand flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
+          ${hubEsc(userName.charAt(0).toUpperCase())}
         </div>
-        
-        <div class="flex items-center gap-2">
-          <button onclick="navigateTo('wallet')" class="px-4 py-3 glass-panel rounded-xl hover:scale-105 transition-transform flex items-center gap-2">
-            <i data-lucide="wallet" class="w-5 h-5 text-indigo-600"></i>
-            <span class="text-sm font-bold text-slate-700 dark:text-slate-200">${walletBalanceLabel}</span>
-          </button>
-          <button onclick="toggleTheme()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform">
-            <i data-lucide="sun" class="w-5 h-5"></i>
-          </button>
-          <button onclick="toggleLanguage()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform text-sm font-bold">
-            ${isRTL ? 'EN' : 'عربي'}
-          </button>
-          <button onclick="handleLogout()" class="p-3 glass-panel rounded-xl hover:scale-105 transition-transform text-rose-500">
-            <i data-lucide="log-out" class="w-5 h-5"></i>
-          </button>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs text-slate-500 dark:text-slate-400">${hubGreeting()}</div>
+          <div class="truncate text-base font-bold text-slate-900 dark:text-white">${isRTL ? `مرحباً، ${hubEsc(userName)}!` : `Welcome, ${hubEsc(userName)}!`}</div>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <button type="button" onclick="toggleTheme()" class="touch-target h-10 w-10 rounded-full bg-white/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200" aria-label="${hubText('Theme', 'المظهر')}"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i></button>
+          <button type="button" onclick="toggleLanguage()" class="touch-target h-10 min-w-10 px-2 rounded-full bg-white/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-xs font-bold text-slate-700 dark:text-slate-200" aria-label="${hubText('Language', 'اللغة')}">${isRTL ? 'EN' : 'عربي'}</button>
+          <button type="button" onclick="handleLogout()" class="touch-target h-10 w-10 rounded-full bg-rose-50 dark:bg-rose-900/20 text-rose-600 flex items-center justify-center" aria-label="${t('logout')}"><i data-lucide="log-out" class="w-4 h-4"></i></button>
         </div>
       </div>
-      
-      <!-- Hero Banner (Optional) -->
-      <div class="glass-panel p-8 rounded-3xl mb-8 alb-hero">
-        <div class="flex items-center justify-between">
-          <div>
-            <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2 alb-gradient-text">
-              ${isRTL ? 'فروع جديدة!' : 'New Services!'}
-            </h2>
-            <p class="text-slate-600 dark:text-slate-300">
-              ${isRTL ? 'أهلاً بشركاء النجاح' : 'Welcome to our partner success platform'}
-            </p>
+
+      <h1 class="text-[26px] font-extrabold tracking-tight text-slate-900 dark:text-white mb-4">${hubText('Services Hub', 'مركز الخدمات')}</h1>
+
+      ${hubWalletCard({ topUp: true, plansLink: false })}
+
+      <!-- Hero -->
+      <div class="hub-hero relative overflow-hidden rounded-3xl p-5 mb-6 text-white">
+        <div class="absolute -top-10 -end-6 w-40 h-40 rounded-full bg-white/10"></div>
+        <div class="relative flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <div class="text-[11px] font-bold uppercase tracking-[0.14em] text-white/70">${hubText('New on Albayan', 'جديد في البيان')}</div>
+            <div class="mt-1 text-xl font-extrabold">${hubText('Ads Studio: posts & auto-replies', 'استوديو الإعلانات: منشورات وردود تلقائية')}</div>
+            <div class="mt-1 text-sm text-white/80">${hubText('Welcome to our partner success platform', 'أهلاً بشركاء النجاح')}</div>
           </div>
-          <div class="hidden md:block">
-            <i data-lucide="sparkles" class="w-16 h-16 text-indigo-400 opacity-50"></i>
-          </div>
+          <i data-lucide="sparkles" class="w-12 h-12 text-white/60 flex-shrink-0"></i>
         </div>
       </div>
-      
-      <!-- Services Grid -->
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6">
-        ${serviceCards}
+
+      ${activeRows.length ? `
+        <div class="hub-section-title">${hubText('Your services', 'خدماتك')}</div>
+        <div class="space-y-2.5 mb-6">${activeHtml}</div>
+      ` : ''}
+
+      <div class="flex items-center justify-between mb-2.5">
+        <div class="hub-section-title mb-0">${hubText('Explore', 'استكشف')}</div>
+        <button type="button" onclick="navigateTo('plans')" class="touch-target min-h-10 px-2 text-[13px] font-semibold text-blue-600 dark:text-blue-300">${hubText('Plans & bundles', 'الباقات والاشتراكات')}</button>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+        ${exploreHtml}
       </div>
     </div>
   `;
 }
 
+// ---------- Smart Systems ----------
+
 function renderSmartSystems() {
   const isRTL = state.language === 'ar';
-  
+  hubEnsurePlansLoaded();
+
   const children = Object.values(SMART_SYSTEMS_CHILDREN)
     .slice()
     .sort((a, b) => (Number(a.order) || 999) - (Number(b.order) || 999));
 
-  const childCards = children.map(child => {
-    const childName = isRTL ? child.nameAr : child.name;
-    const childDesc = isRTL ? child.descriptionAr : child.description;
-    const access = checkServiceAccess(child.id);
-    const disabled = child.comingSoon;
-    
+  const parentStatus = hubServiceStatus('smart_systems');
+  const headerPill = parentStatus.kind === 'active'
+    ? parentStatus.label
+    : parentStatus.kind === 'admin'
+      ? hubText('Included', 'ضمن حسابك')
+      : hubText('Requires subscription', 'يتطلب اشتراكاً');
+  const headerCta = parentStatus.kind === 'active' ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك');
+
+  const rows = children.map(child => {
+    const status = hubServiceStatus(child.id);
+    const locked = status.kind === 'locked';
+    const pillTone = locked ? 'rose' : status.tone;
+    const pillLabel = locked ? hubText('Requires subscription', 'يتطلب اشتراكاً') : status.label;
     return `
-      <button 
-        type="button"
-        onclick="handleSmartSystemClick('${child.id}')"
-        class="group relative glass-panel p-8 rounded-2xl ${isRTL ? 'text-right' : 'text-left'} transition-all duration-300 hover:scale-105 hover:shadow-2xl ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}"
-        ${disabled ? 'disabled' : ''}
-      >
-        ${child.comingSoon ? `
-          <div class="absolute top-4 right-4 px-3 py-1 rounded-full text-xs font-bold uppercase bg-gradient-to-r from-amber-400 to-orange-500 text-white shadow-lg">
-            ${isRTL ? 'قريباً' : 'Coming Soon'}
-          </div>
-        ` : ''}
-        
-        ${access.reason === 'not_subscribed' && !disabled ? `
-          <div class="absolute top-4 right-4">
-            <i data-lucide="lock" class="w-5 h-5 text-amber-500"></i>
-          </div>
-        ` : ''}
-        
-        <div class="w-20 h-20 rounded-3xl bg-gradient-to-br ${child.color} flex items-center justify-center mb-6 group-hover:scale-110 transition-transform shadow-2xl">
-          <i data-lucide="${child.icon}" class="w-10 h-10 text-white"></i>
-        </div>
-        
-        <h3 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${childName}</h3>
-        <p class="text-slate-500 dark:text-slate-400">${childDesc}</p>
-        ${child.requiresSubscription && typeof renderSubscriptionStatusBadge === 'function' ? renderSubscriptionStatusBadge(child.id, isRTL) : ''}
-      </button>
-    `;
+      <button type="button" onclick="handleSmartSystemClick('${hubEsc(child.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target ${status.kind === 'coming' ? 'opacity-70' : ''}">
+        ${hubServiceIcon(child)}
+        <span class="flex-1 min-w-0">
+          <span class="block truncate text-[15px] font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? child.nameAr : child.name)}</span>
+          <span class="block truncate text-xs text-slate-500 dark:text-slate-400 mt-0.5">${hubEsc(isRTL ? child.descriptionAr : child.description)}</span>
+        </span>
+        <span class="flex items-center gap-1.5 flex-shrink-0">
+          ${hubPill(pillLabel, pillTone)}
+          ${locked ? `<i data-lucide="lock" class="w-4 h-4 text-slate-400"></i>` : ''}
+        </span>
+      </button>`;
   }).join('');
-  
+
   return `
-    <div class="max-w-6xl mx-auto">
-      <!-- Back Button -->
-      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
-        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
-      </button>
-      
-      <!-- Header -->
-      <div class="mb-8">
-        <div class="flex items-center gap-4 mb-4">
-          <div class="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center shadow-2xl">
-            <i data-lucide="cpu" class="w-8 h-8 text-white"></i>
+    <div class="hub-shell">
+      ${hubPageHeader(hubText('Smart Systems', 'الأنظمة الذكية'))}
+      <div class="relative overflow-hidden rounded-3xl p-5 mb-5 text-white bg-gradient-to-br from-violet-700 to-fuchsia-600 shadow-xl">
+        <div class="absolute -top-8 -end-5 w-36 h-36 rounded-full bg-white/15"></div>
+        <div class="relative">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs text-white/70">${hubText('Business tools & portals', 'أدوات الأعمال والبوابات')}</span>
+            <span class="rounded-full bg-white/20 px-2.5 py-1 text-[11px] font-bold">${headerPill}</span>
           </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">
-              ${isRTL ? 'الأنظمة الذكية' : 'Smart Systems'}
-            </h1>
-            <p class="text-slate-500 dark:text-slate-400">
-              ${isRTL ? 'أدوات الأعمال المتقدمة' : 'Advanced business tools'}
-            </p>
+          <div class="mt-2 text-2xl font-black">${hubText('Smart Systems', 'الأنظمة الذكية')}</div>
+          <div class="mt-2 flex items-center justify-between gap-3">
+            <span class="text-xs text-white/70">${children.length} ${hubText('systems', 'أنظمة')}</span>
+            <button type="button" onclick="showSubscriptionModal('smart_systems', 'smart_systems')" class="touch-target min-h-10 rounded-full bg-white/20 px-4 text-xs font-bold text-white hover:bg-white/30">${headerCta}</button>
           </div>
         </div>
       </div>
-      
-      <!-- Systems Grid -->
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        ${childCards}
-      </div>
+      <div class="space-y-2.5">${rows}</div>
     </div>
   `;
 }
+
+// ---------- Plans & bundles ----------
+
+let _plansViewFetchedAt = 0;
+function plansEnsureFresh() {
+  if (!isServerModeEnabled() || typeof refreshSubscriptionPlans !== 'function') return;
+  if (Date.now() - _plansViewFetchedAt < 60000) return;
+  _plansViewFetchedAt = Date.now();
+  refreshSubscriptionPlans(true).then(() => { if (state.currentView === 'plans') render(); }).catch(() => {});
+}
+
+function hubServiceName(serviceId) {
+  const svc = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
+  if (!svc) return String(serviceId || '');
+  return state.language === 'ar' ? svc.nameAr : svc.name;
+}
+
+function hubPlanIsActive(plan) {
+  const ids = Array.isArray(plan?.serviceIds) ? plan.serviceIds : [];
+  if (!ids.length) return { active: false, days: null };
+  let minDays = null;
+  for (const sid of ids) {
+    const d = hubDaysLeft(sid);
+    if (d === null) return { active: false, days: null };
+    if (minDays === null || d < minDays) minDays = d;
+  }
+  return { active: true, days: minDays };
+}
+
+function renderPlanRow(plan) {
+  const isRTL = state.language === 'ar';
+  const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
+  const bestValue = plan.badge === 'best_value' || isBundle;
+  const price = Math.max(0, Number(plan.priceMinor) || 0);
+  const { active, days } = hubPlanIsActive(plan);
+  const soon = active && days !== null && days <= 7;
+  const includes = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).map(sid =>
+    `<span class="rounded-full bg-slate-100 dark:bg-slate-800 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">${hubEsc(hubServiceName(sid))}</span>`).join('');
+  return `
+    <div class="hub-card p-4">
+      <div class="flex items-center justify-between gap-2 mb-1">
+        <span class="text-[15px] font-bold text-slate-900 dark:text-white">${hubEsc((isRTL ? plan.nameAr : plan.name) || plan.id)}</span>
+        ${bestValue ? `<span class="rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2.5 py-1 text-[10px] font-extrabold text-white">${hubText('Best value', 'الأفضل قيمة')}</span>` : ''}
+      </div>
+      ${isBundle ? `<div class="flex flex-wrap gap-1.5 my-1.5">${includes}</div>` : `<div class="text-xs text-slate-500 dark:text-slate-400">${hubText('Single service', 'خدمة واحدة')}</div>`}
+      ${Number(plan.savingsPct) > 0 ? `<div class="mt-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${hubText(`Save ${Number(plan.savingsPct)}%`, `وفّر ${Number(plan.savingsPct)}%`)}</div>` : ''}
+      <div class="mt-2.5 flex items-center justify-between gap-3">
+        <span class="text-lg font-black text-slate-900 dark:text-white" dir="ltr">${price > 0 ? hubEsc(hubMoney(price, plan.currency || 'LYD')) : hubText('Free', 'مجاني')} <span class="text-xs font-semibold text-slate-500">${hubEsc(hubPeriodLabel(plan.durationDays))}</span></span>
+        ${active ? hubPill(soon ? hubText(`Expires in ${days} d`, `ينتهي خلال ${days} يوم`) : hubText(`Active · ${days} d`, `نشط · ${days} يوم`), soon ? 'amber' : 'emerald') : ''}
+      </div>
+      <button type="button" onclick="openPlanPaywall('${hubEsc(plan.id)}')" class="touch-target mt-3 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold btn-shine">${active ? hubText('Renew', 'جدّد') : hubText('Subscribe', 'اشترك')}</button>
+    </div>`;
+}
+
+function renderPlansView() {
+  plansEnsureFresh();
+  const plans = (Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [])
+    .filter(p => p && p.id && Array.isArray(p.serviceIds) && p.serviceIds.length)
+    .slice()
+    .sort((a, b) => {
+      // Bundles first (best value), then the catalog order.
+      const bundleDiff = (b.serviceIds.length > 1 ? 1 : 0) - (a.serviceIds.length > 1 ? 1 : 0);
+      return bundleDiff || (Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+    });
+
+  let body = '';
+  if (!isServerModeEnabled()) {
+    body = `
+      <div class="hub-card p-5 text-sm text-slate-600 dark:text-slate-300">
+        <div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Plans need the server connection', 'الباقات تحتاج إلى اتصال الخادم')}</div>
+        ${hubText('In local mode, open a service and subscribe from its card instead.', 'في الوضع المحلي، افتح الخدمة واشترك من بطاقتها.')}
+      </div>`;
+  } else if (!plans.length) {
+    body = `
+      <div class="hub-card p-6 text-center text-sm text-slate-500">
+        <div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        ${hubText('Loading prices…', 'جاري تحميل الأسعار…')}
+        <div class="mt-3"><button type="button" onclick="_plansViewFetchedAt = 0; plansEnsureFresh();" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600 underline">${hubText('Retry', 'إعادة المحاولة')}</button></div>
+      </div>`;
+  } else {
+    body = `<div class="space-y-3">${plans.map(renderPlanRow).join('')}</div>`;
+  }
+
+  return `
+    <div class="hub-shell">
+      ${hubPageHeader(hubText('Plans & bundles', 'الباقات والاشتراكات'))}
+      ${hubWalletCard({ topUp: true })}
+      ${body}
+      ${isCurrentUserAdmin() && isServerModeEnabled() ? `
+        <p class="mt-5 text-center text-xs text-slate-500 dark:text-slate-400">
+          ${hubText('Prices are set in Control Center → Plan manager.', 'تُضبط الأسعار من مركز التحكم ← إدارة الباقات.')}
+        </p>` : ''}
+    </div>
+  `;
+}
+
+// Opens the paywall sheet with this plan pre-selected. The modal fetches a
+// fresh catalog before any purchase — the row on screen is never trusted.
+function openPlanPaywall(planId) {
+  const pid = String(planId || '');
+  const plan = (Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : []).find(p => p && String(p.id) === pid);
+  if (!plan || !Array.isArray(plan.serviceIds) || !plan.serviceIds.length) return;
+  const primary = plan.serviceIds[0];
+  showSubscriptionModal(primary, primary, pid);
+}
+
+// ---------- Charge wallet ----------
+
+const _chargeWallet = { amountText: '50', currency: 'LYD', method: '', busy: false, created: null };
+let _walletPayMethods = null;
+let _walletPayRate = null;
+let _walletPayMethodsBusy = false;
+
+function hubOpenChargeWallet() {
+  _chargeWallet.created = null;
+  navigateTo('charge-wallet');
+}
+
+function ensureWalletPayMethods() {
+  if (!isServerModeEnabled() || _walletPayMethods !== null || _walletPayMethodsBusy) return;
+  if (typeof apiWalletPaymentMethods !== 'function') return;
+  _walletPayMethodsBusy = true;
+  apiWalletPaymentMethods().then(catalog => {
+    _walletPayMethods = Array.isArray(catalog?.methods) ? catalog.methods : [];
+    _walletPayRate = catalog?.rate || null;
+  }).catch(() => {
+    _walletPayMethods = [];
+  }).finally(() => {
+    _walletPayMethodsBusy = false;
+    if (state.currentView === 'charge-wallet') render();
+  });
+}
+
+function chargeWalletAmountMinor() {
+  const major = parseFloat(String(_chargeWallet.amountText || '').replace(/,/g, ''));
+  if (!Number.isFinite(major) || major <= 0) return 0;
+  return Math.round(major * 100);
+}
+
+function chargeWalletSetAmount(value) {
+  _chargeWallet.amountText = String(value);
+  render();
+}
+
+function chargeWalletAmountInput(el) {
+  if (typeof sanitizeMoneyInput === 'function') sanitizeMoneyInput(el);
+  _chargeWallet.amountText = String(el.value || '');
+  const preview = document.getElementById('charge-wallet-amount-display');
+  if (preview) preview.textContent = _chargeWallet.amountText || '0';
+}
+
+function chargeWalletSetCurrency(currency) {
+  _chargeWallet.currency = currency === 'USD' ? 'USD' : 'LYD';
+  render();
+}
+
+function chargeWalletPickMethod(id) {
+  _chargeWallet.method = String(id || '');
+  render();
+}
+
+function _walletPayMethodById(id) {
+  return (Array.isArray(_walletPayMethods) ? _walletPayMethods : []).find(m => m && String(m.id) === String(id)) || null;
+}
+
+function chargeWalletInstructions(created) {
+  const d = created && created.data ? created.data : (created || {});
+  const entry = _walletPayMethodById(d.method);
+  const isAr = state.language === 'ar';
+  const template = entry && entry.instructions ? String(isAr ? entry.instructions.ar : entry.instructions.en) : '';
+  if (!template) {
+    return hubText(
+      `Pay with reference ${d.reference || ''} — the wallet fills up as soon as the payment is confirmed.`,
+      `ادفع بذكر الرمز ${d.reference || ''} — تتعبأ المحفظة فور تأكيد الدفع.`
+    );
+  }
+  return template
+    .split('{reference}').join(String(d.reference || ''))
+    .split('{amountLYD}').join(d.amountMinorLYD ? (d.amountMinorLYD / 100).toFixed(2) : '—')
+    .split('{amountUSD}').join(String(d.currency || 'USD') === 'USD' ? (Number(d.amountMinor || 0) / 100).toFixed(2) : '—')
+    .split('{rate}').join(String(d.lydRate || ''));
+}
+
+async function chargeWalletCreateRequest() {
+  if (_chargeWallet.busy) return;
+  const amountMinor = chargeWalletAmountMinor();
+  const currency = _chargeWallet.currency;
+  if (amountMinor < 100) {
+    showNotification(hubText('Invalid amount', 'مبلغ غير صالح'), hubText(`Minimum charge is 1.00 ${currency}`, `أقل مبلغ للشحن هو 1.00 ${currency}`), 'error');
+    return;
+  }
+  if (!_chargeWallet.method || !_walletPayMethodById(_chargeWallet.method)) {
+    showNotification(hubText('Pick a payment method', 'اختر طريقة الدفع'), hubText('Choose how you will pay, then create the request.', 'اختر كيف ستدفع ثم أنشئ الطلب.'), 'warning');
+    return;
+  }
+  _chargeWallet.busy = true;
+  render();
+  try {
+    const idem = `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`;
+    const created = await apiWalletPaymentRequestCreate(amountMinor, _chargeWallet.method, idem, currency);
+    _chargeWallet.created = created && created.data ? created.data : created;
+    showNotification(hubText('Request created', 'تم إنشاء الطلب'), chargeWalletInstructions(_chargeWallet.created), 'success');
+  } catch (e) {
+    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
+    showNotification(hubText('Could not create the request', 'تعذر إنشاء الطلب'), String(detail), 'error');
+  } finally {
+    _chargeWallet.busy = false;
+    render();
+  }
+}
+
+function renderChargeWalletView() {
+  const isRTL = state.language === 'ar';
+  ensureWalletPayMethods();
+
+  if (!isServerModeEnabled()) {
+    return `
+      <div class="hub-shell">
+        ${hubPageHeader(hubText('Charge wallet', 'اشحن المحفظة'))}
+        <div class="hub-card p-5 text-sm text-slate-600 dark:text-slate-300">
+          <div class="font-bold text-slate-900 dark:text-white mb-1">${hubText('Local mode', 'الوضع المحلي')}</div>
+          ${hubText('Charge requests need the server connection. In local mode an Admin can add balance from the Wallet screen.', 'طلبات الشحن تحتاج إلى اتصال الخادم. في الوضع المحلي يمكن للمدير إضافة رصيد من شاشة المحفظة.')}
+          <button type="button" onclick="navigateTo('wallet')" class="touch-target mt-4 w-full min-h-12 rounded-xl bg-slate-200 dark:bg-slate-700 font-bold text-slate-800 dark:text-white">${t('wallet')}</button>
+        </div>
+      </div>`;
+  }
+
+  const created = _chargeWallet.created;
+  if (created) {
+    const amountLabel = walletFormatMinor(Number(created.amountMinor || 0), created.currency || 'USD');
+    const methodEntry = _walletPayMethodById(created.method);
+    const methodName = methodEntry ? String((isRTL ? methodEntry.name?.ar : methodEntry.name?.en) || created.method) : String(created.method || '');
+    return `
+      <div class="hub-shell">
+        ${hubPageHeader(hubText('Charge wallet', 'اشحن المحفظة'))}
+        <div class="hub-card p-6 text-center">
+          <span class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300"><i data-lucide="check" class="w-8 h-8"></i></span>
+          <div class="text-xl font-extrabold text-slate-900 dark:text-white">${hubText('Request created', 'تم إنشاء الطلب')}</div>
+          <div class="mt-1 text-sm text-slate-500 dark:text-slate-400">${hubText('The wallet fills as soon as the payment is confirmed', 'تتعبأ المحفظة فور تأكيد الدفع')}</div>
+          <div class="mt-5 rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 text-sm text-start">
+            <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('Reference', 'الرمز المرجعي')}</span><span class="font-mono font-extrabold text-slate-900 dark:text-white" dir="ltr">${hubEsc(created.reference || '')}</span></div>
+            <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${t('amount')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(amountLabel)}</span></div>
+            ${created.amountMinorLYD && String(created.currency || 'USD') !== 'LYD' ? `<div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('In LYD', 'بالدينار')}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${hubEsc(walletFormatMinor(Number(created.amountMinorLYD || 0), 'LYD'))}</span></div>` : ''}
+            <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${hubText('Method', 'طريقة الدفع')}</span><span class="font-bold text-slate-900 dark:text-white">${hubEsc(methodName)}</span></div>
+          </div>
+          <p class="mt-4 text-sm text-slate-600 dark:text-slate-300 text-start leading-6">${hubEsc(chargeWalletInstructions(created))}</p>
+          <button type="button" onclick="navigateTo('wallet')" class="touch-target mt-5 w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold btn-shine">${hubText('View wallet', 'عرض المحفظة')}</button>
+          <button type="button" onclick="_chargeWallet.created = null; render();" class="touch-target mt-2 w-full min-h-12 rounded-xl bg-slate-100 dark:bg-slate-800 font-bold text-slate-700 dark:text-slate-200">${hubText('New request', 'طلب جديد')}</button>
+        </div>
+      </div>`;
+  }
+
+  const methods = Array.isArray(_walletPayMethods) ? _walletPayMethods : [];
+  if (methods.length && !_walletPayMethodById(_chargeWallet.method)) _chargeWallet.method = String(methods[0].id || '');
+  const quick = [50, 100, 250];
+  const currency = _chargeWallet.currency;
+  const methodIcons = { bank_transfer: 'landmark', card: 'credit-card', qr: 'qr-code' };
+  const rateNote = currency === 'USD' && _walletPayRate && _walletPayRate.usdToLyd
+    ? `<div class="mt-2 text-center text-xs text-slate-500 dark:text-slate-400" dir="ltr">1 USD ≈ ${hubEsc(_walletPayRate.usdToLyd)} LYD</div>`
+    : '';
+
+  return `
+    <div class="hub-shell">
+      ${hubPageHeader(hubText('Charge wallet', 'اشحن المحفظة'))}
+
+      <div class="text-center mt-2 mb-4">
+        <div class="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400 mb-2">${t('amount')}</div>
+        <div class="flex items-end justify-center gap-2" dir="ltr">
+          <span id="charge-wallet-amount-display" class="text-5xl font-black tracking-tight text-slate-900 dark:text-white">${hubEsc(_chargeWallet.amountText || '0')}</span>
+          <span class="mb-2 text-lg font-semibold text-slate-500">${currency}</span>
+        </div>
+        <label class="sr-only" for="charge-wallet-amount">${t('amount')}</label>
+        <input id="charge-wallet-amount" type="text" inputmode="decimal" value="${hubEsc(_chargeWallet.amountText)}" oninput="chargeWalletAmountInput(this)" class="mt-3 mx-auto block w-40 glass-input rounded-xl px-4 py-2.5 text-center text-lg font-bold" placeholder="0" dir="ltr" />
+        ${rateNote}
+      </div>
+
+      <div class="flex justify-center gap-2 mb-5">
+        ${quick.map(q => `<button type="button" onclick="chargeWalletSetAmount(${q})" class="touch-target min-h-10 rounded-full px-5 text-[13px] font-bold ${String(_chargeWallet.amountText) === String(q) ? 'bg-blue-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200'}">${q}</button>`).join('')}
+      </div>
+
+      <div class="hub-section-title">${hubText('Currency', 'العملة')}</div>
+      <div class="grid grid-cols-2 gap-2 mb-5">
+        ${['LYD', 'USD'].map(c => `<button type="button" onclick="chargeWalletSetCurrency('${c}')" class="touch-target min-h-11 rounded-xl text-sm font-bold ${currency === c ? 'bg-blue-600 text-white' : 'hub-card text-slate-700 dark:text-slate-200'}">${c === 'LYD' ? hubText('LYD · services', 'دينار · الخدمات') : hubText('USD · ads', 'دولار · الإعلانات')}</button>`).join('')}
+      </div>
+
+      <div class="hub-section-title">${hubText('Method', 'طريقة الدفع')}</div>
+      ${methods.length ? `
+        <div class="grid grid-cols-3 gap-2 mb-6">
+          ${methods.map(m => {
+            const picked = String(m.id) === _chargeWallet.method;
+            const name = String((isRTL ? m.name?.ar : m.name?.en) || m.id || '');
+            return `<button type="button" onclick="chargeWalletPickMethod('${hubEsc(m.id)}')" class="touch-target flex min-h-16 flex-col items-center justify-center gap-1.5 rounded-2xl px-2 py-3 text-xs font-bold ${picked ? 'bg-blue-600 text-white shadow-md' : 'hub-card text-slate-700 dark:text-slate-200'}" aria-pressed="${picked}"><i data-lucide="${hubEsc(m.icon || methodIcons[String(m.id)] || 'wallet')}" class="w-5 h-5"></i><span class="text-center leading-tight">${hubEsc(name)}</span></button>`;
+          }).join('')}
+        </div>` : `
+        <div class="hub-card p-4 mb-6 text-sm text-slate-500">
+          ${_walletPayMethodsBusy || _walletPayMethods === null
+            ? hubText('Loading payment methods…', 'جاري تحميل طرق الدفع…')
+            : hubText('Payment methods did not load — check your connection and retry.', 'لم يتم تحميل طرق الدفع — تأكد من الاتصال ثم أعد المحاولة.')}
+          ${_walletPayMethods !== null && !_walletPayMethodsBusy ? `<button type="button" onclick="_walletPayMethods = null; ensureWalletPayMethods();" class="touch-target ms-2 min-h-10 px-2 text-xs font-bold text-blue-600 underline">${hubText('Retry', 'إعادة المحاولة')}</button>` : ''}
+        </div>`}
+
+      <button type="button" onclick="chargeWalletCreateRequest()" ${_chargeWallet.busy || !methods.length ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-base font-bold btn-shine">
+        ${_chargeWallet.busy ? hubText('Creating…', 'جاري الإنشاء…') : hubText('Create charge request', 'إنشاء طلب شحن')}
+      </button>
+      <p class="mt-3 text-center text-xs text-slate-500 dark:text-slate-400">${hubText('You get a reference code; the wallet fills up the moment the payment is confirmed.', 'ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع.')}</p>
+    </div>
+  `;
+}
+
+// ---------- Service placeholder ----------
 
 function renderServicePlaceholder() {
   const serviceId = state.viewData?.serviceId || state.modalData?.serviceId || '';
   const service = SERVICES[serviceId] || SMART_SYSTEMS_CHILDREN[serviceId];
   const isRTL = state.language === 'ar';
-  
+
   if (!service) {
     return `<div class="text-center py-12"><p class="text-slate-500">${isRTL ? 'الخدمة غير موجودة' : 'Service not found'}</p></div>`;
   }
-  
+
   const serviceName = isRTL ? service.nameAr : service.name;
   const serviceDesc = isRTL ? service.descriptionAr : service.description;
-  
+
   return `
-    <div class="max-w-4xl mx-auto">
-      <!-- Back Button -->
-      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
-        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
-      </button>
-      
-      <!-- Placeholder Content -->
-      <div class="glass-panel p-12 rounded-3xl text-center">
-        <div class="w-24 h-24 rounded-3xl bg-gradient-to-br ${service.color} flex items-center justify-center mx-auto mb-6 shadow-2xl">
-          <i data-lucide="${service.icon}" class="w-12 h-12 text-white"></i>
+    <div class="hub-shell">
+      ${hubPageHeader(hubEsc(serviceName))}
+      <div class="hub-card p-10 text-center">
+        <div class="w-20 h-20 rounded-3xl bg-gradient-to-br ${service.color} flex items-center justify-center mx-auto mb-5 shadow-xl">
+          <i data-lucide="${service.icon}" class="w-10 h-10 text-white"></i>
         </div>
-        
-        <h1 class="text-3xl font-bold text-slate-800 dark:text-white mb-3">${serviceName}</h1>
-        <p class="text-lg text-slate-500 dark:text-slate-400 mb-8">${serviceDesc}</p>
-        
+        <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">${hubEsc(serviceName)}</h2>
+        <p class="text-slate-500 dark:text-slate-400 mb-6">${hubEsc(serviceDesc)}</p>
         ${service.comingSoon ? `
-          <div class="inline-flex items-center space-x-3 px-6 py-3 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-white font-bold shadow-lg">
+          <div class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-white font-bold shadow-lg">
             <i data-lucide="clock" class="w-5 h-5"></i>
             <span>${isRTL ? 'قريباً' : 'Coming Soon'}</span>
           </div>
@@ -22088,6 +22863,8 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
   }
 }
 
+// ---------- Wallet ----------
+
 function renderWalletView() {
   const isRTL = state.language === 'ar';
   const uid = String(state.currentUser?.id || '');
@@ -22101,8 +22878,8 @@ function renderWalletView() {
     }
   }
   const balancesHtml = balances.length
-    ? balances.map(({ c, m }) => `<div class="text-sm font-black text-slate-800 dark:text-white">${walletFormatMinor(m, c)}</div>`).join('')
-    : `<div class="text-sm font-black text-slate-800 dark:text-white">${walletFormatMinor(0, WALLET.currency)}</div>`;
+    ? balances.map(({ c, m }) => `<div class="text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(m, c)}</div>`).join('')
+    : `<div class="text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(0, WALLET.currency)}</div>`;
   const currencyOptions = WALLET_SUPPORTED_CURRENCIES
     .map(c => `<option value="${c}" ${c === WALLET.currency ? 'selected' : ''}>${c}</option>`)
     .join('');
@@ -22142,7 +22919,7 @@ function renderWalletView() {
           <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
-        <div class="text-right font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}">
+        <div class="text-end font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
           ${isIn ? '+' : '-'}${Security.escapeHtml(amountStr)}
         </div>
       </div>
@@ -22176,7 +22953,7 @@ function renderWalletView() {
           <div class="text-xs text-slate-500 dark:text-slate-400">
             ${exp ? (isRTL ? `مدفوع حتى: ${Security.escapeHtml(exp)}` : `Paid until: ${Security.escapeHtml(exp)}`) : ''}
           </div>
-          <button onclick="cancelSubscriptionFromUi('${Security.escapeHtml(row.serviceId)}', ${daysLeft}, '${Security.escapeHtml(exp)}')" class="text-xs font-bold text-rose-600 hover:text-rose-700 bg-rose-50 dark:bg-rose-900/20 px-3 py-1.5 rounded-lg">
+          <button onclick="cancelSubscriptionFromUi('${Security.escapeHtml(row.serviceId)}', ${daysLeft}, '${Security.escapeHtml(exp)}')" class="touch-target min-h-10 text-xs font-bold text-rose-600 hover:text-rose-700 bg-rose-50 dark:bg-rose-900/20 px-3 py-1.5 rounded-lg">
             ${isRTL ? 'إلغاء' : 'Cancel'}
           </button>
         </div>
@@ -22185,30 +22962,23 @@ function renderWalletView() {
   }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-4 text-center">${isRTL ? 'لا توجد اشتراكات نشطة' : 'No active subscriptions'}</div>`;
 
   return `
-    <div class="max-w-6xl mx-auto">
-      <button onclick="navigateTo('services-hub')" class="mb-6 flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-medium">
-        <i data-lucide="${isRTL ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
-        <span>${isRTL ? 'العودة للخدمات' : 'Back to Services'}</span>
-      </button>
+    <div class="hub-shell hub-shell-wide">
+      ${hubPageHeader(t('wallet'))}
 
-      <div class="mb-8 flex items-center justify-between gap-4 flex-wrap">
-        <div class="flex items-center gap-4">
-          <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-xl">
-            <i data-lucide="wallet" class="w-7 h-7 text-white"></i>
-          </div>
-          <div>
-            <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('wallet')}</h1>
-            <p class="text-slate-500 dark:text-slate-400">${isRTL ? 'محفظتك واشتراكاتك' : 'Your balance and subscriptions'}</p>
-          </div>
+      <div class="hub-card p-4 mb-5 flex flex-wrap items-center gap-4">
+        <span class="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-md flex-shrink-0"><i data-lucide="wallet" class="w-6 h-6 text-white"></i></span>
+        <div class="flex-1 min-w-0">
+          <div class="text-xs text-slate-500 dark:text-slate-400">${t('balance')}</div>
+          <div class="space-y-0.5 mt-0.5">${balancesHtml}</div>
         </div>
-        <div class="glass-panel px-5 py-3 rounded-2xl">
-          <div class="text-xs text-slate-500 dark:text-slate-400 mb-1">${t('balance')}</div>
-          <div class="space-y-1 mt-1">${balancesHtml}</div>
+        <div class="flex w-full sm:w-auto gap-2">
+          ${isServerModeEnabled() ? `<button type="button" onclick="hubOpenChargeWallet()" class="touch-target flex-1 sm:flex-none min-h-11 rounded-xl bg-blue-600 hover:bg-blue-700 px-4 text-sm font-bold text-white btn-shine">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>` : ''}
+          <button type="button" onclick="navigateTo('plans')" class="touch-target flex-1 sm:flex-none min-h-11 rounded-xl bg-slate-100 dark:bg-slate-800 px-4 text-sm font-bold text-slate-700 dark:text-slate-200">${isRTL ? 'الباقات' : 'Plans & bundles'}</button>
         </div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-        <div class="glass-panel p-6 rounded-2xl">
+        <div class="hub-card p-6">
           <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('transfer')}</h3>
           <div class="space-y-4">
             <div>
@@ -22231,8 +23001,8 @@ function renderWalletView() {
                 <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
               </div>
             </div>
-            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="w-full btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
-              <i data-lucide="send" class="w-4 h-4 inline mr-2"></i>${t('send')}
+            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="touch-target w-full min-h-12 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
+              <i data-lucide="send" class="w-4 h-4 inline me-2"></i>${t('send')}
             </button>
             <div class="text-[11px] text-slate-400">
               ${isRTL ? 'ملاحظة: في الوضع المحلي، هذا للعرض والتجربة فقط.' : 'Note: In local mode this is for testing/demo only.'}
@@ -22241,16 +23011,16 @@ function renderWalletView() {
         </div>
 
         ${isAdmin ? (isServerModeEnabled() ? `
-          <div class="glass-panel p-6 rounded-2xl">
+          <div class="hub-card p-6">
             <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-2">${t('topUp')}</h3>
             <p class="text-sm text-slate-500 dark:text-slate-400">
               ${isRTL
-                ? 'في وضع السيرفر: شحن الرصيد يتم فقط عبر قنوات التمويل الخارجية (البنك/المعالج) وليس يدوياً.'
-                : 'In server mode: top-ups must come from external funding rails (bank/processor), not manual admin credits.'}
+                ? 'في وضع السيرفر: شحن الرصيد يتم فقط عبر قنوات التمويل الخارجية (البنك/المعالج) وليس يدوياً. أنشئ طلب شحن من زر "اشحن المحفظة".'
+                : 'In server mode: top-ups must come from external funding rails (bank/processor), not manual admin credits. Create a charge request with the "Charge wallet" button.'}
             </p>
           </div>
         ` : `
-          <div class="glass-panel p-6 rounded-2xl">
+          <div class="hub-card p-6">
             <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${t('topUp')} (${isRTL ? 'أدمن' : 'Admin'})</h3>
             <div class="space-y-4">
               <div>
@@ -22273,23 +23043,23 @@ function renderWalletView() {
                   <input id="wallet-topup-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
                 </div>
               </div>
-              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="w-full btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
-                <i data-lucide="plus" class="w-4 h-4 inline mr-2"></i>${t('topUp')}
+              <button id="wallet-topup-submit" onclick="walletTopUpFromUi()" class="touch-target w-full min-h-12 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 disabled:opacity-50" type="button">
+                <i data-lucide="plus" class="w-4 h-4 inline me-2"></i>${t('topUp')}
               </button>
             </div>
           </div>
         `) : `
-          <div class="glass-panel p-6 rounded-2xl">
+          <div class="hub-card p-6">
             <h3 class="text-lg font-bold text-slate-800 dark:text-white mb-4">${isRTL ? 'الاشتراكات' : 'Subscriptions'}</h3>
             ${subsRows}
-            <button onclick="navigateTo('services-hub')" class="mt-4 w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
+            <button onclick="navigateTo('services-hub')" class="touch-target mt-4 w-full min-h-12 bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
               ${isRTL ? 'إدارة الخدمات' : 'Manage services'}
             </button>
           </div>
         `}
       </div>
 
-      <div class="glass-panel p-6 rounded-2xl">
+      <div class="hub-card p-6">
         <div class="flex items-center justify-between mb-4">
           <h3 class="text-lg font-bold text-slate-800 dark:text-white">${t('transactions')}</h3>
           <div class="text-xs text-slate-500 dark:text-slate-400">${isAdmin ? (isRTL ? 'آخر 50 (الكل)' : 'Latest 50 (all)') : (isRTL ? 'آخر 50 (لك فقط)' : 'Latest 50 (yours)')}</div>
@@ -22300,10 +23070,12 @@ function renderWalletView() {
   `;
 }
 
+// ---------- Navigation handlers ----------
+
 function handleServiceClick(serviceId) {
   const service = SERVICES[serviceId];
   if (!service) return;
-  
+
   if (service.comingSoon) {
     showNotification(
       state.language === 'ar' ? 'قريباً' : 'Coming Soon',
@@ -22312,7 +23084,7 @@ function handleServiceClick(serviceId) {
     );
     return;
   }
-  
+
   const access = checkServiceAccess(serviceId);
   if (!access.allowed) {
     if (access.reason === 'not_subscribed') {
@@ -22320,12 +23092,12 @@ function handleServiceClick(serviceId) {
       return;
     }
   }
-  
+
   // Navigate to service
   const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
   state.currentView = targetView;
   state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
-  
+
   saveState();
   render();
 }
@@ -22333,7 +23105,7 @@ function handleServiceClick(serviceId) {
 function handleSmartSystemClick(systemId) {
   const system = SMART_SYSTEMS_CHILDREN[systemId];
   if (!system) return;
-  
+
   if (system.comingSoon) {
     showNotification(
       state.language === 'ar' ? 'قريباً' : 'Coming Soon',
@@ -22342,7 +23114,7 @@ function handleSmartSystemClick(systemId) {
     );
     return;
   }
-  
+
   const access = checkServiceAccess(systemId);
   if (!access.allowed) {
     if (access.reason === 'not_subscribed') {
@@ -22365,6 +23137,121 @@ function handleSmartSystemClick(systemId) {
   state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
   saveState();
   render();
+}
+// ==========================================
+// ADMIN TOOLS LAZY LOADER (main bundle)
+// ==========================================
+// The Control Center and the merge tools (page / ad / merge-all dialogs) are
+// Admin-only and ship as their own bundle (admin-tools.js, see
+// src/manifest.json "lazy") so the startup bundle keeps its 2.4 MiB budget.
+// This loader stays in the main bundle: it fetches admin-tools.js once, is
+// kicked as soon as an Admin session renders (so the tools are ready before
+// the first tap), shows a bilingual loading/retry card for the Control Center
+// meanwhile, and re-renders when the bundle arrives. Every cross-bundle call
+// site is guarded with `typeof fn === 'function'`, so a slow network never
+// throws — the merge buttons simply appear once the bundle is in.
+
+let _adminToolsBundlePromise = null;
+let _adminToolsBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
+// After a failed download the automatic warm-up backs off for a while so a
+// missing/offline bundle never turns every render into a new request storm.
+let _adminToolsLastFailureAt = 0;
+const _ADMIN_TOOLS_RETRY_COOLDOWN_MS = 30000;
+
+function _adminToolsBundleUrl() {
+  // Derive from the script tag that provably loaded: correct under any base
+  // path, Capacitor (capacitor://localhost), and any static host. Version with
+  // the main bundle's ?v= (same deploy = same version) when present.
+  try {
+    const tags = document.querySelectorAll('script[src]');
+    for (let i = 0; i < tags.length; i++) {
+      const src = String(tags[i].src || '');
+      if (/script(\.min)?\.js(\?|$)/.test(src)) {
+        const parts = src.split('?');
+        const base = parts[0].replace(/script(\.min)?\.js$/, 'admin-tools.js');
+        return parts[1] ? base + '?' + parts[1] : base;
+      }
+    }
+  } catch (_) {}
+  return 'admin-tools.js';
+}
+
+function adminToolsBundleReady() {
+  return typeof renderControlCenterView === 'function' && typeof showPageMergeDialog === 'function';
+}
+
+// Views whose HTML changes once the bundle exists (merge buttons, Control Center).
+const _ADMIN_TOOLS_VIEWS = new Set(['control-center', 'ads', 'pages', 'customers']);
+
+function ensureAdminToolsLoaded() {
+  if (adminToolsBundleReady()) {
+    _adminToolsBundleState = 'ready';
+    return Promise.resolve();
+  }
+  if (_adminToolsBundlePromise) return _adminToolsBundlePromise;
+  _adminToolsBundleState = 'loading';
+  _adminToolsBundlePromise = new Promise((resolve) => {
+    const tag = document.createElement('script');
+    tag.src = _adminToolsBundleUrl();
+    tag.onload = () => {
+      _adminToolsBundleState = adminToolsBundleReady() ? 'ready' : 'failed';
+      if (_adminToolsBundleState === 'ready' && _ADMIN_TOOLS_VIEWS.has(String(state.currentView || ''))) {
+        try { render(); } catch (_) {}
+      }
+      resolve();
+    };
+    tag.onerror = () => {
+      // A failed classic script created no bindings: retry is safe.
+      try { tag.remove(); } catch (_) {}
+      _adminToolsBundleState = 'failed';
+      _adminToolsBundlePromise = null;
+      _adminToolsLastFailureAt = Date.now();
+      try { if (state.currentView === 'control-center') render(); } catch (_) {}
+      resolve();
+    };
+    document.head.appendChild(tag);
+  });
+  return _adminToolsBundlePromise;
+}
+
+function retryAdminToolsLoad() {
+  _adminToolsBundleState = 'unloaded';
+  _adminToolsBundlePromise = null;
+  _adminToolsLastFailureAt = 0;
+  ensureAdminToolsLoaded();
+  render();
+}
+
+// Called from renderView(): Admins get the bundle warmed on their first render.
+function preloadAdminToolsForCurrentUser() {
+  try {
+    if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return;
+    if (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin()) ensureAdminToolsLoaded();
+  } catch (_) {}
+}
+
+function renderAdminToolsLoadingState() {
+  const isAr = state.language === 'ar';
+  if (_adminToolsBundleState === 'failed') {
+    return `
+      <div class="max-w-md mx-auto mt-16 glass-panel rounded-2xl p-8 text-center" dir="${isAr ? 'rtl' : 'ltr'}">
+        <i data-lucide="cloud-off" class="w-10 h-10 mx-auto text-slate-400 mb-3"></i>
+        <p class="font-bold text-slate-800 dark:text-white">${isAr ? 'تعذر تحميل مركز التحكم' : "Couldn't load the Control Center"}</p>
+        <p class="text-sm text-slate-500 mt-1">${isAr ? 'تحقق من الاتصال ثم أعد المحاولة.' : 'Check your connection and try again.'}</p>
+        <button onclick="retryAdminToolsLoad()" class="touch-target mt-4 min-h-11 px-5 py-2.5 rounded-xl font-bold text-white bg-blue-600 hover:bg-blue-700">${isAr ? 'إعادة المحاولة' : 'Retry'}</button>
+      </div>`;
+  }
+  return `
+    <div class="max-w-md mx-auto mt-16 glass-panel rounded-2xl p-8 text-center" dir="${isAr ? 'rtl' : 'ltr'}">
+      <div class="w-8 h-8 mx-auto mb-3 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+      <p class="text-sm text-slate-500">${isAr ? 'جاري تحميل مركز التحكم…' : 'Loading the Control Center…'}</p>
+    </div>`;
+}
+
+// Boot kick: a Control Center deep link downloads the bundle in parallel with
+// init()'s storage work instead of waiting for the first render.
+if (/^\/control-center(\/|$)/.test(window.location.pathname || '')) {
+  try { ensureAdminToolsLoaded(); } catch (_) {}
 }
 // ==========================================
 // ANALYTICS BREAKDOWNS + META PROFIT LEDGER
@@ -22898,390 +23785,6 @@ if (typeof document !== 'undefined') {
     if (document.getElementById('dollar-purchase-dialog')) closeDollarPurchaseManager();
     else if (document.getElementById('analytics-breakdown-dialog')) closeAnalyticsBreakdown();
   });
-}
-// ==========================================
-// DAILY CONTROL CENTER (ADMIN)
-// ==========================================
-// A small operational cockpit: it does not change accounting automatically.
-// It points the owner to incomplete work, verifies infrastructure readiness,
-// and exposes the audited month-close / encrypted-backup controls.
-
-let _controlCenter = {
-  loading: false,
-  loadedAt: 0,
-  operations: null,
-  meta: null,
-  error: '',
-  period: ''
-};
-
-function controlCenterPreviousMonth() {
-  const now = new Date();
-  const value = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}`;
-}
-
-function controlCenterMoney(value) {
-  const number = Number(value || 0);
-  return Number.isFinite(number) ? number.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '0.00';
-}
-
-function controlCenterTimestamp(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number) || number <= 0) return 'Never';
-  try { return new Date(number).toLocaleString(); } catch (_) { return 'Never'; }
-}
-
-function getControlCenterFacts() {
-  const ads = getVisibleRecords(state.ads || []);
-  const receipts = getVisibleRecords(state.receipts || []);
-  const setupAds = ads.filter(ad => {
-    if (typeof isMetaAdSetupPending === 'function' && isMetaAdSetupPending(ad)) return true;
-    return !String(ad.customerId || '').trim() || Number(ad.amountUSD || 0) <= 0 || !String(ad.paymentStatus || '').trim();
-  });
-  const unpaidReceipts = receipts.filter(receipt => {
-    if (String(receipt.receiptType || '').toUpperCase() === 'TRANSFER_IN') return false;
-    // Canceled/Lost/Destroyed receipts are settled history, not money the
-    // owner still needs to chase — they must not inflate the attention count.
-    if (getReceiptPaymentState(receipt) !== 'not_paid') return false;
-    return true;
-  });
-  const metaFailures = ads.filter(ad => String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim());
-  let snapshot = null;
-  try { snapshot = typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null; } catch (_) {}
-  return {
-    ads,
-    receipts,
-    setupAds,
-    unpaidReceipts,
-    metaFailures,
-    snapshot,
-    attentionCount: setupAds.length + unpaidReceipts.length + metaFailures.length + ((snapshot?.unpricedSpendUSD || 0) > 0.005 ? 1 : 0)
-  };
-}
-
-async function loadControlCenterStatus(force = false) {
-  if (_controlCenter.loading) return;
-  if (!force && _controlCenter.loadedAt && Date.now() - _controlCenter.loadedAt < 60000) return;
-  _controlCenter.loading = true;
-  _controlCenter.error = '';
-  if (state.currentView === 'control-center') RenderQueue.schedule('control-center-loading');
-  try {
-    const [operations, meta] = await Promise.allSettled([apiOperationsStatus(), apiMetaAdsStatus()]);
-    const errors = [];
-    if (operations.status === 'fulfilled') _controlCenter.operations = operations.value;
-    else errors.push(`Operations: ${String(operations.reason?.message || 'unavailable')}`);
-    if (meta.status === 'fulfilled') _controlCenter.meta = meta.value;
-    else errors.push(`Meta: ${String(meta.reason?.message || 'unavailable')}`);
-    _controlCenter.error = errors.join(' | ');
-    _controlCenter.loadedAt = Date.now();
-  } catch (error) {
-    _controlCenter.error = String(error?.message || 'Could not load the server checks');
-  } finally {
-    _controlCenter.loading = false;
-    if (state.currentView === 'control-center') RenderQueue.schedule('control-center-loaded');
-  }
-}
-
-function refreshControlCenter() {
-  _controlCenter.loadedAt = 0;
-  loadControlCenterStatus(true);
-}
-
-function controlCenterOpenAds(mode) {
-  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
-  if (mode === 'setup') state.adFilters.payment = 'pending_setup';
-  if (mode === 'unpaid') state.adFilters.payment = 'not_paid';
-  navigateTo('ads');
-}
-
-function controlCenterOpenReceipts() {
-  state.receiptStatusFilter = 'unpaid';
-  state.receiptPaymentFilter = 'all';
-  navigateTo('receipts');
-}
-
-async function previewControlCenterMonth() {
-  const input = document.getElementById('control-center-period');
-  const period = String(input?.value || _controlCenter.period || controlCenterPreviousMonth());
-  try {
-    const preview = await apiPreviewFinancialPeriod(period);
-    const totals = preview?.totals || {};
-    const blockers = Array.isArray(preview?.blockers) ? preview.blockers : [];
-    const message = [
-      `Receipts: $${controlCenterMoney(totals.receiptVolumeUSD)}`,
-      `Ad sales: $${controlCenterMoney(totals.adSalesUSD)}`,
-      `Meta spend: $${controlCenterMoney(totals.metaSpendUSD)}`,
-      blockers.length ? `Problems to review: ${blockers.map(item => `${item.message} (${item.count})`).join(', ')}` : 'No closing problems found.'
-    ].join('\n');
-    window.alert(message);
-  } catch (error) {
-    showNotification('Month check failed', String(error?.message || error), 'error');
-  }
-}
-
-async function closeControlCenterMonth() {
-  const period = String(document.getElementById('control-center-period')?.value || controlCenterPreviousMonth());
-  try {
-    const preview = await apiPreviewFinancialPeriod(period);
-    const blockers = Array.isArray(preview?.blockers) ? preview.blockers : [];
-    let forceReason = '';
-    if (blockers.length) {
-      const blockerText = blockers.map(item => `${item.message} (${item.count})`).join('\n');
-      forceReason = window.prompt(`This month has items to review:\n${blockerText}\n\nFix them first, or type a clear reason (at least 10 characters) to close anyway:`) || '';
-      if (forceReason.trim().length < 10) return;
-    } else if (!window.confirm(`Close ${period}? After closing, its receipts, ads, and dollar purchases cannot be changed.`)) return;
-    await apiCloseFinancialPeriod(period, forceReason);
-    showNotification('Month closed safely', `${period} is now protected from changes.`, 'success');
-    await loadControlCenterStatus(true);
-  } catch (error) {
-    showNotification('Could not close month', String(error?.message || error), 'error');
-  }
-}
-
-async function unlockControlCenterMonth(period) {
-  const reason = window.prompt(`Why must ${period} be unlocked? This action is recorded in the audit log.`) || '';
-  if (reason.trim().length < 10) {
-    showNotification('Reason required', 'Please write at least 10 characters.', 'warning');
-    return;
-  }
-  try {
-    await apiUnlockFinancialPeriod(period, reason);
-    showNotification('Month unlocked', `${period} can be corrected now. Close it again when finished.`, 'success');
-    await loadControlCenterStatus(true);
-  } catch (error) {
-    showNotification('Could not unlock month', String(error?.message || error), 'error');
-  }
-}
-
-async function runControlCenterBackup() {
-  try {
-    showNotification('Backup started', 'Please keep this page open while the server creates the encrypted copy.', 'info');
-    const response = await apiRunEncryptedBackup();
-    showNotification('Backup complete', response?.backup?.offsite ? 'Encrypted backup saved locally and off-site.' : 'Encrypted backup saved.', 'success');
-    await loadControlCenterStatus(true);
-  } catch (error) {
-    showNotification('Backup failed', String(error?.message || error), 'error');
-  }
-}
-
-function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
-  return `
-    <div class="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/70 p-4 dark:border-slate-700 dark:bg-slate-900/50 sm:flex-row sm:items-center">
-      <div class="flex min-w-0 flex-1 items-start gap-3">
-        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${color}"><i data-lucide="${icon}" class="h-5 w-5"></i></span>
-        <div class="min-w-0"><div class="font-bold text-slate-900 dark:text-white">${Security.escapeHtml(title)}</div><div class="mt-1 text-sm text-slate-500 dark:text-slate-400">${Security.escapeHtml(detail)}</div></div>
-      </div>
-      ${actionHtml}
-    </div>`;
-}
-
-// ---- Subscription plans manager (owner pricing without redeploys) ----
-let _planManager = { loading: false, loadedAt: 0, version: 0, plans: [], error: '', dirty: false };
-// Mirrors the server's KNOWN_SERVICE_IDS; the server re-validates anyway.
-const PLAN_MANAGER_SERVICE_IDS = ['international_shipping', 'local_shipping', 'warehouse', 'smart_systems', 'clothes_system', 'ad_maker'];
-
-async function loadPlanManager(force = false) {
-  if (_planManager.loading || !isServerModeEnabled()) return;
-  if (!force && _planManager.loadedAt && Date.now() - _planManager.loadedAt < 60000) return;
-  if (!force && _planManager.dirty) return; // never clobber unsaved edits
-  _planManager.loading = true;
-  _planManager.error = '';
-  try {
-    const payload = await apiJson('/api/admin/subscription-plans', { method: 'GET' });
-    _planManager.plans = Array.isArray(payload?.plans) ? payload.plans : [];
-    _planManager.version = Number(payload?.version || 0);
-    _planManager.loadedAt = Date.now();
-    _planManager.dirty = false;
-  } catch (error) {
-    _planManager.error = String(error?.payload?.detail || error?.message || 'Could not load the plan catalog');
-  } finally {
-    _planManager.loading = false;
-    if (state.currentView === 'control-center') render();
-  }
-}
-
-function planManagerSetField(index, field, value) {
-  const plan = _planManager.plans[Number(index)];
-  if (!plan) return;
-  if (field === 'priceLYD') plan.priceMinor = Math.max(0, Math.round((Number(String(value).replace(',', '.')) || 0) * 100));
-  else if (field === 'durationDays') plan.durationDays = Math.max(1, Math.min(3660, Math.trunc(Number(value) || 30)));
-  else if (field === 'sortOrder') plan.sortOrder = Math.trunc(Number(value) || 0);
-  else if (field === 'active') plan.active = value === true;
-  else if (field === 'name' || field === 'nameAr') plan[field] = String(value || '').slice(0, 80);
-  _planManager.dirty = true;
-}
-
-function planManagerAddBundle() {
-  const read = id => String(document.getElementById(id)?.value || '').trim();
-  const rawId = read('plan-new-id').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40);
-  const name = read('plan-new-name').slice(0, 80);
-  const nameAr = read('plan-new-name-ar').slice(0, 80);
-  const services = PLAN_MANAGER_SERVICE_IDS.filter(sid => document.getElementById(`plan-new-svc-${sid}`)?.checked);
-  if (rawId.length < 2 || !name || !nameAr || !services.length) {
-    showNotification('Missing details', 'A bundle needs an id, both names, and at least one service.', 'warning');
-    return;
-  }
-  if (_planManager.plans.some(p => String(p.id) === rawId)) {
-    showNotification('Duplicate id', 'A plan with this id already exists.', 'warning');
-    return;
-  }
-  _planManager.plans.push({
-    id: rawId,
-    serviceIds: services,
-    name,
-    nameAr,
-    priceMinor: Math.max(0, Math.round((Number(read('plan-new-price').replace(',', '.')) || 0) * 100)),
-    currency: 'LYD',
-    durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(read('plan-new-days')) || 30))),
-    badge: services.length > 1 ? 'best_value' : null,
-    savingsPct: null,
-    active: true,
-    sortOrder: 0
-  });
-  _planManager.dirty = true;
-  render();
-}
-
-async function savePlanManager() {
-  if (!_planManager.plans.length) return;
-  try {
-    const payload = await apiAdminSaveSubscriptionPlans(_planManager.plans.map(p => ({
-      id: String(p.id),
-      serviceIds: Array.isArray(p.serviceIds) ? p.serviceIds : [],
-      name: String(p.name || ''),
-      nameAr: String(p.nameAr || ''),
-      priceMinor: Math.max(0, Math.trunc(Number(p.priceMinor) || 0)),
-      currency: 'LYD',
-      durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(p.durationDays) || 30))),
-      badge: p.badge || null,
-      savingsPct: Number.isFinite(Number(p.savingsPct)) && p.savingsPct !== null && p.savingsPct !== '' ? Math.trunc(Number(p.savingsPct)) : null,
-      active: p.active !== false,
-      sortOrder: Math.trunc(Number(p.sortOrder) || 0)
-    })), _planManager.version);
-    _planManager.version = Number(payload?.version || _planManager.version + 1);
-    _planManager.dirty = false;
-    _planManager.loadedAt = 0;
-    showNotification('Plans saved', `Catalog version ${_planManager.version} is live — new purchases use it immediately.`, 'success');
-    if (typeof refreshSubscriptionPlans === 'function') refreshSubscriptionPlans(true).catch(() => {});
-    loadPlanManager(true);
-  } catch (error) {
-    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || 'Save failed');
-    showNotification('Could not save plans', String(detail), 'error');
-  }
-}
-
-function renderPlanManagerSection() {
-  if (!isServerModeEnabled()) return '';
-  const rows = _planManager.plans.map((plan, index) => {
-    const safeName = Security.escapeHtml(String(plan.name || plan.id));
-    const services = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).join(' + ');
-    return `
-      <div class="grid grid-cols-2 items-center gap-2 rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800 sm:grid-cols-[1.2fr_1fr_90px_80px_70px_70px]">
-        <div class="min-w-0">
-          <input value="${safeName}" oninput="planManagerSetField(${index}, 'name', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 font-bold text-slate-800 focus:border-indigo-300 dark:text-white" />
-          <input value="${Security.escapeHtml(String(plan.nameAr || ''))}" dir="rtl" oninput="planManagerSetField(${index}, 'nameAr', this.value)" class="w-full rounded-lg border border-transparent bg-transparent px-1 text-xs text-slate-500 focus:border-indigo-300" />
-        </div>
-        <div class="truncate text-xs text-slate-500" title="${Security.escapeHtml(String(plan.id))}">${Security.escapeHtml(services)}</div>
-        <label class="text-xs text-slate-500 sm:text-right">LYD<input type="number" min="0" step="0.01" value="${(Math.max(0, Number(plan.priceMinor) || 0) / 100).toFixed(2)}" oninput="planManagerSetField(${index}, 'priceLYD', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono font-bold dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="text-xs text-slate-500 sm:text-right">Days<input type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="text-xs text-slate-500 sm:text-right">Order<input type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="flex items-center justify-end gap-1 text-xs font-bold ${plan.active !== false ? 'text-emerald-600' : 'text-slate-400'}"><input type="checkbox" ${plan.active !== false ? 'checked' : ''} onchange="planManagerSetField(${index}, 'active', this.checked)" class="h-5 w-5 accent-emerald-600" />On</label>
-      </div>`;
-  }).join('');
-  return `
-      <section class="glass-panel rounded-3xl p-5 sm:p-6">
-        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div><div class="flex items-center gap-2"><i data-lucide="badge-dollar-sign" class="h-5 w-5 text-emerald-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Subscription plans & prices</h2></div>
-          <p class="mt-1 text-sm text-slate-500">Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version: ${Number(_planManager.version) || 0}${_planManager.dirty ? ' · <span class="font-bold text-amber-600">unsaved changes</span>' : ''}</p></div>
-          <div class="flex gap-2">
-            <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">Reload</button>
-            <button type="button" onclick="savePlanManager()" ${_planManager.dirty ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Save all plans</button>
-          </div>
-        </div>
-        ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}
-        <div class="space-y-2">${rows || `<div class="text-sm text-slate-500">${_planManager.loading ? 'Loading plans…' : 'Press Reload to fetch the plan catalog.'}</div>`}</div>
-        <details class="mt-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-700">
-          <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">Add a bundle (one subscription, many systems)</summary>
-          <div class="mt-3 grid gap-3 sm:grid-cols-2">
-            <label class="text-xs font-bold text-slate-500">Bundle id (letters/numbers/underscore)<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
-            <label class="text-xs font-bold text-slate-500">Price (LYD)<input id="plan-new-price" type="number" min="0" step="0.01" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
-            <label class="text-xs font-bold text-slate-500">Name (English)<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
-            <label class="text-xs font-bold text-slate-500">Name (Arabic)<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
-            <label class="text-xs font-bold text-slate-500">Duration (days)<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>
-            <div class="text-xs font-bold text-slate-500">Included systems<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${sid}</span></label>`).join('')}</div></div>
-          </div>
-          <button type="button" onclick="planManagerAddBundle()" class="mt-3 min-h-11 rounded-xl bg-indigo-600 px-4 font-bold text-white">Add to list (save to publish)</button>
-        </details>
-      </section>`;
-}
-
-function renderControlCenterView() {
-  if (!isAdminRole(state.currentUser?.role)) return renderNoAccessView();
-  if (!_controlCenter.period) _controlCenter.period = controlCenterPreviousMonth();
-  if (!_controlCenter.loading && (!_controlCenter.loadedAt || Date.now() - _controlCenter.loadedAt > 60000)) {
-    setTimeout(() => loadControlCenterStatus(false), 0);
-  }
-  if (isServerModeEnabled() && !_planManager.loading && !_planManager.loadedAt) {
-    setTimeout(() => loadPlanManager(false), 0);
-  }
-  const facts = getControlCenterFacts();
-  const operations = _controlCenter.operations || {};
-  const backup = operations.backup || {};
-  const monitoring = operations.monitoring || {};
-  const meta = _controlCenter.meta || {};
-  const periods = Array.isArray(operations.financialPeriods) ? operations.financialPeriods : [];
-  const closedPeriods = periods.filter(row => String(row.status || '').toLowerCase() === 'closed');
-  const tasks = [];
-  if (facts.setupAds.length) tasks.push(renderControlCenterTask('wand-sparkles', 'bg-amber-100 text-amber-700', `${facts.setupAds.length} ads need setup`, 'Add the customer, selling amount, payment, and receipt.', '<button type="button" onclick="controlCenterOpenAds(\'setup\')" class="min-h-11 rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-white">Open ads</button>'));
-  if (facts.unpaidReceipts.length) tasks.push(renderControlCenterTask('receipt', 'bg-rose-100 text-rose-700', `${facts.unpaidReceipts.length} receipts are unpaid`, 'Review money that customers still owe.', '<button type="button" onclick="controlCenterOpenReceipts()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white">Open receipts</button>'));
-  if ((facts.snapshot?.unpricedSpendUSD || 0) > 0.005) tasks.push(renderControlCenterTask('circle-dollar-sign', 'bg-rose-100 text-rose-700', `$${controlCenterMoney(facts.snapshot.unpricedSpendUSD)} Meta spend has no purchase cost`, 'Record the real dollar purchase so profit is not guessed.', '<button type="button" onclick="navigateTo(\'analytics\')" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white">Fix profit data</button>'));
-  if (facts.metaFailures.length) tasks.push(renderControlCenterTask('refresh-cw-off', 'bg-rose-100 text-rose-700', `${facts.metaFailures.length} Meta sync items need retry`, 'The server keeps retrying; open Ads to inspect the affected rows.', '<button type="button" onclick="navigateTo(\'ads\')" class="min-h-11 rounded-xl border border-rose-300 px-4 py-2 text-sm font-bold text-rose-700">Review</button>'));
-  if (!meta.webhookConfigured) tasks.push(renderControlCenterTask('webhook', 'bg-violet-100 text-violet-700', 'Meta instant notifications need setup', 'Add ALBAYAN_META_WEBHOOK_VERIFY_TOKEN in Jelastic, then subscribe Meta to /api/meta-ads/webhook. Polling remains active until then.'));
-  if (Number(monitoring.error_rate || 0) >= 0.05 && Number(monitoring.total_requests || 0) >= 50) tasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', 'Server errors need attention', `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% of requests failed in this server process. Check Jelastic logs.`));
-  if (Number(monitoring.response_ms_p95 || 0) >= 3000 && Number(monitoring.total_requests || 0) >= 50) tasks.push(renderControlCenterTask('timer-off', 'bg-amber-100 text-amber-700', 'Server responses are slow', `The slowest normal requests take about ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. Check database and container resources.`));
-  (operations.setupTasks || []).forEach(task => tasks.push(renderControlCenterTask('shield-alert', 'bg-sky-100 text-sky-700', task, 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.')));
-  if (!tasks.length && !_controlCenter.loading) tasks.push(renderControlCenterTask('badge-check', 'bg-emerald-100 text-emerald-700', 'Everything important is ready', 'No unfinished ads, profit gaps, sync failures, or operations setup problems were found.'));
-
-  return `
-    <div class="space-y-6">
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div><div class="text-xs font-bold uppercase tracking-[0.2em] text-indigo-600">Owner workspace</div><h1 class="mt-1 text-3xl font-black text-slate-900 dark:text-white">Daily Control Center</h1><p class="mt-1 text-slate-500 dark:text-slate-400">One page shows what needs your attention today.</p></div>
-        <button type="button" onclick="refreshControlCenter()" class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-white px-4 py-2 font-bold text-indigo-700 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300"><i data-lucide="refresh-cw" class="h-4 w-4 ${_controlCenter.loading ? 'animate-spin' : ''}"></i>Refresh checks</button>
-      </div>
-
-      ${_controlCenter.error ? `<div class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700">${Security.escapeHtml(_controlCenter.error)}</div>` : ''}
-
-      <section class="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <button type="button" onclick="controlCenterOpenAds('setup')" class="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-left dark:border-amber-900 dark:bg-amber-950/30"><div class="text-sm text-amber-700">Ads to finish</div><div class="mt-1 text-3xl font-black text-amber-900 dark:text-amber-200">${facts.setupAds.length}</div></button>
-        <button type="button" onclick="controlCenterOpenReceipts()" class="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-left dark:border-rose-900 dark:bg-rose-950/30"><div class="text-sm text-rose-700">Unpaid receipts</div><div class="mt-1 text-3xl font-black text-rose-900 dark:text-rose-200">${facts.unpaidReceipts.length}</div></button>
-        <button type="button" onclick="navigateTo('analytics')" class="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-left dark:border-emerald-900 dark:bg-emerald-950/30"><div class="text-sm text-emerald-700">Known gross profit</div><div class="mt-1 text-xl font-black text-emerald-900 dark:text-emerald-200">${controlCenterMoney(facts.snapshot?.knownGrossProfitLYD)} LYD</div></button>
-        <div class="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 dark:border-indigo-900 dark:bg-indigo-950/30"><div class="text-sm text-indigo-700">Protection state</div><div class="mt-1 text-lg font-black text-indigo-900 dark:text-indigo-200">${backup.enabled && backup.encryptionReady && backup.offsiteConfigured ? 'Protected' : 'Setup needed'}</div></div>
-      </section>
-
-      <section class="glass-panel rounded-3xl p-5 sm:p-6"><div class="mb-4 flex items-center justify-between"><div><h2 class="text-xl font-black text-slate-900 dark:text-white">Today’s work</h2><p class="text-sm text-slate-500">Do the first item, then continue downward.</p></div><span class="rounded-full px-3 py-1 text-sm font-bold ${facts.attentionCount ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}">${facts.attentionCount || 0} data items</span></div><div class="space-y-3">${tasks.join('')}</div></section>
-
-      <div class="grid gap-6 lg:grid-cols-2">
-        <section class="glass-panel rounded-3xl p-5 sm:p-6">
-          <div class="flex items-center gap-2"><i data-lucide="archive-restore" class="h-5 w-5 text-sky-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Encrypted backup</h2></div>
-          <div class="mt-4 grid grid-cols-2 gap-3 text-sm"><div class="rounded-xl bg-slate-100 p-3 dark:bg-slate-800"><div class="text-slate-500">Last backup</div><div class="mt-1 font-bold">${Security.escapeHtml(controlCenterTimestamp(backup.lastBackupAt))}</div></div><div class="rounded-xl bg-slate-100 p-3 dark:bg-slate-800"><div class="text-slate-500">Off-site copy</div><div class="mt-1 font-bold">${backup.offsiteConfigured ? 'Connected' : 'Not connected'}</div></div></div>
-          ${backup.lastBackupError ? `<div class="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">${Security.escapeHtml(backup.lastBackupError)}</div>` : ''}
-          <button type="button" onclick="runControlCenterBackup()" ${backup.enabled && backup.encryptionReady ? '' : 'disabled'} class="mt-4 min-h-11 w-full rounded-xl bg-sky-600 px-4 py-2 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Create encrypted backup now</button>
-        </section>
-
-        <section class="glass-panel rounded-3xl p-5 sm:p-6">
-          <div class="flex items-center gap-2"><i data-lucide="lock-keyhole" class="h-5 w-5 text-indigo-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Monthly financial close</h2></div>
-          <p class="mt-2 text-sm text-slate-500">Check a finished month, then lock it so old money cannot change by mistake.</p>
-          <label class="mt-4 block text-sm font-bold text-slate-700 dark:text-slate-300">Month</label><input id="control-center-period" type="month" max="${controlCenterPreviousMonth()}" value="${Security.escapeHtml(_controlCenter.period)}" onchange="_controlCenter.period=this.value" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 dark:border-slate-700 dark:bg-slate-900">
-          <div class="mt-3 grid grid-cols-2 gap-3"><button type="button" onclick="previewControlCenterMonth()" class="min-h-11 rounded-xl border border-indigo-300 px-3 font-bold text-indigo-700">Check month</button><button type="button" onclick="closeControlCenterMonth()" class="min-h-11 rounded-xl bg-indigo-600 px-3 font-bold text-white">Close month</button></div>
-          <div class="mt-4 space-y-2">${closedPeriods.slice(0, 4).map(row => `<div class="flex items-center justify-between rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-800"><span><strong>${Security.escapeHtml(row.period || '')}</strong> · Closed</span><button type="button" onclick="unlockControlCenterMonth('${Security.escapeHtml(String(row.period || ''))}')" class="min-h-10 rounded-lg px-3 font-bold text-amber-700">Unlock</button></div>`).join('') || '<div class="text-sm text-slate-500">No months have been closed yet.</div>'}</div>
-        </section>
-      </div>
-
-      ${renderPlanManagerSection()}
-
-      <section class="glass-panel rounded-3xl p-5 sm:p-6"><h2 class="text-xl font-black text-slate-900 dark:text-white">Live connections</h2><div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Meta read connection</div><div class="mt-1 font-black ${meta.configured ? 'text-emerald-600' : 'text-amber-600'}">${meta.configured ? 'Ready' : 'Needs setup'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Instant Meta webhook</div><div class="mt-1 font-black ${meta.webhookConfigured ? 'text-emerald-600' : 'text-amber-600'}">${meta.webhookConfigured ? 'Ready' : 'Polling fallback'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Backup worker</div><div class="mt-1 font-black ${backup.workerRunning ? 'text-emerald-600' : 'text-amber-600'}">${backup.workerRunning ? 'Running' : 'Not running'}</div></div><div class="rounded-2xl bg-slate-100 p-4 dark:bg-slate-800"><div class="text-sm text-slate-500">Server health</div><div class="mt-1 font-black ${Number(monitoring.error_rate || 0) < 0.05 ? 'text-emerald-600' : 'text-rose-600'}">${Number(monitoring.total_requests || 0) ? `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% errors` : 'Collecting data'}</div><div class="mt-1 text-xs text-slate-500">P95 ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms</div></div></div></section>
-    </div>`;
 }
 // ==========================================
 // SEARCH & FILTER FUNCTIONS
@@ -24404,19 +24907,10 @@ function getCustomerStats(customerId, statsIndex = null) {
   // Calculate total spent USD from ads (status-aware, shared with analytics)
   const totalSpentUSD = customerAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
 
-  // Calculate spent LYD proportionally based on USD spent
-  // This ensures spentLYD cannot exceed paidLYD
+  // Value spending by its actual funding sources below. Applying one average
+  // paid-receipt rate to debt/company-funded dollars mixes currency bases and
+  // can invent LYD credit even when the USD balance is exactly settled.
   let totalSpentLYD = 0;
-  if (totalPaidUSD > 0) {
-    // Proportional calculation: (spentUSD / paidUSD) * paidLYD
-    totalSpentLYD = (totalSpentUSD / totalPaidUSD) * totalPaidLYD;
-  } else if (totalSpentUSD > 0) {
-    // No paid receipts but real ad spend = pure debt. Derive the LYD figure
-    // from each ad's OWN exchange rate so the LYD balance reflects the debt
-    // instead of showing a misleading 0 (which styled the card as positive
-    // and made the "has debt" filter miss a genuine debtor).
-    totalSpentLYD = customerAds.reduce((sum, ad) => sum + getAdSpendLYD(ad), 0);
-  }
   
   // Standalone unpaid-receipt debt. Paid comes only from paid receipts and
   // Spent only from ads, so a Not Paid receipt whose promised money is not
@@ -24476,13 +24970,30 @@ function getCustomerStats(customerId, statsIndex = null) {
   // never lands in these rows (it only shrinks customerOutstandingUSD above),
   // so each covered dollar is credited exactly once.
   const customerReceiptIds = new Set(customerReceipts.map(r => String(r.id || '')));
+  const customerReceiptsById = new Map(customerReceipts.map(r => [String(r.id || ''), r]));
   const receiptRateById = new Map(customerReceipts.map(r => {
-    const rate = Number(r.exchangeRate || state.defaultExchangeRate || 0);
+    // Preserve the receipt's exact saved LYD value, including payment-method
+    // rounding. Fully consuming a $5.15 / 50 LYD receipt must consume 50 LYD.
+    const usd = Number(r.amountUSD);
+    const local = Number(r.amountLocal);
+    const rate = usd > 0 && local > 0
+      ? local / usd
+      : Number(r.exchangeRate || state.defaultExchangeRate || 0);
     return [String(r.id || ''), Number.isFinite(rate) && rate > 0 ? rate : 0];
   }));
   let companyFundedUSD = 0;
   let companyFundedLYD = 0;
   customerAds.forEach(ad => {
+    const linkedReceiptId = String(ad.collectionMethod === 'driver'
+      ? (ad.linkedDeliveryReceiptId || ad.receiptId || ad.fundingReceiptId || '')
+      : (ad.receiptId || ad.fundingReceiptId || ad.linkedDeliveryReceiptId || ''));
+    const linkedReceipt = customerReceiptsById.get(linkedReceiptId);
+    // Reuse this customer's receipt index instead of scanning all receipts for
+    // every unpaid ad while rendering a large customer list.
+    const linkedDebtRate = getAdPaymentState(ad) === 'not_paid'
+      && ['driver', 'in_shop'].includes(String(ad.collectionMethod || ''))
+      ? Number(linkedReceipt?.exchangeRate) : 0;
+    const adRate = linkedDebtRate > 0 ? linkedDebtRate : (Number(getAdSpendExchangeRate(ad)) || 0);
     // CAP at the ad's REAL (status-aware) spend: a stopped/refunded ad may
     // have spent less than the company covered, and the credit must never
     // exceed the spend actually charged to this customer above — otherwise
@@ -24503,7 +25014,9 @@ function getCustomerStats(customerId, statsIndex = null) {
       companyFundedUSD += rowUSD;
       // LYD mirror at the funding receipt's own rate — the same rate this
       // debt used while it sat in receiptDebtLYD before it was covered.
-      companyFundedLYD += rowUSD * (receiptRateById.get(rowReceiptId) || 0);
+      const fundedLYD = rowUSD * (receiptRateById.get(rowReceiptId) || 0);
+      companyFundedLYD += fundedLYD;
+      totalSpentLYD += fundedLYD;
     });
     // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD
     // is company money against spend that no receipt ever backed. Spent stays
@@ -24515,11 +25028,39 @@ function getCustomerStats(customerId, statsIndex = null) {
       creditableUSD
     );
     if (directUSD > 0) {
+      creditableUSD -= directUSD;
       companyFundedUSD += directUSD;
-      const adRate = typeof getAdSpendExchangeRate === 'function'
-        ? (Number(getAdSpendExchangeRate(ad)) || 0)
-        : (Number(ad.exchangeRate || state.defaultExchangeRate) || 0);
       companyFundedLYD += directUSD * adRate;
+      totalSpentLYD += directUSD * adRate;
+    }
+
+    // Price the remaining customer-funded share at each receipt's own rate.
+    // Company rows above are valued identically on both sides of the balance;
+    // absorbing a debt must not create customer cash or a new customer debt.
+    const consume = (amountUSD, receiptId) => {
+      const amount = Math.min(Math.max(Number(amountUSD) || 0, 0), creditableUSD);
+      if (!(amount > 0)) return;
+      const rate = receiptRateById.get(String(receiptId || '')) || adRate;
+      totalSpentLYD += amount * rate;
+      creditableUSD -= amount;
+    };
+    const paidRows = Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length
+      ? ad.receiptAllocations
+      : (Array.isArray(ad.mergedPaidAllocations) ? ad.mergedPaidAllocations : []);
+    paidRows.forEach(row => consume(row?.amountUSD, row?.receiptId));
+    const dueRows = Array.isArray(ad.dueAllocations) ? ad.dueAllocations : [];
+    dueRows.forEach(row => consume(row?.amountUSD, row?.receiptId));
+    if (!dueRows.some(row => Number(row?.amountUSD) > 0) && linkedReceiptId) {
+      consume(getAdLegacyDueMirrorUSD(ad, linkedReceiptId, receiptRateById.get(linkedReceiptId)), linkedReceiptId);
+    }
+    if (creditableUSD > 0) {
+      // Only old, paid, rowless ads use the historical pooled-rate fallback.
+      // Unallocated debt is always valued at the ad/debt receipt's own rate.
+      const legacyPaid = getAdPaymentState(ad) === 'paid'
+        && !Array.isArray(ad.receiptAllocations) && !Array.isArray(ad.dueAllocations);
+      const fallbackRate = legacyPaid && !linkedReceipt && totalPaidUSD > 0
+        ? totalPaidLYD / totalPaidUSD : adRate;
+      totalSpentLYD += creditableUSD * (receiptRateById.get(linkedReceiptId) || fallbackRate);
     }
   });
   companyFundedUSD = Math.round(companyFundedUSD * 100) / 100;
@@ -24961,7 +25502,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
             // Says up front how many of these can simply be folded into their
             // Meta page, so the owner does not have to open every group to find
             // the ones worth acting on.
-            const mergeable = countPageMergeGroups();
+            const mergeable = typeof countPageMergeGroups === 'function' ? countPageMergeGroups() : 0;
             if (!mergeable) return '';
             return isAr
               ? ` — ${mergeable} منها يمكن دمجها في صفحة Meta`
@@ -24972,7 +25513,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
           ${(() => {
             // 48 groups is far too many to confirm one at a time, which is the
             // whole reason this button exists.
-            const mergeableNow = countPageMergeGroups();
+            const mergeableNow = typeof countPageMergeGroups === 'function' ? countPageMergeGroups() : 0;
             if (!mergeableNow) return '';
             return `<button type="button" onclick="showMergeAllDialog(this)" class="min-h-11 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200 inline-flex items-center gap-2" aria-haspopup="dialog">
               <i data-lucide="layers" class="h-4 w-4"></i><span>${isAr ? `دمج الكل (${mergeableNow})` : `Merge all (${mergeableNow})`}</span>
@@ -28028,7 +28569,7 @@ function _handleCompanyDebtCoverageKeydown(event) {
   }
 }
 
-function closeCompanyDebtCoverageModal({ force = false } = {}) {
+function closeCompanyDebtCoverageModal({ force = false, restoreFocus = true } = {}) {
   const dialogState = _companyDebtCoverageDialogState;
   if (dialogState?.busy && !force) return false;
   if (dialogState?.keyHandler) document.removeEventListener('keydown', dialogState.keyHandler);
@@ -28037,7 +28578,7 @@ function closeCompanyDebtCoverageModal({ force = false } = {}) {
     document.body.style.overflow = dialogState.bodyOverflow || '';
     const opener = dialogState.opener;
     _companyDebtCoverageDialogState = null;
-    try { opener?.focus?.(); } catch (_) {}
+    if (restoreFocus) { try { opener?.focus?.(); } catch (_) {} }
   }
   return true;
 }
@@ -28264,6 +28805,7 @@ async function submitCompanyDebtCoverage() {
         expectedLastModified: dialogState.expectedLastModified,
         reason
       });
+      if (_companyDebtCoverageDialogState !== dialogState || !isCurrentUserAdmin()) return false;
       const targetReturned = (response.updatedReceipts || []).some(
         entity => String(entity?.id || '') === dialogState.receiptId
       );
@@ -28287,6 +28829,7 @@ async function submitCompanyDebtCoverage() {
       );
       return response;
     } catch (error) {
+      if (_companyDebtCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
         ? describe409(error, 'This receipt changed on another device. Refresh and review its current balance.')
         : (error?.message || 'Could not apply company funds. Try again.');
@@ -28321,14 +28864,14 @@ function getCustomerCompanyCoverableReceipts(customerId) {
     .filter(r => _isReceiptEligibleForCompanyCoverage(r));
 }
 
-function _closeCompanyCoverageReceiptPicker() {
+function _closeCompanyCoverageReceiptPicker(restoreFocus = true) {
   const picker = document.getElementById('company-coverage-receipt-picker');
   if (picker) {
     if (picker._keyHandler) document.removeEventListener('keydown', picker._keyHandler);
     document.body.style.overflow = picker._bodyOverflow || '';
     const opener = picker._opener;
     picker.remove();
-    try { opener?.focus?.(); } catch (_) {}
+    if (restoreFocus) { try { opener?.focus?.(); } catch (_) {} }
   }
   return true;
 }
@@ -28458,7 +29001,7 @@ function _handleCustomerAdCoverageKeydown(event) {
   }
 }
 
-function closeCustomerAdDebtCoverageModal({ force = false } = {}) {
+function closeCustomerAdDebtCoverageModal({ force = false, restoreFocus = true } = {}) {
   const dialogState = _customerAdCoverageDialogState;
   if (dialogState?.busy && !force) return false;
   if (dialogState?.keyHandler) document.removeEventListener('keydown', dialogState.keyHandler);
@@ -28467,7 +29010,7 @@ function closeCustomerAdDebtCoverageModal({ force = false } = {}) {
     document.body.style.overflow = dialogState.bodyOverflow || '';
     const opener = dialogState.opener;
     _customerAdCoverageDialogState = null;
-    try { opener?.focus?.(); } catch (_) {}
+    if (restoreFocus) { try { opener?.focus?.(); } catch (_) {} }
   }
   return true;
 }
@@ -28689,6 +29232,7 @@ async function submitCustomerAdDebtCoverage() {
         expectedOutstandingMinorUSD: dialogState.outstandingMinorUSD,
         reason
       });
+      if (_customerAdCoverageDialogState !== dialogState || !isCurrentUserAdmin()) return false;
       const entityBatch = (response.updatedAds || []).map(entity => ({ collection: 'ads', entity }));
       const applied = applyValidatedServerEntityBatch(entityBatch, 'customerCompanyCoverage');
       if (applied.length !== entityBatch.length) throw new Error('The company coverage response was incomplete. Refresh and verify.');
@@ -28701,6 +29245,7 @@ async function submitCustomerAdDebtCoverage() {
       );
       return response;
     } catch (error) {
+      if (_customerAdCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
         ? describe409(error, isAr ? 'تغيّرت بيانات العميل على جهاز آخر. أعد المحاولة.' : 'This customer changed on another device. Refresh and review the current debt.')
         : (error?.message || (isAr ? 'تعذّر تطبيق أموال الشركة. حاول مجدداً.' : 'Could not apply company funds. Try again.'));
@@ -30742,975 +31287,6 @@ async function saveRefund() {
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();
   render();
-}
-// ==========================================
-// MERGE TOOLS — one real page, one real ad
-// ==========================================
-// The Meta import leaves two kinds of doubles behind, and both were previously
-// dead ends: showPageDuplicates could only LIST repeated pages, and an imported
-// draft that described an ad the staff had already recorded by hand could only
-// be completed a second time or thrown away.
-//
-//  1. PAGE: the row someone typed by hand before the import existed, beside the
-//     row the Meta sync created. Only the Meta row carries metaPageId, which is
-//     the identity the server writes to, so the hand-made row is always the one
-//     that gives up its ads and goes. The opposite direction would strand every
-//     future imported ad on a fresh page row and re-create the duplicate
-//     immediately (server/meta_ads.py only re-points an imported ad at its own
-//     Meta-derived page, and _ensure_import_page only looks at live pages).
-//
-//  2. AD: the ad the staff recorded with the customer's money, beside the empty
-//     draft the importer created for the same Meta ad. Combining them is really
-//     a RE-LINK: the Meta identity moves onto the record that holds the money,
-//     and the empty draft is removed.
-//
-// Neither flow moves money. Both are built only out of writes the server
-// already accepts on their own: ad.pageId is an ordinary relationship field,
-// and the Meta link travels through the existing transactional
-// /api/meta-ads/ads/{id}/unlink + /link endpoints, which are the only writers
-// allowed to move a metaAdId. Nothing here PATCHes a server-controlled meta*
-// field, so no new backend surface is required.
-//
-// Both flows are also re-runnable on purpose. They do the harmless work first
-// and remove the losing record LAST, so a connection that drops halfway leaves
-// a visibly unfinished merge that finishes correctly when repeated — never a
-// half-deleted one.
-
-// Guards the two dialogs against a double submit (and against a second merge
-// starting while the first is still writing).
-let _mergeToolsBusy = '';
-let _pageMergeReturnFocus = null;
-let _adMergeReturnFocus = null;
-let _mergeAllReturnFocus = null;
-
-function isMergeToolsAdmin() {
-  return typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin();
-}
-
-function getPageMetaIdValue(page) {
-  return String(page?.metaPageId || '').trim();
-}
-
-// ------------------------------------------------------------------
-// 1. Merge a hand-made page into the Meta page with the same name
-// ------------------------------------------------------------------
-
-// Same grouping key the duplicate finder and the category picker already use
-// (Arabic hamza/ة/ى folding, tashkeel stripped, digits folded, spaces
-// collapsed), so "حج وعمرة" and "حج وعمره" land in one group here too.
-function findPageMergeGroups(pages = getPagesVisibleToCurrentUser()) {
-  const active = getVisibleRecords(Array.isArray(pages) ? pages : [])
-    .filter(page => page && !page._deleted && page.id);
-  const groups = new Map();
-  for (const page of active) {
-    const key = pageCategoryKey(page.name);
-    if (!key) continue;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(page);
-  }
-  const mergeable = [];
-  for (const group of groups.values()) {
-    const metaPages = group.filter(page => getPageMetaIdValue(page));
-    const manualPages = group.filter(page => !getPageMetaIdValue(page));
-    // Exactly one Meta row is the only unambiguous case. Two Meta rows for one
-    // name is a different problem (two real Facebook pages, or a server-side
-    // import bug) and must not be guessed at here.
-    if (metaPages.length !== 1 || manualPages.length === 0) continue;
-    mergeable.push({ keepPage: metaPages[0], manualPages });
-  }
-  return mergeable.sort((a, b) => String(a.keepPage?.name || '').localeCompare(String(b.keepPage?.name || '')));
-}
-
-function countPageMergeGroups() {
-  return isMergeToolsAdmin() ? findPageMergeGroups().length : 0;
-}
-
-// Everything the dialog needs, plus the single reason a merge is refused.
-// Recomputed immediately before the write so a dialog left open on a stale
-// screen cannot merge something that changed underneath it.
-function getPageMergePlan(keepPageId, losePageId) {
-  const isAr = state.language === 'ar';
-  const pages = getVisibleRecords(state.pages);
-  const keepPage = pages.find(page => String(page.id) === String(keepPageId || '')) || null;
-  const losePage = pages.find(page => String(page.id) === String(losePageId || '')) || null;
-  const plan = { keepPage, losePage, ads: [], blocked: '' };
-  if (!keepPage || !losePage) {
-    plan.blocked = isAr ? 'إحدى الصفحتين لم تعد موجودة. حدّث الصفحة وحاول مرة أخرى.' : 'One of the two pages no longer exists. Refresh and try again.';
-    return plan;
-  }
-  if (String(keepPage.id) === String(losePage.id)) {
-    plan.blocked = isAr ? 'اختر صفحتين مختلفتين.' : 'Choose two different pages.';
-    return plan;
-  }
-  if (!getPageMetaIdValue(keepPage)) {
-    plan.blocked = isAr ? 'الصفحة الباقية يجب أن تكون صفحة Meta.' : 'The surviving page must be the Meta page.';
-    return plan;
-  }
-  if (getPageMetaIdValue(losePage)) {
-    plan.blocked = isAr ? 'لا يمكن دمج صفحة Meta في صفحة أخرى. تُدمج الصفحة اليدوية فقط.' : 'A Meta page cannot be merged away. Only the hand-made page is merged.';
-    return plan;
-  }
-  if (pageCategoryKey(keepPage.name) !== pageCategoryKey(losePage.name)) {
-    plan.blocked = isAr ? 'الصفحتان ليس لهما نفس الاسم.' : 'The two pages do not share the same name.';
-    return plan;
-  }
-  plan.ads = getAdsForPage(losePage.id);
-  return plan;
-}
-
-function closePageMergeDialog(restoreFocus = true) {
-  document.getElementById('page-merge-dialog')?.remove();
-  const target = _pageMergeReturnFocus?.isConnected === false ? null : _pageMergeReturnFocus;
-  _pageMergeReturnFocus = null;
-  if (restoreFocus && target?.focus) target.focus();
-}
-
-function showPageMergeDialog(keepPageId, losePageId, triggerButton) {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
-    return;
-  }
-  const plan = getPageMergePlan(keepPageId, losePageId);
-  if (plan.blocked) {
-    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
-    return;
-  }
-  closePageMergeDialog(false);
-  _pageMergeReturnFocus = triggerButton || document.activeElement;
-
-  const adCount = plan.ads.length;
-  const keepAdCount = getAdsForPage(plan.keepPage.id).length;
-  const customersById = new Map((state.customers || []).map(customer => [String(customer.id), customer]));
-  const describeOwners = page => getPageCustomerIds(page)
-    .map(id => customersById.get(String(id))?.name || '')
-    .filter(Boolean).join(', ');
-  const loseOwners = describeOwners(plan.losePage);
-  const keepOwners = describeOwners(plan.keepPage);
-  const movedOwners = getPageCustomerIds(plan.losePage)
-    .map(String)
-    .filter(id => !getPageCustomerIds(plan.keepPage).map(String).includes(id));
-
-  const dialog = document.createElement('div');
-  dialog.id = 'page-merge-dialog';
-  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-labelledby', 'page-merge-dialog-title');
-  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
-  dialog.tabIndex = -1;
-  dialog.innerHTML = `
-    <div class="glass-panel w-full max-w-2xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
-      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
-        <div class="flex items-start gap-3 min-w-0">
-          <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
-            <i data-lucide="combine" class="w-6 h-6"></i>
-          </span>
-          <div class="min-w-0">
-            <h2 id="page-merge-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${isAr ? 'دمج الصفحة القديمة في صفحة Meta' : 'Merge the old page into the Meta page'}</h2>
-            <p class="text-sm text-slate-500 break-words">${isAr ? 'تنتقل كل الإعلانات إلى صفحة Meta، ولا يتغير أي مبلغ.' : 'Every ad moves to the Meta page. No money changes.'}</p>
-          </div>
-        </div>
-        <button type="button" onclick="closePageMergeDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
-          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
-        </button>
-      </div>
-      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
-        <div class="grid gap-3 md:grid-cols-2">
-          <section class="rounded-xl border-2 border-rose-200 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-900/10 p-3">
-            <div class="text-xs font-bold uppercase tracking-wide text-rose-700 dark:text-rose-300">${isAr ? 'ستُزال' : 'Will be removed'}</div>
-            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(plan.losePage.name || '')}</div>
-            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300 break-words">
-              ${Security.escapeHtml(plan.losePage.category || (isAr ? 'بدون فئة' : 'No category'))}
-              ${loseOwners ? ` • ${Security.escapeHtml(loseOwners)}` : ` • ${isAr ? 'بدون مالك' : 'No owner'}`}
-            </div>
-            <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">
-              ${isAr ? `${adCount} إعلان سينتقل` : `${adCount} ad${adCount === 1 ? '' : 's'} will move`}
-            </div>
-          </section>
-          <section class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
-            <div class="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">${isAr ? 'ستبقى' : 'Will be kept'}</div>
-            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(plan.keepPage.name || '')}</div>
-            <div class="mt-1 font-mono text-[11px] text-slate-500 break-all">#${Security.escapeHtml(getPageMetaIdValue(plan.keepPage))}</div>
-            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300 break-words">
-              ${Security.escapeHtml(plan.keepPage.category || (isAr ? 'بدون فئة' : 'No category'))}
-              ${keepOwners ? ` • ${Security.escapeHtml(keepOwners)}` : ` • ${isAr ? 'بدون مالك' : 'No owner'}`}
-            </div>
-            <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">
-              ${isAr ? `${keepAdCount} إعلان الآن` : `${keepAdCount} ad${keepAdCount === 1 ? '' : 's'} today`}
-            </div>
-          </section>
-        </div>
-
-        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 text-sm text-slate-600 dark:text-slate-300 space-y-1">
-          <div class="font-bold text-slate-800 dark:text-white">${isAr ? 'ماذا سيحدث' : 'What will happen'}</div>
-          <div>• ${isAr ? `تنتقل ${adCount} إعلان إلى صفحة Meta.` : `${adCount} ad${adCount === 1 ? '' : 's'} move to the Meta page.`}</div>
-          ${movedOwners.length ? `<div>• ${isAr ? 'يُضاف مالك الصفحة القديمة إلى صفحة Meta.' : 'The old page owner is added to the Meta page.'}</div>` : ''}
-          <div>• ${isAr ? 'تُحذف الصفحة القديمة بعد انتقال كل إعلان.' : 'The old page is removed after every ad has moved.'}</div>
-          <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة.' : 'No amount, receipt or photo changes.'}</div>
-        </div>
-      </div>
-      <div class="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 p-4 flex flex-col sm:flex-row gap-2">
-        <button type="button" id="page-merge-confirm" onclick="runPageMerge('${Security.escapeHtml(String(plan.keepPage.id))}','${Security.escapeHtml(String(plan.losePage.id))}')" class="flex-1 btn-shine bg-amber-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-amber-700 min-h-11">
-          <i data-lucide="combine" class="w-4 h-4 inline mr-2"></i>${isAr ? 'دمج الآن' : 'Merge now'}
-        </button>
-        <button type="button" onclick="closePageMergeDialog()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
-      </div>
-    </div>`;
-  dialog.addEventListener('click', event => { if (event.target === dialog) closePageMergeDialog(); });
-  document.body.appendChild(dialog);
-  IconQueue.schedule(dialog);
-  dialog.focus();
-}
-
-async function runPageMerge(keepPageId, losePageId) {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
-    return;
-  }
-  if (_mergeToolsBusy) return;
-  // Re-checked against live state, not against what the dialog was drawn from.
-  const plan = getPageMergePlan(keepPageId, losePageId);
-  if (plan.blocked) {
-    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
-    return;
-  }
-
-  _mergeToolsBusy = 'page';
-  const confirmButton = document.getElementById('page-merge-confirm');
-  if (confirmButton) {
-    confirmButton.disabled = true;
-    confirmButton.textContent = isAr ? 'جارٍ الدمج…' : 'Merging…';
-  }
-
-  try {
-    const result = await _mergeOnePageIntoMeta(keepPageId, losePageId);
-    if (result.ok) {
-      showNotification(
-        isAr ? 'تم الدمج' : 'Merged',
-        isAr
-          ? `تم نقل ${result.moved} إعلان إلى «${result.keepName}» وحُذفت الصفحة القديمة.`
-          : `${result.moved} ad${result.moved === 1 ? '' : 's'} moved to "${result.keepName}" and the old page was removed.`,
-        'success'
-      );
-    } else {
-      showNotification(isAr ? 'لم يكتمل الدمج' : 'Merge did not finish', result.reason, 'warning');
-    }
-  } catch (error) {
-    showNotification(
-      isAr ? 'تعذّر الدمج' : 'Merge failed',
-      error?.message || (isAr ? 'حدث خطأ أثناء الدمج. أعد المحاولة.' : 'Something went wrong during the merge. Try again.'),
-      'error'
-    );
-  } finally {
-    _mergeToolsBusy = '';
-    closePageMergeDialog(false);
-    closePageDuplicatesDialog(false);
-    render();
-  }
-}
-
-// The write sequence for ONE page. Returns a plain result instead of showing a
-// toast, so merging 48 pages can report once at the end instead of 48 times.
-// Order is the safety property: every ad lands on the Meta page BEFORE the old
-// page is removed, so an interrupted run is always safe to repeat.
-async function _mergeOnePageIntoMeta(keepPageId, losePageId) {
-  const isAr = state.language === 'ar';
-  const plan = getPageMergePlan(keepPageId, losePageId);
-  if (plan.blocked) return { ok: false, moved: 0, total: 0, name: '', keepName: '', reason: plan.blocked };
-  const name = String(plan.losePage.name || '');
-  const keepName = String(plan.keepPage.name || '');
-  let moved = 0;
-
-  for (const ad of plan.ads) {
-    const updates = { pageId: String(plan.keepPage.id) };
-    // Only refresh the denormalised copy when the ad actually carries one —
-    // writing it onto rows that never had it would invent a new field.
-    if (String(ad.pageName || '').trim()) updates.pageName = keepName;
-    const expected = Number(ad._lastModified);
-    const saved = await updateRecord(state.ads, ad.id, updates, Number.isFinite(expected) ? expected : undefined);
-    if (!saved) {
-      return {
-        ok: false, moved, total: plan.ads.length, name, keepName,
-        reason: isAr
-          ? `«${name}»: تم نقل ${moved} من ${plan.ads.length} إعلان. لم تُحذف الصفحة القديمة، أعد المحاولة لإكمال الباقي.`
-          : `"${name}": ${moved} of ${plan.ads.length} ads moved. The old page was kept — run it again to finish the rest.`
-      };
-    }
-    moved += 1;
-  }
-
-  // Carry the hand-made page's owner across. An imported page arrives with no
-  // owner at all, so this is usually the only place that knowledge exists.
-  const keepOwnerIds = getPageCustomerIds(plan.keepPage).map(String);
-  const addedOwnerIds = getPageCustomerIds(plan.losePage).map(String).filter(id => !keepOwnerIds.includes(id));
-  if (addedOwnerIds.length) {
-    const keepExpected = Number(plan.keepPage._lastModified);
-    await updateRecord(
-      state.pages,
-      plan.keepPage.id,
-      { customerIds: [...keepOwnerIds, ...addedOwnerIds] },
-      Number.isFinite(keepExpected) ? keepExpected : undefined
-    );
-  }
-
-  const removed = await deleteRecord(state.pages, plan.losePage.id);
-  if (!removed) {
-    return {
-      ok: false, moved, total: plan.ads.length, name, keepName,
-      reason: isAr
-        ? `«${name}»: انتقلت كل الإعلانات، لكن تعذّر حذف الصفحة القديمة. احذفها يدوياً.`
-        : `"${name}": every ad moved, but the old page could not be removed. Delete it by hand.`
-    };
-  }
-  return { ok: true, moved, total: plan.ads.length, name, keepName, reason: '' };
-}
-
-// ---- Merge every duplicate in one run -----------------------------------
-// 48 groups is far too many to confirm one at a time. This does the identical
-// per-page work in a loop, keeps going when one page fails (one bad page must
-// not block the other 47), and can be stopped between pages.
-
-let _mergeAllStopRequested = false;
-
-function stopAllPageMerges() {
-  _mergeAllStopRequested = true;
-  const button = document.getElementById('merge-all-stop');
-  if (button) button.textContent = state.language === 'ar' ? 'جارٍ الإيقاف…' : 'Stopping…';
-}
-
-// Every (Meta page <- hand-made page) move that is currently possible, flattened
-// out of the groups so a group holding three hand-made rows contributes three.
-function buildAllPageMergeJobs() {
-  const jobs = [];
-  if (!isMergeToolsAdmin()) return jobs;
-  for (const group of findPageMergeGroups()) {
-    for (const losePage of group.manualPages) {
-      jobs.push({
-        keepId: String(group.keepPage.id),
-        loseId: String(losePage.id),
-        name: String(losePage.name || ''),
-        ads: getAdsForPage(losePage.id).length
-      });
-    }
-  }
-  return jobs;
-}
-
-function closeMergeAllDialog(restoreFocus = true) {
-  document.getElementById('merge-all-dialog')?.remove();
-  const target = _mergeAllReturnFocus?.isConnected === false ? null : _mergeAllReturnFocus;
-  _mergeAllReturnFocus = null;
-  if (restoreFocus && target?.focus) target.focus();
-}
-
-function showMergeAllDialog(triggerButton) {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
-    return;
-  }
-  const jobs = buildAllPageMergeJobs();
-  if (!jobs.length) {
-    showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لا توجد صفحة يدوية لها صفحة Meta بنفس الاسم.' : 'No hand-made page has a Meta page of the same name.', 'success');
-    return;
-  }
-  closeMergeAllDialog(false);
-  _mergeAllReturnFocus = triggerButton || document.activeElement;
-  const totalAds = jobs.reduce((sum, job) => sum + job.ads, 0);
-
-  const dialog = document.createElement('div');
-  dialog.id = 'merge-all-dialog';
-  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[96] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-labelledby', 'merge-all-title');
-  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
-  dialog.tabIndex = -1;
-  dialog.innerHTML = `
-    <div class="glass-panel w-full max-w-lg max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
-      <div class="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex items-start gap-3">
-        <span class="w-11 h-11 rounded-xl bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
-          <i data-lucide="layers" class="w-6 h-6"></i>
-        </span>
-        <div class="min-w-0">
-          <h2 id="merge-all-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${isAr ? 'دمج كل الصفحات المكررة' : 'Merge every duplicate page'}</h2>
-          <p class="text-sm text-slate-500 break-words">${isAr ? 'يتم تنفيذها واحدة بعد الأخرى، ويمكنك الإيقاف في أي وقت.' : 'Done one after another. You can stop at any point.'}</p>
-        </div>
-      </div>
-      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-3">
-        <div class="grid grid-cols-2 gap-3 text-center">
-          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-            <div class="text-2xl font-bold text-slate-800 dark:text-white">${jobs.length}</div>
-            <div class="text-xs text-slate-500">${isAr ? 'صفحة قديمة ستُزال' : 'old pages removed'}</div>
-          </div>
-          <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3">
-            <div class="text-2xl font-bold text-slate-800 dark:text-white">${totalAds}</div>
-            <div class="text-xs text-slate-500">${isAr ? 'إعلان سينتقل' : 'ads will move'}</div>
-          </div>
-        </div>
-        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 text-sm text-slate-600 dark:text-slate-300 space-y-1">
-          <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة.' : 'No amount, receipt or photo changes.'}</div>
-          <div>• ${isAr ? 'كل صفحة تُحذف فقط بعد انتقال كل إعلاناتها.' : 'Each page is removed only after all of its ads have moved.'}</div>
-          <div>• ${isAr ? 'إذا فشلت صفحة، تستمر البقية وتظهر لك قائمة بما لم يكتمل.' : 'If one page fails the rest continue, and you get a list of what did not finish.'}</div>
-        </div>
-        <div id="merge-all-progress" class="hidden rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm font-bold text-slate-700 dark:text-slate-200" role="status" aria-live="polite"></div>
-        <div id="merge-all-report" class="hidden rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-3 text-xs text-amber-800 dark:text-amber-200 space-y-1 max-h-48 overflow-y-auto"></div>
-      </div>
-      <div class="p-4 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row gap-2">
-        <button type="button" id="merge-all-start" onclick="runAllPageMerges()" class="flex-1 btn-shine bg-amber-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-amber-700 min-h-11">
-          <i data-lucide="layers" class="w-4 h-4 inline mr-2"></i>${isAr ? `دمج الكل (${jobs.length})` : `Merge all (${jobs.length})`}
-        </button>
-        <button type="button" id="merge-all-stop" onclick="stopAllPageMerges()" class="hidden flex-1 bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-200 px-4 py-3 rounded-xl font-bold min-h-11">${isAr ? 'إيقاف' : 'Stop'}</button>
-        <button type="button" id="merge-all-close" onclick="closeMergeAllDialog()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
-      </div>
-    </div>`;
-  dialog.addEventListener('click', event => { if (event.target === dialog && !_mergeToolsBusy) closeMergeAllDialog(); });
-  document.body.appendChild(dialog);
-  IconQueue.schedule(dialog);
-  dialog.focus();
-}
-
-async function runAllPageMerges() {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الصفحات متاح للمدير فقط.' : 'Only an administrator can merge pages.', 'error');
-    return;
-  }
-  if (_mergeToolsBusy) return;
-  const jobs = buildAllPageMergeJobs();
-  if (!jobs.length) {
-    showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لا توجد صفحة يدوية لها صفحة Meta بنفس الاسم.' : 'No hand-made page has a Meta page of the same name.', 'success');
-    return;
-  }
-
-  _mergeToolsBusy = 'page-all';
-  _mergeAllStopRequested = false;
-  const startButton = document.getElementById('merge-all-start');
-  const stopButton = document.getElementById('merge-all-stop');
-  const closeButton = document.getElementById('merge-all-close');
-  const progress = document.getElementById('merge-all-progress');
-  if (startButton) startButton.classList.add('hidden');
-  if (closeButton) closeButton.classList.add('hidden');
-  if (stopButton) stopButton.classList.remove('hidden');
-  if (progress) progress.classList.remove('hidden');
-
-  let done = 0;
-  let movedAds = 0;
-  const problems = [];
-  try {
-    for (const job of jobs) {
-      if (_mergeAllStopRequested) break;
-      if (progress) {
-        progress.textContent = isAr
-          ? `جارٍ الدمج ${done + 1} من ${jobs.length}: ${job.name}`
-          : `Merging ${done + 1} of ${jobs.length}: ${job.name}`;
-      }
-      let result;
-      try {
-        result = await _mergeOnePageIntoMeta(job.keepId, job.loseId);
-      } catch (error) {
-        result = { ok: false, moved: 0, reason: `"${job.name}": ${error?.message || 'unexpected error'}` };
-      }
-      // One page failing must never stop the other 47 — collect and carry on.
-      if (result.ok) {
-        done += 1;
-        movedAds += result.moved;
-      } else {
-        problems.push(result.reason);
-      }
-    }
-  } finally {
-    _mergeToolsBusy = '';
-    _mergeAllStopRequested = false;
-    if (stopButton) stopButton.classList.add('hidden');
-    if (closeButton) closeButton.classList.remove('hidden');
-    if (progress) {
-      progress.textContent = isAr
-        ? `تم دمج ${done} صفحة ونقل ${movedAds} إعلان.`
-        : `Merged ${done} page${done === 1 ? '' : 's'} and moved ${movedAds} ad${movedAds === 1 ? '' : 's'}.`;
-    }
-    const report = document.getElementById('merge-all-report');
-    if (report && problems.length) {
-      report.classList.remove('hidden');
-      report.innerHTML = `<div class="font-bold">${isAr ? `${problems.length} لم تكتمل:` : `${problems.length} did not finish:`}</div>`
-        + problems.map(text => `<div>• ${Security.escapeHtml(String(text))}</div>`).join('');
-    }
-    showNotification(
-      problems.length ? (isAr ? 'اكتمل الدمج جزئياً' : 'Merged with some left over') : (isAr ? 'تم دمج الكل' : 'All merged'),
-      isAr
-        ? `تم دمج ${done} صفحة ونقل ${movedAds} إعلان.${problems.length ? ` ${problems.length} لم تكتمل.` : ''}`
-        : `Merged ${done} page${done === 1 ? '' : 's'} and moved ${movedAds} ad${movedAds === 1 ? '' : 's'}.${problems.length ? ` ${problems.length} did not finish.` : ''}`,
-      problems.length ? 'warning' : 'success'
-    );
-    closePageDuplicatesDialog(false);
-    render();
-  }
-}
-
-// ------------------------------------------------------------------
-// 2. Link a hand-made ad to the Meta draft that describes the same ad
-// ------------------------------------------------------------------
-
-// A row is "imported" when the automation made it, whatever its current link
-// state. Used to tell the two sides of a pair apart.
-function isImportedMetaAd(ad) {
-  return !!ad && (
-    !!String(ad.metaImportState || '').trim()
-    || !!String(ad.metaImportedAt || '').trim()
-    || !!String(ad.metaImportSource || '').trim()
-  );
-}
-
-// Every way this ad names a page, so the two sides can be recognised as the
-// same page even while the manual ad still points at the old page record and
-// the draft already points at the Meta one.
-function _adPageMergeKeys(ad, pagesById) {
-  const keys = new Set();
-  const pageId = String(ad?.pageId || '').trim();
-  const page = !pageId
-    ? null
-    : (pagesById
-      ? (pagesById.get(pageId) || null)
-      : ((state.pages || []).find(item => item && !item._deleted && String(item.id) === pageId) || null));
-  if (pageId) keys.add(`id:${pageId}`);
-  const metaPageId = String(ad?.metaPageId || page?.metaPageId || '').trim();
-  if (metaPageId) keys.add(`meta:${metaPageId}`);
-  const rawName = String(page?.name || ad?.pageName || ad?.metaPageName || '').trim();
-  // "Facebook Page 1234…" is the importer's stand-in, not a name. Matching on it
-  // would pair two unrelated ads that are both waiting for their real name.
-  if (rawName && !metaAdsIsPlaceholderPageName(rawName, metaPageId || pageId)) {
-    const nameKey = pageCategoryKey(rawName);
-    if (nameKey) keys.add(`name:${nameKey}`);
-  }
-  return keys;
-}
-
-function adsShareAPage(left, right) {
-  const leftKeys = _adPageMergeKeys(left);
-  if (!leftKeys.size) return false;
-  for (const key of _adPageMergeKeys(right)) {
-    if (leftKeys.has(key)) return true;
-  }
-  return false;
-}
-
-// The draft must be genuinely empty. Money on both sides is a decision a person
-// has to make one receipt at a time, so it is refused rather than guessed.
-function metaDraftCarriesMoney(ad) {
-  if (!ad) return false;
-  if ((Number(ad.amountUSD) || 0) > 0) return true;
-  if (getAdLinkedReceiptIds(ad).length > 0) return true;
-  if (Array.isArray(ad.topUps) && ad.topUps.length > 0) return true;
-  return !!String(ad.customerId || '').trim();
-}
-
-// The ads table asks about every row, so the WHOLE pairing is resolved in one
-// pass and cached for the render — never once per row. Comparing each ad with
-// every other ad (and re-finding its page each time) is O(ads² × pages) and was
-// measurably the wrong shape for a list this long. Cleared at the top of
-// renderAdsView and after a merge, so it can never describe stale data.
-let _adMergePairCache = null;
-
-function resetAdMergePairCache() {
-  _adMergePairCache = null;
-}
-
-function _buildAdMergePairIndex() {
-  const pairs = new Map();
-  if (!isMergeToolsAdmin() || !isServerModeEnabled()) return pairs;
-
-  const pagesById = new Map(
-    (state.pages || [])
-      .filter(page => page && !page._deleted && page.id)
-      .map(page => [String(page.id), page])
-  );
-  const manualAds = [];
-  const draftAds = [];
-  const keysByAdId = new Map();
-  for (const ad of getVisibleRecords(state.ads)) {
-    if (!ad || ad.recordType === 'receipt' || !ad.id) continue;
-    const linked = !!String(ad.metaAdId || '').trim();
-    const imported = isImportedMetaAd(ad);
-    if (imported && linked) {
-      // A draft that already grew a customer, an amount or a receipt is a real
-      // ad in its own right and must never be absorbed.
-      if (metaDraftCarriesMoney(ad)) continue;
-      draftAds.push(ad);
-    } else if (!imported && !linked) {
-      manualAds.push(ad);
-    } else {
-      // Already linked by hand, or imported and since unlinked: neither half.
-      continue;
-    }
-    keysByAdId.set(String(ad.id), _adPageMergeKeys(ad, pagesById));
-  }
-  if (!manualAds.length || !draftAds.length) return pairs;
-
-  const draftsByKey = new Map();
-  for (const draft of draftAds) {
-    for (const key of keysByAdId.get(String(draft.id))) {
-      if (!draftsByKey.has(key)) draftsByKey.set(key, []);
-      draftsByKey.get(key).push(draft);
-    }
-  }
-
-  // Several hand-made ads of the same price on one page, beside several drafts,
-  // is the NORMAL shape of this problem — refusing everything that is not a
-  // clean one-to-one would hide the feature exactly where it is needed. So every
-  // ad keeps its full candidate list and the owner picks; only the pick itself
-  // is ever written, and getAdMergePlan re-checks it.
-  for (const manual of manualAds) {
-    const found = new Map();
-    for (const key of keysByAdId.get(String(manual.id))) {
-      for (const draft of draftsByKey.get(key) || []) found.set(String(draft.id), draft);
-    }
-    if (!found.size) continue;
-    const partners = [...found.values()];
-    pairs.set(String(manual.id), { role: 'manual', ad: manual, partners });
-    for (const draft of partners) {
-      const entry = pairs.get(String(draft.id)) || { role: 'draft', ad: draft, partners: [] };
-      entry.partners.push(manual);
-      pairs.set(String(draft.id), entry);
-    }
-  }
-  return pairs;
-}
-
-function getAdMergePartnersFor(adId) {
-  const wanted = String(adId || '');
-  if (!wanted) return null;
-  if (!_adMergePairCache) _adMergePairCache = _buildAdMergePairIndex();
-  const entry = _adMergePairCache.get(wanted) || null;
-  return entry && entry.partners.length ? entry : null;
-}
-
-// One button in the ads-table Actions column, on BOTH halves of a possible pair.
-// "Link" is already taken there by the ad -> Meta connection manager, so this
-// says Merge/دمج like the customer flow does.
-function renderAdMergeActionButton(ad, isAr) {
-  const entry = getAdMergePartnersFor(ad?.id);
-  if (!entry) return '';
-  const count = entry.partners.length;
-  const label = isAr ? 'دمج' : 'Merge';
-  const title = entry.role === 'manual'
-    ? (isAr ? 'دمج هذا الإعلان مع نسخته المستوردة من Meta على نفس الصفحة' : 'Merge this ad with its Meta-imported copy on the same page')
-    : (isAr ? 'دمج هذه النسخة المستوردة مع الإعلان الأصلي على نفس الصفحة' : 'Merge this imported copy into the original ad on the same page');
-  return `<button type="button" data-action="merge-meta-twin" data-ad-id="${Security.escapeHtml(String(ad.id))}" onclick="openAdMergePicker(this.dataset.adId, this)" class="inline-flex min-h-10 items-center justify-center gap-1 rounded-lg border border-purple-200 bg-purple-50 px-2 text-xs font-bold text-purple-700 hover:bg-purple-100 dark:border-purple-800 dark:bg-purple-900/30 dark:text-purple-200" title="${Security.escapeHtml(title)}"><i data-lucide="combine" class="h-4 w-4"></i><span>${label}${count > 1 ? ` (${count})` : ''}</span></button>`;
-}
-
-// One candidate goes straight to the confirmation. Several means the owner has
-// to say which two ads are really the same ad — the app must not guess.
-function openAdMergePicker(adId, triggerButton) {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الإعلانات متاح للمدير فقط.' : 'Only an administrator can merge ads.', 'error');
-    return;
-  }
-  const entry = getAdMergePartnersFor(adId);
-  if (!entry) {
-    showNotification(isAr ? 'لا يوجد ما يُدمج' : 'Nothing to merge', isAr ? 'لم يعد هناك إعلان مطابق على نفس الصفحة.' : 'There is no matching ad on the same page any more.', 'warning');
-    return;
-  }
-  const pairFor = partner => (entry.role === 'manual'
-    ? { keepId: String(entry.ad.id), draftId: String(partner.id) }
-    : { keepId: String(partner.id), draftId: String(entry.ad.id) });
-  if (entry.partners.length === 1) {
-    const only = pairFor(entry.partners[0]);
-    showAdMergeDialog(only.keepId, only.draftId, triggerButton);
-    return;
-  }
-
-  closeAdMergeDialog(false);
-  _adMergeReturnFocus = triggerButton || document.activeElement;
-  const dialog = document.createElement('div');
-  dialog.id = 'ad-merge-dialog';
-  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-labelledby', 'ad-merge-picker-title');
-  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
-  dialog.tabIndex = -1;
-  dialog.innerHTML = `
-    <div class="glass-panel w-full max-w-xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
-      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
-        <div class="min-w-0">
-          <h2 id="ad-merge-picker-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${entry.role === 'manual' ? (isAr ? 'أي نسخة Meta هي نفس هذا الإعلان؟' : 'Which Meta copy is the same ad?') : (isAr ? 'أي إعلان هو نفس هذه النسخة؟' : 'Which ad is this copy?')}</h2>
-          <p class="text-sm text-slate-500 break-words">${isAr ? 'كلها على نفس الصفحة. اختر واحداً لمراجعة الدمج قبل تنفيذه.' : 'They are all on the same page. Pick one to review the merge before it runs.'}</p>
-        </div>
-        <button type="button" onclick="closeAdMergeDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
-          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
-        </button>
-      </div>
-      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-2">
-        ${entry.partners.map(partner => {
-          const ids = pairFor(partner);
-          const money = (Number(partner.amountUSD) || 0).toFixed(2);
-          const when = partner.startDate ? new Date(partner.startDate) : null;
-          const dateText = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString(appDateLocale()) : '';
-          return `<button type="button" onclick="showAdMergeDialog('${Security.escapeHtml(ids.keepId)}','${Security.escapeHtml(ids.draftId)}', this)" class="w-full text-start rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 hover:border-purple-300 hover:bg-purple-50 dark:hover:bg-purple-900/20">
-            <div class="font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(partner, isAr))}</div>
-            <div class="mt-0.5 text-xs text-slate-500 break-all">
-              ${String(partner.metaAdId || '').trim() ? `Meta #${Security.escapeHtml(String(partner.metaAdId))}` : `${isAr ? 'المبلغ' : 'Amount'}: $${money}`}
-              ${dateText ? ` • ${Security.escapeHtml(dateText)}` : ''}
-            </div>
-          </button>`;
-        }).join('')}
-      </div>
-      <div class="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 p-4">
-        <button type="button" onclick="closeAdMergeDialog()" class="w-full bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
-      </div>
-    </div>`;
-  dialog.addEventListener('click', event => { if (event.target === dialog) closeAdMergeDialog(); });
-  document.body.appendChild(dialog);
-  IconQueue.schedule(dialog);
-  dialog.focus();
-}
-
-// Re-validates an explicitly chosen pair (the dialog and the write both use it,
-// so a stale dialog can never merge two ads that stopped being a pair).
-function getAdMergePlan(keepAdId, draftAdId) {
-  const isAr = state.language === 'ar';
-  const ads = getVisibleRecords(state.ads);
-  const keepAd = ads.find(item => String(item.id) === String(keepAdId || '')) || null;
-  const draftAd = ads.find(item => String(item.id) === String(draftAdId || '')) || null;
-  const plan = { keepAd, draftAd, metaAdId: '', blocked: '' };
-  if (!keepAd || !draftAd || String(keepAd.id) === String(draftAd.id)) {
-    plan.blocked = isAr ? 'أحد الإعلانين لم يعد موجوداً. حدّث الصفحة وحاول مرة أخرى.' : 'One of the two ads no longer exists. Refresh and try again.';
-    return plan;
-  }
-  if (!isServerModeEnabled()) {
-    plan.blocked = isAr ? 'الدمج يحتاج الاتصال بالخادم.' : 'Merging needs a live server connection.';
-    return plan;
-  }
-  plan.metaAdId = String(draftAd.metaAdId || '').trim();
-  if (!plan.metaAdId || !isImportedMetaAd(draftAd)) {
-    plan.blocked = isAr ? 'الإعلان الثاني ليس نسخة مستوردة من Meta.' : 'The second ad is not a Meta-imported copy.';
-    return plan;
-  }
-  if (String(keepAd.metaAdId || '').trim()) {
-    plan.blocked = isAr ? 'الإعلان الأساسي مرتبط بـ Meta بالفعل. ألغِ ربطه أولاً.' : 'The main ad is already linked to Meta. Unlink it first.';
-    return plan;
-  }
-  if (isImportedMetaAd(keepAd)) {
-    plan.blocked = isAr ? 'الإعلانان كلاهما مستورد من Meta.' : 'Both ads were imported from Meta.';
-    return plan;
-  }
-  if (metaDraftCarriesMoney(draftAd)) {
-    plan.blocked = isAr
-      ? 'النسخة المستوردة عليها عميل أو مبلغ أو وصل. أفرغها أو احذفها بنفسك أولاً.'
-      : 'The imported copy already has a customer, an amount or a receipt. Empty or delete it yourself first.';
-    return plan;
-  }
-  if (!adsShareAPage(keepAd, draftAd)) {
-    plan.blocked = isAr ? 'الإعلانان ليسا على نفس الصفحة.' : 'The two ads are not on the same page.';
-    return plan;
-  }
-  return plan;
-}
-
-function closeAdMergeDialog(restoreFocus = true) {
-  document.getElementById('ad-merge-dialog')?.remove();
-  const target = _adMergeReturnFocus?.isConnected === false ? null : _adMergeReturnFocus;
-  _adMergeReturnFocus = null;
-  if (restoreFocus && target?.focus) target.focus();
-}
-
-function _describeMergeAdCustomer(ad, isAr) {
-  const customer = (state.customers || []).find(item => String(item.id) === String(ad?.customerId || ''));
-  return String(customer?.name || ad?.customerName || ad?.metaAdName || (isAr ? 'بدون عميل' : 'No customer')).trim();
-}
-
-function showAdMergeDialog(keepAdId, draftAdId, triggerButton) {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الإعلانات متاح للمدير فقط.' : 'Only an administrator can merge ads.', 'error');
-    return;
-  }
-  const plan = getAdMergePlan(keepAdId, draftAdId);
-  if (plan.blocked) {
-    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
-    return;
-  }
-  closeAdMergeDialog(false);
-  _adMergeReturnFocus = triggerButton || document.activeElement;
-
-  const keepAmount = (Number(plan.keepAd.amountUSD) || 0).toFixed(2);
-  const keepReceipts = getAdLinkedReceiptIds(plan.keepAd).length;
-  const dialog = document.createElement('div');
-  dialog.id = 'ad-merge-dialog';
-  dialog.className = 'mobile-dialog-overlay fixed inset-0 z-[95] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-labelledby', 'ad-merge-dialog-title');
-  dialog.setAttribute('dir', isAr ? 'rtl' : 'ltr');
-  dialog.tabIndex = -1;
-  dialog.innerHTML = `
-    <div class="glass-panel w-full max-w-2xl max-h-[90dvh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-slide-up">
-      <div class="sticky top-0 z-10 bg-white dark:bg-slate-900 flex items-start justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700">
-        <div class="flex items-start gap-3 min-w-0">
-          <span class="w-11 h-11 rounded-xl bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 flex items-center justify-center shrink-0">
-            <i data-lucide="combine" class="w-6 h-6"></i>
-          </span>
-          <div class="min-w-0">
-            <h2 id="ad-merge-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white break-words">${isAr ? 'دمج الإعلان مع نسخة Meta' : 'Merge this ad with its Meta copy'}</h2>
-            <p class="text-sm text-slate-500 break-words">${isAr ? 'ينتقل ربط Meta إلى الإعلان الذي يحمل المال، وتُحذف النسخة الفارغة.' : 'The Meta link moves to the ad that holds the money, and the empty copy is removed.'}</p>
-          </div>
-        </div>
-        <button type="button" onclick="closeAdMergeDialog()" class="min-w-11 min-h-11 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center flex-shrink-0" aria-label="${isAr ? 'إغلاق' : 'Close'}">
-          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
-        </button>
-      </div>
-      <div class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4">
-        <div class="grid gap-3 md:grid-cols-2">
-          <section class="rounded-xl border-2 border-emerald-300 dark:border-emerald-700 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
-            <div class="text-xs font-bold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">${isAr ? 'سيبقى' : 'Will be kept'}</div>
-            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(_describeMergeAdCustomer(plan.keepAd, isAr))}</div>
-            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'المبلغ' : 'Amount'}: $${keepAmount}</div>
-            <div class="text-xs text-slate-600 dark:text-slate-300">${isAr ? `${keepReceipts} وصل مرتبط` : `${keepReceipts} linked receipt${keepReceipts === 1 ? '' : 's'}`}</div>
-            <div class="mt-2 inline-flex items-center gap-1 rounded-full bg-white/80 dark:bg-slate-900/50 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200">${isAr ? 'سيأخذ ربط Meta' : 'Gains the Meta link'}</div>
-          </section>
-          <section class="rounded-xl border-2 border-rose-200 dark:border-rose-800 bg-rose-50/60 dark:bg-rose-900/10 p-3">
-            <div class="text-xs font-bold uppercase tracking-wide text-rose-700 dark:text-rose-300">${isAr ? 'ستُزال' : 'Will be removed'}</div>
-            <div class="mt-1 font-bold text-slate-800 dark:text-white break-words">${Security.escapeHtml(String(plan.draftAd.metaAdName || (isAr ? 'مسودة Meta' : 'Meta draft')))}</div>
-            <div class="mt-1 font-mono text-[11px] text-slate-500 break-all">Meta #${Security.escapeHtml(plan.metaAdId)}</div>
-            <div class="mt-1 text-xs text-slate-600 dark:text-slate-300">${isAr ? 'بدون عميل أو مبلغ أو وصل' : 'No customer, amount or receipt'}</div>
-          </section>
-        </div>
-
-        <div class="rounded-xl border border-slate-200 dark:border-slate-700 p-3 text-sm text-slate-600 dark:text-slate-300 space-y-1">
-          <div class="font-bold text-slate-800 dark:text-white">${isAr ? 'ماذا سيحدث' : 'What will happen'}</div>
-          <div>• ${isAr ? 'يُفك ربط Meta عن النسخة الفارغة.' : 'The empty copy releases the Meta link.'}</div>
-          <div>• ${isAr ? 'يُربط الإعلان الباقي بنفس إعلان Meta ويأخذ الصورة والميزانية والمصروف.' : 'The surviving ad is linked to the same Meta ad and picks up its photo, budget and spend.'}</div>
-          <div>• ${isAr ? 'تُحذف النسخة الفارغة في النهاية.' : 'The empty copy is removed last.'}</div>
-          <div>• ${isAr ? 'لا يتغير أي مبلغ أو وصل أو صورة في الإعلان الباقي.' : 'No amount, receipt or photo on the surviving ad changes.'}</div>
-        </div>
-      </div>
-      <div class="sticky bottom-0 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 p-4 flex flex-col sm:flex-row gap-2">
-        <button type="button" id="ad-merge-confirm" onclick="runAdMerge('${Security.escapeHtml(String(plan.keepAd.id))}','${Security.escapeHtml(String(plan.draftAd.id))}')" class="flex-1 btn-shine bg-purple-600 text-white px-4 py-3 rounded-xl font-bold hover:bg-purple-700 min-h-11">
-          <i data-lucide="combine" class="w-4 h-4 inline mr-2"></i>${isAr ? 'دمج الآن' : 'Merge now'}
-        </button>
-        <button type="button" onclick="closeAdMergeDialog()" class="flex-1 bg-slate-200 dark:bg-slate-700 px-4 py-3 rounded-xl font-bold hover:bg-slate-300 min-h-11">${isAr ? 'إلغاء' : 'Cancel'}</button>
-      </div>
-    </div>`;
-  dialog.addEventListener('click', event => { if (event.target === dialog) closeAdMergeDialog(); });
-  document.body.appendChild(dialog);
-  IconQueue.schedule(dialog);
-  dialog.focus();
-}
-
-function _liveMergeAd(adId) {
-  return (state.ads || []).find(item => item && String(item.id) === String(adId || '')) || null;
-}
-
-async function runAdMerge(keepAdId, draftAdId) {
-  const isAr = state.language === 'ar';
-  if (!isMergeToolsAdmin()) {
-    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'دمج الإعلانات متاح للمدير فقط.' : 'Only an administrator can merge ads.', 'error');
-    return;
-  }
-  if (_mergeToolsBusy) return;
-  const plan = getAdMergePlan(keepAdId, draftAdId);
-  if (plan.blocked) {
-    showNotification(isAr ? 'تعذّر الدمج' : 'Cannot merge', plan.blocked, 'warning');
-    return;
-  }
-
-  _mergeToolsBusy = 'ad';
-  const confirmButton = document.getElementById('ad-merge-confirm');
-  if (confirmButton) {
-    confirmButton.disabled = true;
-    confirmButton.textContent = isAr ? 'جارٍ الدمج…' : 'Merging…';
-  }
-
-  const metaAdId = plan.metaAdId;
-  const draftId = String(plan.draftAd.id);
-  const keepId = String(plan.keepAd.id);
-  let released = false;
-  try {
-    // 1. Release the link. Meta allows one Albayan ad per Meta ad and the check
-    //    ignores deleted rows, so the draft has to let go before the real ad can
-    //    take over.
-    const draftBefore = _liveMergeAd(draftId);
-    // Without a known version the server cannot detect that someone else edited
-    // the ad first, so refuse rather than overwrite blindly.
-    if (!Number.isFinite(Number(draftBefore?._lastModified))) {
-      throw new Error(isAr ? 'حدّث البيانات ثم أعد المحاولة.' : 'Refresh the data and try again.');
-    }
-    const unlinked = await apiUnlinkMetaAd(
-      draftId,
-      Number(draftBefore._lastModified),
-      Security.generateSecureId('merge_unlink')
-    );
-    applyValidatedServerEntityBatch([{ collection: 'ads', entity: unlinked.ad }], 'adMergeUnlink');
-    released = true;
-
-    // 2. Give the link to the ad that actually holds the money. This also pulls
-    //    the Meta photo, budget, spend and schedule onto it.
-    const keepBefore = _liveMergeAd(keepId);
-    if (!Number.isFinite(Number(keepBefore?._lastModified))) {
-      throw new Error(isAr ? 'حدّث البيانات ثم أعد المحاولة.' : 'Refresh the data and try again.');
-    }
-    const linked = await apiLinkMetaAd(
-      keepId,
-      metaAdId,
-      Number(keepBefore._lastModified),
-      Security.generateSecureId('merge_link')
-    );
-    applyValidatedServerEntityBatch([{ collection: 'ads', entity: linked.ad }], 'adMergeLink');
-    released = false;
-
-    // 3. Only now is the empty draft redundant. A draft carries no money, so
-    //    removing it returns nothing and unwinds nothing.
-    const removed = await deleteRecord(state.ads, draftId);
-    if (!removed) {
-      showNotification(
-        isAr ? 'تم الربط' : 'Linked',
-        isAr ? 'انتقل ربط Meta بنجاح، لكن تعذّر حذف النسخة الفارغة. احذفها يدوياً.' : 'The Meta link moved successfully, but the empty copy could not be removed. Delete it by hand.',
-        'warning'
-      );
-      return;
-    }
-    showNotification(
-      isAr ? 'تم الدمج' : 'Merged',
-      isAr ? 'أصبح الإعلان مرتبطاً بـ Meta وحُذفت النسخة المكررة.' : 'The ad is now linked to Meta and the duplicate copy was removed.',
-      'success'
-    );
-  } catch (error) {
-    // The draft gave up its link and the real ad never took it. Put it back so
-    // the pair is exactly as it was and the merge can simply be retried.
-    if (released) {
-      try {
-        const draftNow = _liveMergeAd(draftId);
-        const restored = await apiLinkMetaAd(
-          draftId,
-          metaAdId,
-          Number(draftNow?._lastModified),
-          Security.generateSecureId('merge_restore')
-        );
-        applyValidatedServerEntityBatch([{ collection: 'ads', entity: restored.ad }], 'adMergeRestore');
-      } catch (_) {
-        showNotification(
-          isAr ? 'يحتاج انتباهك' : 'Needs your attention',
-          isAr
-            ? `لم يكتمل الدمج وبقيت النسخة المستوردة بدون ربط. اربطها يدوياً بإعلان Meta رقم ${metaAdId}.`
-            : `The merge did not finish and the imported copy is left unlinked. Link it back to Meta ad ${metaAdId} by hand.`,
-          'error'
-        );
-      }
-    }
-    showNotification(
-      isAr ? 'تعذّر الدمج' : 'Merge failed',
-      error?.message || (isAr ? 'حدث خطأ أثناء الدمج. أعد المحاولة.' : 'Something went wrong during the merge. Try again.'),
-      'error'
-    );
-  } finally {
-    _mergeToolsBusy = '';
-    resetAdMergePairCache();
-    closeAdMergeDialog(false);
-    render();
-  }
 }
 // ==========================================
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
@@ -39783,87 +39359,116 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
+      // Paywall sheet (2026-09 redesign). Money rules are unchanged: plans
+      // come only from the server catalog, purchases run through
+      // handleSubscribePlan (idempotent, one at a time), and a short wallet
+      // can never buy — it is sent to Charge wallet instead.
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
+      const preferredPlanId = String(state.modalData?.planId || '');
       const isRTL = state.language === 'ar';
-      const lockPlans = typeof getPlansForService === 'function' ? getPlansForService(lockSubscribeToId) : [];
+      const lockCatalog = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+      let lockPlans = typeof getPlansForService === 'function' ? getPlansForService(lockSubscribeToId) : [];
+      // A plan chosen on the Plans page may be a bundle whose first service is
+      // not the one being unlocked — make sure it leads the list.
+      const preferredPlan = preferredPlanId ? lockCatalog.find(p => p && String(p.id) === preferredPlanId) : null;
+      if (preferredPlan) lockPlans = [preferredPlan, ...lockPlans.filter(p => String(p.id) !== preferredPlanId)];
       const lydBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, 'LYD') : 0;
-      const planCards = lockPlans.map(plan => {
+      const lockServiceLabel = (sid) => {
+        const svc = SERVICES[sid] || SMART_SYSTEMS_CHILDREN[sid];
+        return Security.escapeHtml(String(svc ? (isRTL ? svc.nameAr : svc.name) : sid));
+      };
+      const lockPeriod = (days) => {
+        const d = Number(days) || 30;
+        if (d === 30 || d === 31) return isRTL ? '/ شهر' : '/ month';
+        if (d === 365 || d === 360) return isRTL ? '/ سنة' : '/ year';
+        return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
+      };
+      const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
+      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+
+      const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
         const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
         const price = Math.max(0, Number(plan.priceMinor) || 0);
-        const priceLabel = price > 0
-          ? `${walletFormatMinor(price, 'LYD')} / ${Number(plan.durationDays) || 30}${isRTL ? ' يوم' : 'd'}`
-          : (isRTL ? 'مجاني' : 'Free');
-        const short = price > lydBalanceMinor;
+        const after = lydBalanceMinor - price;
+        const short = after < 0;
         const safePlanId = Security.escapeHtml(String(plan.id));
-        return `
-          <div class="rounded-2xl border-2 ${isBundle ? 'border-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20' : 'border-slate-200 dark:border-slate-700'} p-4 text-start">
-            <div class="flex flex-wrap items-center justify-between gap-2">
+        const buyLabel = `${isRTL ? 'اشترك' : 'Subscribe'}${price > 0 ? ` — ${lockMoney(price)}` : ''}`;
+        const includes = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).map(sid =>
+          `<span class="rounded-full bg-slate-100 dark:bg-slate-800 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">${lockServiceLabel(sid)}</span>`).join('');
+        if (!primary) {
+          return `
+            <div class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 flex items-center justify-between gap-3">
               <div class="min-w-0">
-                <div class="flex items-center gap-2 font-black text-slate-800 dark:text-white">
-                  <i data-lucide="${isBundle ? 'package' : 'circle-check'}" class="w-4 h-4 ${isBundle ? 'text-indigo-600' : 'text-emerald-600'}"></i>${planName}
-                  ${plan.badge === 'best_value' ? `<span class="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:text-amber-200">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}
-                </div>
-                <div class="mt-1 text-xs text-slate-500">
-                  ${isBundle
-                    ? (isRTL ? `${plan.serviceIds.length} خدمات في اشتراك واحد` : `${plan.serviceIds.length} services in one subscription`)
-                    : (isRTL ? 'خدمة واحدة' : 'Single service')}
-                  ${Number(plan.savingsPct) > 0 ? ` · ${isRTL ? 'توفير' : 'save'} ${Number(plan.savingsPct)}%` : ''}
-                </div>
+                <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${planName}${isBundle ? ` <span class="ms-1 rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2 py-0.5 text-[10px] font-extrabold text-white">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}</div>
+                <div class="text-xs text-slate-500" dir="ltr">${price > 0 ? Security.escapeHtml(lockMoney(price)) : (isRTL ? 'مجاني' : 'Free')} ${Security.escapeHtml(lockPeriod(plan.durationDays))}</div>
               </div>
-              <div class="text-end">
-                <div class="font-black text-slate-800 dark:text-white">${priceLabel}</div>
-                <button onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="mt-1 rounded-xl ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-indigo-600 text-white hover:bg-indigo-700'} px-4 py-2 text-sm font-bold">
-                  ${isRTL ? 'اشترك' : 'Subscribe'}
-                </button>
-              </div>
+              <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl px-4 text-sm font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${isRTL ? 'اشترك' : 'Subscribe'}</button>
+            </div>`;
+        }
+        return `
+          <div class="text-start">
+            ${includes ? `<div class="flex flex-wrap gap-1.5 mb-3">${includes}</div>` : ''}
+            ${Number(plan.savingsPct) > 0 ? `<div class="mb-3 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${isRTL ? `وفّر ${Number(plan.savingsPct)}%` : `Save ${Number(plan.savingsPct)}%`}</div>` : ''}
+            <div class="rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 text-sm mb-4">
+              <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${isRTL ? 'الباقة' : 'Plan'}</span><span class="font-extrabold text-slate-900 dark:text-white" dir="ltr">${price > 0 ? Security.escapeHtml(lockMoney(price)) : (isRTL ? 'مجاني' : 'Free')} <span class="text-[11px] font-semibold text-slate-500">${Security.escapeHtml(lockPeriod(plan.durationDays))}</span></span></div>
+              <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${Security.escapeHtml(lockMoney(lydBalanceMinor))}</span></div>
+              <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${short ? (isRTL ? 'ينقصك' : 'You need') : (isRTL ? 'الرصيد بعد' : 'Balance after')}</span><span class="font-bold ${short ? 'text-rose-600' : 'text-emerald-600'}" dir="ltr">${Security.escapeHtml(lockMoney(Math.abs(after)))}</span></div>
             </div>
-            ${short ? `<div class="mt-2 text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
+            <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
+            ${short ? `<div class="mt-2 text-center text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
           </div>`;
-      }).join('');
-      modalContent = `
-        <div class="text-center">
-          <div class="w-16 h-16 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mx-auto mb-4">
-            <i data-lucide="lock" class="w-8 h-8 text-white"></i>
-          </div>
-          <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">
-            ${isRTL ? 'غير مشترك' : 'Not Subscribed'}
-          </h2>
-          <p class="text-slate-600 dark:text-slate-300 mb-4">
-            ${isRTL
-              ? `أنت غير مشترك في <strong>${lockServiceName}</strong>. اختر خطة الاشتراك:`
-              : `You are not subscribed to <strong>${lockServiceName}</strong>. Choose your plan:`
-            }
-          </p>
-          <div class="mb-4 flex items-center justify-between rounded-2xl bg-white/40 dark:bg-slate-800/30 border border-white/30 px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
-            <span>${isRTL ? 'رصيد المحفظة (د.ل)' : 'Wallet balance (LYD)'}</span>
-            <span class="font-bold">${walletFormatMinor(lydBalanceMinor, 'LYD')}</span>
-          </div>
-          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : (isServerModeEnabled() ? `
-          <!-- Server mode with no plans yet: the catalog is still loading or the
-               fetch failed. NEVER offer a purchase button here — it would take
-               real money while showing no price at all. -->
-          <div class="mb-4 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-sm text-slate-500">
-            <div class="w-6 h-6 mx-auto mb-2 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      };
+
+      const primaryPlan = lockPlans[0] || null;
+      const otherPlans = lockPlans.slice(1);
+      const sheetTitle = Security.escapeHtml(String(primaryPlan ? ((isRTL ? primaryPlan.nameAr : primaryPlan.name) || primaryPlan.id) : lockServiceName));
+      let plansBody = '';
+      if (primaryPlan) {
+        plansBody = `
+          ${planCard(primaryPlan, true)}
+          ${otherPlans.length ? `
+            <div class="mt-5 mb-2 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-400">${isRTL ? 'باقات أخرى' : 'Other plans'}</div>
+            <div class="space-y-2 max-h-[30dvh] overflow-y-auto custom-scrollbar pe-1">${otherPlans.map(p => planCard(p, false)).join('')}</div>` : ''}`;
+      } else if (isServerModeEnabled()) {
+        // Server mode with no plans yet: the catalog is still loading or the
+        // fetch failed. NEVER offer a purchase button here — it would take
+        // real money while showing no price at all.
+        plansBody = `
+          <div class="mb-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-center text-sm text-slate-500">
+            <div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             ${isRTL ? 'جاري تحميل الأسعار…' : 'Loading prices…'}
             <div class="mt-3">
-              <button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="text-xs font-bold text-indigo-600 hover:text-indigo-700 underline">
+              <button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600 hover:text-blue-700 underline">
                 ${isRTL ? 'إعادة المحاولة' : 'Retry'}
               </button>
             </div>
-          </div>` : `
-          <div class="flex space-x-3 mb-1">
-            <button onclick="handleSubscribe('${Security.escapeHtml(String(lockSubscribeToId))}', '${Security.escapeHtml(String(lockServiceId))}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>
-              ${isRTL ? 'اشترك' : 'Subscribe'}
-            </button>
-          </div>`)}
-          <button onclick="closeModal()" class="w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
-            ${isRTL ? 'إلغاء' : 'Cancel'}
-          </button>
+          </div>`;
+      } else {
+        plansBody = `
+          <p class="mb-4 text-sm text-slate-600 dark:text-slate-300 text-start">
+            ${isRTL ? `أنت غير مشترك في <strong>${Security.escapeHtml(String(lockServiceName))}</strong>.` : `You are not subscribed to <strong>${Security.escapeHtml(String(lockServiceName))}</strong>.`}
+          </p>
+          <div class="mb-4 flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-700 px-4 py-3 text-sm">
+            <span class="text-slate-500">${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span>
+            <span class="font-bold" dir="ltr">${Security.escapeHtml(lockMoney(lydBalanceMinor))}</span>
+          </div>
+          <button onclick="handleSubscribe('${Security.escapeHtml(String(lockSubscribeToId))}', '${Security.escapeHtml(String(lockServiceId))}')" class="touch-target w-full min-h-14 btn-shine bg-blue-600 text-white rounded-2xl text-base font-bold hover:bg-blue-700">
+            <i data-lucide="check" class="w-4 h-4 inline me-2"></i>${isRTL ? 'اشترك' : 'Subscribe'}
+          </button>`;
+      }
+      modalContent = `
+        <div class="flex items-center justify-between gap-3 mb-4">
+          <div class="min-w-0 text-start">
+            <div class="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-400">${isRTL ? 'يتطلب اشتراكاً' : 'Requires subscription'}</div>
+            <h2 class="truncate text-xl font-extrabold text-slate-900 dark:text-white">${sheetTitle}</h2>
+          </div>
+          <button type="button" onclick="closeModal()" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-200" aria-label="${isRTL ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="w-4 h-4"></i></button>
         </div>
+        ${plansBody}
+        ${isServerModeEnabled() ? lockChargeLink : ''}
       `;
       break;
     }
@@ -39991,7 +39596,7 @@ function renderModal() {
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = state.activeModal === 'customer-merge'
     ? ' max-h-[90dvh] overflow-y-auto custom-scrollbar'
-    : (state.activeModal === 'receipt' || state.activeModal === 'ad')
+    : (state.activeModal === 'receipt' || state.activeModal === 'ad' || state.activeModal === 'subscription-lock')
       ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
       : '';
   const modalAccessibility = state.activeModal === 'customer-merge'
@@ -45555,8 +45160,8 @@ async function downloadFullServerBackup(button = null) {
     setTimeout(() => { try { link.remove(); } catch (_) {} }, 60000);
     showNotification(
       isAr ? 'بدأ التنزيل' : 'Download started',
-      isAr ? `قد يستغرق عدة دقائق (~${mb} ميجابايت). اترك التبويب مفتوحاً حتى ينتهي.` : `This can take several minutes (~${mb} MB). Keep this tab open until it finishes.`,
-      'success'
+      isAr ? `قد يستغرق عدة دقائق (~${mb} ميجابايت). بدء التنزيل لا يعني اكتمال النسخة. احتفظ بالنسخة السابقة حتى يتم التحقق من الملف الجديد؛ إذا انقطع التنزيل فتجاهله وأعد المحاولة.` : `This can take several minutes (~${mb} MB). Starting is not proof of a complete backup. Keep your previous backup until the new file is checked; discard interrupted downloads and retry.`,
+      'info'
     );
     addAuditLog('backup', 'full-backup', 'Requested a full server backup download', { resourceType: 'backup' });
   } catch (error) {
@@ -45813,12 +45418,15 @@ async function init() {
     setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
     let me = null;
     let authCheckUnavailable = false;
+    const authRequestIdentity = getAuthMeIdentity();
     try {
       me = await apiAuthMe();
     } catch (error) {
+      if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;
       console.warn('[MobileRuntime] Session verification unavailable:', error?.message || error);
     }
+    if (getAuthMeIdentity() !== authRequestIdentity) return;
     // A successful health response does not guarantee that the session check
     // also reached the server. Treat a network/timeout failure differently
     // from a definitive 401 (which apiAuthMe returns as null).
@@ -45843,6 +45451,7 @@ async function init() {
         try {
           await loadCollectionsFromStorage(null);
           assertCachedCollectionIdentifiersSafe();
+          migrateOldDataFormats();
         } catch (e) {
           // IndexedDB error - continue with empty state and load from server.
           for (const name of PERSISTED_COLLECTIONS) state[name] = [];
@@ -45880,8 +45489,6 @@ async function init() {
         const startupIdentity = getServerSessionIdentity();
         const startupLoad = serverLoadAllData().then((loadResult) => {
           if (loadResult?.aborted) return;
-          // Migrate old data formats to work with new features
-          migrateOldDataFormats();
           // Re-render with fresh data
           render();
           // Restore modal from URL if needed (e.g., user refreshed with modal open)

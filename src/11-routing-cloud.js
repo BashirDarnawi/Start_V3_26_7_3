@@ -24,7 +24,9 @@ const VIEW_TO_PATH = {
   'clothes-system': '/clothes-system',
   'ads-studio': '/ads-studio',
   'service-placeholder': '/service',
-  'wallet': '/wallet'
+  'wallet': '/wallet',
+  'plans': '/plans',
+  'charge-wallet': '/charge-wallet'
 };
 
 // Reverse map: path to view

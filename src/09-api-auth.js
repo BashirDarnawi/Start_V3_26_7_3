@@ -165,6 +165,7 @@ async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
       return await fn();
     } catch (e) {
       lastError = e;
+      if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
       const status = e?.status;
       // Don't retry client errors (400, 401, 403, 404, 409) or successful responses
       if (status && status >= 400 && status < 500 && status !== 408) {
@@ -301,32 +302,60 @@ async function retryServerDetection() {
   return false;
 }
 
+function getAuthMeIdentity() {
+  // Role/permission updates can happen without a logout or a user-id change.
+  return getServerSessionIdentity() + '|' + _authMeRequestGeneration + '|' + JSON.stringify({
+    role: state.currentUser?.role || '',
+    permissions: state.currentUser?.permissions || {},
+    subscriptions: state.currentUser?.subscriptions || []
+  });
+}
+
 async function apiAuthMe() {
+  const identity = getAuthMeIdentity();
   const now = Date.now();
   
   // Return cached session if fresh (within 10 seconds) - prevents logout on rapid refresh
-  if (_sessionCache.user && (now - _sessionCache.timestamp) < _sessionCache.cacheDurationMs) {
+  if (_sessionCache.identity === identity && _sessionCache.user && (now - _sessionCache.timestamp) < _sessionCache.cacheDurationMs) {
     return _sessionCache.user;
   }
-  
+  // Share simultaneous checks from startup/permissions, but never across users.
+  if (_sessionRequest?.identity === identity) return _sessionRequest.promise;
+  const request = { identity, promise: null };
+  request.promise = _loadAuthMeForIdentity(identity);
+  _sessionRequest = request;
+  try { return await request.promise; }
+  finally { if (_sessionRequest === request) _sessionRequest = null; }
+}
+
+async function _loadAuthMeForIdentity(identity) {
+  const assertCurrent = () => {
+    if (getAuthMeIdentity() !== identity) throw makeSessionChangedError();
+  };
   try {
     // Fast timeout with retry for resilience
     const user = await withRetry(
-      () => apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs: 5000 }),
+      () => {
+        assertCurrent();
+        return apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs: 5000 });
+      },
       2, // 2 retries
       200 // 200ms delay between retries
     );
     
-    // Cache successful session
+    assertCurrent();
+    // Cache successful session only for the identity that initiated it.
     if (user) {
-      _sessionCache = { user, timestamp: now, cacheDurationMs: 10000 };
+      if (state.currentUser?.id && String(user.id || '') !== String(state.currentUser.id)) throw makeSessionChangedError();
+      _sessionCache = { user, timestamp: Date.now(), cacheDurationMs: 10000, identity };
     }
     
     return user;
   } catch (e) {
+    assertCurrent();
     if (e?.status === 401) {
       // Clear cache on explicit 401
-      _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
+      _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' };
       return null;
     }
     // On timeout/network error, use a previously verified in-memory session
@@ -334,7 +363,7 @@ async function apiAuthMe() {
     // so mobile startup can show Retry instead of a misleading Login screen.
     if (e?.name === 'AbortError' || e?.message?.includes('timeout')) {
       console.warn('[apiAuthMe] Timeout - using cached session');
-      if (_sessionCache.user) {
+      if (_sessionCache.identity === identity && _sessionCache.user) {
         return _sessionCache.user;
       }
       throw e;
@@ -620,6 +649,17 @@ async function apiGetSyncWatermarks() {
     }
     watermarks[collection] = value;
   }
+  // Separate metadata from the cursor map so existing Object.values/JSON
+  // consumers can never mistake a compatibility version for a row timestamp.
+  const compatibilityVersion = payload?.dataCompatibilityVersion;
+  if (compatibilityVersion !== undefined && compatibilityVersion !== null) {
+    if (!Number.isSafeInteger(compatibilityVersion) || compatibilityVersion < 1) {
+      const error = new Error('Invalid data compatibility version');
+      error.code = 'INVALID_SYNC_WATERMARKS';
+      throw error;
+    }
+    Object.defineProperty(watermarks, 'dataCompatibilityVersion', { value: compatibilityVersion });
+  }
   return watermarks;
 }
 
@@ -628,7 +668,9 @@ async function apiGetSyncWatermarks() {
 let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' }; // 30 second cache
 
 // Session cache to prevent logout on rapid refresh
-let _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 }; // 10 second cache
+let _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' }; // 10 second cache
+let _sessionRequest = null;
+let _authMeRequestGeneration = 0;
 
 async function apiListUsersForUi() {
   const identity = getServerSessionIdentity();
@@ -1979,10 +2021,11 @@ async function apiSetAdCampaignPublishStatus(campaignId, expectedLastModified, p
 }
 
 // Wallet payment requests (server-authoritative; confirm is admin/gateway).
-async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey) {
+async function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey, currency = 'USD') {
+  const safeCurrency = String(currency || 'USD').toUpperCase() === 'LYD' ? 'LYD' : 'USD';
   return withRetry(() => apiJson('/api/wallet/payment-requests', {
     method: 'POST',
-    body: { amountMinor, currency: 'USD', method, idempotencyKey }
+    body: { amountMinor, currency: safeCurrency, method, idempotencyKey }
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500);
 }
 
@@ -2292,6 +2335,10 @@ async function serverLoadAllData() {
     if (!Number.isNaN(rate)) state.defaultExchangeRate = rate;
   }
 
+  // Login, manual refresh, and permission reloads must all apply legacy shape
+  // compatibility, not only the initial application startup callback.
+  migrateOldDataFormats();
+
   // Users list for UI (delivery assignment, etc.)
   if (loadAborted()) return abortedResult();
   try {
@@ -2394,6 +2441,10 @@ async function serverLoadAllData() {
   // they don't show "All data synchronized successfully" over missing data.
   if (loadAborted()) return abortedResult();
   if (typeof queueNativeReminderSync === 'function') queueNativeReminderSync();
+  if (failed.length === 0 && Number.isSafeInteger(preLoadWatermarks?.dataCompatibilityVersion)) {
+    _serverLiveSync.dataCompatibilityVersion = preLoadWatermarks.dataCompatibilityVersion;
+    _serverLiveSync.lastCompatibilityCheckAt = Date.now();
+  }
   return { failed, forbidden };
 }
 

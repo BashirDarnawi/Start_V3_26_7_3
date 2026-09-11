@@ -71,6 +71,8 @@ from .backfills import (
     backfill_customer_names,
     backfill_relink_baselines,
 )
+from .data_compatibility import DATA_COMPATIBILITY_VERSION
+from .financial_compatibility import project_financial_entity
 from .ad_campaign_actions import (
     apply_boost_campaign_fields,
     create_ad_campaign_actions_router,
@@ -152,6 +154,7 @@ from .financial_core import (
     _financial_ad_payment_status,
     _financial_allocation_map,
     _financial_destroyed_receipt_create_error,
+    _financial_due_total,
     _financial_legacy_due_receipt_id,
     _financial_minor,
     _financial_outgoing,
@@ -177,6 +180,7 @@ from .meta_ads import (
     stamp_import_completion,
 )
 from .ad_media import create_ad_media_router
+from .social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -1176,7 +1180,7 @@ def _project_entity_contacts_for_user(
     entity: dict[str, Any], user: dict[str, Any]
 ) -> dict[str, Any]:
     return project_entity_contacts(
-        entity,
+        project_financial_entity(entity),
         user_has_permission(user, "customers", "viewContacts"),
     )
 
@@ -2869,6 +2873,11 @@ def serve_clothes_script(request: Request):
     return _serve_lazy_bundle(request, "clothes.js")
 
 
+@app.get("/admin-tools.js")
+def serve_admin_tools_script(request: Request):
+    return _serve_lazy_bundle(request, "admin-tools.js")
+
+
 @app.get("/style.css")
 def serve_style(request: Request):
     if not STYLE_PATH.exists():
@@ -3766,7 +3775,9 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
 # shadow entities (e.g. a junk type="users" row that never reaches the real auth
 # users table). Real accounts, deliveries, audit logs and settings each have
 # their own dedicated, properly-gated endpoints.
-_NON_STORE_COLLECTIONS = frozenset({"users", "deliveries", "settings", "analytics", "auditLogs"})
+_NON_STORE_COLLECTIONS = frozenset({"users", "deliveries", "settings", "analytics", "auditLogs"}) | (
+    SOCIAL_STUDIO_COLLECTIONS  # router-only: /api/social-studio validates ownership + Meta ids
+)
 
 
 def _reject_non_store_collection(name: str) -> None:
@@ -6271,8 +6282,15 @@ def _financial_explicit_usage(
 
 
 def _financial_committed_usage(
-    ad_rows: list[Any], receipt_id: str, *, exclude_ad_id: str | None = None
+    ad_rows: list[Any], receipt_id: str, *, exclude_ad_id: str | None = None,
+    customer_cash_only: bool = False,
 ) -> int:
+    """Read gross commitments, or the customer's cash share of a paid pot.
+
+    Unpaid/gross capacity includes company funds and must reserve their rows.
+    A settled receipt's amountUSD, however, records customer cash only. Company
+    rows still fund their ads but must not consume that cash a second time.
+    """
     total = 0
     for row in ad_rows:
         if exclude_ad_id and str(row.get("id") or "") == exclude_ad_id:
@@ -6280,7 +6298,10 @@ def _financial_committed_usage(
         ad = _financial_row_data(row)
         if str(ad.get("recordType") or "") == "receipt":
             continue
-        total += _financial_ad_committed(ad, receipt_id)
+        committed = _financial_ad_committed(ad, receipt_id)
+        if customer_cash_only:
+            committed = max(committed - _financial_ad_company_usage(ad, receipt_id), 0)
+        total += committed
     return total
 
 
@@ -6350,63 +6371,6 @@ def _financial_validate_combined_capacity(
             raise HTTPException(
                 status_code=409, detail=f"Insufficient balance on receipt {rid}"
             )
-
-
-def _financial_due_total(data: dict[str, Any]) -> int:
-    """The receipt's capacity — ONE number, whichever pool is asking.
-
-    Before collection a delivery receipt is worth the debt the driver will collect.
-    Once collected it is worth what was ACTUALLY collected (amountUSD); the debt fields
-    survive only as history. Reading the frozen debt as a capacity of its own after
-    collection is what let one receipt advertise its money twice — once as due credit and
-    once as paid balance — so two ads could each spend the same note. Over-collecting
-    legitimately adds real balance; re-reading the stale debt invents it.
-    """
-    if bool(data.get("isPaid")) or str(data.get("status") or "") == "Paid":
-        # A settled receipt's amountUSD is CUSTOMER cash only. Company-covered
-        # dollars are equally real pot money (they keep funding the ads they
-        # covered), so the pot is their sum — otherwise settling a covered
-        # receipt would make its own committed allocations exceed capacity.
-        covered_minor = (
-            _financial_minor(data.get("companyCoveredUSD"), "stored companyCoveredUSD")
-            if data.get("companyCoveredUSD") is not None
-            else 0
-        )
-        return _financial_minor(data.get("amountUSD"), "receipt due amount") + covered_minor
-    status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
-    not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
-    # An office receipt already records its promised credit directly in USD.
-    # Re-deriving it through LYD can introduce a one-cent rounding difference
-    # between the receipt card and the amount the server lets an ad reserve.
-    if not_paid_collection in {"office", "in_shop", "shop"}:
-        return _financial_minor(data.get("amountUSD"), "receipt due amount")
-    local_value = data.get("debtAmountLocal")
-    if local_value is None:
-        local_value = data.get("amountLocal")
-    local = _financial_minor(local_value, "receipt due amount")
-    usd_value = data.get("debtAmountUSD")
-    if usd_value is None:
-        usd_value = data.get("amountUSD")
-    usd_minor = _financial_minor(usd_value, "receipt due amount")
-    # NEVER divide the local amount by an invented rate. _financial_rate falls
-    # back to 1 for junk, and validate_exchange_rate CLAMPS a blank/zero rate
-    # up to MIN_EXCHANGE_RATE (0.001) before storing it — so a 500 LYD debt
-    # with no Rate 2 used to divide by 0.001 and advertise $500,000 of
-    # spendable ad credit. The receipt's own USD figure is the truthful
-    # answer whenever it exists; only a rate we actually trust may convert.
-    if usd_minor > 0:
-        return usd_minor
-    raw_rate = data.get("exchangeRate")
-    rate = _financial_rate(raw_rate)
-    trusted_rate = (
-        raw_rate is not None
-        and str(raw_rate) != ""
-        and rate > Decimal(str(MIN_EXCHANGE_RATE))
-        and rate != Decimal(1)
-    )
-    if local > 0 and trusted_rate:
-        return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    return usd_minor
 
 
 def _financial_valid_rate(value: Any) -> Decimal | None:
@@ -6752,7 +6716,7 @@ def _receipt_transfer_atomic(
             ad_rows = _financial_active_rows(conn, "ads")
             total = _financial_minor(source.get("amountUSD"), "receipt amount")
             committed = _financial_committed_usage(
-                ad_rows, source_id
+                ad_rows, source_id, customer_cash_only=True
             ) + _financial_outgoing(source)
             # Unsettled rowless driver ads (paid receipt whose settlement
             # cascade has not run yet) reserve their gap here too — otherwise
@@ -6947,7 +6911,7 @@ def _financial_validate_paid_receipts(
             raise HTTPException(status_code=400, detail="Funding receipt belongs to another customer")
         total = _financial_minor(data.get("amountUSD"), "receipt amount")
         committed = _financial_committed_usage(
-            ad_rows, receipt_id, exclude_ad_id=current_ad_id
+            ad_rows, receipt_id, exclude_ad_id=current_ad_id, customer_cash_only=True
         ) + _financial_outgoing(data)
         requested = _financial_minor(allocation.get("amountUSD"), "receipt allocation")
         if committed + requested > total:
@@ -7140,6 +7104,7 @@ def _financial_derive_ad(
     due_allocations: list[dict[str, Any]] = []
     payments: list[dict[str, Any]] = []
     amount_minor = 0
+    company_minor = company_pool_total_minor(base)
     if payment_status == "paid":
         if any(
             _financial_allocations(value, name)
@@ -7166,7 +7131,7 @@ def _financial_derive_ad(
                 detail="Paid ads cannot use unpaid receipt funding",
             )
         paid_allocations = _financial_allocations(
-            paid_request, "receiptAllocations", allow_empty=False
+            paid_request, "receiptAllocations", allow_empty=company_minor > 0
         )
         _financial_validate_paid_receipts(
             paid_allocations,
@@ -7206,6 +7171,9 @@ def _financial_derive_ad(
                     status_code=400,
                     detail="Paid receipt funding must exactly settle the customer's share of the unpaid ad amount",
                 )
+        # Allocations name the customer share; company funding remains part
+        # of the ad's budget even after settlement or an unrelated edit.
+        amount_minor += company_minor
         linked_id = ""
         collection_method = ""
     elif payment_status == "not_paid" and collection_method == "driver":
@@ -7335,7 +7303,7 @@ def _financial_derive_ad(
         amount_minor = sum(
             _financial_minor(row["amountUSD"], "shop receipt allocation")
             for row in [*paid_allocations, *due_allocations]
-        )
+        ) + company_minor
         linked_row = locked_receipts.get(linked_id)
         linked_data = _financial_row_data(linked_row) if linked_row else {}
         base["exchangeRate"] = linked_data.get("exchangeRate") or base.get("exchangeRate")
@@ -7482,19 +7450,20 @@ def _financial_apply_refund(
     if refund_type not in {"None", "Full", "Partial"}:
         raise HTTPException(status_code=400, detail="Invalid refundType")
     ad_amount = _financial_minor(existing.get("amountUSD"), "ad amount")
-    # A STOPPED ad is only worth what it actually spent, not its original
-    # budget. Refunding against the budget recomputed spentUSD upward — an ad
-    # stopped at $10 of $100, refunded $20, recorded $80 of spend and let
-    # settlement draw that phantom amount from the receipt. Ads that were
-    # never stopped have no effective amount of their own, so this falls back
-    # to amountUSD and their behaviour is unchanged.
-    # _financial_ad_effective_amount already returns MINOR units (it is
-    # spentUSD when the ad was stopped, else amountUSD) — converting it again
-    # would multiply by 100 and silently restore the old behaviour.
-    try:
-        effective_minor = min(ad_amount, _financial_ad_effective_amount(existing))
-    except Exception:
-        effective_minor = ad_amount
+    existing_refund_type = str(existing.get("refundType") or "None")
+    existing_refund_active = existing_refund_type in {"Full", "Partial"}
+    # A refund is an absolute amount against the PRE-refund spend, just like
+    # its allocation baselines. Reusing remaining spentUSD on each save
+    # subtracted the same refund twice (and a Full re-save restored funding).
+    effective_minor = _financial_ad_effective_amount(existing)
+    if existing_refund_active:
+        if existing.get("preRefundSpentUSD") is not None:
+            effective_minor = _financial_minor(existing["preRefundSpentUSD"], "pre-refund spend")
+        else:
+            # Compatibility for unstopped ads and legacy refunds without a
+            # spend stamp: remaining spend + the stored absolute refund.
+            effective_minor += _financial_minor(existing.get("refundAmount"), "stored refund")
+    effective_minor = min(ad_amount, effective_minor)
     refund_amount = 0 if refund_type == "None" else _financial_minor(
         requested.get("refundAmount"), "refundAmount"
     )
@@ -7502,11 +7471,14 @@ def _financial_apply_refund(
         refund_amount = effective_minor
     if refund_amount > effective_minor:
         raise HTTPException(status_code=400, detail="Refund exceeds the ad's unrefunded amount")
+    if refund_type != "None" and effective_minor - refund_amount < company_pool_total_minor(existing):
+        raise HTTPException(
+            status_code=409,
+            detail="Refund exceeds the customer-funded share; company funding must be reconciled separately",
+        )
 
     current_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
     current_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
-    existing_refund_type = str(existing.get("refundType") or "None")
-    existing_refund_active = existing_refund_type in {"Full", "Partial"}
     # Refund baselines are authoritative only while the row is actually in an
     # active refund lifecycle.  Old/corrupt rows can contain stale or forged
     # baseline metadata beside refundType=None; trusting it on an "undo" would
@@ -7521,6 +7493,7 @@ def _financial_apply_refund(
     if not existing_refund_active:
         result.pop("refundBaselinePaymentStatus", None)
         result.pop("preRefundStatus", None)
+        result.pop("preRefundSpentUSD", None)
     paid_baseline = _financial_allocations(
         stored_paid_baseline if isinstance(stored_paid_baseline, list) else current_paid,
         "refundAllocationBaseline",
@@ -7570,7 +7543,7 @@ def _financial_apply_refund(
         restored_spend = existing.get("preRefundSpentUSD") if existing_refund_active else None
         if restored_spend is not None:
             result["spentUSD"] = restored_spend
-        else:
+        elif existing_refund_active:
             result.pop("spentUSD", None)
         result.pop("preRefundSpentUSD", None)
         # Undo returns to the status that existed before the refund. Legacy
@@ -7657,6 +7630,16 @@ def _financial_apply_refund(
     # as free while the ad still holds it.
     result["dueAmountToUseLYD"] = 0.0
     result["hasMergedPaidFunds"] = bool(paid) and payment_status == "not_paid"
+    funded_minor = (
+        sum(_financial_minor(row["amountUSD"], "allocation") for row in paid + due)
+        + company_pool_total_minor(result)
+    )
+    target_minor = effective_minor if refund_type == "None" else effective_minor - refund_amount
+    if funded_minor > target_minor:
+        raise HTTPException(
+            status_code=409,
+            detail="Refund funding baseline is inconsistent; review the ad's funding before continuing",
+        )
     return result
 
 
@@ -8194,9 +8177,10 @@ def _ad_mutation_atomic(
                     supplied_allocations = _financial_allocations(
                         clean_request.get("receiptAllocations", existing.get("receiptAllocations")),
                         "receiptAllocations",
-                        allow_empty=False,
+                        allow_empty=company_pool_total_minor(existing) > 0,
                     )
-                    if sum(_financial_minor(row["amountUSD"], "allocation") for row in supplied_allocations) != expected_total:
+                    funded_total = sum(_financial_minor(row["amountUSD"], "allocation") for row in supplied_allocations) + company_pool_total_minor(existing)
+                    if funded_total != expected_total:
                         raise HTTPException(status_code=400, detail="Top-up allocations do not match the server total")
                     prepared_request = {
                         **existing,
@@ -8793,7 +8777,8 @@ def _financial_reclassify_ad_for_paid_receipt(
         next_baseline["dueLegacyReceiptId"] = ""
         if (
             not stop_due
-            and sum(stop_paid.values()) == _financial_minor(ad.get("amountUSD"), "ad amount")
+            and sum(stop_paid.values()) + company_pool_total_minor(ad)
+            == _financial_minor(ad.get("amountUSD"), "ad amount")
         ):
             next_baseline["paymentStatus"] = "paid"
         next_baseline["merged"] = (
@@ -8811,7 +8796,11 @@ def _financial_reclassify_ad_for_paid_receipt(
         result["refundDueBaseline"] = _financial_rows_from_allocation_map(refund_due)
         if (
             not refund_due
-            and sum(refund_paid.values()) == _financial_minor(ad.get("amountUSD"), "ad amount")
+            and sum(refund_paid.values()) + company_pool_total_minor(ad)
+            == _financial_minor(
+                ad.get("preRefundSpentUSD") if ad.get("preRefundSpentUSD") is not None else ad.get("amountUSD"),
+                "pre-refund ad amount",
+            )
         ):
             result["refundBaselinePaymentStatus"] = "paid"
 
@@ -8823,7 +8812,7 @@ def _financial_reclassify_ad_for_paid_receipt(
     live_paid = _financial_allocation_map(result.get("receiptAllocations"))
     live_due = _financial_allocation_map(result.get("dueAllocations"))
     live_target = _financial_ad_effective_amount(result)
-    if baseline_changed and not live_due and sum(live_paid.values()) == live_target:
+    if baseline_changed and not live_due and sum(live_paid.values()) + company_pool_total_minor(result) == live_target:
         result["paymentStatus"] = "paid"
         result["isPaid"] = True
         result["collectionMethod"] = ""
@@ -9311,7 +9300,7 @@ def _financial_patch_receipt_atomic(
             _financial_apply_delivery_completion_truth(
                 receipt_id, old, merged, ad_rows
             )
-            _apply_coverage_settlement_truth(old, merged)
+            _apply_coverage_settlement_truth(old, merged, due_total=_financial_due_total)
             canceled_due_source = (
                 (
                     str(merged.get("deliveryStatus") or "") == "Canceled"
@@ -10933,7 +10922,7 @@ def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
                 watermarks[collection] = _sync_watermark_max(
                     conn, collection, created_by=uid
                 )
-    return {"watermarks": watermarks}
+    return {"watermarks": watermarks, "dataCompatibilityVersion": DATA_COMPATIBILITY_VERSION}
 
 
 @app.get("/api/collections/{collection}", response_model=list[EntityResponse])
@@ -13693,6 +13682,21 @@ app.include_router(
         require_same_origin=require_same_origin,
     )
 )
+_SOCIAL_STUDIO_CTX = {
+    **_WALLET_PAYMENTS_CTX,
+    "validate_image": lambda photo: _validate_ad_campaign_image_source(photo)[0],
+    "list_entities": list_entities, "upsert_entity": upsert_entity,
+    "soft_delete_entity": soft_delete_entity, "sanitize_json": sanitize_json,
+    "new_id": new_id, "is_admin": lambda user: str(user.get("role") or "").lower() == "admin",
+    "has_ad_maker_subscription": _has_active_ad_maker_subscription,
+}
+app.include_router(
+    create_social_studio_router(
+        current_user_dependency=current_user,
+        require_same_origin=require_same_origin,
+        ctx=_SOCIAL_STUDIO_CTX,
+    )
+)
 app.include_router(
     create_operations_router(
         current_user_dependency=current_user,
@@ -13748,6 +13752,8 @@ FRONTEND_ROUTES = {
     "/studio/",
     "/service",
     "/wallet",
+    "/plans",
+    "/charge-wallet",
     "/account",
 }
 

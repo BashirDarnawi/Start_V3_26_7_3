@@ -109,7 +109,7 @@ vm.runInContext(fs.readFileSync(SCRIPT, 'utf8'), sandbox, { filename: 'script.js
 // Lazy bundles (Ads Studio, Clothes System) load into the same context so
 // every assertion keeps working exactly as under one concatenation (the vm
 // global lexical environment is shared across runInContext calls).
-for (const lazyBundle of ['studio.js', 'clothes.js']) {
+for (const lazyBundle of ['studio.js', 'clothes.js', 'admin-tools.js']) {
   vm.runInContext(
     fs.readFileSync(path.join(__dirname, '..', lazyBundle), 'utf8'),
     sandbox,
@@ -2112,7 +2112,7 @@ console.log('\n=== URLs: every view and modal is addressable ===');
 
 check('every renderView case has a URL path', () => {
   const map = vm.runInContext('VIEW_TO_PATH', sandbox);
-  const views = ['services-hub', 'smart-systems', 'clothes-system', 'service-placeholder', 'wallet',
+  const views = ['services-hub', 'smart-systems', 'clothes-system', 'service-placeholder', 'wallet', 'plans', 'charge-wallet',
     'analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'reconciliation',
     'users', 'audit', 'settings', 'delivery-dashboard', 'no-access'];
   const missing = views.filter(v => !map[v]);
@@ -3122,7 +3122,8 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   // scan the WHOLE shipped app, not only the startup bundle.
   const built = fs.readFileSync(SCRIPT, 'utf8')
     + fs.readFileSync(path.join(__dirname, '..', 'clothes.js'), 'utf8')
-    + fs.readFileSync(path.join(__dirname, '..', 'studio.js'), 'utf8');
+    + fs.readFileSync(path.join(__dirname, '..', 'studio.js'), 'utf8')
+    + fs.readFileSync(path.join(__dirname, '..', 'admin-tools.js'), 'utf8');
   for (const endpoint of ['/api/wallet/transfers', '/api/wallet/top-ups', '/api/wallet/reversals', '/api/subscriptions/purchase', '/api/clothes/orders/mutate', '/api/receipts/transfers', '/api/ads/mutate', '/stop', '/api/sync/watermarks']) {
     assert(built.includes(endpoint), `missing dedicated endpoint ${endpoint}`);
   }

@@ -1373,7 +1373,7 @@ function isCurrentUserAdmin() {
 }
 
 // "Secret ideas" gating (UI only). Non-admin users are kept inside Albayan Manager for now.
-const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'smart-systems', 'service-placeholder', 'wallet']);
+const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet']);
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {

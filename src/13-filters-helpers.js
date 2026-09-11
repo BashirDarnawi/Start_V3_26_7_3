@@ -1119,19 +1119,10 @@ function getCustomerStats(customerId, statsIndex = null) {
   // Calculate total spent USD from ads (status-aware, shared with analytics)
   const totalSpentUSD = customerAds.reduce((sum, ad) => sum + getAdSpendUSD(ad), 0);
 
-  // Calculate spent LYD proportionally based on USD spent
-  // This ensures spentLYD cannot exceed paidLYD
+  // Value spending by its actual funding sources below. Applying one average
+  // paid-receipt rate to debt/company-funded dollars mixes currency bases and
+  // can invent LYD credit even when the USD balance is exactly settled.
   let totalSpentLYD = 0;
-  if (totalPaidUSD > 0) {
-    // Proportional calculation: (spentUSD / paidUSD) * paidLYD
-    totalSpentLYD = (totalSpentUSD / totalPaidUSD) * totalPaidLYD;
-  } else if (totalSpentUSD > 0) {
-    // No paid receipts but real ad spend = pure debt. Derive the LYD figure
-    // from each ad's OWN exchange rate so the LYD balance reflects the debt
-    // instead of showing a misleading 0 (which styled the card as positive
-    // and made the "has debt" filter miss a genuine debtor).
-    totalSpentLYD = customerAds.reduce((sum, ad) => sum + getAdSpendLYD(ad), 0);
-  }
   
   // Standalone unpaid-receipt debt. Paid comes only from paid receipts and
   // Spent only from ads, so a Not Paid receipt whose promised money is not
@@ -1191,13 +1182,30 @@ function getCustomerStats(customerId, statsIndex = null) {
   // never lands in these rows (it only shrinks customerOutstandingUSD above),
   // so each covered dollar is credited exactly once.
   const customerReceiptIds = new Set(customerReceipts.map(r => String(r.id || '')));
+  const customerReceiptsById = new Map(customerReceipts.map(r => [String(r.id || ''), r]));
   const receiptRateById = new Map(customerReceipts.map(r => {
-    const rate = Number(r.exchangeRate || state.defaultExchangeRate || 0);
+    // Preserve the receipt's exact saved LYD value, including payment-method
+    // rounding. Fully consuming a $5.15 / 50 LYD receipt must consume 50 LYD.
+    const usd = Number(r.amountUSD);
+    const local = Number(r.amountLocal);
+    const rate = usd > 0 && local > 0
+      ? local / usd
+      : Number(r.exchangeRate || state.defaultExchangeRate || 0);
     return [String(r.id || ''), Number.isFinite(rate) && rate > 0 ? rate : 0];
   }));
   let companyFundedUSD = 0;
   let companyFundedLYD = 0;
   customerAds.forEach(ad => {
+    const linkedReceiptId = String(ad.collectionMethod === 'driver'
+      ? (ad.linkedDeliveryReceiptId || ad.receiptId || ad.fundingReceiptId || '')
+      : (ad.receiptId || ad.fundingReceiptId || ad.linkedDeliveryReceiptId || ''));
+    const linkedReceipt = customerReceiptsById.get(linkedReceiptId);
+    // Reuse this customer's receipt index instead of scanning all receipts for
+    // every unpaid ad while rendering a large customer list.
+    const linkedDebtRate = getAdPaymentState(ad) === 'not_paid'
+      && ['driver', 'in_shop'].includes(String(ad.collectionMethod || ''))
+      ? Number(linkedReceipt?.exchangeRate) : 0;
+    const adRate = linkedDebtRate > 0 ? linkedDebtRate : (Number(getAdSpendExchangeRate(ad)) || 0);
     // CAP at the ad's REAL (status-aware) spend: a stopped/refunded ad may
     // have spent less than the company covered, and the credit must never
     // exceed the spend actually charged to this customer above — otherwise
@@ -1218,7 +1226,9 @@ function getCustomerStats(customerId, statsIndex = null) {
       companyFundedUSD += rowUSD;
       // LYD mirror at the funding receipt's own rate — the same rate this
       // debt used while it sat in receiptDebtLYD before it was covered.
-      companyFundedLYD += rowUSD * (receiptRateById.get(rowReceiptId) || 0);
+      const fundedLYD = rowUSD * (receiptRateById.get(rowReceiptId) || 0);
+      companyFundedLYD += fundedLYD;
+      totalSpentLYD += fundedLYD;
     });
     // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD
     // is company money against spend that no receipt ever backed. Spent stays
@@ -1230,11 +1240,39 @@ function getCustomerStats(customerId, statsIndex = null) {
       creditableUSD
     );
     if (directUSD > 0) {
+      creditableUSD -= directUSD;
       companyFundedUSD += directUSD;
-      const adRate = typeof getAdSpendExchangeRate === 'function'
-        ? (Number(getAdSpendExchangeRate(ad)) || 0)
-        : (Number(ad.exchangeRate || state.defaultExchangeRate) || 0);
       companyFundedLYD += directUSD * adRate;
+      totalSpentLYD += directUSD * adRate;
+    }
+
+    // Price the remaining customer-funded share at each receipt's own rate.
+    // Company rows above are valued identically on both sides of the balance;
+    // absorbing a debt must not create customer cash or a new customer debt.
+    const consume = (amountUSD, receiptId) => {
+      const amount = Math.min(Math.max(Number(amountUSD) || 0, 0), creditableUSD);
+      if (!(amount > 0)) return;
+      const rate = receiptRateById.get(String(receiptId || '')) || adRate;
+      totalSpentLYD += amount * rate;
+      creditableUSD -= amount;
+    };
+    const paidRows = Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length
+      ? ad.receiptAllocations
+      : (Array.isArray(ad.mergedPaidAllocations) ? ad.mergedPaidAllocations : []);
+    paidRows.forEach(row => consume(row?.amountUSD, row?.receiptId));
+    const dueRows = Array.isArray(ad.dueAllocations) ? ad.dueAllocations : [];
+    dueRows.forEach(row => consume(row?.amountUSD, row?.receiptId));
+    if (!dueRows.some(row => Number(row?.amountUSD) > 0) && linkedReceiptId) {
+      consume(getAdLegacyDueMirrorUSD(ad, linkedReceiptId, receiptRateById.get(linkedReceiptId)), linkedReceiptId);
+    }
+    if (creditableUSD > 0) {
+      // Only old, paid, rowless ads use the historical pooled-rate fallback.
+      // Unallocated debt is always valued at the ad/debt receipt's own rate.
+      const legacyPaid = getAdPaymentState(ad) === 'paid'
+        && !Array.isArray(ad.receiptAllocations) && !Array.isArray(ad.dueAllocations);
+      const fallbackRate = legacyPaid && !linkedReceipt && totalPaidUSD > 0
+        ? totalPaidLYD / totalPaidUSD : adRate;
+      totalSpentLYD += creditableUSD * (receiptRateById.get(linkedReceiptId) || fallbackRate);
     }
   });
   companyFundedUSD = Math.round(companyFundedUSD * 100) / 100;
@@ -1676,7 +1714,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
             // Says up front how many of these can simply be folded into their
             // Meta page, so the owner does not have to open every group to find
             // the ones worth acting on.
-            const mergeable = countPageMergeGroups();
+            const mergeable = typeof countPageMergeGroups === 'function' ? countPageMergeGroups() : 0;
             if (!mergeable) return '';
             return isAr
               ? ` — ${mergeable} منها يمكن دمجها في صفحة Meta`
@@ -1687,7 +1725,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
           ${(() => {
             // 48 groups is far too many to confirm one at a time, which is the
             // whole reason this button exists.
-            const mergeableNow = countPageMergeGroups();
+            const mergeableNow = typeof countPageMergeGroups === 'function' ? countPageMergeGroups() : 0;
             if (!mergeableNow) return '';
             return `<button type="button" onclick="showMergeAllDialog(this)" class="min-h-11 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200 inline-flex items-center gap-2" aria-haspopup="dialog">
               <i data-lucide="layers" class="h-4 w-4"></i><span>${isAr ? `دمج الكل (${mergeableNow})` : `Merge all (${mergeableNow})`}</span>
@@ -4743,7 +4781,7 @@ function _handleCompanyDebtCoverageKeydown(event) {
   }
 }
 
-function closeCompanyDebtCoverageModal({ force = false } = {}) {
+function closeCompanyDebtCoverageModal({ force = false, restoreFocus = true } = {}) {
   const dialogState = _companyDebtCoverageDialogState;
   if (dialogState?.busy && !force) return false;
   if (dialogState?.keyHandler) document.removeEventListener('keydown', dialogState.keyHandler);
@@ -4752,7 +4790,7 @@ function closeCompanyDebtCoverageModal({ force = false } = {}) {
     document.body.style.overflow = dialogState.bodyOverflow || '';
     const opener = dialogState.opener;
     _companyDebtCoverageDialogState = null;
-    try { opener?.focus?.(); } catch (_) {}
+    if (restoreFocus) { try { opener?.focus?.(); } catch (_) {} }
   }
   return true;
 }
@@ -4979,6 +5017,7 @@ async function submitCompanyDebtCoverage() {
         expectedLastModified: dialogState.expectedLastModified,
         reason
       });
+      if (_companyDebtCoverageDialogState !== dialogState || !isCurrentUserAdmin()) return false;
       const targetReturned = (response.updatedReceipts || []).some(
         entity => String(entity?.id || '') === dialogState.receiptId
       );
@@ -5002,6 +5041,7 @@ async function submitCompanyDebtCoverage() {
       );
       return response;
     } catch (error) {
+      if (_companyDebtCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
         ? describe409(error, 'This receipt changed on another device. Refresh and review its current balance.')
         : (error?.message || 'Could not apply company funds. Try again.');
@@ -5036,14 +5076,14 @@ function getCustomerCompanyCoverableReceipts(customerId) {
     .filter(r => _isReceiptEligibleForCompanyCoverage(r));
 }
 
-function _closeCompanyCoverageReceiptPicker() {
+function _closeCompanyCoverageReceiptPicker(restoreFocus = true) {
   const picker = document.getElementById('company-coverage-receipt-picker');
   if (picker) {
     if (picker._keyHandler) document.removeEventListener('keydown', picker._keyHandler);
     document.body.style.overflow = picker._bodyOverflow || '';
     const opener = picker._opener;
     picker.remove();
-    try { opener?.focus?.(); } catch (_) {}
+    if (restoreFocus) { try { opener?.focus?.(); } catch (_) {} }
   }
   return true;
 }
@@ -5173,7 +5213,7 @@ function _handleCustomerAdCoverageKeydown(event) {
   }
 }
 
-function closeCustomerAdDebtCoverageModal({ force = false } = {}) {
+function closeCustomerAdDebtCoverageModal({ force = false, restoreFocus = true } = {}) {
   const dialogState = _customerAdCoverageDialogState;
   if (dialogState?.busy && !force) return false;
   if (dialogState?.keyHandler) document.removeEventListener('keydown', dialogState.keyHandler);
@@ -5182,7 +5222,7 @@ function closeCustomerAdDebtCoverageModal({ force = false } = {}) {
     document.body.style.overflow = dialogState.bodyOverflow || '';
     const opener = dialogState.opener;
     _customerAdCoverageDialogState = null;
-    try { opener?.focus?.(); } catch (_) {}
+    if (restoreFocus) { try { opener?.focus?.(); } catch (_) {} }
   }
   return true;
 }
@@ -5404,6 +5444,7 @@ async function submitCustomerAdDebtCoverage() {
         expectedOutstandingMinorUSD: dialogState.outstandingMinorUSD,
         reason
       });
+      if (_customerAdCoverageDialogState !== dialogState || !isCurrentUserAdmin()) return false;
       const entityBatch = (response.updatedAds || []).map(entity => ({ collection: 'ads', entity }));
       const applied = applyValidatedServerEntityBatch(entityBatch, 'customerCompanyCoverage');
       if (applied.length !== entityBatch.length) throw new Error('The company coverage response was incomplete. Refresh and verify.');
@@ -5416,6 +5457,7 @@ async function submitCustomerAdDebtCoverage() {
       );
       return response;
     } catch (error) {
+      if (_customerAdCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
         ? describe409(error, isAr ? 'تغيّرت بيانات العميل على جهاز آخر. أعد المحاولة.' : 'This customer changed on another device. Refresh and review the current debt.')
         : (error?.message || (isAr ? 'تعذّر تطبيق أموال الشركة. حاول مجدداً.' : 'Could not apply company funds. Try again.'));

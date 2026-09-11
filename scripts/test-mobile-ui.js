@@ -660,7 +660,7 @@ check('packaged mobile cold start gates before auth instead of showing Login',
   mobileRuntime.includes('window.location.reload()'));
 check('mobile session timeout cannot be mistaken for a real logout',
   serverApi.includes('Without that cache, propagate the connectivity failure') &&
-  /if \(_sessionCache\.user\)[\s\S]*?return _sessionCache\.user;[\s\S]*?throw e;/.test(serverApi) &&
+  /if \(_sessionCache\.identity === identity && _sessionCache\.user\)[\s\S]*?return _sessionCache\.user;[\s\S]*?throw e;/.test(serverApi) &&
   init.includes('let authCheckUnavailable = false;') &&
   init.includes('if (authCheckUnavailable && connectivityGateEnabled && mobileRuntimeNeedsServer())') &&
   init.includes("const connectivityGateEnabled = (typeof connectivityUiEnabled === 'function')") &&
@@ -1136,6 +1136,119 @@ check('the studio shell cannot resurrect manager dialogs or rewrite the manager 
   routing.includes('if (IS_STUDIO_SHELL) { _bootModalParams = null; return; }') &&
   read('src/06-persistence.js').includes('if (prior && prior.currentView) toSave.currentView = prior.currentView;') &&
   read('server/main.py').includes('"/studio/",'));
+
+// ---------- Services Hub redesign (one responsive design for web + mobile) ----------
+const servicesWallet = read('src/12c-services-wallet.js');
+const adminToolsLoader = read('src/12b0-admin-tools-loader.js');
+const bundleManifestJson = JSON.parse(read('src/manifest.json'));
+
+check('hub, plans and charge-wallet screens exist and stay admin-only platform views',
+  servicesWallet.includes('function renderServicesHub()') &&
+  servicesWallet.includes('function renderPlansView()') &&
+  servicesWallet.includes('function renderChargeWalletView()') &&
+  views.includes("case 'plans': return renderPlansView();") &&
+  views.includes("case 'charge-wallet': return renderChargeWalletView();") &&
+  views.includes("'wallet', 'plans', 'charge-wallet', 'clothes-system', 'ads-studio'].includes(state.currentView)") &&
+  dataAudit.includes("'service-placeholder', 'wallet', 'plans', 'charge-wallet']") &&
+  routing.includes("'plans': '/plans'") && routing.includes("'charge-wallet': '/charge-wallet'"));
+
+check('hub prices come only from the server plan catalog, never hardcoded',
+  servicesWallet.includes('function hubPlanForService(serviceId)') &&
+  servicesWallet.includes('state.subscriptionPlans') &&
+  !/\b\d+(\.\d+)? (LYD|د\.ل)\b/.test(servicesWallet.replace(/\/\/.*$/gm, '')) &&
+  servicesWallet.includes("hubText('Subscribe', 'اشترك')") &&
+  servicesWallet.includes('refreshSubscriptionPlans(true)'));
+
+check('charge wallet creates a server payment request with a clamped currency and a method from the live catalog',
+  servicesWallet.includes('apiWalletPaymentRequestCreate(amountMinor, _chargeWallet.method, idem, currency)') &&
+  servicesWallet.includes('apiWalletPaymentMethods()') &&
+  servicesWallet.includes("if (!_chargeWallet.method || !_walletPayMethodById(_chargeWallet.method))") &&
+  serverApi.includes("const safeCurrency = String(currency || 'USD').toUpperCase() === 'LYD' ? 'LYD' : 'USD';") &&
+  servicesWallet.includes("hubText('Local mode', 'الوضع المحلي')"));
+
+check('paywall sheet never sells without a server price and routes a short wallet to Charge wallet',
+  modals.includes('NEVER offer a purchase button here') &&
+  modals.includes("const preferredPlanId = String(state.modalData?.planId || '');") &&
+  modals.includes("${short ? 'disabled' : ''}") &&
+  modals.includes("if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');") &&
+  modals.includes("state.activeModal === 'subscription-lock')\n      ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'"));
+
+check('hub screens keep every old action, bilingual labels, LTR money and phone touch targets',
+  servicesWallet.includes('onclick="toggleTheme()"') && servicesWallet.includes('onclick="toggleLanguage()"') &&
+  servicesWallet.includes('onclick="handleLogout()"') &&
+  servicesWallet.includes('function handleServiceClick(serviceId)') &&
+  servicesWallet.includes('function handleSmartSystemClick(systemId)') &&
+  servicesWallet.includes('function cancelSubscriptionFromUi(') &&
+  servicesWallet.includes('walletTopUpFromUi()') && servicesWallet.includes('walletTransferFromUi()') &&
+  servicesWallet.includes("hubText('Coming soon', 'قريباً')") &&
+  servicesWallet.includes('dir="ltr">${hubEsc(walletFormatMinor(balanceMinor, \'LYD\'))}') &&
+  (servicesWallet.match(/touch-target/g) || []).length >= 25 &&
+  css.includes('.hub-card {') && css.includes('.dark .hub-card {') && css.includes('.hub-tile-watermark {'));
+
+check('admin tools ship lazily with guarded call sites and a bounded retry',
+  bundleManifestJson.lazy && Array.isArray(bundleManifestJson.lazy['admin-tools.js']) &&
+  bundleManifestJson.lazy['admin-tools.js'].includes('12b-control-center.js') &&
+  bundleManifestJson.lazy['admin-tools.js'].includes('13b-merge-tools.js') &&
+  bundleManifestJson.files.includes('12b0-admin-tools-loader.js') &&
+  views.includes("if (typeof renderControlCenterView === 'function') return renderControlCenterView();") &&
+  views.includes("if (typeof resetAdMergePairCache === 'function') resetAdMergePairCache();") &&
+  views.includes("typeof renderAdMergeActionButton === 'function' ? renderAdMergeActionButton(ad, isAr) : ''") &&
+  helpers.includes("typeof countPageMergeGroups === 'function' ? countPageMergeGroups() : 0") &&
+  adminToolsLoader.includes('const _ADMIN_TOOLS_RETRY_COOLDOWN_MS = 30000;') &&
+  adminToolsLoader.includes("_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return;") &&
+  adminToolsLoader.includes('onclick="retryAdminToolsLoad()"') &&
+  read('server/main.py').includes('"admin-tools.js"'));
+
+// ---------- Social Studio (posts scheduler + auto-reply rules, studio.js bundle) ----------
+const socialStudio = read('src/15f-social-studio.js');
+
+check('social studio ships in the studio bundle and is wired into the Ads Studio tabs',
+  Array.isArray(bundleManifestJson.lazy['studio.js']) &&
+  bundleManifestJson.lazy['studio.js'].includes('15c-ads-studio.js') &&
+  bundleManifestJson.lazy['studio.js'].includes('15f-social-studio.js') &&
+  adsStudio.includes("{ id: 'posts', icon: 'send', label: 'Posts', labelAr: 'المنشورات' }") &&
+  adsStudio.includes("{ id: 'replies', icon: 'message-circle-reply', label: 'Replies', labelAr: 'الردود' }") &&
+  adsStudio.includes("else if (_adsStudioActiveTab === 'posts') content = renderSocialStudioPostsTab();") &&
+  adsStudio.includes("else if (_adsStudioActiveTab === 'replies') content = renderSocialStudioRepliesTab();") &&
+  adsStudio.includes("${typeof renderSocialStudioOverviewSection === 'function' ? renderSocialStudioOverviewSection() : ''}") &&
+  adsStudio.includes("if (typeof resetSocialStudioState === 'function') resetSocialStudioState();"));
+
+check('social studio never handles Meta credentials in the browser and only talks to its server API',
+  !/accessToken|access_token|appSecret|app_secret|password/i.test(socialStudio) &&
+  socialStudio.includes("return apiJson('/api/social-studio' + path, options, extra);") &&
+  (socialStudio.match(/apiJson\(/g) || []).length === 1 &&
+  socialStudio.includes('return isServerModeEnabled() && typeof adsStudioCanUse === \'function\' && adsStudioCanUse();') &&
+  socialStudio.includes('function resetSocialStudioState()') &&
+  socialStudio.includes("if (_social.forUser !== uid) { resetSocialStudioState(); _social.forUser = uid; }"));
+
+check('social composer enforces the post limits and reuses the safe image pipeline',
+  socialStudio.includes('const SOCIAL_MAX_CAPTION = 2200;') &&
+  socialStudio.includes('const SOCIAL_MAX_MEDIA = 4;') &&
+  socialStudio.includes('const SOCIAL_MAX_MEDIA_BYTES = 5 * 1024 * 1024;') &&
+  socialStudio.includes('const dataUrl = await compressImageToDataUrl(file);') &&
+  socialStudio.includes("if (!isSafeAdsStudioCreativeSource(dataUrl)) throw new Error('unsupported output');") &&
+  socialStudio.includes('accept="image/png,image/jpeg,image/webp"') &&
+  socialStudio.includes("return socialText('Instagram posts need at least one photo.'") &&
+  socialStudio.includes("return socialText('The scheduled time must be in the future.'") &&
+  socialStudio.includes('scheduledAt: statusWanted === \'scheduled\' ? new Date(c.scheduledAt).toISOString() : \'\''));
+
+check('social studio page linking is admin-only in the UI and destructive actions confirm first',
+  socialStudio.includes("function socialOpenLinkSheet() {\n  if (!isCurrentUserAdmin()) return;") &&
+  socialStudio.includes("${isAdmin ? `<button type=\"button\" onclick=\"socialOpenLinkSheet()\"") &&
+  socialStudio.includes("const ok = confirm(socialText('Publish this post now?'") &&
+  socialStudio.includes("const ok = confirm(socialText('Delete this post?'") &&
+  socialStudio.includes("const ok = confirm(socialText(`Delete the rule \"${r.name}\"?`") &&
+  socialStudio.includes("const ok = confirm(socialText(`Unlink \"${page.name}\"?"));
+
+check('social studio screens are bilingual, RTL-aware and phone friendly with live-sync-safe fields',
+  (socialStudio.match(/socialText\(/g) || []).length >= 80 &&
+  (socialStudio.match(/touch-target/g) || []).length >= 30 &&
+  socialStudio.includes("isAr ? 'chevron-right' : 'chevron-left'") &&
+  socialStudio.includes('id="social-caption"') && socialStudio.includes("oninput=\"socialComposerSet('caption', this.value)\"") &&
+  socialStudio.includes('id="social-rule-name"') && socialStudio.includes("oninput=\"socialRuleSet('name', this.value)\"") &&
+  socialStudio.includes('id="social-schedule-at"') &&
+  socialStudio.includes('role="switch"') &&
+  !socialStudio.includes('<table'));
 
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;

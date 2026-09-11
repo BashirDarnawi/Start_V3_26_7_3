@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import socket
 import threading
 import time
 import unicodedata
@@ -44,8 +45,14 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _META_WRITE_LOCK = threading.RLock()
 _META_DISCOVERY_LOCK = threading.Lock()
 _META_DUE_SYNC_LOCK = threading.Lock()
+_META_PAGE_NAME_BACKFILL_LOCK = threading.Lock()
+_META_MEDIA_ARCHIVE_LOCK = threading.Lock()
 _META_REMOTE_BACKOFF_LOCK = threading.Lock()
 _META_REMOTE_REQUEST_LOCK = threading.Lock()
+# Page access tokens for Social Studio: process memory only, 50-minute TTL.
+_PAGE_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+_PAGE_TOKEN_LOCK = threading.Lock()
+_PAGE_TOKEN_TTL_SECONDS = 50 * 60
 _META_REMOTE_BACKOFF_UNTIL = 0.0
 _META_REMOTE_BACKOFF_REASON = ""
 _META_REMOTE_USAGE_PERCENT = 0
@@ -1073,16 +1080,81 @@ class MetaAdsClient:
         return MetaAdsError("request_failed", "Meta could not return the requested ad information.", provider_code=provider_code)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._request("GET", path, params=params)
+
+    def _post(
+        self,
+        path: str,
+        data: dict[str, Any] | None = None,
+        *,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """POST form data to Graph (Social Studio publishing and replies).
+
+        ``access_token`` lets a call use a Page token instead of the system
+        token; the appsecret_proof is always computed for the token actually
+        sent. Nested dict/list values are JSON-encoded the way Graph expects.
+        """
+        form: dict[str, Any] = {}
+        for key, value in (data or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                form[str(key)] = "true" if value else "false"
+            elif isinstance(value, (dict, list)):
+                form[str(key)] = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+            else:
+                form[str(key)] = str(value)
+        return self._request("POST", path, data=form, access_token=access_token)
+
+    def page_access_token(self, page_id: Any) -> str:
+        """Page token for publishing/replying, cached in memory for 50 minutes.
+
+        Never persisted and never logged: the cache lives only in this process.
+        """
+        clean_id = re.sub(r"\D", "", str(page_id or ""))
+        if not clean_id:
+            raise MetaAdsError("invalid_path", "Invalid Meta page id")
+        with _PAGE_TOKEN_LOCK:
+            cached = _PAGE_TOKEN_CACHE.get(clean_id)
+            if cached and cached[1] > time.monotonic():
+                return cached[0]
+        payload = self._get(clean_id, {"fields": "access_token"})
+        token = str(payload.get("access_token") or "")
+        if not token:
+            raise MetaAdsError(
+                "authorization",
+                "Albayan's Meta token cannot manage this page. Reconnect the access token.",
+            )
+        with _PAGE_TOKEN_LOCK:
+            _PAGE_TOKEN_CACHE[clean_id] = (token, time.monotonic() + _PAGE_TOKEN_TTL_SECONDS)
+        return token
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
         safe_path = str(path or "").strip("/")
         if not safe_path or ".." in safe_path or not re.fullmatch(r"[A-Za-z0-9_/-]+", safe_path):
             raise MetaAdsError("invalid_path", "Invalid Meta API request")
+        token = str(access_token or self.config.access_token)
         query = dict(params or {})
+        form = dict(data or {})
         if self.config.app_secret:
-            query["appsecret_proof"] = hmac.new(
+            proof = hmac.new(
                 self.config.app_secret.encode("utf-8"),
-                self.config.access_token.encode("utf-8"),
+                token.encode("utf-8"),
                 hashlib.sha256,
             ).hexdigest()
+            if method == "POST":
+                form["appsecret_proof"] = proof
+            else:
+                query["appsecret_proof"] = proof
         url = f"https://graph.facebook.com/{self.config.graph_version}/{safe_path}"
         # Every Meta caller (background import, details refresh, manual action,
         # webhook wake-up and partner statistics) shares this one request lane.
@@ -1108,12 +1180,15 @@ class MetaAdsClient:
                     timeout=float(self.config.request_timeout_seconds),
                     follow_redirects=False,
                     headers={
-                        "Authorization": f"Bearer {self.config.access_token}",
+                        "Authorization": f"Bearer {token}",
                         "Accept": "application/json",
                         "User-Agent": "Albayan-Meta-Read-Sync/1.0",
                     },
                 ) as client:
-                    with client.stream("GET", url, params=query) as response:
+                    request_kwargs: dict[str, Any] = (
+                        {"data": form} if method == "POST" else {"params": query}
+                    )
+                    with client.stream(method, url, **request_kwargs) as response:
                         response_body = _read_capped_response_body(
                             response, 6 * 1024 * 1024
                         )
@@ -2816,6 +2891,10 @@ def _ensure_import_page(
             {"k": f"albayan_meta_page:{meta_page_id}"},
         )
     meta_name = _clean_text(snapshot.get("metaPageName"), 240)
+    if _is_placeholder_page_name(meta_name, meta_page_id):
+        # Older imports used several placeholder spellings. None is new
+        # identity evidence, and must not replace an already resolved name.
+        meta_name = ""
     meta_category = _clean_text(snapshot.get("metaPageCategory"), 160)
     matched_row, matched_data = _entity_by_json_field(
         conn, "pages", "metaPageId", meta_page_id
@@ -2854,12 +2933,7 @@ def _ensure_import_page(
     if matched_row is not None and isinstance(matched_data, dict):
         updated = dict(matched_data)
         existing_name = _clean_text(updated.get("name"), 240)
-        placeholder_name = f"Facebook Page {meta_page_id}"
-        if meta_name and (
-            not existing_name
-            or _canonical_page_name(existing_name)
-            == _canonical_page_name(placeholder_name)
-        ):
+        if meta_name and _is_placeholder_page_name(existing_name, meta_page_id):
             updated["name"] = meta_name
         existing_category = _clean_text(updated.get("category"), 160)
         if meta_category and (
@@ -2879,13 +2953,26 @@ def _ensure_import_page(
             updated["metaPageCategory"] = meta_category
         meta_picture = _clean_https_url(snapshot.get("metaPagePictureUrl"))
         existing_picture = _clean_https_url(updated.get("metaPagePictureUrl"))
+        archived_picture = _clean_https_url(updated.get("metaPagePictureArchivedFrom"))
+        existing_picture_key = _cdn_asset_key(existing_picture)
+        has_current_picture_copy = bool(
+            str(updated.get("metaPagePictureData") or "").strip()
+            and (
+                (archived_picture and archived_picture == existing_picture)
+                or (existing_picture_key and _cdn_asset_key(archived_picture) == existing_picture_key)
+            )
+        )
         # Signed avatar URLs rotate their query parameters on every Graph
         # read. Rewrite the stored one only when the underlying photo really
-        # changed (or none is stored yet), so the routine 15-minute ad sync
-        # does not bump the page's version — and re-download it to every
-        # client — each pass.
+        # changed or its current copy has not been saved yet. Once archived,
+        # routine sync does not bump the page's version or resend it to every
+        # client just because the signature changed.
         if meta_picture and (
             not existing_picture
+            # Failed legacy archives sometimes stamped the old URL without
+            # storing any bytes. Keep a fresh signature until a copy exists;
+            # otherwise the missing-picture repair only retries an expired URL.
+            or not has_current_picture_copy
             or (
                 _cdn_asset_key(meta_picture)
                 and _cdn_asset_key(meta_picture) != _cdn_asset_key(existing_picture)
@@ -4590,6 +4677,46 @@ def _forget_page_name_failure(page_id: str) -> None:
 # The URL stays beside the copy as a fallback and as the change-detector.
 _META_MEDIA_MAX_BYTES = 600 * 1024  # a 1280px JPEG lands far below this
 _META_MEDIA_ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+_META_MEDIA_CDN_ROOTS = ("fbcdn.net", "fbsbx.com", "cdninstagram.com")
+_META_MEDIA_REQUEST_SECONDS = 15.0
+_META_MEDIA_BATCH_SECONDS = 30.0
+_META_MEDIA_FAILURES: dict[str, tuple[int, float]] = {}
+
+
+def _meta_media_destination(url: str) -> tuple[str, str] | None:
+    """Resolve only known Meta CDNs and pin the connection to a public IP.
+
+    Browser fallback URLs have a looser policy; do not reuse that policy for
+    server egress. Validate every DNS answer and connect to the checked address
+    itself, so a second DNS lookup cannot redirect the socket into our network.
+    """
+    clean = _clean_https_url(url)
+    if not clean:
+        return None
+    try:
+        parsed = urlsplit(clean)
+        host = str(parsed.hostname or "").lower()
+        if parsed.port not in (None, 443):
+            return None
+        if not any(host == root or host.endswith("." + root) for root in _META_MEDIA_CDN_ROOTS):
+            return None
+        addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        if not addresses:
+            return None
+        checked = []
+        for _family, _kind, _protocol, _canon, address in addresses:
+            ip = ipaddress.ip_address(address[0])
+            if not ip.is_global:
+                return None
+            checked.append(str(ip))
+        # Some hosts publish AAAA records although the deployment has no IPv6
+        # route. Prefer a checked IPv4 answer; IPv6-only CDNs still work.
+        checked.sort(key=lambda address: ipaddress.ip_address(address).version)
+        # Keep the signed path/query unchanged and the original hostname for
+        # certificate validation, SNI, and HTTP virtual-host selection.
+        return str(httpx.URL(clean).copy_with(host=checked[0])), host
+    except (ValueError, OSError, httpx.InvalidURL):
+        return None
 
 
 def _archive_meta_image(url: str) -> str:
@@ -4599,18 +4726,35 @@ def _archive_meta_image(url: str) -> str:
     unexpected — wrong content type, oversized, redirect, network error —
     returns '' so the caller simply keeps the link it already had.
     """
-    clean = _clean_https_url(url)
-    if not clean:
-        return ""
+    deadline = time.monotonic() + _META_MEDIA_REQUEST_SECONDS
     try:
-        with httpx.Client(timeout=20.0, follow_redirects=True) as client:
-            with client.stream("GET", clean) as response:
+        destination = _meta_media_destination(url)
+        if not destination or time.monotonic() >= deadline:
+            return ""
+        pinned_url, hostname = destination
+        with httpx.Client(timeout=5.0, follow_redirects=False, trust_env=False) as client:
+            with client.stream(
+                "GET", pinned_url,
+                headers={"Host": hostname, "Accept-Encoding": "identity"},
+                extensions={"sni_hostname": hostname},
+            ) as response:
                 if int(response.status_code or 0) != 200:
                     return ""
                 content_type = str(response.headers.get("content-type") or "").split(";")[0].strip().lower()
                 if content_type not in _META_MEDIA_ALLOWED_TYPES:
                     return ""
-                payload = _read_capped_response_body(response, _META_MEDIA_MAX_BYTES)
+                # CDN images are already compressed. Reject transport encoding
+                # to avoid decompression bombs and enforce the cap on raw bytes.
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                    return ""
+                declared = int(response.headers.get("content-length") or "0")
+                if declared > _META_MEDIA_MAX_BYTES:
+                    return ""
+                payload = bytearray()
+                for chunk in response.iter_bytes():
+                    if time.monotonic() >= deadline or len(payload) + len(chunk) > _META_MEDIA_MAX_BYTES:
+                        return ""
+                    payload.extend(chunk)
                 if not payload:
                     return ""
         return f"data:{content_type};base64," + base64.b64encode(payload).decode("ascii")
@@ -4618,63 +4762,103 @@ def _archive_meta_image(url: str) -> str:
         return ""
 
 
-def archive_meta_media(limit: int = 20) -> int:
+def archive_meta_media(limit: int = 20, *, stop_event: threading.Event | None = None) -> int:
+    """Run at most one bounded media batch per process, never on the sync lane."""
+    if not _META_MEDIA_ARCHIVE_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        return _archive_meta_media_batch(min(max(int(limit), 0), 20), stop_event=stop_event)
+    finally:
+        _META_MEDIA_ARCHIVE_LOCK.release()
+
+
+def _archive_meta_media_batch(limit: int, *, stop_event: threading.Event | None = None) -> int:
     """Store our own copy of ad creatives and page avatars, a few per pass.
 
     Deliberately a separate slow lane rather than part of the sync: a download
     failure must never make a sync look broken, and the work is spread out so
     a first run over hundreds of ads cannot stall the worker. Each row is
-    re-archived only when its fbcdn URL actually changes (tracked by
-    metaThumbnailArchivedFrom), so a steady state costs nothing.
+    re-archived only when its fbcdn URL changes or the saved bytes are missing.
+    Older builds marked failed downloads as archived; checking both the URL
+    and the actual copy lets those records heal without recreating the ad.
     """
     if limit <= 0:
         return 0
+    deadline = time.monotonic() + _META_MEDIA_BATCH_SECONDS
+    # Look past temporarily failed URLs so one expired link does not starve
+    # later rows. Both memory and each database candidate scan remain bounded.
+    scan_limit = limit + min(len(_META_MEDIA_FAILURES), 200)
+
+    def attemptable(url: str) -> bool:
+        state = _META_MEDIA_FAILURES.get(hashlib.sha256(url.encode()).hexdigest())
+        return not state or state[1] <= time.monotonic()
+
     stored = 0
     targets: list[tuple[str, str, str, str, str]] = []  # (type, id, url, data_key, from_key)
     with db_conn() as conn:
         ad_id_expr = json_field_sql("metaAdId")
         ad_url_expr = json_field_sql("metaThumbnailUrl")
         ad_from_expr = json_field_sql("metaThumbnailArchivedFrom")
+        ad_data_expr = json_field_sql("metaThumbnailData")
         ad_rows = conn.execute(
             text(
                 f"SELECT id,{ad_url_expr} AS media_url FROM entities "
                 "WHERE type='ads' AND deleted=false "
                 f"AND COALESCE({ad_id_expr}, '')<>'' "
                 f"AND LOWER(COALESCE({ad_url_expr}, '')) LIKE 'https://%' "
-                f"AND COALESCE({ad_from_expr}, '')<>COALESCE({ad_url_expr}, '') "
+                f"AND (COALESCE({ad_from_expr}, '')<>COALESCE({ad_url_expr}, '') "
+                f"OR TRIM(COALESCE({ad_data_expr}, ''))='') "
                 "ORDER BY last_modified ASC LIMIT :limit"
             ),
-            {"limit": limit},
+            {"limit": scan_limit},
         ).mappings().all()
         for row in ad_rows:
             url = _clean_https_url(row.get("media_url"))
-            if not url:
+            if not url or not attemptable(url):
                 continue
             targets.append(("ads", str(row["id"]), url, "metaThumbnailData", "metaThumbnailArchivedFrom"))
+            if len(targets) >= limit:
+                break
         remaining = max(0, limit - len(targets))
         if remaining:
             page_id_expr = json_field_sql("metaPageId")
             page_url_expr = json_field_sql("metaPagePictureUrl")
             page_from_expr = json_field_sql("metaPagePictureArchivedFrom")
+            page_data_expr = json_field_sql("metaPagePictureData")
             page_rows = conn.execute(
                 text(
                     f"SELECT id,{page_url_expr} AS media_url FROM entities "
                     "WHERE type='pages' AND deleted=false "
                     f"AND COALESCE({page_id_expr}, '')<>'' "
                     f"AND LOWER(COALESCE({page_url_expr}, '')) LIKE 'https://%' "
-                    f"AND COALESCE({page_from_expr}, '')<>COALESCE({page_url_expr}, '') "
+                    f"AND (COALESCE({page_from_expr}, '')<>COALESCE({page_url_expr}, '') "
+                    f"OR TRIM(COALESCE({page_data_expr}, ''))='') "
                     "ORDER BY last_modified ASC LIMIT :limit"
                 ),
-                {"limit": remaining},
+                {"limit": remaining + min(len(_META_MEDIA_FAILURES), 200)},
             ).mappings().all()
             for row in page_rows:
                 url = _clean_https_url(row.get("media_url"))
-                if url:
+                if url and attemptable(url):
                     targets.append(("pages", str(row["id"]), url, "metaPagePictureData", "metaPagePictureArchivedFrom"))
+                    if len(targets) >= limit:
+                        break
 
     skipped = 0
     for entity_type, entity_id, url, data_key, from_key in targets:
+        if time.monotonic() >= deadline or (stop_event and stop_event.is_set()):
+            break
+        if not attemptable(url):
+            continue
+        failure_key = hashlib.sha256(url.encode()).hexdigest()
         encoded = _archive_meta_image(url)
+        if not encoded:
+            attempts = min(_META_MEDIA_FAILURES.get(failure_key, (0, 0))[0] + 1, 7)
+            if len(_META_MEDIA_FAILURES) >= 1000 and failure_key not in _META_MEDIA_FAILURES:
+                _META_MEDIA_FAILURES.pop(next(iter(_META_MEDIA_FAILURES)))
+            _META_MEDIA_FAILURES[failure_key] = (attempts, time.monotonic() + min(60 * 2 ** (attempts - 1), 3600))
+            continue
+        _META_MEDIA_FAILURES.pop(failure_key, None)
         try:
             _store_archived_image(entity_type, entity_id, url, data_key, from_key, encoded)
             if encoded:
@@ -4709,8 +4893,15 @@ def _store_archived_image(
         data = json_loads(row.get("data_json") or "{}") or {}
         if not isinstance(data, dict):
             return
-        # Stamp the attempt either way: a URL that cannot be fetched must not
-        # be retried on every pass forever.
+        # A sync may change the URL while the HTTP request is in flight. Never
+        # attach the old creative to a row that now refers to another image.
+        url_key = "metaThumbnailUrl" if entity_type == "ads" else "metaPagePictureUrl"
+        if data.get(url_key) != url or not encoded:
+            return
+        if data.get(from_key) == url and str(data.get(data_key) or "").strip():
+            # Another worker may already have repaired this same old row while
+            # our request was running. Keep its copy and avoid a version bump.
+            return
         data[from_key] = url
         if encoded:
             data[data_key] = encoded
@@ -4718,6 +4909,16 @@ def _store_archived_image(
 
 
 def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
+    """Keep boot, manual, and periodic name passes from overlapping."""
+    if not _META_PAGE_NAME_BACKFILL_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        return _backfill_placeholder_page_names(direct_lookup_limit)
+    finally:
+        _META_PAGE_NAME_BACKFILL_LOCK.release()
+
+
+def _backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
     """Give placeholder-named Meta import pages their real Facebook name.
 
     Ads Manager shows the page name in several places; this pass tries every
@@ -4901,27 +5102,27 @@ def backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
 
 _WORKER_STOP = threading.Event()
 _WORKER_THREAD: threading.Thread | None = None
+_MEDIA_WORKER_THREAD: threading.Thread | None = None
 _WORKER_CONTROL_LOCK = threading.Lock()
 _WORKER_STARTED_AT = ""
+_MEDIA_WORKER_STATE: dict[str, Any] = {"lastSuccessAt": "", "lastErrorAt": "", "archivedLastPass": 0}
 
 
-def _worker_loop() -> None:
+def _worker_loop(stop_event: threading.Event | None = None, startup_cutoff: str | None = None) -> None:
+    stop = stop_event if stop_event is not None else _WORKER_STOP
     # Give startup/migrations time to settle before the first external call.
-    if _WORKER_STOP.wait(5):
+    if stop.wait(5):
         return
     last_discovery_monotonic = 0.0
     last_sync_monotonic = 0.0
-    # Startup already runs the page-name pass on its own thread; the worker's
-    # first periodic pass waits a full interval instead of duplicating it.
-    last_page_names_monotonic = time.monotonic()
-    while not _WORKER_STOP.is_set():
+    while not stop.is_set():
         try:
             config = load_meta_ads_config()
             if _server_token_matches(config):
                 _refresh_meta_provider_state()
             remote_pause = _meta_remote_backoff_remaining()
             if remote_pause:
-                _WORKER_STOP.wait(min(max(remote_pause, 2), 60))
+                stop.wait(min(max(remote_pause, 2), 60))
                 continue
             current = time.monotonic()
             discovery_ran = False
@@ -4930,7 +5131,7 @@ def _worker_loop() -> None:
                 or current - last_discovery_monotonic
                 >= config.discovery_interval_seconds
             ):
-                discover_meta_ads(startup_cutoff=_WORKER_STARTED_AT)
+                discover_meta_ads(startup_cutoff=startup_cutoff if startup_cutoff is not None else _WORKER_STARTED_AT)
                 last_discovery_monotonic = current
                 discovery_ran = True
             if not discovery_ran and (
@@ -4940,53 +5141,83 @@ def _worker_loop() -> None:
             ):
                 sync_due_meta_ads()
                 last_sync_monotonic = current
-            # Placeholder pages get their real name filled in periodically —
-            # cheap when there is nothing to do (one local pages scan).
-            if current - last_page_names_monotonic >= 600:
-                backfill_placeholder_page_names()
-                # Same slow lane: keep our own copies of the Facebook images
-                # so they survive the signed fbcdn URLs expiring. A few per
-                # pass, so a first run over hundreds of ads never stalls this
-                # worker or hammers the CDN.
-                try:
-                    archive_meta_media(limit=20)
-                except Exception:
-                    print("[albayan] Meta media archive pass failed; it will retry.")
-                last_page_names_monotonic = current
         except Exception:
             print("[albayan] Meta Ads background pass failed; it will retry.")
-        _WORKER_STOP.wait(2)
+        stop.wait(2)
+
+
+def _media_worker_loop(stop: threading.Event) -> None:
+    """One slow, bounded lane; never queues work on the discovery thread."""
+    if stop.wait(5):
+        return
+    # main.py already starts a boot name pass. Avoid duplicating that work;
+    # the shared name lock also protects manual/periodic overlaps.
+    last_page_names = time.monotonic()
+    while not stop.is_set():
+        try:
+            archived = archive_meta_media(limit=20, stop_event=stop)
+            _MEDIA_WORKER_STATE.update(lastSuccessAt=_iso_now(), archivedLastPass=archived)
+        except Exception:
+            _MEDIA_WORKER_STATE["lastErrorAt"] = _iso_now()
+            print("[albayan] Meta media archive pass failed; it will retry.")
+        if stop.is_set():
+            return
+        if time.monotonic() - last_page_names >= 600 and not _meta_remote_backoff_remaining():
+            try:
+                # Optional name lookups have a deliberately smaller remote
+                # budget than boot/manual repair so discovery gets priority.
+                backfill_placeholder_page_names(direct_lookup_limit=5)
+            except Exception:
+                print("[albayan] Meta page-name pass failed; it will retry.")
+            last_page_names = time.monotonic()
+        stop.wait(60)
 
 
 def start_meta_ads_worker() -> None:
-    global _WORKER_THREAD, _WORKER_STARTED_AT
+    global _WORKER_THREAD, _MEDIA_WORKER_THREAD, _WORKER_STARTED_AT, _WORKER_STOP
     config = load_meta_ads_config()
     if not config.configured or not config.background_sync:
         return
     if _server_token_matches(config):
         _refresh_meta_provider_state(force=True)
     with _WORKER_CONTROL_LOCK:
-        if _WORKER_THREAD and _WORKER_THREAD.is_alive():
+        # Keep references to any thread that is still draining after shutdown.
+        # Never clear its stop event or create overlapping worker generations.
+        if any(thread and thread.is_alive() for thread in (_WORKER_THREAD, _MEDIA_WORKER_THREAD)):
             return
-        _WORKER_STOP.clear()
+        _WORKER_STOP = threading.Event()
         _WORKER_STARTED_AT = _iso_now()
         _WORKER_THREAD = threading.Thread(
             target=_worker_loop,
+            args=(_WORKER_STOP, _WORKER_STARTED_AT),
             name="albayan-meta-ads-sync",
             daemon=True,
         )
+        _MEDIA_WORKER_THREAD = threading.Thread(
+            target=_media_worker_loop,
+            args=(_WORKER_STOP,),
+            name="albayan-meta-media",
+            daemon=True,
+        )
         _WORKER_THREAD.start()
+        _MEDIA_WORKER_THREAD.start()
     print("[albayan] Meta Ads read-only synchronization and safe draft import enabled.")
 
 
 def stop_meta_ads_worker() -> None:
-    global _WORKER_THREAD
+    global _WORKER_THREAD, _MEDIA_WORKER_THREAD
     with _WORKER_CONTROL_LOCK:
-        thread = _WORKER_THREAD
+        threads = (_WORKER_THREAD, _MEDIA_WORKER_THREAD)
         _WORKER_STOP.set()
-        _WORKER_THREAD = None
-    if thread and thread.is_alive():
-        thread.join(timeout=3)
+    deadline = time.monotonic() + 3
+    for thread in threads:
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+    with _WORKER_CONTROL_LOCK:
+        if _WORKER_THREAD is threads[0] and not (threads[0] and threads[0].is_alive()):
+            _WORKER_THREAD = None
+        if _MEDIA_WORKER_THREAD is threads[1] and not (threads[1] and threads[1].is_alive()):
+            _MEDIA_WORKER_THREAD = None
 
 
 class MetaAdLinkRequest(BaseModel):
@@ -5071,6 +5302,11 @@ def create_meta_ads_router(
             "discoveryFastPages": config.discovery_fast_pages,
             "remoteBackoffSeconds": provider_state["retryAfterSeconds"],
             "providerState": provider_state,
+            "mediaWorker": {
+                **_MEDIA_WORKER_STATE,
+                "running": bool(_MEDIA_WORKER_THREAD and _MEDIA_WORKER_THREAD.is_alive()),
+                "retryingUrls": len(_META_MEDIA_FAILURES),
+            },
             "webhookConfigured": bool(
                 config.webhook_verify_token and config.app_secret
             ),
@@ -5370,6 +5606,12 @@ def create_meta_ads_router(
             payload = json.loads(raw_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise HTTPException(status_code=400, detail="Invalid webhook payload")
+        if isinstance(payload, dict) and payload.get("object") in ("page", "instagram"):
+            # Page/Instagram comment events belong to Social Studio. Imported
+            # lazily because social_studio imports this module.
+            from . import social_studio
+
+            background_tasks.add_task(social_studio.handle_meta_webhook, payload)
         account_ids: list[str] = []
         if isinstance(payload, dict) and payload.get("object") == "ad_account":
             for entry in payload.get("entry") or []:

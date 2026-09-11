@@ -2,15 +2,27 @@
 # Build: docker build -t albayan -f server/Dockerfile .
 # Run:   docker run -p 8000:8000 albayan
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS backup-tools
 
 WORKDIR /app
 
-# pg_dump is required for consistent PostgreSQL backups. Installing the
-# matching Debian client also keeps the runtime image small and predictable.
+# Bookworm's default client is PostgreSQL 15, which cannot dump the PostgreSQL
+# 16 server in docker-compose.yml. Install the matching major from PostgreSQL's
+# signed official repository (keep this major aligned with the database image).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-client \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl --fail --show-error --silent --location \
+       https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && printf '%s\n' 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' \
+       > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
+    && pg_dump --version \
     && rm -rf /var/lib/apt/lists/*
+
+FROM backup-tools AS runtime
 
 # Install dependencies first (better layer caching)
 COPY server/requirements.txt /app/server/requirements.txt
@@ -36,8 +48,12 @@ ENV ALBAYAN_RELEASE_SHA=${ALBAYAN_BUILD_SHA}
 
 # Copy application code
 COPY server /app/server
-COPY index.html script.js studio.js clothes.js style.css privacy.html delete-account.html alembic.ini /app/
+COPY index.html script.js studio.js clothes.js admin-tools.js style.css privacy.html delete-account.html alembic.ini /app/
 COPY assets /app/assets
+
+# Fail closed before publishing if build exclusions ever regress. Only inspect
+# the image's copied files; mounted production data is never touched.
+RUN python /app/server/image_safety.py /app
 
 # NO minification step. rjsmin cannot parse nested template literals and was
 # silently corrupting the served bundle's text and class attributes — see

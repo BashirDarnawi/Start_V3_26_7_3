@@ -2104,87 +2104,116 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
+      // Paywall sheet (2026-09 redesign). Money rules are unchanged: plans
+      // come only from the server catalog, purchases run through
+      // handleSubscribePlan (idempotent, one at a time), and a short wallet
+      // can never buy — it is sent to Charge wallet instead.
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
+      const preferredPlanId = String(state.modalData?.planId || '');
       const isRTL = state.language === 'ar';
-      const lockPlans = typeof getPlansForService === 'function' ? getPlansForService(lockSubscribeToId) : [];
+      const lockCatalog = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+      let lockPlans = typeof getPlansForService === 'function' ? getPlansForService(lockSubscribeToId) : [];
+      // A plan chosen on the Plans page may be a bundle whose first service is
+      // not the one being unlocked — make sure it leads the list.
+      const preferredPlan = preferredPlanId ? lockCatalog.find(p => p && String(p.id) === preferredPlanId) : null;
+      if (preferredPlan) lockPlans = [preferredPlan, ...lockPlans.filter(p => String(p.id) !== preferredPlanId)];
       const lydBalanceMinor = state.currentUser?.id ? WALLET.getBalanceMinor(state.currentUser.id, 'LYD') : 0;
-      const planCards = lockPlans.map(plan => {
+      const lockServiceLabel = (sid) => {
+        const svc = SERVICES[sid] || SMART_SYSTEMS_CHILDREN[sid];
+        return Security.escapeHtml(String(svc ? (isRTL ? svc.nameAr : svc.name) : sid));
+      };
+      const lockPeriod = (days) => {
+        const d = Number(days) || 30;
+        if (d === 30 || d === 31) return isRTL ? '/ شهر' : '/ month';
+        if (d === 365 || d === 360) return isRTL ? '/ سنة' : '/ year';
+        return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
+      };
+      const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
+      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+
+      const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
         const isBundle = Array.isArray(plan.serviceIds) && plan.serviceIds.length > 1;
         const price = Math.max(0, Number(plan.priceMinor) || 0);
-        const priceLabel = price > 0
-          ? `${walletFormatMinor(price, 'LYD')} / ${Number(plan.durationDays) || 30}${isRTL ? ' يوم' : 'd'}`
-          : (isRTL ? 'مجاني' : 'Free');
-        const short = price > lydBalanceMinor;
+        const after = lydBalanceMinor - price;
+        const short = after < 0;
         const safePlanId = Security.escapeHtml(String(plan.id));
-        return `
-          <div class="rounded-2xl border-2 ${isBundle ? 'border-indigo-400 bg-indigo-50/60 dark:bg-indigo-900/20' : 'border-slate-200 dark:border-slate-700'} p-4 text-start">
-            <div class="flex flex-wrap items-center justify-between gap-2">
+        const buyLabel = `${isRTL ? 'اشترك' : 'Subscribe'}${price > 0 ? ` — ${lockMoney(price)}` : ''}`;
+        const includes = (Array.isArray(plan.serviceIds) ? plan.serviceIds : []).map(sid =>
+          `<span class="rounded-full bg-slate-100 dark:bg-slate-800 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">${lockServiceLabel(sid)}</span>`).join('');
+        if (!primary) {
+          return `
+            <div class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 flex items-center justify-between gap-3">
               <div class="min-w-0">
-                <div class="flex items-center gap-2 font-black text-slate-800 dark:text-white">
-                  <i data-lucide="${isBundle ? 'package' : 'circle-check'}" class="w-4 h-4 ${isBundle ? 'text-indigo-600' : 'text-emerald-600'}"></i>${planName}
-                  ${plan.badge === 'best_value' ? `<span class="rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:text-amber-200">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}
-                </div>
-                <div class="mt-1 text-xs text-slate-500">
-                  ${isBundle
-                    ? (isRTL ? `${plan.serviceIds.length} خدمات في اشتراك واحد` : `${plan.serviceIds.length} services in one subscription`)
-                    : (isRTL ? 'خدمة واحدة' : 'Single service')}
-                  ${Number(plan.savingsPct) > 0 ? ` · ${isRTL ? 'توفير' : 'save'} ${Number(plan.savingsPct)}%` : ''}
-                </div>
+                <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${planName}${isBundle ? ` <span class="ms-1 rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2 py-0.5 text-[10px] font-extrabold text-white">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}</div>
+                <div class="text-xs text-slate-500" dir="ltr">${price > 0 ? Security.escapeHtml(lockMoney(price)) : (isRTL ? 'مجاني' : 'Free')} ${Security.escapeHtml(lockPeriod(plan.durationDays))}</div>
               </div>
-              <div class="text-end">
-                <div class="font-black text-slate-800 dark:text-white">${priceLabel}</div>
-                <button onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="mt-1 rounded-xl ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-indigo-600 text-white hover:bg-indigo-700'} px-4 py-2 text-sm font-bold">
-                  ${isRTL ? 'اشترك' : 'Subscribe'}
-                </button>
-              </div>
+              <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl px-4 text-sm font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${isRTL ? 'اشترك' : 'Subscribe'}</button>
+            </div>`;
+        }
+        return `
+          <div class="text-start">
+            ${includes ? `<div class="flex flex-wrap gap-1.5 mb-3">${includes}</div>` : ''}
+            ${Number(plan.savingsPct) > 0 ? `<div class="mb-3 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">${isRTL ? `وفّر ${Number(plan.savingsPct)}%` : `Save ${Number(plan.savingsPct)}%`}</div>` : ''}
+            <div class="rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 text-sm mb-4">
+              <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${isRTL ? 'الباقة' : 'Plan'}</span><span class="font-extrabold text-slate-900 dark:text-white" dir="ltr">${price > 0 ? Security.escapeHtml(lockMoney(price)) : (isRTL ? 'مجاني' : 'Free')} <span class="text-[11px] font-semibold text-slate-500">${Security.escapeHtml(lockPeriod(plan.durationDays))}</span></span></div>
+              <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${Security.escapeHtml(lockMoney(lydBalanceMinor))}</span></div>
+              <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${short ? (isRTL ? 'ينقصك' : 'You need') : (isRTL ? 'الرصيد بعد' : 'Balance after')}</span><span class="font-bold ${short ? 'text-rose-600' : 'text-emerald-600'}" dir="ltr">${Security.escapeHtml(lockMoney(Math.abs(after)))}</span></div>
             </div>
-            ${short ? `<div class="mt-2 text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
+            <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
+            ${short ? `<div class="mt-2 text-center text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
           </div>`;
-      }).join('');
-      modalContent = `
-        <div class="text-center">
-          <div class="w-16 h-16 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mx-auto mb-4">
-            <i data-lucide="lock" class="w-8 h-8 text-white"></i>
-          </div>
-          <h2 class="text-2xl font-bold text-slate-800 dark:text-white mb-2">
-            ${isRTL ? 'غير مشترك' : 'Not Subscribed'}
-          </h2>
-          <p class="text-slate-600 dark:text-slate-300 mb-4">
-            ${isRTL
-              ? `أنت غير مشترك في <strong>${lockServiceName}</strong>. اختر خطة الاشتراك:`
-              : `You are not subscribed to <strong>${lockServiceName}</strong>. Choose your plan:`
-            }
-          </p>
-          <div class="mb-4 flex items-center justify-between rounded-2xl bg-white/40 dark:bg-slate-800/30 border border-white/30 px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
-            <span>${isRTL ? 'رصيد المحفظة (د.ل)' : 'Wallet balance (LYD)'}</span>
-            <span class="font-bold">${walletFormatMinor(lydBalanceMinor, 'LYD')}</span>
-          </div>
-          ${planCards ? `<div class="space-y-3 mb-4 max-h-[45dvh] overflow-y-auto custom-scrollbar pr-1">${planCards}</div>` : (isServerModeEnabled() ? `
-          <!-- Server mode with no plans yet: the catalog is still loading or the
-               fetch failed. NEVER offer a purchase button here — it would take
-               real money while showing no price at all. -->
-          <div class="mb-4 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-sm text-slate-500">
-            <div class="w-6 h-6 mx-auto mb-2 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+      };
+
+      const primaryPlan = lockPlans[0] || null;
+      const otherPlans = lockPlans.slice(1);
+      const sheetTitle = Security.escapeHtml(String(primaryPlan ? ((isRTL ? primaryPlan.nameAr : primaryPlan.name) || primaryPlan.id) : lockServiceName));
+      let plansBody = '';
+      if (primaryPlan) {
+        plansBody = `
+          ${planCard(primaryPlan, true)}
+          ${otherPlans.length ? `
+            <div class="mt-5 mb-2 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-400">${isRTL ? 'باقات أخرى' : 'Other plans'}</div>
+            <div class="space-y-2 max-h-[30dvh] overflow-y-auto custom-scrollbar pe-1">${otherPlans.map(p => planCard(p, false)).join('')}</div>` : ''}`;
+      } else if (isServerModeEnabled()) {
+        // Server mode with no plans yet: the catalog is still loading or the
+        // fetch failed. NEVER offer a purchase button here — it would take
+        // real money while showing no price at all.
+        plansBody = `
+          <div class="mb-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-center text-sm text-slate-500">
+            <div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             ${isRTL ? 'جاري تحميل الأسعار…' : 'Loading prices…'}
             <div class="mt-3">
-              <button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="text-xs font-bold text-indigo-600 hover:text-indigo-700 underline">
+              <button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600 hover:text-blue-700 underline">
                 ${isRTL ? 'إعادة المحاولة' : 'Retry'}
               </button>
             </div>
-          </div>` : `
-          <div class="flex space-x-3 mb-1">
-            <button onclick="handleSubscribe('${Security.escapeHtml(String(lockSubscribeToId))}', '${Security.escapeHtml(String(lockServiceId))}')" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
-              <i data-lucide="check" class="w-4 h-4 inline mr-2"></i>
-              ${isRTL ? 'اشترك' : 'Subscribe'}
-            </button>
-          </div>`)}
-          <button onclick="closeModal()" class="w-full bg-slate-200 dark:bg-slate-700 px-6 py-3 rounded-xl font-bold hover:bg-slate-300">
-            ${isRTL ? 'إلغاء' : 'Cancel'}
-          </button>
+          </div>`;
+      } else {
+        plansBody = `
+          <p class="mb-4 text-sm text-slate-600 dark:text-slate-300 text-start">
+            ${isRTL ? `أنت غير مشترك في <strong>${Security.escapeHtml(String(lockServiceName))}</strong>.` : `You are not subscribed to <strong>${Security.escapeHtml(String(lockServiceName))}</strong>.`}
+          </p>
+          <div class="mb-4 flex items-center justify-between rounded-2xl border border-slate-200 dark:border-slate-700 px-4 py-3 text-sm">
+            <span class="text-slate-500">${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span>
+            <span class="font-bold" dir="ltr">${Security.escapeHtml(lockMoney(lydBalanceMinor))}</span>
+          </div>
+          <button onclick="handleSubscribe('${Security.escapeHtml(String(lockSubscribeToId))}', '${Security.escapeHtml(String(lockServiceId))}')" class="touch-target w-full min-h-14 btn-shine bg-blue-600 text-white rounded-2xl text-base font-bold hover:bg-blue-700">
+            <i data-lucide="check" class="w-4 h-4 inline me-2"></i>${isRTL ? 'اشترك' : 'Subscribe'}
+          </button>`;
+      }
+      modalContent = `
+        <div class="flex items-center justify-between gap-3 mb-4">
+          <div class="min-w-0 text-start">
+            <div class="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-400">${isRTL ? 'يتطلب اشتراكاً' : 'Requires subscription'}</div>
+            <h2 class="truncate text-xl font-extrabold text-slate-900 dark:text-white">${sheetTitle}</h2>
+          </div>
+          <button type="button" onclick="closeModal()" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-200" aria-label="${isRTL ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="w-4 h-4"></i></button>
         </div>
+        ${plansBody}
+        ${isServerModeEnabled() ? lockChargeLink : ''}
       `;
       break;
     }
@@ -2312,7 +2341,7 @@ function renderModal() {
   // Make Ad/Receipt modals scroll on the whole panel (header + content) to avoid "nothing shows" confusion.
   const modalScrollable = state.activeModal === 'customer-merge'
     ? ' max-h-[90dvh] overflow-y-auto custom-scrollbar'
-    : (state.activeModal === 'receipt' || state.activeModal === 'ad')
+    : (state.activeModal === 'receipt' || state.activeModal === 'ad' || state.activeModal === 'subscription-lock')
       ? ' max-h-[90vh] overflow-y-auto custom-scrollbar'
       : '';
   const modalAccessibility = state.activeModal === 'customer-merge'

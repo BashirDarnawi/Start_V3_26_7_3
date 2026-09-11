@@ -1340,7 +1340,7 @@ function renderMobileBottomNavigation() {
 
 function renderMainApp(viewHTML = null) {
   const dir = getDir();
-  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
+  const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
   
   return `
     <div class="app-shell flex min-h-screen" dir="${dir}">
@@ -1533,9 +1533,15 @@ function renderSidebar() {
 }
 
 function renderView() {
+  // Admin-only tools (Control Center, merge dialogs) live in admin-tools.js;
+  // warm it on the first Admin render so it is ready before the first tap.
+  if (typeof preloadAdminToolsForCurrentUser === 'function') preloadAdminToolsForCurrentUser();
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
-    case 'control-center': return renderControlCenterView();
+    case 'control-center':
+      if (typeof renderControlCenterView === 'function') return renderControlCenterView();
+      ensureAdminToolsLoaded();
+      return renderAdminToolsLoadingState();
     case 'smart-systems': return renderSmartSystems();
     case 'clothes-system':
       if (typeof renderClothesSystemView === 'function') return renderClothesSystemView();
@@ -1547,6 +1553,8 @@ function renderView() {
       return renderAdsStudioLoadingState();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
+    case 'plans': return renderPlansView();
+    case 'charge-wallet': return renderChargeWalletView();
     case 'analytics': return renderAnalyticsView();
     case 'customers': return renderCustomersView();
     case 'receipts': return renderReceiptsView();
@@ -3670,7 +3678,7 @@ function renderAdsView() {
   // Pairing a hand-made ad with its Meta twin scans every ad, so it is resolved
   // once per render pass instead of once per row (same shape as the deliveries
   // view's collection-target cache).
-  resetAdMergePairCache();
+  if (typeof resetAdMergePairCache === 'function') resetAdMergePairCache();
   const allAds = getFilteredAds(customersById);
   const adF = state.adFilters || {};
   const isAr = state.language === 'ar';
@@ -3981,7 +3989,7 @@ function renderAdsView() {
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
                         ${renderMetaAdActionButton(ad, isAr)}
-                        ${renderAdMergeActionButton(ad, isAr)}
+                        ${typeof renderAdMergeActionButton === 'function' ? renderAdMergeActionButton(ad, isAr) : ''}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
                         ${can('ads', 'viewPhotos') && adPhotoCount > 0 ? `
                         <button type="button" data-action="view-ad-photos" data-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="openAdPhotoViewer(this.dataset.adId, 0, this)" class="ad-photo-view-button inline-flex items-center justify-center gap-1.5 font-bold" title="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}" aria-label="${isAr ? `عرض صور الإعلان (${adPhotoCount})` : `View ad photos (${adPhotoCount})`}">

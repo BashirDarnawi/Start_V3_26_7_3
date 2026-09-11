@@ -29,6 +29,7 @@ const ADS_STUDIO_MAX_SELECTED_SOURCE_BYTES = 40 * 1024 * 1024;
 const ADS_STUDIO_MAX_TOTAL_CREATIVE_BYTES = 5 * 1024 * 1024;
 
 function resetAdsStudioSessionState() {
+  if (typeof resetSocialStudioState === 'function') resetSocialStudioState();
   // Invalidate image compression still running for the previous draft/session.
   _adsStudioPhotoToken++;
   if (typeof window !== 'undefined' && window._adsStudioSearchTimer) {
@@ -55,7 +56,10 @@ function resetAdsStudioSessionState() {
 const ADS_STUDIO_TABS = [
   { id: 'dashboard', icon: 'layout-dashboard', label: 'Overview', labelAr: 'نظرة عامة' },
   { id: 'campaigns', icon: 'megaphone', label: 'My Campaigns', labelAr: 'حملاتي' },
-  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' }
+  { id: 'builder', icon: 'wand-sparkles', label: 'Create Campaign', labelAr: 'إنشاء حملة' },
+  // Social Studio (15f-social-studio.js): scheduled posts + auto-reply rules.
+  { id: 'posts', icon: 'send', label: 'Posts', labelAr: 'المنشورات' },
+  { id: 'replies', icon: 'message-circle-reply', label: 'Replies', labelAr: 'الردود' }
 ];
 
 const ADS_STUDIO_OBJECTIVES = [
@@ -363,6 +367,8 @@ function renderAdsStudioView() {
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
   else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue();
+  else if (_adsStudioActiveTab === 'posts') content = renderSocialStudioPostsTab();
+  else if (_adsStudioActiveTab === 'replies') content = renderSocialStudioRepliesTab();
   else content = renderAdsStudioDashboard();
 
   return `
@@ -423,6 +429,8 @@ function renderAdsStudioDashboard() {
           </div>
         `).join('')}
       </div>
+
+      ${typeof renderSocialStudioOverviewSection === 'function' ? renderSocialStudioOverviewSection() : ''}
 
       <div class="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
         <div class="glass-panel rounded-2xl p-4 sm:p-6">
