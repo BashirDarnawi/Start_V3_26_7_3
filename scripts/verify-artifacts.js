@@ -13,10 +13,12 @@ const path = require('path');
 const crypto = require('crypto');
 const os = require('os');
 const { spawnSync } = require('child_process');
+const { bundleManifest } = require('./lib/bundle-manifest');
 
 const ROOT = path.join(__dirname, '..');
 const INCLUDE_NATIVE = process.argv.includes('--include-native');
 const errors = [];
+let bundleOutputs = ['script.js'];
 
 function rel(file) {
   return path.relative(ROOT, file).replace(/\\/g, '/');
@@ -74,7 +76,7 @@ function compareTree(sourceDir, targetDir) {
   }
 }
 
-// Verify that the generated root bundle is exactly the ordered source bundle.
+// Verify every generated bundle, including lazy features, against source.
 const manifestPath = path.join(ROOT, 'src', 'manifest.json');
 const manifestData = read(manifestPath);
 if (manifestData) {
@@ -85,30 +87,20 @@ if (manifestData) {
     errors.push(`Invalid src/manifest.json: ${error.message}`);
   }
   if (manifest) {
-    if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
-      errors.push('src/manifest.json must contain a non-empty files array');
-    } else {
-      const parts = [];
-      for (const name of manifest.files) {
-        if (typeof name !== 'string') {
-          errors.push(`Source manifest entries must be strings: ${JSON.stringify(name)}`);
-          continue;
+    try {
+      const bundles = bundleManifest(manifest);
+      bundleOutputs = bundles.map(bundle => bundle.out);
+      for (const bundle of bundles) {
+        const parts = bundle.files.map(name => read(path.join(ROOT, 'src', name)));
+        if (parts.some(part => part === null)) continue;
+        const generated = Buffer.concat(parts);
+        const rootBundle = read(path.join(ROOT, bundle.out));
+        if (rootBundle && !generated.equals(rootBundle)) {
+          errors.push(`${bundle.out} is not the current src bundle (expected ${digest(generated)}, found ${digest(rootBundle)})`);
         }
-        const normalized = path.posix.normalize(String(name).replace(/\\/g, '/'));
-        if (path.isAbsolute(name) || normalized.startsWith('../') || normalized === '..') {
-          errors.push(`Unsafe source path in manifest: ${name}`);
-          continue;
-        }
-        const part = read(path.join(ROOT, 'src', normalized));
-        if (part) parts.push(part);
       }
-      const generated = Buffer.concat(parts);
-      const rootBundle = read(path.join(ROOT, 'script.js'));
-      if (rootBundle && !generated.equals(rootBundle)) {
-        errors.push(
-          `script.js is not the current src bundle (expected ${digest(generated)}, found ${digest(rootBundle)})`
-        );
-      }
+    } catch (error) {
+      errors.push(error.message);
     }
   }
 }
@@ -148,7 +140,7 @@ if (!fs.existsSync(tailwindCli)) {
 }
 
 const www = path.join(ROOT, 'www');
-for (const name of ['index.html', 'script.js', 'style.css']) {
+for (const name of ['index.html', ...bundleOutputs, 'style.css']) {
   compare(path.join(ROOT, name), path.join(www, name));
 }
 compareTree(path.join(ROOT, 'assets'), path.join(www, 'assets'));
@@ -159,7 +151,7 @@ if (INCLUDE_NATIVE) {
     path.join(ROOT, 'ios', 'App', 'App', 'public'),
   ];
   for (const nativeRoot of nativeRoots) {
-    for (const name of ['index.html', 'script.js', 'style.css']) {
+    for (const name of ['index.html', ...bundleOutputs, 'style.css']) {
       compare(path.join(www, name), path.join(nativeRoot, name));
     }
     compareTree(path.join(www, 'assets'), path.join(nativeRoot, 'assets'));

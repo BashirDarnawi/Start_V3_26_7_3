@@ -1629,8 +1629,8 @@ async function downloadFullServerBackup(button = null) {
     setTimeout(() => { try { link.remove(); } catch (_) {} }, 60000);
     showNotification(
       isAr ? 'بدأ التنزيل' : 'Download started',
-      isAr ? `قد يستغرق عدة دقائق (~${mb} ميجابايت). اترك التبويب مفتوحاً حتى ينتهي.` : `This can take several minutes (~${mb} MB). Keep this tab open until it finishes.`,
-      'success'
+      isAr ? `قد يستغرق عدة دقائق (~${mb} ميجابايت). بدء التنزيل لا يعني اكتمال النسخة. احتفظ بالنسخة السابقة حتى يتم التحقق من الملف الجديد؛ إذا انقطع التنزيل فتجاهله وأعد المحاولة.` : `This can take several minutes (~${mb} MB). Starting is not proof of a complete backup. Keep your previous backup until the new file is checked; discard interrupted downloads and retry.`,
+      'info'
     );
     addAuditLog('backup', 'full-backup', 'Requested a full server backup download', { resourceType: 'backup' });
   } catch (error) {

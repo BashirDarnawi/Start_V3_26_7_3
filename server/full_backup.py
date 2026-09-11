@@ -10,7 +10,7 @@ Why this exists beside the encrypted server backup:
   all (media never reaches the client — see ``entity_projection``).
 
 This module streams gzip-compressed NDJSON: one line per record, media
-included, written incrementally so a 400 MB export costs a few MB of RAM.
+included, with memory bounded by one stored row and small encoding buffers.
 A truncated download is detectable because the trailing footer line is missing.
 
 DELIBERATELY EXCLUDED, and it must stay that way:
@@ -35,8 +35,9 @@ import threading
 import time
 import zlib
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Generator, Iterator
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
@@ -45,9 +46,12 @@ from .db import get_engine
 
 BACKUP_FORMAT = "albayan-full-backup/1"
 # Yield at least this often so an idle-timeout proxy always sees traffic.
-FLUSH_EVERY_ROWS = 64
+FLUSH_EVERY_CHUNKS = 64
 FLUSH_EVERY_BYTES = 256 * 1024
-ROW_BATCH = 200
+# Media rows may each contain several MB. A row count of 200 is not a safe
+# memory bound: fetch one row and encode its JSON in bounded chunks instead.
+ROW_BATCH = 1
+JSON_CHUNK_CHARS = 64 * 1024
 # A stream that runs longer than this ends with complete:false rather than
 # being cut off silently mid-record.
 MAX_STREAM_SECONDS = 30 * 60
@@ -67,8 +71,8 @@ def _json_line(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _entity_line(row: Any) -> bytes:
-    """Build one entity line WITHOUT parsing data_json.
+def _entity_chunks(row: Any) -> Iterator[bytes]:
+    """Serialize one row without parsing or copying its entire media JSON.
 
     data_json is always valid JSON (written by db.json_dumps), so it is spliced
     in as text. That is the whole memory trick: an 8 MB data URL passes through
@@ -87,7 +91,32 @@ def _entity_line(row: Any) -> bytes:
     data_json = row["data_json"] or "{}"
     if isinstance(data_json, bytes):
         data_json = data_json.decode("utf-8", "replace")
-    return (prefix + ',"data":' + data_json + "}\n").encode("utf-8")
+    yield (prefix + ',"data":').encode("utf-8")
+    for start in range(0, len(data_json), JSON_CHUNK_CHARS):
+        yield data_json[start:start + JSON_CHUNK_CHARS].encode("utf-8")
+    yield b"}\n"
+
+
+class _BackupStreamingResponse(StreamingResponse):
+    """Close the sync iterator even when ASGI cancels before/while streaming."""
+
+    def __init__(self, iterator: Generator[bytes, None, None], cleanup: Callable[[], None], **kwargs: Any):
+        super().__init__(iterator, **kwargs)
+        self._backup_iterator = iterator
+        self._backup_cleanup = cleanup
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette's iterate_in_threadpool does not close its underlying
+            # synchronous generator on disconnect. Shield cleanup from the
+            # cancellation and cover the never-started-generator case too.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await anyio.to_thread.run_sync(self._backup_iterator.close)
+                finally:
+                    await anyio.to_thread.run_sync(self._backup_cleanup)
 
 
 def create_full_backup_router(
@@ -165,170 +194,184 @@ def create_full_backup_router(
 
         started_at = time.monotonic()
         filename = f"albayan-full-backup-{_utc_stamp()}.ndjson.gz"
-        audit_fn(
-            admin_id, "backup_download_started", "backup", filename,
-            "Started a full data backup download",
-            {"ip": getattr(getattr(request, "client", None), "host", "") or ""},
-        )
+        try:
+            audit_fn(
+                admin_id, "backup_download_started", "backup", filename,
+                "Started a full data backup download",
+                {"ip": getattr(getattr(request, "client", None), "host", "") or ""},
+            )
+        except BaseException:
+            _STREAM_SLOT.release()
+            raise
 
-        def generate() -> Iterator[bytes]:
+        state: dict[str, Any] = {"conn": None, "complete": False, "bytes": 0, "counts": {}}
+        cleanup_lock = threading.Lock()
+        cleaned_up = False
+
+        def cleanup() -> None:
+            nonlocal cleaned_up
+            with cleanup_lock:
+                if cleaned_up:
+                    return
+                cleaned_up = True
+            try:
+                if state["conn"] is not None:
+                    state["conn"].close()
+            finally:
+                _STREAM_SLOT.release()
+                try:
+                    audit_fn(
+                        admin_id, "backup_download_completed", "backup", filename,
+                        f"Full backup download finished ({'complete' if state['complete'] else 'INCOMPLETE'})",
+                        {key: state[key] for key in ("bytes", "complete", "counts")},
+                    )
+                except Exception:
+                    pass
+
+        def generate() -> Generator[bytes, None, None]:
             # Audited on completion too: logging only at the end would make an
             # aborted mass download invisible.
             compressor = zlib.compressobj(9, zlib.DEFLATED, 31)
             digest = hashlib.sha256()
-            counts: dict[str, int] = {}
+            counts: dict[str, int] = state["counts"]
             plain_bytes = 0
             complete = True
-            conn = None
             pending = 0
             pending_bytes = 0
 
             def emit(chunk: bytes) -> bytes:
                 nonlocal plain_bytes
                 plain_bytes += len(chunk)
+                state["bytes"] = plain_bytes
                 digest.update(chunk)
                 return compressor.compress(chunk)
 
-            try:
-                conn = get_engine().connect().execution_options(
-                    stream_results=True, yield_per=ROW_BATCH
-                )
-                trans = conn.begin()
-                if _is_postgres():
-                    # One consistent snapshot for the whole file.
-                    conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-                out = emit(_json_line({
-                    "_type": "header",
-                    "format": BACKUP_FORMAT,
-                    "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    "release": release_sha or "",
-                    "dialect": "postgresql" if _is_postgres() else "sqlite",
-                    "includesMedia": True,
-                    "excluded": [
-                        "password_hash", "password_salt", "password_algo",
-                        "password_iterations", "sessions", "password_resets", "app_logins",
-                    ],
-                }))
-                if out:
-                    yield out
+            def stream_rows(statement: str):
+                # Apply streaming to SELECTs only, never transaction commands.
+                # Explicit yield_per=1 also bounds psycopg's fetch buffer.
+                with conn.execute(text(statement).execution_options(
+                    stream_results=True, yield_per=ROW_BATCH,
+                )) as result:
+                    yield from result.mappings()
 
-                # Keyset cursor over (type, id): no OFFSET scans, stable order.
-                last_type, last_id = "", ""
-                while True:
-                    batch = conn.execute(
-                        text(
-                            "SELECT type, id, data_json, deleted, created_at, created_by, last_modified "
-                            "FROM entities WHERE (type > :t) OR (type = :t AND id > :i) "
-                            "ORDER BY type, id LIMIT :lim"
-                        ),
-                        {"t": last_type, "i": last_id, "lim": ROW_BATCH},
-                    ).mappings().all()
-                    if not batch:
-                        break
-                    for row in batch:
-                        last_type, last_id = str(row["type"]), str(row["id"])
-                        counts[last_type] = counts.get(last_type, 0) + 1
-                        chunk = emit(_entity_line(row))
+            def timed_out() -> bool:
+                return time.monotonic() - started_at > MAX_STREAM_SECONDS
+
+            try:
+                try:
+                    conn = get_engine().connect()
+                    state["conn"] = conn
+                    if _is_postgres():
+                        # Set isolation before BEGIN and before any server-side
+                        # SELECT cursor. DECLARE CURSOR FOR SET is invalid SQL.
+                        conn = conn.execution_options(isolation_level="REPEATABLE READ")
+                    trans = conn.begin()
+                    if not _is_postgres():
+                        # sqlite3's legacy mode does not BEGIN for a SELECT.
+                        # Make all three tables share an actual read snapshot.
+                        conn.exec_driver_sql("BEGIN")
+                    for raw_chunk in records(stream_rows, timed_out, counts):
+                        out = emit(raw_chunk)
                         pending += 1
-                        pending_bytes += len(chunk)
-                        if chunk:
-                            yield chunk
-                        if pending >= FLUSH_EVERY_ROWS or pending_bytes >= FLUSH_EVERY_BYTES:
-                            flushed = compressor.flush(zlib.Z_SYNC_FLUSH)
+                        pending_bytes += len(raw_chunk)
+                        if out:
+                            yield out
+                        if pending >= FLUSH_EVERY_CHUNKS or pending_bytes >= FLUSH_EVERY_BYTES:
+                            out = compressor.flush(zlib.Z_SYNC_FLUSH)
                             pending = 0
                             pending_bytes = 0
-                            if flushed:
-                                yield flushed
-                    if (time.monotonic() - started_at) > MAX_STREAM_SECONDS:
-                        complete = False
-                        break
-
-                if complete:
-                    for urow in conn.execute(text(
-                        "SELECT id, name, email, role, permissions_json, deleted, "
-                        "created_at, created_by, last_modified FROM users ORDER BY id"
-                    )).mappings():
-                        counts["users"] = counts.get("users", 0) + 1
-                        out = emit(_json_line({
-                            "_type": "user",
-                            "id": str(urow["id"]),
-                            "name": urow["name"],
-                            "email": urow["email"],
-                            "role": urow["role"],
-                            "permissions": urow["permissions_json"],
-                            "deleted": bool(urow["deleted"]),
-                            "createdAt": int(urow["created_at"] or 0),
-                            "createdBy": urow["created_by"],
-                            "lastModified": int(urow["last_modified"] or 0),
-                        }))
-                        if out:
-                            yield out
-
-                    for arow in conn.execute(text(
-                        "SELECT id, ts, user_id, action, resource_type, resource_id, "
-                        "message, metadata_json FROM audit_logs ORDER BY id"
-                    )).mappings():
-                        counts["auditLogs"] = counts.get("auditLogs", 0) + 1
-                        out = emit(_json_line({
-                            "_type": "audit",
-                            "id": str(arow["id"]),
-                            "ts": int(arow["ts"] or 0),
-                            "userId": arow["user_id"],
-                            "action": arow["action"],
-                            "resourceType": arow["resource_type"],
-                            "resourceId": arow["resource_id"],
-                            "message": arow["message"],
-                            "metadata": arow["metadata_json"],
-                        }))
-                        if out:
-                            yield out
-                trans.rollback()
-            except Exception as exc:  # noqa: BLE001 - the footer must record it
-                complete = False
-                try:
-                    out = emit(_json_line({"_type": "error", "message": str(exc)[:300]}))
+                            if out:
+                                yield out
+                    complete = not timed_out()
+                    trans.rollback()
+                except Exception:
+                    # A mid-download failure cannot change HTTP status, but it
+                    # must never be reported as a usable backup. Do not expose
+                    # SQL/driver exception text (which may contain row data).
+                    complete = False
+                    out = emit(_json_line({
+                        "_type": "error",
+                        "message": "Backup did not finish. Download a new copy before relying on it.",
+                    }))
                     if out:
                         yield out
-                except Exception:
-                    pass
-            finally:
-                try:
-                    footer = emit(_json_line({
-                        "_type": "footer",
-                        "complete": complete,
-                        "counts": counts,
-                        "bytes": plain_bytes,
-                        "sha256": digest.hexdigest(),
-                    }))
-                    if footer:
-                        yield footer
-                    tail = compressor.flush(zlib.Z_FINISH)
-                    if tail:
-                        yield tail
-                except Exception:
-                    pass
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                _STREAM_SLOT.release()
-                try:
-                    audit_fn(
-                        admin_id, "backup_download_completed", "backup", filename,
-                        f"Full backup download finished ({'complete' if complete else 'INCOMPLETE'})",
-                        {"bytes": plain_bytes, "complete": complete, "counts": counts},
-                    )
-                except Exception:
-                    pass
 
-        return StreamingResponse(
-            generate(),
-            media_type="application/x-ndjson",
+                footer = emit(_json_line({
+                    "_type": "footer", "complete": complete, "counts": counts,
+                    "bytes": plain_bytes, "sha256": digest.hexdigest(),
+                }))
+                if footer:
+                    yield footer
+                tail = compressor.flush(zlib.Z_FINISH)
+                if tail:
+                    yield tail
+                state["complete"] = complete
+            finally:
+                # No yields here: GeneratorExit on a cancelled download must
+                # reach resource release, including while yielding the footer.
+                cleanup()
+
+        def records(stream_rows: Callable, timed_out: Callable,
+                    counts: dict[str, int]) -> Iterator[bytes]:
+            yield _json_line({
+                "_type": "header", "format": BACKUP_FORMAT,
+                "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "release": release_sha or "",
+                "dialect": "postgresql" if _is_postgres() else "sqlite",
+                "includesMedia": True,
+                "excluded": [
+                    "password_hash", "password_salt", "password_algo",
+                    "password_iterations", "sessions", "password_resets", "app_logins",
+                ],
+            })
+            # One index-ordered cursor, one row fetched at a time. Never
+            # materialize a list of photo-bearing records with .all().
+            for row in stream_rows(
+                "SELECT type, id, data_json, deleted, created_at, created_by, last_modified "
+                "FROM entities ORDER BY type, id"
+            ):
+                if timed_out():
+                    return
+                collection = str(row["type"])
+                counts[collection] = counts.get(collection, 0) + 1
+                yield from _entity_chunks(row)
+            for row in stream_rows(
+                "SELECT id, name, email, role, permissions_json, deleted, "
+                "created_at, created_by, last_modified FROM users ORDER BY id"
+            ):
+                if timed_out():
+                    return
+                counts["users"] = counts.get("users", 0) + 1
+                yield _json_line({
+                    "_type": "user", "id": str(row["id"]),
+                    "name": row["name"], "email": row["email"], "role": row["role"],
+                    "permissions": row["permissions_json"], "deleted": bool(row["deleted"]),
+                    "createdAt": int(row["created_at"] or 0), "createdBy": row["created_by"],
+                    "lastModified": int(row["last_modified"] or 0),
+                })
+            for row in stream_rows(
+                "SELECT id, ts, user_id, action, resource_type, resource_id, "
+                "message, metadata_json FROM audit_logs ORDER BY id"
+            ):
+                if timed_out():
+                    return
+                counts["auditLogs"] = counts.get("auditLogs", 0) + 1
+                yield _json_line({
+                    "_type": "audit", "id": str(row["id"]), "ts": int(row["ts"] or 0),
+                    "userId": row["user_id"], "action": row["action"],
+                    "resourceType": row["resource_type"], "resourceId": row["resource_id"],
+                    "message": row["message"], "metadata": row["metadata_json"],
+                })
+
+        return _BackupStreamingResponse(
+            generate(), cleanup,
+            media_type="application/gzip",
             headers={
-                # Set ourselves so Starlette's GZipMiddleware does not compress
-                # an already-compressed body a second time.
-                "Content-Encoding": "gzip",
+                # This is a .gz FILE, not gzip transport encoding. "gzip"
+                # here makes browsers transparently decompress the file while
+                # retaining its .gz filename. Explicit identity also stops
+                # GZipMiddleware from compressing the archive a second time.
+                "Content-Encoding": "identity",
                 "Content-Disposition": f'attachment; filename="{filename}"',
             },
         )

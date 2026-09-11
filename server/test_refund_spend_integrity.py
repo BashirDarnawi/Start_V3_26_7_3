@@ -9,6 +9,9 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
@@ -68,6 +71,78 @@ def test_undo_restores_the_pre_refund_spend_instead_of_deleting_it():
     assert float(undone.get("spentUSD") or 0) == 10.0, (
         "undo dropped the stop's spend, so the ad reads as having spent its whole budget"
     )
+
+
+@pytest.mark.parametrize("refund_type,amount", [("Partial", 2), ("Full", 10)])
+@pytest.mark.parametrize("stopped", [True, False])
+def test_refund_status_resaves_are_money_noops(refund_type, amount, stopped):
+    existing = _stopped_ad()
+    if not stopped:
+        existing.update(amountUSD=10, status="Active")
+        existing.pop("spentUSD")
+    first = _financial_apply_refund(
+        ACTOR, {"refundType": refund_type, "refundAmount": amount}, existing
+    )
+    saved = first
+    for status in ("Refunded", "Pending", "Refunded"):
+        saved = _financial_apply_refund(
+            ACTOR,
+            {"refundType": refund_type, "refundAmount": amount, "refundStatus": status},
+            saved,
+        )
+        for field in ("spentUSD", "refundAmount", "receiptAllocations", "dueAllocations"):
+            assert saved[field] == first[field], field
+    undone = _financial_apply_refund(ACTOR, {"refundType": "None"}, saved)
+    assert undone["receiptAllocations"] == existing["receiptAllocations"]
+    assert undone.get("spentUSD") == existing.get("spentUSD")
+    assert undone["status"] == existing["status"]
+
+
+def test_refund_amount_changes_and_full_partial_transitions_use_original_spend():
+    saved = _stopped_ad()
+    for refund_type, amount, expected_spend in (
+        ("Partial", 2, 8), ("Partial", 7, 3), ("Full", 0, 0), ("Partial", 1, 9)
+    ):
+        saved = _financial_apply_refund(
+            ACTOR, {"refundType": refund_type, "refundAmount": amount}, saved
+        )
+        assert saved["spentUSD"] == expected_spend
+        assert sum(row["amountUSD"] for row in saved["receiptAllocations"]) == expected_spend
+        assert saved["preRefundSpentUSD"] == 10
+    with pytest.raises(HTTPException, match="exceeds"):
+        _financial_apply_refund(ACTOR, {"refundType": "Partial", "refundAmount": 11}, saved)
+
+
+def test_none_on_an_unrefunded_stopped_ad_preserves_spend_and_ignores_stale_stamp():
+    existing = _stopped_ad()
+    existing["preRefundSpentUSD"] = 99
+    saved = _financial_apply_refund(ACTOR, {"refundType": "None"}, existing)
+    assert saved["spentUSD"] == 10
+    assert saved["receiptAllocations"] == existing["receiptAllocations"]
+    assert "preRefundSpentUSD" not in saved
+
+
+def test_legacy_refund_without_spend_stamp_resaves_against_reconstructed_baseline():
+    first = _financial_apply_refund(
+        ACTOR, {"refundType": "Partial", "refundAmount": 2}, _stopped_ad()
+    )
+    first.pop("preRefundSpentUSD")
+    saved = _financial_apply_refund(
+        ACTOR, {"refundType": "Partial", "refundAmount": 3}, first
+    )
+    assert saved["spentUSD"] == 7
+    assert saved["receiptAllocations"] == [{"receiptId": "receipt_R", "amountUSD": 7}]
+
+
+def test_new_refund_discards_a_stale_spend_stamp_outside_a_refund_lifecycle():
+    existing = _stopped_ad()
+    existing.update(amountUSD=10, status="Active", refundType="None", preRefundSpentUSD=5)
+    existing.pop("spentUSD")
+    request = {"refundType": "Partial", "refundAmount": 2}
+    first = _financial_apply_refund(ACTOR, request, existing)
+    second = _financial_apply_refund(ACTOR, request, first)
+    assert first["spentUSD"] == second["spentUSD"] == 8
+    assert "preRefundSpentUSD" not in second
 
 
 def test_batch_reference_index_matches_the_per_receipt_scan():

@@ -8,6 +8,7 @@
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { isolatedTestEnvironment, sqliteTestUrl } = require('./lib/test-environment');
 
 const ROOT = path.resolve(__dirname, '..');
 const TMP_DIR = path.join(ROOT, '.tmp', 'e2e');
@@ -41,8 +42,7 @@ const child = spawn(findPython(), [
   cwd: ROOT,
   stdio: 'inherit',
   env: {
-    ...process.env,
-    PYTHONIOENCODING: 'utf-8',
+    ...isolatedTestEnvironment(process.env, sqliteTestUrl(DB_PATH)),
     ALBAYAN_DB_PATH: DB_PATH,
     ALBAYAN_COOKIE_SECURE: 'false',
     ALBAYAN_DEBUG_MODE: 'false',

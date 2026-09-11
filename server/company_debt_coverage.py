@@ -17,6 +17,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
 from .db import db_conn, get_engine, json_loads
+from .financial_compatibility import (
+    project_financial_data,
+    receipt_customer_outstanding_minor,
+)
 
 from .financial_core import (
     _financial_ad_direct_coverage,
@@ -86,8 +90,16 @@ def protect_company_coverage_fields(
     submitted = fields.intersection(requested)
     if not submitted:
         return
+    # Old records can now return corrected read-side summaries without a
+    # database write. Accept an exact echo of that server-derived view as well
+    # as the raw stored value, but remove either before applying the patch.
+    # Derive from EXISTING data only: submitted amounts must not authorize a
+    # client-forged coverage field.
+    readable = project_financial_data(collection, existing) if existing is not None else {}
     if existing is None or any(
-        requested.get(field) != existing.get(field) for field in submitted
+        requested.get(field) != existing.get(field)
+        and requested.get(field) != readable.get(field)
+        for field in submitted
     ):
         raise HTTPException(
             status_code=405,
@@ -109,6 +121,42 @@ class CompanyCoveragePlan:
     ads: tuple[CompanyCoverageAdPlan, ...]
     allocated_minor: int
     unassigned_minor: int
+
+
+def _move_coverage_baselines(
+    source: dict[str, Any], updated: dict[str, Any], receipt_id: str, moved_minor: int,
+) -> None:
+    """Keep reversible customer funding in step with irreversible coverage.
+
+    A refund undo or spend correction may restore its saved customer pools.
+    Once company funds replace a due slice, restoring that slice would charge
+    the customer again. Move the same cents out of every applicable baseline;
+    company funding remains in its existing, server-owned ledger.
+    """
+    if str(source.get("refundType") or "None") in {"Full", "Partial"} and isinstance(source.get("refundDueBaseline"), list):
+        due = _financial_allocation_map(source["refundDueBaseline"])
+        available = due.get(receipt_id, 0)
+        if available > 0:
+            if available < moved_minor:
+                raise HTTPException(status_code=409, detail="Refund baseline changed; review the ad before covering its debt")
+            due[receipt_id] = available - moved_minor
+            updated["refundDueBaseline"] = _financial_rows_from_allocation_map(due)
+    baseline = source.get("stopAllocationBaseline")
+    if isinstance(baseline, dict):
+        due = _financial_allocation_map(baseline.get("due"))
+        available = due.get(receipt_id, 0)
+        legacy_id = str(baseline.get("dueLegacyReceiptId") or _financial_legacy_due_receipt_id(source) or "")
+        legacy = _financial_minor(baseline.get("dueLegacy"), "stop baseline due") if legacy_id == receipt_id else 0
+        if available + legacy > 0:
+            if available + legacy < moved_minor:
+                raise HTTPException(status_code=409, detail="Stop baseline changed; review the ad before covering its debt")
+            from_rows = min(available, moved_minor)
+            due[receipt_id] = available - from_rows
+            next_baseline = dict(baseline)
+            next_baseline["due"] = _financial_rows_from_allocation_map(due)
+            if legacy_id == receipt_id:
+                next_baseline["dueLegacy"] = _financial_usd(legacy - (moved_minor - from_rows))
+            updated["stopAllocationBaseline"] = next_baseline
 
 
 def plan_company_debt_coverage(
@@ -153,6 +201,7 @@ def plan_company_debt_coverage(
             updated = dict(source)
             updated["companyFundingAllocations"] = _financial_rows_from_allocation_map(company)
             updated["companyFundedUSD"] = _financial_usd(sum(company.values()))
+            _move_coverage_baselines(source, updated, receipt_id, moved)
             planned.append(
                 CompanyCoverageAdPlan(ad_id=ad_id, data=updated, moved_minor=moved)
             )
@@ -177,6 +226,7 @@ def plan_company_debt_coverage(
         updated["dueAmountToUseLYD"] = 0.0
         updated["customerDueUSD"] = _financial_usd(sum(due.values()))
         updated["companyFundedUSD"] = _financial_usd(sum(company.values()))
+        _move_coverage_baselines(source, updated, receipt_id, moved)
         planned.append(
             CompanyCoverageAdPlan(ad_id=ad_id, data=updated, moved_minor=moved)
         )
@@ -198,8 +248,8 @@ def _read_company_coverage_state(
     """Return ``(grossDebt, coveredBefore, outstandingBefore, source)``.
 
     ``collected_minor`` is customer cash already collected against this debt
-    (a Delivered-but-UNDERPAID receipt). It only shapes the derived fallback;
-    a stored ``customerOutstandingUSD`` already accounts for collection.
+    (a Delivered-but-UNDERPAID receipt). The same canonical read used for old
+    entity responses takes priority over a stale cached outstanding summary.
     """
     gross_minor = financial_due_total(data)
     covered_minor = (
@@ -207,6 +257,11 @@ def _read_company_coverage_state(
         if data.get("companyCoveredUSD") is not None
         else 0
     )
+    canonical_outstanding = receipt_customer_outstanding_minor(
+        data, financial_due_total, collected_minor=collected_minor
+    )
+    if canonical_outstanding is not None:
+        return gross_minor, covered_minor, canonical_outstanding, 1
     outstanding_stored_minor = (
         _financial_minor(
             data.get("customerOutstandingUSD"),
@@ -1324,8 +1379,12 @@ def create_company_debt_coverage_router(
                         replayed=True,
                     )
 
+                # Money mutations lock receipts -> sorted ads -> customers.
+                # Reading the customer here is only discovery: locking it
+                # before ads deadlocked with ordinary ad edits holding an ad
+                # while waiting for this same customer row.
                 customer_row = ctx["clothes_lock_row"](
-                    conn, "customers", customer_id, postgres=postgres
+                    conn, "customers", customer_id, postgres=False
                 )
                 if not customer_row or bool(customer_row["deleted"]):
                     raise HTTPException(status_code=404, detail="Customer not found")
@@ -1364,6 +1423,23 @@ def create_company_debt_coverage_router(
                         continue
                     plans.append((str(ad_id_row["id"]), ad_row, ad_data, gap_minor))
                     total_gap_minor += gap_minor
+
+                customer_row = ctx["clothes_lock_row"](
+                    conn, "customers", customer_id, postgres=postgres
+                )
+                if not customer_row or bool(customer_row["deleted"]):
+                    raise HTTPException(status_code=404, detail="Customer not found")
+                # Creation/reassignment may complete while we wait for locks.
+                # Never cover a stale subset or acquire a new ad lock after
+                # the customer lock: return a retryable conflict instead.
+                current_ad_ids = conn.execute(
+                    text(
+                        "SELECT id FROM entities WHERE type='ads' AND deleted=false "
+                        f"AND {customer_expr} = :customer_id ORDER BY id"
+                    ), {"customer_id": customer_id},
+                ).scalars().all()
+                if current_ad_ids != [row["id"] for row in ad_id_rows]:
+                    raise HTTPException(status_code=409, detail="Customer ads changed; refresh and review the current debt")
 
                 if int(body.expectedOutstandingMinorUSD) != total_gap_minor:
                     raise HTTPException(

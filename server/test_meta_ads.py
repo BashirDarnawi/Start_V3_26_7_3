@@ -2080,9 +2080,15 @@ def test_import_page_stores_picture_and_ignores_signature_rotation():
         stored, version = _stored_page()
         assert stored["metaPagePictureUrl"] == f"{base}?oh=aaa&oe=bbb"
 
-        # The same photo behind rotated signing parameters must NOT rewrite
-        # the page: the routine 15-minute ad sync would otherwise bump every
-        # page's version (re-downloading it to every client) each pass.
+        # Once our copy is saved, rotated signing parameters must NOT rewrite
+        # the page. While a copy is missing, refresh the signed link so old
+        # failed archives can recover (covered by legacy compatibility tests).
+        meta_ads._store_archived_image(
+            "pages", created_page_id, snapshot["metaPagePictureUrl"],
+            "metaPagePictureData", "metaPagePictureArchivedFrom",
+            "data:image/png;base64,c2F2ZWQ=",
+        )
+        _, version = _stored_page()
         rotated = dict(snapshot, metaPagePictureUrl=f"{base}?oh=ccc&oe=ddd")
         with db_conn() as conn:
             meta_ads._ensure_import_page(conn, rotated)
@@ -2258,9 +2264,8 @@ def test_failed_results_read_never_zeroes_stored_spend(actors):
 def test_meta_images_are_archived_into_our_own_rows(actors, monkeypatch):
     """fbcdn links expire; the stored copy is what survives.
 
-    Also pins the failure behaviour: a URL that cannot be fetched is stamped
-    as attempted so it is not retried on every pass forever, and the row keeps
-    the link it already had.
+    Failed downloads preserve the old photo and retry only after a bounded
+    cooldown; a transient CDN failure must not permanently disable archiving.
     """
     ad_id = "meta_test_media_archive"
     meta_id = "777000111333444"
@@ -2295,7 +2300,7 @@ def test_meta_images_are_archived_into_our_own_rows(actors, monkeypatch):
         meta_ads.archive_meta_media(limit=10)
         assert calls["n"] == 0, "unchanged URL was re-downloaded"
 
-        # A download that fails leaves the previous copy and stops retrying.
+        # A download that fails leaves the previous copy and enters cooldown.
         with db_conn() as conn:
             row = conn.execute(
                 text("SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
@@ -2309,7 +2314,11 @@ def test_meta_images_are_archived_into_our_own_rows(actors, monkeypatch):
         meta_ads.archive_meta_media(limit=10)
         stored, _ = _stored_ad(ad_id)
         assert stored["metaThumbnailData"] == photo, "a failed fetch destroyed the archived copy"
-        assert stored["metaThumbnailArchivedFrom"] == "https://scontent.xx.fbcdn.net/v/t39/changed_9.jpg"
+        assert stored["metaThumbnailArchivedFrom"] != "https://scontent.xx.fbcdn.net/v/t39/changed_9.jpg"
+        calls["n"] = 0
+        monkeypatch.setattr(meta_ads, "_archive_meta_image", _counting)
+        meta_ads.archive_meta_media(limit=10)
+        assert calls["n"] == 0, "a failed URL retried before its cooldown"
     finally:
         with db_conn() as conn:
             conn.execute(

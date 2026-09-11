@@ -18,6 +18,8 @@ const _serverLiveSync = {
   // (the server's updated_since window only looks back 15s).
   serverWatermark: 0,
   fullLoadCursorReady: false,
+  dataCompatibilityVersion: null,
+  lastCompatibilityCheckAt: 0,
   collectionCursors: Object.create(null),
   serviceEntitlements: null,
   // Authentication identity and poller lifecycle are deliberately separate.
@@ -46,6 +48,8 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.serverWatermark = 0;
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.dataCompatibilityVersion = null;
+  _serverLiveSync.lastCompatibilityCheckAt = 0;
   _serverLiveSync.collectionCursors = Object.create(null);
   _serverLiveSync.serviceEntitlements = null;
   if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
@@ -184,7 +188,11 @@ async function clearServerCollectionsForVisibility(collections) {
       _serverLiveSync.collectionCursors[name] = 0;
     }
     if (typeof clearCollectionCorruption === 'function') clearCollectionCorruption(name);
-    if (db) {
+  }
+  // Purge every in-memory collection before the first storage await. A slow
+  // IndexedDB write for ads must not leave revoked receipt photos/data visible.
+  if (db) {
+    for (const name of names) {
       const cleared = await saveCollectionToIndexedDB(name, []);
       if (serverSessionIdentityChanged(identity)) return false;
       if (cleared === false) markCollectionDirty(name);
@@ -277,7 +285,7 @@ function _deltaRecordVersion(record) {
 // newer server revision (or the equal-revision deletion tie handled below);
 // preserving object identity for normal equal/stale replays also prevents a
 // needless whole-view render every 3s.
-function _shouldApplyDeltaRecord(incoming, current) {
+function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false) {
   const incomingVersion = _deltaRecordVersion(incoming);
   const currentVersion = _deltaRecordVersion(current);
 
@@ -289,7 +297,12 @@ function _shouldApplyDeltaRecord(incoming, current) {
     // deletes. In that tie, deletion must win or the active row can survive on
     // this client forever. Replayed tombstones remain no-ops, and an equal-
     // version active record can never resurrect a tombstone.
-    return incoming._deleted === true && current?._deleted !== true;
+    if (incoming._deleted === true && current?._deleted !== true) return true;
+    if (current?._deleted === true && incoming._deleted !== true) return false;
+    // A deployment can improve the read projection without changing stored
+    // accounting or timestamps. Only its one-time compatibility refresh may
+    // accept changed data at the same revision; ordinary polls stay no-ops.
+    return refreshEqualVersion && JSON.stringify(incoming) !== JSON.stringify(current);
   }
   if (incomingVersion !== null) return true;
   if (currentVersion !== null) return false;
@@ -303,7 +316,7 @@ function _shouldApplyDeltaRecord(incoming, current) {
   }
 }
 
-function applyServerDelta(collectionName, records) {
+function applyServerDelta(collectionName, records, { refreshEqualVersion = false } = {}) {
   if (!Array.isArray(records) || records.length === 0) return false;
   if (!Array.isArray(state[collectionName])) state[collectionName] = [];
   const arr = state[collectionName];
@@ -330,15 +343,18 @@ function applyServerDelta(collectionName, records) {
     const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
-      if (!_shouldApplyDeltaRecord(clean, arr[idx])) continue;
+      if (!_shouldApplyDeltaRecord(clean, arr[idx], refreshEqualVersion)) continue;
+      normalizeLegacyCollectionRecords(collectionName, [clean]);
       arr[idx] = clean;                       // update existing in place
       changed = true;
     } else if (newById.has(clean.id)) {
       const stagedIndex = newById.get(clean.id);
-      if (!_shouldApplyDeltaRecord(clean, newOnes[stagedIndex])) continue;
+      if (!_shouldApplyDeltaRecord(clean, newOnes[stagedIndex], refreshEqualVersion)) continue;
+      normalizeLegacyCollectionRecords(collectionName, [clean]);
       newOnes[stagedIndex] = clean;           // duplicate id -> keep newest revision
       changed = true;
     } else {
+      normalizeLegacyCollectionRecords(collectionName, [clean]);
       newById.set(clean.id, newOnes.length);
       newOnes.push(clean);
       changed = true;
@@ -352,6 +368,77 @@ function applyServerDelta(collectionName, records) {
     arr.unshift(...newOnes);
   }
   return changed;
+}
+
+function serverCompatibilityRefreshDeferred() {
+  return !!state.activeModal || _savingReceiptInFlight || Array.from(_pendingAdMutationAttempts.values()).some(attempt => attempt?.promise)
+    || _serverUserUpdate.pending.size > 0
+    || !!document.querySelector('[role="dialog"], #delivery-complete-modal');
+}
+
+// Read-only catch-up; acknowledge successful loads in this session only.
+// Persisting a marker could certify a cache whose IndexedDB write failed.
+async function refreshServerDataCompatibility() {
+  if (!isServerModeEnabled() || !state.currentUser || serverCompatibilityRefreshDeferred()) return null;
+  const now = Date.now();
+  if (_serverLiveSync.lastCompatibilityCheckAt && now - _serverLiveSync.lastCompatibilityCheckAt < 60000) return null;
+  _serverLiveSync.lastCompatibilityCheckAt = now;
+  const identity = getServerSessionIdentity();
+  const pollerEpoch = _serverLiveSync.pollerEpoch;
+  const aborted = () => serverSessionIdentityChanged(identity) || pollerEpoch !== _serverLiveSync.pollerEpoch;
+  let watermarks;
+  try { watermarks = await apiGetSyncWatermarks(); }
+  catch (_) { return null; } // Older servers may not support version metadata.
+  if (aborted()) return { aborted: true };
+  const version = watermarks.dataCompatibilityVersion;
+  if (!Number.isSafeInteger(version) || version === _serverLiveSync.dataCompatibilityVersion) return null;
+  const collections = getAuthorizedServerSyncCollections();
+  const accessSnapshot = () => JSON.stringify(getAuthorizedServerSyncCollections().map(name => [name, getServerCollectionVisibilityScope(state.currentUser, name)]));
+  const scope = accessSnapshot();
+  const deferred = () => serverCompatibilityRefreshDeferred() || scope !== accessSnapshot();
+  if (deferred()) {
+    _serverLiveSync.lastCompatibilityCheckAt = 0;
+    return null;
+  }
+  let fetched;
+  try {
+    fetched = await _runWithConcurrency(collections, SERVER_API.liveSyncConcurrency || 4, async collection => ({
+      collection, records: await apiLoadCollectionSince(collection, 0)
+    }));
+  } catch (_) {
+    if (aborted()) return { aborted: true };
+    // Keep the previous version and every current row. Retry on the next
+    // bounded version check, rather than hammering a failing collection.
+    state.serverLastSyncErrorAt = new Date().toISOString();
+    return { ok: false };
+  }
+  if (aborted()) return { aborted: true };
+  if (deferred()) {
+    _serverLiveSync.lastCompatibilityCheckAt = 0;
+    return null;
+  }
+  let changed = false;
+  const changedCollections = [];
+  for (const { collection, records } of fetched) {
+    // Merge instead of replacing: preserve absent unsynced local records and
+    // any newer revision received during this slower full-history request.
+    const collectionChanged = applyServerDelta(collection, records, { refreshEqualVersion: true });
+    changed = collectionChanged || changed;
+    if (collectionChanged) {
+      changedCollections.push(collection);
+      markCollectionDirty(collection);
+    }
+    if (_collectionCache[collection]) _collectionCache[collection] = { data: null, timestamp: 0, identity: '' };
+    _serverLiveSync.collectionCursors[collection] = Number(watermarks[collection]) || 0;
+  }
+  _serverLiveSync.dataCompatibilityVersion = version;
+  if (changed) {
+    assignSequentialNumbers(true, changedCollections);
+    _closeCustomerPagesDialogForStateChange();
+    saveState();
+    RenderQueue.schedule('liveSync(data-compatibility)');
+  }
+  return { ok: true, refreshed: true };
 }
 
 // Customer page spending and the delivery WhatsApp preview are body-mounted
@@ -381,6 +468,32 @@ function _closeCustomerPagesDialogForStateChange() {
   return true;
 }
 
+// A scope-narrowing response contains no tombstones for newly hidden rows.
+// Every role transition therefore needs the same purge before a scoped reload,
+// including Delivery -> Employee (whose next tick switches sync strategies).
+async function reloadServerDataForAccessChange(accessBefore, isAborted) {
+  const scopeChanges = getServerVisibilityScopeChanges(accessBefore, state.currentUser);
+  if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
+  _serverLiveSync.lastDeliverySig = null;
+  closeSensitiveAuthenticatedUi();
+  _authMeRequestGeneration += 1;
+  _sessionRequest = null;
+  cancelPendingRequests();
+  invalidateUsersListCache();
+  state.users = [];
+  upsertCurrentUserIntoUsers();
+  await clearServerCollectionsForVisibility(scopeChanges);
+  if (isAborted()) return { aborted: true };
+  if (db) {
+    const usersCleared = await saveCollectionToIndexedDB('users', state.users);
+    if (isAborted()) return { aborted: true };
+    if (usersCleared === false) markCollectionDirty('users');
+    else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete('users');
+  }
+  const result = await serverLoadAllData();
+  return isAborted() ? { aborted: true } : result;
+}
+
 async function serverLiveSyncOnce() {
   if (!isServerModeEnabled()) return { ok: false, skipped: true };
   if (!state.currentUser) return { ok: false, skipped: true };
@@ -398,6 +511,10 @@ async function serverLiveSyncOnce() {
     _serverLiveSync.pollerEpoch !== _pollerEpoch
   );
 
+  const compatibilityRefresh = await refreshServerDataCompatibility();
+  if (_syncAborted() || compatibilityRefresh?.aborted) return { ok: false, skipped: true };
+  if (compatibilityRefresh?.ok === false) return { ok: false };
+
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
   // The delivery branch below early-returns before the users/permissions refresh
@@ -412,17 +529,21 @@ async function serverLiveSyncOnce() {
     if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
       _serverLiveSync.lastUsersSyncAt = nowMs;
       let accessChanged = false;
+      const accessBefore = Security.sanitizeObject(state.currentUser || {});
       try { accessChanged = await refreshCurrentUserPermissions(); }
       catch (e) { if (ALBAYAN_DEBUG_MODE) console.warn('[serverLiveSyncOnce] delivery access refresh failed:', e?.message || e); }
       if (_syncAborted()) return { ok: false, skipped: true };
       if (accessChanged) {
-        // roleLower is recomputed next tick and per-collection cursors default to
-        // 0, so the employee/admin branch performs a full catch-up. Reset the
-        // delivery signature and force a render now so the sidebar/landing view
-        // unlock immediately.
-        _serverLiveSync.lastDeliverySig = null;
+        const scopedReload = await reloadServerDataForAccessChange(accessBefore, _syncAborted);
+        if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
+        const reloadFailed = Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0;
+        if (reloadFailed) state.serverLastSyncErrorAt = new Date().toISOString();
+        else {
+          state.serverLastSyncAt = new Date().toISOString();
+          state.serverLastSyncErrorAt = null;
+        }
         if (typeof forceFullRender === 'function') forceFullRender();
-        if (String(state.currentUser.role || '').toLowerCase() !== 'delivery') return { ok: true };
+        return { ok: !reloadFailed };
       }
     }
   }
@@ -466,20 +587,15 @@ async function serverLiveSyncOnce() {
     } catch (_) {}
     const changed = (sig === null) || sig !== _serverLiveSync.lastDeliverySig;
     if (changed) {
-      if (Array.isArray(ads)) state.ads = ads;
-      if (Array.isArray(receipts)) state.receipts = receipts;
-      if (Array.isArray(customers)) state.customers = customers;
+      for (const [collection, records] of [['ads', ads], ['receipts', receipts], ['customers', customers]]) {
+        if (!Array.isArray(records)) continue;
+        normalizeLegacyCollectionRecords(collection, records);
+        state[collection] = records;
+      }
       if (sig !== null) _serverLiveSync.lastDeliverySig = sig;
     }
     
-    // Ensure data migration on live sync (only if data changed, and debounced)
-    if (changed) {
-      // Run migration in background (don't block render)
-      setTimeout(() => {
-        migrateOldDataFormats();
-        assignSequentialNumbers(false); // Use cache if available
-      }, 100);
-    }
+    if (changed) assignSequentialNumbers(true, ['ads', 'receipts', 'customers']);
 
     const nextCursor = computeServerCursorFromState();
     _serverLiveSync.cursor = Math.max(_serverLiveSync.cursor || 0, nextCursor);
@@ -638,13 +754,11 @@ async function serverLiveSyncOnce() {
     return { ok: !reloadFailed };
   }
   
-  // Ensure data migration on live sync (only if data changed, debounced to not block render)
-  if (changed) {
-    setTimeout(() => {
-      migrateOldDataFormats();
-      assignSequentialNumbers(false); // Use cache if available
-    }, 100);
-  }
+  // Incoming rows were normalized before insertion; never render an old shape
+  // and repair it later in a timer. Unchanged collections need no migration.
+  if (changed) assignSequentialNumbers(true, [
+    ['ads', adsChanged], ['receipts', receiptsChanged], ['customers', customersChanged], ['pages', pagesChanged]
+  ].filter(([, didChange]) => didChange).map(([collection]) => collection));
 
   // Advance only the collection whose request completed. Failed collections
   // retain their own prior cursor and are retried without blocking others.
@@ -696,38 +810,9 @@ async function serverLiveSyncOnce() {
       const accessBefore = Security.sanitizeObject(state.currentUser || {});
       const permsChanged = await refreshCurrentUserPermissions();
       if (_syncAborted()) return { ok: false, skipped: true };
-      const scopeChanges = permsChanged
-        ? getServerVisibilityScopeChanges(accessBefore, state.currentUser)
-        : [];
       if (permsChanged) {
-        // Permissions moved, so any prior per-collection 403 purge is stale.
-        // Reset the guard so a re-grant-then-re-revoke cycle still purges once.
-        if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
-        // Access revocation can hide pages, ads, balances, or the customer itself.
-        // Close immediately, before cache writes/refetches, so its old authorized
-        // snapshot cannot outlive the newly-scoped state even on a slow network.
-        _closeCustomerPagesDialogForStateChange();
         customerPagesDataChanged = true;
-        // Stop reusing any in-flight/broader snapshot, purge the affected
-        // collections, then perform a fresh server-scoped load. A view->viewOwn
-        // response has no tombstones for rows that became unauthorized, so
-        // merging deltas can never repair this transition safely.
-        cancelPendingRequests();
-        invalidateUsersListCache();
-        // The Admin users list is authorization-scoped too. Keep only the
-        // freshly-authenticated caller until /api/users (or /users/public)
-        // returns the new scope, and replace its persisted cache immediately.
-        state.users = [];
-        upsertCurrentUserIntoUsers();
-        if (db) {
-          const usersCleared = await saveCollectionToIndexedDB('users', state.users);
-          if (_syncAborted()) return { ok: false, skipped: true };
-          if (usersCleared === false) markCollectionDirty('users');
-          else if (typeof idbSync === 'object' && idbSync?.dirty) idbSync.dirty.delete('users');
-        }
-        await clearServerCollectionsForVisibility(scopeChanges);
-        if (_syncAborted()) return { ok: false, skipped: true };
-        const scopedReload = await serverLoadAllData();
+        const scopedReload = await reloadServerDataForAccessChange(accessBefore, _syncAborted);
         if (_syncAborted() || scopedReload?.aborted) return { ok: false, skipped: true };
         if (Array.isArray(scopedReload?.failed) && scopedReload.failed.length > 0) anyFetchFailed = true;
         changed = true;
@@ -1531,8 +1616,86 @@ function showSessionTransitionOverlay(message) {
   return overlay;
 }
 
+// Body-mounted dialogs are not descendants of #app. Re-rendering the login
+// page alone cannot remove them. Keep sensitive surfaces/drafts in one teardown
+// path, run synchronously before storage/network waits, and do not restore focus
+// to an old account's button or navigate browser history during teardown.
+const AUTHENTICATED_DIALOG_IDS = Object.freeze([
+  'app-modal', 'duplicate-receipt-warning', 'customer-pages-dialog', 'page-ads-dialog',
+  'page-duplicates-dialog', 'page-merge-dialog', 'merge-all-dialog', 'ad-merge-dialog',
+  'delivery-whatsapp-share-dialog', 'delivery-complete-modal', 'delivery-cancel-modal',
+  'ad-primary-photo-picker', 'receipt-photo-viewer', 'company-debt-coverage-modal',
+  'customer-ad-coverage-modal', 'company-coverage-receipt-picker', 'collect-receipt-modal',
+  'new-receipt-chooser', 'destroyed-receipt-dialog', 'edit-history-modal', 'meta-history-modal',
+  'meta-ad-preview-modal', 'meta-insights-modal', 'meta-ads-modal', 'stop-ad-modal',
+  'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning'
+]);
+
+function closeSensitiveAuthenticatedUi() {
+  _closeCustomerPagesDialogForStateChange();
+  const closers = [
+    () => closeCustomerPagesDialog(false), () => closePageAdsDialog(false),
+    () => closePageDuplicatesDialog(false), () => closePageMergeDialog(false),
+    () => closeMergeAllDialog(false), () => closeAdMergeDialog(false),
+    () => closeDeliveryWhatsAppPrompt(false), () => closeAdPrimaryPhotoPicker(false),
+    () => closeReceiptPhotoViewer(false),
+    () => closeCompanyDebtCoverageModal({ force: true, restoreFocus: false }),
+    () => closeCustomerAdDebtCoverageModal({ force: true, restoreFocus: false }),
+    () => _closeCompanyCoverageReceiptPicker(false),
+    () => closeMetaInsightsModal(), () => closeMetaAdsConnectionModal(),
+    () => closeCommandPalette(), () => closeAnalyticsBreakdown(false), () => closeDollarPurchaseManager(false),
+    () => resetAdsStudioSessionState(), () => resetReceiptCustomerRiskWarningState()
+  ];
+  for (const close of closers) { try { close(); } catch (_) {} }
+  for (const id of AUTHENTICATED_DIALOG_IDS) document.getElementById(id)?.remove();
+  // Also cover auxiliary feature dialogs that use the shared overlay class.
+  document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
+  state.activeModal = null;
+  state.modalData = null;
+  state.tempAdFunding = null;
+  state.tempMergeFunding = null;
+  state.tempMixedReceiptTargetUSD = null;
+  state.tempAdPhotos = [];
+  state.tempReceiptPhotos = [];
+  state.tempAdPrimaryPhotoIndex = 0;
+  state.tempAdPrimaryPhotoDirty = false;
+  state.tempAdPhotosDirty = false;
+  state.tempReceiptPhotosDirty = false;
+  _adPhotoUploadGeneration += 1;
+  _receiptPhotoUploadGeneration += 1;
+  _adPhotoUploadsInFlight = 0;
+  _receiptPhotoUploadsInFlight = 0;
+  _deliveryCompletionOpen = null;
+  _collectReceiptId = '';
+  _collectTargetLYD = 0;
+  _tempCollectPayments = [];
+  clearTimeout(_deliveryDraftSaveTimer);
+  _deliveryDraftSaveTimer = null;
+  _newReceiptCarried = false;
+  tempTopUps = [];
+  if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken += 1;
+  if (typeof _clothesTempPhoto !== 'undefined') _clothesTempPhoto = null;
+  if (typeof _clothesTempVariants !== 'undefined') _clothesTempVariants = [];
+  if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];
+  if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
+  window._newUserAccessPreset = '';
+  document.body.style.overflow = '';
+  try {
+    localStorage.removeItem(NATIVE_PHOTO_PENDING_KEY);
+    // Old delivery drafts were not account-namespaced. Never offer them to the
+    // next signed-in user; normal background/camera restoration keeps them.
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(_DELIVERY_DRAFT_PREFIX)) localStorage.removeItem(key);
+    }
+  } catch (_) {}
+}
+
 function resetAuthenticatedServerCaches() {
-  _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000 };
+  closeSensitiveAuthenticatedUi();
+  _authMeRequestGeneration += 1;
+  _sessionRequest = null;
+  _sessionCache = { user: null, timestamp: 0, cacheDurationMs: 10000, identity: '' };
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
   for (const key of Object.keys(_collectionCache)) {
     _collectionCache[key] = { data: null, timestamp: 0, identity: '' };
@@ -1576,7 +1739,7 @@ async function wipeAuthenticatedServerDataFromClient() {
   // This helper is also used by the session-expiry path, which does not pass
   // through the normal logout function. Remove body-mounted financial data
   // before clearing auth/state or awaiting IndexedDB writes.
-  _closeCustomerPagesDialogForStateChange();
+  closeSensitiveAuthenticatedUi();
   const collections = Array.isArray(PERSISTED_COLLECTIONS)
     ? PERSISTED_COLLECTIONS
     : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
@@ -1591,7 +1754,7 @@ async function wipeAuthenticatedServerDataFromClient() {
 }
 
 function emergencyFinishClientSignOut(serverMode, expired) {
-  _closeCustomerPagesDialogForStateChange();
+  closeSensitiveAuthenticatedUi();
   try { stopServerLiveSync(); } catch (_) {}
   try { advanceServerSessionEpoch(); } catch (_) {}
   try { cancelPendingRequests(); } catch (_) {}
@@ -1618,7 +1781,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
 async function _handleLogoutOnce() {
   const serverMode = isServerModeEnabled();
   const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'جارٍ تسجيل الخروج...' : 'Signing out...');
-  _closeCustomerPagesDialogForStateChange();
+  closeSensitiveAuthenticatedUi();
   try {
     if (state.currentUser) {
       addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);

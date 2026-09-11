@@ -24,6 +24,93 @@ function safeProjectToken(projectName) {
   return projectName.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 }
 
+test('an upgrade refreshes an existing receipt at the same revision without recreating it', async ({ page }, testInfo) => {
+  await signIn(page);
+  const receiptId = await page.evaluate(async label => {
+    const customer = { id: generateId('cust'), name: `Upgrade Customer ${label}`,
+      phones: [`094${Date.now().toString().slice(-7)}`], platform: 'Facebook',
+      joinDate: new Date().toISOString(), profileLinks: [] };
+    if (!await addRecord(state.customers, customer)) throw new Error('Customer seed failed');
+    const receipt = { id: generateId('receipt'), recordType: 'receipt', customerId: customer.id,
+      customerName: customer.name, status: 'Not Paid', isPaid: false, amountUSD: 120,
+      amountLocal: 600, debtAmountUSD: 120, debtAmountLocal: 600, exchangeRate: 5,
+      deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' } };
+    if (!await addRecord(state.receipts, receipt)) throw new Error('Receipt seed failed');
+    return receipt.id;
+  }, safeProjectToken(testInfo.project.name));
+  await page.goto('/receipts');
+  const button = page.locator(`button[data-receipt-id="${receiptId}"][aria-label^="Cover part"]`);
+  await expect(button).toBeVisible();
+  const result = await page.evaluate(async id => {
+    stopServerLiveSync();
+    const path = `/api/collections/receipts/${encodeURIComponent(id)}`;
+    const before = await apiJson(path);
+    const row = state.receipts.find(item => item.id === id);
+    // Simulate a cached summary from an older app; its server revision did
+    // not change when the new read rules were deployed.
+    row.customerOutstandingUSD = 999;
+    _serverLiveSync.dataCompatibilityVersion = 0;
+    _serverLiveSync.lastCompatibilityCheckAt = 0;
+    const refresh = await refreshServerDataCompatibility();
+    const current = state.receipts.find(item => item.id === id);
+    const after = await apiJson(path);
+    return { refresh, cachedOutstanding: current.customerOutstandingUSD ?? null,
+      before, after, acknowledged: _serverLiveSync.dataCompatibilityVersion };
+  }, receiptId);
+  expect(result.refresh?.refreshed).toBe(true);
+  expect(result.cachedOutstanding).toBeNull();
+  expect(result.before).toEqual(result.after);
+  expect(result.acknowledged).toBeGreaterThan(0);
+  await button.click();
+  const dialog = page.locator('#company-debt-coverage-modal');
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('$120.00');
+  await expect(dialog).not.toContainText('$999.00');
+});
+
+for (const transition of ['expiry', 'logout']) {
+  test(`company-debt dialog is private and closes completely on ${transition}`, async ({ page, context }, testInfo) => {
+    await signIn(page);
+    const seeded = await page.evaluate(async label => {
+      const customer = {
+        id: generateId('cust'), name: `Private Coverage ${label}`,
+        phones: [`093${Date.now().toString().slice(-7)}`],
+        platform: 'Facebook', joinDate: new Date().toISOString(), profileLinks: [],
+      };
+      if (!await addRecord(state.customers, customer)) throw new Error('Customer seed failed');
+      const receipt = {
+        id: generateId('receipt'), recordType: 'receipt', customerId: customer.id,
+        customerName: customer.name, status: 'Not Paid', isPaid: false,
+        amountUSD: 120, amountLocal: 600, debtAmountUSD: 120, debtAmountLocal: 600,
+        exchangeRate: 5, deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' },
+      };
+      if (!await addRecord(state.receipts, receipt)) throw new Error('Receipt seed failed');
+      return { receiptId: receipt.id, customerName: customer.name };
+    }, `${safeProjectToken(testInfo.project.name)} ${transition}`);
+    await page.goto('/receipts');
+    const button = page.locator(`button[data-receipt-id="${seeded.receiptId}"][aria-label^="Cover part"]`);
+    await expect(button).toBeVisible();
+    await button.click();
+    const dialog = page.locator('#company-debt-coverage-modal');
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(seeded.customerName);
+    await expect(dialog).toContainText('$120.00');
+    if (transition === 'expiry') {
+      await context.clearCookies();
+      await page.evaluate(() => handleServerAuthExpired(getServerSessionIdentity()));
+    } else {
+      await page.evaluate(() => handleLogout());
+    }
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByText(seeded.customerName, { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.body.style.overflow)).not.toBe('hidden');
+    expect((await page.request.get('/api/auth/me')).status()).toBe(401);
+    // A used device intentionally offers its saved-account chooser first.
+    await page.getByRole('button', { name: 'Use another account', exact: true }).click();
+    await expect(page.locator('#login-form')).toBeVisible();
+  });
+}
+
 test('administrator can create a customer and duplicate phones are blocked', async ({ page }, testInfo) => {
   await signIn(page);
   await page.goto('/customers');
@@ -116,6 +203,7 @@ test('copied photos paste into an ad while text fields keep normal paste', async
     state.pages.push({
       id: generateId('page'),
       name: 'Clipboard Photo Page',
+      metaPageId: '100000000000099',
       category: 'E2E',
       customerIds: [customerId],
       createdAt: new Date().toISOString(),
@@ -234,6 +322,33 @@ test('workspace stays usable across small phones, tablets, and landscape screens
       expect(layout.overflow, `${route} overflows on ${viewport.name}`).toBeLessThanOrEqual(1);
       expect(layout.outsideControls, `${route} has unreachable controls on ${viewport.name}`).toEqual([]);
     }
+  }
+});
+
+test('lazy Clothes and Studio features load with their responsive styles', async ({ page }) => {
+  await signIn(page);
+  await page.setViewportSize({ width: 820, height: 1024 });
+  await page.goto('/clothes-system');
+  const tabs = page.locator('.clothes-tab-bar');
+  await expect(tabs).toBeVisible();
+  await expect(tabs).toHaveCSS('flex-wrap', 'wrap');
+
+  await page.goto('/studio');
+  await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+  const columns = await page.evaluate(() => {
+    const probe = document.createElement('div');
+    probe.className = 'grid md:grid-cols-[1fr_auto]';
+    probe.innerHTML = '<span>Primary content</span><span>Action</span>';
+    document.body.appendChild(probe);
+    const count = getComputedStyle(probe).gridTemplateColumns.split(' ').length;
+    probe.remove();
+    return count;
+  });
+  expect(columns).toBe(2);
+  for (const width of [320, 390, 820]) {
+    await page.setViewportSize({ width, height: 844 });
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+    expect(overflow, `Studio overflows at ${width}px`).toBeLessThanOrEqual(1);
   }
 });
 

@@ -3,8 +3,8 @@
  * Sync the root frontend files into www/ (the folder Capacitor bundles
  * into the Android/iOS apps).
  *
- * Why this exists: the frontend is edited at the project root (index.html,
- * script.js, style.css) because the server serves those files directly.
+ * Why this exists: source modules in src/ build the root JavaScript bundles;
+ * index.html and style.css are edited at the root and served directly.
  * Capacitor, however, packages the copies in www/. Without this script the
  * two drift apart and mobile silently ships old code — which is exactly
  * what had happened before this script was added.
@@ -15,11 +15,13 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { bundleManifest } = require('./lib/bundle-manifest');
 
 const ROOT = path.join(__dirname, '..');
 const WWW = path.join(ROOT, 'www');
 
-const FILES = ['index.html', 'script.js', 'studio.js', 'clothes.js', 'style.css'];
+const bundles = bundleManifest(JSON.parse(fs.readFileSync(path.join(ROOT, 'src', 'manifest.json'), 'utf8')));
+const FILES = ['index.html', ...bundles.map(bundle => bundle.out), 'style.css'];
 // The assets/ folder (prebuilt tailwind.css, fonts, lucide) ships to mobile too.
 const ASSET_DIRS = ['assets'];
 

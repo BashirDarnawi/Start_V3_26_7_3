@@ -217,12 +217,15 @@ async function init() {
     setLoadingStatus(state.language === 'ar' ? 'جارٍ التحقق من الجلسة...' : 'Checking session...');
     let me = null;
     let authCheckUnavailable = false;
+    const authRequestIdentity = getAuthMeIdentity();
     try {
       me = await apiAuthMe();
     } catch (error) {
+      if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;
       console.warn('[MobileRuntime] Session verification unavailable:', error?.message || error);
     }
+    if (getAuthMeIdentity() !== authRequestIdentity) return;
     // A successful health response does not guarantee that the session check
     // also reached the server. Treat a network/timeout failure differently
     // from a definitive 401 (which apiAuthMe returns as null).
@@ -247,6 +250,7 @@ async function init() {
         try {
           await loadCollectionsFromStorage(null);
           assertCachedCollectionIdentifiersSafe();
+          migrateOldDataFormats();
         } catch (e) {
           // IndexedDB error - continue with empty state and load from server.
           for (const name of PERSISTED_COLLECTIONS) state[name] = [];
@@ -284,8 +288,6 @@ async function init() {
         const startupIdentity = getServerSessionIdentity();
         const startupLoad = serverLoadAllData().then((loadResult) => {
           if (loadResult?.aborted) return;
-          // Migrate old data formats to work with new features
-          migrateOldDataFormats();
           // Re-render with fresh data
           render();
           // Restore modal from URL if needed (e.g., user refreshed with modal open)

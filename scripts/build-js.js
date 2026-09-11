@@ -17,16 +17,14 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { bundleManifest } = require('./lib/bundle-manifest');
 
 const ROOT = path.join(__dirname, '..');
 const SRC = path.join(ROOT, 'src');
 
 const manifest = JSON.parse(fs.readFileSync(path.join(SRC, 'manifest.json'), 'utf8'));
 
-const bundles = [
-  { out: 'script.js', files: manifest.files },
-  ...Object.entries(manifest.lazy || {}).map(([out, files]) => ({ out, files })),
-];
+const bundles = bundleManifest(manifest);
 
 // A source file in two bundles would redeclare its top-level let/const at
 // load time (SyntaxError) — refuse before writing anything.

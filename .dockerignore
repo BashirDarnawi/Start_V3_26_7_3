@@ -11,6 +11,37 @@
 
 .env
 .env.*
+**/.env
+**/.env.*
+
+# Runtime state and private material must never enter the image or build cache.
+# These exclusions do NOT delete local files or affect mounted production data.
+server/data/
+**/backups/
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.dump
+**/*.sql.gz
+**/*.ndjson.gz
+**/*.backup*
+**/*.aesgcm
+**/*.key
+**/*.pem
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+.venv/
+**/.venv/
+.tmp/
+.pytest_tmp*/
+test-results/
+playwright-report/
 
 node_modules/
 
@@ -30,5 +61,4 @@ scripts/
 .pycache_tmp/
 *.log
 script.min.js
-
 

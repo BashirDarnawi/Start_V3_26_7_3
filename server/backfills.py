@@ -1,6 +1,6 @@
 """Startup data backfills extracted from main.py (which sits at its size cap).
 
-Both passes are idempotent, print-only, and must never fail the boot; main
+The passes are idempotent, report their changes, and must never fail the boot; main
 injects its process-wide SQLite financial lock so single-process ordering is
 identical to when this code lived inline.
 """
@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from .db import db_conn, get_engine, json_dumps, json_loads
+from .db import db_conn, get_engine, json_dumps, json_loads, now_ms
 from .operations import financial_period_is_closed
 from .startup_financial_scan import active_row_batches
 
@@ -33,11 +33,28 @@ def _lock_full_row(conn: Any, collection: str, entity_id: str) -> Any | None:
     postgres = str(conn.engine.dialect.name or "") == "postgresql"
     return conn.execute(
         text(
-            "SELECT id,data_json,deleted FROM entities WHERE type=:type AND id=:id"
+            "SELECT id,data_json,deleted,last_modified FROM entities WHERE type=:type AND id=:id"
             + (" FOR UPDATE" if postgres else "")
         ),
         {"type": collection, "id": entity_id},
     ).mappings().first()
+
+
+def _save_backfill_row(conn: Any, collection: str, row: Any, data: dict[str, Any]) -> None:
+    """Publish a locked repair to delta sync without altering creation history."""
+    baseline = int(row["last_modified"])
+    modified = max(now_ms(), baseline + 1)
+    updated = {**data, "_lastModified": modified}
+    result = conn.execute(
+        text(
+            "UPDATE entities SET data_json=:data,last_modified=:modified "
+            "WHERE type=:type AND id=:id AND last_modified=:baseline"
+        ),
+        {"data": json_dumps(updated), "modified": modified, "type": collection,
+         "id": str(row["id"]), "baseline": baseline},
+    )
+    if result.rowcount != 1:
+        raise RuntimeError("Backfill row changed concurrently; retry on next startup")
 
 
 def sanitize_str(value, max_length: int = 10000) -> str:
@@ -63,9 +80,8 @@ def backfill_customer_names(sqlite_financial_lock=None) -> int:
     customerId, (c) lacks a usable customerName, and (d) whose customer resolves
     to a name — so it is a no-op on every startup after the first and safe to run
     unconditionally. Only the NAME is copied; phone/contact are never read. The
-    record's last_modified/_lastModified are deliberately left untouched: the
-    client fetches every collection in full on load, so a limited-permission
-    role picks up the stamp on its next login/refresh without a resync storm.
+    record's modification cursor advances only when it changes, so already-open
+    clients receive the corrected old record through ordinary delta sync.
 
     Returns the number of records stamped.
     """
@@ -112,10 +128,7 @@ def backfill_customer_names(sqlite_financial_lock=None) -> int:
                         if not name or financial_period_is_closed(etype, data, conn=conn):
                             continue
                         data["customerName"] = name
-                        conn.execute(
-                            text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
-                            {"d": json_dumps(data), "t": etype, "id": str(row["id"])},
-                        )
+                        _save_backfill_row(conn, etype, row, data)
                         stamped += 1
         if stamped:
             print(f"[albayan] Backfilled customerName on {stamped} receipts/ads")
@@ -189,10 +202,7 @@ def backfill_covered_settled_receipts(sqlite_financial_lock=None) -> int:
                         ) / 100
                     data["amountUSD"] = new_amount
                     data["customerOutstandingUSD"] = 0.0
-                    conn.execute(
-                        text("UPDATE entities SET data_json = :d WHERE type = 'receipts' AND id = :id"),
-                        {"d": json_dumps(data), "id": str(row["id"])},
-                    )
+                    _save_backfill_row(conn, "receipts", row, data)
                     fixed += 1
         if fixed:
             print(f"[albayan] Normalized {fixed} covered receipt(s) settled before the coverage-aware settle")
@@ -268,8 +278,8 @@ def backfill_relink_baselines(sqlite_financial_lock=None) -> int:
           restores from baselines, so refunded ads keep theirs untouched), and
       (b) its LIVE allocations reference exactly ONE receipt R, and
       (c) a baseline names some other receipt X != R  ->  rewrite X to R.
-    Amounts are never changed; last_modified is left untouched (display-only
-    linkage data — the delete guard re-reads rows directly). Idempotent: after
+    Amounts are never changed; modification cursors advance so open clients
+    receive repaired linkage metadata. Idempotent: after
     the first pass no baseline names a non-live receipt, so it is a no-op on
     every later startup.
 
@@ -296,10 +306,7 @@ def backfill_relink_baselines(sqlite_financial_lock=None) -> int:
                         continue
                     if financial_period_is_closed("ads", data, conn=conn):
                         continue
-                    conn.execute(
-                        text("UPDATE entities SET data_json = :d WHERE type = 'ads' AND id = :id"),
-                        {"d": json_dumps(data), "id": str(row["id"])},
-                    )
+                    _save_backfill_row(conn, "ads", row, data)
                     repaired += 1
         if repaired:
             print(f"[albayan] Retargeted stale relink baselines on {repaired} ads")

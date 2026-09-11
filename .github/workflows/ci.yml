@@ -22,6 +22,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run test:build-safety
+      - run: npm run test:review-regressions
+      - run: npm run test:session-regressions
+      - name: Existing data must also receive current behavior
+        run: npm run test:legacy-data
       - name: Run permission and browser-state tests
         run: npm run test:js
       - name: Run phone and responsive UI tests
@@ -31,8 +36,11 @@ jobs:
       - run: npm run build
       - run: npm run sync:www
       - run: npm run verify:generated
+      - run: npx cap copy
+      - name: Native bundled files must also match the reviewed source
+        run: npm run verify:mobile
       - name: Generated files must be committed
-        run: git diff --exit-code -- script.js assets/tailwind.css www
+        run: git diff --exit-code -- script.js studio.js clothes.js assets/tailwind.css www
       - name: Dependencies must have no known high-severity vulnerability
         run: npm audit --audit-level=high
 
@@ -90,18 +98,19 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: albayan_ci
+          POSTGRES_DB: albayan_test_ci
           POSTGRES_USER: albayan
           POSTGRES_PASSWORD: ci-only-password
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U albayan -d albayan_ci"
+          --health-cmd "pg_isready -U albayan -d albayan_test_ci"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
     env:
-      DATABASE_URL: postgresql+psycopg://albayan:ci-only-password@127.0.0.1:5432/albayan_ci
+      DATABASE_URL: postgresql+psycopg://albayan:ci-only-password@127.0.0.1:5432/albayan_test_ci
+      ALBAYAN_TEST_POSTGRES_URL: postgresql+psycopg://albayan:ci-only-password@127.0.0.1:5432/albayan_test_ci
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -114,6 +123,10 @@ jobs:
       - run: python -m alembic current
       - name: Query migrated PostgreSQL database
         run: python -c "from sqlalchemy import text; from server.db import get_engine; c=get_engine().connect(); print(c.execute(text('SELECT 1')).scalar_one()); c.close()"
+      - name: Exercise real PostgreSQL backup and financial workflows
+        run: python -m pytest -q -p no:cacheprovider server/test_full_backup_postgres.py server/test_postgres_financial_review.py
+      - name: Build the actual application backup client
+        run: docker build --tag albayan-backup-ci --file server/Dockerfile .
       - name: Prove a PostgreSQL backup can be restored
         shell: bash
         run: |
@@ -122,20 +135,20 @@ jobs:
           docker run --rm --network host \
             -e PGPASSWORD=ci-only-password \
             -v "$PWD/.tmp/postgres-restore:/backup" \
-            postgres:16-alpine \
-            pg_dump --host 127.0.0.1 --username albayan --dbname albayan_ci \
+            --user "$(id -u):$(id -g)" albayan-backup-ci \
+            pg_dump --host 127.0.0.1 --username albayan --dbname albayan_test_ci \
               --format custom --no-owner --no-acl --file /backup/albayan.dump
           docker run --rm --network host \
-            -e PGPASSWORD=ci-only-password postgres:16-alpine \
+            -e PGPASSWORD=ci-only-password albayan-backup-ci \
             createdb --host 127.0.0.1 --username albayan albayan_restore
           docker run --rm --network host \
             -e PGPASSWORD=ci-only-password \
             -v "$PWD/.tmp/postgres-restore:/backup:ro" \
-            postgres:16-alpine \
+            albayan-backup-ci \
             pg_restore --host 127.0.0.1 --username albayan --dbname albayan_restore \
               --exit-on-error --no-owner --no-acl /backup/albayan.dump
           docker run --rm --network host \
-            -e PGPASSWORD=ci-only-password postgres:16-alpine \
+            -e PGPASSWORD=ci-only-password albayan-backup-ci \
             psql --host 127.0.0.1 --username albayan --dbname albayan_restore \
               --set ON_ERROR_STOP=1 --tuples-only \
               --command "SELECT COUNT(*) FROM alembic_version;"

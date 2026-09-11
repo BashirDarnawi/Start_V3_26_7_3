@@ -763,12 +763,33 @@ function assertCachedCollectionIdentifiersSafe() {
 // DATA MIGRATION: Normalize old records
 // ==========================================
 // Ensures old data has all required fields so new features work correctly
-function migrateOldDataFormats() {
+const LEGACY_DELIVERY_STATUS_NAMES = Object.freeze({
+  office: 'Office', 'needs delivery': 'Needs Delivery', 'in progress': 'In Progress',
+  delivered: 'Delivered', canceled: 'Canceled', cancelled: 'Canceled'
+});
+
+function migrateOldDataFormats({ records = state, collections = ['receipts', 'ads', 'customers', 'pages'], persist = true, numberRecords = true } = {}) {
   let changed = false;
+  const selected = new Set(collections);
+  const positiveSavedNumber = value => {
+    if (typeof value !== 'number' && typeof value !== 'string') return 0;
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : 0;
+  };
+  const normalizeDeliveryStatus = record => {
+    const key = String(record.deliveryStatus || '').trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+    const normalized = Object.prototype.hasOwnProperty.call(LEGACY_DELIVERY_STATUS_NAMES, key)
+      ? LEGACY_DELIVERY_STATUS_NAMES[key] : null;
+    // An unknown historical status is not proof that a delivery is in Office.
+    if (normalized && normalized !== record.deliveryStatus) {
+      record.deliveryStatus = normalized;
+      changed = true;
+    }
+  };
 
   // Migrate Receipts - ALWAYS process ALL receipts (including old data)
-  if (Array.isArray(state.receipts)) {
-    for (const receipt of state.receipts) {
+  if (selected.has('receipts') && Array.isArray(records.receipts)) {
+    for (const receipt of records.receipts) {
       if (!receipt) continue;
       // Process even deleted records to ensure data consistency
 
@@ -801,18 +822,12 @@ function migrateOldDataFormats() {
         changed = true;
       }
 
-      // Fix delivery status - ensure it's a valid status
-      if (receipt.deliveryStatus) {
-        const validStatuses = ['Office', 'Needs Delivery', 'In Progress', 'Delivered', 'Canceled'];
-        if (!validStatuses.includes(receipt.deliveryStatus)) {
-          receipt.deliveryStatus = 'Office';
-          changed = true;
-        }
-      }
+      normalizeDeliveryStatus(receipt);
 
       // Ensure exchangeRate is a number
-      if (receipt.exchangeRate !== undefined && typeof receipt.exchangeRate !== 'number') {
-        receipt.exchangeRate = parseFloat(receipt.exchangeRate) || state.defaultExchangeRate || 1;
+      if (typeof receipt.exchangeRate === 'string' && receipt.exchangeRate.trim()
+          && Number.isFinite(Number(receipt.exchangeRate)) && Number(receipt.exchangeRate) > 0) {
+        receipt.exchangeRate = Number(receipt.exchangeRate);
         changed = true;
       }
 
@@ -829,8 +844,8 @@ function migrateOldDataFormats() {
   }
 
   // Migrate Ads - ALWAYS process ALL ads (including old data)
-  if (Array.isArray(state.ads)) {
-    for (const ad of state.ads) {
+  if (selected.has('ads') && Array.isArray(records.ads)) {
+    for (const ad of records.ads) {
       if (!ad) continue;
 
       // Ensure ad has receiptAllocations array
@@ -868,18 +883,15 @@ function migrateOldDataFormats() {
       // Ensure dueAllocations array exists
       if (!Array.isArray(ad.dueAllocations)) {
         ad.dueAllocations = [];
-        // Materialize the row from the legacy dueAmountToUse* mirror — the amount the
-        // usage helpers already credit this ad with. It is NOT ad.amountUSD: an ad can
-        // draw only part of its budget from delivery due credit and the rest from a paid
-        // receipt, and writing the whole ad amount here invented due usage that never
-        // happened, over-locking the delivery receipt and disagreeing with the server
-        // (which derives the same number from the mirror). This runs on every live-sync
-        // tick, so the error compounded across devices.
+        changed = true;
+        // Use the recorded due mirror, not the whole ad budget: mixed paid/due
+        // funding must match the server without charging the paid share twice.
         const legacyDueUSD = (() => {
-          const usd = parseFloat(ad.dueAmountToUseUSD) || 0;
+          const usd = positiveSavedNumber(ad.dueAmountToUseUSD);
           if (usd > 0) return usd;
-          const lyd = parseFloat(ad.dueAmountToUseLYD) || 0;
-          const rate = ad.exchangeRate || state.defaultExchangeRate || 1;
+          const lyd = positiveSavedNumber(ad.dueAmountToUseLYD);
+          const rate = positiveSavedNumber(ad.exchangeRate);
+          // Today's workspace rate cannot establish an old ad's USD debt.
           return lyd > 0 && rate > 0 ? lyd / rate : 0;
         })();
         if (ad.linkedDeliveryReceiptId && getAdPaymentState(ad) !== 'paid' && legacyDueUSD > 0) {
@@ -909,20 +921,13 @@ function migrateOldDataFormats() {
         changed = true;
       }
 
-      // Fix delivery status
-      if (ad.deliveryStatus) {
-        const validStatuses = ['Office', 'Needs Delivery', 'In Progress', 'Delivered', 'Canceled'];
-        if (!validStatuses.includes(ad.deliveryStatus)) {
-          ad.deliveryStatus = 'Office';
-          changed = true;
-        }
-      }
+      normalizeDeliveryStatus(ad);
     }
   }
 
   // Migrate Customers - ALWAYS process ALL customers
-  if (Array.isArray(state.customers)) {
-    for (const customer of state.customers) {
+  if (selected.has('customers') && Array.isArray(records.customers)) {
+    for (const customer of records.customers) {
       if (!customer) continue;
 
       // Ensure phones is an array
@@ -944,8 +949,8 @@ function migrateOldDataFormats() {
   }
 
   // Migrate Pages - ALWAYS process ALL pages
-  if (Array.isArray(state.pages)) {
-    for (const page of state.pages) {
+  if (selected.has('pages') && Array.isArray(records.pages)) {
+    for (const page of records.pages) {
       if (!page) continue;
 
       // Ensure customerIds is an array
@@ -967,16 +972,24 @@ function migrateOldDataFormats() {
   }
 
   // Assign sequential numbers to all records
-  assignSequentialNumbers();
+  if (numberRecords) assignSequentialNumbers();
 
-  if (changed) {
-    console.log('[Migration] Data formats updated for ALL records');
-    markAllCollectionsDirty();
+  if (changed && persist) {
+    for (const collection of selected) markCollectionDirty(collection);
     // Save immediately to persist migrations
     saveState();
   }
 
   return changed;
+}
+
+// Local read compatibility only; normalize incoming rows without rescanning
+// unrelated collections. Full contract: docs/DATA_COMPATIBILITY.md.
+function normalizeLegacyCollectionRecords(collection, records) {
+  return migrateOldDataFormats({
+    records: { [collection]: records }, collections: [collection],
+    persist: false, numberRecords: false
+  });
 }
 
 // ==========================================
@@ -992,8 +1005,9 @@ let _seqNoCache = {
   lastUpdate: 0
 };
 
-function assignSequentialNumbers(force = false) {
+function assignSequentialNumbers(force = false, collections = ['ads', 'receipts', 'customers', 'pages']) {
   const now = Date.now();
+  const selected = new Set(collections);
   // Only recalculate if forced or cache is stale (>5 seconds old)
   if (!force && (now - _seqNoCache.lastUpdate) < 5000 && _seqNoCache.ads !== null) {
     return; // Use cached numbers
@@ -1010,7 +1024,7 @@ function assignSequentialNumbers(force = false) {
   const sortByCreated = (a, b) => getTime(a) - getTime(b);
   
   // Assign numbers to Ads (only if missing or forced)
-  if (Array.isArray(state.ads)) {
+  if (selected.has('ads') && Array.isArray(state.ads)) {
     const visible = getVisibleRecords(state.ads);
     const needsUpdate = force || visible.some(ad => !ad._seqNo);
     if (needsUpdate) {
@@ -1023,7 +1037,7 @@ function assignSequentialNumbers(force = false) {
   }
   
   // Assign numbers to Receipts
-  if (Array.isArray(state.receipts)) {
+  if (selected.has('receipts') && Array.isArray(state.receipts)) {
     const visible = getVisibleRecords(state.receipts);
     const needsUpdate = force || visible.some(r => !r._seqNo);
     if (needsUpdate) {
@@ -1036,7 +1050,7 @@ function assignSequentialNumbers(force = false) {
   }
   
   // Assign numbers to Customers
-  if (Array.isArray(state.customers)) {
+  if (selected.has('customers') && Array.isArray(state.customers)) {
     const visible = getVisibleRecords(state.customers);
     const needsUpdate = force || visible.some(c => !c._seqNo);
     if (needsUpdate) {
@@ -1049,7 +1063,7 @@ function assignSequentialNumbers(force = false) {
   }
   
   // Assign numbers to Pages
-  if (Array.isArray(state.pages)) {
+  if (selected.has('pages') && Array.isArray(state.pages)) {
     const visible = getVisibleRecords(state.pages);
     const needsUpdate = force || visible.some(p => !p._seqNo);
     if (needsUpdate) {

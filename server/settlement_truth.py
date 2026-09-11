@@ -167,7 +167,8 @@ def apply_delivery_completion_truth(
 
 
 def apply_coverage_settlement_truth(
-    old: dict[str, Any], merged: dict[str, Any]
+    old: dict[str, Any], merged: dict[str, Any], *,
+    due_total: Callable[[dict[str, Any]], int],
 ) -> None:
     """Keep amountUSD = CUSTOMER cash across settle/unsettle of a covered receipt.
 
@@ -193,6 +194,23 @@ def apply_coverage_settlement_truth(
     old_paid = str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
     new_paid = str(merged.get("status") or "") == "Paid" or merged.get("isPaid") is True
     if old_paid == new_paid:
+        # Direct debt/payment edits are part of the same financial lifecycle as
+        # settlement. Recompute only when relevant inputs change: a note edit
+        # must not silently repair historical accounting state.
+        money_fields = ("amountUSD", "amountLocal", "debtAmountUSD", "debtAmountLocal",
+                        "exchangeRate", "deliveryStatus", "status", "isPaid")
+        if any(old.get(field) != merged.get(field) for field in money_fields):
+            if new_paid or str(merged.get("status") or "") in {"Canceled", "Lost", "Destroyed"} or str(merged.get("deliveryStatus") or "") == "Canceled":
+                merged["customerOutstandingUSD"] = 0.0
+            else:
+                collected_minor = (
+                    _financial_minor(merged.get("amountUSD"), "receipt collected amount")
+                    if str(merged.get("deliveryStatus") or "") == "Delivered"
+                    else 0
+                )
+                merged["customerOutstandingUSD"] = _financial_usd(
+                    max(due_total(merged) - covered_minor - collected_minor, 0)
+                )
         return
 
     amount_minor = _financial_minor(merged.get("amountUSD"), "receipt amount")

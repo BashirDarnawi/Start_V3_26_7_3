@@ -613,6 +613,15 @@ def reconcile_unpaid_receipt_debt(
         expanded = dict(receipt)
         expanded["amountUSD"] = _financial_usd(target_minor)
         expanded["amountLocal"] = _financial_usd(new_local_minor)
+        for field, value in (("debtAmountUSD", target_minor), ("debtAmountLocal", new_local_minor)):
+            if field in expanded:
+                expanded[field] = _financial_usd(value)
+        # This path only handles uncollected Office debt (validated above).
+        # Stored coverage summaries must follow BOTH growth and release;
+        # otherwise collection/coverage keeps offering the former liability.
+        covered_minor = _financial_minor(receipt.get("companyCoveredUSD"), "stored company coverage")
+        if covered_minor > 0 or receipt.get("customerOutstandingUSD") is not None:
+            expanded["customerOutstandingUSD"] = _financial_usd(max(target_minor - covered_minor, 0))
         expanded["updatedAt"] = iso_utc()
         history = (
             list(expanded.get("editHistory"))

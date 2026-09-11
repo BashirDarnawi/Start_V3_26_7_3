@@ -425,6 +425,9 @@ def create_wallet_payments_router(
                     same = (
                         str(prior_data.get("userId") or "") == uid
                         and int(prior_data.get("amountMinor") or 0) == amount
+                        # Older requests without a currency were USD-only,
+                        # matching the confirmation path's legacy default.
+                        and str(prior_data.get("currency") or "USD").strip().upper() == cur
                         and str(prior_data.get("method") or "") == method
                     )
                     if not same:

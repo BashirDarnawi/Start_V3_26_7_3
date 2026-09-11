@@ -1062,3 +1062,116 @@ def test_partially_covered_ad_can_stop_at_full_budget_but_not_above(actors):
     assert float(saved["spentUSD"]) == 100.0
     assert saved["dueAllocations"] == [{"receiptId": "stopcov_r2", "amountUSD": 60.0}]
     assert saved["companyFundingAllocations"] == [{"receiptId": "stopcov_r2", "amountUSD": 40.0}]
+
+
+def _update_covered_ad(ad: dict, updates: dict, key: str, actors) -> dict:
+    response = client.post(
+        "/api/ads/mutate",
+        json={
+            "action": "update", "adId": ad["id"], "idempotencyKey": key,
+            "expectedLastModified": ad["lastModified"], "data": updates,
+        },
+        cookies=actors["admin"],
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["ad"]
+
+
+@pytest.mark.parametrize("covered_amount", [40, 100])
+def test_covered_ad_budget_survives_note_edit_and_paid_conversion(actors, covered_amount):
+    tag = f"cov_budget_{covered_amount}"
+    customer_id, receipt_id, ad_id = f"{tag}_c", f"{tag}_r", f"{tag}_a"
+    _customer(customer_id, actors)
+    receipt = _unpaid_receipt(receipt_id, customer_id, 100, actors)
+    _create_ad(ad_id, customer_id, receipt_id, 100, actors)
+    covered = _cover(receipt_id, covered_amount * 100, f"{tag}_cover", receipt["lastModified"], actors["admin"])
+    assert covered.status_code == 200, covered.text
+    ad = covered.json()["updatedAds"][0]
+    company_rows = ad["data"]["companyFundingAllocations"]
+
+    ad = _update_covered_ad(ad, {"notes": "No money change"}, f"{tag}_note", actors)
+    assert ad["data"]["amountUSD"] == 100
+    assert ad["data"]["initialAmountUSD"] == 100
+    assert ad["data"]["companyFundingAllocations"] == company_rows
+
+    customer_share = 100 - covered_amount
+    paid_rows = []
+    if customer_share:
+        _paid_receipt(f"{tag}_paid", customer_id, customer_share, actors)
+        paid_rows = [{"receiptId": f"{tag}_paid", "amountUSD": customer_share}]
+    ad = _update_covered_ad(ad, {
+        "paymentStatus": "paid", "receiptAllocations": paid_rows,
+        "dueAllocations": [], "mergedPaidAllocations": [],
+    }, f"{tag}_settle", actors)
+    assert ad["data"]["amountUSD"] == 100
+    assert ad["data"]["companyFundingAllocations"] == company_rows
+    assert ad["data"]["receiptAllocations"] == paid_rows
+    assert ad["data"]["paymentStatus"] == "paid"
+    ad = _update_covered_ad(ad, {"notes": "Paid note edit"}, f"{tag}_paid_note", actors)
+    assert ad["data"]["amountUSD"] == 100
+    assert ad["data"]["initialAmountUSD"] == 100
+    # The preserved gross budget must also remain compatible with top-ups:
+    # company dollars are already funded, not a second customer charge.
+    _paid_receipt(f"{tag}_topup", customer_id, 10, actors)
+    ad = _update_covered_ad(ad, {
+        "topUps": [{"amount": 10, "extendDays": 0}],
+        "receiptAllocations": [*paid_rows, {"receiptId": f"{tag}_topup", "amountUSD": 10}],
+    }, f"{tag}_topup_save", actors)
+    assert ad["data"]["amountUSD"] == 110
+    assert ad["data"]["initialAmountUSD"] == 100
+    assert ad["data"]["companyFundingAllocations"] == company_rows
+
+
+def test_covered_receipt_outstanding_tracks_debt_growth_and_release(actors):
+    cid, rid = "cov_growth_summary_c", "cov_growth_summary_r"
+    _customer(cid, actors)
+    receipt = _unpaid_receipt(rid, cid, 100, actors)
+    _create_ad("cov_growth_summary_a1", cid, rid, 100, actors)
+    covered = _cover(rid, 4000, "cov_growth_summary_cover", receipt["lastModified"], actors["admin"])
+    assert covered.status_code == 200, covered.text
+    receipt = covered.json()["updatedReceipts"][0]
+    created = client.post("/api/ads/mutate", json={
+        "action": "create", "adId": "cov_growth_summary_a2", "idempotencyKey": "cov_growth_summary_grow",
+        "data": {
+            "customerId": cid, "paymentStatus": "not_paid", "collectionMethod": "in_shop",
+            "receiptId": rid, "receiptAllocations": [],
+            "dueAllocations": [{"receiptId": rid, "amountUSD": 50}],
+            "unpaidReceiptDebtIncrease": {
+                "receiptId": rid, "amountUSD": 50, "expectedLastModified": receipt["lastModified"],
+            },
+        },
+    }, cookies=actors["admin"])
+    assert created.status_code == 200, created.text
+    receipt = _entity("receipts", rid, actors["admin"])
+    assert receipt["data"]["amountUSD"] == receipt["data"]["debtAmountUSD"] == 150
+    assert receipt["data"]["customerOutstandingUSD"] == 110
+
+    stopped = _stop("cov_growth_summary_a2", 2500, "cov_growth_summary_release", created.json()["ad"]["lastModified"], actors["admin"])
+    assert stopped.status_code == 200, stopped.text
+    receipt = _entity("receipts", rid, actors["admin"])
+    assert receipt["data"]["amountUSD"] == receipt["data"]["debtAmountUSD"] == 125
+    assert receipt["data"]["amountLocal"] == receipt["data"]["debtAmountLocal"] == 625
+    assert receipt["data"]["customerOutstandingUSD"] == 85
+    remaining = _cover(rid, 8500, "cov_growth_summary_cover_rest", receipt["lastModified"], actors["admin"])
+    assert remaining.status_code == 200, remaining.text
+    assert remaining.json()["updatedReceipts"][0]["data"]["customerOutstandingUSD"] == 0
+
+
+@pytest.mark.parametrize("refund_type,refund_amount", [("Partial", 2), ("Full", 10)])
+def test_refund_status_update_keeps_exact_money_through_api(actors, refund_type, refund_amount):
+    tag = f"refund_resave_{refund_type.lower()}"
+    cid, rid, aid = f"{tag}_c", f"{tag}_r", f"{tag}_a"
+    _customer(cid, actors)
+    _paid_receipt(rid, cid, 100, actors)
+    created = client.post("/api/ads/mutate", json={
+        "action": "create", "adId": aid, "idempotencyKey": f"{tag}_create",
+        "data": {"customerId": cid, "paymentStatus": "paid", "receiptAllocations": [{"receiptId": rid, "amountUSD": 100}]},
+    }, cookies=actors["admin"])
+    assert created.status_code == 200, created.text
+    stopped = _stop(aid, 1000, f"{tag}_stop", created.json()["ad"]["lastModified"], actors["admin"])
+    assert stopped.status_code == 200, stopped.text
+    first = _update_covered_ad(stopped.json()["ad"], {"refundType": refund_type, "refundAmount": refund_amount}, f"{tag}_first", actors)
+    second = _update_covered_ad(first, {"refundType": refund_type, "refundAmount": refund_amount, "refundStatus": "Refunded"}, f"{tag}_second", actors)
+    for field in ("spentUSD", "refundAmount", "receiptAllocations", "dueAllocations"):
+        assert second["data"][field] == first["data"][field]
+    assert second["data"]["spentUSD"] == 10 - refund_amount

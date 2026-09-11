@@ -12,17 +12,34 @@ If you are a developer **or an AI** making changes: read this first.
 ## How to edit the frontend (IMPORTANT)
 
 `script.js` is a **GENERATED file** — never edit it directly. The real source
-code lives in `src/` (17 ordered files, see `src/README.md` for what's where).
+code lives in `src/` (ordered in `src/manifest.json`, including lazy bundles).
 Workflow:
 
 ```
 # 1. edit the right file in src/
-npm run build:js      # 2. rebuild script.js
+npm run build         # 2. rebuild all JavaScript and CSS
 npm run sync:mobile   # 3. push to the iOS/Android app folders
+npm run verify:mobile # 4. verify every web and native bundle matches source
 ```
 
 If you add/change Tailwind classes built from data (like `bg-${color}-50`),
 also update the safelist in `tailwind.config.js` and run `npm run build:css`.
+
+See `docs/RELEASE_AND_SAFETY.md` for mandatory validation and the actual deployment
+path. Do not publish or migrate live records as an incidental part of a code fix.
+
+## Every update must support existing records
+
+Follow `docs/DATA_COMPATIBILITY.md` when changing persisted fields or calculations.
+Adding a default only to a create form is **not** a completed feature. Test an
+old-format record inserted directly (without today's create path), as well as a
+new record. Read, edit, live sync, local cache, photos and repeated upgrades must
+still work. Do not guess missing money, exchange rates, creators or history.
+
+Read-only compatibility changes that affect unchanged server records must bump
+`DATA_COMPATIBILITY_VERSION` in `server/data_compatibility.py`. This tells open
+clients to refresh once. A persisted backfill must also advance each changed
+record's modification cursor; it must be idempotent and respect closed periods.
 
 ## Non‑negotiable rules (do not break)
 
@@ -93,5 +110,3 @@ AI should be used as an **assistant**:
 
 - `PLATFORM_FOUNDATION.md` (architecture + portability)
 - `MONEY_PLATFORM_ROADMAP.md` (payments/POS/cards roadmap + money safety rules)
-
-

@@ -223,12 +223,28 @@ def _financial_period_lock_key(period: str) -> int:
     return int.from_bytes(digest[:8], "big", signed=True)
 
 
-def _lock_financial_period(conn: Any, period: str) -> None:
+def _lock_financial_period(conn: Any, period: str, *, exclusive: bool = False) -> None:
+    """Let ordinary writers coexist while closing/unlocking stays exclusive.
+
+    A money mutation only needs the period to remain open until it commits;
+    it does not own the entire month's other rows. Exclusive writer locks
+    serialized unrelated work and deadlocked with receipt/ad row locks taken
+    by other money paths. Close/unlock take exclusivity before reading their
+    snapshot; subsequent writers acquire shared access and recheck status.
+    Never upgrade a shared period lock to exclusive within one transaction.
+    """
     if str(conn.engine.dialect.name or "") == "postgresql":
-        conn.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _financial_period_lock_key(period)},
-        )
+        params = {"lock_key": _financial_period_lock_key(period)}
+        if exclusive:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), params)
+        elif not conn.scalar(text("SELECT pg_try_advisory_xact_lock_shared(:lock_key)"), params):
+            # Writers may already hold receipt/ad rows. Never queue behind a
+            # close while holding them: another active writer may need those
+            # same rows before it can release its shared period lock.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Financial period {period} is being closed or unlocked; retry after it finishes",
+            )
 
 
 def assert_financial_period_open(
@@ -870,7 +886,7 @@ def create_operations_router(
             raise HTTPException(status_code=400, detail="Only a completed month can be closed")
         force_reason = " ".join(str((body or {}).get("forceReason") or "").split())[:500]
         with db_conn() as conn:
-            _lock_financial_period(conn, period)
+            _lock_financial_period(conn, period, exclusive=True)
             existing = _close_record(period, conn=conn)
             if existing and str(existing.get("status") or "").lower() == "closed":
                 return existing
@@ -905,7 +921,7 @@ def create_operations_router(
         if len(reason) < 10:
             raise HTTPException(status_code=400, detail="Unlock reason must be at least 10 characters")
         with db_conn() as conn:
-            _lock_financial_period(conn, period)
+            _lock_financial_period(conn, period, exclusive=True)
             existing = _close_record(period, conn=conn)
             if not existing:
                 raise HTTPException(status_code=404, detail="Financial period was not found")

@@ -8,8 +8,10 @@ and dark mode.
 
 ## The important facts
 
-- **Frontend:** one vanilla-JavaScript app — `index.html` + `script.js`
-  (~20,000+ lines) + `style.css`. No build step.
+- **Frontend:** vanilla JavaScript source modules in `src/`, ordered by
+  `src/manifest.json`. `npm run build` generates `script.js`, lazy bundles
+  (`studio.js`, `clothes.js`), and Tailwind CSS. Never edit generated bundles.
+  `index.html` and `style.css` remain editable root files.
 - **Backend:** `server/` — Python FastAPI + PostgreSQL (SQLite for dev).
   Serves the frontend and a JSON API with cookie-session login.
 - **Two data modes, detected automatically at startup:**
@@ -18,8 +20,8 @@ and dark mode.
   - *Local mode* — no backend found; everything is stored in the browser
     (IndexedDB) and works offline.
 - **Mobile:** `android/` and `ios/` are Capacitor shells that load the copy
-  of the frontend in `www/`. After editing the root frontend files, run
-  `npm run sync:mobile` so mobile gets the same code.
+  of the frontend in `www/`. Run `npm run build` then `npm run sync:mobile`
+  and `npm run verify:mobile` before packaging, so mobile gets the same code.
 - **Docs:** `PLATFORM_FOUNDATION.md`, `MONEY_PLATFORM_ROADMAP.md`, and
   `CONTRIBUTING.md` hold the platform rules (stable service IDs, append-only
   wallet ledger, etc.). Anything in `docs/archive/` is a historical report —
@@ -45,5 +47,22 @@ first-run setup screen (local mode), `server/create_admin.py`, or the
 
 ```bash
 # Backend tests (from the project root; needs Python + server/requirements.txt)
-python -m pytest
+npm test
+# Real browser flows use a disposable LOCAL database, never your live server:
+npm run test:e2e
+# Confirm web AND Android/iOS copies include every generated bundle:
+npm run verify:mobile
 ```
+
+## Safe changes and releases
+
+Read `CONTRIBUTING.md` and `docs/RELEASE_AND_SAFETY.md` before edits or publishing.
+Money must remain consistent across receipts, ads, customers, company coverage,
+refunds, and currency conversion. Test combinations and repeated saves, not just
+each feature alone. Do not automatically rewrite historical money records.
+
+Production uses **Docker Hub `bashird/albayan` → Libyan Spider Jelastic**.
+A Git commit, an image push, a Jelastic redeploy, and a mobile-app build are
+different steps. `npm run release:image:push` runs checks, builds, and pushes a
+versioned rollback tag plus `latest`; it does not redeploy Jelastic. Only run
+publishing commands with the owner's explicit authorization.

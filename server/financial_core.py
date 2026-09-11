@@ -116,6 +116,68 @@ def _financial_rate(value: Any) -> Decimal:
     return rate
 
 
+def _financial_due_total(data: dict[str, Any]) -> int:
+    """The receipt's capacity — ONE number, whichever pool is asking.
+
+    Before collection a delivery receipt is worth the debt the driver will collect.
+    Once collected it is worth what was ACTUALLY collected (amountUSD); the debt fields
+    survive only as history. Reading the frozen debt as a capacity of its own after
+    collection is what let one receipt advertise its money twice — once as due credit and
+    once as paid balance — so two ads could each spend the same note. Over-collecting
+    legitimately adds real balance; re-reading the stale debt invents it.
+    """
+    if bool(data.get("isPaid")) or str(data.get("status") or "") == "Paid":
+        # A settled receipt's amountUSD is CUSTOMER cash only. Company-covered
+        # dollars are equally real pot money (they keep funding the ads they
+        # covered), so the pot is their sum — otherwise settling a covered
+        # receipt would make its own committed allocations exceed capacity.
+        covered_minor = (
+            _financial_minor(data.get("companyCoveredUSD"), "stored companyCoveredUSD")
+            if data.get("companyCoveredUSD") is not None
+            else 0
+        )
+        return _financial_minor(data.get("amountUSD"), "receipt due amount") + covered_minor
+    status_detail = data.get("statusDetail") if isinstance(data.get("statusDetail"), dict) else {}
+    not_paid_collection = str(status_detail.get("notPaidCollection") or "").strip().lower()
+    # An office receipt already records its promised credit directly in USD.
+    # Re-deriving it through LYD can introduce a one-cent rounding difference
+    # between the receipt card and the amount the server lets an ad reserve.
+    # A legacy Delivered receipt can still carry an office marker, but its
+    # amountUSD is collected cash; its explicit debt fields remain the gross.
+    if (
+        not_paid_collection in {"office", "in_shop", "shop"}
+        and str(data.get("deliveryStatus") or "").strip().lower() != "delivered"
+    ):
+        return _financial_minor(data.get("amountUSD"), "receipt due amount")
+    local_value = data.get("debtAmountLocal")
+    if local_value is None:
+        local_value = data.get("amountLocal")
+    local = _financial_minor(local_value, "receipt due amount")
+    usd_value = data.get("debtAmountUSD")
+    if usd_value is None:
+        usd_value = data.get("amountUSD")
+    usd_minor = _financial_minor(usd_value, "receipt due amount")
+    # NEVER divide the local amount by an invented rate. _financial_rate falls
+    # back to 1 for junk, and validate_exchange_rate CLAMPS a blank/zero rate
+    # up to MIN_EXCHANGE_RATE (0.001) before storing it — so a 500 LYD debt
+    # with no Rate 2 used to divide by 0.001 and advertise $500,000 of
+    # spendable ad credit. The receipt's own USD figure is the truthful
+    # answer whenever it exists; only a rate we actually trust may convert.
+    if usd_minor > 0:
+        return usd_minor
+    raw_rate = data.get("exchangeRate")
+    rate = _financial_rate(raw_rate)
+    trusted_rate = (
+        raw_rate is not None
+        and str(raw_rate) != ""
+        and rate > Decimal(str(MIN_EXCHANGE_RATE))
+        and rate != Decimal(1)
+    )
+    if local > 0 and trusted_rate:
+        return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return usd_minor
+
+
 def _financial_ad_payment_status(ad: dict[str, Any] | None) -> str:
     """Return the canonical payment state for current and historical ads.
 

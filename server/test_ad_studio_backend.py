@@ -972,6 +972,36 @@ def _review_campaign(actors, campaign_id: str, last_modified: int, decision: str
 class TestStudioWalletPayments:
     """The customer wallet: gateway-ready charges, holds, and captures."""
 
+    @pytest.mark.parametrize("currency,other_currency", [("USD", "LYD"), ("LYD", "USD")])
+    def test_payment_retry_keeps_currency_and_rejects_changed_instruction(self, actors, currency, other_currency):
+        # Independent actors avoid sharing open-request limits or rate buckets
+        # with the lifecycle tests. No gateway or real payment is contacted.
+        email = f"wallet-currency-{currency.lower()}@tests.albayanhub.com"
+        password = "WalletCurrencyTest123!"
+        _create_user(actors["admin"], email, password, {})
+        cookies = _login(email, password)
+        request = {
+            "amountMinor": 1000, "currency": currency, "method": "adfali",
+            "idempotencyKey": f"wallet-currency-retry-{currency.lower()}",
+        }
+        created = client.post("/api/wallet/payment-requests", json=request, cookies=cookies)
+        assert created.status_code == 200, created.text
+        rid = created.json()["id"]
+        exact = client.post("/api/wallet/payment-requests", json=request, cookies=cookies)
+        assert exact.status_code == 200 and exact.json()["id"] == rid
+        assert exact.json()["data"]["currency"] == currency
+        changed = client.post(
+            "/api/wallet/payment-requests",
+            json={**request, "currency": other_currency}, cookies=cookies,
+        )
+        assert changed.status_code == 409, changed.text
+        # Rejection must leave the original request intact and still usable.
+        original = client.get(f"/api/wallet/payment-requests/{rid}", cookies=cookies)
+        assert original.status_code == 200
+        assert original.json()["data"]["currency"] == currency
+        assert original.json()["data"]["amountMinor"] == 1000
+        assert client.post(f"/api/wallet/payment-requests/{rid}/cancel", cookies=cookies).status_code == 200
+
     def test_payment_request_lifecycle_credits_exactly_once(self, actors):
         created = client.post(
             "/api/wallet/payment-requests",

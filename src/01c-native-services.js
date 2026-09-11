@@ -7,6 +7,7 @@
 
 const NATIVE_SECURE_PREFIX = 'albayan_secure_v1_';
 const NATIVE_PHOTO_PENDING_KEY = 'albayan_native_photo_pending';
+const NATIVE_PHOTO_MAX_AGE_MS = 10 * 60 * 1000;
 const NATIVE_APP_LOCK_AFTER_MS = 30 * 1000;
 const NATIVE_REMINDER_LIMIT = 50;
 
@@ -14,6 +15,9 @@ let _nativeServicesPromise = null;
 let _nativeViewportFrame = 0;
 let _nativeBackgroundedAt = 0;
 let _nativeUnlockBusy = false;
+// A privacy overlay during a short app switch is not the same as an unmet
+// authentication challenge. Background events must never clear the latter.
+let _nativeAuthenticationRequired = false;
 let _nativeReminderTimer = null;
 let _nativePrefs = {
   ready: false,
@@ -227,13 +231,53 @@ async function _nativeCameraResultToFile(result) {
   }
 }
 
+function _nativePhotoEntityId(target) {
+  if (target === 'delivery') return String(document.getElementById('delivery-complete-modal')?.dataset?.receiptId || '');
+  if (target === 'ads-studio') return String(typeof _adsStudioDraft === 'object' ? _adsStudioDraft?.id || '' : '');
+  return String(state.modalData?.id || '');
+}
+
+function _captureNativePhotoContext(target) {
+  return {
+    version: 2, target, createdAt: Date.now(), operationId: generateId('native_photo'),
+    userId: String(state.currentUser?.id || ''),
+    scope: String(getCollectionStorageScope() || ''),
+    entityId: _nativePhotoEntityId(target),
+    sessionIdentity: getServerSessionIdentity(), accessIdentity: getAuthMeIdentity(),
+    pasteContext: capturePhotoPasteContext(target), requiresPending: false
+  };
+}
+
+function _readNativePhotoPending() {
+  try { return JSON.parse(localStorage.getItem(NATIVE_PHOTO_PENDING_KEY) || 'null'); } catch (_) { return null; }
+}
+
+function _clearNativePhotoPending(operationId) {
+  try {
+    if (_readNativePhotoPending()?.operationId === operationId) localStorage.removeItem(NATIVE_PHOTO_PENDING_KEY);
+  } catch (_) {}
+}
+
+function _nativePhotoContextIsCurrent(context) {
+  return !!context?.userId && context.userId === String(state.currentUser?.id || '')
+    && context.sessionIdentity === getServerSessionIdentity()
+    && context.accessIdentity === getAuthMeIdentity()
+    && context.entityId === _nativePhotoEntityId(context.target)
+    && context.pasteContext === capturePhotoPasteContext(context.target)
+    && (!context.requiresPending || _readNativePhotoPending()?.operationId === context.operationId);
+}
+
 async function _deliverNativeCameraResult(result, target, context, attempts = 0) {
   const resolvedTarget = String(target || '');
-  if (context != null && typeof capturePhotoPasteContext === 'function' && attempts === 0 && context !== capturePhotoPasteContext(resolvedTarget)) return false;
+  // Accept the old paste-context argument from callers, but immediately bind it
+  // to the current user/form. All retries retain this exact immutable identity.
+  const guard = context?.version === 2 ? context : _captureNativePhotoContext(resolvedTarget);
+  if (context != null && context?.version !== 2 && context !== guard.pasteContext) return false;
+  if (!_nativePhotoContextIsCurrent(guard)) return false;
   if (typeof _photoPasteTargetIsAvailable === 'function' && !_photoPasteTargetIsAvailable(resolvedTarget)) {
     if (attempts < 40) {
-      setTimeout(() => _deliverNativeCameraResult(result, resolvedTarget, null, attempts + 1), 250);
-      return true;
+      await new Promise(resolve => setTimeout(resolve, 250));
+      return _deliverNativeCameraResult(result, resolvedTarget, guard, attempts + 1);
     }
     showNotification(
       state.language === 'ar' ? 'افتح النموذج مرة أخرى' : 'Open the form again',
@@ -243,13 +287,40 @@ async function _deliverNativeCameraResult(result, target, context, attempts = 0)
     return false;
   }
   const file = await _nativeCameraResultToFile(result);
-  if (!file) return false;
+  // Reading a native URI can await an OS/cloud download. The user may already
+  // have logged out or opened another receipt by the time that read finishes.
+  if (!file || !_nativePhotoContextIsCurrent(guard)) return false;
   const routed = typeof _routePastedPhotoFiles === 'function' && _routePastedPhotoFiles(resolvedTarget, [file]);
   if (routed) {
-    try { localStorage.removeItem(NATIVE_PHOTO_PENDING_KEY); } catch (_) {}
+    _clearNativePhotoPending(guard.operationId);
     await nativeHaptic('success');
   }
   return !!routed;
+}
+
+async function _restoreNativeCameraResult(result, pending, attempts = 0) {
+  const age = Date.now() - Number(pending?.createdAt);
+  if (pending?.version !== 2 || !pending.operationId || !pending.userId || !pending.entityId
+      || !Number.isFinite(age) || age < 0 || age > NATIVE_PHOTO_MAX_AGE_MS
+      || _readNativePhotoPending()?.operationId !== pending.operationId) return false;
+  // After Android restores a killed WebView, auth and the original delivery
+  // dialog can take a moment to return. Wait only for the saved owner and record,
+  // never attach to an arbitrary newly opened/unsaved form of the same type.
+  const currentId = String(state.currentUser?.id || '');
+  if (currentId && currentId !== pending.userId) return false;
+  const ready = currentId === pending.userId
+    && String(getCollectionStorageScope() || '') === pending.scope
+    && _photoPasteTargetIsAvailable(pending.target)
+    && _nativePhotoEntityId(pending.target) === pending.entityId;
+  if (!ready) {
+    if (attempts >= 40) return false;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return _restoreNativeCameraResult(result, pending, attempts + 1);
+  }
+  const guard = _captureNativePhotoContext(pending.target);
+  guard.operationId = pending.operationId;
+  guard.requiresPending = true;
+  return _deliverNativeCameraResult(result, pending.target, guard);
 }
 
 async function takeNativePhoto(requestedTarget = '') {
@@ -266,9 +337,13 @@ async function takeNativePhoto(requestedTarget = '') {
   if (target === 'delivery' && typeof _flushDeliveryCompletionDraftNow === 'function') {
     _flushDeliveryCompletionDraftNow();
   }
-  const context = typeof capturePhotoPasteContext === 'function' ? capturePhotoPasteContext(target) : null;
+  const context = _captureNativePhotoContext(target);
+  if (!context.userId) return false;
   try {
-    localStorage.setItem(NATIVE_PHOTO_PENDING_KEY, JSON.stringify({ target, createdAt: Date.now() }));
+    // Persist only stable identifiers, never the DOM/draft object or photo data.
+    const { version, createdAt, operationId, userId, scope, entityId } = context;
+    localStorage.setItem(NATIVE_PHOTO_PENDING_KEY, JSON.stringify({ version, target, createdAt, operationId, userId, scope, entityId }));
+    context.requiresPending = true;
   } catch (_) {}
   try {
     const result = await camera.getPhoto({
@@ -397,11 +472,13 @@ function removeNativeAppLock() {
 
 async function unlockNativeApp() {
   if (_nativeUnlockBusy) return false;
+  _nativeAuthenticationRequired = true;
   _nativeUnlockBusy = true;
   renderNativeAppLock();
   const ok = await authenticateNativeDevice();
   _nativeUnlockBusy = false;
   if (ok) {
+    _nativeAuthenticationRequired = false;
     removeNativeAppLock();
     await nativeHaptic('success');
   } else {
@@ -430,7 +507,10 @@ async function setNativeBiometricLockEnabled(enabled) {
   const saved = await nativeSecureSet('biometric_lock_enabled', next);
   if (!saved) return false;
   _nativePrefs.biometricEnabled = next;
-  if (!next) removeNativeAppLock();
+  if (!next) {
+    _nativeAuthenticationRequired = false;
+    removeNativeAppLock();
+  }
   if (state.currentView === 'settings') render();
   showNotification(
     state.language === 'ar' ? 'تم تحديث حماية الجهاز' : 'Device protection updated',
@@ -548,6 +628,7 @@ async function syncNativeSystemBarsTheme() {
 async function initializeNativeSessionProtection() {
   await setupNativeServices();
   if (!isPackagedMobileApp() || !state?.currentUser || !_nativePrefs.biometricEnabled) {
+    _nativeAuthenticationRequired = false;
     removeNativeAppLock();
     queueNativeReminderSync();
     return true;
@@ -574,7 +655,10 @@ async function setupNativeServices() {
     }
     await getNativeBiometricInfo(true);
     _nativePrefs.ready = true;
-    if (_nativePrefs.biometricEnabled) renderNativeAppLock();
+    if (_nativePrefs.biometricEnabled) {
+      _nativeAuthenticationRequired = true;
+      renderNativeAppLock();
+    }
 
     const keyboard = getCapacitorPlugin('Keyboard');
     await _addNativeListener(keyboard, 'keyboardWillShow', event => _setNativeKeyboardOpen(true, event?.keyboardHeight));
@@ -594,7 +678,8 @@ async function setupNativeServices() {
         return;
       }
       const protectedSession = _nativePrefs.biometricEnabled && state?.currentUser;
-      if (protectedSession && Date.now() - _nativeBackgroundedAt >= NATIVE_APP_LOCK_AFTER_MS) {
+      if (protectedSession && (_nativeAuthenticationRequired || Date.now() - _nativeBackgroundedAt >= NATIVE_APP_LOCK_AFTER_MS)) {
+        _nativeAuthenticationRequired = true;
         renderNativeAppLock();
         unlockNativeApp();
       } else {
@@ -608,7 +693,7 @@ async function setupNativeServices() {
       if (event?.pluginId !== 'Camera' || event?.methodName !== 'getPhoto' || !event?.data) return;
       let pending = null;
       try { pending = JSON.parse(localStorage.getItem(NATIVE_PHOTO_PENDING_KEY) || 'null'); } catch (_) {}
-      if (pending?.target) _deliverNativeCameraResult(event.data, pending.target, null);
+      if (pending?.target) _restoreNativeCameraResult(event.data, pending).catch(() => {});
     });
 
     const notifications = getCapacitorPlugin('LocalNotifications');

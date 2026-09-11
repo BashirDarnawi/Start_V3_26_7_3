@@ -1,6 +1,14 @@
 const { defineConfig, devices } = require('@playwright/test');
 
 const baseURL = process.env.ALBAYAN_E2E_BASE_URL || 'http://127.0.0.1:18081';
+// Tests create financial/customer records. Remote/live targets are never a
+// supported test shortcut. External mode is only for a disposable local server.
+const target = new URL(baseURL);
+if (!['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) ||
+    !['http:', 'https:'].includes(target.protocol) ||
+    (process.env.ALBAYAN_E2E_EXTERNAL_SERVER && process.env.ALBAYAN_E2E_DISPOSABLE_SERVER !== 'true')) {
+  throw new Error('Browser tests require a local disposable server. External local mode additionally requires ALBAYAN_E2E_DISPOSABLE_SERVER=true.');
+}
 
 module.exports = defineConfig({
   testDir: './tests/e2e',

@@ -9,6 +9,7 @@
  */
 const { spawnSync } = require('child_process');
 const path = require('path');
+const { isolatedTestEnvironment } = require('./lib/test-environment');
 
 const ROOT = path.join(__dirname, '..');
 const PYTEST_ARGS = ['-m', 'pytest', '-q', '-p', 'no:cacheprovider'];
@@ -21,6 +22,7 @@ function run(command, args, options = {}) {
     cwd: ROOT,
     stdio: quiet ? 'ignore' : 'inherit',
     shell: false,
+    env: isolatedTestEnvironment(process.env, 'sqlite+pysqlite:///:memory:'),
     ...spawnOptions,
   });
 }
@@ -76,6 +78,9 @@ function testWithDocker() {
     'run', '--rm',
     '--env', 'ALBAYAN_COOKIE_SECURE=false',
     '--env', 'ALBAYAN_DB_PATH=/tmp/albayan-tests.db',
+    '--env', 'DATABASE_URL=sqlite+pysqlite:///:memory:',
+    '--env', 'ALBAYAN_META_BACKGROUND_SYNC=false',
+    '--env', 'ALBAYAN_META_AUTO_IMPORT=false',
     image,
     'python', ...PYTEST_ARGS, '--basetemp', DOCKER_PYTEST_BASETEMP,
   ]).status;

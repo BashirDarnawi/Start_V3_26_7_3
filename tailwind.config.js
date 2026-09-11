@@ -17,7 +17,8 @@ const DYNAMIC_COLORS = '(amber|blue|cyan|emerald|indigo|purple|rose|slate|violet
 
 module.exports = {
   darkMode: 'class',
-  content: ['./index.html', './script.js'],
+  // Scan source modules too: Studio and Clothes are loaded as separate bundles.
+  content: ['./index.html', './src/**/*.js'],
   safelist: [
     { pattern: new RegExp(`^bg-${DYNAMIC_COLORS}-(50|100|600|800)$`), variants: ['hover', 'dark', 'dark:hover'] },
     { pattern: new RegExp(`^bg-${DYNAMIC_COLORS}-900/20$`), variants: ['dark', 'dark:hover'] },

@@ -14,7 +14,8 @@ Both `walletTransactions` and `serviceSubscriptions` are persisted in **IndexedD
 
 ## Adding a new service (future‑proof way)
 
-Edit `script.js` → find `const SERVICES = { ... }` and add a new entry:
+Edit `src/05-state-services.js` → find `const SERVICES = { ... }` and add a new entry.
+Then run `npm run build`; `script.js` is generated and must never be edited directly.
 
 - **Required fields**:
   - `id` (stable string, never change after launch)
@@ -95,5 +96,4 @@ This is the long-term direction so every new change keeps the same goal in mind:
 - **Immutable history**: do not delete wallet/subscription history; use reversals/cancellations.
 - **Security always**: no plaintext secrets; audit logs must redact.
 - **Huge data safe**: any large collection must be persisted in IndexedDB (`PERSISTED_COLLECTIONS`).
-
 
