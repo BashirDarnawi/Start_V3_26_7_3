@@ -18,6 +18,17 @@ async function signIn(page) {
   // specific element, then each test can open the route it needs.
   await page.waitForFunction(() => typeof state !== 'undefined' && !!state.currentUser?.id);
   await expect(page.getByText(/welcome,?\s*e2e administrator/i)).toBeVisible();
+  // The live-sync poller starts only after the post-login full data load has
+  // settled; waiting for it makes every seed and refresh below deterministic.
+  await waitForLiveSync(page);
+}
+
+// A page that boots from its cache renders first and starts the poller only
+// once the authoritative server load completes. Tests that stop or inspect
+// the poller must wait for that moment, or the startup load restarts it
+// underneath them and aborts their in-flight work.
+async function waitForLiveSync(page) {
+  await page.waitForFunction(() => typeof _serverLiveSync !== 'undefined' && !!_serverLiveSync.timer, null, { timeout: 30000 });
 }
 
 function safeProjectToken(projectName) {
@@ -41,8 +52,12 @@ test('an upgrade refreshes an existing receipt at the same revision without recr
   await page.goto('/receipts');
   const button = page.locator(`button[data-receipt-id="${receiptId}"][aria-label^="Cover part"]`);
   await expect(button).toBeVisible();
+  await waitForLiveSync(page);
   const result = await page.evaluate(async id => {
     stopServerLiveSync();
+    // A poll tick that was already running keeps going after stop(); let it
+    // finish so the refresh below never races it.
+    await (_serverLiveSync.tickPromise || Promise.resolve());
     const path = `/api/collections/receipts/${encodeURIComponent(id)}`;
     const before = await apiJson(path);
     const row = state.receipts.find(item => item.id === id);
@@ -187,6 +202,7 @@ test('receipt photos open from the outside card action', async ({ page }, testIn
 test('copied photos paste into an ad while text fields keep normal paste', async ({ page }) => {
   await signIn(page);
   await page.goto('/ads');
+  await waitForLiveSync(page);
   // Render the real ad form directly so this focused clipboard regression does
   // not depend on a page/customer fixture created by a different test.
   await page.evaluate(() => {

@@ -860,6 +860,10 @@ async function _runWithConcurrency(items, limit, fn) {
 async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
+  // Expose the running tick so callers that stop the poller (tests, logout
+  // paths) can await the work already in flight instead of racing it.
+  let finishTick = null;
+  _serverLiveSync.tickPromise = new Promise(resolve => { finishTick = resolve; });
   updateSyncIndicator('syncing');
   let ok = false;
   try {
@@ -871,6 +875,8 @@ async function serverLiveSyncTick() {
     updateSyncIndicator('error');
   } finally {
     _serverLiveSync.inFlight = false;
+    _serverLiveSync.tickPromise = null;
+    if (finishTick) finishTick();
   }
   // Exponential failure backoff (capped at 60s); any success resets it.
   if (ok) {

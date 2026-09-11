@@ -13000,6 +13000,10 @@ async function _runWithConcurrency(items, limit, fn) {
 async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
+  // Expose the running tick so callers that stop the poller (tests, logout
+  // paths) can await the work already in flight instead of racing it.
+  let finishTick = null;
+  _serverLiveSync.tickPromise = new Promise(resolve => { finishTick = resolve; });
   updateSyncIndicator('syncing');
   let ok = false;
   try {
@@ -13011,6 +13015,8 @@ async function serverLiveSyncTick() {
     updateSyncIndicator('error');
   } finally {
     _serverLiveSync.inFlight = false;
+    _serverLiveSync.tickPromise = null;
+    if (finishTick) finishTick();
   }
   // Exponential failure backoff (capped at 60s); any success resets it.
   if (ok) {
@@ -23399,7 +23405,7 @@ function renderManagerTabBar() {
     <nav class="mobile-bottom-nav" aria-label="${isAr ? 'التنقل السريع' : 'Quick navigation'}">
       ${lead.filter(entry => shellCanOpen(entry.id)).map(item).join('')}
       ${canAddReceipt ? `
-      <button type="button" onclick="showNewReceiptChooser()" class="mobile-bottom-nav-item mobile-bottom-nav-fab" aria-label="${isAr ? 'وصل جديد' : 'New receipt'}">
+      <button type="button" onclick="showNewReceiptChooser()" class="mobile-bottom-nav-item mobile-bottom-nav-fab" aria-label="${isAr ? 'إنشاء وصل' : 'Create receipt'}">
         <span class="mobile-bottom-nav-fab-circle"><i data-lucide="plus" class="h-6 w-6"></i></span>
       </button>` : ''}
       ${trail.filter(entry => shellCanOpen(entry.id)).map(item).join('')}
