@@ -17,7 +17,7 @@
     "12-views.js",
     "12c-services-wallet.js",
     "12b0-admin-tools-loader.js",
-    "12a-analytics-profit.js",
+    "12d-manager-shell.js",
     "13-filters-helpers.js",
     "14-forms.js",
     "15-modals.js",
@@ -37,6 +37,7 @@
       "15b-clothes.js"
     ],
     "admin-tools.js": [
+      "12a-analytics-profit.js",
       "12b-control-center.js",
       "13b-merge-tools.js"
     ]

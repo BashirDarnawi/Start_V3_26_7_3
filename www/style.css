@@ -3091,3 +3091,108 @@ button.hub-card:active {
   color: #ffffff;
   opacity: 0.07;
 }
+
+/* ==========================================
+   2026-09 DESIGN RE-SKIN — flat surfaces everywhere (Albayan Studio design)
+   One look for web, iOS and Android: flat page ground, white cards with a
+   soft border, brand-blue primary actions, pill chips, and a tab bar with a
+   centre "+" on phones. Appended last so it wins over the older glass rules.
+   ========================================== */
+html:not(.dark) { background-color: #eef1f7; }
+html:not(.dark) body { background-color: #eef1f7 !important; }
+html.dark { background-color: #070b16; }
+html.dark body { background-color: #070b16 !important; }
+#aurora-bg, .bg-noise { display: none !important; }
+body::before { background: none !important; }
+
+.glass-panel {
+  background: #ffffff;
+  border: 1px solid #e7ebf2;
+  box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.glass-panel:hover {
+  transform: none;
+  border-color: #dbe3f0;
+  box-shadow: 0 10px 30px -18px rgba(var(--brand-blue-rgb), 0.28);
+}
+.dark .glass-panel { background: #0f1830; border-color: rgba(255, 255, 255, 0.09); box-shadow: none; }
+.dark .glass-panel:hover { border-color: rgba(255, 255, 255, 0.16); box-shadow: none; }
+.glass-panel-sm { background: #ffffff; border: 1px solid #e7ebf2; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+.dark .glass-panel-sm { background: #0f1830; border-color: rgba(255, 255, 255, 0.09); }
+
+.glass-input {
+  background: #ffffff;
+  border: 1px solid #e7ebf2;
+  border-radius: 12px;
+  box-shadow: none;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.glass-input:focus { border-color: var(--brand-blue); box-shadow: 0 0 0 3px rgba(var(--brand-blue-rgb), 0.12); }
+.glass-input:hover:not(:focus) { border-color: #d5dce8; }
+.dark .glass-input { background: #0b1326; border-color: rgba(255, 255, 255, 0.12); color: #f8fafc; }
+
+/* Primary actions: one brand blue instead of indigo/purple gradients. */
+.bg-indigo-600, .bg-purple-600, .bg-indigo-500 { background-color: var(--brand-blue) !important; }
+.hover\:bg-indigo-700:hover, .hover\:bg-purple-700:hover, .hover\:bg-indigo-600:hover { background-color: var(--brand-blue-700) !important; }
+.text-purple-600 { color: var(--brand-blue) !important; }
+.accent-indigo-600, .accent-purple-600 { accent-color: var(--brand-blue); }
+.alb-btn-primary { background: var(--brand-blue); box-shadow: 0 10px 24px -14px rgba(var(--brand-blue-rgb), 0.6); }
+.alb-btn-primary:hover { background: var(--brand-blue-700); filter: none; }
+.alb-nav-active { background: var(--brand-blue); box-shadow: none; }
+.alb-mark { background: linear-gradient(135deg, var(--brand-blue), var(--brand-blue-700)); box-shadow: 0 14px 30px -18px rgba(var(--brand-blue-rgb), 0.7); }
+.btn-shine { box-shadow: 0 8px 20px -12px rgba(var(--brand-blue-rgb), 0.45); }
+.app-content .hover\:scale-105:hover, .app-content .hover\:scale-\[1\.02\]:hover { transform: none !important; }
+.app-content h1.text-3xl { font-size: 1.65rem; font-weight: 800; letter-spacing: -0.02em; }
+
+/* Search + chips float on the page (no card around them). */
+.smart-filter-panel.glass-panel { background: transparent; border: 0; box-shadow: none; padding: 0; }
+.smart-search-field { background: #ffffff; border: 1px solid #e7ebf2; border-radius: 14px; color: #94a3b8; }
+.dark .smart-search-field { background: #0f1830; border-color: rgba(255, 255, 255, 0.12); }
+.smart-search-field:focus-within { border-color: var(--brand-blue); box-shadow: 0 0 0 3px rgba(var(--brand-blue-rgb), 0.12); }
+.smart-filter-chip { background: #ffffff; border-color: #e7ebf2; color: #475569; font-size: 0.8rem; }
+.dark .smart-filter-chip { background: #0f1830; border-color: rgba(255, 255, 255, 0.12); color: #cbd5e1; }
+.smart-filter-chip.is-active { color: #ffffff; background: var(--brand-blue); border-color: var(--brand-blue); box-shadow: none; }
+.smart-filter-chip.is-active.is-danger { color: #ffffff; background: #e11d48; border-color: #e11d48; }
+.smart-filter-chip.is-active.is-warning { color: #ffffff; background: #d97706; border-color: #d97706; }
+.smart-filter-chip.is-active.is-success { color: #ffffff; background: #059669; border-color: #059669; }
+.workspace-filter-toggle, .workspace-load-more { color: var(--brand-blue); background: #ffffff; border: 1px solid #e7ebf2; }
+.workspace-filter-toggle.is-open { color: var(--brand-blue-700); background: #e6edfd; }
+.dark .workspace-filter-toggle, .dark .workspace-load-more { background: #0f1830; border-color: rgba(255, 255, 255, 0.12); color: #93c5fd; }
+.workspace-filter-count { background: var(--brand-blue); }
+
+/* Shell: solid sidebar and bars. */
+.app-sidebar { background: #ffffff !important; border-color: #e7ebf2 !important; box-shadow: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+.dark .app-sidebar { background: #0f1830 !important; border-color: rgba(255, 255, 255, 0.09) !important; }
+.mobile-app-header { background: rgba(238, 241, 247, 0.94) !important; border-bottom: 0 !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+.dark .mobile-app-header { background: rgba(7, 11, 22, 0.94) !important; }
+.workspace-topbar { background: rgba(238, 241, 247, 0.94) !important; border-color: #e7ebf2 !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+.dark .workspace-topbar { background: rgba(7, 11, 22, 0.94) !important; border-color: rgba(255, 255, 255, 0.09) !important; }
+.workspace-global-search { background: #ffffff; border-color: #e7ebf2; border-radius: 14px; }
+.dark .workspace-global-search { background: #0f1830; border-color: rgba(255, 255, 255, 0.12); }
+
+/* Phone tab bar: Home · Receipts · (+) · Customers · More */
+.mobile-bottom-nav { background: #ffffff !important; border-top: 1px solid #e7ebf2 !important; box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.06) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; gap: 0; }
+.dark .mobile-bottom-nav { background: #0f1830 !important; border-color: rgba(255, 255, 255, 0.09) !important; }
+.mobile-bottom-nav-item { color: #64748b; font-size: 0.66rem; }
+.mobile-bottom-nav-item.is-active { color: var(--brand-blue); background: transparent; }
+.dark .mobile-bottom-nav-item.is-active { color: #93c5fd; background: transparent; }
+.mobile-bottom-nav-fab { padding: 0; }
+.mobile-bottom-nav-item.mobile-bottom-nav-fab > .mobile-bottom-nav-fab-circle {
+  display: flex !important;
+  width: 3.25rem !important;
+  height: 3.25rem;
+  overflow: visible;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--brand-blue);
+  color: #ffffff;
+  border: 4px solid #eef1f7;
+  box-shadow: 0 10px 24px -8px rgba(var(--brand-blue-rgb), 0.6);
+  transform: translateY(-14px);
+}
+.dark .mobile-bottom-nav-fab-circle { border-color: #070b16; }
+.mobile-bottom-nav-fab:active .mobile-bottom-nav-fab-circle { transform: translateY(-14px) scale(0.96); }

@@ -238,7 +238,7 @@ function renderServicesHub() {
     <div class="hub-shell">
       <!-- Header: avatar, greeting, quick actions (all pre-existing actions kept) -->
       <div class="flex items-center gap-3 mb-4">
-        <div class="w-11 h-11 rounded-full alb-gradient-brand flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
+        <div class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
           ${hubEsc(userName.charAt(0).toUpperCase())}
         </div>
         <div class="flex-1 min-w-0">

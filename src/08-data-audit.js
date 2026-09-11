@@ -1377,6 +1377,8 @@ const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'sm
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
+  collect: 'receipts',
+  reminders: 'customers',
   'control-center': 'analytics',
   analytics: 'analytics',
   customers: 'customers',
@@ -1414,6 +1416,7 @@ const ALBAYAN_MANAGER_VIEW_ORDER = [
 
 function userCanAccessView(user, view) {
   if (!user) return false;
+  if (String(view || '') === 'more') return true; // launcher page, per-tile gating inside
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   const moduleKey = VIEW_PERMISSION_MODULES[String(view || '')];
   if (!moduleKey) return false;

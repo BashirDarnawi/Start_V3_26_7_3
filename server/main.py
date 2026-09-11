@@ -13754,6 +13754,9 @@ FRONTEND_ROUTES = {
     "/wallet",
     "/plans",
     "/charge-wallet",
+    "/more",
+    "/collect",
+    "/reminders",
     "/account",
 }
 

@@ -1250,6 +1250,74 @@ check('social studio screens are bilingual, RTL-aware and phone friendly with li
   socialStudio.includes('role="switch"') &&
   !socialStudio.includes('<table'));
 
+// ---------- Manager phone shell (2026-09 design: tab bar with +, More, Collect, Reminders) ----------
+const managerShell = read('src/12d-manager-shell.js');
+const serverMain = read('server/main.py');
+
+check('manager shell ships in the startup bundle and the profitability module moved to the admin bundle',
+  bundleManifestJson.files.includes('12d-manager-shell.js') &&
+  !bundleManifestJson.files.includes('12a-analytics-profit.js') &&
+  bundleManifestJson.lazy['admin-tools.js'].includes('12a-analytics-profit.js') &&
+  adminToolsLoader.includes("typeof renderProfitabilityPanel === 'function'") &&
+  adminToolsLoader.includes("can('analytics', 'viewFinancials')") &&
+  views.includes("typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null") &&
+  views.includes("profitability && typeof renderProfitabilityPanel === 'function'") &&
+  (views.match(/if \(typeof openAnalyticsBreakdown === 'function'\) openAnalyticsBreakdown\(/g) || []).length === 3);
+
+check('phone tab bar is Home · Receipts · (+) · Customers · More with permission gating',
+  views.includes("if (typeof renderManagerTabBar === 'function') return renderManagerTabBar();") &&
+  managerShell.includes('function renderManagerTabBar()') &&
+  managerShell.includes("const canAddReceipt = !delivery && currentUserHasPermission('receipts', 'add');") &&
+  managerShell.includes('onclick="showNewReceiptChooser()" class="mobile-bottom-nav-item mobile-bottom-nav-fab"') &&
+  managerShell.includes("onclick=\"navigateTo('more')\"") &&
+  managerShell.includes('function shellCanOpen(viewId)') &&
+  managerShell.includes("lead.filter(entry => shellCanOpen(entry.id))") &&
+  css.includes('.mobile-bottom-nav-item.mobile-bottom-nav-fab > .mobile-bottom-nav-fab-circle') &&
+  views.includes('aria-controls="app-sidebar"') && views.includes('mobile-menu-button'));
+
+check('More, Collect and Reminders are real routed views with the sidebar access rules',
+  views.includes("case 'more': return renderMoreView();") &&
+  views.includes("case 'collect': return renderCollectView();") &&
+  views.includes("case 'reminders': return renderRemindersView();") &&
+  routing.includes("'more': '/more'") && routing.includes("'collect': '/collect'") && routing.includes("'reminders': '/reminders'") &&
+  dataAudit.includes("  collect: 'receipts',\n  reminders: 'customers',") &&
+  dataAudit.includes("if (String(view || '') === 'more') return true;") &&
+  serverMain.includes('"/more",') && serverMain.includes('"/collect",') && serverMain.includes('"/reminders",') &&
+  managerShell.includes("tiles.filter(tile => tile.allowed === undefined ? shellCanOpen(tile.id) : tile.allowed)"));
+
+check('collect-a-debt and reminders delegate to the existing money flows and never invent balances',
+  managerShell.includes('const statsIndex = buildCustomerStatsIndex();') &&
+  managerShell.includes('const stats = getCustomerStats(c.id, statsIndex);') &&
+  managerShell.includes("getReceiptPaymentState(r) === 'not_paid'") &&
+  managerShell.includes("if (unpaid.length === 1 && currentUserHasPermission('receipts', 'markCollected') && typeof openCollectReceiptModal === 'function') {") &&
+  managerShell.includes('if (openCustomerReceipts(cid)) {') &&
+  managerShell.includes("return shellCanOpen('receipts') && (isCurrentUserAdmin() || can('customers', 'viewBalance'));") &&
+  managerShell.includes("if (!can('customers', 'viewContacts')) return;") &&
+  managerShell.includes('const base = buildWhatsAppLink(phone);') &&
+  managerShell.includes('localStorage.setItem(SHELL_REMINDER_LOG_KEY, JSON.stringify(log))') &&
+  !/fetch\(|apiJson\(/.test(managerShell));
+
+check('home hero hides money without analytics.viewFinancials and onboarding only shows in the packaged app',
+  views.includes("renderManagerHomeHero(receipts, ads, canViewFinancials)") &&
+  managerShell.includes('${canViewFinancials ? shellEsc(shellLyd(collectedLyd)) : receiptsThisMonth}') &&
+  managerShell.includes('if (canViewFinancials) {\n    const statsIndex = buildCustomerStatsIndex();') &&
+  managerShell.includes("if (!state.currentUser || IS_STUDIO_SHELL || !shellIsNativeApp()) return false;") &&
+  managerShell.includes("localStorage.getItem(SHELL_ONBOARDED_KEY) !== '1'") &&
+  views.includes("shellShouldShowOnboarding() ? renderMobileOnboarding() : ''") &&
+  (managerShell.match(/touch-target/g) || []).length >= 20 &&
+  !managerShell.includes('<table'));
+
+check('global re-skin is flat: no aurora, solid cards, brand-blue primaries and chips',
+  css.includes('#aurora-bg, .bg-noise { display: none !important; }') &&
+  css.includes('.dark .glass-panel { background: #0f1830;') &&
+  css.includes('.bg-indigo-600, .bg-purple-600, .bg-indigo-500 { background-color: var(--brand-blue) !important; }') &&
+  css.includes('.smart-filter-chip.is-active { color: #ffffff; background: var(--brand-blue);') &&
+  css.includes('.smart-filter-panel.glass-panel { background: transparent;') &&
+  views.includes("Albayan <span class=\"text-lg font-bold text-slate-400\">البيان</span>") &&
+  views.includes("typeof renderSettingsAppearanceCard === 'function'") &&
+  managerShell.includes('function renderSettingsAppearanceCard()') &&
+  managerShell.includes("shellSetTheme('") && managerShell.includes("onclick=\"toggleLanguage()\""));
+
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,

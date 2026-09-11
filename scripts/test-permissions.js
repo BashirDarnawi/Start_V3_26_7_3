@@ -2112,7 +2112,7 @@ console.log('\n=== URLs: every view and modal is addressable ===');
 
 check('every renderView case has a URL path', () => {
   const map = vm.runInContext('VIEW_TO_PATH', sandbox);
-  const views = ['services-hub', 'smart-systems', 'clothes-system', 'service-placeholder', 'wallet', 'plans', 'charge-wallet',
+  const views = ['services-hub', 'smart-systems', 'clothes-system', 'service-placeholder', 'wallet', 'plans', 'charge-wallet', 'more', 'collect', 'reminders',
     'analytics', 'customers', 'receipts', 'pages', 'ads', 'deliveries', 'reconciliation',
     'users', 'audit', 'settings', 'delivery-dashboard', 'no-access'];
   const missing = views.filter(v => !map[v]);

@@ -8494,6 +8494,8 @@ const PLATFORM_ADMIN_ONLY_VIEWS = new Set(['services-hub', 'control-center', 'sm
 
 // View -> permission module mapping (used for landing + access checks)
 const VIEW_PERMISSION_MODULES = {
+  collect: 'receipts',
+  reminders: 'customers',
   'control-center': 'analytics',
   analytics: 'analytics',
   customers: 'customers',
@@ -8531,6 +8533,7 @@ const ALBAYAN_MANAGER_VIEW_ORDER = [
 
 function userCanAccessView(user, view) {
   if (!user) return false;
+  if (String(view || '') === 'more') return true; // launcher page, per-tile gating inside
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   const moduleKey = VIEW_PERMISSION_MODULES[String(view || '')];
   if (!moduleKey) return false;
@@ -14040,7 +14043,10 @@ const VIEW_TO_PATH = {
   'service-placeholder': '/service',
   'wallet': '/wallet',
   'plans': '/plans',
-  'charge-wallet': '/charge-wallet'
+  'charge-wallet': '/charge-wallet',
+  'more': '/more',
+  'collect': '/collect',
+  'reminders': '/reminders'
 };
 
 // Reverse map: path to view
@@ -15814,8 +15820,9 @@ function _renderLoginBrandHeader(subtitle) {
             <div class="w-16 h-16 rounded-3xl mx-auto mb-4 alb-mark alb-mark-dot flex items-center justify-center">
               <span class="text-white text-2xl font-extrabold">A</span>
             </div>
-            <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${t('appName')}</h1>
-            <p class="text-slate-500 mt-2">${subtitle}</p>
+            <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">Albayan <span class="text-lg font-bold text-slate-400">البيان</span></h1>
+            <p class="text-slate-500 mt-1">${state.language === 'ar' ? 'إدارة مكتب الإعلان' : 'Ad office management'}</p>
+            <p class="text-sm text-slate-400 mt-2">${subtitle}</p>
           </div>`;
 }
 
@@ -16300,6 +16307,12 @@ function getWorkspaceViewTitle(view = state.currentView) {
     'delivery-dashboard': 'dashboard',
     'clothes-system': 'clothesSystem'
   };
+  const custom = {
+    more: state.language === 'ar' ? 'المزيد' : 'More',
+    collect: state.language === 'ar' ? 'تحصيل دين' : 'Collect a debt',
+    reminders: state.language === 'ar' ? 'التذكيرات' : 'Reminders'
+  }[view];
+  if (custom) return custom;
   const key = keyByView[view];
   return key ? t(key) : t('adManager');
 }
@@ -16369,6 +16382,8 @@ function canOpenWorkspaceView(view) {
 }
 
 function renderMobileBottomNavigation() {
+  // 2026-09 design: Home · Receipts · (+) · Customers · More, see 12d-manager-shell.js.
+  if (typeof renderManagerTabBar === 'function') return renderManagerTabBar();
   const isAr = state.language === 'ar';
   const candidates = isDeliveryRole(state.currentUser?.role)
     ? [
@@ -16408,8 +16423,12 @@ function renderMainApp(viewHTML = null) {
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
       <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
         ${showSidebar ? `
-        <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-3 md:hidden flex justify-between items-center">
-          <div class="min-w-0 truncate font-bold">${t('adManager')}</div>
+        <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
+          <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
+            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${t('adManager')}</div>
+          </div>
           <div class="flex items-center gap-1">
             <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
             <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
@@ -16421,6 +16440,7 @@ function renderMainApp(viewHTML = null) {
       </main>
       ${showSidebar ? renderMobileBottomNavigation() : ''}
     </div>
+    ${typeof shellShouldShowOnboarding === 'function' && shellShouldShowOnboarding() ? renderMobileOnboarding() : ''}
   `;
 }
 
@@ -16613,6 +16633,9 @@ function renderView() {
       return renderAdsStudioLoadingState();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
+    case 'more': return renderMoreView();
+    case 'collect': return renderCollectView();
+    case 'reminders': return renderRemindersView();
     case 'plans': return renderPlansView();
     case 'charge-wallet': return renderChargeWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -16636,7 +16659,7 @@ function renderNoAccessView() {
   return `
     <div class="min-h-[70vh] flex items-center justify-center">
       <div class="text-center max-w-md mx-auto p-8">
-        <div class="w-24 h-24 rounded-full alb-gradient-brand flex items-center justify-center mx-auto mb-6 shadow-2xl">
+        <div class="w-24 h-24 rounded-full alb-mark flex items-center justify-center mx-auto mb-6 shadow-2xl">
           <i data-lucide="lock" class="w-12 h-12 text-white"></i>
         </div>
         <h1 class="text-3xl font-bold text-slate-800 dark:text-white mb-4">
@@ -16811,7 +16834,7 @@ function renderAnalyticsView() {
   const canViewLiquidity = isCurrentUserAdmin();
   const liquidity = canViewLiquidity ? getLiquiditySnapshot() : null;
   const profitability = canViewFinancials && isCurrentUserAdmin()
-    ? getCurrentProfitabilitySnapshot(ads)
+    ? (typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null)
     : null;
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
@@ -16948,6 +16971,7 @@ function renderAnalyticsView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
+      ${typeof renderManagerHomeHero === 'function' ? renderManagerHomeHero(receipts, ads, canViewFinancials) : ''}
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
@@ -16968,7 +16992,7 @@ function renderAnalyticsView() {
         ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
         ` : `
         <!-- Show paid ad revenue separately for clarity -->
-        <button type="button" onclick="openAnalyticsBreakdown('ad-revenue')" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform text-left w-full">
+        <button type="button" onclick="if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('ad-revenue')" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform text-left w-full">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -16981,7 +17005,7 @@ function renderAnalyticsView() {
             </div>
           </div>
         </button>
-        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "openAnalyticsBreakdown('receipts-volume')")}
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('receipts-volume')")}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -16998,7 +17022,7 @@ function renderAnalyticsView() {
         </div>
 
         <!-- Collection Status Card -->
-        <button type="button" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer text-left w-full" onclick="openAnalyticsBreakdown('collection-status')">
+        <button type="button" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer text-left w-full" onclick="if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('collection-status')">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -17026,7 +17050,7 @@ function renderAnalyticsView() {
         `}
       </div>
 
-      ${profitability ? renderProfitabilityPanel(profitability, isAr) : ''}
+      ${profitability && typeof renderProfitabilityPanel === 'function' ? renderProfitabilityPanel(profitability, isAr) : ''}
 
       ${canViewLiquidity && liquidity ? (() => {
         const covered = liquidity.coveragePercent >= 100;
@@ -17644,7 +17668,7 @@ function renderCustomersView() {
       </div>
 
       <!-- Stats Cards (money figures require customers.viewBalance) -->
-      <div class="grid grid-cols-1 ${canSeeCustomerBalances ? 'md:grid-cols-3' : ''} gap-6">
+      <div class="grid ${canSeeCustomerBalances ? 'grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
@@ -21847,6 +21871,7 @@ function renderSettingsView() {
   return `
     <div class="space-y-6 animate-fade-in-up">
       <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('settings')}</h1>
+      ${typeof renderSettingsAppearanceCard === 'function' ? `<div>${renderSettingsAppearanceCard()}</div>` : ''}
 
       <!-- Security -->
       <div class="glass-panel rounded-2xl p-6">
@@ -22145,6 +22170,8 @@ function renderSettingsView() {
           <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'سجلات التدقيق:' : 'Audit Logs:'}</span><span class="font-bold">${getVisibleRecords(state.logs).length}</span></div>
         </div>
       </div>
+
+      <button type="button" onclick="handleLogout()" class="touch-target w-full min-h-12 rounded-2xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 font-bold flex items-center justify-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${isAr ? 'تسجيل الخروج' : 'Sign out'}</button>
     </div>
   `;
 }
@@ -22388,7 +22415,7 @@ function renderServicesHub() {
     <div class="hub-shell">
       <!-- Header: avatar, greeting, quick actions (all pre-existing actions kept) -->
       <div class="flex items-center gap-3 mb-4">
-        <div class="w-11 h-11 rounded-full alb-gradient-brand flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
+        <div class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white text-base font-bold shadow-md flex-shrink-0">
           ${hubEsc(userName.charAt(0).toUpperCase())}
         </div>
         <div class="flex-1 min-w-0">
@@ -23177,11 +23204,11 @@ function _adminToolsBundleUrl() {
 }
 
 function adminToolsBundleReady() {
-  return typeof renderControlCenterView === 'function' && typeof showPageMergeDialog === 'function';
+  return typeof renderControlCenterView === 'function' && typeof showPageMergeDialog === 'function' && typeof renderProfitabilityPanel === 'function';
 }
 
 // Views whose HTML changes once the bundle exists (merge buttons, Control Center).
-const _ADMIN_TOOLS_VIEWS = new Set(['control-center', 'ads', 'pages', 'customers']);
+const _ADMIN_TOOLS_VIEWS = new Set(['control-center', 'ads', 'pages', 'customers', 'analytics']);
 
 function ensureAdminToolsLoaded() {
   if (adminToolsBundleReady()) {
@@ -23226,7 +23253,9 @@ function retryAdminToolsLoad() {
 function preloadAdminToolsForCurrentUser() {
   try {
     if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return;
-    if (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin()) ensureAdminToolsLoaded();
+    const wantsTools = (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin())
+      || (typeof can === 'function' && can('analytics', 'viewFinancials'));
+    if (wantsTools) ensureAdminToolsLoaded();
   } catch (_) {}
 }
 
@@ -23254,537 +23283,560 @@ if (/^\/control-center(\/|$)/.test(window.location.pathname || '')) {
   try { ensureAdminToolsLoaded(); } catch (_) {}
 }
 // ==========================================
-// ANALYTICS BREAKDOWNS + META PROFIT LEDGER
+// ALBAYAN MANAGER PHONE SHELL (2026-09 design refresh)
 // ==========================================
+// The "Albayan Studio" design gives the manager a phone-first shell: a home
+// hero with quick actions, a bottom tab bar with a centre "+", a More page,
+// a Collect-a-debt flow with WhatsApp reminders, appearance rows in Settings
+// and a one-time onboarding on the packaged app. Every piece here delegates
+// to the EXISTING flows (receipt chooser, collect modal, customer receipts,
+// theme/language toggles, logout) — nothing about money or permissions is
+// re-implemented, only presented the new way. Desktop keeps the sidebar and
+// simply shares the same cards.
 
-const ANALYTICS_PERIOD_COUNTS = Object.freeze({ day: 30, week: 12, month: 12 });
-let _analyticsBreakdownState = { metric: '', granularity: 'day', trigger: null };
-let _dollarPurchaseTrigger = null;
+// ---------- small shared helpers ----------
 
-function analyticsNumber(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
+function shellText(en, ar) {
+  return state.language === 'ar' ? ar : en;
 }
 
-function analyticsMoney(value, digits = 2) {
-  return analyticsNumber(value).toLocaleString('en-US', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits
-  });
-}
-
-function analyticsEscape(value) {
+function shellEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
 }
 
-function analyticsDateValue(value) {
-  const time = new Date(value || 0).getTime();
-  return Number.isFinite(time) && time > 0 ? time : 0;
+function shellInitial(name) {
+  const text = String(name || '').trim();
+  return text ? text.charAt(0).toUpperCase() : '?';
 }
 
-function analyticsLocalDateISO(value = new Date()) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (!Number.isFinite(date.getTime())) return '';
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 10);
+// Money in LYD with no trailing zeros for whole numbers ("1,250 LYD").
+function shellLyd(amount) {
+  const n = Number(amount) || 0;
+  const rounded = Math.round(n * 100) / 100;
+  const text = Number.isInteger(rounded)
+    ? rounded.toLocaleString('en-US')
+    : rounded.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${text} ${shellText('LYD', 'د.ل')}`;
 }
 
-function getAdActualSpendUSD(ad) {
-  if (!ad || ad._deleted) return 0;
-  const frozenFinalSpend = getFrozenFinalAdSpendUSD(ad);
-  if (frozenFinalSpend !== null) return frozenFinalSpend;
-  const metaMinor = Number(ad.metaSpendMinor);
-  if (ad.metaAdId && Number.isFinite(metaMinor) && metaMinor >= 0) {
-    return Math.max(0, metaMinor / 100);
-  }
-  const recorded = Number(ad.spentUSD);
-  if (Number.isFinite(recorded) && recorded >= 0) return recorded;
-  const status = String(ad.status || '').toLowerCase();
-  if (['stopped', 'completed', 'canceled', 'cancelled', 'lost'].includes(status)) {
-    return Math.max(0, analyticsNumber(getAdSpendUSD(ad)));
-  }
-  // An active manual ad has only a planned budget, not verified spend. Treating
-  // that plan as cost would overstate expenses and consume dollar inventory.
-  return 0;
+function shellUsd(amount) {
+  return `$${(Number(amount) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function getAdProfitEventTime(ad) {
-  const status = String(ad?.status || ad?.metaEffectiveStatus || '').toLowerCase();
-  const isFinal = ['stopped', 'completed', 'canceled', 'cancelled', 'lost', 'archived'].includes(status);
-  // A completed ad is priced at the date its spend finished, not the date a
-  // later sync happened to read it. Active ads use the latest spend snapshot.
-  const values = isFinal
-    ? [ad?.stoppedAt, ad?.endDate, ad?.metaLastSyncedAt, ad?.startDate, ad?.createdAt, ad?._created]
-    : [ad?.metaLastSyncedAt, ad?.stoppedAt, ad?.endDate, ad?.startDate, ad?.createdAt, ad?._created];
-  for (const value of values) {
-    const time = analyticsDateValue(value);
-    if (time) return time;
-  }
-  return Date.now();
+function shellIsNativeApp() {
+  try {
+    return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+  } catch (_) { return false; }
 }
 
-function getAdSaleRateLYD(ad) {
-  const helperRate = typeof getAdSpendExchangeRate === 'function'
-    ? analyticsNumber(getAdSpendExchangeRate(ad))
-    : 0;
-  if (helperRate > 0) return helperRate;
-  const explicit = analyticsNumber(ad?.exchangeRate || ad?.rate);
-  if (explicit > 0) return explicit;
-  const amount = analyticsNumber(ad?.amountUSD);
-  const local = analyticsNumber(ad?.amountLocal);
-  return amount > 0 && local > 0 ? local / amount : 0;
+function shellReceiptLyd(receipt) {
+  const local = Number(receipt?.amountLocal);
+  if (Number.isFinite(local) && local > 0) return local;
+  const usd = Number(receipt?.amountUSD) || 0;
+  const rate = Number(receipt?.exchangeRate) || Number(state.defaultExchangeRate) || 0;
+  return usd * rate;
 }
 
-/**
- * Build a conservative FIFO profit snapshot. Each USD purchase is a cost lot;
- * spend can only consume lots that existed on/before the ad's observation date.
- * This prevents a newly-entered purchase from silently pricing old spend.
- */
-function buildAdProfitabilitySnapshot(purchases, ads) {
-  const lots = (Array.isArray(purchases) ? purchases : [])
-    .filter(row => row && !row._deleted && analyticsNumber(row.amountUSD) > 0 && analyticsNumber(row.rateLYD) > 0)
-    .map(row => {
-      const amountCents = Math.max(0, Math.round(analyticsNumber(row.amountUSD) * 100));
-      const dateMs = analyticsDateValue(`${String(row.purchaseDate || '').slice(0, 10)}T00:00:00`) || analyticsDateValue(row.createdAt || row._created);
-      return {
-        id: String(row.id || ''),
-        dateMs,
-        purchaseDate: String(row.purchaseDate || '').slice(0, 10),
-        amountCents,
-        remainingCents: amountCents,
-        rateLYD: analyticsNumber(row.rateLYD),
-        source: String(row.source || '')
-      };
-    })
-    .sort((a, b) => a.dateMs - b.dateMs || a.id.localeCompare(b.id));
+function shellReceiptNumber(receipt) {
+  return String(receipt?.finalReceiptNo || receipt?.serialNumber || receipt?.tempReceiptNo || '').trim();
+}
 
-  const adEvents = (Array.isArray(ads) ? ads : [])
-    .filter(ad => ad && !ad._deleted && ad.recordType !== 'receipt')
-    .map(ad => ({ ad, time: getAdProfitEventTime(ad), spendCents: Math.max(0, Math.round(getAdActualSpendUSD(ad) * 100)) }))
-    .sort((a, b) => a.time - b.time || String(a.ad.id || '').localeCompare(String(b.ad.id || '')));
+function shellReceiptStatusMeta(receipt) {
+  const paymentState = getReceiptPaymentState(receipt);
+  if (paymentState === 'paid') return { label: shellText('Paid', 'مدفوع'), tone: 'emerald' };
+  if (paymentState === 'canceled') return { label: shellText('Canceled', 'ملغى'), tone: 'slate' };
+  if (paymentState === 'lost') return { label: shellText('Lost', 'ضائع'), tone: 'rose' };
+  return { label: shellText('Unpaid', 'غير مدفوع'), tone: 'amber' };
+}
 
-  let nextLot = 0;
-  const available = [];
-  const rows = [];
-  for (const event of adEvents) {
-    while (nextLot < lots.length && lots[nextLot].dateMs <= event.time) available.push(lots[nextLot++]);
-    let neededCents = event.spendCents;
-    let costLYD = 0;
-    const allocations = [];
-    for (const lot of available) {
-      if (neededCents <= 0) break;
-      if (lot.remainingCents <= 0) continue;
-      const usedCents = Math.min(neededCents, lot.remainingCents);
-      lot.remainingCents -= usedCents;
-      neededCents -= usedCents;
-      const usedUSD = usedCents / 100;
-      const lotCost = usedUSD * lot.rateLYD;
-      costLYD += lotCost;
-      allocations.push({ purchaseId: lot.id, amountUSD: usedUSD, rateLYD: lot.rateLYD, costLYD: lotCost });
-    }
-    const coveredCents = event.spendCents - neededCents;
-    const paid = typeof getAdPaymentState === 'function'
-      ? getAdPaymentState(event.ad) === 'paid'
-      : !!event.ad.isPaid;
-    const saleRateLYD = getAdSaleRateLYD(event.ad);
-    const recognizedRevenueLYD = paid && saleRateLYD > 0 ? (coveredCents / 100) * saleRateLYD : 0;
-    rows.push({
-      ad: event.ad,
-      adId: String(event.ad.id || ''),
-      eventTime: event.time,
-      paid,
-      soldBudgetUSD: Math.max(0, analyticsNumber(event.ad.amountUSD)),
-      soldBudgetLYD: Math.max(0, analyticsNumber(event.ad.amountLocal)) || Math.max(0, analyticsNumber(event.ad.amountUSD)) * saleRateLYD,
-      actualSpendUSD: event.spendCents / 100,
-      coveredUSD: coveredCents / 100,
-      unpricedUSD: neededCents / 100,
-      saleRateLYD,
-      costLYD,
-      recognizedRevenueLYD,
-      knownProfitLYD: recognizedRevenueLYD - costLYD,
-      allocations
+function shellPill(label, tone = 'slate') {
+  const tones = {
+    emerald: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+    amber: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+    rose: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+    blue: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+  };
+  return `<span class="inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${tones[tone] || tones.slate}">${label}</span>`;
+}
+
+// Same gate the sidebar uses, so the More page and the tab bar never show a
+// destination the user cannot open.
+const SHELL_VIEW_MODULES = Object.freeze({
+  'control-center': 'analytics', analytics: 'analytics', customers: 'customers', receipts: 'receipts',
+  pages: 'pages', ads: 'ads', deliveries: 'deliveries', reconciliation: 'analytics', users: 'users',
+  audit: 'auditLogs', settings: 'settings', 'clothes-system': 'clothesProducts'
+});
+
+function shellCanOpen(viewId) {
+  if (isAdminRole(state.currentUser?.role)) return true;
+  if (isDeliveryRole(state.currentUser?.role) && (viewId === 'delivery-dashboard' || viewId === 'deliveries')) return true;
+  const moduleName = SHELL_VIEW_MODULES[viewId];
+  if (!moduleName) return false;
+  return currentUserHasPermission(moduleName, 'view') || currentUserHasPermission(moduleName, 'viewOwn');
+}
+
+function shellCanCollect() {
+  return shellCanOpen('receipts') && (isCurrentUserAdmin() || can('customers', 'viewBalance'));
+}
+
+// ---------- bottom tab bar (Home · Receipts · + · Customers · More) ----------
+
+function renderManagerTabBar() {
+  const isAr = state.language === 'ar';
+  const delivery = isDeliveryRole(state.currentUser?.role);
+  const lead = delivery
+    ? [{ id: 'delivery-dashboard', icon: 'layout-dashboard', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'deliveries', icon: 'truck', label: isAr ? 'التوصيل' : 'Delivery' }]
+    : [{ id: 'analytics', icon: 'house', label: isAr ? 'الرئيسية' : 'Home' }, { id: 'receipts', icon: 'receipt', label: isAr ? 'الوصولات' : 'Receipts' }];
+  const trail = delivery ? [] : [{ id: 'customers', icon: 'users', label: isAr ? 'العملاء' : 'Customers' }];
+  const canAddReceipt = !delivery && currentUserHasPermission('receipts', 'add');
+  const item = (entry) => `
+      <button type="button" onclick="navigateTo('${entry.id}')" class="mobile-bottom-nav-item ${state.currentView === entry.id ? 'is-active' : ''}" aria-current="${state.currentView === entry.id ? 'page' : 'false'}">
+        <i data-lucide="${entry.icon}" class="h-5 w-5"></i>
+        <span>${entry.label}</span>
+      </button>`;
+  return `
+    <nav class="mobile-bottom-nav" aria-label="${isAr ? 'التنقل السريع' : 'Quick navigation'}">
+      ${lead.filter(entry => shellCanOpen(entry.id)).map(item).join('')}
+      ${canAddReceipt ? `
+      <button type="button" onclick="showNewReceiptChooser()" class="mobile-bottom-nav-item mobile-bottom-nav-fab" aria-label="${isAr ? 'وصل جديد' : 'New receipt'}">
+        <span class="mobile-bottom-nav-fab-circle"><i data-lucide="plus" class="h-6 w-6"></i></span>
+      </button>` : ''}
+      ${trail.filter(entry => shellCanOpen(entry.id)).map(item).join('')}
+      <button type="button" onclick="navigateTo('more')" class="mobile-bottom-nav-item ${state.currentView === 'more' ? 'is-active' : ''}" aria-label="${isAr ? 'المزيد' : 'More'}">
+        <i data-lucide="grid-3x3" class="h-5 w-5"></i>
+        <span>${isAr ? 'المزيد' : 'More'}</span>
+      </button>
+    </nav>
+  `;
+}
+
+// ---------- More page ----------
+
+function shellMoreTiles() {
+  const isAr = state.language === 'ar';
+  const admin = isCurrentUserAdmin();
+  const receipts = Array.isArray(state.receipts) ? getVisibleRecords(state.receipts) : [];
+  const pendingDeliveries = receipts.filter(r => ['Needs Delivery', 'In Progress'].includes(String(r?.deliveryStatus || '').trim())).length;
+  const activeAds = (Array.isArray(state.ads) ? getVisibleRecords(state.ads) : []).filter(a => a && a.recordType !== 'receipt' && String(a.status || '') === 'Active').length;
+  const pagesCount = (Array.isArray(state.pages) ? getVisibleRecords(state.pages) : []).length;
+  const usersCount = (Array.isArray(state.users) ? getVisibleRecords(state.users) : []).length;
+  const tiles = [
+    { id: 'pages', icon: 'file-text', color: 'from-sky-500 to-blue-500', name: isAr ? 'الصفحات' : 'Pages', sub: isAr ? `${pagesCount} مُدارة` : `${pagesCount} managed` },
+    { id: 'ads', icon: 'megaphone', color: 'from-indigo-500 to-violet-500', name: isAr ? 'الحملات الإعلانية' : 'Ad campaigns', sub: isAr ? `${activeAds} نشطة` : `${activeAds} active` },
+    { id: 'deliveries', icon: 'truck', color: 'from-emerald-500 to-teal-500', name: isAr ? 'التوصيل' : 'Deliveries', sub: isAr ? `${pendingDeliveries} معلّقة` : `${pendingDeliveries} pending` },
+    { id: 'reconciliation', icon: 'clipboard-check', color: 'from-amber-500 to-orange-500', name: isAr ? 'التسوية' : 'Reconciliation', sub: isAr ? 'النقد اليومي' : 'Daily cash' },
+    { id: 'collect', icon: 'hand-coins', color: 'from-rose-500 to-pink-500', name: isAr ? 'تحصيل دين' : 'Collect a debt', sub: isAr ? 'المستحقات والتذكيرات' : 'Debts & reminders', allowed: shellCanCollect() },
+    { id: 'users', icon: 'users', color: 'from-blue-500 to-cyan-500', name: isAr ? 'الفريق' : 'Team', sub: isAr ? `${usersCount} أعضاء` : `${usersCount} members` },
+    { id: 'audit', icon: 'file-clock', color: 'from-slate-500 to-slate-600', name: isAr ? 'سجل التدقيق' : 'Audit log', sub: isAr ? 'كل النشاط' : 'All activity' },
+    { id: 'settings', icon: 'settings', color: 'from-slate-600 to-slate-700', name: isAr ? 'الإعدادات' : 'Settings', sub: isAr ? 'المظهر · الحساب' : 'Theme · account' },
+    { id: 'control-center', icon: 'gauge', color: 'from-violet-600 to-fuchsia-600', name: isAr ? 'مركز التحكم' : 'Control Center', sub: isAr ? 'الباقات والأدوات' : 'Plans & tools', allowed: admin },
+    { id: 'wallet', icon: 'wallet', color: 'from-emerald-600 to-green-500', name: isAr ? 'المحفظة' : 'Wallet', sub: isAr ? 'الرصيد والتحويلات' : 'Balance & transfers', allowed: admin },
+    { id: 'services-hub', icon: 'grid-3x3', color: 'from-blue-600 to-cyan-500', name: isAr ? 'مركز الخدمات' : 'Services Hub', sub: isAr ? 'كل خدمات المنصة' : 'All platform services', allowed: admin },
+    { id: 'clothes-system', icon: 'shirt', color: 'from-rose-500 to-pink-500', name: isAr ? 'نظام الملابس' : 'Clothes System', sub: isAr ? 'المستودع والشحنات' : 'Warehouse & shipments' },
+    { id: 'ads-studio', icon: 'rocket', color: 'from-blue-600 to-cyan-500', name: isAr ? 'استوديو الإعلانات' : 'Ads Studio', sub: isAr ? 'منشورات وردود تلقائية' : 'Posts & auto-replies', allowed: admin || hasSubscription('ad_maker') }
+  ];
+  return tiles.filter(tile => tile.allowed === undefined ? shellCanOpen(tile.id) : tile.allowed);
+}
+
+function renderMoreView() {
+  const isAr = state.language === 'ar';
+  const tiles = shellMoreTiles();
+  const user = state.currentUser || {};
+  return `
+    <div class="hub-shell">
+      <h1 class="text-[26px] font-extrabold tracking-tight text-slate-900 dark:text-white mb-4">${isAr ? 'المزيد' : 'More'}</h1>
+      <button type="button" onclick="editUser('${shellEsc(user.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 mb-5 text-start touch-target">
+        <span class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white font-bold flex-shrink-0">${shellEsc(shellInitial(user.name))}</span>
+        <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(user.role || '')}</span></span>
+        <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
+      </button>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        ${tiles.map(tile => `
+          <button type="button" onclick="navigateTo('${tile.id}')" class="hub-card hub-tile w-full p-4 text-start touch-target">
+            <span class="w-11 h-11 rounded-2xl bg-gradient-to-br ${tile.color} flex items-center justify-center text-white shadow-md"><i data-lucide="${tile.icon}" class="w-5 h-5"></i></span>
+            <span class="mt-3 block truncate text-sm font-bold text-slate-900 dark:text-white">${tile.name}</span>
+            <span class="block truncate text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">${tile.sub}</span>
+          </button>`).join('')}
+      </div>
+      <div class="mt-6 grid grid-cols-2 gap-2">
+        <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(state.theme)}</button>
+        <button type="button" onclick="toggleLanguage()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="globe" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
+      </div>
+      <button type="button" onclick="handleLogout()" class="touch-target mt-3 w-full min-h-12 rounded-2xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 font-bold flex items-center justify-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${t('logout')}</button>
+      <div class="mt-3">${renderAlwaysAvailableAccountLinks()}</div>
+    </div>
+  `;
+}
+
+// ---------- Home hero (top of the analytics view) ----------
+
+function renderManagerHomeHero(receipts, ads, canViewFinancials) {
+  const isAr = state.language === 'ar';
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
+  const inWindow = (value, from, to) => { const ts = new Date(value || 0).getTime(); return Number.isFinite(ts) && ts >= from && ts < to; };
+  const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r));
+  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(r.createdAt || r.startDate, monthStart, Infinity));
+  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(r.createdAt || r.startDate, prevStart, monthStart));
+  const collectedLyd = paidThisMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
+  const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
+  const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
+  const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
+  const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
+  const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.createdAt || a.startDate, monthStart, Infinity)).reduce((sum, a) => sum + getAdSpendUSD(a), 0);
+  let owedLyd = 0;
+  let owedCount = 0;
+  if (canViewFinancials) {
+    const statsIndex = buildCustomerStatsIndex();
+    getCustomersVisibleToCurrentUser().forEach(c => {
+      const stats = getCustomerStats(c.id, statsIndex);
+      if (stats.balance < -0.005) {
+        owedCount += 1;
+        const lyd = Number(stats.balanceLYD);
+        owedLyd += Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
+      }
     });
   }
-
-  while (nextLot < lots.length) available.push(lots[nextLot++]);
-  const visibleLots = lots.map(lot => ({ ...lot, remainingUSD: lot.remainingCents / 100 }));
-  const totalPurchasedUSD = visibleLots.reduce((sum, lot) => sum + lot.amountCents / 100, 0);
-  const totalPurchaseCostLYD = visibleLots.reduce((sum, lot) => sum + (lot.amountCents / 100) * lot.rateLYD, 0);
-  const inventoryUSD = visibleLots.reduce((sum, lot) => sum + lot.remainingUSD, 0);
-  const inventoryCostLYD = visibleLots.reduce((sum, lot) => sum + lot.remainingUSD * lot.rateLYD, 0);
-  const paidRows = rows.filter(row => row.paid);
-  return {
-    lots: visibleLots,
-    rows,
-    rowsByAdId: new Map(rows.map(row => [row.adId, row])),
-    totalPurchasedUSD,
-    totalPurchaseCostLYD,
-    inventoryUSD,
-    inventoryCostLYD,
-    soldBudgetUSD: rows.reduce((sum, row) => sum + row.soldBudgetUSD, 0),
-    actualSpendUSD: rows.reduce((sum, row) => sum + row.actualSpendUSD, 0),
-    paidActualSpendUSD: paidRows.reduce((sum, row) => sum + row.actualSpendUSD, 0),
-    paidRevenueLYD: paidRows.reduce((sum, row) => sum + row.recognizedRevenueLYD, 0),
-    paidCostLYD: paidRows.reduce((sum, row) => sum + row.costLYD, 0),
-    knownGrossProfitLYD: paidRows.reduce((sum, row) => sum + row.knownProfitLYD, 0),
-    unpricedSpendUSD: rows.reduce((sum, row) => sum + row.unpricedUSD, 0),
-    unpaidSpendUSD: rows.filter(row => !row.paid).reduce((sum, row) => sum + row.actualSpendUSD, 0),
-    missingSaleRateUSD: paidRows.filter(row => row.saleRateLYD <= 0).reduce((sum, row) => sum + row.coveredUSD, 0)
-  };
-}
-
-function getCurrentProfitabilitySnapshot(adsOverride) {
-  return buildAdProfitabilitySnapshot(
-    getVisibleRecords(state.dollarPurchases || []),
-    Array.isArray(adsOverride) ? adsOverride : getVisibleRecords(state.ads || [])
-  );
-}
-
-function analyticsStartOfDay(value) {
-  const date = new Date(value);
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-function analyticsPeriods(granularity, nowValue) {
-  const kind = ANALYTICS_PERIOD_COUNTS[granularity] ? granularity : 'day';
-  const count = ANALYTICS_PERIOD_COUNTS[kind];
-  const now = analyticsStartOfDay(nowValue || Date.now());
-  let current;
-  if (kind === 'week') {
-    current = new Date(now);
-    const day = current.getDay() || 7;
-    current.setDate(current.getDate() - day + 1);
-  } else if (kind === 'month') {
-    current = new Date(now.getFullYear(), now.getMonth(), 1);
-  } else current = now;
-
-  const periods = [];
-  for (let offset = count - 1; offset >= 0; offset -= 1) {
-    let start;
-    if (kind === 'month') start = new Date(current.getFullYear(), current.getMonth() - offset, 1);
-    else {
-      start = new Date(current);
-      start.setDate(start.getDate() - offset * (kind === 'week' ? 7 : 1));
-    }
-    let end;
-    if (kind === 'month') end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
-    else {
-      end = new Date(start);
-      end.setDate(end.getDate() + (kind === 'week' ? 7 : 1));
-    }
-    const label = kind === 'month'
-      ? start.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
-      : kind === 'week'
-        ? `${start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}`
-        : start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
-    periods.push({ start: start.getTime(), end: end.getTime(), label, count: 0, primaryUSD: 0, secondaryUSD: 0, profitLYD: 0 });
-  }
-  return periods;
-}
-
-function analyticsRecordTime(record, type) {
-  const candidates = type === 'receipt'
-    ? [record?.receiptDate, record?.date, record?.createdAt, record?._created]
-    : [record?.startDate, record?.createdAt, record?._created];
-  for (const value of candidates) {
-    const time = analyticsDateValue(value);
-    if (time) return time;
-  }
-  return 0;
-}
-
-function buildAnalyticsBreakdown(metric, granularity, options = {}) {
-  const periods = analyticsPeriods(granularity, options.now || Date.now());
-  const ads = Array.isArray(options.ads) ? options.ads : getVisibleRecords(state.ads || []);
-  const receipts = (Array.isArray(options.receipts) ? options.receipts : getVisibleRecords(state.receipts || []))
-    .filter(row => row && !row._deleted && (typeof isTransferInReceipt !== 'function' || !isTransferInReceipt(row)));
-  const profit = options.profitSnapshot || buildAdProfitabilitySnapshot(options.purchases || state.dollarPurchases || [], ads);
-  const findPeriod = time => periods.find(period => time >= period.start && time < period.end);
-
-  if (metric === 'ad-revenue') {
-    for (const ad of ads) {
-      if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
-      const paid = typeof getAdPaymentState === 'function' ? getAdPaymentState(ad) === 'paid' : !!ad.isPaid;
-      if (!paid) continue;
-      const period = findPeriod(analyticsRecordTime(ad, 'ad'));
-      if (!period) continue;
-      const profitRow = profit.rowsByAdId.get(String(ad.id || ''));
-      period.count += 1;
-      period.primaryUSD += Math.max(0, analyticsNumber(getAdSpendUSD(ad)));
-      period.secondaryUSD += profitRow?.actualSpendUSD || 0;
-      period.profitLYD += profitRow?.knownProfitLYD || 0;
-    }
-  } else {
-    for (const receipt of receipts) {
-      const period = findPeriod(analyticsRecordTime(receipt, 'receipt'));
-      if (!period) continue;
-      const amount = Math.max(0, analyticsNumber(receipt.amountUSD));
-      period.count += 1;
-      if (metric === 'collection-status') {
-        if (receipt.collected) period.primaryUSD += amount;
-        else period.secondaryUSD += amount;
-      } else period.primaryUSD += amount;
-    }
-  }
-  return { metric, granularity: ANALYTICS_PERIOD_COUNTS[granularity] ? granularity : 'day', periods };
-}
-
-function analyticsMetricTitle(metric, isAr) {
-  const titles = {
-    'ad-revenue': isAr ? 'تفصيل إيراد الإعلانات المدفوعة' : 'Paid Ad Revenue Breakdown',
-    'receipts-volume': isAr ? 'تفصيل حجم الوصولات' : 'Receipts Volume Breakdown',
-    'collection-status': isAr ? 'تفصيل حالة التحصيل' : 'Collection Status Breakdown'
-  };
-  return titles[metric] || titles['ad-revenue'];
-}
-
-function renderAnalyticsBreakdownDialog() {
-  const root = document.getElementById('analytics-breakdown-dialog');
-  if (!root) return;
-  if (typeof can !== 'function' || !can('analytics', 'viewFinancials')) {
-    closeAnalyticsBreakdown(false);
-    return;
-  }
-  const isAr = state.language === 'ar';
-  const data = buildAnalyticsBreakdown(_analyticsBreakdownState.metric, _analyticsBreakdownState.granularity);
-  const maxValue = Math.max(1, ...data.periods.map(row => row.primaryUSD + row.secondaryUSD));
-  const showProfit = isCurrentUserAdmin() && _analyticsBreakdownState.metric === 'ad-revenue';
-  const metric = _analyticsBreakdownState.metric;
-  const labels = metric === 'collection-status'
-    ? { primary: isAr ? 'محصل' : 'Collected', secondary: isAr ? 'غير محصل' : 'Outstanding' }
-    : metric === 'ad-revenue'
-      ? { primary: isAr ? 'إيراد مسجل' : 'Booked revenue', secondary: isAr ? 'إنفاق فعلي' : 'Actual spend' }
-      : { primary: isAr ? 'قيمة الوصولات' : 'Receipt value', secondary: '' };
-  const totals = data.periods.reduce((acc, row) => ({
-    count: acc.count + row.count,
-    primary: acc.primary + row.primaryUSD,
-    secondary: acc.secondary + row.secondaryUSD,
-    profit: acc.profit + row.profitLYD
-  }), { count: 0, primary: 0, secondary: 0, profit: 0 });
-
-  root.innerHTML = `
-    <div class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm" onclick="closeAnalyticsBreakdown()"></div>
-    <section role="dialog" aria-modal="true" aria-labelledby="analytics-breakdown-title" dir="${isAr ? 'rtl' : 'ltr'}"
-      class="fixed inset-x-3 top-4 bottom-4 sm:inset-x-[8%] lg:inset-x-[16%] glass-panel rounded-3xl shadow-2xl overflow-hidden flex flex-col">
-      <header class="p-4 sm:p-6 border-b border-slate-200/70 dark:border-slate-700 flex items-start justify-between gap-4">
-        <div>
-          <h2 id="analytics-breakdown-title" class="text-xl font-bold text-slate-900 dark:text-white">${analyticsMetricTitle(metric, isAr)}</h2>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? 'اختر يومي أو أسبوعي أو شهري لفهم التغيرات بوضوح.' : 'Switch between daily, weekly, and monthly views to understand the trend.'}</p>
-        </div>
-        <button type="button" onclick="closeAnalyticsBreakdown()" aria-label="Close" class="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"><i data-lucide="x" class="w-5 h-5"></i></button>
-      </header>
-      <div class="p-4 sm:p-6 overflow-y-auto flex-1">
-        <div class="grid grid-cols-3 gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl mb-5">
-          ${['day', 'week', 'month'].map(kind => `<button type="button" onclick="setAnalyticsBreakdownGranularity('${kind}')" class="px-3 py-2 rounded-lg text-sm font-semibold ${data.granularity === kind ? 'bg-white dark:bg-slate-700 text-indigo-600 shadow-sm' : 'text-slate-500'}">${kind === 'day' ? (isAr ? 'يومي' : 'Daily') : kind === 'week' ? (isAr ? 'أسبوعي' : 'Weekly') : (isAr ? 'شهري' : 'Monthly')}</button>`).join('')}
-        </div>
-        <div class="grid grid-cols-2 ${showProfit ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-3 mb-6">
-          <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'السجلات' : 'Records'}</p><p class="text-xl font-bold">${totals.count}</p></div>
-          <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 p-4"><p class="text-xs text-slate-500">${labels.primary}</p><p class="text-xl font-bold">$${analyticsMoney(totals.primary)}</p></div>
-          ${labels.secondary ? `<div class="rounded-2xl bg-amber-50 dark:bg-amber-950/40 p-4"><p class="text-xs text-slate-500">${labels.secondary}</p><p class="text-xl font-bold">$${analyticsMoney(totals.secondary)}</p></div>` : ''}
-          ${showProfit ? `<div class="rounded-2xl bg-cyan-50 dark:bg-cyan-950/40 p-4"><p class="text-xs text-slate-500">${isAr ? 'ربح معروف' : 'Known profit'}</p><p class="text-xl font-bold">${analyticsMoney(totals.profit)} LYD</p></div>` : ''}
-        </div>
-        <div class="space-y-2 mb-6" aria-label="Trend chart">
-          ${data.periods.map(row => `<div class="grid grid-cols-[64px_1fr_90px] sm:grid-cols-[90px_1fr_120px] items-center gap-3 text-xs">
-            <span class="text-slate-500">${analyticsEscape(row.label)}</span>
-            <div class="h-5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden flex">
-              <div class="h-full bg-indigo-500" style="width:${Math.max(0, row.primaryUSD / maxValue * 100)}%"></div>
-              ${row.secondaryUSD ? `<div class="h-full bg-amber-400" style="width:${Math.max(0, row.secondaryUSD / maxValue * 100)}%"></div>` : ''}
-            </div>
-            <span class="font-semibold text-right">$${analyticsMoney(row.primaryUSD)}</span>
-          </div>`).join('')}
-        </div>
-        <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700">
-          <table class="w-full min-w-[620px] text-sm">
-            <thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'الفترة' : 'Period'}</th><th class="p-3 text-right">${isAr ? 'العدد' : 'Count'}</th><th class="p-3 text-right">${labels.primary}</th>${labels.secondary ? `<th class="p-3 text-right">${labels.secondary}</th>` : ''}${showProfit ? `<th class="p-3 text-right">${isAr ? 'الربح المعروف' : 'Known profit'}</th>` : ''}</tr></thead>
-            <tbody>${data.periods.slice().reverse().map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.label)}</td><td class="p-3 text-right">${row.count}</td><td class="p-3 text-right">$${analyticsMoney(row.primaryUSD)}</td>${labels.secondary ? `<td class="p-3 text-right">$${analyticsMoney(row.secondaryUSD)}</td>` : ''}${showProfit ? `<td class="p-3 text-right ${row.profitLYD >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${analyticsMoney(row.profitLYD)} LYD</td>` : ''}</tr>`).join('')}</tbody>
-          </table>
-        </div>
-        ${metric === 'collection-status' ? `<button type="button" onclick="openOutstandingReceiptsFromAnalytics()" class="mt-5 w-full sm:w-auto px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-semibold">${isAr ? 'عرض الوصولات غير المحصلة' : 'View outstanding receipts'}</button>` : ''}
+  const monthName = (() => { try { return now.toLocaleDateString(appDateLocale(), { month: 'long' }); } catch (_) { return ''; } })();
+  const recent = revenueReceipts.slice().sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).slice(0, 5);
+  const customersById = new Map((Array.isArray(state.customers) ? state.customers : []).map(c => [String(c.id), c]));
+  const canAddReceipt = currentUserHasPermission('receipts', 'add');
+  const canAddAd = can('ads', 'add');
+  const quick = [
+    canAddReceipt ? { icon: 'receipt', label: isAr ? 'وصل' : 'Receipt', onclick: 'showNewReceiptChooser()' } : null,
+    canAddAd ? { icon: 'megaphone', label: isAr ? 'إعلان' : 'New ad', onclick: 'showAdModal()' } : null,
+    shellCanCollect() ? { icon: 'hand-coins', label: isAr ? 'تحصيل' : 'Collect', onclick: "navigateTo('collect')" } : null,
+    { icon: 'grid-3x3', label: isAr ? 'المزيد' : 'More', onclick: "navigateTo('more')" }
+  ].filter(Boolean);
+  const kpi = (label, value, onclick) => `
+    <button type="button" onclick="${onclick}" class="hub-card p-3.5 text-start touch-target">
+      <span class="block text-[11px] text-slate-500 dark:text-slate-400">${label}</span>
+      <span class="block mt-1 text-lg font-extrabold text-slate-900 dark:text-white truncate" dir="ltr">${value}</span>
+    </button>`;
+  return `
+    <section class="manager-home-hero space-y-4" data-manager-home-hero>
+      <button type="button" onclick="navigateTo('receipts')" class="hub-hero relative overflow-hidden w-full rounded-3xl p-5 text-start text-white touch-target">
+        <span class="absolute -top-10 -end-6 w-40 h-40 rounded-full bg-white/10"></span>
+        <span class="relative block">
+          <span class="block text-[11px] font-bold uppercase tracking-[0.14em] text-white/70">Albayan</span>
+          <span class="block mt-1 text-sm text-white/80">${canViewFinancials ? (isAr ? `المُحصَّل · ${shellEsc(monthName)}` : `Collected · ${shellEsc(monthName)}`) : (isAr ? `وصولات · ${shellEsc(monthName)}` : `Receipts · ${shellEsc(monthName)}`)}</span>
+          <span class="block mt-1 text-3xl font-black tracking-tight" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(collectedLyd)) : receiptsThisMonth}</span>
+          ${canViewFinancials ? `<span class="mt-2 flex flex-wrap items-center gap-3 text-xs text-white/80">
+            ${pct === null ? `<span>${isAr ? 'أول شهر مُسجَّل' : 'First month on record'}</span>` : `<span class="inline-flex items-center gap-1"><i data-lucide="${pct >= 0 ? 'trending-up' : 'trending-down'}" class="w-3.5 h-3.5"></i>${pct >= 0 ? '+' : ''}${pct}% ${isAr ? 'مقابل الشهر الماضي' : 'vs last month'}</span>`}
+            <span dir="ltr">≈ ${shellEsc(shellUsd(collectedUsd))}</span>
+          </span>` : ''}
+        </span>
+      </button>
+      <div class="grid gap-2" style="grid-template-columns: repeat(${quick.length}, minmax(0, 1fr));">
+        ${quick.map(q => `<button type="button" onclick="${q.onclick}" class="hub-card touch-target flex flex-col items-center justify-center gap-1.5 p-3 text-center"><span class="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 flex items-center justify-center"><i data-lucide="${q.icon}" class="w-5 h-5"></i></span><span class="text-[11px] font-bold text-slate-700 dark:text-slate-200">${q.label}</span></button>`).join('')}
       </div>
-    </section>`;
-  if (window.lucide) lucide.createIcons({ nodes: [root] });
+      <div class="grid grid-cols-3 gap-2">
+        ${kpi(isAr ? 'الوصولات' : 'Receipts', receiptsThisMonth, "navigateTo('receipts')")}
+        ${canViewFinancials ? kpi(isAr ? 'مستحق' : 'Owed', shellEsc(shellLyd(owedLyd)), shellCanCollect() ? "navigateTo('collect')" : "navigateTo('customers')") : kpi(isAr ? 'العملاء' : 'Customers', getCustomersVisibleToCurrentUser().length, "navigateTo('customers')")}
+        ${canViewFinancials ? kpi(isAr ? 'الإنفاق' : 'Ad spend', shellEsc(shellUsd(adSpendUsd)), "navigateTo('ads')") : kpi(isAr ? 'الإعلانات' : 'Ads', (Array.isArray(ads) ? ads.length : 0), "navigateTo('ads')")}
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <span class="hub-section-title mb-0">${isAr ? 'النشاط الأخير' : 'Recent activity'}</span>
+          <button type="button" onclick="navigateTo('receipts')" class="touch-target min-h-10 px-2 text-[13px] font-semibold text-blue-600 dark:text-blue-300">${isAr ? 'عرض الكل' : 'See all'}</button>
+        </div>
+        ${recent.length ? `<div class="space-y-2">${recent.map(r => {
+          const customerName = customersById.get(String(getReceiptCustomerReferenceId(r)))?.name || r.customerName || (isAr ? 'غير معروف' : 'Unknown');
+          const meta = shellReceiptStatusMeta(r);
+          const number = shellReceiptNumber(r);
+          return `<button type="button" onclick="openReceiptFromHome('${shellEsc(r.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3 text-start touch-target">
+            <span class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(customerName))}</span>
+            <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(customerName)}</span><span class="block truncate text-[11px] text-slate-500">${number ? `#${shellEsc(number)} · ` : ''}${r.createdAt ? shellEsc(new Date(r.createdAt).toLocaleDateString(appDateLocale())) : ''}</span></span>
+            <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${canViewFinancials ? shellEsc(shellLyd(shellReceiptLyd(r))) : ''}</span>${shellPill(meta.label, meta.tone)}</span>
+          </button>`;
+        }).join('')}</div>` : `<div class="hub-card p-5 text-center text-sm text-slate-500">${isAr ? 'لا يوجد نشاط بعد' : 'No activity yet'}</div>`}
+      </div>
+    </section>
+  `;
 }
 
-function openAnalyticsBreakdown(metric, granularity = 'day') {
-  if (!['ad-revenue', 'receipts-volume', 'collection-status'].includes(metric)) return;
-  if (typeof can !== 'function' || !can('analytics', 'viewFinancials')) {
-    showNotification(
-      state.language === 'ar' ? 'غير مسموح' : 'Permission required',
-      state.language === 'ar' ? 'هذه التفاصيل المالية متاحة للمستخدمين المصرح لهم فقط.' : 'These financial details are available only to authorized users.',
-      'error'
-    );
-    return;
-  }
-  closeAnalyticsBreakdown(false);
-  _analyticsBreakdownState = { metric, granularity, trigger: document.activeElement };
-  const root = document.createElement('div');
-  root.id = 'analytics-breakdown-dialog';
-  root.style.position = 'fixed';
-  root.style.inset = '0';
-  root.style.zIndex = '10000';
-  document.body.appendChild(root);
-  document.body.classList.add('overflow-hidden');
-  renderAnalyticsBreakdownDialog();
-  setTimeout(() => document.querySelector('#analytics-breakdown-dialog button')?.focus(), 0);
-}
-
-function setAnalyticsBreakdownGranularity(granularity) {
-  if (!ANALYTICS_PERIOD_COUNTS[granularity]) return;
-  _analyticsBreakdownState.granularity = granularity;
-  renderAnalyticsBreakdownDialog();
-}
-
-function closeAnalyticsBreakdown(restoreFocus = true) {
-  document.getElementById('analytics-breakdown-dialog')?.remove();
-  if (!document.getElementById('dollar-purchase-dialog')) document.body.classList.remove('overflow-hidden');
-  if (restoreFocus && _analyticsBreakdownState.trigger?.focus) _analyticsBreakdownState.trigger.focus();
-}
-
-function openOutstandingReceiptsFromAnalytics() {
-  closeAnalyticsBreakdown(false);
-  state.receiptCollectedFilter = 'not-collected';
+function openReceiptFromHome(receiptId) {
+  const id = String(receiptId || '');
+  if (!id) return;
+  state.receiptSearch = '';
+  state.receiptCustomerFilter = '';
+  state.receiptRecordFilter = id;
   navigateTo('receipts');
 }
 
-function renderProfitabilityPanel(snapshot, isAr) {
-  if (!isCurrentUserAdmin()) return '';
-  const profitPositive = snapshot.knownGrossProfitLYD >= 0;
-  return `
-    <section class="glass-panel rounded-3xl p-5 sm:p-6" aria-labelledby="profitability-title">
-      <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-5">
-        <div>
-          <div class="flex items-center gap-2"><i data-lucide="chart-no-axes-combined" class="w-5 h-5 text-indigo-600"></i><h2 id="profitability-title" class="text-xl font-bold text-slate-900 dark:text-white">${isAr ? 'ربحية إعلانات ميتا' : 'Meta Ads Profitability'}</h2></div>
-          <p class="text-sm text-slate-500 mt-1 max-w-3xl">${isAr ? 'يحسب النظام تكلفة الدولارات بطريقة الأقدم أولاً. لا يظهر الربح إلا للإنفاق الفعلي المدفوع الذي نعرف تكلفة دولاراته.' : 'Dollar purchase lots are consumed oldest-first (FIFO). Profit is recognized only for paid, actual ad spend whose dollar cost is known.'}</p>
-        </div>
-        <button type="button" onclick="openDollarPurchaseManager()" class="w-full lg:w-auto px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-lg flex items-center justify-center gap-2"><i data-lucide="badge-dollar-sign" class="w-5 h-5"></i>${isAr ? 'تسجيل شراء دولارات' : 'Record Dollar Purchase'}</button>
-      </div>
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'إيراد معترف به' : 'Recognized revenue'}</p><p class="text-xl font-bold text-emerald-700">${analyticsMoney(snapshot.paidRevenueLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">$${analyticsMoney(snapshot.paidActualSpendUSD)} ${isAr ? 'إنفاق مدفوع' : 'paid spend'}</p></div>
-        <div class="rounded-2xl bg-rose-50 dark:bg-rose-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'تكلفة فيسبوك' : 'Facebook cost'}</p><p class="text-xl font-bold text-rose-700">${analyticsMoney(snapshot.paidCostLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'من دفعات الدولار المسجلة' : 'from recorded USD lots'}</p></div>
-        <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsMoney(snapshot.knownGrossProfitLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
-        <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">$${analyticsMoney(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsMoney(snapshot.inventoryCostLYD)} LYD ${isAr ? 'تكلفة' : 'cost'}</p></div>
-      </div>
-      ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
-        <strong>${isAr ? 'يحتاج إكمال:' : 'Needs attention:'}</strong>
-        ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: $${analyticsMoney(snapshot.unpricedSpendUSD)}.` : ''}
-        ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: $${analyticsMoney(snapshot.missingSaleRateUSD)}.` : ''}
-        ${isAr ? 'هذه المبالغ مستبعدة من الربح حتى تكتمل البيانات.' : 'These amounts stay out of profit until their data is complete.'}
-      </div>` : ''}
-    </section>`;
+// ---------- Collect a debt ----------
+
+let _collectFilter = 'all'; // 'all' | 'overdue' | 'oldest'
+const SHELL_OVERDUE_DAYS = 30;
+
+function collectSetFilter(mode) {
+  _collectFilter = ['overdue', 'oldest'].includes(mode) ? mode : 'all';
+  render();
 }
 
-function dollarPurchaseRemainingById(snapshot) {
-  return new Map(snapshot.lots.map(lot => [lot.id, lot.remainingUSD]));
+function shellDebtorRows() {
+  const statsIndex = buildCustomerStatsIndex();
+  const now = Date.now();
+  const rows = [];
+  getCustomersVisibleToCurrentUser().forEach(c => {
+    const stats = getCustomerStats(c.id, statsIndex);
+    if (!(stats.balance < -0.005)) return;
+    const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
+    let oldest = null;
+    unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
+    const ageDays = oldest === null ? null : Math.max(0, Math.floor((now - oldest) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
+    const lyd = Number(stats.balanceLYD);
+    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
+    rows.push({
+      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balance),
+      overdue: ageDays !== null && ageDays > SHELL_OVERDUE_DAYS,
+      number: unpaid.length ? shellReceiptNumber(unpaid.slice().sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0))[0]) : ''
+    });
+  });
+  return rows;
 }
 
-function renderDollarPurchaseDialog() {
-  const root = document.getElementById('dollar-purchase-dialog');
-  if (!root) return;
-  if (!isCurrentUserAdmin()) { closeDollarPurchaseManager(); return; }
+function shellAgeText(ageDays) {
+  if (ageDays === null || ageDays === undefined) return shellText('no open receipt', 'بدون وصل مفتوح');
+  if (ageDays === 0) return shellText('today', 'اليوم');
+  if (ageDays === 1) return shellText('1 day', 'يوم واحد');
+  return shellText(`${ageDays} days`, `${ageDays} يوماً`);
+}
+
+function renderCollectView() {
   const isAr = state.language === 'ar';
-  const snapshot = getCurrentProfitabilitySnapshot();
-  const remaining = dollarPurchaseRemainingById(snapshot);
-  const purchases = getVisibleRecords(state.dollarPurchases || []).slice().sort((a, b) => String(b.purchaseDate || '').localeCompare(String(a.purchaseDate || '')) || analyticsDateValue(b.createdAt || b._created) - analyticsDateValue(a.createdAt || a._created));
-  const today = analyticsLocalDateISO();
-  root.innerHTML = `
-    <div class="fixed inset-0 bg-slate-950/60 backdrop-blur-sm" onclick="closeDollarPurchaseManager()"></div>
-    <section role="dialog" aria-modal="true" aria-labelledby="dollar-purchase-title" dir="${isAr ? 'rtl' : 'ltr'}" class="fixed inset-x-3 top-4 bottom-4 sm:inset-x-[7%] lg:inset-x-[14%] glass-panel rounded-3xl shadow-2xl overflow-hidden flex flex-col">
-      <header class="p-4 sm:p-6 border-b border-slate-200/70 dark:border-slate-700 flex items-start justify-between gap-4"><div><h2 id="dollar-purchase-title" class="text-xl font-bold">${isAr ? 'سجل شراء دولارات فيسبوك' : 'Facebook Dollar Purchase Ledger'}</h2><p class="text-sm text-slate-500 mt-1">${isAr ? 'سجل كل مرة تشتري فيها دولارات مع السعر الحقيقي في السوق.' : 'Record every USD purchase at the real market rate you paid.'}</p></div><button type="button" onclick="closeDollarPurchaseManager()" aria-label="Close" class="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"><i data-lucide="x" class="w-5 h-5"></i></button></header>
-      <div class="p-4 sm:p-6 overflow-y-auto flex-1 space-y-6">
-        <form id="dollar-purchase-form" onsubmit="saveDollarPurchase(event)" class="rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-800 p-4 sm:p-5">
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <label class="text-sm font-medium">${isAr ? 'تاريخ الشراء' : 'Purchase date'}<input name="purchaseDate" type="date" value="${today}" max="${today}" required class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl"></label>
-            <label class="text-sm font-medium">${isAr ? 'المبلغ بالدولار' : 'USD amount'}<input name="amountUSD" type="number" min="0.01" max="1000000" step="0.01" inputmode="decimal" required oninput="updateDollarPurchasePreview()" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="100.00"></label>
-            <label class="text-sm font-medium">${isAr ? 'سعر 1 دولار بالدينار' : 'LYD paid per $1'}<input name="rateLYD" type="number" min="0.0001" max="1000" step="0.0001" inputmode="decimal" required oninput="updateDollarPurchasePreview()" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="9.7000"></label>
-            <div class="rounded-xl bg-white dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي ما دفعته' : 'Total paid'}</p><p id="dollar-purchase-total" class="text-xl font-bold text-indigo-700 mt-1">0.00 LYD</p></div>
-            <label class="text-sm font-medium sm:col-span-2">${isAr ? 'المصدر أو الحساب (اختياري)' : 'Source/account (optional)'}<input name="source" maxlength="120" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl" placeholder="${isAr ? 'مثال: السوق / الحساب المسبق 1' : 'Example: Market / Prepaid Balance 1'}"></label>
-            <label class="text-sm font-medium sm:col-span-2">${isAr ? 'ملاحظة (اختياري)' : 'Note (optional)'}<input name="note" maxlength="240" class="glass-input mt-1 w-full px-3 py-2.5 rounded-xl"></label>
-          </div>
-          <div class="mt-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><p class="text-xs text-slate-500">${isAr ? 'السجل غير قابل للتعديل. لتصحيح خطأ، احذفه وأنشئه من جديد.' : 'Records are immutable. To correct a mistake, delete it and create it again.'}</p><button type="submit" class="px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold">${isAr ? 'حفظ شراء الدولار' : 'Save Dollar Purchase'}</button></div>
-        </form>
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3"><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي المشترى' : 'Total purchased'}</p><p class="font-bold">$${analyticsMoney(snapshot.totalPurchasedUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إجمالي التكلفة' : 'Total cost'}</p><p class="font-bold">${analyticsMoney(snapshot.totalPurchaseCostLYD)} LYD</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'المتبقي' : 'Inventory'}</p><p class="font-bold">$${analyticsMoney(snapshot.inventoryUSD)}</p></div><div class="rounded-xl bg-slate-50 dark:bg-slate-800 p-3"><p class="text-xs text-slate-500">${isAr ? 'إنفاق بلا تكلفة' : 'Unpriced spend'}</p><p class="font-bold ${snapshot.unpricedSpendUSD ? 'text-amber-600' : 'text-emerald-600'}">$${analyticsMoney(snapshot.unpricedSpendUSD)}</p></div></div>
-        <div class="overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-700"><table class="w-full min-w-[720px] text-sm"><thead class="bg-slate-50 dark:bg-slate-800"><tr><th class="p-3 text-left">${isAr ? 'التاريخ' : 'Date'}</th><th class="p-3 text-right">USD</th><th class="p-3 text-right">${isAr ? 'السعر' : 'Rate'}</th><th class="p-3 text-right">${isAr ? 'التكلفة' : 'Cost'}</th><th class="p-3 text-right">${isAr ? 'المتبقي' : 'Remaining'}</th><th class="p-3 text-left">${isAr ? 'المصدر / الملاحظة' : 'Source / note'}</th><th class="p-3"></th></tr></thead><tbody>${purchases.length ? purchases.map(row => `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-medium">${analyticsEscape(row.purchaseDate)}</td><td class="p-3 text-right">$${analyticsMoney(row.amountUSD)}</td><td class="p-3 text-right">${analyticsMoney(row.rateLYD, 4)}</td><td class="p-3 text-right">${analyticsMoney(row.totalLYD || analyticsNumber(row.amountUSD) * analyticsNumber(row.rateLYD))} LYD</td><td class="p-3 text-right">$${analyticsMoney(remaining.get(String(row.id || '')) || 0)}</td><td class="p-3"><div class="font-medium">${analyticsEscape(row.source || '—')}</div><div class="text-xs text-slate-500">${analyticsEscape(row.note || '')}</div></td><td class="p-3 text-right"><button type="button" onclick="deleteDollarPurchase('${analyticsEscape(row.id)}')" class="p-2 rounded-lg text-rose-600 hover:bg-rose-50" aria-label="Delete"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`).join('') : `<tr><td colspan="7" class="p-8 text-center text-slate-500">${isAr ? 'لم تسجل أي عملية شراء دولارات بعد.' : 'No dollar purchases recorded yet.'}</td></tr>`}</tbody></table></div>
+  if (!shellCanCollect()) {
+    return `<div class="hub-shell"><div class="hub-card p-8 text-center"><i data-lucide="lock" class="w-10 h-10 mx-auto text-slate-300 mb-3"></i><p class="font-bold text-slate-800 dark:text-white">${isAr ? 'لا توجد صلاحية' : 'No access'}</p><p class="text-sm text-slate-500 mt-1">${isAr ? 'تحصيل الديون يحتاج صلاحية عرض الوصولات وأرصدة العملاء.' : 'Collecting debts needs receipt and customer-balance permissions.'}</p></div></div>`;
+  }
+  let rows = shellDebtorRows();
+  const totalLyd = rows.reduce((sum, r) => sum + r.dueLyd, 0);
+  const overdueCount = rows.filter(r => r.overdue).length;
+  if (_collectFilter === 'overdue') rows = rows.filter(r => r.overdue);
+  rows.sort((a, b) => _collectFilter === 'oldest'
+    ? ((a.oldest || Infinity) - (b.oldest || Infinity))
+    : (b.dueLyd - a.dueLyd));
+  const chips = [['all', isAr ? 'الكل' : 'All'], ['overdue', isAr ? 'المتأخرة' : 'Overdue'], ['oldest', isAr ? 'الأقدم أولاً' : 'Oldest first']];
+  return `
+    <div class="hub-shell">
+      ${hubPageHeader(isAr ? 'تحصيل دين' : 'Collect a debt', { backTo: 'analytics' })}
+      <div class="hub-card p-4 mb-4">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400">${isAr ? 'الرصيد المستحق' : 'Outstanding balance'}</div>
+        <div class="mt-1 text-3xl font-black text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(totalLyd))}</div>
+        <div class="mt-1 text-xs text-slate-500">${isAr ? `${rows.length === 1 ? 'عميل واحد' : `${rows.length} عملاء`} · ${overdueCount} متأخر` : `${rows.length} customer${rows.length === 1 ? '' : 's'} · ${overdueCount} overdue`}</div>
       </div>
-    </section>`;
-  if (window.lucide) lucide.createIcons({ nodes: [root] });
+      <div class="flex gap-2 mb-3 overflow-x-auto custom-scrollbar pb-1">
+        ${chips.map(([id, label]) => `<button type="button" onclick="collectSetFilter('${id}')" class="touch-target min-h-10 whitespace-nowrap rounded-full px-4 text-sm font-bold ${_collectFilter === id ? 'bg-blue-600 text-white' : 'hub-card text-slate-700 dark:text-slate-200'}">${label}</button>`).join('')}
+      </div>
+      ${can('customers', 'viewContacts') ? `<button type="button" onclick="navigateTo('reminders')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 mb-4 text-start touch-target">
+        <span class="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-300 flex items-center justify-center flex-shrink-0"><i data-lucide="message-circle" class="w-5 h-5"></i></span>
+        <span class="flex-1 min-w-0 text-sm font-bold text-slate-900 dark:text-white">${isAr ? 'إرسال التذكيرات' : 'Send reminders'}</span>
+        <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
+      </button>` : ''}
+      ${rows.length ? `<div class="space-y-2">${rows.map(row => `
+        <button type="button" onclick="openDebtorCollection('${shellEsc(row.customer.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
+          <span class="w-11 h-11 rounded-full ${row.overdue ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'} flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(row.customer.name))}</span>
+          <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500">${row.number ? `#${shellEsc(row.number)} · ` : ''}<span class="${row.overdue ? 'text-rose-600 font-bold' : ''}">${shellEsc(shellAgeText(row.ageDays))}</span></span></span>
+          <span class="text-end flex-shrink-0"><span class="block text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(row.dueLyd))}</span><span class="block text-[10px] text-slate-400" dir="ltr">${shellEsc(shellUsd(row.dueUsd))}</span></span>
+          <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
+        </button>`).join('')}</div>`
+        : `<div class="hub-card p-8 text-center"><i data-lucide="badge-check" class="w-10 h-10 mx-auto text-emerald-400 mb-3"></i><p class="font-bold text-slate-800 dark:text-white">${isAr ? 'لا توجد ديون مستحقة' : 'Nothing outstanding'}</p><p class="text-sm text-slate-500 mt-1">${isAr ? 'كل العملاء مسدَّدون.' : 'Every customer is settled.'}</p></div>`}
+    </div>
+  `;
 }
 
-function openDollarPurchaseManager() {
-  if (!isCurrentUserAdmin()) { showNotification('Not Allowed', 'Only an Admin can manage dollar purchase costs.', 'error'); return; }
-  closeDollarPurchaseManager(false);
-  _dollarPurchaseTrigger = document.activeElement;
-  const root = document.createElement('div');
-  root.id = 'dollar-purchase-dialog';
-  root.style.position = 'fixed';
-  root.style.inset = '0';
-  root.style.zIndex = '10001';
-  document.body.appendChild(root);
-  document.body.classList.add('overflow-hidden');
-  renderDollarPurchaseDialog();
-  setTimeout(() => document.querySelector('#dollar-purchase-form input')?.focus(), 0);
-}
-
-function closeDollarPurchaseManager(restoreFocus = true) {
-  document.getElementById('dollar-purchase-dialog')?.remove();
-  if (!document.getElementById('analytics-breakdown-dialog')) document.body.classList.remove('overflow-hidden');
-  if (restoreFocus && _dollarPurchaseTrigger?.focus) _dollarPurchaseTrigger.focus();
-}
-
-function updateDollarPurchasePreview() {
-  const form = document.getElementById('dollar-purchase-form');
-  const output = document.getElementById('dollar-purchase-total');
-  if (!form || !output) return;
-  output.textContent = `${analyticsMoney(analyticsNumber(form.amountUSD?.value) * analyticsNumber(form.rateLYD?.value))} LYD`;
-}
-
-async function saveDollarPurchase(event) {
-  event?.preventDefault();
-  if (!isCurrentUserAdmin()) return;
-  const form = event?.currentTarget || document.getElementById('dollar-purchase-form');
-  if (!form || !form.reportValidity()) return;
-  const amountUSD = analyticsNumber(form.amountUSD.value);
-  const rateLYD = analyticsNumber(form.rateLYD.value);
-  const purchaseDate = String(form.purchaseDate.value || '');
-  const today = analyticsLocalDateISO();
-  if (amountUSD <= 0 || rateLYD <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate) || purchaseDate > today) {
-    showNotification('Check the values', 'Enter a valid past or current date, USD amount, and market rate.', 'error');
+// One open receipt: go straight to the collect dialog. Several: show the
+// customer's unpaid receipts so the right one is picked.
+function openDebtorCollection(customerId) {
+  const cid = String(customerId || '');
+  const statsIndex = buildCustomerStatsIndex();
+  const unpaid = (statsIndex.receiptsByCustomer.get(cid) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
+  if (unpaid.length === 1 && currentUserHasPermission('receipts', 'markCollected') && typeof openCollectReceiptModal === 'function') {
+    openCollectReceiptModal(unpaid[0].id);
     return;
   }
-  const submit = form.querySelector('button[type="submit"]');
-  if (submit) submit.disabled = true;
-  const ok = await addRecord(state.dollarPurchases, {
-    purchaseDate,
-    amountUSD: Math.round(amountUSD * 100) / 100,
-    rateLYD: Math.round(rateLYD * 10000) / 10000,
-    totalLYD: Math.round(amountUSD * rateLYD * 100) / 100,
-    source: String(form.source.value || '').trim(),
-    note: String(form.note.value || '').trim(),
-    createdAt: new Date().toISOString()
-  });
-  if (ok) {
-    showNotification('Dollar purchase saved', 'Profit and inventory were recalculated.', 'success');
-    renderDollarPurchaseDialog();
-    if (state.currentView === 'analytics') RenderQueue.schedule('profitability-purchase');
-  } else if (submit) submit.disabled = false;
-}
-
-async function deleteDollarPurchase(id) {
-  if (!isCurrentUserAdmin() || !Security.isValidRecordId(id)) return;
-  if (!confirm('Delete this dollar purchase? Profit and inventory will be recalculated.')) return;
-  const ok = await deleteRecord(state.dollarPurchases, id);
-  if (ok) {
-    showNotification('Dollar purchase deleted', 'Profit and inventory were recalculated.', 'success');
-    renderDollarPurchaseDialog();
+  if (openCustomerReceipts(cid)) {
+    state.receiptStatusFilter = 'not_paid';
+    render();
   }
 }
 
-if (typeof document !== 'undefined') {
-  document.addEventListener('keydown', event => {
-    if (event.key !== 'Escape') return;
-    if (document.getElementById('dollar-purchase-dialog')) closeDollarPurchaseManager();
-    else if (document.getElementById('analytics-breakdown-dialog')) closeAnalyticsBreakdown();
-  });
+// ---------- WhatsApp reminders ----------
+
+const SHELL_REMINDER_LOG_KEY = 'albayan_debt_reminders_v1';
+
+function shellReminderLog() {
+  try { const raw = localStorage.getItem(SHELL_REMINDER_LOG_KEY); const parsed = raw ? JSON.parse(raw) : {}; return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
+}
+
+function shellReminderStamp(customerId) {
+  try { const log = shellReminderLog(); log[String(customerId)] = Date.now(); localStorage.setItem(SHELL_REMINDER_LOG_KEY, JSON.stringify(log)); } catch (_) {}
+}
+
+function shellReminderAgo(ts) {
+  if (!ts) return shellText('never', 'لا يوجد');
+  const days = Math.floor((Date.now() - Number(ts)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
+  if (days <= 0) return shellText('today', 'اليوم');
+  if (days === 1) return shellText('yesterday', 'أمس');
+  return shellText(`${days} days ago`, `قبل ${days} يوماً`);
+}
+
+function shellReminderMessage(row) {
+  const office = shellText('Albayan', 'البيان');
+  const amount = shellLyd(row.dueLyd);
+  return state.language === 'ar'
+    ? `مرحباً ${row.customer.name}، تذكير ودّي من ${office}: لديك رصيد مستحق بقيمة ${amount}. يسعدنا استلامه في أقرب وقت. شكراً لتعاونك.`
+    : `Hello ${row.customer.name}, a friendly reminder from ${office}: your outstanding balance is ${amount}. We would appreciate settling it at your earliest convenience. Thank you.`;
+}
+
+function remindDebtor(customerId) {
+  if (!can('customers', 'viewContacts')) return;
+  const row = shellDebtorRows().find(r => String(r.customer.id) === String(customerId));
+  if (!row) return;
+  const phone = (getCustomerPhoneEntries(row.customer).map(entry => entry.value).find(Boolean)) || '';
+  if (!phone) {
+    showNotification(shellText('No phone number', 'لا يوجد رقم هاتف'), shellText('Add a phone number to this customer first.', 'أضف رقم هاتف لهذا العميل أولاً.'), 'warning');
+    return;
+  }
+  const base = buildWhatsAppLink(phone);
+  const url = `${base}${base.includes('?') ? '&' : '?'}text=${encodeURIComponent(shellReminderMessage(row))}`;
+  const opened = window.open(url, '_blank', 'noopener');
+  if (!opened) { try { window.location.href = url; } catch (_) {} }
+  shellReminderStamp(row.customer.id);
+  showNotification(shellText('Reminder opened', 'تم فتح التذكير'), shellText('WhatsApp is ready with the message.', 'واتساب جاهز بالرسالة.'), 'success');
+  render();
+}
+
+// Browsers only allow one new window per tap, so "Remind all" walks the
+// overdue list one tap at a time: each tap opens the next customer not
+// reminded in the last day.
+function remindAllOverdue() {
+  const log = shellReminderLog();
+  const dayAgo = Date.now() - TIME_CONSTANTS.MILLISECONDS_PER_DAY;
+  const next = shellDebtorRows().filter(r => r.overdue).find(r => !(Number(log[String(r.customer.id)]) > dayAgo));
+  if (!next) {
+    showNotification(shellText('All reminded', 'تم تذكير الجميع'), shellText('Every overdue customer was reminded in the last day.', 'تم تذكير كل العملاء المتأخرين خلال اليوم الأخير.'), 'success');
+    return;
+  }
+  remindDebtor(next.customer.id);
+}
+
+function renderRemindersView() {
+  const isAr = state.language === 'ar';
+  if (!shellCanCollect() || !can('customers', 'viewContacts')) {
+    return `<div class="hub-shell"><div class="hub-card p-8 text-center"><i data-lucide="lock" class="w-10 h-10 mx-auto text-slate-300 mb-3"></i><p class="font-bold text-slate-800 dark:text-white">${isAr ? 'لا توجد صلاحية' : 'No access'}</p><p class="text-sm text-slate-500 mt-1">${isAr ? 'التذكيرات تحتاج صلاحية عرض أرقام العملاء.' : 'Reminders need permission to see customer contacts.'}</p></div></div>`;
+  }
+  const log = shellReminderLog();
+  const rows = shellDebtorRows().sort((a, b) => (b.overdue - a.overdue) || (b.dueLyd - a.dueLyd));
+  const overdueCount = rows.filter(r => r.overdue).length;
+  return `
+    <div class="hub-shell">
+      ${hubPageHeader(isAr ? 'التذكيرات' : 'Reminders', { backTo: 'collect' })}
+      <div class="hub-card p-3.5 mb-4 flex items-center gap-3 text-sm text-slate-600 dark:text-slate-300">
+        <i data-lucide="message-circle" class="w-5 h-5 text-emerald-600 flex-shrink-0"></i>
+        <span>${isAr ? 'تذكير كل المتأخرين عبر واتساب — كل ضغطة تفتح العميل التالي.' : 'Remind all overdue via WhatsApp — each tap opens the next customer.'}</span>
+      </div>
+      ${rows.length ? `<div class="space-y-2">${rows.map(row => `
+        <div class="hub-card flex items-center gap-3 p-3.5">
+          <span class="w-11 h-11 rounded-full ${row.overdue ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'} flex items-center justify-center font-bold flex-shrink-0">${shellEsc(shellInitial(row.customer.name))}</span>
+          <span class="flex-1 min-w-0"><span class="block truncate text-sm font-bold text-slate-900 dark:text-white">${shellEsc(row.customer.name)}</span><span class="block truncate text-[11px] text-slate-500"><span dir="ltr">${shellEsc(shellLyd(row.dueLyd))}</span> · ${isAr ? 'آخر تذكير' : 'Last reminder'}: ${shellEsc(shellReminderAgo(log[String(row.customer.id)]))}</span></span>
+          <button type="button" onclick="remindDebtor('${shellEsc(row.customer.id)}')" class="touch-target min-h-10 rounded-full bg-emerald-600 hover:bg-emerald-700 px-4 text-xs font-bold text-white">${isAr ? 'تذكير' : 'Remind'}</button>
+        </div>`).join('')}</div>
+      <button type="button" onclick="remindAllOverdue()" ${overdueCount ? '' : 'disabled'} class="touch-target mt-4 w-full min-h-12 rounded-2xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold">${isAr ? `تذكير كل المتأخرين (${overdueCount})` : `Remind all overdue (${overdueCount})`}</button>`
+        : `<div class="hub-card p-8 text-center"><i data-lucide="badge-check" class="w-10 h-10 mx-auto text-emerald-400 mb-3"></i><p class="font-bold text-slate-800 dark:text-white">${isAr ? 'لا أحد يحتاج تذكيراً' : 'Nobody needs a reminder'}</p></div>`}
+    </div>
+  `;
+}
+
+// ---------- Settings: appearance + account rows ----------
+
+function shellSetTheme(theme) {
+  state.theme = theme === 'dark' ? 'dark' : theme === 'system' ? 'system' : 'light';
+  applyTheme();
+  saveState();
+  render();
+}
+
+function renderSettingsAppearanceCard() {
+  const isAr = state.language === 'ar';
+  const user = state.currentUser || {};
+  const dark = state.theme === 'dark';
+  const row = (label, value, onclick, extra = '') => `
+    <button type="button" onclick="${onclick}" class="w-full flex items-center justify-between gap-3 px-4 py-3.5 text-start touch-target">
+      <span class="text-sm font-semibold text-slate-800 dark:text-white">${label}</span>
+      <span class="flex items-center gap-2 text-sm text-slate-500">${value}${extra}</span>
+    </button>`;
+  return `
+    <button type="button" onclick="editUser('${shellEsc(user.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 text-start touch-target">
+      <span class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white font-bold flex-shrink-0">${shellEsc(shellInitial(user.name))}</span>
+      <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(user.role || '')}${user.email ? ` · <span dir="ltr">${shellEsc(user.email)}</span>` : ''}</span></span>
+      <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
+    </button>
+    <div class="hub-section-title mt-5">${isAr ? 'المظهر' : 'Appearance'}</div>
+    <div class="hub-card divide-y divide-slate-200 dark:divide-slate-700">
+      <div class="flex items-center justify-between gap-3 px-4 py-3">
+        <span class="text-sm font-semibold text-slate-800 dark:text-white">${isAr ? 'الوضع الداكن' : 'Dark mode'}</span>
+        <button type="button" role="switch" aria-checked="${dark ? 'true' : 'false'}" onclick="shellSetTheme('${dark ? 'light' : 'dark'}')" class="touch-target relative inline-flex h-7 w-12 flex-shrink-0 items-center rounded-full transition-colors ${dark ? 'bg-emerald-500' : 'bg-slate-300 dark:bg-slate-600'}" aria-label="${isAr ? 'الوضع الداكن' : 'Dark mode'}"><span class="absolute top-1 h-5 w-5 rounded-full bg-white shadow transition-all ${dark ? 'ltr:left-6 rtl:right-6' : 'ltr:left-1 rtl:right-1'}"></span></button>
+      </div>
+      ${row(isAr ? 'اتباع النظام' : 'Follow system theme', state.theme === 'system' ? (isAr ? 'مفعّل' : 'On') : (isAr ? 'متوقف' : 'Off'), "shellSetTheme('" + (state.theme === 'system' ? 'light' : 'system') + "')")}
+      ${row(isAr ? 'اللغة' : 'Language', isAr ? 'العربية ›' : 'English ›', 'toggleLanguage()')}
+    </div>
+  `;
+}
+
+// ---------- one-time onboarding (packaged app only) ----------
+
+const SHELL_ONBOARDED_KEY = 'albayan_onboarded_v1';
+let _onboardingStep = 0;
+
+function shellShouldShowOnboarding() {
+  if (!state.currentUser || IS_STUDIO_SHELL || !shellIsNativeApp()) return false;
+  try { return localStorage.getItem(SHELL_ONBOARDED_KEY) !== '1'; } catch (_) { return false; }
+}
+
+function dismissMobileOnboarding() {
+  try { localStorage.setItem(SHELL_ONBOARDED_KEY, '1'); } catch (_) {}
+  _onboardingStep = 0;
+  document.getElementById('mobile-onboarding')?.remove();
+}
+
+function onboardingStep(delta) {
+  _onboardingStep = Math.max(0, Math.min(2, _onboardingStep + delta));
+  const host = document.getElementById('mobile-onboarding');
+  if (!host) return;
+  host.outerHTML = renderMobileOnboarding();
+  const fresh = document.getElementById('mobile-onboarding');
+  if (fresh && typeof IconQueue !== 'undefined') IconQueue.schedule(fresh);
+}
+
+function renderMobileOnboarding() {
+  const isAr = state.language === 'ar';
+  const slides = [
+    { icon: 'briefcase', title: isAr ? 'مكتب إعلاناتك في جيبك' : 'Your ad office, in your pocket', text: isAr ? 'الوصولات والعملاء والإعلانات والتوصيل — في مكان واحد.' : 'Receipts, customers, ads and deliveries — all in one place.' },
+    { icon: 'hand-coins', title: isAr ? 'حصّل الديون أينما كنت' : 'Collect debts on the go', text: isAr ? 'سجّل دفعة أو أرسل سائقاً، ويُسوّى النقد تلقائياً.' : 'Record a payment or send a driver; cash is reconciled automatically.' },
+    { icon: 'languages', title: isAr ? 'بالعربية والإنجليزية، كما تحب' : 'Arabic & English, your way', text: isAr ? 'دعم كامل من اليمين لليسار، الدينار والدولار، فاتح أو داكن.' : 'Full right-to-left, LYD & USD, dark or light.' }
+  ];
+  const step = Math.max(0, Math.min(slides.length - 1, _onboardingStep));
+  const slide = slides[step];
+  const last = step === slides.length - 1;
+  return `
+    <div id="mobile-onboarding" class="fixed inset-0 z-[70] flex flex-col bg-white dark:bg-slate-950 p-6" dir="${isAr ? 'rtl' : 'ltr'}" role="dialog" aria-modal="true">
+      <div class="flex items-center justify-between">
+        ${step > 0 ? `<button type="button" onclick="onboardingStep(-1)" class="touch-target flex h-11 w-11 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800" aria-label="${isAr ? 'رجوع' : 'Back'}"><i data-lucide="${isAr ? 'chevron-right' : 'chevron-left'}" class="w-5 h-5"></i></button>` : '<span></span>'}
+        <button type="button" onclick="dismissMobileOnboarding()" class="touch-target min-h-11 px-3 text-sm font-bold text-slate-500">${isAr ? 'تخطّي' : 'Skip'}</button>
+      </div>
+      <div class="flex flex-1 flex-col items-center justify-center text-center">
+        <span class="mb-6 flex h-24 w-24 items-center justify-center rounded-3xl alb-mark text-white shadow-xl"><i data-lucide="${slide.icon}" class="w-12 h-12"></i></span>
+        <h2 class="text-2xl font-extrabold text-slate-900 dark:text-white">${slide.title}</h2>
+        <p class="mt-3 max-w-xs text-sm text-slate-500 dark:text-slate-400">${slide.text}</p>
+      </div>
+      <div>
+        <div class="mb-4 flex justify-center gap-2">${slides.map((_, i) => `<span class="h-2 rounded-full ${i === step ? 'w-6 bg-blue-600' : 'w-2 bg-slate-300 dark:bg-slate-700'}"></span>`).join('')}</div>
+        <button type="button" onclick="${last ? 'dismissMobileOnboarding()' : 'onboardingStep(1)'}" class="touch-target w-full min-h-14 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-base font-bold">${last ? (isAr ? 'ابدأ الآن' : 'Get started') : (isAr ? 'التالي' : 'Next')}</button>
+      </div>
+    </div>
+  `;
 }
 // ==========================================
 // SEARCH & FILTER FUNCTIONS

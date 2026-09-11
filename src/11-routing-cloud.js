@@ -26,7 +26,10 @@ const VIEW_TO_PATH = {
   'service-placeholder': '/service',
   'wallet': '/wallet',
   'plans': '/plans',
-  'charge-wallet': '/charge-wallet'
+  'charge-wallet': '/charge-wallet',
+  'more': '/more',
+  'collect': '/collect',
+  'reminders': '/reminders'
 };
 
 // Reverse map: path to view

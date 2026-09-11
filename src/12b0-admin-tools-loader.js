@@ -37,11 +37,11 @@ function _adminToolsBundleUrl() {
 }
 
 function adminToolsBundleReady() {
-  return typeof renderControlCenterView === 'function' && typeof showPageMergeDialog === 'function';
+  return typeof renderControlCenterView === 'function' && typeof showPageMergeDialog === 'function' && typeof renderProfitabilityPanel === 'function';
 }
 
 // Views whose HTML changes once the bundle exists (merge buttons, Control Center).
-const _ADMIN_TOOLS_VIEWS = new Set(['control-center', 'ads', 'pages', 'customers']);
+const _ADMIN_TOOLS_VIEWS = new Set(['control-center', 'ads', 'pages', 'customers', 'analytics']);
 
 function ensureAdminToolsLoaded() {
   if (adminToolsBundleReady()) {
@@ -86,7 +86,9 @@ function retryAdminToolsLoad() {
 function preloadAdminToolsForCurrentUser() {
   try {
     if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return;
-    if (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin()) ensureAdminToolsLoaded();
+    const wantsTools = (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin())
+      || (typeof can === 'function' && can('analytics', 'viewFinancials'));
+    if (wantsTools) ensureAdminToolsLoaded();
   } catch (_) {}
 }
 

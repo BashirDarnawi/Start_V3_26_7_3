@@ -754,8 +754,9 @@ function _renderLoginBrandHeader(subtitle) {
             <div class="w-16 h-16 rounded-3xl mx-auto mb-4 alb-mark alb-mark-dot flex items-center justify-center">
               <span class="text-white text-2xl font-extrabold">A</span>
             </div>
-            <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${t('appName')}</h1>
-            <p class="text-slate-500 mt-2">${subtitle}</p>
+            <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">Albayan <span class="text-lg font-bold text-slate-400">البيان</span></h1>
+            <p class="text-slate-500 mt-1">${state.language === 'ar' ? 'إدارة مكتب الإعلان' : 'Ad office management'}</p>
+            <p class="text-sm text-slate-400 mt-2">${subtitle}</p>
           </div>`;
 }
 
@@ -1240,6 +1241,12 @@ function getWorkspaceViewTitle(view = state.currentView) {
     'delivery-dashboard': 'dashboard',
     'clothes-system': 'clothesSystem'
   };
+  const custom = {
+    more: state.language === 'ar' ? 'المزيد' : 'More',
+    collect: state.language === 'ar' ? 'تحصيل دين' : 'Collect a debt',
+    reminders: state.language === 'ar' ? 'التذكيرات' : 'Reminders'
+  }[view];
+  if (custom) return custom;
   const key = keyByView[view];
   return key ? t(key) : t('adManager');
 }
@@ -1309,6 +1316,8 @@ function canOpenWorkspaceView(view) {
 }
 
 function renderMobileBottomNavigation() {
+  // 2026-09 design: Home · Receipts · (+) · Customers · More, see 12d-manager-shell.js.
+  if (typeof renderManagerTabBar === 'function') return renderManagerTabBar();
   const isAr = state.language === 'ar';
   const candidates = isDeliveryRole(state.currentUser?.role)
     ? [
@@ -1348,8 +1357,12 @@ function renderMainApp(viewHTML = null) {
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
       <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
         ${showSidebar ? `
-        <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-3 md:hidden flex justify-between items-center">
-          <div class="min-w-0 truncate font-bold">${t('adManager')}</div>
+        <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
+          <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
+            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${t('adManager')}</div>
+          </div>
           <div class="flex items-center gap-1">
             <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
             <button type="button" onclick="toggleMobileMenu()" class="mobile-menu-button touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'فتح القائمة' : 'Open menu'}" aria-controls="app-sidebar" aria-expanded="${state.isMobileMenuOpen ? 'true' : 'false'}"><i data-lucide="menu" class="w-6 h-6"></i></button>
@@ -1361,6 +1374,7 @@ function renderMainApp(viewHTML = null) {
       </main>
       ${showSidebar ? renderMobileBottomNavigation() : ''}
     </div>
+    ${typeof shellShouldShowOnboarding === 'function' && shellShouldShowOnboarding() ? renderMobileOnboarding() : ''}
   `;
 }
 
@@ -1553,6 +1567,9 @@ function renderView() {
       return renderAdsStudioLoadingState();
     case 'service-placeholder': return renderServicePlaceholder();
     case 'wallet': return renderWalletView();
+    case 'more': return renderMoreView();
+    case 'collect': return renderCollectView();
+    case 'reminders': return renderRemindersView();
     case 'plans': return renderPlansView();
     case 'charge-wallet': return renderChargeWalletView();
     case 'analytics': return renderAnalyticsView();
@@ -1576,7 +1593,7 @@ function renderNoAccessView() {
   return `
     <div class="min-h-[70vh] flex items-center justify-center">
       <div class="text-center max-w-md mx-auto p-8">
-        <div class="w-24 h-24 rounded-full alb-gradient-brand flex items-center justify-center mx-auto mb-6 shadow-2xl">
+        <div class="w-24 h-24 rounded-full alb-mark flex items-center justify-center mx-auto mb-6 shadow-2xl">
           <i data-lucide="lock" class="w-12 h-12 text-white"></i>
         </div>
         <h1 class="text-3xl font-bold text-slate-800 dark:text-white mb-4">
@@ -1751,7 +1768,7 @@ function renderAnalyticsView() {
   const canViewLiquidity = isCurrentUserAdmin();
   const liquidity = canViewLiquidity ? getLiquiditySnapshot() : null;
   const profitability = canViewFinancials && isCurrentUserAdmin()
-    ? getCurrentProfitabilitySnapshot(ads)
+    ? (typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null)
     : null;
 
   // Calculate ad revenue - separate paid vs pending/unpaid for clarity.
@@ -1888,6 +1905,7 @@ function renderAnalyticsView() {
 
   return `
     <div class="space-y-6 animate-fade-in-up">
+      ${typeof renderManagerHomeHero === 'function' ? renderManagerHomeHero(receipts, ads, canViewFinancials) : ''}
       <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">${t('analytics')}</h1>
@@ -1908,7 +1926,7 @@ function renderAnalyticsView() {
         ${renderStatCard(isAr ? 'حالة التحصيل' : 'Collection Status', `${collectedReceipts.length}/${revenueReceipts.length}`, 'wallet', 'from-amber-500 to-orange-600')}
         ` : `
         <!-- Show paid ad revenue separately for clarity -->
-        <button type="button" onclick="openAnalyticsBreakdown('ad-revenue')" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform text-left w-full">
+        <button type="button" onclick="if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('ad-revenue')" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform text-left w-full">
           <div class="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -1921,7 +1939,7 @@ function renderAnalyticsView() {
             </div>
           </div>
         </button>
-        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "openAnalyticsBreakdown('receipts-volume')")}
+        ${renderStatCard(isAr ? 'حجم الوصولات' : 'Receipts Volume', '$' + totalReceiptsUSD.toFixed(2), 'file-text', 'from-indigo-500 to-purple-600', "if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('receipts-volume')")}
         <!-- Show available balance (paid receipts - used) -->
         <div class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform">
           <div class="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
@@ -1938,7 +1956,7 @@ function renderAnalyticsView() {
         </div>
 
         <!-- Collection Status Card -->
-        <button type="button" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer text-left w-full" onclick="openAnalyticsBreakdown('collection-status')">
+        <button type="button" class="glass-panel rounded-2xl p-5 relative overflow-hidden group hover:scale-[1.02] transition-transform cursor-pointer text-left w-full" onclick="if (typeof openAnalyticsBreakdown === 'function') openAnalyticsBreakdown('collection-status')">
           <div class="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-600 opacity-10 group-hover:opacity-20 transition-opacity"></div>
           <div class="flex items-start justify-between relative">
             <div>
@@ -1966,7 +1984,7 @@ function renderAnalyticsView() {
         `}
       </div>
 
-      ${profitability ? renderProfitabilityPanel(profitability, isAr) : ''}
+      ${profitability && typeof renderProfitabilityPanel === 'function' ? renderProfitabilityPanel(profitability, isAr) : ''}
 
       ${canViewLiquidity && liquidity ? (() => {
         const covered = liquidity.coveragePercent >= 100;
@@ -2584,7 +2602,7 @@ function renderCustomersView() {
       </div>
 
       <!-- Stats Cards (money figures require customers.viewBalance) -->
-      <div class="grid grid-cols-1 ${canSeeCustomerBalances ? 'md:grid-cols-3' : ''} gap-6">
+      <div class="grid ${canSeeCustomerBalances ? 'grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
         ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
@@ -6787,6 +6805,7 @@ function renderSettingsView() {
   return `
     <div class="space-y-6 animate-fade-in-up">
       <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('settings')}</h1>
+      ${typeof renderSettingsAppearanceCard === 'function' ? `<div>${renderSettingsAppearanceCard()}</div>` : ''}
 
       <!-- Security -->
       <div class="glass-panel rounded-2xl p-6">
@@ -7085,6 +7104,8 @@ function renderSettingsView() {
           <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'سجلات التدقيق:' : 'Audit Logs:'}</span><span class="font-bold">${getVisibleRecords(state.logs).length}</span></div>
         </div>
       </div>
+
+      <button type="button" onclick="handleLogout()" class="touch-target w-full min-h-12 rounded-2xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 font-bold flex items-center justify-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${isAr ? 'تسجيل الخروج' : 'Sign out'}</button>
     </div>
   `;
 }
