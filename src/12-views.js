@@ -2359,7 +2359,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
               </button>`
             : '';
           
-          return `
+          const __customerCard = `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform" data-customer-id="${c.id}">
               <div class="flex justify-between items-start mb-4">
                 <div class="flex-1">
@@ -2486,6 +2486,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
               </div>
             </div>
           `;
+          return shellCustomerRow(c, stats, __customerCard, { canSeeContacts, canSeeBalance, phones, displayNum });
   }).join('');
 }
 
@@ -2602,11 +2603,11 @@ function renderCustomersView() {
       </div>
 
       <!-- Stats Cards (money figures require customers.viewBalance) -->
-      <div class="grid ${canSeeCustomerBalances ? 'grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
+      <div class="grid ${canSeeCustomerBalances ? 'grid-cols-2 sm:grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
-        ${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}
         ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
         ` : ''}
       </div>
 
@@ -2659,7 +2660,7 @@ function renderCustomersView() {
         </div>
       </div>
 
-      <div id="customers-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div id="customers-grid" class="space-y-2">
         ${renderCustomersGrid(visibleCustomers, statsIndex, isCurrentUserAdmin() ? new Set(duplicateCustomerGroups.flatMap(group => group.customers.map(customer => String(customer.id)))) : new Set())}
         ${remainingCustomers > 0 ? `
           <div class="col-span-full flex justify-center py-2">
@@ -2959,7 +2960,7 @@ function renderReceiptsView() {
         ` : ''}</div>
       </div>
 
-      <div id="receipts-grid" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div id="receipts-grid" class="space-y-2">
         ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? (isArV ? 'لا توجد وصولات مطابقة للفلاتر' : 'No receipts match your filters') : (isArV ? 'لا توجد وصولات بعد' : 'No receipts yet')}</p>${hasActiveFilters ? `<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isArV ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : visibleReceipts.map((receipt, idx) => {
           const customer = customersById.get(getReceiptCustomerReferenceId(receipt));
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
@@ -3039,7 +3040,7 @@ function renderReceiptsView() {
           const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
           if (String(receipt.status || '') === 'Destroyed') {
             // Destroyed = a locked number: minimal red card, delete-only.
-            return `
+            const __destroyedCard = `
             <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid #dc2626">
               <div class="flex justify-between items-start">
                 <div>
@@ -3058,8 +3059,9 @@ function renderReceiptsView() {
                 </div>
               </div>
             </div>`;
+            return shellReceiptRow(receipt, customer, __destroyedCard, { receiptDisplayNum, displayFinalNo, displayTempNo, destroyed: true, receiptRecordFilter });
           }
-          return `
+          const __receiptCard = `
             <div data-receipt-card="true" data-receipt-id="${Security.escapeHtml(String(receipt.id || ''))}" class="glass-panel rounded-2xl p-6 hover:scale-[1.01] transition-transform ${receiptRecordFilter === String(receipt.id || '') ? 'ring-2 ring-amber-400 ring-offset-2 dark:ring-offset-slate-950' : ''}" style="border-inline-start:5px solid ${_typeAccent}">
               <div class="flex justify-between items-start mb-4">
                 <div>
@@ -3324,6 +3326,7 @@ function renderReceiptsView() {
               </div>
             </div>
           `;
+          return shellReceiptRow(receipt, customer, __receiptCard, { receiptDisplayNum, displayFinalNo, displayTempNo, hasCustomerDebt, collectionTarget, receiptRecordFilter });
         }).join('')}
         ${remainingReceipts > 0 ? `
           <div class="col-span-full flex justify-center py-2">
@@ -3488,7 +3491,7 @@ function renderPagesView() {
         </div>
       </div>
 
-      <div id="pages-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div id="pages-grid" class="space-y-2">
         ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasPageFilters ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageOwnerFilter === 'needs-owner' && !pageSearch ? (isAr ? 'لا توجد صفحات تحتاج إلى مالك' : 'No pages need an owner') : pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => customersById.get(String(cid)))
@@ -3505,7 +3508,7 @@ function renderPagesView() {
           // the only match as #1.
           const pageDisplayNum = pageDisplayNumberById.get(String(p.id)) || 0;
           
-          return `
+          const __pageCard = `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform">
               <div class="flex justify-between items-start mb-4">
                 <div class="flex-1">
@@ -3592,6 +3595,7 @@ function renderPagesView() {
               </div>
             </div>
           `;
+          return shellPageRow(p, __pageCard, { linkedCustomers, isMetaImportedPage, needsPageOwner, pageStats, canSeePageAds, canSeePageFinancials, pageDisplayNum });
         }).join('')}
         ${remainingPages > 0 ? `
           <div class="col-span-full flex justify-center py-2">
@@ -5870,7 +5874,7 @@ function renderUsersView() {
         </div>
       </div>
 
-      <div id="users-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div id="users-grid" class="space-y-2">
         ${visibleUsers.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="user-search" class="mx-auto mb-4 h-14 w-14 text-slate-300"></i><p class="text-slate-500">${isAr ? 'لا يوجد مستخدمون يطابقون البحث' : 'No users match your search'}</p></div>` : visibleUsers.map(u => {
           const userAdsCount = adsByCreator.get(String(u.id)) || 0;
           const deliveredAdsCount = paidDeliveriesByDriver.get(String(u.id)) || 0;
@@ -5879,7 +5883,7 @@ function renderUsersView() {
           const deliveryFeesShopLYD = deliverySummary.feesShop || 0;
           const deliveryStats = deliveryStatsByDriver.get(String(u.id)) || { totalAssigned: 0, accepted: 0, collected: 0 };
           
-          return `
+          const __userCard = `
             <div class="glass-panel rounded-xl p-5 hover:scale-[1.02] transition-transform">
               <div class="flex items-start justify-between mb-4">
                 <div class="flex items-center space-x-3 flex-1">
@@ -5987,6 +5991,7 @@ function renderUsersView() {
               </div>
             </div>
           `;
+          return shellUserRow(u, __userCard);
         }).join('')}
       </div>
     </div>

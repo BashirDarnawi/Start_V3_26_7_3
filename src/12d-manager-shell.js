@@ -554,3 +554,155 @@ function renderMobileOnboarding() {
     </div>
   `;
 }
+
+// ---------- compact list rows (Receipts · Customers · Pages · Team) ----------
+// The design draws these lists as one-line rows. Each row expands in place to
+// the app's full card, so every existing button keeps working exactly as
+// before — the row is only a summary on top of it.
+
+const _shellExpanded = new Set();
+
+function shellRowKey(kind, id) {
+  return `${kind}:${id}`;
+}
+
+function shellRowIsOpen(kind, id) {
+  return _shellExpanded.has(shellRowKey(kind, id));
+}
+
+function shellToggleRow(kind, id) {
+  const key = shellRowKey(kind, id);
+  if (_shellExpanded.has(key)) _shellExpanded.delete(key); else _shellExpanded.add(key);
+  render();
+}
+
+function shellAvatar(initial, tone = 'blue', extra = '') {
+  const tones = {
+    blue: 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    emerald: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+    amber: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+    rose: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+    slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300',
+    brand: 'alb-mark text-white'
+  };
+  return `<span class="w-11 h-11 rounded-full ${tones[tone] || tones.blue} flex items-center justify-center font-bold flex-shrink-0 ${extra}">${shellEsc(initial)}</span>`;
+}
+
+function shellListRow({ kind, id, avatar, title, sub, trailing = '', card = '', open = false, accent = '' }) {
+  const isAr = state.language === 'ar';
+  const safeKind = shellEsc(kind);
+  const safeId = shellEsc(id);
+  return `
+    <div class="hub-card shell-row ${open ? 'is-open' : ''}" data-shell-row="${safeKind}" data-shell-row-id="${safeId}"${accent ? ` style="border-inline-start:4px solid ${shellEsc(accent)}"` : ''}>
+      <button type="button" onclick="shellToggleRow('${safeKind}', '${safeId}')" aria-expanded="${open ? 'true' : 'false'}" class="w-full flex items-center gap-3 p-3.5 text-start touch-target">
+        ${avatar}
+        <span class="flex-1 min-w-0">
+          <span class="block truncate text-[15px] font-bold text-slate-900 dark:text-white">${title}</span>
+          <span class="block truncate text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">${sub}</span>
+        </span>
+        ${trailing ? `<span class="text-end flex-shrink-0 flex flex-col items-end gap-1">${trailing}</span>` : ''}
+        <i data-lucide="${open ? 'chevron-up' : (isAr ? 'chevron-left' : 'chevron-right')}" class="w-4 h-4 text-slate-400 flex-shrink-0"></i>
+      </button>
+      ${card ? `<div class="shell-row-body"${open ? '' : ' hidden'}>${card}</div>` : ''}
+    </div>`;
+}
+
+function shellReceiptRow(receipt, customer, card, meta = {}) {
+  const isAr = state.language === 'ar';
+  const id = String(receipt?.id || '');
+  const name = customer?.name || receipt?.customerName || (isAr ? 'غير معروف' : 'Unknown');
+  const serial = meta.displayFinalNo || meta.displayTempNo || '';
+  const when = receipt?.createdAt || receipt?.startDate ? new Date(receipt.createdAt || receipt.startDate).toLocaleDateString(appDateLocale()) : '';
+  const paymentState = getReceiptPaymentState(receipt);
+  let tone = 'emerald';
+  let pill = shellPill(isAr ? 'مدفوع' : 'Paid', 'emerald');
+  if (meta.destroyed) { tone = 'rose'; pill = shellPill(isAr ? 'تالف' : 'Destroyed', 'rose'); }
+  else if (meta.hasCustomerDebt) { tone = 'rose'; pill = shellPill(isAr ? 'دين العميل' : 'Customer debt', 'rose'); }
+  else if (paymentState === 'canceled') { tone = 'slate'; pill = shellPill(isAr ? 'ملغى' : 'Canceled', 'slate'); }
+  else if (paymentState === 'lost') { tone = 'rose'; pill = shellPill(isAr ? 'ضائع' : 'Lost', 'rose'); }
+  else if (paymentState !== 'paid') { tone = 'amber'; pill = shellPill(isAr ? 'غير مدفوع' : 'Unpaid', 'amber'); }
+  const amountLyd = meta.hasCustomerDebt && meta.collectionTarget
+    ? Number(meta.collectionTarget.amountLocal) || 0
+    : Number(receipt?.amountLocal) || 0;
+  const trailing = `${meta.destroyed ? '' : `<span class="text-sm font-extrabold ${meta.hasCustomerDebt ? 'text-rose-600 dark:text-rose-400' : 'text-slate-900 dark:text-white'}" dir="ltr">${shellEsc(shellLyd(amountLyd))}</span>`}${pill}`;
+  const subParts = [];
+  if (meta.receiptDisplayNum) subParts.push(`#${meta.receiptDisplayNum}`);
+  if (serial) subParts.push(`${isAr ? 'رقم' : 'No.'} ${shellEsc(serial)}${meta.displayTempNo && !meta.displayFinalNo ? (isAr ? ' (مؤقت)' : ' (temp)') : ''}`);
+  if (when) subParts.push(shellEsc(when));
+  if (receipt?.collected && !meta.destroyed) subParts.push(isAr ? 'مُحصَّل' : 'collected');
+  const open = shellRowIsOpen('receipts', id) || (meta.receiptRecordFilter && meta.receiptRecordFilter === id);
+  return shellListRow({
+    kind: 'receipts', id, open, card,
+    avatar: shellAvatar(shellInitial(name), tone),
+    title: shellEsc(name),
+    sub: subParts.join(' · '),
+    trailing
+  });
+}
+
+function shellCustomerRow(customer, stats, card, meta = {}) {
+  const isAr = state.language === 'ar';
+  const id = String(customer?.id || '');
+  const phones = Array.isArray(meta.phones) ? meta.phones.filter(Boolean) : [];
+  const sub = meta.canSeeContacts
+    ? (phones.length ? `<span dir="ltr">${shellEsc(phones[0])}</span>${phones.length > 1 ? ` +${phones.length - 1}` : ''}` : (isAr ? 'لا يوجد هاتف' : 'No phone'))
+    : shellEsc(customer?.platform || '');
+  let trailing = shellPill(shellEsc(customer?.platform || ''), 'slate');
+  let tone = 'blue';
+  if (meta.canSeeBalance && stats) {
+    const bal = Number(stats.balanceLYD) || 0;
+    const balancePill = bal < -0.005
+      ? shellPill(`${isAr ? 'مدين' : 'Owes'} ${shellEsc(shellLyd(Math.abs(bal)))}`, 'rose')
+      : bal > 0.005
+        ? shellPill(`${isAr ? 'رصيد' : 'Credit'} ${shellEsc(shellLyd(bal))}`, 'blue')
+        : shellPill(isAr ? 'مسدَّد' : 'Settled', 'slate');
+    tone = bal < -0.005 ? 'rose' : 'blue';
+    trailing = `<span class="text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(Number(stats.totalPaidLYD) || 0))}</span>${balancePill}`;
+  }
+  return shellListRow({
+    kind: 'customers', id, card,
+    open: shellRowIsOpen('customers', id),
+    avatar: shellAvatar(shellInitial(customer?.name), tone),
+    title: shellEsc(customer?.name || ''),
+    sub: `${meta.displayNum ? `#${meta.displayNum} · ` : ''}${sub}`, trailing
+  });
+}
+
+function shellPageRow(page, card, meta = {}) {
+  const isAr = state.language === 'ar';
+  const id = String(page?.id || '');
+  const owners = Array.isArray(meta.linkedCustomers) ? meta.linkedCustomers : [];
+  const subParts = [];
+  if (page?.category) subParts.push(shellEsc(page.category));
+  if (meta.canSeePageAds) subParts.push(`${Number(meta.pageStats?.totalAds) || 0} ${isAr ? 'إعلان' : 'ads'}`);
+  if (owners.length) subParts.push(shellEsc(owners[0].name || '') + (owners.length > 1 ? ` +${owners.length - 1}` : ''));
+  const pills = [];
+  if (meta.isMetaImportedPage) pills.push(shellPill('Meta', 'blue'));
+  if (meta.needsPageOwner) pills.push(shellPill(isAr ? 'يحتاج مالك' : 'Needs owner', 'amber'));
+  const spend = meta.canSeePageFinancials && meta.pageStats
+    ? `<span class="text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellUsd(meta.pageStats.totalSpendUSD || 0))}</span>`
+    : '';
+  return shellListRow({
+    kind: 'pages', id, card,
+    open: shellRowIsOpen('pages', id),
+    avatar: shellAvatar(shellInitial(page?.name), meta.needsPageOwner ? 'amber' : 'blue'),
+    title: shellEsc(page?.name || ''),
+    sub: subParts.join(' · ') || (isAr ? 'صفحة فيسبوك' : 'Facebook page'),
+    trailing: `${spend}${pills.join('')}`
+  });
+}
+
+function shellUserRow(user, card) {
+  const isAr = state.language === 'ar';
+  const id = String(user?.id || '');
+  const roleLabel = isAr ? (({ Admin: 'مدير', Employee: 'موظف', Delivery: 'سائق توصيل' })[user?.role] || user?.role || '') : (user?.role || '');
+  const rolePill = shellPill(shellEsc(roleLabel), isAdminRole(user?.role) ? 'rose' : isDeliveryRole(user?.role) ? 'blue' : 'slate');
+  return shellListRow({
+    kind: 'users', id, card,
+    open: shellRowIsOpen('users', id),
+    avatar: shellAvatar(shellInitial(user?.name), 'brand'),
+    title: `${shellEsc(user?.name || '')}${String(user?.id) === String(state.currentUser?.id) ? ` <span class="text-[11px] font-semibold text-blue-600">${isAr ? '(أنت)' : '(You)'}</span>` : ''}`,
+    sub: `<span dir="ltr">${shellEsc(user?.email || '')}</span>`,
+    trailing: rolePill
+  });
+}

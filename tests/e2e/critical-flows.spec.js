@@ -31,6 +31,14 @@ async function waitForLiveSync(page) {
   await page.waitForFunction(() => typeof _serverLiveSync !== 'undefined' && !!_serverLiveSync.timer, null, { timeout: 30000 });
 }
 
+// Lists render as compact rows; a row expands into the full card (with its
+// action buttons) on tap.
+async function expandRow(page, kind, id) {
+  const row = page.locator(`[data-shell-row="${kind}"][data-shell-row-id="${id}"] > button`).first();
+  await row.waitFor({ timeout: 15000 });
+  if ((await row.getAttribute('aria-expanded')) === 'false') await row.click();
+}
+
 function safeProjectToken(projectName) {
   return projectName.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
 }
@@ -50,6 +58,7 @@ test('an upgrade refreshes an existing receipt at the same revision without recr
     return receipt.id;
   }, safeProjectToken(testInfo.project.name));
   await page.goto('/receipts');
+  await expandRow(page, 'receipts', receiptId);
   const button = page.locator(`button[data-receipt-id="${receiptId}"][aria-label^="Cover part"]`);
   await expect(button).toBeVisible();
   await waitForLiveSync(page);
@@ -103,6 +112,7 @@ for (const transition of ['expiry', 'logout']) {
       return { receiptId: receipt.id, customerName: customer.name };
     }, `${safeProjectToken(testInfo.project.name)} ${transition}`);
     await page.goto('/receipts');
+    await expandRow(page, 'receipts', seeded.receiptId);
     const button = page.locator(`button[data-receipt-id="${seeded.receiptId}"][aria-label^="Cover part"]`);
     await expect(button).toBeVisible();
     await button.click();
@@ -142,7 +152,9 @@ test('administrator can create a customer and duplicate phones are blocked', asy
   await page.getByRole('button', { name: /create customer/i }).click();
 
   await expect(page.locator('#app-modal')).toBeHidden();
-  await expect(page.getByText(customerName, { exact: true })).toBeVisible();
+  // The list row shows the name; the same name also sits in the row's
+  // collapsed full card, so take the first (visible) match.
+  await expect(page.getByText(customerName, { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: /add customer/i }).click();
   await page.locator('#customer-name').fill(duplicateName);
@@ -191,7 +203,8 @@ test('receipt photos open from the outside card action', async ({ page }, testIn
   }, token);
 
   await page.goto('/receipts');
-  await expect(page.getByText(seeded.serialNumber, { exact: false })).toBeVisible();
+  await expect(page.getByText(seeded.serialNumber, { exact: false }).first()).toBeVisible();
+  await expandRow(page, 'receipts', seeded.receiptId);
   await page.locator(`button[data-receipt-id="${seeded.receiptId}"][aria-label^="View receipt photos"]`).click();
   await expect(page.locator('#receipt-photo-viewer')).toBeVisible();
   await expect(page.locator('#receipt-photo-viewer-image')).toHaveAttribute('src', /^data:image\/png;base64,/);

@@ -1318,6 +1318,34 @@ check('global re-skin is flat: no aurora, solid cards, brand-blue primaries and 
   managerShell.includes('function renderSettingsAppearanceCard()') &&
   managerShell.includes("shellSetTheme('") && managerShell.includes("onclick=\"toggleLanguage()\""));
 
+// ---------- compact list rows (design lists) ----------
+check('receipts, customers, pages and team render as compact rows that expand to the full card',
+  managerShell.includes('function shellListRow({') &&
+  managerShell.includes("${card ? `<div class=\"shell-row-body\"${open ? '' : ' hidden'}>${card}</div>` : ''}") &&
+  managerShell.includes('function shellReceiptRow(receipt, customer, card, meta = {})') &&
+  managerShell.includes('function shellCustomerRow(customer, stats, card, meta = {})') &&
+  managerShell.includes('function shellPageRow(page, card, meta = {})') &&
+  managerShell.includes('function shellUserRow(user, card)') &&
+  views.includes('return shellReceiptRow(receipt, customer, __receiptCard, {') &&
+  views.includes('return shellReceiptRow(receipt, customer, __destroyedCard, {') &&
+  views.includes('return shellCustomerRow(c, stats, __customerCard, {') &&
+  views.includes('return shellPageRow(p, __pageCard, {') &&
+  views.includes('return shellUserRow(u, __userCard);') &&
+  views.includes('<div id="receipts-grid" class="space-y-2">') &&
+  views.includes('<div id="customers-grid" class="space-y-2">') &&
+  views.includes('<div id="pages-grid" class="space-y-2">') &&
+  views.includes('<div id="users-grid" class="space-y-2">') &&
+  views.includes('data-receipt-card="true" data-receipt-id=') &&
+  css.includes('.shell-row-body > .glass-panel {') &&
+  read('tests/e2e/critical-flows.spec.js').includes("async function expandRow(page, kind, id) {"));
+
+check('compact rows keep money and permission rules of the cards they summarise',
+  managerShell.includes("if (meta.canSeeBalance && stats) {") &&
+  managerShell.includes("meta.canSeeContacts\n    ? (phones.length ?") &&
+  managerShell.includes("const spend = meta.canSeePageFinancials && meta.pageStats") &&
+  managerShell.includes("meta.hasCustomerDebt && meta.collectionTarget\n    ? Number(meta.collectionTarget.amountLocal) || 0\n    : Number(receipt?.amountLocal) || 0") &&
+  managerShell.includes("(meta.receiptRecordFilter && meta.receiptRecordFilter === id)"));
+
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,
