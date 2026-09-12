@@ -1346,6 +1346,17 @@ check('compact rows keep money and permission rules of the cards they summarise'
   managerShell.includes("meta.hasCustomerDebt && meta.collectionTarget\n    ? Number(meta.collectionTarget.amountLocal) || 0\n    : Number(receipt?.amountLocal) || 0") &&
   managerShell.includes("(meta.receiptRecordFilter && meta.receiptRecordFilter === id)"));
 
+check('ads and deliveries tables get phone summary rows that expand to the full detail row',
+  managerShell.includes('function shellTableSummaryRow(kind, id, fields, colspan)') &&
+  managerShell.includes('function shellAdSummaryRow(ad, meta = {})') &&
+  managerShell.includes('function shellDeliverySummaryRow(item, meta = {})') &&
+  views.includes("${shellAdSummaryRow(ad, { customer, adPage, adDisplayNum, needsSetup, isAdPaid, deliveryPerson })}") &&
+  views.includes("<tr ${shellTableDetailAttrs('ads', String(ad.id || ''))}") &&
+  views.includes("${shellDeliverySummaryRow(ad, { customer, deliveryPerson, debtLocal, debtUSD })}") &&
+  views.includes("<tr ${shellTableDetailAttrs('deliveries', String(ad.id || ''))}") &&
+  css.includes('.mobile-card-table tr.shell-tr-summary { display: none !important; }') &&
+  css.includes('.mobile-card-table tbody tr[data-shell-detail]:not(.is-open) { display: none !important; }'));
+
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,

@@ -588,12 +588,11 @@ function shellAvatar(initial, tone = 'blue', extra = '') {
   return `<span class="w-11 h-11 rounded-full ${tones[tone] || tones.blue} flex items-center justify-center font-bold flex-shrink-0 ${extra}">${shellEsc(initial)}</span>`;
 }
 
-function shellListRow({ kind, id, avatar, title, sub, trailing = '', card = '', open = false, accent = '' }) {
+function shellSummaryButton({ kind, id, avatar, title, sub, trailing = '', open = false }) {
   const isAr = state.language === 'ar';
   const safeKind = shellEsc(kind);
   const safeId = shellEsc(id);
   return `
-    <div class="hub-card shell-row ${open ? 'is-open' : ''}" data-shell-row="${safeKind}" data-shell-row-id="${safeId}"${accent ? ` style="border-inline-start:4px solid ${shellEsc(accent)}"` : ''}>
       <button type="button" onclick="shellToggleRow('${safeKind}', '${safeId}')" aria-expanded="${open ? 'true' : 'false'}" class="w-full flex items-center gap-3 p-3.5 text-start touch-target">
         ${avatar}
         <span class="flex-1 min-w-0">
@@ -602,9 +601,72 @@ function shellListRow({ kind, id, avatar, title, sub, trailing = '', card = '', 
         </span>
         ${trailing ? `<span class="text-end flex-shrink-0 flex flex-col items-end gap-1">${trailing}</span>` : ''}
         <i data-lucide="${open ? 'chevron-up' : (isAr ? 'chevron-left' : 'chevron-right')}" class="w-4 h-4 text-slate-400 flex-shrink-0"></i>
-      </button>
+      </button>`;
+}
+
+function shellListRow({ kind, id, avatar, title, sub, trailing = '', card = '', open = false, accent = '' }) {
+  const safeKind = shellEsc(kind);
+  const safeId = shellEsc(id);
+  return `
+    <div class="hub-card shell-row ${open ? 'is-open' : ''}" data-shell-row="${safeKind}" data-shell-row-id="${safeId}"${accent ? ` style="border-inline-start:4px solid ${shellEsc(accent)}"` : ''}>
+      ${shellSummaryButton({ kind, id, avatar, title, sub, trailing, open })}
       ${card ? `<div class="shell-row-body"${open ? '' : ' hidden'}>${card}</div>` : ''}
     </div>`;
+}
+
+// Table lists (Ads, Deliveries): on phones a summary row sits above each
+// detail row and the detail row shows only when expanded; on desktop the
+// summary rows are hidden and the table stays a table (see style.css).
+function shellTableSummaryRow(kind, id, fields, colspan) {
+  const open = shellRowIsOpen(kind, id);
+  return `<tr class="shell-tr-summary ${open ? 'is-open' : ''}" data-shell-row="${shellEsc(kind)}" data-shell-row-id="${shellEsc(id)}"><td colspan="${Number(colspan) || 1}" class="shell-tr-cell">${shellSummaryButton({ kind, id, open, ...fields })}</td></tr>`;
+}
+
+function shellTableDetailAttrs(kind, id) {
+  return `data-shell-detail="${shellEsc(kind)}" data-shell-detail-id="${shellEsc(id)}"`;
+}
+
+function shellAdSummaryRow(ad, meta = {}) {
+  const isAr = state.language === 'ar';
+  const id = String(ad?.id || '');
+  const name = meta.customer?.name || ad?.customerName || (meta.needsSetup ? (ad?.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown'));
+  const tone = meta.needsSetup ? 'amber' : meta.isAdPaid ? 'emerald' : 'rose';
+  const statusTones = { Pending: 'amber', Paused: 'slate', Completed: 'emerald', Canceled: 'rose', Lost: 'rose', Stopped: 'blue', Active: 'emerald' };
+  const status = String(ad?.status || 'Active');
+  const subParts = [];
+  if (meta.adDisplayNum) subParts.push(`#${meta.adDisplayNum}`);
+  if (meta.adPage?.name) subParts.push(shellEsc(meta.adPage.name));
+  const start = new Date(ad?.startDate);
+  if (!Number.isNaN(start.getTime()) && ad?.startDate) subParts.push(shellEsc(start.toLocaleDateString(appDateLocale())));
+  if (meta.deliveryPerson?.name) subParts.push(shellEsc(meta.deliveryPerson.name));
+  const amount = meta.needsSetup
+    ? `<span class="text-xs font-bold text-amber-600">${isAr ? 'غير محدد' : 'Not set'}</span>`
+    : `<span class="text-sm font-extrabold ${meta.isAdPaid ? 'text-slate-900 dark:text-white' : 'text-rose-600 dark:text-rose-400'}" dir="ltr">${shellEsc(shellUsd(Number(ad?.amountUSD) || 0))}</span>`;
+  const pills = shellPill(shellEsc(trStatus(status)), statusTones[status] || 'slate')
+    + (meta.needsSetup ? shellPill(isAr ? 'يحتاج إكمال' : 'Needs setup', 'amber') : (!meta.isAdPaid ? shellPill(isAr ? 'دين غير مدفوع' : 'Unpaid debt', 'rose') : ''));
+  return shellTableSummaryRow('ads', id, {
+    avatar: shellAvatar(shellInitial(name), tone),
+    title: shellEsc(name),
+    sub: subParts.join(' · '),
+    trailing: `${amount}<span class="flex flex-wrap justify-end gap-1">${pills}</span>`
+  }, 10);
+}
+
+function shellDeliverySummaryRow(item, meta = {}) {
+  const isAr = state.language === 'ar';
+  const id = String(item?.id || '');
+  const name = meta.customer?.name || (isAr ? 'غير معروف' : 'Unknown');
+  const status = String(item?.deliveryStatus || 'Needs Delivery');
+  const tones = { 'Needs Delivery': 'amber', 'In Progress': 'blue', 'Delivered': 'emerald', 'Canceled': 'rose' };
+  const subParts = [];
+  subParts.push(meta.deliveryPerson?.name ? shellEsc(meta.deliveryPerson.name) : (isAr ? 'غير مُعيَّن' : 'Unassigned'));
+  if (item?.createdAt || item?.date) subParts.push(shellEsc(formatDateShort(item.createdAt || item.date)));
+  return shellTableSummaryRow('deliveries', id, {
+    avatar: shellAvatar(shellInitial(name), tones[status] || 'slate'),
+    title: shellEsc(name),
+    sub: subParts.join(' · '),
+    trailing: `<span class="text-sm font-extrabold text-slate-900 dark:text-white" dir="ltr">${shellEsc(shellLyd(Number(meta.debtLocal) || 0))}</span>${shellPill(shellEsc(trStatus(status)), tones[status] || 'slate')}`
+  }, 7);
 }
 
 function shellReceiptRow(receipt, customer, card, meta = {}) {

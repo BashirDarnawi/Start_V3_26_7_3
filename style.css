@@ -3209,3 +3209,45 @@ body::before { background: none !important; }
   transform: none !important;
 }
 .shell-row.is-open { border-color: rgba(var(--brand-blue-rgb), 0.35); }
+
+/* Table lists on phones: compact summary rows, detail row only when expanded.
+   Desktop keeps the plain table and never shows the summary rows. */
+@media (min-width: 901px) {
+  .mobile-card-table tr.shell-tr-summary { display: none !important; }
+}
+@media (max-width: 900px) {
+  .mobile-card-table tbody tr[data-shell-detail]:not(.is-open) { display: none !important; }
+  .mobile-card-table tbody tr.shell-tr-summary {
+    padding: 0;
+    gap: 0;
+    background: #ffffff;
+    border: 1px solid #e7ebf2;
+    border-radius: 18px;
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
+  }
+  .dark .mobile-card-table tbody tr.shell-tr-summary { background: #0f1830; border-color: rgba(255, 255, 255, 0.09); box-shadow: none; }
+  .mobile-card-table tbody tr.shell-tr-summary td.shell-tr-cell {
+    flex: 1 1 100% !important;
+    max-width: 100%;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  .mobile-card-table tbody tr.shell-tr-summary td.shell-tr-cell::before { display: none; }
+  .mobile-card-table tbody tr.shell-tr-summary.is-open {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-color: rgba(var(--brand-blue-rgb), 0.35);
+  }
+  .mobile-card-table tbody tr[data-shell-detail].is-open {
+    margin-top: -1rem;
+    border-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+    border-color: rgba(var(--brand-blue-rgb), 0.35);
+    background: #ffffff;
+  }
+  .dark .mobile-card-table tbody tr[data-shell-detail].is-open { background: #0f1830; }
+}

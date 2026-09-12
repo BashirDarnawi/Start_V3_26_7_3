@@ -3900,7 +3900,8 @@ function renderAdsView() {
                 const adPrimaryTile = renderAdPrimaryThumbnail(ad, isAr);
                 const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
                 return `
-                  <tr class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                  ${shellAdSummaryRow(ad, { customer, adPage, adDisplayNum, needsSetup, isAdPaid, deliveryPerson })}
+                  <tr ${shellTableDetailAttrs('ads', String(ad.id || ''))} class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 ${shellRowIsOpen('ads', String(ad.id || '')) ? 'is-open' : ''}">
                     <td class="py-3 px-2" data-label="${isAr ? 'الإعلان / العميل' : 'Ad / Customer'}">
                       <div class="ad-primary-summary">
                         ${adPageAvatarTile}
@@ -4370,7 +4371,8 @@ function renderDeliveriesView(logOnly) {
                   };
                   const isReceipt = true;
                   return `
-                    <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
+                    ${shellDeliverySummaryRow(ad, { customer, deliveryPerson, debtLocal, debtUSD })}
+                    <tr ${shellTableDetailAttrs('deliveries', String(ad.id || ''))} class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors ${shellRowIsOpen('deliveries', String(ad.id || '')) ? 'is-open' : ''}">
                       <td class="px-4 py-3" data-label="${isAr ? 'العميل' : 'Customer'}">
                         <div class="flex items-center space-x-3">
                           <div class="w-9 h-9 rounded-full bg-gradient-to-br ${isReceipt ? 'from-purple-500 to-pink-600' : 'from-indigo-500 to-purple-600'} flex items-center justify-center text-white font-bold text-sm shadow-md">
