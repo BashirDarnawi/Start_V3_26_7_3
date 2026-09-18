@@ -70,6 +70,10 @@ function getAdProfitEventTime(ad) {
 }
 
 function getAdSaleRateLYD(ad) {
+  // No local price on the ad means nobody agreed a sale rate with a customer;
+  // pricing it at today's default rate would invent revenue that moves every
+  // time the default rate is edited. It stays under "missing sale rate".
+  if (!(analyticsNumber(ad?.amountLocal) > 0) && !(analyticsNumber(ad?.exchangeRate || ad?.rate) > 0)) return 0;
   const helperRate = typeof getAdSpendExchangeRate === 'function'
     ? analyticsNumber(getAdSpendExchangeRate(ad))
     : 0;
@@ -411,8 +415,9 @@ function renderProfitabilityPanel(snapshot, isAr) {
         <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsMoney(snapshot.knownGrossProfitLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
         <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">$${analyticsMoney(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsMoney(snapshot.inventoryCostLYD)} LYD ${isAr ? 'تكلفة' : 'cost'}</p></div>
       </div>
-      ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
+      ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0 || snapshot.unpaidSpendUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
         <strong>${isAr ? 'يحتاج إكمال:' : 'Needs attention:'}</strong>
+        ${snapshot.unpaidSpendUSD > 0 ? `${isAr ? 'إنفاق على إعلانات غير مدفوعة (دولارات استُهلكت ولم تُحصَّل بعد)' : 'spend on unpaid ads (dollars used, not yet billed)'}: $${analyticsMoney(snapshot.unpaidSpendUSD)}.` : ''}
         ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: $${analyticsMoney(snapshot.unpricedSpendUSD)}.` : ''}
         ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: $${analyticsMoney(snapshot.missingSaleRateUSD)}.` : ''}
         ${isAr ? 'هذه المبالغ مستبعدة من الربح حتى تكتمل البيانات.' : 'These amounts stay out of profit until their data is complete.'}
@@ -548,6 +553,11 @@ let _controlCenter = {
   period: ''
 };
 
+// Platform-owner screen; still, Arabic admins deserve Arabic messages.
+function ccText(en, ar) {
+  return state.language === 'ar' ? ar : en;
+}
+
 function controlCenterPreviousMonth() {
   const now = new Date();
   const value = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -642,14 +652,14 @@ async function previewControlCenterMonth() {
     const totals = preview?.totals || {};
     const blockers = Array.isArray(preview?.blockers) ? preview.blockers : [];
     const message = [
-      `Receipts: $${controlCenterMoney(totals.receiptVolumeUSD)}`,
-      `Ad sales: $${controlCenterMoney(totals.adSalesUSD)}`,
-      `Meta spend: $${controlCenterMoney(totals.metaSpendUSD)}`,
-      blockers.length ? `Problems to review: ${blockers.map(item => `${item.message} (${item.count})`).join(', ')}` : 'No closing problems found.'
+      `${ccText('Receipts', 'الوصولات')}: $${controlCenterMoney(totals.receiptVolumeUSD)}`,
+      `${ccText('Ad sales', 'مبيعات الإعلانات')}: $${controlCenterMoney(totals.adSalesUSD)}`,
+      `${ccText('Ad spend (actual)', 'الإنفاق الإعلاني الفعلي')}: $${controlCenterMoney(totals.adSpendUSD ?? totals.metaSpendUSD)}`,
+      blockers.length ? `${ccText('Problems to review', 'مشاكل للمراجعة')}: ${blockers.map(item => `${item.message} (${item.count})`).join(', ')}` : ccText('No closing problems found.', 'لا توجد مشاكل تمنع الإقفال.')
     ].join('\n');
     window.alert(message);
   } catch (error) {
-    showNotification('Month check failed', String(error?.message || error), 'error');
+    showNotification(ccText('Month check failed', 'فشل فحص الشهر'), String(error?.message || error), 'error');
   }
 }
 
@@ -661,40 +671,49 @@ async function closeControlCenterMonth() {
     let forceReason = '';
     if (blockers.length) {
       const blockerText = blockers.map(item => `${item.message} (${item.count})`).join('\n');
-      forceReason = window.prompt(`This month has items to review:\n${blockerText}\n\nFix them first, or type a clear reason (at least 10 characters) to close anyway:`) || '';
+      forceReason = window.prompt(ccText(
+        `This month has items to review:\n${blockerText}\n\nFix them first, or type a clear reason (at least 10 characters) to close anyway:`,
+        `هذا الشهر فيه عناصر تحتاج مراجعة:\n${blockerText}\n\nأصلحها أولاً، أو اكتب سبباً واضحاً (10 أحرف على الأقل) للإقفال رغم ذلك:`
+      )) || '';
       if (forceReason.trim().length < 10) return;
-    } else if (!window.confirm(`Close ${period}? After closing, its receipts, ads, and dollar purchases cannot be changed.`)) return;
+    } else if (!window.confirm(ccText(
+      `Close ${period}? After closing, its receipts, ads, and dollar purchases cannot be changed.`,
+      `إقفال ${period}؟ بعد الإقفال لا يمكن تعديل وصولاته وإعلاناته ومشتريات الدولار.`
+    ))) return;
     await apiCloseFinancialPeriod(period, forceReason);
-    showNotification('Month closed safely', `${period} is now protected from changes.`, 'success');
+    showNotification(ccText('Month closed safely', 'تم إقفال الشهر بأمان'), ccText(`${period} is now protected from changes.`, `${period} أصبح محمياً من التعديل.`), 'success');
     await loadControlCenterStatus(true);
   } catch (error) {
-    showNotification('Could not close month', String(error?.message || error), 'error');
+    showNotification(ccText('Could not close month', 'تعذر إقفال الشهر'), String(error?.message || error), 'error');
   }
 }
 
 async function unlockControlCenterMonth(period) {
-  const reason = window.prompt(`Why must ${period} be unlocked? This action is recorded in the audit log.`) || '';
+  const reason = window.prompt(ccText(
+    `Why must ${period} be unlocked? This action is recorded in the audit log.`,
+    `لماذا يجب فتح ${period}؟ يُسجَّل هذا الإجراء في سجل التدقيق.`
+  )) || '';
   if (reason.trim().length < 10) {
-    showNotification('Reason required', 'Please write at least 10 characters.', 'warning');
+    showNotification(ccText('Reason required', 'السبب مطلوب'), ccText('Please write at least 10 characters.', 'اكتب 10 أحرف على الأقل.'), 'warning');
     return;
   }
   try {
     await apiUnlockFinancialPeriod(period, reason);
-    showNotification('Month unlocked', `${period} can be corrected now. Close it again when finished.`, 'success');
+    showNotification(ccText('Month unlocked', 'تم فتح الشهر'), ccText(`${period} can be corrected now. Close it again when finished.`, `يمكن تصحيح ${period} الآن. أقفله مجدداً عند الانتهاء.`), 'success');
     await loadControlCenterStatus(true);
   } catch (error) {
-    showNotification('Could not unlock month', String(error?.message || error), 'error');
+    showNotification(ccText('Could not unlock month', 'تعذر فتح الشهر'), String(error?.message || error), 'error');
   }
 }
 
 async function runControlCenterBackup() {
   try {
-    showNotification('Backup started', 'Please keep this page open while the server creates the encrypted copy.', 'info');
+    showNotification(ccText('Backup started', 'بدأ النسخ الاحتياطي'), ccText('Please keep this page open while the server creates the encrypted copy.', 'أبقِ هذه الصفحة مفتوحة بينما ينشئ الخادم النسخة المشفرة.'), 'info');
     const response = await apiRunEncryptedBackup();
-    showNotification('Backup complete', response?.backup?.offsite ? 'Encrypted backup saved locally and off-site.' : 'Encrypted backup saved.', 'success');
+    showNotification(ccText('Backup complete', 'اكتمل النسخ الاحتياطي'), response?.backup?.offsite ? ccText('Encrypted backup saved locally and off-site.', 'حُفظت النسخة المشفرة محلياً وخارجياً.') : ccText('Encrypted backup saved.', 'حُفظت النسخة المشفرة.'), 'success');
     await loadControlCenterStatus(true);
   } catch (error) {
-    showNotification('Backup failed', String(error?.message || error), 'error');
+    showNotification(ccText('Backup failed', 'فشل النسخ الاحتياطي'), String(error?.message || error), 'error');
   }
 }
 
@@ -760,11 +779,11 @@ function planManagerAddBundle() {
   const nameAr = read('plan-new-name-ar').slice(0, 80);
   const services = PLAN_MANAGER_SERVICE_IDS.filter(sid => document.getElementById(`plan-new-svc-${sid}`)?.checked);
   if (rawId.length < 2 || !name || !nameAr || !services.length) {
-    showNotification('Missing details', 'A bundle needs an id, both names, and at least one service.', 'warning');
+    showNotification(ccText('Missing details', 'بيانات ناقصة'), ccText('A bundle needs an id, both names, and at least one service.', 'الباقة تحتاج إلى معرّف واسمين وخدمة واحدة على الأقل.'), 'warning');
     return;
   }
   if (_planManager.plans.some(p => String(p.id) === rawId)) {
-    showNotification('Duplicate id', 'A plan with this id already exists.', 'warning');
+    showNotification(ccText('Duplicate id', 'معرّف مكرر'), ccText('A plan with this id already exists.', 'توجد خطة بهذا المعرّف بالفعل.'), 'warning');
     return;
   }
   _planManager.plans.push({
@@ -803,12 +822,12 @@ async function savePlanManager() {
     _planManager.version = Number(payload?.version || _planManager.version + 1);
     _planManager.dirty = false;
     _planManager.loadedAt = 0;
-    showNotification('Plans saved', `Catalog version ${_planManager.version} is live — new purchases use it immediately.`, 'success');
+    showNotification(ccText('Plans saved', 'تم حفظ الخطط'), ccText(`Catalog version ${_planManager.version} is live — new purchases use it immediately.`, `الإصدار ${_planManager.version} من الكتالوج أصبح فعالاً — المشتريات الجديدة تستخدمه فوراً.`), 'success');
     if (typeof refreshSubscriptionPlans === 'function') refreshSubscriptionPlans(true).catch(() => {});
     loadPlanManager(true);
   } catch (error) {
     const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || 'Save failed');
-    showNotification('Could not save plans', String(detail), 'error');
+    showNotification(ccText('Could not save plans', 'تعذر حفظ الخطط'), String(detail), 'error');
   }
 }
 

@@ -1474,6 +1474,21 @@ check('money boxes keep thousands separators, WhatsApp links use international d
   read('src/12a-analytics-profit.js').includes("String(ad.metaCurrency || 'USD').toUpperCase() === 'USD'") &&
   read('capacitor.config.json').includes('"readTimeout": 120000'));
 
+// ---------- deep scan round 3 (2026-09-18) ----------
+check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero counts money by paid date and actual spend',
+  helpers.includes("if (rawStatus === 'pending_setup') return 'not_paid';") &&
+  read('src/12a-analytics-profit.js').includes("if (!(analyticsNumber(ad?.amountLocal) > 0) && !(analyticsNumber(ad?.exchangeRate || ad?.rate) > 0)) return 0;") &&
+  read('src/12a-analytics-profit.js').includes("snapshot.unpaidSpendUSD > 0 ? `${isAr ?") &&
+  managerShell.includes("const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;") &&
+  managerShell.includes("const adActual = a => (typeof getAdActualSpendUSD === 'function' ? getAdActualSpendUSD(a) : getAdSpendUSD(a));") &&
+  read('src/12b-control-center.js').includes("function ccText(en, ar) {") &&
+  socialStudio.includes("if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();") &&
+  clothes.includes("updateRecord(state.clothesProducts, editTarget.id, payload, _clothesEditBaseline || undefined)") &&
+  clothes.includes("if (amountPaidLYD > total + 0.005) {") &&
+  helpers.includes("if (e?.status === 409 && isVersionConflict409(e)) {") &&
+  helpers.includes("if (e?.status === 409 && /already exists/i.test(String(e?.message || ''))) {") &&
+  helpers.includes("const openId = String(_deliveryCompletionOpen?.id || '');"));
+
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,

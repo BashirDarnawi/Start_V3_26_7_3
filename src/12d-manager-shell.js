@@ -194,14 +194,20 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
   const inWindow = (value, from, to) => { const ts = new Date(value || 0).getTime(); return Number.isFinite(ts) && ts >= from && ts < to; };
   const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r));
-  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(r.createdAt || r.startDate, monthStart, Infinity));
-  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(r.createdAt || r.startDate, prevStart, monthStart));
+  // "Collected this month" is about when the money came in, not when the
+  // receipt was written (a debt collected on the 3rd counts on the 3rd).
+  const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;
+  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), monthStart, Infinity));
+  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), prevStart, monthStart));
   const collectedLyd = paidThisMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
   const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
-  const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.createdAt || a.startDate, monthStart, Infinity)).reduce((sum, a) => sum + getAdSpendUSD(a), 0);
+  // Same month rule as the analytics breakdown (start date first) and the
+  // same "actual spend" as the profit panel when that bundle is loaded.
+  const adActual = a => (typeof getAdActualSpendUSD === 'function' ? getAdActualSpendUSD(a) : getAdSpendUSD(a));
+  const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.startDate || a.createdAt, monthStart, Infinity)).reduce((sum, a) => sum + adActual(a), 0);
   let owedLyd = 0;
   let owedCount = 0;
   if (canViewFinancials) {

@@ -534,10 +534,11 @@ async function socialEditPost(postId) {
   const generation = ++_socialComposerGeneration;
   const isCurrent = () => socialStudioContextIsCurrent(context) && generation === _socialComposerGeneration;
   let full = summary;
+  let mediaUnknown = false;
   try {
     const res = await socialApi(`/posts/${encodeURIComponent(postId)}`);
     full = socialUnwrap(res, 'post') || summary;
-  } catch (_) { /* Same-session network failure may use the lightweight summary. */ }
+  } catch (_) { mediaUnknown = true; /* Same-session network failure may use the lightweight summary. */ }
   if (!isCurrent()) return;
   const scheduled = String(full.status) === 'scheduled' && full.scheduledAt;
   _social.composer = {
@@ -545,6 +546,8 @@ async function socialEditPost(postId) {
     pageIds: (Array.isArray(full.pageIds) ? full.pageIds : []).map(String),
     caption: String(full.caption || ''),
     media: Array.isArray(full.media) ? full.media.slice() : [],
+    // The summary carries no photos; a save from it must not erase them.
+    mediaUnknown: mediaUnknown && !(Array.isArray(full.media) && full.media.length),
     mode: scheduled ? 'schedule' : 'now',
     scheduledAt: scheduled ? socialIsoToLocalInput(full.scheduledAt) : '',
     autoReply: !!full.autoReplyRuleId,
@@ -669,14 +672,16 @@ function socialComposerValidate() {
 }
 
 function socialComposerBody(statusWanted, c = _social.composer) {
-  return {
+  const body = {
     pageIds: c.pageIds.slice(),
     caption: String(c.caption || ''),
-    media: c.media.slice(),
     status: statusWanted,
     scheduledAt: statusWanted === 'scheduled' ? new Date(c.scheduledAt).toISOString() : '',
     autoReplyRuleId: c.autoReply ? String(c.autoReplyRuleId || '') : ''
   };
+  // Omitting `media` keeps the server's photos; sending [] would delete them.
+  if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();
+  return body;
 }
 
 function socialComposerFingerprint(c) {

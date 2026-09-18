@@ -70,6 +70,10 @@ function getAdProfitEventTime(ad) {
 }
 
 function getAdSaleRateLYD(ad) {
+  // No local price on the ad means nobody agreed a sale rate with a customer;
+  // pricing it at today's default rate would invent revenue that moves every
+  // time the default rate is edited. It stays under "missing sale rate".
+  if (!(analyticsNumber(ad?.amountLocal) > 0) && !(analyticsNumber(ad?.exchangeRate || ad?.rate) > 0)) return 0;
   const helperRate = typeof getAdSpendExchangeRate === 'function'
     ? analyticsNumber(getAdSpendExchangeRate(ad))
     : 0;
@@ -411,8 +415,9 @@ function renderProfitabilityPanel(snapshot, isAr) {
         <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsMoney(snapshot.knownGrossProfitLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
         <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">$${analyticsMoney(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsMoney(snapshot.inventoryCostLYD)} LYD ${isAr ? 'تكلفة' : 'cost'}</p></div>
       </div>
-      ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
+      ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0 || snapshot.unpaidSpendUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
         <strong>${isAr ? 'يحتاج إكمال:' : 'Needs attention:'}</strong>
+        ${snapshot.unpaidSpendUSD > 0 ? `${isAr ? 'إنفاق على إعلانات غير مدفوعة (دولارات استُهلكت ولم تُحصَّل بعد)' : 'spend on unpaid ads (dollars used, not yet billed)'}: $${analyticsMoney(snapshot.unpaidSpendUSD)}.` : ''}
         ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: $${analyticsMoney(snapshot.unpricedSpendUSD)}.` : ''}
         ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: $${analyticsMoney(snapshot.missingSaleRateUSD)}.` : ''}
         ${isAr ? 'هذه المبالغ مستبعدة من الربح حتى تكتمل البيانات.' : 'These amounts stay out of profit until their data is complete.'}

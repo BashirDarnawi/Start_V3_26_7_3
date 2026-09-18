@@ -925,6 +925,9 @@ async function deleteClothesProduct(id) {
 
 // Temp modal state (seeded on open, cleared in closeModal)
 let _clothesTempVariants = [];
+// Version of the product the edit form opened with: a colleague's sale while
+// the form is open must produce a conflict, never a silent stock restore.
+let _clothesEditBaseline = 0;
 let _clothesTempPhoto = null;
 // Generation token for async photo compression — bumped on every product modal
 // open/close so a callback that resolves after the modal changed is discarded.
@@ -947,6 +950,7 @@ function editClothesProduct(id) {
   if (!product) return;
   state.activeModal = 'clothes-product';
   state.modalData = product;
+  _clothesEditBaseline = Number(product._lastModified) || 0;
   const variants = Array.isArray(product.variants) ? product.variants : [];
   _clothesTempVariants = variants.length
     ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
@@ -1178,7 +1182,7 @@ async function saveClothesProductFromModal() {
   const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
 
   if (editTarget) {
-    const saved = await updateRecord(state.clothesProducts, editTarget.id, payload);
+    const saved = await updateRecord(state.clothesProducts, editTarget.id, payload, _clothesEditBaseline || undefined);
     if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث المنتج بنجاح.' : 'Product updated successfully.', 'success');
   } else {
@@ -2975,6 +2979,10 @@ async function saveClothesOrderFromModal() {
   const total = getClothesOrderTotals(totalsProbe).totalLYD;
   if (paymentStatus === 'Paid') amountPaidLYD = total;
   if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
+  if (amountPaidLYD > total + 0.005) {
+    showNotification(isAr ? 'المبلغ المدفوع أكبر من الإجمالي' : 'Paid amount exceeds the total', isAr ? `الإجمالي ${total.toFixed(2)} د.ل. أدخل مبلغاً مساوياً أو أقل.` : `The order total is ${total.toFixed(2)} LYD. Enter that amount or less.`, 'error');
+    return false;
+  }
 
   const payload = { customerName, customerPhone, note, lines, deliveryFeeLYD, paymentStatus, amountPaidLYD, paymentMethod };
 

@@ -23538,14 +23538,20 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
   const inWindow = (value, from, to) => { const ts = new Date(value || 0).getTime(); return Number.isFinite(ts) && ts >= from && ts < to; };
   const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r));
-  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(r.createdAt || r.startDate, monthStart, Infinity));
-  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(r.createdAt || r.startDate, prevStart, monthStart));
+  // "Collected this month" is about when the money came in, not when the
+  // receipt was written (a debt collected on the 3rd counts on the 3rd).
+  const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;
+  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), monthStart, Infinity));
+  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), prevStart, monthStart));
   const collectedLyd = paidThisMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
   const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
-  const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.createdAt || a.startDate, monthStart, Infinity)).reduce((sum, a) => sum + getAdSpendUSD(a), 0);
+  // Same month rule as the analytics breakdown (start date first) and the
+  // same "actual spend" as the profit panel when that bundle is loaded.
+  const adActual = a => (typeof getAdActualSpendUSD === 'function' ? getAdActualSpendUSD(a) : getAdSpendUSD(a));
+  const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.startDate || a.createdAt, monthStart, Infinity)).reduce((sum, a) => sum + adActual(a), 0);
   let owedLyd = 0;
   let owedCount = 0;
   if (canViewFinancials) {
@@ -24240,6 +24246,9 @@ function getAdPaymentState(ad) {
   if (rawStatus === 'paid') return 'paid';
   if (['not_paid', 'notpaid', 'unpaid'].includes(rawStatus)) return 'not_paid';
   if (['wont_pay', 'wontpay'].includes(rawStatus)) return 'wont_pay';
+  // A Meta import that staff have not set up yet has no customer and no
+  // price: nobody has paid for it, whatever the historical default says.
+  if (rawStatus === 'pending_setup') return 'not_paid';
   if (typeof ad?.isPaid === 'boolean') return ad.isPaid ? 'paid' : 'not_paid';
 
   // Very old records without either field were created before unpaid ads
@@ -27932,7 +27941,15 @@ const _DELIVERY_USD_METHODS = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
 function _deliveryDefaultRate1(method) {
   const r = getDefaultRate1(method);
   if (r > 0) return r;
-  return _DELIVERY_USD_METHODS.includes(method) ? (Number(state.defaultExchangeRate) || 1) : 1;
+  if (!_DELIVERY_USD_METHODS.includes(method)) return 1;
+  // The server judges the collected LYD against the receipt's OWN rate. A
+  // customer paying exactly the dollar debt must not read as over- or
+  // under-paid because today's default rate differs from the receipt's.
+  const openId = String(_deliveryCompletionOpen?.id || '');
+  const open = openId ? (state.receipts || []).find(r => r && String(r.id) === openId) : null;
+  const receiptRate = Number(open?.exchangeRate);
+  if (Number.isFinite(receiptRate) && receiptRate > 0) return receiptRate;
+  return Number(state.defaultExchangeRate) || 1;
 }
 
 function _deliveryPaymentRowHtml(payment, opts = {}) {
@@ -28529,8 +28546,10 @@ async function submitReceiptDeliveryCompletion(receiptId) {
         }).catch(() => {});
       }
     } catch (e) {
-      // Idempotency / retries: if we hit a conflict, load latest and succeed if already delivered.
-      if (e?.status === 409) {
+      // Idempotency / retries: on a VERSION conflict, load latest and succeed
+      // if already delivered. A rule refusal also arrives as 409 ("number
+      // already exists"); rebasing on that looped "tap again" forever.
+      if (e?.status === 409 && isVersionConflict409(e)) {
         try {
           const latest = await apiGetEntity('receipts', receipt.id);
           const latestData = latest?.data ? Security.sanitizeObject(latest.data) : null;
@@ -28612,6 +28631,41 @@ async function submitReceiptDeliveryCompletion(receiptId) {
           // Fall through to error toast - retry also failed
           if (ALBAYAN_DEBUG_MODE) console.warn('[handleDeliveryComplete] Retry fetch failed:', retryErr?.message || retryErr);
         }
+      }
+      if (e?.status === 409 && /already exists/i.test(String(e?.message || ''))) {
+        showNotification(
+          state.language === 'ar' ? 'رقم الوصل مستخدم' : 'Receipt number already used',
+          state.language === 'ar' ? 'هذا الرقم مسجل لوصل آخر. أدخل رقم الوصل النهائي الصحيح ثم أعد المحاولة.' : 'This number belongs to another receipt. Enter the correct final receipt number and try again.',
+          'error'
+        );
+        if (btn) btn.disabled = false;
+        return;
+      }
+      // F3: the office canceled or reassigned this job while the form was
+      // open. The server answers 400/403, not 409; close the form honestly.
+      if (e?.status === 400 || e?.status === 403) {
+        try {
+          const latest = await apiGetEntity('receipts', receipt.id);
+          const latestData = latest?.data ? Security.sanitizeObject(latest.data) : null;
+          const mine = String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');
+          if (latestData && (String(latestData.deliveryStatus || '') === 'Canceled' || !mine)) {
+            const idxLive = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
+            if (idxLive !== -1) state.receipts[idxLive] = latestData;
+            markCollectionDirty('receipts');
+            saveState();
+            _clearDeliveryCompletionDraft(receipt.id);
+            document.getElementById('delivery-complete-modal')?.remove();
+            forceFullRender();
+            showNotification(
+              state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
+              !mine
+                ? (state.language === 'ar' ? 'تم تحويل هذا التوصيل إلى سائق آخر.' : 'This delivery was reassigned to another driver.')
+                : (state.language === 'ar' ? 'تم إلغاء هذا التوصيل من الإدارة.' : 'This delivery was canceled by an admin.'),
+              'error'
+            );
+            return;
+          }
+        } catch (_) {}
       }
       const netMessage = describeNetworkError(e);
       if (netMessage) {

@@ -174,6 +174,14 @@ def _entity_rows(collection: str, conn: Any | None = None) -> list[dict[str, Any
     return result
 
 
+def _business_zone() -> ZoneInfo | timezone:
+    name = (os.getenv("ALBAYAN_BUSINESS_TIMEZONE") or "Africa/Tripoli").strip()
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return timezone.utc
+
+
 def _record_date(collection: str, data: dict[str, Any]) -> date | None:
     keys = {
         "receipts": ("date", "receiptDate", "createdAt", "_created"),
@@ -184,13 +192,25 @@ def _record_date(collection: str, data: dict[str, Any]) -> date | None:
         value = data.get(key)
         if value in (None, ""):
             continue
+        # A timestamp belongs to the business day it happened on in Libya,
+        # the same calendar the analytics screen and the "which month may be
+        # closed" rule use. A receipt written at 00:30 on the 1st is not last
+        # month's receipt because UTC still says the 31st.
         if isinstance(value, (int, float)):
             try:
                 stamp = float(value)
-                return datetime.fromtimestamp(stamp if abs(stamp) < 100_000_000_000 else stamp / 1000, tz=timezone.utc).date()
+                return datetime.fromtimestamp(stamp if abs(stamp) < 100_000_000_000 else stamp / 1000, tz=_business_zone()).date()
             except (OverflowError, OSError, ValueError):
                 continue
         text_value = str(value).strip()
+        if len(text_value) > 10 and "T" in text_value:
+            try:
+                parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(_business_zone()).date()
+            except ValueError:
+                pass
         try:
             if len(text_value) >= 10:
                 return date.fromisoformat(text_value[:10])
@@ -318,23 +338,103 @@ def assert_financial_bulk_import_open(
         assert_financial_period_open(collection, data, conn=conn)
 
 
+# The month snapshot must say the same thing as the analytics screen. These
+# mirror src/08-data-audit.js getReceiptPaymentState, src/13-filters-helpers.js
+# getAdPaymentState / getAdSpendUSD and src/12a-analytics-profit.js
+# getAdActualSpendUSD (with src/11b-ad-final-spend.js).
+_TERMINAL_AD_STATUSES = {"stopped", "completed", "canceled", "cancelled", "lost", "archived"}
+
+
+def _receipt_payment_state(row: dict[str, Any]) -> str:
+    status = re.sub(r"[\s_-]+", "", str(row.get("status") or "").strip().lower())
+    if status in ("canceled", "cancelled", "destroyed"):
+        return "canceled"
+    if status == "lost":
+        return "lost"
+    if status == "paid":
+        return "paid"
+    if status in ("notpaid", "unpaid", "pending"):
+        return "not_paid"
+    if row.get("isPaid") is True:
+        return "paid"
+    if row.get("isPaid") is False:
+        return "not_paid"
+    return "unknown"
+
+
+def _ad_payment_state(row: dict[str, Any]) -> str:
+    raw = str(row.get("paymentStatus") or "").strip().lower().replace("\u2019", "").replace("\u2018", "").replace("'", "")
+    raw = re.sub(r"_+", "_", re.sub(r"[\s-]+", "_", raw))
+    if raw == "paid":
+        return "paid"
+    if raw in ("not_paid", "notpaid", "unpaid", "pending_setup"):
+        return "not_paid"
+    if raw in ("wont_pay", "wontpay"):
+        return "wont_pay"
+    if isinstance(row.get("isPaid"), bool):
+        return "paid" if row["isPaid"] else "not_paid"
+    return "paid"
+
+
+def _ad_sale_usd(row: dict[str, Any]) -> float:
+    """Status-aware sale value: a stopped ad sold what it spent, not its budget."""
+    status = str(row.get("status") or "").strip().lower()
+    spent = row.get("spentUSD")
+    if status == "stopped" and spent is not None:
+        return max(0.0, _safe_number(spent))
+    if status in ("completed", "canceled", "cancelled", "lost"):
+        return max(0.0, _safe_number(spent if spent is not None else row.get("amountUSD")))
+    if status in ("pending", "paused"):
+        return 0.0
+    return max(0.0, _safe_number(row.get("amountUSD")))
+
+
+def _ad_actual_spend_usd(row: dict[str, Any]) -> float:
+    """Frozen final spend first, then USD Meta spend, then the recorded spend."""
+    status = str(row.get("status") or "").strip().lower()
+    spent = row.get("spentUSD")
+    has_spent = spent not in (None, "") and _safe_number(spent) >= 0
+    frozen = has_spent and (
+        row.get("manualSpentOverride") is True or bool(row.get("finalSpendConfirmedAt")) or status in _TERMINAL_AD_STATUSES
+    )
+    if frozen:
+        return max(0.0, _safe_number(spent))
+    minor = row.get("metaSpendMinor")
+    if str(row.get("metaAdId") or "") and minor not in (None, "") and _safe_number(minor) >= 0 \
+            and str(row.get("metaCurrency") or "USD").upper() == "USD":
+        return max(0.0, _safe_number(minor) / 100)
+    if has_spent:
+        return max(0.0, _safe_number(spent))
+    if status in ("stopped", "completed", "canceled", "cancelled", "lost"):
+        return _ad_sale_usd(row)
+    return 0.0
+
+
 def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
     receipts = [row for row in _entity_rows("receipts", conn) if _period_for_record("receipts", row) == period]
-    ads = [row for row in _entity_rows("ads", conn) if _period_for_record("ads", row) == period]
+    # Legacy receipt rows once lived inside the ads collection; every money
+    # path skips them, and so must the month totals.
+    ads = [
+        row for row in _entity_rows("ads", conn)
+        if str(row.get("recordType") or "") != "receipt" and _period_for_record("ads", row) == period
+    ]
     purchases = [row for row in _entity_rows("dollarPurchases", conn) if _period_for_record("dollarPurchases", row) == period]
 
-    normal_receipts = [row for row in receipts if str(row.get("receiptType") or "") != "TRANSFER_IN"]
+    # Canceled, lost and destroyed receipts are neither revenue nor debt.
+    normal_receipts = [
+        row for row in receipts
+        if str(row.get("receiptType") or "") != "TRANSFER_IN" and _receipt_payment_state(row) not in ("canceled", "lost")
+    ]
     receipt_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in normal_receipts)
-    paid_receipts = [row for row in normal_receipts if row.get("isPaid") is True or str(row.get("status") or "").lower() == "paid"]
+    paid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "paid"]
     paid_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in paid_receipts)
-    ad_sales = sum(max(0.0, _safe_number(row.get("amountUSD"))) for row in ads)
-    # Meta reports spend in the ad account's currency; only USD accounts may
-    # be summed as dollars (the client applies the same rule).
-    meta_spend = sum(
-        max(0.0, _safe_number(row.get("metaSpendMinor")) / 100)
-        for row in ads
-        if str(row.get("metaCurrency") or "USD").upper() == "USD"
-    )
+    paid_ads = [row for row in ads if _ad_payment_state(row) == "paid"]
+    ad_sales = sum(_ad_sale_usd(row) for row in paid_ads)
+    ad_sales_pending = sum(_ad_sale_usd(row) for row in ads if _ad_payment_state(row) == "not_paid")
+    # Actual spend with the same precedence as the profitability panel: a
+    # staff-confirmed final figure beats a later Meta reading, and manual ads
+    # count their recorded spend.
+    actual_spend = sum(_ad_actual_spend_usd(row) for row in ads)
     purchase_usd = sum(max(0.0, _safe_number(row.get("amountUSD"))) for row in purchases)
     purchase_cost_lyd = sum(max(0.0, _safe_number(row.get("totalLYD"))) for row in purchases)
     setup_ads = [
@@ -343,7 +443,7 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         or _safe_number(row.get("amountUSD")) <= 0
         or not str(row.get("paymentStatus") or "").strip()
     ]
-    unpaid_receipts = [row for row in normal_receipts if row not in paid_receipts]
+    unpaid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "not_paid"]
     blockers = []
     if setup_ads:
         blockers.append({"code": "ads_need_setup", "count": len(setup_ads), "message": "Ads still need customer, amount, or payment setup"})
@@ -364,7 +464,10 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
             "receiptVolumeUSD": round(receipt_total, 2),
             "paidReceiptsUSD": round(paid_total, 2),
             "adSalesUSD": round(ad_sales, 2),
-            "metaSpendUSD": round(meta_spend, 2),
+            "adSalesPendingUSD": round(ad_sales_pending, 2),
+            "adSpendUSD": round(actual_spend, 2),
+            # Kept for older clients; it is the same actual-spend figure.
+            "metaSpendUSD": round(actual_spend, 2),
             "dollarsPurchasedUSD": round(purchase_usd, 2),
             "dollarPurchaseCostLYD": round(purchase_cost_lyd, 2),
         },

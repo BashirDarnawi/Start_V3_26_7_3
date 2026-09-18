@@ -5530,24 +5530,33 @@ def _clothes_order_mutation_atomic(
                 for line in [*old_lines, *new_lines]
                 if isinstance(line, dict) and line.get("productId")
             }
+            # A payment change moves no stock: it needs no product locks and no
+            # product-edit permission on every item of the order.
             products = _clothes_load_products_for_update(
-                conn, product_ids, actor, postgres=postgres
+                conn, product_ids if act != "payment" else set(), actor, postgres=postgres
             )
             changed_products: set[str] = set()
 
             if act == "create":
                 normalized = _clothes_normalize_order_payload(clean_data, new_lines, products, None)
                 _clothes_deduct_order_stock(new_lines, products, changed_products)
+                # Order numbers are per business: one owner's sequence must not
+                # depend on (or reveal) other tenants' orders. Deleted orders
+                # still count so a number is never reused.
+                order_owner = str(actor.get("id") or "")
                 _lock_idempotency_key(
-                    conn, "global", postgres=postgres, namespace="clothesOrderNumber"
+                    conn, f"owner:{order_owner}", postgres=postgres, namespace="clothesOrderNumber"
                 )
                 max_order_no = 0
                 for existing in conn.execute(
-                    text("SELECT data_json FROM entities WHERE type='clothesOrders'")
+                    text(
+                        f"SELECT {json_field_sql('orderNo')} AS order_no FROM entities "
+                        "WHERE type='clothesOrders' AND created_by=:owner"
+                    ),
+                    {"owner": order_owner},
                 ).mappings().all():
-                    existing_data = json_loads(existing.get("data_json") or "{}") or {}
                     try:
-                        max_order_no = max(max_order_no, int(existing_data.get("orderNo") or 0))
+                        max_order_no = max(max_order_no, int(float(existing.get("order_no") or 0)))
                     except (TypeError, ValueError, OverflowError):
                         pass
                 normalized.update(
@@ -12363,6 +12372,27 @@ def update_collection_item(
         if not _mark_collected_patch and not _delivery_ok:
             raise HTTPException(status_code=403, detail="Forbidden")
         delivery_grant_patch = _delivery_ok
+
+    if collection == "receipts" and not delivery_grant_patch and role_lower not in {"delivery", "admin"}:
+        # A staff edit grant is not a way around the delivery state machine:
+        # a Delivered or Canceled job is final, and other moves follow the
+        # same transitions the deliveries.* grants follow.
+        _status_updates = sanitize_json(body.data or {}) or {}
+        if "deliveryStatus" in _status_updates:
+            _current_status = str((existing.get("data") or {}).get("deliveryStatus") or "").strip()
+            _next_status = str(_status_updates.get("deliveryStatus") or "").strip()
+            if _next_status != _current_status:
+                if _current_status in {"Delivered", "Canceled"}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot change status from '{_current_status}' - this is a terminal state",
+                    )
+                if _next_status != "Delivered" and _next_status not in _DELIVERY_TRANSITIONS.get(_current_status, set()):
+                    # (Delivered keeps its own rule below: completion belongs to the assigned driver.)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid status transition from '{_current_status}' to '{_next_status}'",
+                    )
 
     if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
         _driver_updates = sanitize_json(body.data or {}) or {}

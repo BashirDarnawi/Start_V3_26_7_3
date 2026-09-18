@@ -516,10 +516,11 @@ def test_unreadable_results_are_not_recorded_as_a_zero_spend_sync(meta_env):
 def test_month_totals_ignore_non_usd_meta_spend():
     period = "2031-01"
     usd_id, eur_id = f"ad_usd_{TAG}", f"ad_eur_{TAG}"
-    _insert_entity("ads", usd_id, {"recordType": "ad", "startDate": "2031-01-05", "amountUSD": 10, "metaSpendMinor": 1200, "metaCurrency": "USD", "customerId": "x"})
-    _insert_entity("ads", eur_id, {"recordType": "ad", "startDate": "2031-01-06", "amountUSD": 10, "metaSpendMinor": 30000, "metaCurrency": "EUR", "customerId": "x"})
+    _insert_entity("ads", usd_id, {"recordType": "ad", "status": "Active", "startDate": "2031-01-05", "amountUSD": 10, "metaAdId": "944444444444444", "metaSpendMinor": 1200, "metaCurrency": "USD", "customerId": "x", "paymentStatus": "paid"})
+    _insert_entity("ads", eur_id, {"recordType": "ad", "status": "Active", "startDate": "2031-01-06", "amountUSD": 10, "metaAdId": "955555555555555", "metaSpendMinor": 30000, "metaCurrency": "EUR", "customerId": "x", "paymentStatus": "paid"})
     try:
         snapshot = operations._period_snapshot(period)
         assert snapshot["totals"]["metaSpendUSD"] == 12.0
+        assert snapshot["totals"]["adSpendUSD"] == 12.0
     finally:
         _delete_entities(usd_id, eur_id)

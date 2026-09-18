@@ -209,3 +209,84 @@ an unassigned office receipt (only assigning a job to another driver is
 refused now); the Arabic comma did not follow the thousands rule; and the
 clothes date helper handled date-only values wrongly. The customer-merge
 lock-order fix landed in the same follow-up commit.
+
+
+---
+
+# Round 3 (same day)
+
+Four more hunters on areas nobody had examined: the analytics and month-close
+maths, the Clothes stock and order invariants, the driver's daily delivery
+flow, and the Social Studio rule engine and scheduler. Several findings came
+with scratch tests, now permanent in `server/test_deep_scan_round3.py`
+(and the Clothes shipment flow was re-verified in a browser).
+
+## Fixed
+
+### Reporting (what the owner sees)
+
+| Problem | Fix |
+| --- | --- |
+| The month-close snapshot and the analytics screen disagreed: the close counted every ad's full budget as sales (stopped ads at $500 instead of the $100 they spent), ignored staff-confirmed final spend in favour of a later Meta reading, counted a canceled receipt that had once been paid as paid revenue, kept canceled/lost/destroyed receipts in the volume and as "unpaid" blockers, and counted legacy receipt rows stored in the ads collection as ads. | The snapshot now uses the same money vocabulary as the screen (status-aware sales, frozen final spend first, canceled receipts neither revenue nor debt, legacy rows skipped) and reports `adSalesPendingUSD` and `adSpendUSD` (actual). |
+| Records were assigned to a month by the UTC date, so a receipt written at 00:30 on the 1st in Libya belonged to the previous month on the server but to the new month on the screen, and closing the old month locked it. | Timestamps are converted to the business time zone (Africa/Tripoli) before taking the calendar day. |
+| A freshly imported Meta ad awaiting setup counted as a paid ad and the profit panel priced its spend at today's default exchange rate, inventing revenue that moved whenever the default rate was edited. | `pending_setup` is unpaid; an ad with no agreed local price is never priced at the default rate (it stays under "missing sale rate"). |
+| The home hero counted "collected this month" by the date the receipt was written, not when the money came in, and "ad spend" was booked budget. | Collected uses the paid date; ad spend uses actual spend and the same month rule as analytics. |
+| The dollar cost of spend on unpaid ads was invisible. | The profit panel lists it under "needs attention". |
+| Control Center month check said "Meta spend". | Says "Ad spend (actual)". |
+
+### Social Studio
+
+| Problem | Fix |
+| --- | --- |
+| The composer's "Auto-reply on this post" choice was stored but never used; only a rule's own scope decided. | That rule is evaluated first for comments on that post. |
+| A comment arriving during a Meta pause or outage was claimed and never answered ("will resume automatically" was untrue). | Temporary failures keep the claim with a retry time; the scheduler retries with backoff for up to seven days. |
+| A scheduled post hit by a temporary Meta problem became a permanent failure. | The worker keeps it scheduled and retries with backoff (5, 10, 20 … minutes, up to five attempts). |
+| A "chosen posts" rule missed a post whose other page had failed (status `failed` even though this page was live), and only the newest 500 posts were scanned. | Both statuses are scanned. |
+| "Once per person" was page-wide: a generic thank-you consumed the person's one price reply; a bare like counted as an answer. | Per rule; only a sent DM or public reply counts; pre-existing history rows keep their page-wide meaning. |
+| Replies inside a thread (usually to our own auto-reply) got another auto-reply. | Nested replies are skipped. |
+| Short Latin keywords matched inside other words ("hi" in "Benghazi"). | Three-letter-or-shorter Latin keywords need word boundaries; Arabic prefixes still match. |
+| Editing a post after a failed detail load could save it without its photos. | The save omits the photo field when the photos were never loaded. |
+
+### Clothes
+
+| Problem | Fix |
+| --- | --- |
+| Editing a product while a colleague sold from it could silently restore the sold quantity: the form saved with whatever version live-sync had refreshed. | The form keeps the version it opened with; a concurrent sale now produces a conflict. |
+| Order numbers were one global sequence across all businesses (a new shop's first order was numbered after other tenants' orders, revealing their volume). | One sequence per business. |
+| Changing an order's payment status required product-edit permission on every product in it. | Payment changes need no product permission. |
+| Overpayment was accepted in local mode and rejected by the server with a raw message. | Validated before saving, bilingual. |
+
+### Deliveries (driver flow)
+
+| Problem | Fix |
+| --- | --- |
+| A duplicate final receipt number trapped the driver in a "receipt changed, tap again" loop: every 409 was treated as a version conflict. | Only real version conflicts are rebased; a used number shows "Receipt number already used". |
+| A staff member with `receipts.edit` could reopen a Delivered or Canceled job or move it backwards, with no validation. | Staff edits follow the same delivery state machine (terminal states are final). |
+| When the office canceled or reassigned a job while the driver's form was open, the driver saw a raw error and a dead form. | The app re-reads the job and closes the form with a clear message. |
+| A dollar collected on a dollar debt was converted at today's default rate instead of the receipt's own rate, producing false over- or under-payment. | The receipt's rate seeds the conversion. |
+
+### Also
+
+- Control Center toasts and dialogs are bilingual.
+- The customer-merge lock order (left open in round 2) was fixed earlier today.
+
+## Still open for the owner (round 3)
+
+1. Clothes: a product variant that was ever shipped or sold cannot be renamed
+   and such a product cannot be deleted (the server refuses); the client text
+   promises otherwise. Needs a rename operation.
+2. Clothes: cancel/return records no refund, so "money collected" drops by the
+   full paid amount whether or not money was returned.
+3. Deliveries: "Delete mission" and some dropdown moves are refused for staff
+   holding only `deliveries.assign`; the overpay cap is only known server-side;
+   deleting a driver leaves their in-progress jobs assigned to a ghost.
+4. Social Studio: captions and replies lose `<` and `>` (the write-time
+   sanitiser strips them everywhere); Instagram requires JPEG and specific
+   aspect ratios, which the composer does not enforce; partial publishing
+   success is shown as total failure.
+5. Analytics: users with view-own scopes see partial totals presented as
+   business totals; paused paid ads count $0 revenue while the profit panel
+   counts their spend.
+6. Round-2 items still open: startup repair passes on every boot, backup-now
+   inside the request, hash-locked Python dependencies, no idle session
+   timeout, finished ads never leave the Meta sync queue.

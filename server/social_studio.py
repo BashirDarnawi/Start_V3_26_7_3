@@ -192,6 +192,15 @@ def media_public_url(post_id: str, index: int, *, expires_at: int | None = None)
     )
 
 
+def _keyword_matches(keyword: str, normalized: str) -> bool:
+    """Substring match, except that very short Latin keywords ("hi", "ok")
+    must stand alone: "hi" inside "Benghazi" is not a greeting. Arabic
+    prefixes (the keyword inside a longer word) stay substring matches."""
+    if len(keyword) <= 3 and re.fullmatch(r"[a-z0-9]+", keyword):
+        return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", normalized) is not None
+    return keyword in normalized
+
+
 def evaluate_rules(
     rules: list[dict[str, Any]],
     settings: dict[str, Any] | None,
@@ -202,6 +211,7 @@ def evaluate_rules(
     from_id: str,
     already_replied_from_ids: set[str],
     now_local: datetime,
+    already_replied_rule_ids: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Pick the first enabled rule that applies to a comment (pure, no I/O).
 
@@ -218,6 +228,9 @@ def evaluate_rules(
     normalized = normalize_text(text)
     quiet = (settings or {}).get("quietHours") or {}
     replied = {str(x) for x in (already_replied_from_ids or set())}
+    # "Once per person" is per RULE: a generic thank-you must not use up the
+    # person's one price reply.
+    replied_rules = {str(x) for x in (already_replied_rule_ids or set())}
     for rule in rules:
         if not isinstance(rule, dict) or not _bool(rule.get("enabled"), True):
             continue
@@ -229,9 +242,13 @@ def evaluate_rules(
                 continue
         if str(rule.get("trigger") or "every") == "keywords":
             keywords = [normalize_text(k) for k in (rule.get("keywords") or [])]
-            if not any(keyword and keyword in normalized for keyword in keywords):
+            if not any(keyword and _keyword_matches(keyword, normalized) for keyword in keywords):
                 continue
-        if _bool(rule.get("oncePerPerson")) and str(from_id or "") in replied:
+        if _bool(rule.get("oncePerPerson")) and (
+            str(from_id or "") in replied
+            or "*" in replied_rules
+            or str(rule.get("id") or "") in replied_rules
+        ):
             continue
         if _bool(rule.get("quietHours")) and _in_quiet_window(quiet, now_local):
             continue
@@ -748,7 +765,7 @@ def _publish_to_page(client: Any, page: dict[str, Any], post_id: str, post: dict
     )
 
 
-def publish_post(post_id: str, *, actor_id: str = "") -> dict[str, Any]:
+def publish_post(post_id: str, *, actor_id: str = "", from_scheduler: bool = False) -> dict[str, Any]:
     """Run the publish routine for a post already claimed as ``publishing``.
 
     Pages that already succeeded in an earlier attempt keep their metaPostId
@@ -777,10 +794,12 @@ def publish_post(post_id: str, *, actor_id: str = "") -> dict[str, Any]:
     }
     client: Any = None
     client_error = ""
+    client_error_retryable = False
     try:
         client = _meta.get_meta_ads_client()
     except _meta.MetaAdsError as error:
         client_error = error.public_message
+        client_error_retryable = bool(error.retryable)
     results: list[dict[str, Any]] = []
     errors: list[str] = []
     for page_id in [str(p) for p in (data.get("pageIds") or [])]:
@@ -791,6 +810,7 @@ def publish_post(post_id: str, *, actor_id: str = "") -> dict[str, Any]:
         page = ctx["get_entity"](PAGES_TYPE, page_id) if _SAFE_ID_RE.fullmatch(page_id) else None
         if client is None:
             result["error"] = client_error
+            result["retryable"] = client_error_retryable
         elif not page or page.get("deleted") or str(page["data"].get("ownerId") or "") != owner_id:
             result["error"] = "This page is no longer linked to the account."
         else:
@@ -799,6 +819,7 @@ def publish_post(post_id: str, *, actor_id: str = "") -> dict[str, Any]:
                 result["metaPostId"] = _publish_to_page(client, page["data"], post_id, data)
             except _meta.MetaAdsError as error:
                 result["error"] = error.public_message
+                result["retryable"] = bool(error.retryable)
                 healthy = error.code != "authorization"
             except Exception as error:  # never leak tokens/stack traces into rows
                 result["error"] = f"Publishing failed ({type(error).__name__})."
@@ -811,12 +832,28 @@ def publish_post(post_id: str, *, actor_id: str = "") -> dict[str, Any]:
             errors.append(result["error"])
         results.append(result)
     now = _iso_now()
-    updates: dict[str, Any] = {
-        "results": results,
-        "status": "published" if not errors else "failed",
-        "lastError": "" if not errors else errors[0],
-        "updatedAt": now,
-    }
+    attempts = int(data.get("publishAttempts") or 0) + 1
+    temporary_only = bool(errors) and all(bool(r.get("retryable")) for r in results if r.get("error"))
+    if from_scheduler and temporary_only and attempts < 6:
+        # A temporary Meta condition (pause, outage) must not turn a scheduled
+        # post into a permanent failure: keep it scheduled a little later.
+        delay_minutes = min(240, 5 * (2 ** (attempts - 1)))
+        updates: dict[str, Any] = {
+            "results": results,
+            "status": "scheduled",
+            "scheduledAt": _iso_at(datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)),
+            "publishAttempts": attempts,
+            "lastError": errors[0],
+            "updatedAt": now,
+        }
+    else:
+        updates = {
+            "results": results,
+            "status": "published" if not errors else "failed",
+            "lastError": "" if not errors else errors[0],
+            "publishAttempts": attempts,
+            "updatedAt": now,
+        }
     if not errors:
         updates["publishedAt"] = now
     saved = ctx["patch_entity"](POSTS_TYPE, post_id, updates, actor_id or owner_id)
@@ -894,9 +931,13 @@ def run_scheduler_tick(*, now: datetime | None = None, limit: int = 20) -> int:
             continue  # another worker generation/process took it
         attempted += 1
         try:
-            publish_post(entity["id"], actor_id=owner_id)
+            publish_post(entity["id"], actor_id=owner_id, from_scheduler=True)
         except Exception as error:
             print(f"[albayan] Social Studio publish failed for {entity['id']} ({type(error).__name__}).")
+    try:
+        _retry_pending_replies(current)
+    except Exception:
+        print("[albayan] Social Studio reply retry pass failed; it will retry.")
     return attempted
 
 
@@ -965,12 +1006,17 @@ def _comment_reservation_guard(owner_id: str):
             yield
 
 
-def _has_person_reply(owner_id: str, page_id: str, from_id: str) -> bool:
-    """Check this person's full history, not the latest 1,000 display rows."""
+def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[str]:
+    """Rules that already answered this person on this page (full history).
+
+    Only a sent DM or public reply (or a reply still in flight) counts; a
+    bare like is not an answer."""
+    found: set[str] = set()
     with db_conn() as conn:
         params = {"type": LOG_TYPE, "owner": owner_id, "page": page_id, "person": from_id, "after": ""}
         query = text(
-            f"SELECT id, {_json_field('actions')} AS actions, {_json_field('processing')} AS processing "
+            f"SELECT id, {_json_field('actions')} AS actions, {_json_field('processing')} AS processing, "
+            f"{_json_field('ruleId')} AS rule_id "
             f"FROM entities WHERE type=:type AND deleted=false AND created_by=:owner "
             f"AND {_json_field('ownerId')}=:owner AND {_json_field('pageId')}=:page "
             f"AND {_json_field('fromId')}=:person AND id>:after ORDER BY id ASC LIMIT 100"
@@ -984,11 +1030,147 @@ def _has_person_reply(owner_id: str, page_id: str, from_id: str) -> bool:
                     try:
                         actions = json_loads(actions)
                     except ValueError:
-                        pass
-                if actions or _bool(row["processing"]):
-                    return True
+                        actions = []
+                answered = _bool(row["processing"]) or (
+                    isinstance(actions, list) and any(str(a) in ("dm", "public") for a in actions)
+                )
+                if answered:
+                    # History rows written before replies carried a rule id
+                    # keep their old page-wide meaning ("*" = every rule).
+                    found.add(str(row["rule_id"] or "") or "*")
             params["after"] = rows[-1]["id"]
-    return False
+    return found
+
+
+def _has_person_reply(owner_id: str, page_id: str, from_id: str) -> bool:
+    """Check this person's full history, not the latest 1,000 display rows."""
+    return bool(_person_replied_rule_ids(owner_id, page_id, from_id))
+
+
+def _iso_at(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _retry_after_iso(attempt: int) -> str:
+    """15 min, 30 min, 1 h, 2 h, 4 h ... after a temporary Meta problem."""
+    minutes = min(240, 15 * (2 ** max(0, int(attempt) - 1)))
+    return _iso_at(datetime.now(timezone.utc) + timedelta(minutes=minutes))
+
+
+def _execute_rule_actions(
+    page: dict[str, Any], rule: dict[str, Any], platform: str, comment_id: str
+) -> tuple[list[str], list[str], bool]:
+    """Send the DM / public reply / like for one comment.
+
+    Returns (actions, errors, retryable): retryable when nothing was sent and
+    every failure was a temporary Meta condition (pause, outage), so the
+    scheduler may try again instead of the comment being lost."""
+    actions: list[str] = []
+    errors: list[str] = []
+    failures = 0
+    temporary = 0
+    client: Any = None
+    token = ""
+    try:
+        client = _meta.get_meta_ads_client()
+        token = client.page_access_token(str(page.get("metaPageId") or ""))
+    except _meta.MetaAdsError as error:
+        client = None
+        errors.append(error.public_message)
+        failures += 1
+        temporary += 1 if error.retryable else 0
+    dm_sent = False
+    if client is not None:
+        dm_text = str(rule.get("dmText") or "")
+        if _bool(rule.get("dmEnabled")) and dm_text and not _bool(rule.get("pauseDms")):
+            try:
+                if platform == "fb":
+                    client._post(f"{comment_id}/private_replies", {"message": dm_text}, access_token=token)
+                else:
+                    client._post(
+                        f"{page.get('igUserId')}/messages",
+                        {
+                            "recipient": json.dumps({"comment_id": str(comment_id)}, separators=(",", ":")),
+                            "message": json.dumps({"text": dm_text}, separators=(",", ":"), ensure_ascii=False),
+                        },
+                        access_token=token,
+                    )
+                actions.append("dm")
+                dm_sent = True
+            except _meta.MetaAdsError as error:
+                errors.append(f"dm: {error.public_message}")
+                failures += 1
+                temporary += 1 if error.retryable else 0
+        public_reply = str(rule.get("publicReply") or "")
+        if public_reply and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
+            try:
+                path = f"{comment_id}/comments" if platform == "fb" else f"{comment_id}/replies"
+                client._post(path, {"message": public_reply}, access_token=token)
+                actions.append("public")
+            except _meta.MetaAdsError as error:
+                errors.append(f"public: {error.public_message}")
+                failures += 1
+                temporary += 1 if error.retryable else 0
+        if platform == "fb" and _bool(rule.get("likeComment")):
+            try:
+                client._post(f"{comment_id}/likes", {}, access_token=token)
+                actions.append("like")
+            except _meta.MetaAdsError as error:
+                errors.append(f"like: {error.public_message}")
+                failures += 1
+                temporary += 1 if error.retryable else 0
+    retryable = not actions and failures > 0 and temporary == failures
+    return actions, errors, retryable
+
+
+def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
+    """Answer comments whose reply hit a temporary Meta problem earlier.
+
+    The reservation row kept the claim; without this pass such a comment was
+    never answered ("will resume automatically" was a lie). Meta's private
+    reply window is seven days, so older rows are left alone."""
+    ctx = _ctx()
+    now_iso = _iso_at(now)
+    cutoff = _iso_at(now - timedelta(days=7))
+    with db_conn() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
+                f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {_json_field('retryAfter')} <= :now "
+                f"AND {_json_field('at')} >= :cutoff ORDER BY {_json_field('retryAfter')} ASC LIMIT :limit"
+            ),
+            {"type": LOG_TYPE, "now": now_iso, "cutoff": cutoff, "limit": max(1, int(limit))},
+        ).mappings().all()
+    attempted = 0
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(data, dict):
+            continue
+        owner_id = str(data.get("ownerId") or "")
+        attempts = max(1, int(data.get("attempts") or 1))
+        page_entity = ctx["get_entity"](PAGES_TYPE, str(data.get("pageId") or "")) if data.get("pageId") else None
+        rule_entity = ctx["get_entity"](RULES_TYPE, str(data.get("ruleId") or "")) if data.get("ruleId") else None
+        usable = (
+            _owner_can_automate(owner_id)
+            and page_entity and not page_entity.get("deleted")
+            and str((page_entity.get("data") or {}).get("ownerId") or "") == owner_id
+            and rule_entity and not rule_entity.get("deleted")
+            and _bool((rule_entity.get("data") or {}).get("enabled"), True)
+        )
+        if not usable:
+            patch: dict[str, Any] = {"retryAfter": "", "error": "Reply retry stopped: the page, rule or access is no longer available."}
+        else:
+            actions, errors, retryable = _execute_rule_actions(
+                page_entity["data"], rule_entity["data"], str(data.get("platform") or ""), str(data.get("commentId") or "")
+            )
+            patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
+            patch["retryAfter"] = _retry_after_iso(attempts + 1) if (retryable and attempts + 1 < 6) else ""
+        try:
+            ctx["patch_entity"](LOG_TYPE, str(row["id"]), patch, owner_id)
+        except HTTPException:
+            pass
+        attempted += 1
+    return attempted
 
 
 def process_comment(
@@ -1017,21 +1199,36 @@ def process_comment(
         )
         if not rules:
             return None
-        replied = {from_id} if (
-            any(_bool(rule.get("oncePerPerson")) for rule in rules)
-            and _has_person_reply(owner_id, page_entity["id"], from_id)
-        ) else set()
-        refs = {str(post_ref or "")}
-        # Every public comment lands here; only ids and Meta results are
-        # needed, never the base64 photos of every published post.
-        for post in _lean_posts(owner_id, "published", limit=500):
-            results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
-            if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):
-                refs.add(post["id"])
-        rule = evaluate_rules(
-            rules, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
-            already_replied_from_ids=replied, now_local=datetime.now(_zone(settings.get("timezone"))),
+        replied_rules = (
+            _person_replied_rule_ids(owner_id, page_entity["id"], from_id)
+            if any(_bool(rule.get("oncePerPerson")) for rule in rules) else set()
         )
+        refs = {str(post_ref or "")}
+        preferred_rule_id = ""
+        # Every public comment lands here; only ids and Meta results are
+        # needed, never the base64 photos of every published post. A post
+        # whose OTHER page failed is still live on this one, so scan both.
+        for status in ("published", "failed"):
+            for post in _lean_posts(owner_id, status, limit=500):
+                results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
+                if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):
+                    refs.add(post["id"])
+                    preferred_rule_id = preferred_rule_id or str(post["data"].get("autoReplyRuleId") or "")
+        now_local = datetime.now(_zone(settings.get("timezone")))
+        rule = None
+        if preferred_rule_id:
+            # The composer's "Auto-reply on this post" choice wins for this
+            # post whatever the rule's own scope says.
+            chosen = [dict(r, scope="all") for r in rules if str(r.get("id") or "") == preferred_rule_id]
+            rule = evaluate_rules(
+                chosen, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
+                already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
+            )
+        if not rule:
+            rule = evaluate_rules(
+                rules, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
+                already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
+            )
         if not rule:
             return None
         log_id = _log_id(owner_id, platform, comment_id)
@@ -1056,57 +1253,18 @@ def process_comment(
             if error.status_code == 409:
                 return None
             raise
-    actions: list[str] = []
-    errors: list[str] = []
-    client: Any = None
-    token = ""
-    try:
-        client = _meta.get_meta_ads_client()
-        token = client.page_access_token(str(page.get("metaPageId") or ""))
-    except _meta.MetaAdsError as error:
-        client = None
-        errors.append(error.public_message)
-    dm_sent = False
-    if client is not None:
-        dm_text = str(rule.get("dmText") or "")
-        if _bool(rule.get("dmEnabled")) and dm_text and not _bool(rule.get("pauseDms")):
-            try:
-                if platform == "fb":
-                    client._post(f"{comment_id}/private_replies", {"message": dm_text}, access_token=token)
-                else:
-                    client._post(
-                        f"{page.get('igUserId')}/messages",
-                        {
-                            "recipient": json.dumps({"comment_id": str(comment_id)}, separators=(",", ":")),
-                            "message": json.dumps({"text": dm_text}, separators=(",", ":"), ensure_ascii=False),
-                        },
-                        access_token=token,
-                    )
-                actions.append("dm")
-                dm_sent = True
-            except _meta.MetaAdsError as error:
-                errors.append(f"dm: {error.public_message}")
-        public_reply = str(rule.get("publicReply") or "")
-        if public_reply and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
-            try:
-                path = f"{comment_id}/comments" if platform == "fb" else f"{comment_id}/replies"
-                client._post(path, {"message": public_reply}, access_token=token)
-                actions.append("public")
-            except _meta.MetaAdsError as error:
-                errors.append(f"public: {error.public_message}")
-        if platform == "fb" and _bool(rule.get("likeComment")):
-            try:
-                client._post(f"{comment_id}/likes", {}, access_token=token)
-                actions.append("like")
-            except _meta.MetaAdsError as error:
-                errors.append(f"like: {error.public_message}")
+    actions, errors, retryable = _execute_rule_actions(page, rule, platform, str(comment_id))
     log_data["actions"] = actions
     log_data["error"] = "; ".join(errors)[:500]
     log_data["processing"] = False
+    patch: dict[str, Any] = {"actions": actions, "error": log_data["error"], "processing": False}
+    if retryable:
+        # Nothing was sent and the cause is temporary: keep the claim and let
+        # the scheduler try again instead of losing the comment for good.
+        patch["retryAfter"] = _retry_after_iso(1)
+        patch["attempts"] = 1
     try:
-        saved = ctx["patch_entity"](LOG_TYPE, log_id, {
-            "actions": actions, "error": log_data["error"], "processing": False,
-        }, owner_id)
+        saved = ctx["patch_entity"](LOG_TYPE, log_id, patch, owner_id)
         return saved.get("data") or log_data
     except HTTPException:
         return log_data
@@ -1132,10 +1290,15 @@ def handle_meta_webhook(payload: Any) -> int:
                     continue
                 platform, comment_id = "fb", str(value.get("comment_id") or "")
                 post_ref, message = str(value.get("post_id") or ""), str(value.get("message") or "")
+                parent_id = str(value.get("parent_id") or "")
+                if parent_id and parent_id != post_ref:
+                    continue  # a reply inside a thread (often to our own auto-reply)
             elif obj == "instagram":
                 if change.get("field") != "comments":
                     continue
                 media = value.get("media") if isinstance(value.get("media"), dict) else {}
+                if value.get("parent_id"):
+                    continue  # a reply inside a thread (often to our own auto-reply)
                 platform, comment_id = "ig", str(value.get("id") or "")
                 post_ref, message = str(media.get("id") or ""), str(value.get("text") or "")
             else:
