@@ -646,7 +646,10 @@ function buildCustomerStatsIndex() {
       if (list) list.push(p); else pagesByCustomer.set(cid, [p]);
     }
   }
-  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId };
+  // This index belongs to ONE synchronous render: filtering, sorting, totals
+  // and cards may request the same customer repeatedly. Never retain it across
+  // edits/live sync; a new render builds fresh groups and fresh derived stats.
+  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, statsByCustomer: new Map() };
 }
 
 // Status-aware USD "spent" for a single ad — the ONE definition of how much
@@ -1082,6 +1085,10 @@ function getPageSpendSummary(pageId, spendIndex = null) {
 
 function getCustomerStats(customerId, statsIndex = null) {
   const normalizedCustomerId = String(customerId || '');
+  const cachedStats = statsIndex?.statsByCustomer?.get(normalizedCustomerId);
+  // Return a fresh object as before, so a caller cannot alter another card's
+  // cached totals. Single-record/action callers without an index stay uncached.
+  if (cachedStats) return { ...cachedStats };
   const customerAds = statsIndex
     ? (statsIndex.adsByCustomer.get(normalizedCustomerId) || [])
     : getVisibleRecords(state.ads).filter(ad => String(ad.customerId || ad.customer || '') === normalizedCustomerId && ad.recordType !== 'receipt');
@@ -1303,7 +1310,7 @@ function getCustomerStats(customerId, statsIndex = null) {
     .filter(Number.isFinite);
   const lastAdDate = customerActivityDates.length ? Math.max(...customerActivityDates) : null;
   
-  return {
+  const stats = {
     totalSpent,
     totalPaid,
     balance,
@@ -1328,6 +1335,8 @@ function getCustomerStats(customerId, statsIndex = null) {
     totalReceipts: customerReceipts.length,
     linkedPagesCount: linkedPages.length
   };
+  statsIndex?.statsByCustomer?.set(normalizedCustomerId, { ...stats });
+  return stats;
 }
 
 let _customerPagesReturnFocus = null;
@@ -2418,16 +2427,25 @@ function importUserPermissions(userId) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
     return;
   }
+  // File selection/reading can outlive logout, a role change, or a switch
+  // between local and server data. Never apply that file as the next user.
+  const importIdentity = getAuthMeIdentity();
+  const importServerMode = isServerModeEnabled();
+  const importIsCurrent = () => getAuthMeIdentity() === importIdentity
+    && isServerModeEnabled() === importServerMode
+    && canManageUsersAction('managePermissions');
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
   
   input.onchange = (e) => {
+    if (!importIsCurrent()) return;
     const file = e.target.files[0];
     if (!file) return;
     
     const reader = new FileReader();
     reader.onload = (event) => {
+      if (!importIsCurrent()) return;
       try {
         const data = JSON.parse(event.target.result);
         const user = state.users.find(u => u.id === userId);
@@ -4709,7 +4727,7 @@ function clearAllReceiptFilters() {
 // company expense against customer debt, never customer-paid cash or revenue.
 let _companyDebtCoverageDialogState = null;
 
-function _getCompanyCoverableOutstandingUSD(receipt) {
+function _getCompanyCoverableOutstandingUSD(receipt, collectionTarget = null) {
   if (!receipt || receipt._deleted) return 0;
   const stored = Number(receipt.customerOutstandingUSD);
   if (receipt.customerOutstandingUSD != null && Number.isFinite(stored)) {
@@ -4718,7 +4736,7 @@ function _getCompanyCoverableOutstandingUSD(receipt) {
   // The collection target is already net of company coverage. A Delivered
   // (UNDERPAID) receipt has additionally received real customer cash — its
   // amountUSD after completion — which is not outstanding either.
-  const target = getReceiptCollectionTarget(receipt);
+  const target = collectionTarget || getReceiptCollectionTarget(receipt);
   // The server sizes receipt-level coverage from the receipt's OWN amount and
   // debt fields (_financial_due_total). A zero-value delivery receipt whose
   // debt exists only as linked driver ads has no coverable liability there —
@@ -4732,7 +4750,7 @@ function _getCompanyCoverableOutstandingUSD(receipt) {
   return Math.max(Math.round(fallback * 100) / 100, 0);
 }
 
-function _isReceiptEligibleForCompanyCoverage(receipt) {
+function _isReceiptEligibleForCompanyCoverage(receipt, collectionTarget = null) {
   const debtType = getReceiptDebtType(receipt);
   return isCurrentUserAdmin()
     && !!receipt
@@ -4741,7 +4759,7 @@ function _isReceiptEligibleForCompanyCoverage(receipt) {
     // In-shop debt AND delivery debt are both coverable; the server collects
     // only the customer's remaining share after coverage.
     && (debtType === 'shop' || debtType === 'delivery')
-    && _getCompanyCoverableOutstandingUSD(receipt) > 0.005;
+    && _getCompanyCoverableOutstandingUSD(receipt, collectionTarget) > 0.005;
 }
 
 function _companyCoverageMoney(value) {

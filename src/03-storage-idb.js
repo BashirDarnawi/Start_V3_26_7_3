@@ -538,23 +538,77 @@ function isCollectionCorrupted(name) { return _corruptedCollections.has(String(n
 function markCollectionCorrupted(name) { _corruptedCollections.add(String(name || '')); }
 function clearCollectionCorruption(name) { _corruptedCollections.delete(String(name || '')); }
 
+function readCollectionSnapshot(name, capturedScope) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([DATA_STORE_NAME], 'readonly');
+    const store = tx.objectStore(DATA_STORE_NAME);
+    const snapshot = { meta: null, record: null, chunks: [] };
+    tx.oncomplete = () => resolve(snapshot);
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB read failed'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB read aborted'));
+    const metaRequest = store.get(getCollectionMetaKey(name, capturedScope));
+    metaRequest.onsuccess = () => {
+      try {
+        const meta = snapshot.meta = metaRequest.result;
+        // Enqueue inside this request callback, without awaiting: Safari can
+        // close an idle transaction across an await. One transaction sees one
+        // generation even if another tab replaces chunks or switches layouts.
+        if (meta && meta.type === 'collection_meta') {
+          if (!Number.isSafeInteger(meta.chunkCount) || meta.chunkCount < 0) {
+            const error = new Error(`IndexedDB collection "${name}" has invalid chunk metadata`);
+            error.code = 'IDB_COLLECTION_CORRUPT';
+            error.partialData = [];
+            throw error;
+          }
+          let next = 0;
+          const readBatch = () => {
+            try {
+              const end = Math.min(next + 32, meta.chunkCount);
+              let pending = end - next;
+              for (; next < end; next++) {
+                const index = next;
+                const request = store.get(getCollectionChunkKey(name, index, capturedScope));
+                request.onsuccess = () => {
+                  snapshot.chunks[index] = request.result;
+                  // Bound synchronous work and outstanding requests, without
+                  // yielding an idle transaction or limiting collection size.
+                  if (--pending === 0 && next < meta.chunkCount) readBatch();
+                };
+              }
+            } catch (error) {
+              try { tx.abort(); } catch (_) {}
+              reject(error);
+            }
+          };
+          readBatch();
+        } else {
+          const request = store.get(_scopedCollectionStorageName(name, capturedScope));
+          request.onsuccess = () => { snapshot.record = request.result; };
+        }
+      } catch (error) {
+        try { tx.abort(); } catch (_) {}
+        reject(error);
+      }
+    };
+  });
+}
+
 async function loadCollectionFromIndexedDB(collectionName) {
   if (!db) return null;
   const name = String(collectionName || '');
   if (!name) return null;
   const capturedScope = _collectionStorageScope;
-  const dataKey = _scopedCollectionStorageName(name, capturedScope);
 
   try {
-    const metaKey = getCollectionMetaKey(name, capturedScope);
-    const meta = await idbGet(DATA_STORE_NAME, metaKey);
+    const snapshot = await readCollectionSnapshot(name, capturedScope);
+    const meta = snapshot.meta;
 
     // Chunked layout
     if (meta && meta.type === 'collection_meta' && Number.isFinite(meta.chunkCount)) {
       const chunks = [];
       let missingChunk = false;
       for (let i = 0; i < meta.chunkCount; i++) {
-        const chunk = await idbGet(DATA_STORE_NAME, getCollectionChunkKey(name, i, capturedScope));
+        const chunk = snapshot.chunks[i];
         if (chunk && Array.isArray(chunk.data)) {
           chunks.push(...chunk.data);
         } else {
@@ -582,7 +636,9 @@ async function loadCollectionFromIndexedDB(collectionName) {
       // nuances bricking otherwise-complete data).
       const recordCountMismatch = Number.isFinite(meta.recordCount) && chunks.length !== meta.recordCount;
       if (missingChunk || recordCountMismatch || (checksumMismatch && recordCountMismatch)) {
-        markCollectionCorrupted(name);
+        // The caller still receives the original read's error, but it must not
+        // disable saving a different account activated while this read ran.
+        if (capturedScope === _collectionStorageScope) markCollectionCorrupted(name);
         const err = new Error(`IndexedDB collection "${name}" is incomplete (${missingChunk ? 'missing chunk' : 'record count mismatch'})`);
         err.code = 'IDB_COLLECTION_CORRUPT';
         err.partialData = chunks;
@@ -593,7 +649,7 @@ async function loadCollectionFromIndexedDB(collectionName) {
     }
 
     // Legacy single-record layout
-    const record = await idbGet(DATA_STORE_NAME, dataKey);
+    const record = snapshot.record;
     if (record) {
       const currentChecksum = DataIntegrity.calculateChecksum(record.data);
       if (record.checksum && currentChecksum !== record.checksum) {
@@ -605,7 +661,10 @@ async function loadCollectionFromIndexedDB(collectionName) {
     return null;
   } catch (error) {
     // Let the corruption signal reach the loader so it can fall back + warn.
-    if (error && error.code === 'IDB_COLLECTION_CORRUPT') throw error;
+    if (error && error.code === 'IDB_COLLECTION_CORRUPT') {
+      if (capturedScope === _collectionStorageScope) markCollectionCorrupted(name);
+      throw error;
+    }
     console.error('Error loading collection from IndexedDB:', error);
     return null;
   }

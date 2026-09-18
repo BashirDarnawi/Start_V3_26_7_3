@@ -184,8 +184,9 @@ test('receipt photos open from the outside card action', async ({ page }, testIn
     const now = Date.now();
     const receipt = {
       id: generateId('receipt'),
-      receiptNo: `E2E-PHOTO-${projectToken}-${now}`,
-      serialNumber: `S${String(now).slice(-8)}`,
+      // Truncating the timestamp can produce S0..., which is not a valid serial.
+      receiptNo: `S${now}`,
+      serialNumber: `S${now}`,
       customerId: customer.id,
       customerName: customer.name,
       status: 'Paid',
@@ -311,19 +312,19 @@ test('critical workspace routes fit the viewport and forms open', async ({ page 
   expect(modalFits).toBe(true);
 });
 
-test('workspace stays usable across small phones, tablets, and landscape screens', async ({ page }) => {
-  await signIn(page);
-
-  const viewports = [
-    { name: 'small phone portrait', width: 320, height: 568 },
-    { name: 'common Android portrait', width: 360, height: 640 },
-    { name: 'modern phone portrait', width: 390, height: 844 },
-    { name: 'small phone landscape', width: 667, height: 375 },
-    { name: 'large phone landscape', width: 932, height: 430 },
-    { name: 'tablet portrait', width: 768, height: 1024 }
-  ];
-
-  for (const viewport of viewports) {
+// Each viewport is an independent case with the unchanged default timeout.
+// Eighteen full page boots in one case exhausted its aggregate budget while
+// individual route/layout assertions were still passing.
+for (const viewport of [
+  { name: 'small phone portrait', width: 320, height: 568 },
+  { name: 'common Android portrait', width: 360, height: 640 },
+  { name: 'modern phone portrait', width: 390, height: 844 },
+  { name: 'small phone landscape', width: 667, height: 375 },
+  { name: 'large phone landscape', width: 932, height: 430 },
+  { name: 'tablet portrait', width: 768, height: 1024 }
+]) {
+  test(`workspace stays usable across small phones, tablets, and landscape screens: ${viewport.name}`, async ({ page }) => {
+    await signIn(page);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
 
     for (const route of ['/customers', '/receipts', '/ads']) {
@@ -351,8 +352,8 @@ test('workspace stays usable across small phones, tablets, and landscape screens
       expect(layout.overflow, `${route} overflows on ${viewport.name}`).toBeLessThanOrEqual(1);
       expect(layout.outsideControls, `${route} has unreachable controls on ${viewport.name}`).toEqual([]);
     }
-  }
-});
+  });
+}
 
 test('lazy Clothes and Studio features load with their responsive styles', async ({ page }) => {
   await signIn(page);
@@ -392,7 +393,7 @@ test('administrator can run the read-only data integrity check', async ({ page }
   await expect(page.locator('#app-modal')).toBeVisible();
   await expect(page.getByRole('heading', { name: /data integrity check/i })).toBeVisible();
   await expect(page.getByText(/records checked/i)).toBeVisible();
-  await page.getByRole('button', { name: /^close$/i }).click();
+  await page.locator('#app-modal .app-dialog-close').click();
   await expect(page.locator('#app-modal')).toBeHidden();
 });
 

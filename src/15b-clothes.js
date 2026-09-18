@@ -307,15 +307,15 @@ function renderClothesDashboardTab() {
   }
 
   const bigCard = (icon, label, value, sub, gradient) => `
-    <div class="glass-panel rounded-2xl p-5">
-      <div class="flex items-center gap-3">
+    <div class="clothes-kpi-card glass-panel rounded-2xl p-5">
+      <div class="clothes-kpi-layout flex items-center gap-3">
         <div class="w-12 h-12 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
           <i data-lucide="${icon}" class="w-6 h-6 text-white"></i>
         </div>
         <div class="min-w-0">
           <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-          <div class="text-xl font-bold text-slate-800 dark:text-white truncate">${value}</div>
-          ${sub ? `<div class="text-xs text-slate-400 dark:text-slate-500 truncate">${sub}</div>` : ''}
+          <div class="clothes-kpi-value text-xl font-bold text-slate-800 dark:text-white">${value}</div>
+          ${sub ? `<div class="clothes-kpi-note text-xs text-slate-400 dark:text-slate-500">${sub}</div>` : ''}
         </div>
       </div>
     </div>
@@ -668,13 +668,13 @@ function renderClothesProductsTab() {
   stockValueUSD = Math.round(stockValueUSD * 100) / 100;
 
   const statCard = (icon, label, value, gradient) => `
-    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
+    <div class="clothes-kpi-card clothes-kpi-layout glass-panel rounded-2xl p-4 flex items-center gap-3">
       <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
         <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
       </div>
       <div class="min-w-0">
         <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
+        <div class="clothes-kpi-value text-lg font-bold text-slate-800 dark:text-white">${value}</div>
       </div>
     </div>
   `;
@@ -1417,13 +1417,13 @@ function renderClothesShipmentsTab() {
   receivedUSD = Math.round(receivedUSD * 100) / 100;
 
   const statCard = (icon, label, value, gradient) => `
-    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
+    <div class="clothes-kpi-card clothes-kpi-layout glass-panel rounded-2xl p-4 flex items-center gap-3">
       <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
         <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
       </div>
       <div class="min-w-0">
         <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
+        <div class="clothes-kpi-value text-lg font-bold text-slate-800 dark:text-white">${value}</div>
       </div>
     </div>
   `;
@@ -2256,13 +2256,13 @@ function renderClothesOrdersTab() {
   owedLYD = Math.round(owedLYD * 100) / 100;
 
   const statCard = (icon, label, value, gradient) => `
-    <div class="glass-panel rounded-2xl p-4 flex items-center gap-3">
+    <div class="clothes-kpi-card clothes-kpi-layout glass-panel rounded-2xl p-4 flex items-center gap-3">
       <div class="w-11 h-11 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center shadow-lg shrink-0">
         <i data-lucide="${icon}" class="w-5 h-5 text-white"></i>
       </div>
       <div class="min-w-0">
         <div class="text-xs text-slate-500 dark:text-slate-400">${label}</div>
-        <div class="text-lg font-bold text-slate-800 dark:text-white truncate">${value}</div>
+        <div class="clothes-kpi-value text-lg font-bold text-slate-800 dark:text-white">${value}</div>
       </div>
     </div>
   `;

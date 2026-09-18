@@ -284,7 +284,7 @@ function renderAdsStudioHeader() {
   const isAr = adsStudioIsAr();
   const backTarget = adsStudioBackTarget();
   return `
-    <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6">
+    <div class="studio-page-header flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6">
       <div class="flex items-center gap-3 min-w-0">
         ${backTarget ? `
           <button type="button" onclick="navigateTo('${backTarget}')" class="touch-target w-11 h-11 flex-shrink-0 rounded-xl bg-white/70 dark:bg-slate-800/70 border border-white/60 dark:border-slate-700 flex items-center justify-center text-blue-600" aria-label="${isAr ? 'العودة' : 'Back'}">
@@ -295,7 +295,7 @@ function renderAdsStudioHeader() {
           <i data-lucide="rocket" class="w-7 h-7 text-white"></i>
         </div>
         <div class="min-w-0">
-          <h1 class="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white truncate">${isAr ? 'استوديو إعلانات البيان' : 'Albayan Ads Studio'}</h1>
+          <h1 class="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white">${isAr ? 'استوديو إعلانات البيان' : 'Albayan Ads Studio'}</h1>
           <p class="text-sm text-slate-500 dark:text-slate-400">${isAr ? 'أنشئ حملتك بنفسك، وسنراجعها قبل النشر' : 'Build your campaign; our team reviews it before publishing'}</p>
         </div>
       </div>
@@ -311,8 +311,8 @@ function renderAdsStudioHeader() {
 function renderAdsStudioTabBar() {
   const isAr = adsStudioIsAr();
   return `
-    <div class="mb-6 overflow-x-auto custom-scrollbar pb-2">
-      <div class="flex min-w-max gap-2" role="tablist" aria-label="${isAr ? 'أقسام استوديو الإعلانات' : 'Ads Studio sections'}">
+    <div class="studio-section-navigation mb-6 pb-2">
+      <div class="studio-section-tabs flex flex-wrap gap-2" role="tablist" aria-label="${isAr ? 'أقسام استوديو الإعلانات' : 'Ads Studio sections'}">
         ${adsStudioTabsForUser().map(tab => {
           const active = _adsStudioActiveTab === tab.id;
           return `
@@ -400,7 +400,7 @@ function renderAdsStudioDashboard() {
   ];
   return `
     <section class="space-y-6">
-      <div class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-700 via-blue-600 to-cyan-500 p-6 sm:p-8 text-white shadow-2xl">
+      <div class="studio-dashboard-hero relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-700 via-blue-600 to-cyan-500 p-6 sm:p-8 text-white shadow-2xl">
         <div class="absolute -right-10 -top-16 h-52 w-52 rounded-full bg-white/10"></div>
         <div class="relative grid gap-6 md:grid-cols-[1fr_auto] md:items-center">
           <div>
@@ -909,7 +909,23 @@ function adsStudioSwitchToFullWizard() {
 
 function renderAdsStudioWizardProgress() {
   const isAr = adsStudioIsAr();
-  return `<div class="mb-6 overflow-x-auto pb-2"><div class="flex min-w-[620px] items-center">${adsStudioWizardSteps().map(([num, icon, en, ar], index, all) => `<div class="flex flex-1 items-center"><div class="flex items-center gap-2 ${_adsStudioWizardStep >= Number(num) ? 'text-blue-700 dark:text-cyan-300' : 'text-slate-400'}"><span class="w-9 h-9 rounded-full flex items-center justify-center font-black ${_adsStudioWizardStep >= Number(num) ? 'bg-blue-100 dark:bg-blue-900/40' : 'bg-slate-100 dark:bg-slate-800'}">${num}</span><span class="text-xs font-bold whitespace-nowrap">${isAr ? ar : en}</span></div>${index < all.length - 1 ? `<div class="mx-3 h-0.5 flex-1 ${_adsStudioWizardStep > Number(num) ? 'bg-blue-500' : 'bg-slate-200 dark:bg-slate-700'}"></div>` : ''}</div>`).join('')}</div></div>`;
+  const steps = adsStudioWizardSteps();
+  const current = steps.find(step => Number(step[0]) === Number(_adsStudioWizardStep)) || steps[0];
+  const currentNumber = Number(current[0]);
+  // Read-only progress, not jump links: Continue/Back still run the existing
+  // draft validation and navigation. The boost flow keeps its three steps.
+  return `<section class="studio-wizard-progress" aria-label="${isAr ? 'مراحل إنشاء الحملة' : 'Campaign setup progress'}">
+    <div class="studio-wizard-current" role="status" aria-live="polite" aria-atomic="true">
+      <span>${isAr ? `الخطوة ${currentNumber} من ${steps.length}` : `Step ${currentNumber} of ${steps.length}`}</span>
+      <strong>${Security.escapeHtml(isAr ? current[3] : current[2])}</strong>
+    </div>
+    <ol class="studio-wizard-steps" role="list" style="--studio-step-count:${steps.length}">
+      ${steps.map(([num, icon, en, ar]) => `<li class="studio-wizard-step ${Number(num) < currentNumber ? 'is-complete' : (Number(num) === currentNumber ? 'is-current' : '')}"${Number(num) === currentNumber ? ' aria-current="step"' : ''}>
+        <span class="studio-wizard-step-number" aria-hidden="true">${Number(num) < currentNumber ? '<i data-lucide="check" class="w-4 h-4"></i>' : num}</span>
+        <span class="studio-wizard-step-label"><span class="sr-only">${isAr ? 'الخطوة' : 'Step'} ${num}: </span>${Security.escapeHtml(isAr ? ar : en)}${Number(num) < currentNumber ? `<span class="sr-only"> — ${isAr ? 'مكتملة' : 'completed'}</span>` : ''}</span>
+      </li>`).join('')}
+    </ol>
+  </section>`;
 }
 
 function renderAdsStudioBuilder() {
@@ -1748,12 +1764,12 @@ function _adsStudioWalletRequestRow(entity, adminView) {
   const hasPhoto = Number(d._photoCount || 0) > 0 || !!d.receiptPhotoAt;
   const lyd = d.amountMinorLYD ? ` • ≈ ${(d.amountMinorLYD / 100).toFixed(2)} LYD` : '';
   return `
-    <div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
+    <div class="studio-wallet-request flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
       <div class="min-w-0">
         <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))} ${hasPhoto ? '<i data-lucide="paperclip" class="inline w-3.5 h-3.5 text-emerald-600"></i>' : ''}</div>
         <div class="text-xs text-slate-500">${adsStudioMoney(parseInt(d.amountMinor, 10) || 0)}${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}</div>
       </div>
-      <div class="flex flex-wrap items-center gap-2">
+      <div class="studio-wallet-request-actions flex flex-wrap items-center gap-2">
         <span class="text-xs font-bold ${statusColor}">${Security.escapeHtml(String(d.status || ''))}</span>
         ${isPending && !adminView && entry && entry.requiresReceiptPhoto ? `
           <label class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 cursor-pointer">
@@ -1784,9 +1800,9 @@ function renderAdsStudioWallet() {
   return `
     <div class="space-y-6">
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Wallet balance', 'رصيد المحفظة')}</div><div class="text-2xl font-bold text-slate-800 dark:text-white">${adsStudioMoney(balance)}</div></div>
-        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Held for submitted campaigns', 'محجوز للحملات المُرسلة')}</div><div class="text-2xl font-bold text-amber-600">${adsStudioMoney(held)}</div></div>
-        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Wallet balance', 'رصيد المحفظة')}</div><div class="workspace-money-value text-2xl font-bold text-slate-800 dark:text-white">${adsStudioMoney(balance)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Held for submitted campaigns', 'محجوز للحملات المُرسلة')}</div><div class="workspace-money-value text-2xl font-bold text-amber-600">${adsStudioMoney(held)}</div></div>
+        <div class="glass-panel rounded-2xl p-5"><div class="text-xs text-slate-500 mb-1">${adsStudioText('Available to spend', 'متاح للصرف')}</div><div class="workspace-money-value text-2xl font-bold text-emerald-600">${adsStudioMoney(available)}</div></div>
       </div>
 
       <div class="glass-panel rounded-2xl p-6">
@@ -1794,7 +1810,7 @@ function renderAdsStudioWallet() {
         <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
         <div class="mb-4">
           <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount (USD)', 'المبلغ (دولار)')}</label>
-          <div class="flex items-center gap-3">
+          <div class="studio-wallet-charge-preview flex flex-wrap items-center gap-3">
             <input id="ads-studio-charge-amount" type="number" min="1" step="0.01" placeholder="50.00" oninput="adsStudioUpdateLydPreview()"
               class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
             <span id="ads-studio-lyd-preview" class="text-sm font-bold text-blue-700 dark:text-blue-300"></span>
@@ -1843,9 +1859,9 @@ function renderAdsStudioWallet() {
         <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Recent wallet activity', 'آخر حركات المحفظة')}</h3>
         ${history.length ? `<div class="space-y-1">${history.map(tx => {
           const incoming = String(tx.toUserId || '') === uid;
-          return `<div class="flex justify-between text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
+          return `<div class="workspace-wallet-row text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
             <span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(tx.memo || tx.type || ''))}</span>
-            <span class="font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
+            <span class="workspace-wallet-amount font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
           </div>`;
         }).join('')}</div>`
           : `<p class="text-sm text-slate-500">${adsStudioText('No wallet activity yet.', 'لا توجد حركات بعد.')}</p>`}

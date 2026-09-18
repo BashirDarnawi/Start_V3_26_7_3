@@ -25,12 +25,19 @@ jobs:
       - run: npm run test:build-safety
       - run: npm run test:review-regressions
       - run: npm run test:session-regressions
+      - run: npm run test:social-native-regressions
+      - run: npm run test:import-boundaries
+      - run: npm run test:clothes-submit-boundaries
+      - run: npm run test:sync-persistence-work
+      - run: npm run test:render-performance
       - name: Existing data must also receive current behavior
         run: npm run test:legacy-data
       - name: Run permission and browser-state tests
         run: npm run test:js
       - name: Run phone and responsive UI tests
         run: npm run test:mobile-ui
+      - name: Keep compact summaries and permission-safe previews correct
+        run: npm run test:design-shell
       - name: Run financial invariants
         run: npm run test:money
       - run: npm run build

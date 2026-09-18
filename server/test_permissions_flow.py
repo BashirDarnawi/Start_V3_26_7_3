@@ -42,7 +42,12 @@ from server.main import app
 from server.db import db_conn, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 
-client = TestClient(app, headers={"Origin": "http://testserver"})
+# Keep this module's real login limits independent from hundreds of other
+# suites using TestClient's default peer. Do not reset/disable production
+# limiters just to exercise legitimate permission-management workflows.
+client = TestClient(
+    app, headers={"Origin": "http://testserver"}, client=("192.0.2.143", 50000)
+)
 
 ADMIN_EMAIL = "permflow-admin@tests.albayanhub.com"
 ADMIN_PASSWORD = "TestPassword123!Secure"
@@ -143,6 +148,32 @@ def _login(email, password):
 def _admin_cookies():
     cookies, _ = _login(ADMIN_EMAIL, ADMIN_PASSWORD)
     return cookies
+
+
+def test_permission_logins_are_isolated_from_other_suites_ip_budget(monkeypatch):
+    from server import auth_limits, rate_limiter
+
+    # Scope this synthetic exhausted bucket to this test, preserving every
+    # other suite's limiter state on exit. Real admission logic still runs.
+    monkeypatch.setattr(rate_limiter, "_REDIS_ENABLED", False)
+    monkeypatch.setattr(rate_limiter, "_MEMORY_STORE", {})
+    monkeypatch.setattr(rate_limiter, "_MEMORY_WINDOWS", {})
+    monkeypatch.setattr(rate_limiter, "_LAST_CLEANUP", now_ms())
+    key = "login:ip:testclient"
+    for _ in range(auth_limits._LOGIN_IP_MAX_ATTEMPTS):
+        assert rate_limiter.check_rate_limit(
+            key, auth_limits._LOGIN_IP_MAX_ATTEMPTS, auth_limits._LOGIN_WINDOW_MS
+        )[0]
+    shared_client = TestClient(app, headers={"Origin": "http://testserver"})
+    blocked = shared_client.post("/api/auth/login", json={
+        "email": ADMIN_EMAIL, "password": ADMIN_PASSWORD,
+    })
+    assert blocked.status_code == 429
+    assert _admin_cookies()["albayan_session"]
+    # The test fix must not clear the exhausted peer or weaken its limit.
+    assert not rate_limiter.check_rate_limit(
+        key, auth_limits._LOGIN_IP_MAX_ATTEMPTS, auth_limits._LOGIN_WINDOW_MS
+    )[0]
 
 
 def _create_user(admin_cookies, name, email, password, role, permissions):

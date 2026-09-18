@@ -579,7 +579,13 @@ function maybeShowLocalDataDurabilityReminder() {
     return !['button', 'submit', 'reset', 'checkbox', 'radio', 'range', 'file', 'color'].includes(type);
   }
   document.addEventListener('focusin', (e) => {
-    if (isTextEntry(e.target)) document.body.classList.add('keyboard-open');
+    if (isTextEntry(e.target)) {
+      document.body.classList.add('keyboard-open');
+      // Keep this dialog's alignment stable after its first field focus.
+      // Blurring on button press must not move Save/Cancel before release.
+      // A newly opened dialog has a new panel, so starts as a bottom sheet.
+      e.target.closest?.('.app-dialog-panel')?.classList.add('app-dialog-input-engaged');
+    }
   });
   document.addEventListener('focusout', () => {
     setTimeout(() => {

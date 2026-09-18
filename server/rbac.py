@@ -136,3 +136,15 @@ def user_has_permission(user: dict[str, Any], module: str, action: str, *, recor
         return True
 
     return False
+
+
+def is_within_delivery_scope(user: dict[str, Any], data: dict[str, Any]) -> bool:
+    """Delivery roles cannot escape assignment scope through broader grants.
+
+    This is an additional row boundary, not a substitute for action checks.
+    Call it on current locked data and on the final plan before persisting.
+    """
+    if str(user.get("role") or "").lower() != "delivery":
+        return True
+    uid = str(user.get("id") or "")
+    return bool(uid) and str(data.get("deliveryPersonId") or "") == uid

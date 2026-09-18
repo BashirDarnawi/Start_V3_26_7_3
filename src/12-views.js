@@ -1252,7 +1252,9 @@ function getWorkspaceViewTitle(view = state.currentView) {
 }
 
 function isWorkspaceFilterPanelExpanded(view) {
-  if (isAdvancedWorkspaceMode()) return true;
+  // One complete workspace, with optional disclosure of the SAME filters.
+  // Do not force them open based on the old Simple/Advanced preference: on a
+  // phone that put a screenful of controls in front of every receipt or ad.
   const panels = state.expandedFilterPanels;
   return !!(panels && typeof panels === 'object' && panels[view]);
 }
@@ -1266,7 +1268,6 @@ function toggleWorkspaceFilterPanel(view) {
 }
 
 function renderWorkspaceFilterToggle(view, activeCount = 0) {
-  if (isAdvancedWorkspaceMode()) return '';
   const isAr = state.language === 'ar';
   const expanded = isWorkspaceFilterPanelExpanded(view);
   const safeView = Security.escapeHtml(String(view || ''));
@@ -1274,7 +1275,7 @@ function renderWorkspaceFilterToggle(view, activeCount = 0) {
   return `
     <button type="button" onclick="toggleWorkspaceFilterPanel('${safeView}')" class="workspace-filter-toggle touch-target ${expanded ? 'is-open' : ''}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${safeView}-advanced-filters">
       <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
-      <span>${expanded ? (isAr ? 'إخفاء الفلاتر' : 'Hide filters') : (isAr ? 'المزيد من الفلاتر' : 'More filters')}</span>
+      <span>${expanded ? (isAr ? 'إخفاء الفلاتر' : 'Hide filters') : (isAr ? 'الفلاتر والترتيب' : 'Filters & sort')}</span>
       ${count > 0 ? `<span class="workspace-filter-count">${count}</span>` : ''}
       <i data-lucide="chevron-${expanded ? 'up' : 'down'}" class="w-4 h-4"></i>
     </button>
@@ -1352,7 +1353,7 @@ function renderMainApp(viewHTML = null) {
   const showSidebar = !['services-hub', 'smart-systems', 'service-placeholder', 'wallet', 'plans', 'charge-wallet', 'clothes-system', 'ads-studio'].includes(state.currentView);
   
   return `
-    <div class="app-shell flex min-h-screen" dir="${dir}">
+    <div class="app-shell ui-workspace flex min-h-screen" dir="${dir}" data-ui-design="studio-2026">
       ${showSidebar ? renderSidebar() : ''}
       <!-- Sidebar is fixed on desktop (md), so main content must offset by sidebar width for ALL roles -->
       <main class="app-main min-w-0 flex-1 ${showSidebar ? (dir === 'rtl' ? 'md:mr-72' : 'md:ml-72') : ''}">
@@ -1360,8 +1361,8 @@ function renderMainApp(viewHTML = null) {
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
           <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
           <div class="min-w-0 flex-1">
-            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${Security.escapeHtml(getWorkspaceViewTitle())}</div>
-            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${t('adManager')}</div>
+            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${state.language === 'ar' ? 'مساحة العمل' : 'Your workspace'}</div>
+            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${t('adManager')}</div>
           </div>
           <div class="flex items-center gap-1">
             <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
@@ -1370,7 +1371,7 @@ function renderMainApp(viewHTML = null) {
         </header>
         ${renderWorkspaceTopbar()}
         ` : ''}
-        <div id="workspace-view-content" class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${viewHTML === null ? renderView() : viewHTML}</div>
+        <div id="workspace-view-content" data-view="${Security.escapeHtml(String(state.currentView || ''))}" class="app-content min-w-0 p-4 md:p-8 max-w-7xl mx-auto">${viewHTML === null ? renderView() : viewHTML}</div>
       </main>
       ${showSidebar ? renderMobileBottomNavigation() : ''}
     </div>
@@ -1484,6 +1485,15 @@ function renderSidebar() {
   }
   
   const showServicesHubLink = isCurrentUserAdmin();
+  const navGroups = [
+    { label: state.language === 'ar' ? 'مساحة العمل' : 'Workspace', ids: ['control-center', 'analytics', 'customers', 'receipts', 'pages', 'ads'] },
+    { label: state.language === 'ar' ? 'العمليات' : 'Operations', ids: ['deliveries', 'delivery-dashboard', 'reconciliation', 'clothesProducts', 'clothes-system'] },
+    { label: state.language === 'ar' ? 'الإدارة' : 'Administration', ids: ['users', 'audit', 'settings'] }
+  ];
+  // Keep unknown/future permitted routes visible rather than silently losing
+  // them when a new section is added to the existing permission-filtered list.
+  const groupedIds = new Set(navGroups.flatMap(group => group.ids));
+  navGroups.push({ label: state.language === 'ar' ? 'المزيد' : 'More', ids: navItems.filter(item => !groupedIds.has(item.id)).map(item => item.id) });
   return `
     ${state.isMobileMenuOpen ? '<div class="mobile-menu-backdrop fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onclick="toggleMobileMenu()" aria-hidden="true"></div>' : ''}
     <aside id="app-sidebar" class="app-sidebar fixed inset-y-0 left-0 z-50 w-72 bg-white/90 dark:bg-slate-900/90 backdrop-blur-2xl border-r border-white/20 shadow-lg transform transition-transform duration-300 ${state.isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 flex flex-col" aria-label="${state.language === 'ar' ? 'القائمة الرئيسية' : 'Main navigation'}">
@@ -1494,7 +1504,7 @@ function renderSidebar() {
         </button>
         <button type="button" onclick="toggleMobileMenu()" class="mobile-sidebar-close touch-target md:hidden flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'إغلاق القائمة' : 'Close menu'}"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
-      <nav class="flex-1 p-4 space-y-2 overflow-y-auto">
+      <nav class="workspace-sidebar-nav flex-1 p-4 overflow-y-auto">
         ${showServicesHubLink ? `
           <!-- Back to Services Hub (Admin only) -->
           <button onclick="navigateTo('services-hub')" class="flex items-center space-x-3 w-full px-4 py-3 rounded-xl font-medium text-slate-600 dark:text-slate-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 mb-3 border-b border-slate-200 dark:border-slate-700 pb-3">
@@ -1503,12 +1513,15 @@ function renderSidebar() {
           </button>
         ` : ''}
         
-        ${navItems.map(item => `
-          <button onclick="navigateTo('${item.id}')" class="flex items-center space-x-3 w-full px-4 py-3 rounded-xl font-medium ${state.currentView === item.id ? 'alb-nav-active' : 'text-slate-600 dark:text-slate-400 hover:bg-white/20'}">
+        ${navGroups.map(group => {
+          const items = navItems.filter(item => group.ids.includes(item.id));
+          return items.length ? `<section class="workspace-nav-group"><h2>${group.label}</h2>${items.map(item => `
+          <button type="button" onclick="navigateTo('${item.id}')" ${state.currentView === item.id ? 'aria-current="page"' : ''} class="flex items-center space-x-3 w-full px-4 py-3 rounded-xl font-medium ${state.currentView === item.id ? 'alb-nav-active' : 'text-slate-600 dark:text-slate-400 hover:bg-white/20'}">
             <i data-lucide="${item.icon}" class="w-5 h-5"></i>
             <span>${t(item.label)}</span>
           </button>
-        `).join('')}
+        `).join('')}</section>` : '';
+        }).join('')}
       </nav>
       <div class="p-4 space-y-3 border-t border-white/10">
         <!-- Current User Profile -->
@@ -2198,11 +2211,11 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
     ? ` role="button" tabindex="0" onclick="${onClick}" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${onClick}}"`
     : '';
   return `
-    <div class="glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
-      <div class="flex items-start justify-between">
+    <div class="workspace-stat-card glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
+      <div class="workspace-stat-layout flex items-start justify-between">
         <div class="min-w-0 flex-1">
-          <p class="text-[10px] md:text-sm text-slate-500 font-medium uppercase truncate">${title}</p>
-          <p class="text-lg md:text-3xl font-bold mt-1 md:mt-2 truncate">${value}</p>
+          <p class="workspace-stat-label text-[10px] md:text-sm text-slate-500 font-medium uppercase">${title}</p>
+          <p class="workspace-stat-value text-lg md:text-3xl font-bold mt-1 md:mt-2"><bdi>${value}</bdi></p>
         </div>
         <div class="w-8 h-8 md:w-12 md:h-12 bg-gradient-to-br ${gradient} rounded-lg md:rounded-xl flex items-center justify-center text-white shadow-lg flex-shrink-0 ml-2">
           <i data-lucide="${icon}" class="w-4 h-4 md:w-6 md:h-6"></i>
@@ -2486,7 +2499,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
               </div>
             </div>
           `;
-          return shellCustomerRow(c, stats, __customerCard, { canSeeContacts, canSeeBalance, phones, displayNum });
+          return shellCustomerRow(c, stats, __customerCard, { canSeeContacts, canSeeBalance, phones, displayNum, linkedReceiptsButton, linkedPagesButton, canEditThisCustomer, coverableDebtUSD });
   }).join('');
 }
 
@@ -2660,7 +2673,7 @@ function renderCustomersView() {
         </div>
       </div>
 
-      <div id="customers-grid" class="space-y-2">
+      <div id="customers-grid" class="workspace-directory-grid">
         ${renderCustomersGrid(visibleCustomers, statsIndex, isCurrentUserAdmin() ? new Set(duplicateCustomerGroups.flatMap(group => group.customers.map(customer => String(customer.id)))) : new Set())}
         ${remainingCustomers > 0 ? `
           <div class="col-span-full flex justify-center py-2">
@@ -2960,7 +2973,7 @@ function renderReceiptsView() {
         ` : ''}</div>
       </div>
 
-      <div id="receipts-grid" class="space-y-2">
+      <div id="receipts-grid" class="workspace-directory-grid">
         ${filteredReceipts.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasActiveFilters ? 'search-x' : 'receipt'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${hasActiveFilters ? (isArV ? 'لا توجد وصولات مطابقة للفلاتر' : 'No receipts match your filters') : (isArV ? 'لا توجد وصولات بعد' : 'No receipts yet')}</p>${hasActiveFilters ? `<button onclick="clearAllReceiptFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isArV ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : visibleReceipts.map((receipt, idx) => {
           const customer = customersById.get(getReceiptCustomerReferenceId(receipt));
           const displayFinalNo = receipt.finalReceiptNo || receipt.serialNumber || '';
@@ -2977,17 +2990,21 @@ function renderReceiptsView() {
           const hasMultiplePayments = payments.length > 1;
           const receiptPhotoCount = getReceiptPhotoCount(receipt);
           const receiptDebtType = getReceiptDebtType(receipt);
-          const collectionTarget = getReceiptCollectionTarget(receipt);
+          // The usage index includes every possible direct/legacy debt link.
+          // The unchanged target reader still applies its exact customer,
+          // payment and preferred-link checks to these candidates. Reuse the
+          // result below, rather than rescanning all ads for coverage badges.
+          const collectionTarget = getReceiptCollectionTarget(receipt, receiptUsageAdIndex.get(String(receipt.id || '')) || []);
           const hasCustomerDebt = receiptDebtType !== 'none'
             && (collectionTarget.amountUSD > 0 || collectionTarget.amountLocal > 0);
           // Company coverage is an admin-only business-expense action. The
           // shared helper prefers the server's authoritative outstanding
           // amount and nets out cash a driver already collected.
-          const companyCoverableOutstandingUSD = _getCompanyCoverableOutstandingUSD(receipt);
+          const companyCoverableOutstandingUSD = _getCompanyCoverableOutstandingUSD(receipt, collectionTarget);
           const companyCoveredUSD = Math.max(Number(receipt.companyCoveredUSD) || 0, 0);
           const companyCoverageCount = Math.max(Math.trunc(Number(receipt.companyCoverageCount) || 0), 0);
           const canCoverWithCompanyFunds = isCurrentUserAdmin()
-            && _isReceiptEligibleForCompanyCoverage(receipt);
+            && _isReceiptEligibleForCompanyCoverage(receipt, collectionTarget);
 
           // Calculate total paid as sum of R1 values (amount × rate)
           const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
@@ -3326,7 +3343,7 @@ function renderReceiptsView() {
               </div>
             </div>
           `;
-          return shellReceiptRow(receipt, customer, __receiptCard, { receiptDisplayNum, displayFinalNo, displayTempNo, hasCustomerDebt, collectionTarget, receiptRecordFilter });
+          return shellReceiptRow(receipt, customer, __receiptCard, { receiptDisplayNum, displayFinalNo, displayTempNo, hasCustomerDebt, collectionTarget, receiptRecordFilter, displayedUsedUSD, displayedRemainingUSD, canSeeReceiptAds, linkedAdCount: linkedAdCountByReceipt.get(String(receipt.id || '')) || 0, receiptPhotoCount, canEditThisReceipt, canCoverWithCompanyFunds });
         }).join('')}
         ${remainingReceipts > 0 ? `
           <div class="col-span-full flex justify-center py-2">
@@ -3491,7 +3508,7 @@ function renderPagesView() {
         </div>
       </div>
 
-      <div id="pages-grid" class="space-y-2">
+      <div id="pages-grid" class="workspace-directory-grid">
         ${visiblePages.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="${hasPageFilters ? 'search-x' : 'file-text'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${pageOwnerFilter === 'needs-owner' && !pageSearch ? (isAr ? 'لا توجد صفحات تحتاج إلى مالك' : 'No pages need an owner') : pageSearch ? (isAr ? 'لا توجد صفحات تطابق البحث' : 'No pages match your search') : (isAr ? 'لا توجد صفحات بعد' : 'No pages yet')}</p></div>` : visiblePages.map((p) => {
           const linkedCustomers = getPageCustomerIds(p)
             .map(cid => customersById.get(String(cid)))
@@ -3736,11 +3753,11 @@ function renderAdsView() {
         <div class="flex flex-wrap gap-2">
           ${renderMetaInsightsHeaderButton(isAr)}
           ${renderMetaAdsHeaderButton(isAr)}
-          <button onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center space-x-2">
+          <button type="button" onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2">
             <i data-lucide="plus" class="w-4 h-4"></i>
             <span>${t('addAd')}</span>
           </button>
-          <button onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl">
+          <button type="button" onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl" aria-label="${isAr ? 'طباعة الإعلانات' : 'Print ads'}" title="${isAr ? 'طباعة الإعلانات' : 'Print ads'}">
             <i data-lucide="printer" class="w-4 h-4"></i>
           </button>
         </div>
@@ -3897,8 +3914,10 @@ function renderAdsView() {
                 // Rendered ahead of the template so the page avatar knows
                 // whether a photo tile actually renders beside it (manual ads
                 // without uploads produce no tile and need the solo layout).
-                const adPrimaryTile = renderAdPrimaryThumbnail(ad, isAr);
+                const adPrimaryTile = shellAdMedia(ad, isAr);
                 const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
+                const visibleLinkedReceiptIds = canOpenWorkspaceView('receipts')
+                  ? adReceiptIds.filter(id => receiptsById.has(String(id))) : [];
                 return `
                   ${shellAdSummaryRow(ad, { customer, adPage, adDisplayNum, needsSetup, isAdPaid, deliveryPerson })}
                   <tr ${shellTableDetailAttrs('ads', String(ad.id || ''))} class="border-b border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 ${shellRowIsOpen('ads', String(ad.id || '')) ? 'is-open' : ''}">
@@ -3985,7 +4004,7 @@ function renderAdsView() {
                       ${serialDisplay ? `<span class="font-mono text-xs">${Security.escapeHtml(serialDisplay)}</span>` : '-'}
                       ${(() => {
                         const n = getAdEditHistoryCount(ad);
-                        return n ? `<button onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
+                        return n ? `<button type="button" onclick="showAdEditHistory('${ad.id}')" class="block mt-1 text-[10px] px-1.5 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded-full hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors font-medium">${isAr ? `${n} تعديل` : `${n} edit${n > 1 ? 's' : ''}`}</button>` : '';
                       })()}
                     </td>
                     <td class="py-3 px-2 text-xs" data-label="${isAr ? 'التاريخ' : 'Date'}">
@@ -4008,9 +4027,11 @@ function renderAdsView() {
                         return endLine + upLine;
                       })()}
                       ${renderMetaAdScheduleSummary(ad, isAr)}
+                      ${!ad.metaAdId && Number.isFinite(Number(ad.days)) && Number(ad.days) > 0 ? `<div>${isAr ? 'المدة' : 'Duration'}: ${Security.escapeHtml(String(ad.days))} ${isAr ? 'يوم' : 'days'}</div>` : ''}
                     </td>
                     <td class="py-3 px-2" data-label="${isAr ? 'إجراءات' : 'Actions'}">
                       <div class="ads-table-actions flex flex-wrap gap-2 md:gap-1 justify-center md:justify-start">
+                      ${visibleLinkedReceiptIds.length ? `<div class="ads-linked-receipts">${visibleLinkedReceiptIds.map(id => `<button type="button" data-action="view-ad-receipt" data-receipt-id="${Security.escapeHtml(String(id))}" onclick="openReceiptRecord(this.dataset.receiptId)"><i data-lucide="arrow-up-right" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${isAr ? 'وصل' : 'Receipt'} #${Security.escapeHtml(_rcptNo(receiptsById.get(String(id))) || String(id))}</span></button>`).join('')}</div>` : ''}
                         ${renderMetaAdActionButton(ad, isAr)}
                         ${typeof renderAdMergeActionButton === 'function' ? renderAdMergeActionButton(ad, isAr) : ''}
                         ${needsSetup && canEditThisAd ? `<button type="button" onclick="completeMetaImportedAd('${Security.escapeHtml(String(ad.id))}')" class="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg bg-amber-100 px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200" title="${isAr ? 'إكمال العميل والدفع والوصل' : 'Complete customer, payment and receipt details'}"><i data-lucide="clipboard-check" class="h-4 w-4"></i><span>${isAr ? 'إكمال' : 'Complete'}</span></button>` : ''}
@@ -4023,20 +4044,20 @@ function renderAdsView() {
                           <i data-lucide="image-up" class="h-4 w-4 shrink-0"></i><span>${isAr ? 'الرئيسية' : 'Main photo'}</span>
                         </button>` : ''}
                         ${!needsSetup && _isAdToppable(ad) && (!isServerModeEnabled() || isAdPaid) ? `
-                        <button onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
+                        <button type="button" onclick="manageTopUps('${ad.id}')" class="text-blue-600 hover:text-blue-700 p-2 md:p-0" title="${isAr ? 'عمليات الشحن' : 'Top-ups'}">
                           <i data-lucide="trending-up" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.topUps && ad.topUps.length > 0 ? `<span class="text-xs">${ad.topUps.length}</span>` : ''}
                         </button>` : ''}
-                        ${!needsSetup ? `<button onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
+                        ${!needsSetup ? `<button type="button" onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
                         </button>
-                        <button onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
+                        <button type="button" onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>` : ''}
-                        ${canEditThisAd ? `<button onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
-                        ${canDeleteThisAd ? `<button onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
+                        ${canEditThisAd ? `<button type="button" onclick="editAd('${ad.id}')" class="text-indigo-600 hover:text-indigo-700 p-2 md:p-0" title="${t('edit')}"><i data-lucide="edit" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
+                        ${canDeleteThisAd ? `<button type="button" onclick="deleteAd('${ad.id}')" class="text-rose-600 hover:text-rose-700 p-2 md:p-0" title="${t('delete')}"><i data-lucide="trash-2" class="w-5 h-5 md:w-4 md:h-4"></i></button>` : ''}
                       </div>
                     </td>
                   </tr>
@@ -4208,339 +4229,137 @@ function renderDeliveriesView(logOnly) {
 
   const activeDeliveries = deliveryReceipts.filter(d => d.deliveryStatus === 'In Progress' || d.deliveryStatus === 'Needs Delivery');
 
+  const esc = value => Security.escapeHtml(String(value ?? ''));
+  const renderDeliveryCard = ad => {
+    const customer = deliveryCustomersById.get(String(ad.customerId));
+    const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
+    const collectedCash = _getCollectedCashLocal(ad);
+    const receivedInOffice = _isReceivedInOffice(ad);
+    const officeEligible = String(ad.deliveryStatus || '') === 'Delivered' && collectedCash > 0;
+    const deliveryTarget = _getCollectionTargetCached(ad);
+    const debtLocal = deliveryTarget.amountLocal;
+    const debtUSD = deliveryTarget.amountUSD;
+    const active = ad.deliveryStatus === 'Needs Delivery' || ad.deliveryStatus === 'In Progress';
+    const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
+    const safeId = esc(ad.id);
+    const tone = ({ 'Needs Delivery': 'waiting', 'In Progress': 'active', 'Delivered': 'done', 'Canceled': 'canceled' })[ad.deliveryStatus] || 'neutral';
+    const receiptNumber = ad.tempReceiptNo || ad.finalReceiptNo || ad.serialNumber || ad.displayNumber || ad.id;
+    return `
+      <article class="ops-delivery-card ${isUrgent ? 'is-urgent' : ''}" data-delivery-record="${safeId}">
+        <header class="ops-record-header">
+          <span class="ops-record-icon" aria-hidden="true"><i data-lucide="receipt" class="w-5 h-5"></i></span>
+          <div class="ops-record-identity">
+            <p class="ops-eyebrow">${isAr ? 'وصل' : 'Receipt'} <bdi>#${esc(receiptNumber)}</bdi></p>
+            <h3>${esc(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
+            <p class="ops-record-phone"><bdi>${esc(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</bdi></p>
+          </div>
+          <span class="ops-status ops-status--${tone}">${trStatus(ad.deliveryStatus)}</span>
+        </header>
+        ${isUrgent ? `<p class="ops-attention"><i data-lucide="alert-circle" class="w-4 h-4"></i>${isAr ? 'بانتظار تعيين سائق' : 'Waiting for a driver'}</p>` : ''}
+        <div class="ops-delivery-money">
+          <div><span class="ops-field-label">${isAr ? 'المبلغ' : 'Amount'}</span><strong><bdi>${debtLocal.toLocaleString('en-US')} <small>LYD</small></bdi></strong><span class="ops-secondary-money"><bdi>$${debtUSD.toFixed(2)}</bdi></span></div>
+          <div><span class="ops-field-label">${isAr ? 'التاريخ' : 'Date'}</span><span class="ops-date">${formatDateShort(ad.createdAt || ad.date)}</span>
+            ${String(ad.deliveryStatus || '') === 'Delivered' ? `<span class="ops-collected">${isAr ? 'المُحصَّل' : 'Collected'} <bdi>${collectedCash.toLocaleString('en-US')} LYD</bdi></span>` : ''}
+          </div>
+        </div>
+        <div class="ops-assignment">
+          <div class="ops-driver-field">
+            <label class="ops-field-label" ${!deliveryPerson && canAssign ? `for="delivery-assign-${safeId}"` : ''}>${isAr ? 'السائق' : 'Driver'}</label>
+            ${deliveryPerson ? `<span class="ops-driver-name"><i data-lucide="user-round" class="w-4 h-4"></i>${esc(deliveryPerson.name || '')}</span>`
+              : canAssign ? `<select id="delivery-assign-${safeId}" onchange="assignDelivery('${safeId}', this.value)" class="ops-select"><option value="">${isAr ? 'تعيين سائق...' : 'Assign driver...'}</option>${deliveryUsers.map(u => `<option value="${esc(u.id)}">${esc(u.name || '')}</option>`).join('')}</select>`
+              : `<span class="ops-muted">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</span>`}
+          </div>
+          <div class="ops-office-field">
+            <span class="ops-field-label">${isAr ? 'تسليم المكتب' : 'Office handover'}</span>
+            ${!officeEligible ? '<span class="ops-muted">—</span>'
+              : receivedInOffice ? `<span class="ops-office-received"><i data-lucide="check-check" class="w-4 h-4"></i>${isAr ? 'تم الاستلام' : 'Received'}</span>${canOffice ? `<button type="button" onclick="undoOfficeHandover('${safeId}')" class="ops-button ops-button--quiet ops-button--danger">${isAr ? 'تراجع' : 'Undo'}</button>` : ''}`
+              : canOffice ? `<button type="button" onclick="markOfficeHandover('${safeId}')" class="ops-button ops-button--receive"><i data-lucide="hand-coins" class="w-4 h-4"></i>${isAr ? 'استلام' : 'Receive'}</button>`
+              : `<span class="ops-muted">${isAr ? 'قيد الانتظار' : 'Pending'}</span>`}
+          </div>
+        </div>
+        <footer class="ops-record-actions" aria-label="${isAr ? 'الإجراءات' : 'Actions'}">
+          ${roleLower === 'delivery' ? ''
+            : `<label class="ops-status-editor"><span class="sr-only">${isAr ? 'الحالة' : 'Status'}</span><select onchange="updateDeliveryStatus('${safeId}', this.value)" class="ops-select">${DELIVERY_STATUSES.map(s => `<option value="${esc(s)}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>`}
+          <button type="button" onclick="showDeliveryDetails('${safeId}')" class="ops-button ops-button--quiet"><i data-lucide="arrow-up-right" class="w-4 h-4"></i><span>${isAr ? 'التفاصيل' : 'Details'}</span></button>
+          ${canShareDeliveryReceiptToWhatsApp(ad) ? `<button type="button" data-receipt-id="${safeId}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="ops-button ops-button--whatsapp" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}"><i data-lucide="message-circle" class="w-4 h-4"></i><span>WhatsApp</span></button>` : ''}
+          ${active ? `<button type="button" onclick="openDeliveryCancelModal('${safeId}')" class="ops-button ops-button--quiet ops-button--danger"><i data-lucide="x-circle" class="w-4 h-4"></i><span>${t('cancel')}</span></button>` : ''}
+          ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `<button type="button" onclick="removeDeliveryMission('${safeId}')" class="ops-button ops-button--icon ops-button--danger" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}" aria-label="${isAr ? 'حذف المهمة' : 'Delete Mission'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
+        </footer>
+      </article>`;
+  };
+  // Keep the entire result region self-contained: the debounced search swaps
+  // this exact node's contents without replacing the focused search field.
+  const resultsHtml = `
+    <div id="delivery-log-results" class="ops-delivery-results">
+      <p class="ops-result-count" role="status">${isAr ? `عرض ${visibleDeliveryRows.length} من ${filteredDeliveries.length} توصيلة` : `Showing ${visibleDeliveryRows.length} of ${filteredDeliveries.length} deliveries`}</p>
+      <div class="ops-delivery-grid">
+        ${filteredDeliveries.length === 0 ? `<div class="ops-empty"><span class="ops-empty-icon"><i data-lucide="inbox" class="w-7 h-7"></i></span><h3>${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</h3><p>${isAr ? 'ستظهر مهام التوصيل هنا. يمكنك تعديل الفلاتر للبحث في السجل.' : 'Delivery missions appear here. Adjust your filters to search the log.'}</p></div>` : visibleDeliveryRows.map(renderDeliveryCard).join('')}
+      </div>
+      ${remainingDeliveryRows > 0 ? `<div class="ops-load-more"><button type="button" onclick="loadMoreDeliveries()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveryRows} متبقي)` : `Load more (${remainingDeliveryRows} remaining)`}</button></div>` : ''}
+    </div>`;
+  if (logOnlyPass) return resultsHtml;
+
   return `
-    <div class="space-y-4 animate-fade-in-up">
-      <!-- Header -->
-      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
-        <div>
-          <h1 class="text-2xl font-bold text-slate-800 dark:text-white">${isAr ? 'عمليات التوصيل' : 'Delivery Operations'}</h1>
-          <p class="text-sm text-slate-500 mt-0.5">${isAr ? `${deliveryReceipts.length} توصيلة • تتبع الوصولات فقط` : `${deliveryReceipts.length} deliveries • Tracking receipts only`}</p>
+    <div class="ops-workspace ops-deliveries">
+      <header class="ops-hero">
+        <div class="ops-hero-copy">
+          <p class="ops-eyebrow"><i data-lucide="route" class="w-4 h-4"></i>${isAr ? 'إدارة التوصيل' : 'Delivery workspace'}</p>
+          <h1>${isAr ? 'عمليات التوصيل' : 'Delivery Operations'}</h1>
+          <p>${isAr ? `${deliveryReceipts.length} توصيلة • تتبع الوصولات فقط` : `${deliveryReceipts.length} deliveries • Tracking receipts only`}</p>
         </div>
-        <div class="flex items-center space-x-2">
-          <button onclick="refreshDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-slate-100 dark:hover:bg-slate-800">
-            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-            <span>${isAr ? 'تحديث' : 'Refresh'}</span>
-          </button>
-          ${canAssign ? `
-          <button onclick="checkStuckDeliveries()" class="glass-panel px-3 py-2 rounded-xl text-sm font-medium flex items-center space-x-2 hover:bg-amber-50 dark:hover:bg-amber-900/20" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}">
-            <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600"></i>
-            <span class="text-amber-700 dark:text-amber-400">${isAr ? 'فحص العالقة' : 'Check Stuck'}</span>
-          </button>
-          ` : ''}
-          ${canExportDeliveries ? `
-          <button onclick="exportDeliveryReport()" class="btn-shine bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-bold flex items-center space-x-2">
-            <i data-lucide="download" class="w-4 h-4"></i>
-            <span>${t('export')}</span>
-          </button>
-          ` : ''}
-        </div>
-      </div>
-
-      ${(logOnlyPass || !canViewDeliveryStats) ? '' : `
-      <!-- Stats (compact): 4 money/count tiles + pipeline strip in one panel -->
-      <div class="glass-panel rounded-2xl p-4">
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <div class="p-3 rounded-xl bg-amber-50 dark:bg-amber-900/15 border-l-4 border-amber-500">
-            <div class="text-[11px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wide">${isAr ? 'بانتظار التوصيل' : 'Pending Delivery'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.pendingDelivery}</div>
-            <div class="text-[11px] text-slate-500">${isAr ? 'وصولات لم تُوصَّل بعد' : 'Receipts not yet delivered'}</div>
-          </div>
-          <div class="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/15 border-l-4 border-emerald-500">
-            <div class="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.uncollectedLYD.toLocaleString('en-US')} <span class="text-sm">LYD</span></div>
-            <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</div>
-          </div>
-          <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-900/15 border-l-4 border-purple-500">
-            <div class="text-[11px] font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wide">${isAr ? 'بحوزة السائقين' : 'Held by Drivers'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.heldByDrivers}</div>
-            <div class="text-[11px] text-slate-500">${isAr ? 'تم توصيلها لكن ليست في المكتب' : 'Delivered but not in office'}</div>
-          </div>
-          <div class="p-3 rounded-xl bg-blue-50 dark:bg-blue-900/15 border-l-4 border-blue-500">
-            <div class="text-[11px] font-bold text-blue-700 dark:text-blue-400 uppercase tracking-wide">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</div>
-            <div class="text-2xl font-black text-slate-800 dark:text-white">${stats.driverCashLYD.toLocaleString('en-US')} <span class="text-sm">LYD</span></div>
-            <div class="text-[11px] text-slate-500">${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</div>
+        <div class="ops-hero-side">
+          <div class="ops-hero-count"><strong>${activeDeliveries.length}</strong><span>${isAr ? 'التوصيلات النشطة' : 'Active Deliveries'}</span></div>
+          <div class="ops-hero-actions">
+            <button type="button" onclick="refreshDeliveries()" class="ops-button ops-button--hero"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
+            ${canAssign ? `<button type="button" onclick="checkStuckDeliveries()" class="ops-button ops-button--hero" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}"><i data-lucide="alert-triangle" class="w-4 h-4"></i>${isAr ? 'فحص العالقة' : 'Check Stuck'}</button>` : ''}
+            ${canExportDeliveries ? `<button type="button" onclick="exportDeliveryReport()" class="ops-button ops-button--hero-primary"><i data-lucide="download" class="w-4 h-4"></i>${t('export')}</button>` : ''}
           </div>
         </div>
-        <!-- Pipeline as a slim strip (same numbers, no icon towers) -->
-        <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
-          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'خط السير' : 'Pipeline'}</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>${isAr ? 'بانتظار التعيين' : 'Pending Assignment'} <b>${stats.pendingAssignment}</b></span>
-          <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>${isAr ? 'قيد التوصيل' : 'In Progress'} <b>${stats.inProgress}</b></span>
-          <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>${isAr ? 'مكتمل' : 'Completed'} <b>${stats.completed}</b></span>
-          <span class="text-slate-300">→</span>
-          <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>${isAr ? 'ملغي' : 'Canceled'} <b>${stats.canceled}</b></span>
-        </div>
-        <!-- Delivery-fee money strip: collected, shop-covered loss, variance vs quoted -->
-        <div class="mt-3 pt-3 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
-          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wide">${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</span>
-          <span>${isAr ? 'المُحصَّل' : 'Collected'} <b>${stats.feesCollectedLYD.toLocaleString('en-US')}</b> LYD</span>
-          <span class="${stats.feesShopPaidLYD > 0 ? 'text-rose-600 dark:text-rose-400 font-medium' : ''}">${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'} <b>${stats.feesShopPaidLYD.toLocaleString('en-US')}</b> LYD</span>
-          <span class="${stats.feeVarianceLYD < 0 ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'}">${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'} <b>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')}</b> LYD</span>
-        </div>
-      </div>
+      </header>
+      ${!canViewDeliveryStats ? '' : `
+        <section class="ops-kpi-rail" aria-label="${isAr ? 'ملخص التوصيل' : 'Delivery summary'}">
+          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--waiting"><i data-lucide="clock-3" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'بانتظار التوصيل' : 'Pending Delivery'}</span><strong>${stats.pendingDelivery}</strong><small>${isAr ? 'وصولات لم تُوصَّل بعد' : 'Receipts not yet delivered'}</small></div>
+          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--done"><i data-lucide="wallet" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'قيمة غير مُحصَّلة' : 'Uncollected Value'}</span><strong><bdi>${stats.uncollectedLYD.toLocaleString('en-US')} <small>LYD</small></bdi></strong><small>${isAr ? 'للتحصيل من العملاء' : 'To be collected from customers'}</small></div>
+          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--active"><i data-lucide="package-check" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'بحوزة السائقين' : 'Held by Drivers'}</span><strong>${stats.heldByDrivers}</strong><small>${isAr ? 'تم توصيلها لكن ليست في المكتب' : 'Delivered but not in office'}</small></div>
+          <div class="ops-kpi"><span class="ops-kpi-icon ops-status--active"><i data-lucide="banknote" class="w-5 h-5"></i></span><span class="ops-field-label">${isAr ? 'قيمة نقد السائقين' : 'Driver Cash Value'}</span><strong><bdi>${stats.driverCashLYD.toLocaleString('en-US')} <small>LYD</small></bdi></strong><small>${isAr ? 'للتحصيل من السائقين' : 'To be collected from drivers'}</small></div>
+        </section>
+        <section class="ops-pipeline" aria-label="${isAr ? 'خط السير' : 'Pipeline'}">
+          <div><span class="ops-step">1</span><span>${isAr ? 'بانتظار التعيين' : 'Pending Assignment'}</span><strong>${stats.pendingAssignment}</strong></div>
+          <div><span class="ops-step">2</span><span>${isAr ? 'قيد التوصيل' : 'In Progress'}</span><strong>${stats.inProgress}</strong></div>
+          <div><span class="ops-step">3</span><span>${isAr ? 'مكتمل' : 'Completed'}</span><strong>${stats.completed}</strong></div>
+          <div><span class="ops-step"><i data-lucide="x" class="w-3 h-3"></i></span><span>${isAr ? 'ملغي' : 'Canceled'}</span><strong>${stats.canceled}</strong></div>
+        </section>
+        <section class="ops-fee-strip" aria-label="${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}">
+          <h2><i data-lucide="coins" class="w-4 h-4"></i>${isAr ? 'رسوم التوصيل' : 'Delivery Fees'}</h2>
+          <div><span>${isAr ? 'المُحصَّل' : 'Collected'}</span><bdi>${stats.feesCollectedLYD.toLocaleString('en-US')} LYD</bdi></div>
+          <div class="${stats.feesShopPaidLYD > 0 ? 'ops-text-danger' : ''}"><span>${isAr ? 'يتحملها المحل (خسارة)' : 'Paid by shop (loss)'}</span><bdi>${stats.feesShopPaidLYD.toLocaleString('en-US')} LYD</bdi></div>
+          <div><span>${isAr ? 'الفرق عن المتفق عليه' : 'Variance vs quoted'}</span><bdi>${stats.feeVarianceLYD >= 0 ? '+' : '-'}${Math.abs(stats.feeVarianceLYD).toLocaleString('en-US')} LYD</bdi></div>
+        </section>
       `}
-
-      <!-- Driver Performance & Delivery Log Grid -->
-      <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        ${(logOnlyPass || !canViewDeliveryStats) ? '' : `
-        <!-- Driver Performance (compact rows, same numbers) -->
-        <div class="glass-panel rounded-2xl p-4">
-          <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2>
-          <div class="space-y-2 max-h-80 overflow-y-auto">
-            ${driverPerformance.length === 0 ? `
-              <div class="text-center py-6 text-slate-500 text-sm">${isAr ? 'لا يوجد سائقو توصيل' : 'No delivery drivers found'}</div>
-            ` : driverPerformance.map((driver, idx) => `
-              <div class="p-3 rounded-xl border ${idx === 0 && driver.totalAssigned > 0 ? 'border-amber-300 bg-amber-50/60 dark:bg-amber-900/15 dark:border-amber-700' : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50'}">
-                <div class="flex items-center justify-between gap-2">
-                  <div class="font-bold text-sm text-slate-800 dark:text-white truncate">
-                    ${idx === 0 && driver.totalAssigned > 0 ? '⭐ ' : ''}${Security.escapeHtml(driver.name || '')}
-                    <span class="font-normal text-xs text-slate-500">• ${driver.totalAssigned} ${isAr ? 'مُعيَّنة' : 'assigned'}</span>
-                  </div>
-                  <div class="text-sm font-black ${driver.successRate >= 80 ? 'text-emerald-600' : driver.successRate >= 50 ? 'text-amber-600' : 'text-slate-500'}">${driver.successRate}%</div>
-                </div>
-                <div class="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-600 dark:text-slate-300">
-                  <span>${isAr ? 'معلّقة' : 'Pending'} <b>${driver.pending}</b></span>
-                  <span class="text-blue-600 dark:text-blue-400">${isAr ? 'نشطة' : 'Active'} <b>${driver.inProgress}</b></span>
-                  <span class="text-emerald-600 dark:text-emerald-400">${isAr ? 'منجزة' : 'Done'} <b>${driver.completed}</b></span>
-                  <span class="text-purple-600 dark:text-purple-400">${isAr ? 'بحوزته' : 'Held'} <b>${driver.heldCash.toLocaleString('en-US')}</b> LYD</span>
-                </div>
-              </div>
-            `).join('')}
+      <div class="ops-board ${canViewDeliveryStats ? 'has-driver-panel' : ''}">
+        <section class="ops-record-section">
+          <div class="ops-section-heading"><div><p class="ops-eyebrow">${isAr ? 'كل المهام في مكان واحد' : 'Every mission in one place'}</p><h2>${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2></div><span class="ops-section-icon"><i data-lucide="list-checks" class="w-5 h-5"></i></span></div>
+          <div class="ops-controls">
+            <label class="ops-search" for="delivery-search-input"><span class="sr-only">${isAr ? 'بحث في التوصيلات' : 'Search deliveries'}</span><i data-lucide="search" class="w-5 h-5"></i><input id="delivery-search-input" type="search" placeholder="${isAr ? 'العميل، الهاتف أو رقم الوصل...' : 'Customer, phone or receipt number...'}" value="${esc(searchTerm)}" oninput="filterDeliveries('search', this.value)" autocomplete="off" /></label>
+            <label><span class="ops-field-label">${isAr ? 'الحالة' : 'Status'}</span><select onchange="filterDeliveries('status', this.value)" class="ops-select"><option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>${DELIVERY_STATUSES.map(s => `<option value="${esc(s)}" ${filterStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>
+            <label><span class="ops-field-label">${isAr ? 'السائق' : 'Driver'}</span><select onchange="filterDeliveries('driver', this.value)" class="ops-select"><option value="all" ${filterDriver === 'all' ? 'selected' : ''}>${isAr ? 'كل السائقين' : 'All Drivers'}</option>${deliveryUsers.map(u => `<option value="${esc(u.id)}" ${filterDriver === u.id ? 'selected' : ''}>${esc(u.name || '')}</option>`).join('')}</select></label>
           </div>
-        </div>
-        `}
-
-        <!-- Delivery Log -->
-        <div class="${canViewDeliveryStats ? 'xl:col-span-2' : 'xl:col-span-3'} glass-panel rounded-2xl p-4">
-          <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-3">
-            <h2 class="text-base font-bold text-slate-800 dark:text-white">${isAr ? 'سجل التوصيل' : 'Delivery Log'}</h2>
-            <div class="flex flex-wrap items-center gap-2 w-full md:w-auto">
-              <div class="relative flex-1 md:flex-none">
-                <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"></i>
-                <input id="delivery-search-input" type="text" placeholder="${isAr ? 'بحث...' : 'Search...'}" value="${Security.escapeHtml(searchTerm)}" oninput="filterDeliveries('search', this.value)" class="glass-input w-full md:w-40 pl-9 pr-3 py-2 rounded-lg text-sm">
-              </div>
-              <select onchange="filterDeliveries('status', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-                <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All Status'}</option>
-                ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${filterStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
-              </select>
-              <select onchange="filterDeliveries('driver', this.value)" class="glass-input px-3 py-2 rounded-lg text-sm">
-                <option value="all" ${filterDriver === 'all' ? 'selected' : ''}>${isAr ? 'كل السائقين' : 'All Drivers'}</option>
-                ${deliveryUsers.map(u => `<option value="${u.id}" ${filterDriver === u.id ? 'selected' : ''}>${Security.escapeHtml(u.name || '')}</option>`).join('')}
-              </select>
+          ${resultsHtml}
+        </section>
+        ${!canViewDeliveryStats ? '' : `
+          <aside class="ops-driver-panel">
+            <div class="ops-section-heading"><div><p class="ops-eyebrow">${isAr ? 'الفريق' : 'Your team'}</p><h2>${isAr ? 'أداء السائقين' : 'Driver Performance'}</h2></div><span class="ops-section-icon"><i data-lucide="users-round" class="w-5 h-5"></i></span></div>
+            <div class="ops-driver-list">
+              ${driverPerformance.length === 0 ? `<div class="ops-empty ops-empty--small"><i data-lucide="users-round" class="w-7 h-7"></i><p>${isAr ? 'لا يوجد سائقو توصيل' : 'No delivery drivers found'}</p></div>` : driverPerformance.map(driver => `
+                <article class="ops-driver-card">
+                  <div class="ops-driver-heading"><span class="ops-driver-avatar" aria-hidden="true">${esc(String(driver.name || '?').charAt(0))}</span><div><h3>${esc(driver.name || '')}</h3><p>${driver.totalAssigned} ${isAr ? 'مُعيَّنة' : 'assigned'}</p></div><strong>${driver.successRate}%</strong></div>
+                  <div class="ops-driver-metrics"><div><span>${isAr ? 'معلّقة' : 'Pending'}</span><b>${driver.pending}</b></div><div><span>${isAr ? 'نشطة' : 'Active'}</span><b>${driver.inProgress}</b></div><div><span>${isAr ? 'منجزة' : 'Done'}</span><b>${driver.completed}</b></div></div>
+                  <div class="ops-driver-held"><span>${isAr ? 'بحوزته' : 'Held'}</span><strong><bdi>${driver.heldCash.toLocaleString('en-US')} LYD</bdi></strong></div>
+                </article>`).join('')}
             </div>
-          </div>
-
-          <!-- Delivery Table -->
-          <div id="delivery-log-results" class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
-            <table class="mobile-card-table delivery-mobile-table w-full text-sm">
-              <thead>
-                <tr class="bg-slate-50 dark:bg-slate-800/50">
-                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'العميل' : 'Customer'}</th>
-                  <th class="text-left px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'السائق' : 'Delivery Person'}</th>
-                  <th class="text-right px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'المبلغ' : 'Amount'}</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'الحالة' : 'Status'}</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'التسليم للمكتب' : 'Office Handover'}</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'التاريخ' : 'Date'}</th>
-                  <th class="text-center px-4 py-3 font-bold text-slate-600 dark:text-slate-400 uppercase text-xs tracking-wider">${isAr ? 'إجراءات' : 'Actions'}</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
-                ${filteredDeliveries.length === 0 ? `
-                  <tr>
-                    <td colspan="7" class="px-4 py-12 text-center">
-                      <i data-lucide="inbox" class="w-12 h-12 mx-auto text-slate-300 mb-3"></i>
-                      <p class="text-slate-500">${isAr ? 'لا توجد توصيلات' : 'No deliveries found'}</p>
-                    </td>
-                  </tr>
-                ` : visibleDeliveryRows.map(ad => {
-          const customer = deliveryCustomersById.get(String(ad.customerId));
-          const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
-                  const collectedCash = _getCollectedCashLocal(ad);
-                  const receivedInOffice = _isReceivedInOffice(ad);
-                  const officeEligible = String(ad.deliveryStatus || '') === 'Delivered' && collectedCash > 0;
-                  const deliveryTarget = _getCollectionTargetCached(ad);
-                  const debtLocal = deliveryTarget.amountLocal;
-                  const debtUSD = deliveryTarget.amountUSD;
-                  const statusColors = {
-                    'Needs Delivery': 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
-                    'In Progress': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
-                    'Delivered': 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
-                    'Canceled': 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'
-                  };
-                  const isReceipt = true;
-                  return `
-                    ${shellDeliverySummaryRow(ad, { customer, deliveryPerson, debtLocal, debtUSD })}
-                    <tr ${shellTableDetailAttrs('deliveries', String(ad.id || ''))} class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors ${shellRowIsOpen('deliveries', String(ad.id || '')) ? 'is-open' : ''}">
-                      <td class="px-4 py-3" data-label="${isAr ? 'العميل' : 'Customer'}">
-                        <div class="flex items-center space-x-3">
-                          <div class="w-9 h-9 rounded-full bg-gradient-to-br ${isReceipt ? 'from-purple-500 to-pink-600' : 'from-indigo-500 to-purple-600'} flex items-center justify-center text-white font-bold text-sm shadow-md">
-                            ${isReceipt ? '<i data-lucide="receipt" class="w-4 h-4"></i>' : (customer?.name?.charAt(0) || '?')}
-                          </div>
-                          <div>
-                            <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</div>
-                            <div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</div>
-                            <span class="text-[10px] px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 font-medium">${isAr ? 'وصل' : 'Receipt'}</span>
-                          </div>
-                        </div>
-                      </td>
-                      <td class="px-4 py-3" data-label="${isAr ? 'السائق' : 'Driver'}">
-                        ${deliveryPerson ? `
-                          <div class="flex items-center space-x-2">
-                            <div class="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white text-xs font-bold">
-                              ${deliveryPerson.name?.charAt(0) || '?'}
-                            </div>
-                            <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(deliveryPerson.name || '')}</span>
-                          </div>
-                        ` : (canAssign ? `
-                          <select onchange="assignDelivery('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs">
-                            <option value="">${isAr ? 'تعيين...' : 'Assign...'}</option>
-                            ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
-                          </select>
-                        ` : `<span class="text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</span>`)}
-                      </td>
-                      <td class="px-4 py-3 text-right" data-label="${isAr ? 'المبلغ' : 'Amount'}">
-                        <div class="font-bold text-emerald-600">${debtLocal.toLocaleString('en-US')} LYD</div>
-                        <div class="text-xs text-slate-500">$${debtUSD.toFixed(2)}</div>
-                        ${String(ad.deliveryStatus || '') === 'Delivered' ? `
-                          <div class="text-[10px] text-slate-500 mt-1">${isAr ? 'المُحصَّل' : 'Collected'}: <span class="font-bold text-slate-700 dark:text-slate-300">${collectedCash.toLocaleString('en-US')} LYD</span></div>
-                        ` : ''}
-                      </td>
-                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'الحالة' : 'Status'}">
-                        <span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">
-                          ${trStatus(ad.deliveryStatus)}
-                        </span>
-                      </td>
-                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'تسليم المكتب' : 'Office handover'}">
-                        ${!officeEligible ? `
-                          <span class="text-slate-400 text-xs">—</span>
-                        ` : receivedInOffice ? `
-                          <div class="inline-flex flex-col items-center gap-1">
-                            <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
-                              <i data-lucide="check" class="w-3 h-3 mr-1"></i>${isAr ? 'تم الاستلام' : 'Received'}
-                            </span>
-                            ${canOffice ? `<button onclick="undoOfficeHandover('${ad.id}')" class="text-[10px] font-bold text-rose-600 hover:text-rose-700">${isAr ? 'تراجع' : 'Undo'}</button>` : ''}
-                          </div>
-                        ` : `
-                          ${canOffice ? `
-                            <button onclick="markOfficeHandover('${ad.id}')" class="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-300 transition-colors">
-                              <i data-lucide="hand" class="w-3 h-3 mr-1"></i>${isAr ? 'استلام' : 'Receive'}
-                            </button>
-                          ` : `<span class="text-xs text-slate-500">${isAr ? 'قيد الانتظار' : 'Pending'}</span>`}
-                        `}
-                      </td>
-                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'التاريخ' : 'Date'}">
-                        <div class="text-xs text-slate-600 dark:text-slate-400">${formatDateShort(ad.createdAt || ad.date)}</div>
-                      </td>
-                      <td class="px-4 py-3" data-label="${isAr ? 'الإجراءات' : 'Actions'}">
-                        <div class="flex items-center justify-center space-x-1">
-                          ${roleLower === 'delivery'
-                            ? `<span class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold ${statusColors[ad.deliveryStatus] || 'bg-slate-100 text-slate-700'}">${trStatus(ad.deliveryStatus)}</span>`
-                            : `<select onchange="updateDeliveryStatus('${ad.id}', this.value)" class="glass-input px-2 py-1 rounded-lg text-xs w-24">
-                            ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
-                          </select>`}
-                          <button onclick="showDeliveryDetails('${ad.id}')" class="p-1.5 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-300 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
-                            <i data-lucide="eye" class="w-4 h-4"></i>
-                          </button>
-                          ${canShareDeliveryReceiptToWhatsApp(ad) ? `
-                            <button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="min-w-11 min-h-11 md:min-w-0 md:min-h-0 p-1.5 rounded-lg bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 transition-colors" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}">
-                              <i data-lucide="message-circle" class="w-4 h-4"></i>
-                            </button>
-                          ` : ''}
-                          ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                            <button onclick="removeDeliveryMission('${ad.id}')" class="p-1.5 rounded-lg bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-300 transition-colors" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
-                              <i data-lucide="trash-2" class="w-4 h-4"></i>
-                            </button>
-                          ` : ''}
-                        </div>
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>
-          ${remainingDeliveryRows > 0 ? `
-            <div class="mt-4 flex justify-center">
-              <button type="button" onclick="loadMoreDeliveries()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveryRows} متبقي)` : `Load more (${remainingDeliveryRows} remaining)`}</button>
-            </div>
-          ` : ''}
-        </div>
+          </aside>`}
       </div>
-
-      <!-- Active Deliveries (compact cards, same actions) -->
-      <div class="glass-panel rounded-2xl p-4">
-        <h2 class="text-base font-bold text-slate-800 dark:text-white mb-3">
-          ${isAr ? 'التوصيلات النشطة' : 'Active Deliveries'}
-          <span class="ml-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">${activeDeliveries.length}</span>
-        </h2>
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          ${activeDeliveries.length === 0 ? `
-            <div class="col-span-full py-8 text-center">
-              <p class="text-slate-500 font-medium">${isAr ? 'كل شيء منجز!' : 'All caught up!'}</p>
-              <p class="text-sm text-slate-400">${isAr ? 'لا توجد توصيلات معلّقة حالياً' : 'No pending deliveries at the moment'}</p>
-            </div>
-          ` : activeDeliveries.map(ad => {
-            const customer = state.customers.find(c => c.id === ad.customerId);
-            const deliveryPerson = ad.deliveryPersonId ? deliveryUsers.find(u => u.id === ad.deliveryPersonId) : null;
-            const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
-
-          return `
-              <div class="rounded-xl border ${isUrgent ? 'border-rose-300 dark:border-rose-700' : 'border-slate-200 dark:border-slate-700'} bg-white dark:bg-slate-800/50 p-3">
-                <div class="flex items-start justify-between gap-2 mb-2">
-                  <div class="min-w-0">
-                    <h3 class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
-                    <p class="text-xs text-slate-500 truncate">${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
-                  </div>
-                  <div class="flex flex-col items-end gap-1 flex-shrink-0">
-                    <span class="px-2 py-0.5 rounded-lg text-[11px] font-bold ${ad.deliveryStatus === 'In Progress' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'}">${trStatus(ad.deliveryStatus)}</span>
-                    ${isUrgent ? `<span class="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase bg-rose-500 text-white">${isAr ? 'عاجل' : 'Urgent'}</span>` : ''}
-                  </div>
-                </div>
-
-                <div class="text-sm mb-2">
-                  <span class="font-bold text-emerald-600">${(_deliveryDisplayAmounts(ad).local || 0).toLocaleString('en-US')} LYD</span>
-                  <span class="text-xs text-slate-500 ml-2">$${(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)}</span>
-                </div>
-
-                ${deliveryPerson ? `
-                  <div class="mb-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">${isAr ? 'السائق' : 'Driver'}: ${Security.escapeHtml(deliveryPerson.name || '')}</div>
-                ` : (canAssign ? `
-                  <select onchange="assignDelivery('${ad.id}', this.value)" class="w-full glass-input px-3 py-2 rounded-lg text-sm mb-2">
-                    <option value="">${isAr ? 'تعيين سائق...' : 'Assign driver...'}</option>
-                    ${deliveryUsers.map(u => `<option value="${u.id}">${Security.escapeHtml(u.name || '')}</option>`).join('')}
-                  </select>
-                ` : `<div class="mb-2 text-xs text-slate-400">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</div>`)}
-
-                <div class="flex space-x-2">
-                  ${canShareDeliveryReceiptToWhatsApp(ad) ? `
-                    <button type="button" data-receipt-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="min-h-11 bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center gap-1" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}">
-                      <i data-lucide="message-circle" class="w-4 h-4"></i><span class="sr-only">WhatsApp</span>
-                    </button>
-                  ` : ''}
-                  ${String(ad.deliveryStatus || '') !== 'Delivered' && String(ad.deliveryStatus || '') !== 'Canceled' ? `
-                    <button onclick="openDeliveryCancelModal('${ad.id}')" class="flex-1 bg-rose-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold flex items-center justify-center space-x-1">
-                      <i data-lucide="x-circle" class="w-4 h-4"></i>
-                      <span>${t('cancel')}</span>
-                    </button>
-                  ` : ''}
-                  <button onclick="showDeliveryDetails('${ad.id}')" class="bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-lg text-sm" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
-                    <i data-lucide="more-horizontal" class="w-4 h-4"></i>
-                  </button>
-                  ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `
-                    <button onclick="removeDeliveryMission('${ad.id}')" class="bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300 px-3 py-1.5 rounded-lg text-sm" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}">
-                      <i data-lucide="trash-2" class="w-4 h-4"></i>
-                    </button>
-                  ` : ''}
-              </div>
-            </div>
-          `;
-        }).join('')}
-        </div>
-      </div>
-    </div>
-  `;
+    </div>`;
 }
 
 // (renderPipelineStage helper removed — the pipeline is now a slim inline
@@ -5640,17 +5459,22 @@ function renderReconciliationView() {
       return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
     });
   return `
-    <div class="space-y-6 animate-fade-in-up">
-      <div>
-        <h1 class="text-3xl font-bold">${t('jobReconciliation')}</h1>
-        <p class="text-sm text-slate-500 mt-1">${isAr ? 'تظهر الإعلانات في اليوم التالي لانتهائها، أو بعد يوم من إيقافها.' : 'Ads appear the day after their scheduled end, or one day after they are stopped.'}</p>
-      </div>
-      <div class="glass-panel rounded-2xl p-3 sm:p-6">
-        ${visibleAds.length === 0 ? `<div class="text-center text-slate-500 py-10">
+    <div class="ops-workspace ops-reconciliation">
+      <header class="ops-hero">
+        <div class="ops-hero-copy">
+          <p class="ops-eyebrow"><i data-lucide="scale" class="w-4 h-4"></i>${isAr ? 'مراجعة المصروف النهائي' : 'Final spend review'}</p>
+          <h1>${t('jobReconciliation')}</h1>
+          <p>${isAr ? 'تظهر الإعلانات في اليوم التالي لانتهائها، أو بعد يوم من إيقافها.' : 'Ads appear the day after their scheduled end, or one day after they are stopped.'}</p>
+        </div>
+        <div class="ops-hero-count"><strong>${visibleAds.length}</strong><span>${isAr ? 'إعلانات جاهزة للمراجعة' : 'Ads ready for review'}</span></div>
+      </header>
+      <div class="ops-reconciliation-intro"><i data-lucide="list-checks" class="w-5 h-5"></i><p>${isAr ? 'راجع الميزانية والمصروف، أعد المتبقي للعميل، ثم سجّل تأكيد إبلاغه.' : 'Review budget and spend, return the remaining amount, then record your customer notification.'}</p></div>
+      <div class="ops-reconciliation-records">
+        ${visibleAds.length === 0 ? `<div class="ops-empty">
           <i data-lucide="calendar-check" class="w-9 h-9 mx-auto mb-3 text-emerald-500"></i>
           <p class="font-medium">${isAr ? 'لا توجد إعلانات منتهية تحتاج إلى تسوية الآن' : 'No finished ads need reconciliation now'}</p>
         </div>` : `
-          <div class="space-y-4">
+          <div class="ops-reconciliation-grid">
             ${visibleAds.map(ad => {
               const id = String(ad.id);
               const safeId = Security.escapeHtml(id);
@@ -5692,47 +5516,44 @@ function renderReconciliationView() {
                     ad.remainingCustomerInformedAt ? new Date(ad.remainingCustomerInformedAt).toLocaleString(appDateLocale()) : ''
                   ].filter(Boolean).join(' • ')
                 : '';
-              return `<section class="rounded-2xl border border-l-4 ${statusVisual.card} p-4 sm:p-5" data-reconciliation-card="${safeId}">
-                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div class="min-w-0">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <span class="rounded-md bg-indigo-100 px-2 py-0.5 text-xs font-bold text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">#${Security.escapeHtml(ad.displayNumber || id)}</span>
-                      <h2 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'عميل غير معروف' : 'Unknown customer'))}</h2>
-                      <span class="rounded-full px-2.5 py-1 text-xs font-bold ${statusVisual.badge}">${statusVisual.label}</span>
-                      <span class="rounded-full px-2.5 py-1 text-xs font-bold ${informed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : (hasSavedSpend ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}">
-                        ${informed ? (isAr ? 'تم إبلاغ العميل' : 'Customer informed') : (hasSavedSpend ? (isAr ? 'تم حفظ المصروف' : 'Spend saved') : (isAr ? 'تحتاج تسوية' : 'Needs reconciliation'))}
-                      </span>
-                    </div>
-                    <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-500">
-                      <span>${Security.escapeHtml(page?.name || (isAr ? 'بدون صفحة' : 'No page'))}</span>
-                      <span aria-hidden="true">•</span>
-                      <span class="rounded-md bg-sky-100 px-2 py-0.5 font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
-                      <span aria-hidden="true">•</span>
-                      <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
-                    </div>
+              return `<section class="ops-reconciliation-card ${statusVisual.card}" data-reconciliation-card="${safeId}">
+                <header class="ops-reconciliation-header">
+                  <span class="ops-record-icon" aria-hidden="true"><i data-lucide="megaphone" class="w-5 h-5"></i></span>
+                  <div class="ops-record-identity">
+                    <p class="ops-eyebrow">${isAr ? 'إعلان' : 'Ad'} <bdi>#${Security.escapeHtml(ad.displayNumber || id)}</bdi></p>
+                    <h2>${Security.escapeHtml(customer?.name || (isAr ? 'عميل غير معروف' : 'Unknown customer'))}</h2>
+                    <p>${Security.escapeHtml(page?.name || (isAr ? 'بدون صفحة' : 'No page'))}</p>
+                    ${ad.metaAdName ? `<p class="ops-ad-name">${Security.escapeHtml(String(ad.metaAdName))}</p>` : ''}
                   </div>
-                  <div class="sm:text-right">
-                    <div class="text-xs uppercase tracking-wide text-slate-500">${isAr ? 'ميزانية الإعلان' : 'Ad budget'}</div>
-                    <div class="text-2xl font-bold text-slate-800 dark:text-white">$${amountUSD.toFixed(2)}</div>
+                  <span class="ops-reconciliation-state ${statusVisual.badge}">${statusVisual.label}</span>
+                </header>
+                <div class="ops-reconciliation-timeline">
+                  <span><i data-lucide="calendar" class="w-4 h-4"></i>${isAr ? 'البداية' : 'Start'}: ${startDay?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                  <span>${stoppedDay ? (isAr ? 'تم إيقافه' : 'Stopped') : (isAr ? 'الانتهاء' : 'End')}: ${(stoppedDay || endDay)?.toLocaleDateString(appDateLocale()) || '-'}</span>
+                </div>
+                <div class="ops-reconciliation-money">
+                  <div class="ops-reconciliation-budget">
+                    <span class="ops-field-label">${isAr ? 'ميزانية الإعلان' : 'Ad budget'}</span>
+                    <strong><bdi>$${amountUSD.toFixed(2)}</bdi></strong>
+                    <small>${isAr ? 'المبلغ المخطط للإعلان' : 'Planned ad amount'}</small>
+                  </div>
+                  <div class="ops-reconciliation-spend">
+                    <label for="reconciliation-spent-${safeId}" class="ops-field-label">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
+                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="ops-spend-input" ${canReconcile ? '' : 'disabled'} />
+                  </div>
+                  <div class="ops-reconciliation-remaining">
+                    <span class="ops-field-label">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</span>
+                    <strong id="reconciliation-remaining-${safeId}">${remainingUSD === null ? '—' : `$${remainingUSD.toFixed(2)}`}</strong>
                   </div>
                 </div>
-
-                <div class="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
-                  <div>
-                    <label for="reconciliation-spent-${safeId}" class="mb-1.5 block text-sm font-bold text-slate-700 dark:text-slate-200">${isAr ? 'المصروف الفعلي على فيسبوك (USD)' : 'Actual Facebook spend (USD)'}</label>
-                    <input id="reconciliation-spent-${safeId}" type="text" inputmode="decimal" value="${displaySpentUSD === null ? '' : displaySpentUSD.toFixed(2)}" placeholder="0.00" oninput="sanitizeMoneyInput(this); updateReconciliationPreview('${safeId}')" class="glass-input min-h-12 w-full rounded-xl px-4 text-lg font-bold" ${canReconcile ? '' : 'disabled'} />
-                    ${manualSpentOverride ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-amber-700 dark:text-amber-300"><i data-lucide="badge-check" class="h-3 w-3 shrink-0"></i><span>${isAr ? 'هذا هو المصروف النهائي المصحح والمحفوظ. يمكنك تعديله مرة أخرى.' : 'This is the saved corrected final spend. You can edit it again.'}</span></div>` : (metaSpendAuto ? `<div class="mt-1 flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300"><i data-lucide="refresh-cw" class="h-3 w-3 shrink-0"></i><span>${isAr ? `معبأ من Meta (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). صححه قبل الحفظ إذا كان المبلغ النهائي مختلفاً.` : `Prefilled from Meta (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if the final amount is different.`}</span></div>` : '')}
-                  </div>
-                  <div class="rounded-xl bg-white/70 p-3 dark:bg-slate-900/50">
-                    <div class="text-xs text-slate-500">${isAr ? 'المتبقي الذي سيعود للعميل' : 'Remaining returned to customer'}</div>
-                    <div id="reconciliation-remaining-${safeId}" class="text-xl font-bold text-emerald-600">${remainingUSD === null ? '—' : `$${remainingUSD.toFixed(2)}`}</div>
-                  </div>
-                  <button id="reconciliation-submit-${safeId}" type="button" onclick="confirmStopAd('${safeId}', 'reconciliation')" class="min-h-12 rounded-xl bg-indigo-600 px-5 font-bold text-white shadow hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50" ${canReconcile ? '' : 'disabled'}>
-                    ${hasSavedSpend ? (isAr ? 'تحديث التسوية' : 'Update reconciliation') : (isAr ? 'حفظ وإرجاع المتبقي' : 'Save & return remaining')}
-                  </button>
+                ${manualSpentOverride ? `<p class="ops-spend-source ops-spend-source--corrected"><i data-lucide="badge-check" class="h-4 w-4"></i><span>${isAr ? 'هذا هو المصروف النهائي المصحح والمحفوظ. يمكنك تعديله مرة أخرى.' : 'This is the saved corrected final spend. You can edit it again.'}</span></p>` : (metaSpendAuto ? `<p class="ops-spend-source"><i data-lucide="refresh-cw" class="h-4 w-4"></i><span>${isAr ? `معبأ من Meta (آخر مزامنة: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). صححه قبل الحفظ إذا كان المبلغ النهائي مختلفاً.` : `Prefilled from Meta (last sync: ${metaAdsFormatDate(ad.metaSyncedAt, true)}). Correct it before saving if the final amount is different.`}</span></p>` : '')}
+                <div class="ops-reconciliation-progress">
+                  <span class="ops-reconciliation-state ${informed ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : (hasSavedSpend ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300')}">
+                    <i data-lucide="${informed ? 'check-check' : hasSavedSpend ? 'check' : 'clock-3'}" class="w-4 h-4"></i>
+                    ${informed ? (isAr ? 'تم إبلاغ العميل' : 'Customer informed') : (hasSavedSpend ? (isAr ? 'تم حفظ المصروف' : 'Spend saved') : (isAr ? 'تحتاج تسوية' : 'Needs reconciliation'))}
+                  </span>
                 </div>
-
-                <label class="mt-4 flex min-h-12 cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-white/80 p-3 dark:border-slate-700 dark:bg-slate-900/50 ${informed ? 'cursor-default' : ''}">
+                <label class="ops-informed-control ${informed ? 'is-confirmed' : ''}">
                   <input id="reconciliation-informed-${safeId}" type="checkbox" class="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600" ${informed ? 'checked disabled' : ''} ${!informed && (remainingUSD === null || remainingUSD <= 0 || !canReconcile) ? 'disabled' : ''} />
                   <span class="min-w-0">
                     <span class="block text-sm font-bold text-slate-800 dark:text-slate-100">${isAr ? 'أؤكد أنني أبلغت العميل بالمبلغ المتبقي' : 'I confirm that I told the customer about the remaining amount'}</span>
@@ -5743,6 +5564,11 @@ function renderReconciliationView() {
                       : (informedDetails ? Security.escapeHtml(informedDetails) : (isAr ? 'يمكن تحديد هذا بعد إدخال مصروف فعلي أقل من الميزانية. وإذا تغيّر المصروف يجب تأكيد المبلغ الجديد.' : 'Check this after entering spend below the budget. If the spend changes, confirm the new amount again.'))}</span>
                   </span>
                 </label>
+                <div class="ops-reconciliation-save">
+                  <button id="reconciliation-submit-${safeId}" type="button" onclick="confirmStopAd('${safeId}', 'reconciliation')" class="ops-button ops-button--primary" ${canReconcile ? '' : 'disabled'}><i data-lucide="check" class="w-4 h-4"></i>
+                    ${hasSavedSpend ? (isAr ? 'تحديث التسوية' : 'Update reconciliation') : (isAr ? 'حفظ وإرجاع المتبقي' : 'Save & return remaining')}
+                  </button>
+                </div>
                 ${!canReconcile ? `<p class="mt-2 text-xs text-rose-600">${isAr ? 'ليس لديك صلاحية تسوية هذا الإعلان.' : 'You do not have permission to reconcile this ad.'}</p>` : ''}
               </section>`;
             }).join('')}
@@ -5876,7 +5702,7 @@ function renderUsersView() {
         </div>
       </div>
 
-      <div id="users-grid" class="space-y-2">
+      <div id="users-grid" class="workspace-directory-grid">
         ${visibleUsers.length === 0 ? `<div class="col-span-full glass-panel rounded-2xl p-12 text-center"><i data-lucide="user-search" class="mx-auto mb-4 h-14 w-14 text-slate-300"></i><p class="text-slate-500">${isAr ? 'لا يوجد مستخدمون يطابقون البحث' : 'No users match your search'}</p></div>` : visibleUsers.map(u => {
           const userAdsCount = adsByCreator.get(String(u.id)) || 0;
           const deliveredAdsCount = paidDeliveriesByDriver.get(String(u.id)) || 0;
@@ -5993,7 +5819,7 @@ function renderUsersView() {
               </div>
             </div>
           `;
-          return shellUserRow(u, __userCard);
+          return shellUserRow(u, __userCard, { canEditThisUser: u.id === state.currentUser?.id || (canEditUsers && (isAdmin || !isAdminRole(u.role))) });
         }).join('')}
       </div>
     </div>
@@ -6108,19 +5934,14 @@ function renderAuditView() {
   };
   
   return `
-    <div class="space-y-6 animate-fade-in-up">
-      <!-- Header -->
-      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <div>
-          <h1 class="text-3xl font-bold bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 bg-clip-text text-transparent flex items-center space-x-3">
-            <span class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg">
-              <i data-lucide="file-clock" class="w-5 h-5 text-white"></i>
-            </span>
-            <span>${t('auditLogs')}</span>
-          </h1>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? `${totalLogs.toLocaleString('en-US')} إجمالي السجلات` : `${totalLogs.toLocaleString('en-US')} total entries`} ${hasActiveFilters ? (isAr ? `(مصفّاة من ${allLogs.length.toLocaleString('en-US')})` : `(filtered from ${allLogs.length.toLocaleString('en-US')})`) : ''}</p>
+    <div class="management-workspace audit-workspace" dir="${isAr ? 'rtl' : 'ltr'}">
+      <header class="management-hero">
+        <div class="management-hero-copy">
+          <span class="management-eyebrow">${isAr ? 'تاريخ مساحة العمل' : 'Workspace history'}</span>
+          <h1>${t('auditLogs')}</h1>
+          <p>${isAr ? 'راجع ما تغيّر ومن قام به. افتح أي نشاط للاطلاع على تفاصيله.' : 'See what changed and who changed it. Open any activity for its full details.'}</p>
         </div>
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="management-audit-actions">
           ${canExportLogs ? `
           <button onclick="backupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 border-2 border-emerald-200 dark:border-emerald-800 transition-all" title="${isAr ? 'إنشاء نسخة احتياطية كاملة من كل السجلات' : 'Create full backup of all logs'}">
             <i data-lucide="archive" class="w-4 h-4 text-emerald-600"></i>
@@ -6149,66 +5970,17 @@ function renderAuditView() {
           </button>
           ` : ''}
         </div>
-      </div>
-      
-      <!-- Storage Status Banner -->
-      <div class="glass-panel rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 border border-indigo-200 dark:border-indigo-800">
-        <div class="flex items-center space-x-3">
-          <div class="w-8 h-8 rounded-lg bg-indigo-100 dark:bg-indigo-800 flex items-center justify-center">
-            <i data-lucide="database" class="w-4 h-4 text-indigo-600 dark:text-indigo-300"></i>
-          </div>
-          <div>
-            <div class="text-xs font-bold text-indigo-700 dark:text-indigo-300">${isAr ? 'التخزين الدائم مفعّل' : 'Persistent Storage Enabled'}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${db ? (isAr ? 'IndexedDB نشط - السجلات محفوظة بشكل دائم' : 'IndexedDB Active - Logs stored permanently') : (isAr ? 'LocalStorage فقط - يُنصح بالنسخ الاحتياطي' : 'LocalStorage Only - Consider backing up')}</div>
-          </div>
-        </div>
-        <div class="flex items-center space-x-4 text-xs">
-          <div class="text-center">
-            <div class="font-bold text-indigo-700 dark:text-indigo-300">${allLogs.length.toLocaleString('en-US')}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
-          </div>
-          <div class="text-center">
-            <div class="font-bold text-indigo-700 dark:text-indigo-300">${db ? '∞' : Math.min(allLogs.length, MAX_LOGS_IN_LOCALSTORAGE || 500)}</div>
-            <div class="text-[10px] text-indigo-600/70 dark:text-indigo-400/70">${isAr ? 'في التخزين' : 'In Storage'}</div>
-          </div>
-          <div class="w-2 h-2 rounded-full ${db ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}"></div>
-        </div>
-      </div>
+      </header>
 
-      <!-- Stats Cards -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div class="glass-panel rounded-xl p-4 text-center">
-          <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
-            <i data-lucide="activity" class="w-5 h-5 text-blue-600"></i>
-          </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.length.toLocaleString('en-US')}</div>
-          <div class="text-xs text-slate-500">${isAr ? 'إجمالي السجلات' : 'Total Logs'}</div>
-        </div>
-        <div class="glass-panel rounded-xl p-4 text-center">
-          <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
-            <i data-lucide="plus-circle" class="w-5 h-5 text-emerald-600"></i>
-          </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</div>
-          <div class="text-xs text-slate-500">${isAr ? 'إنشاء' : 'Creates'}</div>
-        </div>
-        <div class="glass-panel rounded-xl p-4 text-center">
-          <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
-            <i data-lucide="edit-3" class="w-5 h-5 text-amber-600"></i>
-          </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</div>
-          <div class="text-xs text-slate-500">${isAr ? 'تعديلات' : 'Updates'}</div>
-        </div>
-        <div class="glass-panel rounded-xl p-4 text-center">
-          <div class="w-10 h-10 mx-auto mb-2 rounded-lg bg-rose-100 dark:bg-rose-900/30 flex items-center justify-center">
-            <i data-lucide="trash-2" class="w-5 h-5 text-rose-600"></i>
-          </div>
-          <div class="text-2xl font-bold text-slate-800 dark:text-white">${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</div>
-          <div class="text-xs text-slate-500">${isAr ? 'حذف' : 'Deletes'}</div>
-        </div>
-      </div>
+      <div class="management-audit-layout">
+        <aside class="management-audit-overview" aria-label="${isAr ? 'ملخص الأنشطة المتاحة' : 'Available activity summary'}">
+          <section class="management-card management-audit-summary"><span class="management-section-icon"><i data-lucide="activity" class="h-5 w-5"></i></span><span class="management-eyebrow">${isAr ? 'السجلات المتاحة لك' : 'Records available to you'}</span><strong class="management-audit-total">${allLogs.length.toLocaleString('en-US')}</strong><p>${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p><dl class="management-facts"><div><dt>${isAr ? 'إنشاء' : 'Creates'}</dt><dd>${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'تعديلات' : 'Updates'}</dt><dd>${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'حذف' : 'Deletes'}</dt><dd>${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</dd></div></dl></section>
+          <section class="management-card management-audit-storage"><i data-lucide="${isServerModeEnabled() ? 'cloud' : 'hard-drive'}" class="h-5 w-5"></i><h2>${isServerModeEnabled() ? (isAr ? 'سجل الخادم' : 'Server activity trail') : (isAr ? 'سجل هذا الجهاز' : 'This device’s activity trail')}</h2><p>${isServerModeEnabled() ? (isAr ? 'يُطلب أحدث سجل من الخادم عند فتح هذه الصفحة. تعكس الصادرات السجلات المتاحة لحسابك.' : 'The latest trail is requested from the server when this page opens. Exports reflect the records available to your account.') : (isAr ? 'السجلات محفوظة في هذا المتصفح. أنشئ نسخة احتياطية قبل مسح بيانات المتصفح أو تغيير الجهاز.' : 'Records are stored in this browser. Back up before clearing browser data or changing devices.')}</p>${!isServerModeEnabled() ? `<span class="management-storage-caption">${db ? 'IndexedDB' : 'LocalStorage'}</span>` : ''}</section>
+        </aside>
+        <div class="management-audit-feed">
 
       <!-- Filters -->
-      <div class="smart-filter-panel glass-panel rounded-2xl p-4">
+      <div class="smart-filter-panel management-card">
         <div class="smart-filter-primary">
           <!-- Search -->
           <div class="smart-search-field flex-1 relative">
@@ -6222,7 +5994,7 @@ function renderAuditView() {
               oninput="updateAuditFilter('search', this.value)"
               class="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all"
             />
-            <span id="audit-search-clear">${state.auditSearch ? `<button onclick="clearAuditSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
+            <span id="audit-search-clear">${state.auditSearch ? `<button type="button" aria-label="${isAr ? 'مسح البحث' : 'Clear search'}" onclick="clearAuditSearch()" class="absolute right-3 top-1/2 -translate-y-1/2 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>` : ''}</span>
           </div>
           ${renderWorkspaceFilterToggle('audit', auditAdvancedFilterCount)}
         </div>
@@ -6230,12 +6002,12 @@ function renderAuditView() {
         <div id="audit-advanced-filters" class="workspace-advanced-panel ${auditAdvancedFiltersOpen ? '' : 'hidden'}" aria-hidden="${auditAdvancedFiltersOpen ? 'false' : 'true'}">
           <!-- Filter Dropdowns -->
           <div class="audit-filter-controls workspace-filter-grid">
-            <select onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isAr ? 'الإجراء' : 'Action'}" onchange="updateAuditFilter('action', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditActionFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل الإجراءات' : 'All Actions'}</option>
               ${uniqueActions.map(a => `<option value="${Security.escapeHtml(a)}" ${state.auditActionFilter === a ? 'selected' : ''}>${Security.escapeHtml(a)}</option>`).join('')}
             </select>
 
-            <select onchange="updateAuditFilter('category', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditCategoryFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isAr ? 'الفئة' : 'Category'}" onchange="updateAuditFilter('category', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditCategoryFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل الفئات' : 'All Categories'}</option>
               <option value="auth" ${state.auditCategoryFilter === 'auth' ? 'selected' : ''}>🔐 ${isAr ? 'مصادقة' : 'Auth'}</option>
               <option value="data" ${state.auditCategoryFilter === 'data' ? 'selected' : ''}>💾 ${isAr ? 'بيانات' : 'Data'}</option>
@@ -6243,7 +6015,7 @@ function renderAuditView() {
               <option value="general" ${state.auditCategoryFilter === 'general' ? 'selected' : ''}>📄 ${isAr ? 'عام' : 'General'}</option>
             </select>
 
-            <select onchange="updateAuditFilter('severity', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditSeverityFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isAr ? 'الخطورة' : 'Severity'}" onchange="updateAuditFilter('severity', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditSeverityFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل درجات الخطورة' : 'All Severity'}</option>
               <option value="info" ${state.auditSeverityFilter === 'info' ? 'selected' : ''}>ℹ️ ${isAr ? 'معلومة' : 'Info'}</option>
               <option value="warning" ${state.auditSeverityFilter === 'warning' ? 'selected' : ''}>⚠️ ${isAr ? 'تحذير' : 'Warning'}</option>
@@ -6251,7 +6023,7 @@ function renderAuditView() {
               <option value="critical" ${state.auditSeverityFilter === 'critical' ? 'selected' : ''}>🚨 ${isAr ? 'حرج' : 'Critical'}</option>
             </select>
 
-            <select onchange="updateAuditFilter('user', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditUserFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
+            <select aria-label="${isAr ? 'المستخدم' : 'User'}" onchange="updateAuditFilter('user', this.value)" class="px-3 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-xs font-medium ${state.auditUserFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all">${isAr ? 'كل المستخدمين' : 'All Users'}</option>
               ${uniqueUsers.map(userId => {
                 const user = state.users.find(u => u.id === userId);
@@ -6273,8 +6045,9 @@ function renderAuditView() {
         </div>
       </div>
 
-      <!-- Logs Table -->
-      <div id="audit-results" class="glass-panel rounded-2xl overflow-hidden">
+      <!-- Keep this boundary stable for the scoped search refresh. -->
+      <div id="audit-results" class="management-audit-results">
+        <div class="management-section-heading"><div><h2>${isAr ? 'تسلسل النشاط' : 'Activity timeline'}</h2><p role="status">${isAr ? `${totalLogs.toLocaleString('en-US')} سجل${hasActiveFilters ? ' يطابق الفلاتر' : ''}` : `${totalLogs.toLocaleString('en-US')} ${hasActiveFilters ? 'matching' : 'available'} entries`}</p></div><span class="management-storage-caption">${isAr ? 'الأحدث أولاً' : 'Newest first'}</span></div>
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
@@ -6282,75 +6055,31 @@ function renderAuditView() {
             ${hasActiveFilters ? `<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}
           </div>
         ` : `
-          <div class="overflow-x-auto">
-            <table class="mobile-card-table audit-mobile-table w-full text-sm">
-              <thead class="bg-slate-50 dark:bg-slate-800/50">
-                <tr>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوقت' : 'Timestamp'}</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'المستخدم' : 'User'}</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الإجراء' : 'Action'}</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الفئة' : 'Category'}</th>
-                  <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الوصف' : 'Description'}</th>
-                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'الخطورة' : 'Severity'}</th>
-                  <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase">${isAr ? 'التفاصيل' : 'Details'}</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+          <ol class="management-timeline" aria-label="${isAr ? 'الأنشطة' : 'Activities'}">
                 ${paginatedLogs.map(log => {
                   const user = state.users.find(u => u.id === log.userId);
                   const severity = log.severity || 'info';
                   const category = log.category || 'general';
+                  const userName = log.userName || user?.name || (isAr ? 'النظام' : 'System');
                   return `
-                    <tr class="hover:bg-slate-50 dark:hover:bg-slate-800/30 transition-colors">
-                      <td class="px-4 py-3" data-label="${isAr ? 'الوقت' : 'Timestamp'}">
-                        <div class="text-xs font-medium text-slate-700 dark:text-slate-300">${new Date(log.date).toLocaleDateString(appDateLocale())}</div>
-                        <div class="text-[10px] text-slate-500">${new Date(log.date).toLocaleTimeString(appDateLocale())}</div>
-                      </td>
-                      <td class="px-4 py-3" data-label="${isAr ? 'المستخدم' : 'User'}">
-                        <div class="flex items-center space-x-2">
-                          <div class="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
-                            ${(log.userName || user?.name || 'S').charAt(0).toUpperCase()}
-                          </div>
-                          <span class="text-xs font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</span>
-                        </div>
-                      </td>
-                      <td class="px-4 py-3" data-label="${isAr ? 'الإجراء' : 'Action'}">
-                        <span class="inline-flex px-2 py-1 rounded-lg text-xs font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
-                          ${Security.escapeHtml(log.action)}
-                        </span>
-                      </td>
-                      <td class="px-4 py-3" data-label="${isAr ? 'الفئة' : 'Category'}">
-                        <span class="inline-flex items-center space-x-1 text-xs text-slate-600 dark:text-slate-400">
-                          <i data-lucide="${categoryIcons[category] || 'file-text'}" class="w-3 h-3"></i>
-                          <span class="capitalize">${Security.escapeHtml(category)}</span>
-                        </span>
-                      </td>
-                      <td class="audit-description-cell px-4 py-3 max-w-md" data-label="${isAr ? 'الوصف' : 'Description'}">
-                        <p class="text-xs text-slate-600 dark:text-slate-400 truncate" title="${Security.escapeHtml(log.description || '')}">${Security.escapeHtml(log.description || '')}</p>
-                        ${log.resourceId ? `<p class="text-[10px] text-slate-400 mt-0.5">ID: ${log.resourceId.substring(0, 12)}...</p>` : ''}
-                      </td>
-                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'الخطورة' : 'Severity'}">
-                        <span class="inline-flex px-2 py-1 rounded-full text-[10px] font-bold uppercase ${severityColors[severity] || severityColors['info']}">
-                          ${isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity}
-                        </span>
-                      </td>
-                      <td class="px-4 py-3 text-center" data-label="${isAr ? 'التفاصيل' : 'Details'}">
-                        <button onclick="showLogDetails('${log.id}')" class="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors" title="${isAr ? 'عرض التفاصيل' : 'View Details'}">
-                          <i data-lucide="eye" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
-                        </button>
-                      </td>
-                    </tr>
+                    <li class="management-timeline-item">
+                      <span class="management-timeline-marker" aria-hidden="true"><i data-lucide="${categoryIcons[category] || 'file-text'}" class="h-4 w-4"></i></span>
+                      <article class="management-card management-activity-card">
+                        <div class="management-activity-top"><div class="management-activity-tags"><span class="management-action-tag">${Security.escapeHtml(log.action || '')}</span><span class="management-category-tag">${Security.escapeHtml(category)}</span><span class="management-severity-tag ${severityColors[severity] || severityColors.info}">${Security.escapeHtml(isAr ? (({ info: 'معلومة', warning: 'تحذير', error: 'خطأ', critical: 'حرج' })[severity] || severity) : severity)}</span></div><time datetime="${Security.escapeHtml(String(log.date || ''))}">${new Date(log.date).toLocaleDateString(appDateLocale())}<span>${new Date(log.date).toLocaleTimeString(appDateLocale())}</span></time></div>
+                        <div class="management-activity-author"><span class="management-avatar" aria-hidden="true">${Security.escapeHtml(String(userName).charAt(0).toUpperCase())}</span><strong>${Security.escapeHtml(userName)}</strong></div>
+                        <p class="management-activity-description">${Security.escapeHtml(log.description || '')}</p>
+                        <div class="management-activity-footer">${log.resourceId ? `<p class="management-resource-id"><span>${isAr ? 'معرّف السجل' : 'Record ID'}</span><bdi>${Security.escapeHtml(String(log.resourceId))}</bdi></p>` : '<span></span>'}<button type="button" data-log-id="${Security.escapeHtml(String(log.id || ''))}" onclick="showLogDetails(this.dataset.logId)" class="management-button"><i data-lucide="eye" class="h-4 w-4"></i>${isAr ? 'عرض التفاصيل' : 'View details'}</button></div>
+                      </article>
+                    </li>
                   `;
                 }).join('')}
-              </tbody>
-            </table>
-          </div>
+          </ol>
           
           <!-- Pagination -->
-          <div class="px-4 py-3 border-t border-slate-200 dark:border-slate-700 flex flex-col md:flex-row items-center justify-between gap-3">
-            <div class="flex items-center space-x-2 text-xs text-slate-500">
+          <div class="management-audit-pagination">
+            <div class="management-pagination-summary">
               <span>${isAr ? 'عرض' : 'Show'}</span>
-              <select onchange="updateAuditPageSize(this.value)" class="px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs">
+              <select aria-label="${isAr ? 'عدد السجلات في الصفحة' : 'Entries per page'}" onchange="updateAuditPageSize(this.value)" class="px-2 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs">
                 <option value="25" ${state.auditPageSize === 25 ? 'selected' : ''}>25</option>
                 <option value="50" ${state.auditPageSize === 50 ? 'selected' : ''}>50</option>
                 <option value="100" ${state.auditPageSize === 100 ? 'selected' : ''}>100</option>
@@ -6361,11 +6090,11 @@ function renderAuditView() {
               <span>${isAr ? `عرض ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} من ${totalLogs}` : `Showing ${startIndex + 1}-${Math.min(startIndex + state.auditPageSize, totalLogs)} of ${totalLogs}`}</span>
             </div>
             
-            <div class="flex items-center space-x-1">
-              <button onclick="updateAuditPage(1)" ${currentPage === 1 ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage === 1 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
+            <nav class="management-page-buttons" aria-label="${isAr ? 'صفحات سجل النشاط' : 'Activity pages'}">
+              <button aria-label="${isAr ? 'الصفحة الأولى' : 'First page'}" onclick="updateAuditPage(1)" ${currentPage === 1 ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage === 1 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
                 <i data-lucide="chevrons-left" class="w-3 h-3"></i>
               </button>
-              <button onclick="updateAuditPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage === 1 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
+              <button aria-label="${isAr ? 'الصفحة السابقة' : 'Previous page'}" onclick="updateAuditPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage === 1 ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
                 <i data-lucide="chevron-left" class="w-3 h-3"></i>
               </button>
               
@@ -6373,15 +6102,17 @@ function renderAuditView() {
                 ${isAr ? `صفحة ${currentPage} من ${totalPages || 1}` : `Page ${currentPage} of ${totalPages || 1}`}
               </span>
               
-              <button onclick="updateAuditPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage >= totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
+              <button aria-label="${isAr ? 'الصفحة التالية' : 'Next page'}" onclick="updateAuditPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage >= totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
                 <i data-lucide="chevron-right" class="w-3 h-3"></i>
               </button>
-              <button onclick="updateAuditPage(${totalPages})" ${currentPage >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage >= totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
+              <button aria-label="${isAr ? 'الصفحة الأخيرة' : 'Last page'}" onclick="updateAuditPage(${totalPages})" ${currentPage >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg text-xs font-medium ${currentPage >= totalPages ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700'}">
                 <i data-lucide="chevrons-right" class="w-3 h-3"></i>
               </button>
-            </div>
+            </nav>
           </div>
         `}
+      </div>
+        </div>
       </div>
     </div>
   `;
@@ -6691,16 +6422,23 @@ function restoreAuditLogs() {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية مسح/استرجاع السجلات' : 'Requires the Clear Logs permission', 'error');
     return;
   }
+  const importIdentity = getAuthMeIdentity();
+  const importServerMode = isServerModeEnabled();
+  const importIsCurrent = () => getAuthMeIdentity() === importIdentity
+    && isServerModeEnabled() === importServerMode
+    && can('auditLogs', 'clear');
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json';
 
   input.onchange = async (e) => {
+    if (!importIsCurrent()) return;
     const file = e.target.files[0];
     if (!file) return;
     
     const reader = new FileReader();
     reader.onload = async (event) => {
+      if (!importIsCurrent()) return;
       try {
         const backup = JSON.parse(event.target.result);
         
@@ -6714,6 +6452,7 @@ function restoreAuditLogs() {
         let imported = 0;
         
         for (const log of backup.logs) {
+          if (!importIsCurrent()) return;
           if (!existingIds.has(log.id)) {
             state.logs.push(log);
             existingIds.add(log.id);
@@ -6722,6 +6461,7 @@ function restoreAuditLogs() {
             // Also save to IndexedDB
             if (db) {
               await saveLogToIndexedDB(log);
+              if (!importIsCurrent()) return;
             }
           }
         }
@@ -6744,6 +6484,7 @@ function restoreAuditLogs() {
         render();
         lucide.createIcons();
       } catch (error) {
+        if (!importIsCurrent()) return;
         console.error('Restore error:', error);
         showNotification(state.language === 'ar' ? 'خطأ' : 'Error', (state.language === 'ar' ? 'فشل استرجاع النسخة الاحتياطية: ' : 'Failed to restore backup: ') + error.message, 'error');
       }
@@ -6808,14 +6549,24 @@ function renderSettingsView() {
   const nativeStatus = typeof nativeSecuritySettingsStatus === 'function'
     ? nativeSecuritySettingsStatus()
     : { isNative: false, ready: true, biometricEnabled: false, remindersEnabled: false, biometricAvailable: false };
+  const settingsSections = [
+    [typeof renderSettingsAppearanceCard === 'function' ? 'settings-appearance' : 'settings-performance', 'sliders-horizontal', isAr ? 'التفضيلات' : 'Preferences'],
+    ['settings-security', 'shield-check', isAr ? 'الأمان والحساب' : 'Security & account'],
+    ['settings-finance', 'banknote', isAr ? 'إعدادات الأموال' : 'Money settings'],
+    ['settings-data', 'database-backup', isAr ? 'البيانات والنسخ' : 'Data & backups'],
+    ['settings-about', 'info', isAr ? 'معلومات التطبيق' : 'About Albayan']
+  ];
   
   return `
-    <div class="space-y-6 animate-fade-in-up">
-      <h1 class="text-3xl font-bold text-slate-800 dark:text-white">${t('settings')}</h1>
-      ${typeof renderSettingsAppearanceCard === 'function' ? `<div>${renderSettingsAppearanceCard()}</div>` : ''}
+    <div class="management-workspace settings-workspace" dir="${isAr ? 'rtl' : 'ltr'}">
+      <header class="management-hero"><div class="management-hero-copy"><span class="management-eyebrow">${isAr ? 'مساحة عملك' : 'Your workspace'}</span><h1>${t('settings')}</h1><p>${isAr ? 'إعدادات واضحة لهاتفك وحسابك وأموال العمل. كل الأدوات متاحة أدناه.' : 'A clear place for your device, account and business settings. Every tool remains available below.'}</p></div><span class="management-status"><i data-lucide="${isServerModeEnabled() ? 'cloud' : 'hard-drive'}" class="h-4 w-4"></i>${isServerModeEnabled() ? (isAr ? 'متصل بالخادم' : 'Server workspace') : (isAr ? 'مساحة محلية' : 'Local workspace')}</span></header>
+      <div class="management-settings-layout">
+        <nav class="management-settings-nav" aria-label="${isAr ? 'أقسام الإعدادات' : 'Settings sections'}"><span class="management-eyebrow">${isAr ? 'انتقل إلى' : 'Jump to'}</span>${settingsSections.map(([id, icon, label]) => `<button type="button" onclick="document.getElementById('${id}')?.scrollIntoView({block:'start'}); document.getElementById('${id}')?.focus({preventScroll:true})"><i data-lucide="${icon}" class="h-4 w-4"></i><span>${label}</span><i data-lucide="chevron-right" class="h-4 w-4 management-direction-icon"></i></button>`).join('')}<p>${isAr ? 'تظهر أدوات الإدارة وفق صلاحيات حسابك.' : 'Management tools follow your account permissions.'}</p></nav>
+        <div class="management-settings-grid">
+      ${typeof renderSettingsAppearanceCard === 'function' ? `<div id="settings-appearance" tabindex="-1" class="management-settings-card settings-wide">${renderSettingsAppearanceCard()}</div>` : ''}
 
       <!-- Security -->
-      <div class="glass-panel rounded-2xl p-6">
+      <div id="settings-security" tabindex="-1" class="management-card management-settings-card">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="shield" class="w-5 h-5 mr-2 text-indigo-600"></i>
           ${t('security')}
@@ -6893,7 +6644,7 @@ function renderSettingsView() {
 
       ${nativeStatus.isNative ? `
       <!-- Protection and reminders for this physical phone only -->
-      <div class="glass-panel rounded-2xl p-4 sm:p-6" data-native-device-settings>
+      <div id="settings-device" tabindex="-1" class="management-card management-settings-card" data-native-device-settings>
         <h2 class="text-xl font-bold mb-2 flex items-center gap-2">
           <i data-lucide="smartphone" class="w-5 h-5 text-indigo-600"></i>
           ${isAr ? 'حماية هذا الهاتف' : 'This phone'}
@@ -6922,7 +6673,7 @@ function renderSettingsView() {
       </div>` : ''}
 
       <!-- Privacy and account deletion -->
-      <div class="glass-panel rounded-2xl p-6">
+      <div id="settings-privacy" tabindex="-1" class="management-card management-settings-card">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="shield-check" class="w-5 h-5 mr-2 text-indigo-600"></i>
           ${isAr ? 'الخصوصية والحساب' : 'Privacy & Account'}
@@ -6945,7 +6696,7 @@ function renderSettingsView() {
       </div>
 
       <!-- Performance mode (for slow devices) -->
-      <div class="glass-panel rounded-2xl p-6">
+      <div id="settings-performance" tabindex="-1" class="management-card management-settings-card">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="zap" class="w-5 h-5 mr-2 text-amber-500"></i>
           ${state.language === 'ar' ? 'الأداء' : 'Performance'}
@@ -6966,14 +6717,14 @@ function renderSettingsView() {
       </div>
 
       <!-- Exchange Rate -->
-      <div class="glass-panel rounded-2xl p-6">
+      <div id="settings-finance" tabindex="-1" class="management-card management-settings-card settings-wide">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="dollar-sign" class="w-5 h-5 mr-2 text-emerald-600"></i>
           ${isAr ? 'إدارة سعر الصرف' : 'Exchange Rate Management'}
         </h2>
         <div class="space-y-4">
           <div class="flex flex-col md:flex-row md:items-center space-y-2 md:space-y-0 md:space-x-4">
-            <label class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
+            <label for="default-rate-input" class="text-sm font-medium text-slate-700 dark:text-slate-300">${isAr ? 'السعر الحالي (USD إلى LYD):' : 'Current Rate (USD to LYD):'}</label>
             ${can('settings', 'manageExchangeRate') ? `
             <input type="text" id="default-rate-input" inputmode="decimal" value="${Security.escapeHtml(String(state.defaultExchangeRate ?? ''))}" oninput="sanitizeMoneyInput(this, 4)" onchange="updateExchangeRate(this.value)" class="glass-input px-4 py-2 rounded-xl w-32 font-bold text-emerald-600" />
             <button onclick="updateExchangeRate(document.getElementById('default-rate-input').value)" class="btn-shine bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm">${isAr ? 'حفظ السعر' : 'Save Rate'}</button>
@@ -7015,7 +6766,7 @@ function renderSettingsView() {
       </div>
 
       <!-- Data Management -->
-      <div class="glass-panel rounded-2xl p-6">
+      <div id="settings-data" tabindex="-1" class="management-card management-settings-card settings-wide">
         <h2 class="text-xl font-bold mb-4 flex items-center">
           <i data-lucide="database" class="w-5 h-5 mr-2 text-blue-600"></i>
           ${isAr ? 'إدارة البيانات' : 'Data Management'}
@@ -7075,7 +6826,7 @@ function renderSettingsView() {
 
       <!-- Cloud Sync -->
       ${state.cloudConfig.enabled ? `
-        <div class="glass-panel rounded-2xl p-6">
+        <div id="settings-cloud" tabindex="-1" class="management-card management-settings-card">
           <h2 class="text-xl font-bold mb-4 flex items-center">
             <i data-lucide="cloud" class="w-5 h-5 mr-2 text-indigo-600"></i>
             ${isAr ? 'المزامنة السحابية' : 'Cloud Sync'}
@@ -7101,7 +6852,7 @@ function renderSettingsView() {
       ` : ''}
 
       <!-- App Info -->
-      <div class="glass-panel rounded-2xl p-6">
+      <div id="settings-about" tabindex="-1" class="management-card management-settings-card">
         <h2 class="text-xl font-bold mb-4">${isAr ? 'معلومات التطبيق' : 'Application Info'}</h2>
         <div class="space-y-2 text-sm">
           <div class="flex justify-between"><span class="text-slate-500">${isAr ? 'الإصدار:' : 'Version:'}</span><span class="font-mono">3.5.0 Vanilla</span></div>
@@ -7112,7 +6863,9 @@ function renderSettingsView() {
         </div>
       </div>
 
-      <button type="button" onclick="handleLogout()" class="touch-target w-full min-h-12 rounded-2xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 font-bold flex items-center justify-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${isAr ? 'تسجيل الخروج' : 'Sign out'}</button>
+        </div>
+      </div>
+      <button type="button" onclick="handleLogout()" class="management-button management-signout text-rose-600"><i data-lucide="log-out" class="w-4 h-4"></i>${isAr ? 'تسجيل الخروج' : 'Sign out'}</button>
     </div>
   `;
 }

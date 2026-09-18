@@ -349,21 +349,30 @@ def refund_stopped_campaign_budget(
     return str(saved.get("id") or "")
 
 
-def _update_payment_row(conn: Any, request_id: str, data: dict[str, Any]) -> None:
+def _update_payment_row(
+    conn: Any, entity: dict[str, Any], data: dict[str, Any]
+) -> dict[str, Any]:
+    """Advance both sync cursors from the caller's locked version."""
     data = dict(data)
-    data["_lastModified"] = now_ms()
-    conn.execute(
+    baseline = int(entity.get("lastModified") or 0)
+    data["_lastModified"] = max(now_ms(), baseline + 1)
+    result = conn.execute(
         text(
             "UPDATE entities SET data_json = :d, last_modified = :m "
-            "WHERE type = :t AND id = :id AND deleted = false"
+            "WHERE type = :t AND id = :id AND deleted = false "
+            "AND last_modified = :baseline"
         ),
         {
             "d": json_dumps(data),
             "m": int(data["_lastModified"]),
             "t": WALLET_PAYMENT_COLLECTION,
-            "id": request_id,
+            "id": str(entity.get("id") or ""),
+            "baseline": baseline,
         },
     )
+    if int(result.rowcount or 0) != 1:
+        raise HTTPException(status_code=409, detail="Conflict: payment request has changed")
+    return {**entity, "data": data, "lastModified": int(data["_lastModified"])}
 
 
 def _load_payment_request(conn: Any, ctx: dict[str, Any], request_id: str, *, lock: bool) -> dict[str, Any]:
@@ -585,8 +594,7 @@ def create_wallet_payments_router(
                     "receiptNote": str(body.note or "").strip()[:500],
                 }
             )
-            _update_payment_row(conn, rid, data)
-            entity["data"] = data
+            entity = _update_payment_row(conn, entity, data)
         ctx["audit"](uid, "attach_receipt", WALLET_PAYMENT_COLLECTION, rid, "")
         return _lean_payment_entity(entity)
 
@@ -673,8 +681,7 @@ def create_wallet_payments_router(
                     "walletTransactionId": str(credit.get("id") or ""),
                 }
             )
-            _update_payment_row(conn, rid, data)
-            fresh["data"] = data
+            fresh = _update_payment_row(conn, fresh, data)
         ctx["audit"](
             str(user.get("id") or ""), "confirm", WALLET_PAYMENT_COLLECTION, rid,
             f"credited {amount} {currency}" + (" override-missing-receipt" if data.get("receiptOverriddenBy") else ""),
@@ -714,8 +721,7 @@ def create_wallet_payments_router(
                     "canceledBy": str(user.get("id") or ""),
                 }
             )
-            _update_payment_row(conn, rid, data)
-            entity["data"] = data
+            entity = _update_payment_row(conn, entity, data)
         ctx["audit"](str(user.get("id") or ""), "cancel", WALLET_PAYMENT_COLLECTION, rid, "")
         return entity
 

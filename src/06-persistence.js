@@ -244,6 +244,10 @@ async function flushDirtyCollections() {
   try {
     for (const name of toFlush) {
       if (flushGeneration !== idbSync.scopeGeneration) break;
+      // Edits queued while an earlier collection was saving are included in
+      // this collection's upcoming write. Consume them at the write boundary,
+      // not after its await: edits during this write still need another pass.
+      idbSync.dirty.delete(name);
       try {
         const saved = await saveCollectionToIndexedDB(name, state[name]);
         if (saved === false) failed.push(name);
@@ -1078,11 +1082,11 @@ function assignSequentialNumbers(force = false, collections = ['ads', 'receipts'
   _seqNoCache.lastUpdate = now;
 }
 
-async function ensureUsersHavePasswordHashes() {
-  if (!Array.isArray(state.users)) return;
+async function ensureUsersHavePasswordHashes(users = state.users, { persist = true } = {}) {
+  if (!Array.isArray(users)) return;
 
   let changed = false;
-  for (const user of state.users) {
+  for (const user of users) {
     if (!user || user._deleted) continue;
 
     // If user has a plaintext password (legacy), migrate immediately
@@ -1108,7 +1112,7 @@ async function ensureUsersHavePasswordHashes() {
     }
   }
 
-  if (changed) {
+  if (changed && persist) {
     markCollectionDirty('users');
     saveState();
     await flushDirtyCollections();

@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -866,6 +867,204 @@ def test_scheduler_tick_publishes_due_posts_once(actors, graph):
     # The worker only starts when Meta is configured, and stops cleanly.
     studio.stop_social_studio_worker()
     assert studio._WORKER_THREAD is None
+
+
+@pytest.mark.parametrize("action", ["edit", "cancel", "delete"])
+def test_post_mutation_cannot_overwrite_a_concurrent_publish_claim(actors, monkeypatch, action):
+    cookies = actors["a"]["cookies"]
+    page = _link(actors, "a", "5100000000031")
+    post = _post(cookies, [page["id"]], status="scheduled", scheduledAt=_future()).json()
+    original_load = studio._load_owned
+    claimed = []
+
+    def load_then_claim(*args, **kwargs):
+        entity = original_load(*args, **kwargs)
+        if entity["id"] == post["id"] and not claimed:
+            claimed.append(studio._claim_post(studio._ctx(), entity, actors["a"]["id"]))
+        return entity
+
+    monkeypatch.setattr(studio, "_load_owned", load_then_claim)
+    path = f"{API}/posts/{post['id']}"
+    if action == "edit":
+        response = client.patch(path, json={"caption": "Late edit", "status": "draft"}, cookies=cookies)
+    elif action == "cancel":
+        response = client.post(path + "/cancel", cookies=cookies)
+    else:
+        response = client.delete(path, cookies=cookies)
+    assert claimed == [True]
+    assert response.status_code == 409, response.text
+    saved = studio._ctx()["get_entity"](studio.POSTS_TYPE, post["id"])
+    assert saved["deleted"] is False
+    assert saved["data"]["status"] == "publishing"
+    assert saved["data"]["caption"] == post["caption"]
+
+
+def test_scheduler_finds_due_posts_beyond_500_future_posts(actors):
+    now = datetime.now(timezone.utc)
+    stamp = now_ms()
+    rows = []
+    for i in range(502):
+        due = i >= 500
+        post_id = f"spost_scheduler_regression_{i}"
+        data = {"id": post_id, "ownerId": actors["a"]["id"], "status": "scheduled",
+                "scheduledAt": (now + timedelta(days=-1 if due else 30)).isoformat(),
+                "media": [VALID_PNG_DATA_URL]}
+        rows.append({"id": post_id, "data": json_dumps(data), "stamp": stamp + i,
+                     "owner": actors["a"]["id"], "type": studio.POSTS_TYPE})
+    with db_conn() as conn:
+        conn.execute(text("INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                          "VALUES (:type,:id,:data,false,:stamp,:owner,:stamp)"), rows)
+    due = studio._due_scheduled_posts(now, 1)
+    assert [entity["id"] for entity in due] == ["spost_scheduler_regression_500"]
+    assert len(studio._due_scheduled_posts(now, 20)) == 2
+    assert studio._due_scheduled_posts(now, 0) == []
+
+
+@contextmanager
+def _suspend_social_owner(owner_id, reason):
+    """Temporarily change real stored access, restoring shared fixture rows."""
+    with db_conn() as conn:
+        subscriptions = conn.execute(text(
+            "SELECT id,data_json FROM entities WHERE type='serviceSubscriptions' AND created_by=:uid"
+        ), {"uid": owner_id}).mappings().all()
+        if reason == "deleted":
+            conn.execute(text("UPDATE users SET deleted=true WHERE id=:uid"), {"uid": owner_id})
+        else:
+            for row in subscriptions:
+                data = json_loads(row["data_json"])
+                if reason == "expired":
+                    data["expiresAt"] = "2001-01-01T00:00:00Z"
+                else:
+                    data["status"] = "canceled"
+                conn.execute(text("UPDATE entities SET data_json=:data WHERE type='serviceSubscriptions' AND id=:id"),
+                             {"id": row["id"], "data": json_dumps(data)})
+    try:
+        yield
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("UPDATE users SET deleted=false WHERE id=:uid"), {"uid": owner_id})
+            for row in subscriptions:
+                conn.execute(text("UPDATE entities SET data_json=:data WHERE type='serviceSubscriptions' AND id=:id"),
+                             {"id": row["id"], "data": row["data_json"]})
+
+
+@pytest.mark.parametrize("reason", ["expired", "canceled", "deleted"])
+def test_scheduled_post_rechecks_owner_access_and_can_be_retried_after_renewal(actors, graph, reason):
+    owner = actors["a"]
+    page = _link(actors, "a", "5100000000038")
+    post = _post(owner["cookies"], [page["id"]], status="scheduled", scheduledAt=_future(2)).json()
+    with _suspend_social_owner(owner["id"], reason):
+        assert studio.run_scheduler_tick(now=datetime.now(timezone.utc) + timedelta(minutes=5)) == 1
+        assert graph.calls == [], "A disabled or unsubscribed owner must not publish in the background"
+        saved = studio._ctx()["get_entity"](studio.POSTS_TYPE, post["id"])["data"]
+        assert saved["status"] == "failed"
+        assert saved["lastError"]
+        assert saved["caption"] == post["caption"]
+    retry = client.post(f"{API}/posts/{post['id']}/publish", cookies=owner["cookies"])
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["status"] == "published"
+    assert len(graph.calls) == 1
+
+
+@pytest.mark.parametrize("reason", ["expired", "canceled", "deleted"])
+def test_comment_automation_rechecks_owner_access_without_losing_rules(actors, graph, reason):
+    owner = actors["a"]
+    _link(actors, "a", "5100000000039")
+    _rule(owner["cookies"], publicReply="Thanks for your comment")
+    payload = _fb_comment("5100000000039", "5100000000039_1", "9019", "hello")
+    with _suspend_social_owner(owner["id"], reason):
+        assert studio.handle_meta_webhook(payload) == 0
+        assert graph.calls == []
+        assert _log_rows(owner["id"]) == []
+    assert studio.handle_meta_webhook(payload) == 1
+    assert graph.paths() == [("5100000000039_1/comments", {"message": "Thanks for your comment"})]
+
+
+def test_once_per_person_skips_a_second_comment_while_first_reply_is_in_flight(actors, graph, monkeypatch):
+    _link(actors, "a", "5100000000040")
+    _rule(actors["a"]["cookies"], oncePerPerson=True)
+    original_post = graph.post
+    nested = []
+
+    def during_reply(path, data, token):
+        if not nested:
+            nested.append("entered")
+            nested.append(studio.handle_meta_webhook(
+                _fb_comment("5100000000040", "5100000000040_2", "9020", "second comment")
+            ))
+        return original_post(path, data, token)
+
+    monkeypatch.setattr(graph, "post", during_reply)
+    assert studio.handle_meta_webhook(
+        _fb_comment("5100000000040", "5100000000040_1", "9020", "first comment")
+    ) == 1
+    assert nested == ["entered", 0]
+    assert len(graph.calls) == 1
+
+
+def test_once_per_person_keeps_old_reply_history_beyond_the_display_limit(actors, graph):
+    page = _link(actors, "a", "5100000000041")
+    _rule(actors["a"]["cookies"], oncePerPerson=True)
+    owner = actors["a"]["id"]
+    stamp = now_ms()
+    rows = []
+    for i in range(1002):
+        data = {"id": f"srl_old_history_{i}", "ownerId": owner, "pageId": page["id"],
+                "fromId": "9021" if i == 0 else f"new_person_{i}", "actions": ["public"]}
+        rows.append({"id": data["id"], "data": json_dumps(data), "owner": owner, "stamp": stamp + i})
+    with db_conn() as conn:
+        conn.execute(text("INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                          "VALUES ('socialReplyLog',:id,:data,false,:stamp,:owner,:stamp)"), rows)
+    assert studio.handle_meta_webhook(
+        _fb_comment("5100000000041", "5100000000041_1", "9021", "returning person")
+    ) == 0
+    assert graph.calls == []
+
+
+def test_once_per_person_releases_definite_failure_but_remembers_success(actors, graph):
+    _link(actors, "a", "5100000000042")
+    _rule(actors["a"]["cookies"], oncePerPerson=True)
+    graph.fail["/comments"] = meta_ads.MetaAdsError("request_failed", "Reply refused")
+    first = _fb_comment("5100000000042", "5100000000042_1", "9022", "hello")
+    assert studio.handle_meta_webhook(first) == 1
+    assert _log_rows(actors["a"]["id"])[0]["processing"] is False
+    graph.fail.clear()
+    assert studio.handle_meta_webhook(
+        _fb_comment("5100000000042", "5100000000042_2", "9022", "try again")
+    ) == 1
+    assert studio.handle_meta_webhook(
+        _fb_comment("5100000000042", "5100000000042_3", "9022", "already answered")
+    ) == 0
+    assert len(graph.calls) == 2
+
+
+def test_once_per_person_stays_page_scoped_and_other_rules_can_reply_repeatedly(actors, graph):
+    for page_id in ["5100000000043", "5100000000044"]:
+        _link(actors, "a", page_id)
+    rule = _rule(actors["a"]["cookies"], oncePerPerson=True)
+    for page_id, from_id in [("5100000000043", "9023"), ("5100000000044", "9023"),
+                             ("5100000000043", "9024")]:
+        assert studio.handle_meta_webhook(_fb_comment(page_id, f"{page_id}_{from_id}", from_id, "hello")) == 1
+    response = client.patch(f"{API}/rules/{rule['id']}", json={"oncePerPerson": False}, cookies=actors["a"]["cookies"])
+    assert response.status_code == 200
+    assert studio.handle_meta_webhook(_fb_comment("5100000000043", "5100000000043_2", "9023", "hello again")) == 1
+    assert len(graph.calls) == 4
+
+
+def test_background_access_preserves_admin_and_current_staff_review_exemptions(actors):
+    assert studio._owner_can_automate(actors["admin"]["id"])
+    uid = actors["c"]["id"]
+    assert not studio._owner_can_automate(uid)
+    with db_conn() as conn:
+        conn.execute(text("UPDATE users SET permissions_json=:permissions WHERE id=:uid"), {
+            "uid": uid, "permissions": json_dumps({"adCampaignRequests": ["review"]}),
+        })
+    try:
+        assert studio._owner_can_automate(uid)
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("UPDATE users SET permissions_json='{}' WHERE id=:uid"), {"uid": uid})
+    assert not studio._owner_can_automate(uid)
 
 
 def test_stats_last_24h_and_platform_shares(actors, graph):

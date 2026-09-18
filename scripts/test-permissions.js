@@ -970,6 +970,31 @@ check('the ads list shows who created and completed an ad on its own row, never 
   assert(widths.reduce((sum, w) => sum + w, 0) === 100, `ads column widths total ${widths.reduce((s, w) => s + w, 0)}%, not 100%`);
 });
 
+check('classic ad rows retain direct receipt links without exposing inaccessible receipts', () => {
+  loginAs(ADMIN);
+  seedBusinessData();
+  S.language = 'en';
+  S.adSearch = '';
+  S.adFilters = {};
+  S.adReceiptFilter = '';
+  Object.assign(S.ads[0], { receiptId: 'r1', days: 7 });
+  S.receipts[0].serialNumber = 'S123';
+  const adminHtml = visible(sandbox.renderAdsView());
+  assert(adminHtml.includes('ads-summary-table mobile-card-table'), 'classic table missing');
+  assert(!adminHtml.includes('ad-campaign-card'), 'oversized campaign cards returned');
+  assert(adminHtml.includes('data-action="view-ad-receipt" data-receipt-id="r1"'), 'direct receipt shortcut missing');
+  assert(adminHtml.includes('openReceiptRecord(this.dataset.receiptId)'), 'receipt shortcut does not use the existing navigation flow');
+  assert(adminHtml.includes('Duration: 7 days'), 'manual ad duration disappeared');
+
+  loginAs(employee({ ads: ['view'], receipts: ['view'] }));
+  assert(visible(sandbox.renderAdsView()).includes('data-action="view-ad-receipt"'), 'allowed receipt shortcut missing');
+  loginAs(employee({ ads: ['view'] }));
+  assert(!visible(sandbox.renderAdsView()).includes('data-action="view-ad-receipt"'), 'receipt shortcut shown without receipts access');
+  loginAs(employee({ ads: ['view'], receipts: ['viewOwn'] }));
+  assert(!visible(sandbox.renderAdsView()).includes('data-receipt-id="r1"'), 'another employee receipt exposed by shortcut');
+  loginAs(ADMIN);
+});
+
 check('the ads list names the person who completed an imported Meta ad', () => {
   // A Meta-imported row is "Created by" the automation, so the list showed only
   // "System" and there was no way to see who actually did the setup.

@@ -40,9 +40,9 @@ _SQLITE_CLOTHES_LOCK = threading.Lock()
 # User-role membership must be serialized when enforcing the invariant that
 # at least one active Admin always remains.
 _SQLITE_ADMIN_MEMBERSHIP_LOCK = threading.Lock()
-# Password-reset codes are one-shot capabilities. SQLite needs an in-process
-# guard around the conditional claim; PostgreSQL serializes the row update.
-_SQLITE_PASSWORD_RESET_LOCK = threading.Lock()
+# Credential issuance and revocation share one order: user, then credential
+# rows. PostgreSQL uses a user-row lock; SQLite needs an equivalent guard.
+_SQLITE_AUTH_LOCK = threading.RLock()
 # Wallet balance checks and ledger inserts must be serialized in SQLite too;
 # Postgres uses row locks on the participating user records instead.
 _SQLITE_WALLET_LOCK = threading.Lock()
@@ -65,7 +65,7 @@ ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().low
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, now_ms
-from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, normalize_permissions, user_has_permission
+from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
 from .backfills import (
     backfill_covered_settled_receipts,
     backfill_customer_names,
@@ -86,6 +86,7 @@ from .receipt_references import (
     receipt_reference_reason as _receipt_reference_reason,
 )
 from .ad_final_spend import confirm_final_ad_spend, final_spend_audit_metadata
+from .financial_relink_baseline import settled_relink_stop_baseline
 from .unpaid_receipt_growth import (
     UNPAID_RECEIPT_DEBT_INCREASE_FIELD as _UNPAID_RECEIPT_DEBT_INCREASE_FIELD,
     parse_unpaid_receipt_debt_increase as _parse_unpaid_receipt_debt_increase,
@@ -170,6 +171,7 @@ from .entity_projection import (
     _project_entity_media,
     _without_inline_media,
     can_include_entity_media,
+    can_read_related_receipt,
     project_entity_contacts,
 )
 from .meta_ads import (
@@ -179,7 +181,7 @@ from .meta_ads import (
     guard_meta_ad_page_link,
     stamp_import_completion,
 )
-from .ad_media import create_ad_media_router
+from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
 from .social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -985,9 +987,36 @@ def _get_user_by_id_any(user_id: str) -> Optional[dict[str, Any]]:
         return dict(row) if row else None
 
 
-def _create_session(
-    user_id: str, request: Request, duration_ms: Optional[int] = None
+def _auth_mutation_guard():
+    return nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_AUTH_LOCK
+
+
+def _auth_lock_user_conn(conn: Any, user_id: str) -> Optional[dict[str, Any]]:
+    suffix = " FOR UPDATE" if str(get_engine().dialect.name or "") == "postgresql" else ""
+    row = conn.execute(
+        text(f"SELECT * FROM users WHERE id=:id LIMIT 1{suffix}"),
+        {"id": user_id},
+    ).mappings().first()
+    return dict(row) if row and not bool(row.get("deleted")) else None
+
+
+def _auth_password_snapshot_matches(current: dict[str, Any], verified: dict[str, Any]) -> bool:
+    return all(
+        current.get(key) == verified.get(key)
+        for key in ("password_hash", "password_salt", "password_algo", "password_iterations")
+    )
+
+
+def _revoke_user_credentials_conn(conn: Any, user_id: str) -> None:
+    """Call while holding the user lock, in the password/deletion transaction."""
+    for table in ("sessions", "app_logins", "password_resets"):
+        conn.execute(text(f"DELETE FROM {table} WHERE user_id=:uid"), {"uid": user_id})
+
+
+def _insert_session_conn(
+    conn: Any, user_id: str, request: Request, duration_ms: Optional[int] = None
 ) -> tuple[str, str]:
+    """Insert after the caller locks/validates the user and its proof of access."""
     session_id = new_id("sess")
     token = new_id("tok")
     token_hash = hash_token(token)
@@ -999,27 +1028,37 @@ def _create_session(
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
 
-    with db_conn() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, last_seen_at, ip, user_agent)
-                VALUES (:id, :user_id, :token_hash, :created_at, :expires_at, :last_seen_at, :ip, :user_agent)
-                """
-            ),
-            {
-                "id": session_id,
-                "user_id": user_id,
-                "token_hash": token_hash,
-                "created_at": now,
-                "expires_at": expires,
-                "last_seen_at": now,
-                "ip": ip,
-                "user_agent": ua,
-            },
-        )
+    conn.execute(
+        text(
+            """
+            INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, last_seen_at, ip, user_agent)
+            VALUES (:id, :user_id, :token_hash, :created_at, :expires_at, :last_seen_at, :ip, :user_agent)
+            """
+        ),
+        {
+            "id": session_id,
+            "user_id": user_id,
+            "token_hash": token_hash,
+            "created_at": now,
+            "expires_at": expires,
+            "last_seen_at": now,
+            "ip": ip,
+            "user_agent": ua,
+        },
+    )
 
     return session_id, token
+
+
+def _create_session(
+    user_id: str, request: Request, duration_ms: Optional[int] = None,
+    *, verified_user: dict[str, Any],
+) -> tuple[str, str]:
+    with _auth_mutation_guard(), db_conn() as conn:
+        current = _auth_lock_user_conn(conn, user_id)
+        if not current or not _auth_password_snapshot_matches(current, verified_user):
+            raise HTTPException(status_code=409, detail="Account changed during login. Please try again.")
+        return _insert_session_conn(conn, user_id, request, duration_ms)
 
 
 def _delete_session(session_id: str):
@@ -1275,6 +1314,7 @@ def list_entities(
     # customer's private Draft or in-progress Changes Requested revision.
     # Delta reads are handled below with redacted synthetic tombstones so a
     # status transition out of scope also removes a previously visible row.
+    campaign_owner_uid = ""
     if ad_campaign_reviewer_scope:
         visible_status_sql = "'Submitted','Approved','Rejected','Stopped'"
         if updated_since is not None:
@@ -1283,14 +1323,14 @@ def list_entities(
             # Brand-new Drafts never enter the reviewer query at all (even ids
             # and activity timestamps are private).
             visible_status_sql += ",'Changes Requested'"
-        owner_uid = sanitize_str(str(campaign_owner_id or ""))[:80]
-        if owner_uid:
+        campaign_owner_uid = sanitize_str(str(campaign_owner_id or ""))[:80]
+        if campaign_owner_uid:
             # A customer must still see their OWN drafts. Everyone else only
             # ever sees the workflow-visible states.
             where.append(
                 f"({campaign_status_expr} IN ({visible_status_sql}) OR created_by = :campaign_owner)"
             )
-            params["campaign_owner"] = owner_uid
+            params["campaign_owner"] = campaign_owner_uid
         else:
             where.append(f"{campaign_status_expr} IN ({visible_status_sql})")
     # For delta sync (updated_since), we intentionally include deleted rows as tombstones
@@ -1353,10 +1393,12 @@ def list_entities(
         else:
             customer_expr = "json_extract(d.data_json, '$.customerId')"
             assigned_expr = "json_extract(d.data_json, '$.deliveryPersonId')"
+        # Materialize only referenced IDs, not each delivery's full JSON body.
+        # Unlike a correlated EXISTS, this membership set can be built once
+        # per page instead of reparsing all deliveries for every customer.
         where.append(
-            "EXISTS (SELECT 1 FROM entities d "
+            f"id IN (SELECT {customer_expr} FROM entities d "
             "WHERE d.type IN ('ads','receipts') AND d.deleted=false "
-            f"AND {customer_expr}=entities.id "
             f"AND {assigned_expr}=:referenced_delivery_uid)"
         )
         params["referenced_delivery_uid"] = referenced_customer_by
@@ -1398,9 +1440,13 @@ def list_entities(
     if media_projected:
         projected_json, media_count_expression = media_sql_projection
         if campaign_reviewer_delta:
+            visible_campaign = (
+                f"{campaign_status_expr} IN ('Submitted','Approved','Rejected','Stopped')"
+            )
+            if campaign_owner_uid:
+                visible_campaign = f"({visible_campaign} OR created_by = :campaign_owner)"
             projected_json = (
-                "CASE WHEN " + campaign_status_expr +
-                " IN ('Submitted','Approved','Rejected','Stopped') THEN " + projected_json +
+                "CASE WHEN " + visible_campaign + " THEN " + projected_json +
                 " ELSE '{}' END"
             )
         campaign_status_column = (
@@ -1431,6 +1477,7 @@ def list_entities(
             reviewer_hidden = (
                 campaign_reviewer_delta
                 and str(d.get("campaign_status") or "Draft") not in campaign_safe_statuses
+                and not (campaign_owner_uid and d.get("created_by") == campaign_owner_uid)
             )
             data = json_loads(d["data_json"]) or {}
             delivery_person_id = data.get("deliveryPersonId")
@@ -1958,6 +2005,7 @@ def patch_entity(
     *,
     expected_last_modified: int | None = None,
     enforce_ad_campaign_quota: bool = True,
+    ad_photo_actor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Partially update an existing entity (merge semantics).
@@ -2032,6 +2080,12 @@ def patch_entity(
             if not isinstance(data, dict):
                 data = {}
             old_data = dict(data)
+            if entity_type == "ads" and ad_photo_actor is not None:
+                enforce_ad_photo_mutation_permissions(
+                    upd, old_data,
+                    can_upload=user_has_permission(ad_photo_actor, "ads", "uploadPhotos"),
+                    can_view=user_has_permission(ad_photo_actor, "ads", "viewPhotos"),
+                )
             protect_company_coverage_fields(entity_type, upd, old_data)
             data.update(upd)
             if entity_type == "customers":
@@ -2122,12 +2176,14 @@ def get_entity_meta(entity_type: str, entity_id: str) -> Optional[dict[str, Any]
         return dict(row)
 
 
-def soft_delete_entity(entity_type: str, entity_id: str, user_id: str):
-    now = now_ms()
-    with db_conn() as conn:
+def soft_delete_entity(
+    entity_type: str, entity_id: str, user_id: str, *, expected_last_modified: int | None = None
+):
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    with (nullcontext() if postgres else _SQLITE_ENTITY_PATCH_LOCK), db_conn() as conn:
         exists = (
             conn.execute(
-                text("SELECT id,data_json,deleted FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if str(get_engine().dialect.name or "") == "postgresql" else "")),
+                text("SELECT id,data_json,deleted,last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if postgres else "")),
                 {"type": entity_type, "id": entity_id},
             )
             .mappings()
@@ -2135,12 +2191,17 @@ def soft_delete_entity(entity_type: str, entity_id: str, user_id: str):
         )
         if not exists:
             raise HTTPException(status_code=404, detail="Not found")
+        baseline = int(exists["last_modified"])
+        if expected_last_modified is not None and (baseline != int(expected_last_modified) or bool(exists["deleted"])):
+            raise HTTPException(status_code=409, detail="Conflict: record has changed")
         if not bool(exists["deleted"]):
             assert_financial_period_open(entity_type, json_loads(exists.get("data_json") or "{}") or {}, conn=conn)
-        conn.execute(
-            text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
-            {"ts": now, "type": entity_type, "id": entity_id},
+        result = conn.execute(
+            text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id AND last_modified = :baseline"),
+            {"ts": max(now_ms(), baseline + 1), "type": entity_type, "id": entity_id, "baseline": baseline},
         )
+        if result.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Conflict: record has changed")
 
 
 app = FastAPI(title="Albayan Server", version=APP_VERSION)
@@ -3016,7 +3077,9 @@ def login(payload: LoginRequest, request: Request):
     # server-side session lifetime, anything else keeps the standard one.
     remember_me = payload.rememberMe is True
     session_lifetime_ms = SESSION_REMEMBER_DURATION_MS if remember_me else SESSION_DURATION_MS
-    session_id, token = _create_session(user["id"], request, duration_ms=session_lifetime_ms)
+    session_id, token = _create_session(
+        user["id"], request, duration_ms=session_lifetime_ms, verified_user=user
+    )
     cookie_val = new_session_cookie_value(session_id, token)
 
     resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
@@ -3182,7 +3245,7 @@ def setup_admin(payload: SetupAdminRequest, request: Request):
     if not user:
         raise HTTPException(status_code=500, detail="Admin creation failed")
 
-    session_id, token = _create_session(user["id"], request)
+    session_id, token = _create_session(user["id"], request, verified_user=user)
     cookie_val = new_session_cookie_value(session_id, token)
     resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
     login_origin = request.headers.get("origin") or ""
@@ -3207,7 +3270,12 @@ def logout(request: Request, user: dict[str, Any] = Depends(current_user)):
     parsed = parse_session_cookie_value(cookie_val or "")
     if parsed:
         session_id, _ = parsed
-        _delete_session(session_id)
+        with _auth_mutation_guard(), db_conn() as conn:
+            _auth_lock_user_conn(conn, str(user["id"]))
+            conn.execute(text("DELETE FROM sessions WHERE id=:id"), {"id": session_id})
+            # An unredeemed browser-to-app login must not revive a logged-out
+            # browser's access. Other existing device sessions stay signed in.
+            conn.execute(text("DELETE FROM app_logins WHERE user_id=:uid"), {"uid": user["id"]})
 
     resp = JSONResponse(content={"ok": True})
     resp.delete_cookie(COOKIE_NAME, path="/")
@@ -3259,9 +3327,10 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
     now = now_ms()
     pw = hash_password(body.newPassword, iterations=PBKDF2_ITERATIONS_DEFAULT)
     user_id = str(user.get("id"))
-    current_session_id = user.get("session_id")
-
-    with db_conn() as conn:
+    with _auth_mutation_guard(), db_conn() as conn:
+        current = _auth_lock_user_conn(conn, user_id)
+        if not current or not _auth_password_snapshot_matches(current, user):
+            raise HTTPException(status_code=409, detail="Account changed. Sign in again before changing your password.")
         conn.execute(
             text(
                 """
@@ -3284,12 +3353,8 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
             },
         )
 
-        # SECURITY FIX: Delete ALL sessions including current (force re-login)
-        # This prevents session fixation attacks where stolen sessions remain valid
-        conn.execute(
-            text("DELETE FROM sessions WHERE user_id = :user_id"),
-            {"user_id": user_id}
-        )
+        # Revoke every old proof of access, not just established sessions.
+        _revoke_user_credentials_conn(conn, user_id)
 
     audit(user_id, "password_change", "auth", user_id, "User changed password (forced logout)", {})
     
@@ -3322,7 +3387,16 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
 
-    with db_conn() as conn:
+    with _auth_mutation_guard(), db_conn() as conn:
+        current = _auth_lock_user_conn(conn, str(user["id"]))
+        if (
+            not current
+            or not _auth_password_snapshot_matches(current, user)
+            or str(current.get("email") or "").lower() != email
+        ):
+            # A rotation/deletion after the initial lookup must not mint an
+            # outstanding reset token from the old account state.
+            return {"ok": True}
         # Clean up old tokens for this user + expired tokens
         # BEST PRACTICE: Atomic cleanup - combine into single query to prevent race condition
         conn.execute(
@@ -3387,22 +3461,23 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
     with db_conn() as conn:
         plausible = conn.execute(
             text(
-                "SELECT 1 FROM password_resets WHERE token_hash=:token_hash "
+                "SELECT user_id FROM password_resets WHERE token_hash=:token_hash "
                 "AND used_at IS NULL AND expires_at>:now LIMIT 1"
             ),
             {"token_hash": token_hash, "now": now},
-        ).first()
+        ).mappings().first()
     if not plausible:
         raise HTTPException(status_code=400, detail="Invalid or expired reset code")
     # PBKDF2 is deliberately expensive. Do it before taking the database lock,
     # then atomically claim the one-shot token and change the password in the
     # same transaction. The conditional UPDATE guarantees exactly one winner.
     pw = hash_password(body.newPassword, iterations=PBKDF2_ITERATIONS_DEFAULT)
-    postgres = str(get_engine().dialect.name or "") == "postgresql"
-    guard = nullcontext() if postgres else _SQLITE_PASSWORD_RESET_LOCK
-
-    with guard:
+    with _auth_mutation_guard():
         with db_conn() as conn:
+            user_id = str(plausible["user_id"])
+            if not _auth_lock_user_conn(conn, user_id):
+                raise HTTPException(status_code=400, detail="Invalid or expired reset code")
+            now = now_ms()
             row = (
                 conn.execute(
                     text(
@@ -3451,10 +3526,7 @@ def password_reset_confirm(body: PasswordResetConfirmRequest, request: Request):
             )
             if updated.rowcount != 1:
                 raise HTTPException(status_code=400, detail="Invalid or expired reset code")
-            conn.execute(
-                text("DELETE FROM sessions WHERE user_id = :user_id"),
-                {"user_id": user_id},
-            )
+            _revoke_user_credentials_conn(conn, user_id)
 
     audit(user_id, "password_reset", "auth", user_id, "Password reset via token", {})
     return {"ok": True}
@@ -3514,7 +3586,15 @@ def app_login_handoff(
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
 
-    with db_conn() as conn:
+    with _auth_mutation_guard(), db_conn() as conn:
+        current = _auth_lock_user_conn(conn, str(user["id"]))
+        now = now_ms()
+        session = conn.execute(
+            text("SELECT 1 FROM sessions WHERE id=:sid AND user_id=:uid AND expires_at>:now"),
+            {"sid": str(user.get("session_id") or ""), "uid": user["id"], "now": now},
+        ).first()
+        if not current or not session:
+            raise HTTPException(status_code=401, detail="Sign in again before connecting the app")
         # One live code per user, plus opportunistic cleanup of dead codes —
         # same atomic single-statement pattern as password_resets.
         conn.execute(
@@ -3603,32 +3683,40 @@ def app_login_exchange(body: AppLoginExchangeRequest, request: Request):
             .mappings()
             .first()
         )
-        if not row:
-            raise invalid
+    if not row:
+        raise invalid
 
+    # Lock the user BEFORE the code, matching password rotation. Code claim
+    # and session creation must commit together: otherwise rotation can run
+    # in between and the exchange can re-create access after revocation.
+    with _auth_mutation_guard(), db_conn() as conn:
+        user = _auth_lock_user_conn(conn, str(row.get("user_id") or ""))
+        if not user:
+            raise invalid
+        now = now_ms()
         # Atomically claim the one-shot code BEFORE verifying the challenge:
         # exactly one exchange can ever win, and a wrong-verifier attempt
         # burns the code instead of leaving it retryable.
         claimed = conn.execute(
             text(
                 "UPDATE app_logins SET used_at = :used_at "
-                "WHERE id = :id AND used_at IS NULL AND expires_at > :now"
+                "WHERE id = :id AND code_hash=:code_hash AND user_id=:uid "
+                "AND used_at IS NULL AND expires_at > :now"
             ),
-            {"used_at": now, "now": now, "id": row["id"]},
+            {"used_at": now, "now": now, "id": row["id"], "code_hash": code_hash, "uid": user["id"]},
         )
         if claimed.rowcount != 1:
             raise invalid
 
-    if not secrets_compare(computed_challenge, str(row.get("challenge_hash") or "")):
-        raise invalid
+        valid_verifier = secrets_compare(computed_challenge, str(row.get("challenge_hash") or ""))
+        if valid_verifier:
+            session_id, token = _insert_session_conn(
+                conn, user["id"], request, duration_ms=APP_LOGIN_SESSION_MS
+            )
 
-    user = _get_user_by_id(str(row.get("user_id") or ""))
-    if not user:
+    # Raise after committing so a wrong verifier still burns the one-shot code.
+    if not valid_verifier:
         raise invalid
-
-    session_id, token = _create_session(
-        user["id"], request, duration_ms=APP_LOGIN_SESSION_MS
-    )
     cookie_val = new_session_cookie_value(session_id, token)
 
     resp = JSONResponse(content=LoginResponse(user=user_row_to_public(user)).model_dump())
@@ -3712,18 +3800,13 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
                 assigned_to=uid,
                 include_media=include_media,
             )
-        # customers: only those referenced by the driver's assigned deliveries.
-        customer_ids: set[str] = set()
-        for c in ("ads", "receipts"):
-            for it in _page_all(
-                c, include_deleted=False, assigned_to=uid, include_media=False
-            ):
-                cid = (it.get("data") or {}).get("customerId")
-                if cid:
-                    customer_ids.add(sanitize_str(str(cid))[:80])
-        if not customer_ids:
-            return []
-        return _page_all("customers", include_deleted=False, id_in=sorted(customer_ids))
+        # Use the same SQL membership scope as list/delta reads. Reloading all
+        # ad/receipt bodies here duplicated startup work, and passing their IDs
+        # to id_in silently lost customers after its 1,000-ID safety ceiling.
+        return _page_all(
+            "customers", include_deleted=False, referenced_customer_by=uid,
+            include_media=include_media,
+        )
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -4332,7 +4415,8 @@ def _subscription_cancel_atomic(
                 raise HTTPException(status_code=409, detail="Only an active subscription can be canceled")
 
             canceled_at = _iso_utc()
-            modified = now_ms()
+            baseline = int(current["lastModified"])
+            modified = max(now_ms(), baseline + 1)
             data.update(
                 {
                     "status": "canceled",
@@ -4342,13 +4426,16 @@ def _subscription_cancel_atomic(
                     "_lastModified": modified,
                 }
             )
-            conn.execute(
+            result = conn.execute(
                 text(
                     "UPDATE entities SET data_json=:data, last_modified=:modified "
-                    "WHERE type='serviceSubscriptions' AND id=:id"
+                    "WHERE type='serviceSubscriptions' AND id=:id AND deleted=false "
+                    "AND last_modified=:baseline"
                 ),
-                {"data": json_dumps(data), "modified": modified, "id": sub_id},
+                {"data": json_dumps(data), "modified": modified, "id": sub_id, "baseline": baseline},
             )
+            if int(result.rowcount or 0) != 1:
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
             return {
                 **current,
                 "lastModified": modified,
@@ -5228,13 +5315,16 @@ def _clothes_normalize_order_payload(
 
 
 def _clothes_read_mutation_result(
-    conn: Any, marker: dict[str, Any]
+    conn: Any, marker: dict[str, Any], actor: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     marker_data = marker.get("data") or {}
     order_id = validate_entity_id(marker_data.get("orderId"))
     row = _clothes_lock_row(conn, "clothesOrders", order_id, postgres=False)
     if not row:
         raise HTTPException(status_code=409, detail="Idempotent order result no longer exists")
+    # A retry reads CURRENT records, not a frozen response. An old operation
+    # key must never retain access after view rights or ownership changes.
+    _clothes_require_permission(actor, "clothesOrders", "view", row.get("created_by"))
     order = _entity_from_db_row(row)
     products: list[dict[str, Any]] = []
     for product_id in marker_data.get("updatedProductIds") or []:
@@ -5243,7 +5333,9 @@ def _clothes_read_mutation_result(
         except HTTPException:
             continue
         product_row = _clothes_lock_row(conn, "clothesProducts", pid, postgres=False)
-        if product_row:
+        if product_row and user_has_permission(
+            actor, "clothesProducts", "view", record_creator_id=product_row.get("created_by")
+        ):
             products.append(_entity_from_db_row(product_row))
     return order, products
 
@@ -5324,7 +5416,7 @@ def _clothes_order_mutation_atomic(
                     or str(marker_data.get("requestHash") or "") != request_hash
                 ):
                     raise HTTPException(status_code=409, detail="Idempotency key was already used")
-                order, products = _clothes_read_mutation_result(conn, prior_marker)
+                order, products = _clothes_read_mutation_result(conn, prior_marker, actor)
                 return order, products, True
 
             order_row = _clothes_lock_row(conn, "clothesOrders", target_id, postgres=postgres)
@@ -5598,13 +5690,14 @@ def _clothes_apply_shipment_stock(
 
 
 def _clothes_read_shipment_mutation_result(
-    conn: Any, marker: dict[str, Any]
+    conn: Any, marker: dict[str, Any], actor: dict[str, Any]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     marker_data = marker.get("data") or {}
     shipment_id = validate_entity_id(marker_data.get("shipmentId"))
     row = _clothes_lock_row(conn, "clothesShipments", shipment_id, postgres=False)
     if not row:
         raise HTTPException(status_code=409, detail="Idempotent shipment result no longer exists")
+    _clothes_require_permission(actor, "clothesShipments", "view", row.get("created_by"))
     shipment = _entity_from_db_row(row)
     products: list[dict[str, Any]] = []
     for product_id in marker_data.get("updatedProductIds") or []:
@@ -5613,7 +5706,9 @@ def _clothes_read_shipment_mutation_result(
         except HTTPException:
             continue
         product_row = _clothes_lock_row(conn, "clothesProducts", pid, postgres=False)
-        if product_row:
+        if product_row and user_has_permission(
+            actor, "clothesProducts", "view", record_creator_id=product_row.get("created_by")
+        ):
             products.append(_entity_from_db_row(product_row))
     return shipment, products
 
@@ -5658,7 +5753,7 @@ def _clothes_shipment_mutation_atomic(
                     or str(marker_data.get("requestHash") or "") != request_hash
                 ):
                     raise HTTPException(status_code=409, detail="Idempotency key was already used")
-                shipment, products = _clothes_read_shipment_mutation_result(conn, prior_marker)
+                shipment, products = _clothes_read_shipment_mutation_result(conn, prior_marker, actor)
                 return shipment, products, True
 
             shipment_row = _clothes_lock_row(
@@ -7895,6 +7990,10 @@ def _financial_apply_relink(
             if str(next_baseline.get("dueLegacyReceiptId") or "") in vacated:
                 next_baseline["dueLegacyReceiptId"] = replacement
             result["stopAllocationBaseline"] = next_baseline
+    if is_settle and isinstance(result.get("stopAllocationBaseline"), dict):
+        result["stopAllocationBaseline"] = settled_relink_stop_baseline(
+            result, result["stopAllocationBaseline"], strict=False
+        )
     return result
 
 
@@ -8018,8 +8117,29 @@ def _ad_mutation_atomic(
                 request_hash,
             )
             if prior:
+                # A response-loss retry is still a new read of the CURRENT
+                # row. Its old idempotency marker must not restore access
+                # after the actor loses their grant or creator ownership.
+                replay_ad = _financial_entity_result(conn, "ads", str(prior.get("adId")))
+                if replay_ad.get("deleted"):
+                    raise HTTPException(status_code=404, detail="Ad not found")
+                replay_data = replay_ad.get("data") or {}
+                if not is_within_delivery_scope(actor, replay_data):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                replay_creator = replay_ad.get("createdBy") or replay_data.get("createdBy") or replay_data.get("creatorId")
+                can_read = user_has_permission(actor, "ads", "view", record_creator_id=str(replay_creator or ""))
+                can_repeat_action = (
+                    user_has_permission(actor, "ads", "add") and str(replay_creator or "") == actor_id
+                    if body.action == "create"
+                    else user_has_permission(actor, "ads", "edit", record_creator_id=str(replay_creator or ""))
+                )
+                # Read-only staff can confirm an already committed request;
+                # action-only staff retain the ordinary mutation-response
+                # contract, but a former creator cannot open reassigned data.
+                if not can_read and not can_repeat_action:
+                    raise HTTPException(status_code=403, detail="Forbidden")
                 return (
-                    _financial_entity_result(conn, "ads", str(prior.get("adId"))),
+                    replay_ad,
                     list(prior.get("updatedReceiptIds") or []),
                     True,
                 )
@@ -8034,6 +8154,8 @@ def _ad_mutation_atomic(
                 initial_data["createdBy"] = str(initial_row["created_by"])
             if body.action == "create":
                 if not user_has_permission(actor, "ads", "add"):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if not is_within_delivery_scope(actor, clean_request):
                     raise HTTPException(status_code=403, detail="Forbidden")
                 if initial_row:
                     raise HTTPException(status_code=409, detail="Ad ID already exists")
@@ -8062,6 +8184,8 @@ def _ad_mutation_atomic(
                 if int(ad_row["last_modified"]) != int(body.expectedLastModified):
                     raise HTTPException(status_code=409, detail="Conflict: ad has changed")
                 existing = _financial_row_data(ad_row)
+                if not is_within_delivery_scope(actor, existing):
+                    raise HTTPException(status_code=403, detail="Forbidden")
                 if ad_row.get("created_by") is not None:
                     existing["createdBy"] = str(ad_row["created_by"])
                 creator = ad_row.get("created_by") or existing.get("creatorId")
@@ -8072,6 +8196,11 @@ def _ad_mutation_atomic(
                 if _financial_receipt_ids(existing) - set(locked_receipts):
                     raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
 
+            enforce_ad_photo_mutation_permissions(
+                clean_request, existing,
+                can_upload=user_has_permission(actor, "ads", "uploadPhotos"),
+                can_view=user_has_permission(actor, "ads", "viewPhotos"),
+            )
             is_refund = body.action == "update" and "refundType" in clean_request
             # A receipt relink is the only other terminal-ad-capable edit. It
             # moves the ad's committed funding onto a different receipt while
@@ -8212,6 +8341,9 @@ def _ad_mutation_atomic(
                 if is_topup:
                     saved_data["initialAmountUSD"] = _financial_usd(base_minor)
 
+            if not is_within_delivery_scope(actor, saved_data):
+                raise HTTPException(status_code=403, detail="Forbidden")
+
             # A customer confirmation belongs to one exact remaining amount.
             # Preserve it across unrelated edits, but never carry it across a
             # changed budget/spend (including refund-derived spend changes).
@@ -8321,7 +8453,7 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     amount_minor = _financial_minor(ad.get("amountUSD"), "ad amount")
     if spent_minor < 0 or spent_minor > amount_minor:
         raise HTTPException(status_code=400, detail="Spent amount must be between zero and the ad amount")
-    baseline = _financial_stop_baseline(ad)
+    baseline = settled_relink_stop_baseline(ad, _financial_stop_baseline(ad))
     receipt_map = _financial_allocation_map(baseline.get("receipt"))
     due_map = _financial_allocation_map(baseline.get("due"))
     legacy_minor = _financial_minor(baseline.get("dueLegacy"), "stop baseline legacy due")
@@ -8338,6 +8470,11 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
         entries.append(("legacyDue", linked_id, legacy_minor))
     pool_total = sum(entry[2] for entry in entries)
     company_minor = company_pool_total_minor(ad)  # company money is spend capacity too (never re-planned)
+    if spent_minor < company_minor:
+        raise HTTPException(
+            status_code=409,
+            detail="Final spend cannot be less than recorded company funding; reconcile company coverage separately first",
+        )
     if pool_total + company_minor > 0 and spent_minor > pool_total + company_minor:
         raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
     customer_spent = max(spent_minor - company_minor, 0)  # only the customer's pools shrink on a stop
@@ -8465,7 +8602,12 @@ def _ad_stop_atomic(
                 request_hash,
             )
             if prior:
-                return _financial_entity_result(conn, "ads", str(prior.get("adId"))), [_financial_entity_result(conn, "receipts", str(value)) for value in prior.get("updatedReceiptIds", [])], True
+                replay_ad = _financial_entity_result(conn, "ads", str(prior.get("adId")))
+                if replay_ad.get("deleted"):
+                    raise HTTPException(status_code=404, detail="Ad not found")
+                if not is_within_delivery_scope(actor, replay_ad.get("data") or {}):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                return replay_ad, [_financial_entity_result(conn, "receipts", str(value)) for value in prior.get("updatedReceiptIds", [])], True
             initial = _clothes_lock_row(conn, "ads", ad_id, postgres=False)
             if not initial or bool(initial["deleted"]):
                 raise HTTPException(status_code=404, detail="Ad not found")
@@ -8480,6 +8622,8 @@ def _ad_stop_atomic(
             if int(ad_row["last_modified"]) != int(body.expectedLastModified):
                 raise HTTPException(status_code=409, detail="Conflict: ad has changed")
             ad = _financial_row_data(ad_row)
+            if not is_within_delivery_scope(actor, ad):
+                raise HTTPException(status_code=403, detail="Forbidden")
             if _financial_receipt_ids(ad) - set(locked_receipts):
                 raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
             status = str(ad.get("status") or "")
@@ -9849,6 +9993,8 @@ def mutate_ad_funding(
                 status_code=409,
                 detail="Updated unpaid receipt is missing",
             )
+        if not can_read_related_receipt(receipt, user, user_has_permission):
+            continue
         updated_receipts.append(
             EntityResponse(
                 **_project_entity_media_for_user(receipt, user, include_media)
@@ -9893,7 +10039,12 @@ def stop_ad_atomic(
             },
         )
     return AdStopResponse(
-        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)), updatedReceipts=[EntityResponse(**_project_entity_media_for_user(receipt, user, include_media)) for receipt in updated_receipts], replayed=replayed
+        ad=EntityResponse(**_project_entity_media_for_user(ad, user, include_media)),
+        updatedReceipts=[
+            EntityResponse(**_project_entity_media_for_user(receipt, user, include_media))
+            for receipt in updated_receipts if can_read_related_receipt(receipt, user, user_has_permission)
+        ],
+        replayed=replayed,
     )
 
 
@@ -10859,9 +11010,8 @@ def _sync_watermark_max(
         params["personal_uid"] = personal_user_id
     if referenced_customer_by:
         where.append(
-            "EXISTS (SELECT 1 FROM entities d "
+            f"e.id IN (SELECT {json_value('d', 'customerId')} FROM entities d "
             "WHERE d.type IN ('ads','receipts') AND d.deleted=false "
-            f"AND {json_value('d', 'customerId')}=e.id "
             f"AND {json_value('d', 'deliveryPersonId')}=:delivery_uid)"
         )
         params["delivery_uid"] = referenced_customer_by
@@ -11145,6 +11295,17 @@ def get_collection_item(
         _require_clothes_subscription(user)
     # adCampaignRequests reads stay open after expiry (money visibility);
     # ownership scoping below still applies.
+    # Personal records belong to the signed-in account for EVERY role. Check
+    # this before the delivery-business scope, just like list/bootstrap, so a
+    # driver can hydrate their own wallet proof without seeing anyone else's.
+    if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
+        item = get_entity(collection, entity_id)
+        if not item or item.get("deleted"):
+            raise HTTPException(status_code=404, detail="Not found")
+        if not _owns_personal_record(collection, item.get("data"), str(user.get("id") or "")):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return EntityResponse(**_project_entity_media_for_user(item, user))
+
     if role_lower == "delivery":
         if collection in {"ads", "receipts"}:
             item = get_entity(collection, entity_id)
@@ -11166,15 +11327,6 @@ def get_collection_item(
         # assigned-delivery scope.
         if collection != "exchangeRateHistory":
             raise HTTPException(status_code=403, detail="Forbidden")
-
-    # Personal money records: non-admins may fetch ONLY their own rows.
-    if collection in PERSONAL_SCOPED_COLLECTIONS and role_lower != "admin":
-        item = get_entity(collection, entity_id)
-        if not item or item.get("deleted"):
-            raise HTTPException(status_code=404, detail="Not found")
-        if not _owns_personal_record(collection, item.get("data"), str(user.get("id") or "")):
-            raise HTTPException(status_code=403, detail="Forbidden")
-        return EntityResponse(**_project_entity_media_for_user(item, user))
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -11308,6 +11460,12 @@ def create_collection_item(
 
     generic_data = sanitize_json(body.data or {}) or {}
     protect_company_coverage_fields(collection, generic_data)
+    if collection == "ads":
+        enforce_ad_photo_mutation_permissions(
+            generic_data, None,
+            can_upload=user_has_permission(user, "ads", "uploadPhotos"),
+            can_view=user_has_permission(user, "ads", "viewPhotos"),
+        )
     if collection == "ads" and set(generic_data) & META_AD_SERVER_FIELDS:
         raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
     if collection == "pages" and set(generic_data) & META_PAGE_SERVER_FIELDS:
@@ -11984,6 +12142,7 @@ def update_collection_item(
                 updates,
                 str(user.get("id") or "system"),
                 expected_last_modified=body.expectedLastModified,
+                ad_photo_actor=user,
             )
         audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id} " + ("(admin delivery completion)" if admin_completion else "(delivery)"), {})
         return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
@@ -12170,6 +12329,7 @@ def update_collection_item(
             updates_to_save,
             str(user.get("id") or "system"),
             expected_last_modified=body.expectedLastModified,
+            ad_photo_actor=user,
         )
     audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id}", {})
     return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
@@ -12745,13 +12905,16 @@ def batch_delete_entities(
                 # is being deleted in this same batch; otherwise refuse (409),
                 # exactly like _financial_delete_customer_atomic.
                 if customer_ids:
-                    batch_ids = {eid for _c, eid in normalized}
+                    # IDs are unique only WITHIN a collection. A pages/R
+                    # item (even nonexistent) must not stand in for receipts/R
+                    # and permit the customer's actual receipt to be orphaned.
+                    batch_records = set(normalized)
                     for linked_collection in ("receipts", "ads"):
                         for linked_row in _financial_active_rows(conn, linked_collection):
                             linked = _financial_row_data(linked_row)
                             if (
                                 str(linked.get("customerId") or "") in customer_ids
-                                and str(linked_row["id"]) not in batch_ids
+                                and (linked_collection, str(linked_row["id"])) not in batch_records
                             ):
                                 raise HTTPException(
                                     status_code=409,
@@ -13139,7 +13302,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     suffix = " FOR UPDATE" if postgres else ""
 
-    with (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
+    with (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK), _auth_mutation_guard(), db_conn() as conn:
         existing = conn.execute(
             text(f"SELECT * FROM users WHERE id=:id LIMIT 1{suffix}"),
             {"id": user_id},
@@ -13183,8 +13346,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
         )
 
         # Remove authentication artifacts that can contain device/IP details.
-        conn.execute(text("DELETE FROM sessions WHERE user_id=:id"), {"id": user_id})
-        conn.execute(text("DELETE FROM password_resets WHERE user_id=:id"), {"id": user_id})
+        _revoke_user_credentials_conn(conn, user_id)
 
         # Keep action/resource/user identifiers for accountability and financial
         # referential integrity, but remove free-text and metadata that may
@@ -13308,7 +13470,7 @@ def _apply_user_update_atomic(
     """Apply a user update while atomically preserving one active Admin."""
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     guard = nullcontext() if postgres else _SQLITE_ADMIN_MEMBERSHIP_LOCK
-    with guard:
+    with guard, _auth_mutation_guard():
         with db_conn() as conn:
             if postgres:
                 _lock_idempotency_key(
@@ -13361,10 +13523,7 @@ def _apply_user_update_atomic(
             params = {**update_fields, "id": user_id}
             conn.execute(text(f"UPDATE users SET {set_clause} WHERE id=:id"), params)
             if "password_hash" in update_fields or update_fields.get("deleted") is True:
-                conn.execute(
-                    text("DELETE FROM sessions WHERE user_id=:uid"),
-                    {"uid": user_id},
-                )
+                _revoke_user_credentials_conn(conn, user_id)
 
 
 @app.post("/api/users", response_model=UserPublic)

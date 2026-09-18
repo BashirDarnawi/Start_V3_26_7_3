@@ -153,6 +153,71 @@ function buildAdEditHistoryUpdates(oldAd, changes, editorName = state.currentUse
   };
 }
 
+// Presentation only: preserve each form's fields, actions and existing title,
+// while giving every shared panel the same accessible dialog shell.
+function decorateAppModalPanel(panel, { kind, isEdit, isArabic } = {}) {
+  if (!panel) return;
+  const closeLabel = isArabic ? 'إغلاق' : 'Close';
+  panel.classList.add('app-dialog-panel');
+  panel.dataset.modalKind = String(kind || '');
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'true');
+  panel.setAttribute('dir', isArabic ? 'rtl' : 'ltr');
+
+  let heading = panel.querySelector('h2');
+  if (!heading) {
+    heading = document.createElement('h2');
+    const fallbackNames = {
+      receipt: isArabic ? 'وصل' : 'Receipt',
+      'clothes-product': isArabic ? 'منتج' : 'Product',
+      'clothes-shipment': isArabic ? 'شحنة' : 'Shipment',
+      'clothes-order': isArabic ? 'طلب' : 'Order'
+    };
+    const name = Object.prototype.hasOwnProperty.call(fallbackNames, kind)
+      ? fallbackNames[kind] : (isArabic ? 'التفاصيل' : 'Details');
+    heading.textContent = kind === 'receipt'
+      ? (isArabic ? `${isEdit ? 'تعديل' : 'إضافة'} ${name}` : `${isEdit ? 'Edit' : 'Add'} ${name}`)
+      : name;
+    panel.insertBefore(heading, panel.firstChild);
+  }
+  if (!heading.id) heading.id = 'app-modal-title';
+  heading.classList.add('app-dialog-title');
+  panel.setAttribute('aria-labelledby', heading.id);
+
+  const closeActions = Array.from(panel.querySelectorAll('button[onclick]')).filter(button =>
+    /^\s*closeModal\(\)\s*;?\s*$/.test(button.getAttribute('onclick') || '')
+  );
+  // Ad, user and subscription panels already have a header X. Reuse it,
+  // retaining its handler, rather than adding another competing close action.
+  let closeButton = closeActions.find(button => button.querySelector('[data-lucide="x"], [data-lucide="x-circle"]'));
+  if (!closeButton) {
+    closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.setAttribute('onclick', 'closeModal()');
+    closeButton.innerHTML = '<i data-lucide="x" class="w-5 h-5" aria-hidden="true"></i>';
+    const titlebar = document.createElement('div');
+    titlebar.className = 'app-dialog-titlebar';
+    heading.parentNode.insertBefore(titlebar, heading);
+    titlebar.appendChild(heading);
+    titlebar.appendChild(closeButton);
+  }
+  closeButton.classList.add('app-dialog-close');
+  closeButton.setAttribute('aria-label', closeLabel);
+  closeButton.setAttribute('title', closeLabel);
+  for (const button of closeActions) {
+    if (button !== closeButton) button.classList.add('app-dialog-cancel');
+  }
+  for (const form of panel.querySelectorAll('form')) form.classList.add('app-dialog-form');
+  // Connect only unambiguous adjacent labels. Never guess among grouped money
+  // fields or replace an explicit association supplied by a feature form.
+  for (const label of panel.querySelectorAll('label:not([for])')) {
+    const input = label.nextElementSibling;
+    if (input?.matches('input[id]:not([type="hidden"]), select[id], textarea[id]')) {
+      label.setAttribute('for', input.id);
+    }
+  }
+}
+
 function renderModal() {
   const existingModal = document.getElementById('app-modal');
   const previousCustomerMergeFocusId = existingModal && state.activeModal === 'customer-merge'
@@ -556,7 +621,7 @@ function renderModal() {
               
               <!-- Page Selection -->
               <div>
-                <label class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
+                <label for="ad-page-search" class="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">${isArAd ? 'الصفحة *' : 'Page *'}</label>
                 ${metaPageLocked ? `
                 <div id="ad-meta-page-locked-display">
                   <div class="w-full bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-600 px-3 py-2 rounded-lg text-sm flex items-center justify-between gap-2">
@@ -2320,7 +2385,7 @@ function renderModal() {
 
   const modal = document.createElement('div');
   modal.id = 'app-modal';
-  modal.className = 'mobile-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
+  modal.className = 'mobile-dialog-overlay app-dialog-overlay fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4';
   // Smaller, more compact modal sizes
   let modalSize = 'max-w-md';
   if (state.activeModal === 'split-payments' || state.activeModal === 'top-ups' || state.activeModal === 'refund') {
@@ -2347,7 +2412,10 @@ function renderModal() {
   const modalAccessibility = state.activeModal === 'customer-merge'
     ? ' role="dialog" aria-modal="true" aria-labelledby="customer-merge-title"'
     : '';
-  modal.innerHTML = `<div class="glass-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}"${modalAccessibility} onclick="event.stopPropagation()">${modalContent}</div>`;
+  modal.innerHTML = `<div class="glass-panel app-dialog-panel rounded-2xl p-6 w-full ${modalSize}${modalScrollable}"${modalAccessibility} onclick="event.stopPropagation()">${modalContent}</div>`;
+  decorateAppModalPanel(modal.firstElementChild, {
+    kind: state.activeModal, isEdit, isArabic: state.language === 'ar'
+  });
   modal.onclick = closeModal;
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
@@ -2906,24 +2974,34 @@ async function applyLocalReceiptSettle(liveAd, pools) {
 
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
+  // Clothes saves can finish after Cancel followed by another form. The
+  // old record may save successfully, but only its original form may close.
+  const clothesSubmitModal = state.activeModal;
+  const clothesSubmitData = state.modalData;
+  const clothesSubmitForm = document.getElementById('modal-form');
+  const clothesSubmitIdentity = getAuthMeIdentity();
+  const clothesSubmitIsCurrent = () => clothesSubmitForm
+    && document.getElementById('modal-form') === clothesSubmitForm
+    && state.activeModal === clothesSubmitModal && state.modalData === clothesSubmitData
+    && getAuthMeIdentity() === clothesSubmitIdentity;
   
   switch (state.activeModal) {
     case 'clothes-product': {
       if (typeof saveClothesProductFromModal !== 'function') return; // bundle still loading
       const saved = await saveClothesProductFromModal();
-      if (!saved) return; // keep modal open on validation errors
+      if (!saved || !clothesSubmitIsCurrent()) return; // keep validation/replacement forms open
       break;
     }
     case 'clothes-shipment': {
       if (typeof saveClothesShipmentFromModal !== 'function') return;
       const saved = await saveClothesShipmentFromModal();
-      if (!saved) return; // keep modal open on validation errors
+      if (!saved || !clothesSubmitIsCurrent()) return;
       break;
     }
     case 'clothes-order': {
       if (typeof saveClothesOrderFromModal !== 'function') return;
       const saved = await saveClothesOrderFromModal();
-      if (!saved) return; // keep modal open on validation errors
+      if (!saved || !clothesSubmitIsCurrent()) return;
       break;
     }
     case 'wallet-topup': {

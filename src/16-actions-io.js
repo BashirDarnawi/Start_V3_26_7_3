@@ -1118,6 +1118,8 @@ function exportData() {
   );
 }
 
+let _localDataImportGeneration = 0;
+
 function importData() {
   const isAr = state.language === 'ar';
   if (isServerModeEnabled()) {
@@ -1130,6 +1132,10 @@ function importData() {
     );
     return;
   }
+  const importGeneration = ++_localDataImportGeneration;
+  const importIdentity = getAuthMeIdentity();
+  const importIsCurrent = () => importGeneration === _localDataImportGeneration
+    && getAuthMeIdentity() === importIdentity && !isServerModeEnabled();
   // In server mode, import must go through the backend (Admin only) to keep the server as source of truth.
   async function importDataToServer(sanitizedImport) {
     const role = String(state.currentUser?.role || '').toLowerCase();
@@ -1418,7 +1424,9 @@ function importData() {
   input.type = 'file';
   input.accept = 'application/json';
   input.onchange = (e) => {
+    if (!importIsCurrent()) return;
     const file = e.target.files[0];
+    if (!file) return;
     
     // Validate file size (max 50MB)
     if (file.size > 50 * 1024 * 1024) {
@@ -1428,6 +1436,7 @@ function importData() {
     
     const reader = new FileReader();
     reader.onload = async (event) => {
+      if (!importIsCurrent()) return;
       try {
         const imported = JSON.parse(event.target.result);
         
@@ -1464,12 +1473,6 @@ function importData() {
           if (!idCheck.valid) throw new Error(`Invalid backup: ${idCheck.error}`);
         }
 
-        // Server-mode import: Admin-only and writes to backend collections
-        if (isServerModeEnabled()) {
-          await importDataToServer(sanitizedImport);
-          return;
-        }
-        
         // Validate required fields exist
         const requiredArrays = ['ads', 'receipts', 'customers', 'pages', 'users', 'exchangeRateHistory', 'logs'];
         for (const arr of requiredArrays) {
@@ -1485,24 +1488,26 @@ function importData() {
             sanitizedImport[arr] = sanitizedImport[arr].slice(0, STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION);
           }
         }
+
+        // Finish legacy password migration on detached records. Neither a
+        // plaintext user nor half-prepared backup may enter live state while
+        // hashing is still awaiting the device's crypto implementation.
+        const importedUsers = Array.isArray(sanitizedImport.users)
+          ? sanitizedImport.users.map(user => {
+              const copy = { ...user };
+              if (copy.passwordHash && copy.salt) delete copy.password;
+              return copy;
+            })
+          : [];
+        await ensureUsersHavePasswordHashes(importedUsers, { persist: false });
+        if (!importIsCurrent()) return;
         
         // Apply import safely (replace data collections; keep runtime/session state)
         state.ads = Array.isArray(sanitizedImport.ads) ? sanitizedImport.ads : [];
         state.receipts = Array.isArray(sanitizedImport.receipts) ? sanitizedImport.receipts : [];
         state.customers = Array.isArray(sanitizedImport.customers) ? sanitizedImport.customers : [];
         state.pages = Array.isArray(sanitizedImport.pages) ? sanitizedImport.pages : [];
-        state.users = Array.isArray(sanitizedImport.users)
-          ? sanitizedImport.users.map(u => {
-              const copy = { ...u };
-              // Backwards compatibility: if an old backup contains plaintext `password`,
-              // keep it ONLY long enough for `ensureUsersHavePasswordHashes()` to hash it,
-              // then it is removed from storage.
-              if (copy.passwordHash && copy.salt) {
-                delete copy.password;
-              }
-              return copy;
-            })
-          : [];
+        state.users = importedUsers;
         state.exchangeRateHistory = Array.isArray(sanitizedImport.exchangeRateHistory) ? sanitizedImport.exchangeRateHistory : [];
         state.logs = Array.isArray(sanitizedImport.logs) ? sanitizedImport.logs : [];
         state.walletTransactions = Array.isArray(sanitizedImport.walletTransactions) ? sanitizedImport.walletTransactions : [];
@@ -1524,19 +1529,19 @@ function importData() {
         // Normalize legacy receipt storage
         normalizeReceiptsFromAds();
 
-        // Ensure passwords are hashed and metadata present
-        await ensureUsersHavePasswordHashes();
-
         // Persist all collections to IndexedDB
         for (const name of PERSISTED_COLLECTIONS) clearCollectionCorruption(name);
         delete state._quarantinedUnsafeRecords;
         if (db) {
           await clearIndexedDBLogs();
+          if (!importIsCurrent()) return;
         }
         markAllCollectionsDirty();
         await flushDirtyCollections();
+        if (!importIsCurrent()) return;
         if (db) {
           await syncLogsToIndexedDB();
+          if (!importIsCurrent()) return;
         }
         
         saveState();
@@ -1544,6 +1549,7 @@ function importData() {
         showNotification(isAr ? 'تم الاستيراد' : 'Imported', isAr ? 'تم استيراد البيانات والتحقق منها بنجاح' : 'Data imported and validated successfully', 'success');
         render();
       } catch (error) {
+        if (!importIsCurrent()) return;
         addSecurityLog('import_error', error.message);
         showNotification(isAr ? 'خطأ' : 'Error', (isAr ? 'فشل استيراد البيانات: ' : 'Failed to import data: ') + error.message, 'error');
       }

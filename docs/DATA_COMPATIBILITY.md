@@ -38,6 +38,16 @@ No production records were accessed or changed to develop these improvements.
 `GET /api/sync/watermarks` returns the existing visibility-scoped `watermarks`
 and `dataCompatibilityVersion` from `server/data_compatibility.py`.
 
+Version 2 publishes corrected owner visibility for Ads Studio drafts/revisions.
+Older delta responses could incorrectly mark an owner's own private campaign
+as a reviewer-only tombstone. Ownership now remains visible in both full and
+delta reads; other reviewers still receive only redacted removal markers for
+private revisions. This correction does not write or retimestamp stored rows.
+If an open client already cached an incorrect deletion marker, use the app's
+manual Sync/full reload after deployment to recover it. An ordinary version
+refresh intentionally does not resurrect equal-version cached tombstones,
+because old synthetic markers cannot reliably be distinguished from deletions.
+
 When the version differs from the one successfully loaded by a session, the
 client refreshes permitted records. It acknowledges the version only after a
 successful refresh. Failed refreshes remain retryable. Same-version polls do

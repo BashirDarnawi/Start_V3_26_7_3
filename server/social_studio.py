@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -375,6 +376,22 @@ def _owner_exists(owner_id: str) -> bool:
             {"id": owner_id},
         ).first()
     return bool(row)
+
+
+def _owner_can_automate(owner_id: str) -> bool:
+    """Background work must use current account access, not its creation-time grant."""
+    if not owner_id:
+        return False
+    with db_conn() as conn:
+        row = conn.execute(
+            text("SELECT id,role,permissions_json FROM users WHERE id=:id AND deleted=false LIMIT 1"),
+            {"id": owner_id},
+        ).mappings().first()
+    if not row:
+        return False
+    # Match the internal auth identity shape, including permissions_json for
+    # the existing staff-reviewer exemption; public API user shapes differ.
+    return bool(_ctx()["has_ad_maker_subscription"](dict(row)))
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +744,13 @@ def publish_post(post_id: str, *, actor_id: str = "") -> dict[str, Any]:
     if str(data.get("status") or "") != "publishing":
         raise HTTPException(status_code=409, detail="Post is not claimed for publishing")
     owner_id = str(data.get("ownerId") or "")
+    if not _owner_can_automate(owner_id):
+        # Keep the draft, media and any earlier successful results for an
+        # explicit retry after renewal. Never silently publish overdue work.
+        return ctx["patch_entity"](POSTS_TYPE, post_id, {
+            "status": "failed", "updatedAt": _iso_now(),
+            "lastError": "Publishing paused: the owner's account needs active Social Studio access.",
+        }, actor_id or owner_id)
     previous = {
         str(r.get("pageId") or ""): r
         for r in (data.get("results") or [])
@@ -806,13 +830,37 @@ def _claim_post(ctx: dict[str, Any], entity: dict[str, Any], actor_id: str) -> b
 
 
 def _due_scheduled_posts(now: datetime, limit: int) -> list[dict[str, Any]]:
+    """Scan compact keyset batches so future posts cannot hide due work.
+
+    Parse dates in Python to retain support for historical timezone offsets.
+    The publishing claim needs metadata only; media is loaded after claiming.
+    """
+    if limit <= 0:
+        return []
     due = []
-    for entity in _rows_where_json(POSTS_TYPE, "status", "scheduled", limit=500):
-        scheduled_at = _parse_iso(entity["data"].get("scheduledAt"))
-        if scheduled_at is not None and scheduled_at <= now:
-            due.append(entity)
-            if len(due) >= limit:
-                break
+    cursor_created, cursor_id = -1, ""
+    while True:
+        with db_conn() as conn:
+            rows = conn.execute(text(
+                "SELECT type,id,deleted,created_at,created_by,last_modified, "
+                f"{_json_field('scheduledAt')} AS scheduled_at, {_json_field('ownerId')} AS owner_id "
+                "FROM entities WHERE type=:type AND deleted=false "
+                f"AND {_json_field('status')}=:status "
+                "AND (created_at>:cursor_created OR (created_at=:cursor_created AND id>:cursor_id)) "
+                "ORDER BY created_at ASC,id ASC LIMIT 500"
+            ), {"type": POSTS_TYPE, "status": "scheduled", "cursor_created": cursor_created,
+                "cursor_id": cursor_id}).mappings().all()
+        for row in rows:
+            scheduled_at = _parse_iso(row["scheduled_at"])
+            if scheduled_at is not None and scheduled_at <= now:
+                entity = _entity_from_row(row)
+                entity["data"] = {"ownerId": row["owner_id"], "scheduledAt": row["scheduled_at"], "status": "scheduled"}
+                due.append(entity)
+                if len(due) >= limit:
+                    return due
+        if len(rows) < 500:
+            break
+        cursor_created, cursor_id = int(rows[-1]["created_at"]), str(rows[-1]["id"])
     return due
 
 
@@ -884,6 +932,46 @@ def _log_id(owner_id: str, platform: str, comment_id: str) -> str:
     return f"srl_{digest[:32]}"
 
 
+@contextmanager
+def _comment_reservation_guard(owner_id: str):
+    """Serialize rule selection and durable reservation, never the Meta call."""
+    with _COMMENT_LOCK:
+        if str(get_engine().dialect.name or "") == "postgresql":
+            with db_conn() as conn:
+                _ctx()["lock_idempotency_key"](
+                    conn, owner_id, postgres=True, namespace="socialReplyReservation"
+                )
+                yield
+        else:
+            yield
+
+
+def _has_person_reply(owner_id: str, page_id: str, from_id: str) -> bool:
+    """Check this person's full history, not the latest 1,000 display rows."""
+    with db_conn() as conn:
+        params = {"type": LOG_TYPE, "owner": owner_id, "page": page_id, "person": from_id, "after": ""}
+        query = text(
+            f"SELECT id, {_json_field('actions')} AS actions, {_json_field('processing')} AS processing "
+            f"FROM entities WHERE type=:type AND deleted=false AND created_by=:owner "
+            f"AND {_json_field('ownerId')}=:owner AND {_json_field('pageId')}=:page "
+            f"AND {_json_field('fromId')}=:person AND id>:after ORDER BY id ASC LIMIT 100"
+        )
+        # Bounded Python memory even for very old, busy accounts. The database
+        # returns only action metadata for the relevant person, never comments.
+        while rows := conn.execute(query, params).mappings().all():
+            for row in rows:
+                actions = row["actions"]
+                if isinstance(actions, str):
+                    try:
+                        actions = json_loads(actions)
+                    except ValueError:
+                        pass
+                if actions or _bool(row["processing"]):
+                    return True
+            params["after"] = rows[-1]["id"]
+    return False
+
+
 def process_comment(
     *, platform: str, entry_id: str, comment_id: str, post_ref: str, from_id: str, text: str
 ) -> dict[str, Any] | None:
@@ -900,9 +988,9 @@ def process_comment(
     if str(from_id or "") in {str(page.get("metaPageId") or ""), str(page.get("igUserId") or "")}:
         return None  # the page replying to itself is not a customer comment
     owner_id = str(page.get("ownerId") or "")
-    if not owner_id:
+    if not _owner_can_automate(owner_id):
         return None
-    with _COMMENT_LOCK:
+    with _comment_reservation_guard(owner_id):
         settings = _settings_entity(ctx, owner_id)["data"]
         rules = sorted(
             (r["data"] for r in _rows(RULES_TYPE, owner_id) if _bool(r["data"].get("enabled"), True)),
@@ -910,11 +998,10 @@ def process_comment(
         )
         if not rules:
             return None
-        replied = {
-            str(r["data"].get("fromId") or "")
-            for r in _rows(LOG_TYPE, owner_id, limit=1000)
-            if str(r["data"].get("pageId") or "") == page_entity["id"] and r["data"].get("actions")
-        }
+        replied = {from_id} if (
+            any(_bool(rule.get("oncePerPerson")) for rule in rules)
+            and _has_person_reply(owner_id, page_entity["id"], from_id)
+        ) else set()
         refs = {str(post_ref or "")}
         for post in _rows_where_json(POSTS_TYPE, "status", "published", owner_id=owner_id, limit=500):
             results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
@@ -937,6 +1024,7 @@ def process_comment(
             "postId": str(post_ref or ""),
             "fromId": str(from_id or ""),
             "actions": [],
+            "processing": True,
             "at": _iso_now(),
             "error": "",
         }
@@ -993,8 +1081,11 @@ def process_comment(
                 errors.append(f"like: {error.public_message}")
     log_data["actions"] = actions
     log_data["error"] = "; ".join(errors)[:500]
+    log_data["processing"] = False
     try:
-        saved = ctx["patch_entity"](LOG_TYPE, log_id, {"actions": actions, "error": log_data["error"]}, owner_id)
+        saved = ctx["patch_entity"](LOG_TYPE, log_id, {
+            "actions": actions, "error": log_data["error"], "processing": False,
+        }, owner_id)
         return saved.get("data") or log_data
     except HTTPException:
         return log_data
@@ -1353,7 +1444,8 @@ def create_social_studio_router(
         _editable(entity)
         owner_id = str(entity["data"].get("ownerId") or "")
         clean = {**_clean_post(ctx, owner_id, body or {}, entity["data"]), "updatedAt": _iso_now()}
-        saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], clean, scope.uid)
+        saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], clean, scope.uid,
+                                    expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "update", POSTS_TYPE, entity["id"], f"Updated social post ({clean['status']})", {})
         return _public(saved)
 
@@ -1367,7 +1459,8 @@ def create_social_studio_router(
         scope = _mutation(request, user, ctx, ownerId)
         entity = _load_owned(ctx, POSTS_TYPE, post_id, scope)
         _editable(entity)
-        ctx["soft_delete_entity"](POSTS_TYPE, entity["id"], scope.uid)
+        ctx["soft_delete_entity"](POSTS_TYPE, entity["id"], scope.uid,
+                                  expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "delete", POSTS_TYPE, entity["id"], "Deleted social post", {})
         return {"ok": True, "id": entity["id"]}
 
@@ -1396,7 +1489,8 @@ def create_social_studio_router(
         entity = _load_owned(ctx, POSTS_TYPE, post_id, scope)
         if str(entity["data"].get("status") or "") != "scheduled":
             raise HTTPException(status_code=409, detail="Only scheduled posts can be cancelled")
-        saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], {"status": "draft", "updatedAt": _iso_now()}, scope.uid)
+        saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], {"status": "draft", "updatedAt": _iso_now()}, scope.uid,
+                                    expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "cancel", POSTS_TYPE, entity["id"], "Cancelled scheduled social post", {})
         return _public(saved)
 

@@ -18,6 +18,8 @@ const SOCIAL_MAX_MEDIA = 4;
 const SOCIAL_MAX_MEDIA_BYTES = 5 * 1024 * 1024;
 const SOCIAL_MAX_KEYWORDS = 30;
 const SOCIAL_REFRESH_MS = 30000;
+let _socialSessionGeneration = 0;
+let _socialComposerGeneration = 0;
 
 const _social = {
   forUser: '',
@@ -51,8 +53,24 @@ function socialEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
 }
 
-function socialApi(path, options = {}, extra = {}) {
-  return apiJson('/api/social-studio' + path, options, extra);
+function captureSocialStudioContext() {
+  return { generation: _socialSessionGeneration, identity: getAuthMeIdentity() };
+}
+
+function socialStudioContextIsCurrent(context) {
+  return context.generation === _socialSessionGeneration && context.identity === getAuthMeIdentity();
+}
+
+async function socialApi(path, options = {}, extra = {}) {
+  const context = captureSocialStudioContext();
+  try {
+    const result = await apiJson('/api/social-studio' + path, options, extra);
+    if (!socialStudioContextIsCurrent(context)) throw makeSessionChangedError();
+    return result;
+  } catch (error) {
+    if (!socialStudioContextIsCurrent(context)) throw makeSessionChangedError();
+    throw error;
+  }
 }
 
 function socialUnwrap(payload, key) {
@@ -68,6 +86,8 @@ function socialErrorDetail(error, fallbackEn, fallbackAr) {
 }
 
 function resetSocialStudioState() {
+  _socialSessionGeneration++;
+  _socialComposerGeneration++;
   _social.forUser = '';
   _social.loading = false;
   _social.loadedAt = 0;
@@ -78,6 +98,8 @@ function resetSocialStudioState() {
   _social.posts = [];
   _social.stats = null;
   _social.availablePages = null;
+  _social.availableBusy = false;
+  _social.linkOwnerId = '';
   _social.linkSheetOpen = false;
   _social.screen = '';
   _social.composer = null;
@@ -100,12 +122,13 @@ async function socialStudioEnsureLoaded(force = false) {
   if (_social.forUser !== uid) { resetSocialStudioState(); _social.forUser = uid; }
   if (_social.loading) return;
   if (!force && _social.loadedAt && Date.now() - _social.loadedAt < SOCIAL_REFRESH_MS) return;
+  const context = captureSocialStudioContext();
   _social.loading = true;
   try {
     const [settings, rules, pages, posts, stats] = await Promise.allSettled([
       socialApi('/settings'), socialApi('/rules'), socialApi('/pages'), socialApi('/posts'), socialApi('/stats')
     ]);
-    if (uid !== String(state.currentUser?.id || '')) return;
+    if (!socialStudioContextIsCurrent(context)) return;
     if (settings.status === 'fulfilled') _social.settings = socialUnwrap(settings.value, 'settings') || settings.value;
     if (rules.status === 'fulfilled') _social.rules = Array.isArray(rules.value?.rules) ? rules.value.rules : (Array.isArray(rules.value) ? rules.value : []);
     if (pages.status === 'fulfilled') _social.pages = Array.isArray(pages.value?.pages) ? pages.value.pages : (Array.isArray(pages.value) ? pages.value : []);
@@ -115,8 +138,10 @@ async function socialStudioEnsureLoaded(force = false) {
     _social.error = failed ? socialErrorDetail(failed.reason, 'Some studio data did not load.', 'لم يتم تحميل بعض بيانات الاستوديو.') : '';
     _social.loadedAt = Date.now();
   } finally {
-    _social.loading = false;
-    if (state.currentView === 'ads-studio') { try { render(); } catch (_) {} }
+    if (socialStudioContextIsCurrent(context)) {
+      _social.loading = false;
+      if (state.currentView === 'ads-studio') { try { render(); } catch (_) {} }
+    }
   }
 }
 
@@ -298,16 +323,19 @@ function renderSocialStudioOverviewSection() {
 
 function socialOpenLinkSheet() {
   if (!isCurrentUserAdmin()) return;
+  const context = captureSocialStudioContext();
   _social.linkSheetOpen = true;
   _social.linkOwnerId = _social.linkOwnerId || String(state.currentUser?.id || '');
   if (_social.availablePages === null && !_social.availableBusy) {
     _social.availableBusy = true;
     socialApi('/pages/available').then(res => {
+      if (!socialStudioContextIsCurrent(context)) return;
       _social.availablePages = Array.isArray(res?.pages) ? res.pages : [];
     }).catch(e => {
+      if (!socialStudioContextIsCurrent(context)) return;
       _social.availablePages = [];
       showNotification(socialText('Meta pages unavailable', 'صفحات ميتا غير متاحة'), socialErrorDetail(e, 'Connect Meta on the server first.', 'اربط ميتا على الخادم أولاً.'), 'warning');
-    }).finally(() => { _social.availableBusy = false; render(); });
+    }).finally(() => { if (socialStudioContextIsCurrent(context)) { _social.availableBusy = false; render(); } });
   }
   render();
 }
@@ -357,33 +385,38 @@ function renderSocialLinkSheet() {
 
 async function socialLinkPage(metaPageId, platform, igUserId) {
   if (_social.busy) return;
+  const context = captureSocialStudioContext();
   const entry = (Array.isArray(_social.availablePages) ? _social.availablePages : []).find(p => String(p.metaPageId) === String(metaPageId) && String(p.platform) === String(platform));
   _social.busy = true;
   render();
   try {
     await socialApi('/pages/link', { method: 'POST', body: { ownerId: _social.linkOwnerId || String(state.currentUser?.id || ''), metaPageId: String(metaPageId), platform: String(platform), name: entry?.name || '', igUserId: String(igUserId || '') } });
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Page linked', 'تم ربط الصفحة'), entry?.name || '', 'success');
     _social.availablePages = null;
     _social.linkSheetOpen = false;
     socialRefreshNow();
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not link the page', 'تعذر ربط الصفحة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 
 async function socialUnlinkPage(pageId) {
+  const context = captureSocialStudioContext();
   const page = socialPageById(pageId);
   if (!page) return;
   const ok = confirm(socialText(`Unlink "${page.name}"? Scheduled posts for this page will stop and its reply rules will no longer run.`, `إلغاء ربط "${page.name}"؟ ستتوقف المنشورات المجدولة لهذه الصفحة ولن تعمل قواعد الرد الخاصة بها.`));
   if (!ok) return;
   try {
     await socialApi(`/pages/${encodeURIComponent(pageId)}/unlink`, { method: 'POST', body: {} });
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Page unlinked', 'تم إلغاء ربط الصفحة'), '', 'success');
     socialRefreshNow();
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not unlink', 'تعذر إلغاء الربط'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   }
 }
@@ -391,12 +424,14 @@ async function socialUnlinkPage(pageId) {
 // ---------- posts tab ----------
 
 function socialOpenPostsTab(filter) {
+  _socialComposerGeneration++;
   if (filter) _social.postsFilter = filter;
   _social.screen = '';
   setAdsStudioTab('posts');
 }
 
 function socialOpenRepliesTab() {
+  _socialComposerGeneration++;
   _social.screen = '';
   setAdsStudioTab('replies');
 }
@@ -486,6 +521,7 @@ function socialNewComposer() {
 }
 
 function socialBeginCompose() {
+  _socialComposerGeneration++;
   _social.composer = socialNewComposer();
   _social.screen = 'compose';
   if (_adsStudioActiveTab !== 'posts') setAdsStudioTab('posts'); else render();
@@ -494,11 +530,15 @@ function socialBeginCompose() {
 async function socialEditPost(postId) {
   const summary = _social.posts.find(p => String(p.id) === String(postId));
   if (!summary) return;
+  const context = captureSocialStudioContext();
+  const generation = ++_socialComposerGeneration;
+  const isCurrent = () => socialStudioContextIsCurrent(context) && generation === _socialComposerGeneration;
   let full = summary;
   try {
     const res = await socialApi(`/posts/${encodeURIComponent(postId)}`);
     full = socialUnwrap(res, 'post') || summary;
-  } catch (_) { /* fall back to the summary; media may be empty */ }
+  } catch (_) { /* Same-session network failure may use the lightweight summary. */ }
+  if (!isCurrent()) return;
   const scheduled = String(full.status) === 'scheduled' && full.scheduledAt;
   _social.composer = {
     id: String(full.id),
@@ -572,6 +612,7 @@ function socialComposerRemoveMedia(index) {
 }
 
 async function socialComposerAddFiles(fileList) {
+  const context = captureSocialStudioContext();
   const draft = _social.composer;
   if (!draft) return;
   const files = Array.from(fileList || []).filter(file => {
@@ -592,6 +633,7 @@ async function socialComposerAddFiles(fileList) {
     const out = [];
     for (const file of files.slice(0, room)) {
       const dataUrl = await compressImageToDataUrl(file);
+      if (!socialStudioContextIsCurrent(context) || token !== _social.mediaToken || _social.composer !== draft) return;
       if (!isSafeAdsStudioCreativeSource(dataUrl)) throw new Error('unsupported output');
       out.push(dataUrl);
     }
@@ -605,6 +647,7 @@ async function socialComposerAddFiles(fileList) {
     draft.media = next;
     render();
   } catch (_) {
+    if (!socialStudioContextIsCurrent(context) || token !== _social.mediaToken || _social.composer !== draft) return;
     showNotification(socialText('Upload failed', 'تعذر رفع الصورة'), socialText('Please choose another image.', 'يرجى اختيار صورة أخرى.'), 'error');
   }
 }
@@ -625,51 +668,67 @@ function socialComposerValidate() {
   return '';
 }
 
-function socialComposerBody(statusWanted) {
-  const c = _social.composer;
+function socialComposerBody(statusWanted, c = _social.composer) {
   return {
-    pageIds: c.pageIds,
+    pageIds: c.pageIds.slice(),
     caption: String(c.caption || ''),
-    media: c.media,
+    media: c.media.slice(),
     status: statusWanted,
     scheduledAt: statusWanted === 'scheduled' ? new Date(c.scheduledAt).toISOString() : '',
     autoReplyRuleId: c.autoReply ? String(c.autoReplyRuleId || '') : ''
   };
 }
 
+function socialComposerFingerprint(c) {
+  return JSON.stringify([c.pageIds, c.caption, c.media, c.mode, c.scheduledAt, c.autoReply, c.autoReplyRuleId]);
+}
+
 async function socialComposerSave(action) {
   // action: 'draft' | 'schedule' | 'now'
   if (_social.busy || !_social.composer) return;
+  const context = captureSocialStudioContext();
+  const draft = _social.composer;
+  const generation = _socialComposerGeneration;
+  const fingerprint = socialComposerFingerprint(draft);
+  const sameDraft = () => socialStudioContextIsCurrent(context) && _social.composer === draft && generation === _socialComposerGeneration;
+  const isCurrent = () => sameDraft() && fingerprint === socialComposerFingerprint(draft);
   const problem = action === 'draft' && !_social.composer.pageIds.length ? '' : socialComposerValidate();
   if (problem) { showNotification(socialText('Check the post', 'راجع المنشور'), problem, 'warning'); return; }
   const wanted = action === 'schedule' ? 'scheduled' : 'draft';
   _social.busy = true;
   render();
   try {
-    const body = socialComposerBody(wanted);
+    const body = socialComposerBody(wanted, draft);
     let saved;
-    if (_social.composer.id) {
-      saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(_social.composer.id)}`, { method: 'PATCH', body }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post');
+    if (draft.id) {
+      saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(draft.id)}`, { method: 'PATCH', body }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post');
     } else {
       saved = socialUnwrap(await socialApi('/posts', { method: 'POST', body }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post');
     }
-    const postId = String(saved?.id || _social.composer.id || '');
+    if (!sameDraft()) return;
+    const postId = String(saved?.id || draft.id || '');
+    // If publishing fails after creation, retry the same saved post rather
+    // than creating another copy from a draft that still has an empty id.
+    if (postId) draft.id = postId;
+    if (!isCurrent()) return;
     if (action === 'now' && postId) {
       saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post') || saved;
     }
-    _social.lastDone = { action, post: saved || {}, pageNames: _social.composer.pageIds.map(id => socialPageById(id)?.name || '').filter(Boolean), mediaCount: _social.composer.media.length, ruleName: _social.composer.autoReply ? (_social.rules.find(r => String(r.id) === String(_social.composer.autoReplyRuleId))?.name || '') : '' };
+    if (!isCurrent()) return;
+    _social.lastDone = { action, post: saved || {}, pageNames: draft.pageIds.map(id => socialPageById(id)?.name || '').filter(Boolean), mediaCount: draft.media.length, ruleName: draft.autoReply ? (_social.rules.find(r => String(r.id) === String(draft.autoReplyRuleId))?.name || '') : '' };
     _social.composer = null;
     _social.screen = 'post-done';
     socialRefreshNow();
   } catch (e) {
+    if (!isCurrent()) return;
     showNotification(socialText('Could not save the post', 'تعذر حفظ المنشور'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 
 function socialComposerClose() {
+  _socialComposerGeneration++;
   _social.composer = null;
   _social.screen = '';
   render();
@@ -761,41 +820,49 @@ function renderSocialPostDone() {
 
 async function socialPublishPost(postId) {
   if (_social.busy) return;
+  const context = captureSocialStudioContext();
   const ok = confirm(socialText('Publish this post now?', 'نشر هذا المنشور الآن؟'));
   if (!ok) return;
   _social.busy = true;
   render();
   try {
     const res = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post') || {};
+    if (!socialStudioContextIsCurrent(context)) return;
     const failed = String(res.status) === 'failed';
     showNotification(failed ? socialText('Publishing failed', 'فشل النشر') : socialText('Post published', 'تم نشر المنشور'), failed ? String(res.lastError || '') : '', failed ? 'error' : 'success');
     socialRefreshNow();
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not publish', 'تعذر النشر'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 
 async function socialCancelPost(postId) {
+  const context = captureSocialStudioContext();
   try {
     await socialApi(`/posts/${encodeURIComponent(postId)}/cancel`, { method: 'POST', body: {} });
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Schedule cancelled', 'تم إلغاء الجدولة'), socialText('The post is back in Drafts.', 'عاد المنشور إلى المسودات.'), 'success');
     socialRefreshNow();
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not cancel', 'تعذر الإلغاء'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   }
 }
 
 async function socialDeletePost(postId) {
+  const context = captureSocialStudioContext();
   const ok = confirm(socialText('Delete this post?', 'حذف هذا المنشور؟'));
   if (!ok) return;
   try {
     await socialApi(`/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' });
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Post deleted', 'تم حذف المنشور'), '', 'success');
     socialRefreshNow();
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not delete', 'تعذر الحذف'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   }
 }
@@ -809,34 +876,38 @@ function socialSetPlatformFilter(platform) {
 
 async function socialToggleMaster() {
   if (_social.busy) return;
+  const context = captureSocialStudioContext();
   const next = !(_social.settings ? _social.settings.masterEnabled !== false : true);
   _social.busy = true;
   try {
     const res = await socialApi('/settings', { method: 'PUT', body: { masterEnabled: next } });
+    if (!socialStudioContextIsCurrent(context)) return;
     _social.settings = socialUnwrap(res, 'settings') || { ...(_social.settings || {}), masterEnabled: next };
     showNotification(next ? socialText('Auto-reply is on', 'الرد التلقائي مفعّل') : socialText('Auto-reply is paused', 'الرد التلقائي متوقف'), '', 'success');
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not update', 'تعذر التحديث'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 
 async function socialToggleRule(ruleId) {
   const rule = _social.rules.find(r => String(r.id) === String(ruleId));
   if (!rule || _social.busy) return;
+  const context = captureSocialStudioContext();
   const next = rule.enabled === false;
   _social.busy = true;
   try {
     const res = await socialApi(`/rules/${encodeURIComponent(ruleId)}`, { method: 'PATCH', body: { enabled: next } });
+    if (!socialStudioContextIsCurrent(context)) return;
     const saved = socialUnwrap(res, 'rule');
     Object.assign(rule, saved && saved.id ? saved : { enabled: next });
   } catch (e) {
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not update the rule', 'تعذر تحديث القاعدة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 
@@ -888,6 +959,7 @@ function socialNewRule() {
 }
 
 function socialBeginRule() {
+  _socialComposerGeneration++;
   _social.ruleDraft = socialNewRule();
   _social.screen = 'rule';
   render();
@@ -896,6 +968,7 @@ function socialBeginRule() {
 function socialEditRule(ruleId) {
   const rule = _social.rules.find(r => String(r.id) === String(ruleId));
   if (!rule) return;
+  _socialComposerGeneration++;
   _social.ruleDraft = { ...socialNewRule(), ...JSON.parse(JSON.stringify(rule)), keywords: Array.isArray(rule.keywords) ? rule.keywords.slice() : [], postIds: Array.isArray(rule.postIds) ? rule.postIds.slice() : [], keywordInput: '' };
   _social.screen = 'rule';
   render();
@@ -969,6 +1042,8 @@ async function socialRuleSave() {
   const problem = socialRuleValidate();
   if (problem) { showNotification(socialText('Check the rule', 'راجع القاعدة'), problem, 'warning'); return; }
   const r = _social.ruleDraft;
+  const context = captureSocialStudioContext();
+  const isCurrent = () => socialStudioContextIsCurrent(context) && _social.ruleDraft === r;
   const body = {
     name: String(r.name || '').trim(), platform: r.platform === 'ig' ? 'ig' : 'fb', enabled: r.enabled !== false,
     scope: r.scope === 'chosen' ? 'chosen' : 'all', postIds: r.scope === 'chosen' ? r.postIds.map(String) : [],
@@ -982,36 +1057,40 @@ async function socialRuleSave() {
   try {
     if (r.id) await socialApi(`/rules/${encodeURIComponent(r.id)}`, { method: 'PATCH', body });
     else await socialApi('/rules', { method: 'POST', body });
+    if (!isCurrent()) return;
     showNotification(socialText('Rule saved', 'تم حفظ القاعدة'), body.name, 'success');
     _social.platformFilter = body.platform;
     _social.ruleDraft = null;
     _social.screen = '';
     socialRefreshNow();
   } catch (e) {
+    if (!isCurrent()) return;
     showNotification(socialText('Could not save the rule', 'تعذر حفظ القاعدة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 
 async function socialRuleDelete() {
   const r = _social.ruleDraft;
   if (!r || !r.id || _social.busy) return;
+  const context = captureSocialStudioContext();
+  const isCurrent = () => socialStudioContextIsCurrent(context) && _social.ruleDraft === r;
   const ok = confirm(socialText(`Delete the rule "${r.name}"?`, `حذف القاعدة "${r.name}"؟`));
   if (!ok) return;
   _social.busy = true;
   try {
     await socialApi(`/rules/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+    if (!isCurrent()) return;
     showNotification(socialText('Rule deleted', 'تم حذف القاعدة'), '', 'success');
     _social.ruleDraft = null;
     _social.screen = '';
     socialRefreshNow();
   } catch (e) {
+    if (!isCurrent()) return;
     showNotification(socialText('Could not delete the rule', 'تعذر حذف القاعدة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
-    _social.busy = false;
-    render();
+    if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
 }
 

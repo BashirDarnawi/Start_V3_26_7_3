@@ -728,8 +728,8 @@ function renderWalletView() {
     }
   }
   const balancesHtml = balances.length
-    ? balances.map(({ c, m }) => `<div class="text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(m, c)}</div>`).join('')
-    : `<div class="text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(0, WALLET.currency)}</div>`;
+    ? balances.map(({ c, m }) => `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(m, c)}</div>`).join('')
+    : `<div class="workspace-money-value text-base font-black text-slate-800 dark:text-white" dir="ltr">${walletFormatMinor(0, WALLET.currency)}</div>`;
   const currencyOptions = WALLET_SUPPORTED_CURRENCIES
     .map(c => `<option value="${c}" ${c === WALLET.currency ? 'selected' : ''}>${c}</option>`)
     .join('');
@@ -763,13 +763,13 @@ function renderWalletView() {
     const memo = Security.escapeHtml(String(tx.memo || ''));
 
     return `
-      <div class="flex items-start justify-between gap-4 py-3 border-b border-slate-200/60 dark:border-slate-700/60">
+      <div class="workspace-wallet-row py-3 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
           <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(tx.type || 'tx')}</div>
           <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
-        <div class="text-end font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
+        <div class="workspace-wallet-amount font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
           ${isIn ? '+' : '-'}${Security.escapeHtml(amountStr)}
         </div>
       </div>
@@ -794,12 +794,12 @@ function renderWalletView() {
     const exp = row.end ? new Date(row.end).toLocaleDateString(appDateLocale()) : '';
     const daysLeft = row.end ? Math.max(0, Math.ceil((row.end - now) / TIME_CONSTANTS.MILLISECONDS_PER_DAY)) : 0;
     return `
-      <div class="flex items-center justify-between gap-4 py-2 border-b border-slate-200/60 dark:border-slate-700/60">
+      <div class="workspace-subscription-row py-2 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
-          <div class="font-bold text-slate-800 dark:text-white truncate">${Security.escapeHtml(name)}</div>
+          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(name)}</div>
           ${row.periods > 1 ? `<div class="text-[11px] text-emerald-600 dark:text-emerald-400 font-bold">${isRTL ? `${row.periods} فترات مدفوعة` : `${row.periods} paid periods`}</div>` : ''}
         </div>
-        <div class="flex items-center gap-3 shrink-0">
+        <div class="workspace-subscription-actions">
           <div class="text-xs text-slate-500 dark:text-slate-400">
             ${exp ? (isRTL ? `مدفوع حتى: ${Security.escapeHtml(exp)}` : `Paid until: ${Security.escapeHtml(exp)}`) : ''}
           </div>

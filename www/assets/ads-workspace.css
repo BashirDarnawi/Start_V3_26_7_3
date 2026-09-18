@@ -1,0 +1,69 @@
+/* Ads retain their compact table/phone-summary layout in style.css.
+   Keep direct receipt navigation from the redesign without tall cards. */
+.ads-linked-receipts { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; flex: 1 1 100%; }
+.ads-linked-receipts > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 44px;
+  min-width: 44px;
+  max-width: 100%;
+  flex: 1 1 auto;
+  padding: 5px;
+  border: 1px solid var(--ui-line, #e2e7f1);
+  border-radius: 8px;
+  background: var(--ui-surface-soft, #f5f7fc);
+  color: var(--ui-accent, #0649ed);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ads-linked-receipts > button > span { min-width: 0; }
+.ads-linked-receipts > button :is(i, svg) { flex-shrink: 0; }
+.ads-linked-receipts > button:focus-visible { outline: 3px solid var(--ui-accent, #0649ed); outline-offset: 2px; }
+
+/* Read-only setup progress: no horizontal rail or unvalidated jump controls. */
+.studio-wizard-progress { min-width: 0; margin-bottom: 24px; }
+.studio-wizard-current { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 5px 12px; margin-bottom: 16px; font-size: 12px; color: var(--ui-muted, #66758d); }
+.studio-wizard-current strong { color: var(--ui-ink, #172236); font-size: 15px; overflow-wrap: anywhere; }
+.studio-wizard-steps { display: grid; grid-template-columns: repeat(var(--studio-step-count), minmax(0, 1fr)); gap: 8px; padding: 0; margin: 0; list-style: none; }
+.studio-wizard-step { display: flex; flex-direction: column; align-items: center; gap: 7px; position: relative; min-width: 0; color: var(--ui-muted, #66758d); }
+.studio-wizard-step::before { content: ''; position: absolute; inset-inline: 0; top: 17px; height: 2px; background: var(--ui-line, #e2e7f1); }
+.studio-wizard-step:first-child::before { inset-inline-start: 50%; }
+.studio-wizard-step:last-child::before { inset-inline-end: 50%; }
+.studio-wizard-step-number { display: grid; place-items: center; z-index: 1; width: 36px; height: 36px; border-radius: 50%; border: 2px solid var(--ui-line, #e2e7f1); background: var(--ui-surface, #fff); font-size: 13px; font-weight: 750; }
+.studio-wizard-step-label { font-size: 11px; font-weight: 650; text-align: center; overflow-wrap: anywhere; line-height: 1.5; }
+.studio-wizard-step.is-current { color: var(--ui-accent, #0649ed); }
+.studio-wizard-step.is-current .studio-wizard-step-number { background: #0649ed; border-color: #0649ed; color: white; }
+.studio-wizard-step.is-complete .studio-wizard-step-number { background: var(--ui-accent-soft, #eaf0ff); border-color: var(--ui-accent, #0649ed); color: var(--ui-accent, #0649ed); }
+
+/* Full amounts remain text, never ellipsized or clipped. Rows move their
+   amount/actions below names on phones instead of squeezing either side. */
+.workspace-money-value, .clothes-kpi-value, .clothes-kpi-note { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-overflow: clip; font-variant-numeric: tabular-nums; }
+.clothes-kpi-card, .clothes-kpi-layout { min-width: 0; }
+.clothes-kpi-layout > .min-w-0 { flex: 1; max-width: 100%; }
+.workspace-wallet-row, .workspace-subscription-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .85fr); align-items: start; gap: 8px 16px; min-width: 0; }
+.workspace-wallet-row > *, .workspace-subscription-row > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.workspace-wallet-amount { text-align: end; font-variant-numeric: tabular-nums; }
+.workspace-subscription-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 12px; min-width: 0; }
+.workspace-subscription-actions > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.workspace-subscription-actions > button { min-height: 44px; flex-shrink: 0; }
+.studio-wallet-request { min-width: 0; }
+.studio-wallet-request > div { min-width: 0; max-width: 100%; flex: 1 1 200px; overflow-wrap: anywhere; }
+.studio-wallet-request .studio-wallet-request-actions { justify-content: flex-end; }
+.studio-wallet-request-actions :is(button, label) { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.studio-wallet-charge-preview > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.studio-wallet-charge-preview > input { flex: 0 1 144px; }
+@media (max-width: 599px) {
+  .studio-wizard-step-label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .workspace-wallet-row, .workspace-subscription-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .workspace-wallet-amount { text-align: start; }
+  .workspace-subscription-actions { justify-content: space-between; }
+  .studio-wallet-request .studio-wallet-request-actions { justify-content: flex-start; }
+  .clothes-kpi-layout { flex-direction: column; align-items: flex-start; }
+  .clothes-kpi-layout > .min-w-0 { width: 100%; }
+  .clothes-kpi-card .clothes-kpi-value { font-size: 17px; line-height: 1.5; }
+}

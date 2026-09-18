@@ -19,6 +19,13 @@ let _nativeUnlockBusy = false;
 // authentication challenge. Background events must never clear the latter.
 let _nativeAuthenticationRequired = false;
 let _nativeReminderTimer = null;
+let _nativeReminderGeneration = 0;
+let _nativeReminderWork = Promise.resolve();
+let _nativeReminderSettingsWork = Promise.resolve();
+// Device preference remains the last successfully saved value. This separate
+// fence honors an immediate disable request even while secure storage waits
+// or fails; only a successful explicit re-enable may lift it in this session.
+let _nativeReminderSchedulingSuppressed = false;
 let _nativePrefs = {
   ready: false,
   biometricEnabled: false,
@@ -542,7 +549,48 @@ function _nativeReminderId(adId) {
   return 100000 + (Math.abs(hash >>> 0) % 1900000000);
 }
 
-async function syncNativeReconciliationReminders() {
+function _captureNativeReminderContext() {
+  return { generation: _nativeReminderGeneration, identity: getAuthMeIdentity() };
+}
+
+function _nativeReminderContextIsCurrent(context) {
+  return context.generation === _nativeReminderGeneration && context.identity === getAuthMeIdentity();
+}
+
+function _enqueueNativeReminderWork(work) {
+  const operation = _nativeReminderWork.then(work, work);
+  _nativeReminderWork = operation.catch(() => false);
+  return operation;
+}
+
+async function _cancelNativeReconciliationReminders() {
+  const notifications = getCapacitorPlugin('LocalNotifications');
+  if (!notifications?.getPending || !notifications?.cancel) return false;
+  try {
+    const pending = await notifications.getPending();
+    const old = (pending?.notifications || []).filter(note => note?.extra?.albayanType === 'reconciliation');
+    if (old.length) await notifications.cancel({ notifications: old.map(note => ({ id: note.id })) });
+    return true;
+  } catch (_) { return false; }
+}
+
+function resetNativeReminderSession() {
+  _nativeReminderGeneration++;
+  clearTimeout(_nativeReminderTimer);
+  _nativeReminderTimer = null;
+  // Serialize cancellation after any OS schedule call already in progress;
+  // a late native response must not reintroduce the previous user's reminders.
+  return _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
+}
+
+function syncNativeReconciliationReminders() {
+  const context = _captureNativeReminderContext();
+  return _enqueueNativeReminderWork(() => _syncNativeReconciliationRemindersOnce(context));
+}
+
+async function _syncNativeReconciliationRemindersOnce(context) {
+  const isCurrent = () => _nativeReminderContextIsCurrent(context) && !_nativeReminderSchedulingSuppressed && _nativePrefs.remindersEnabled && !!state?.currentUser;
+  if (!isCurrent()) return false;
   if (!isPackagedMobileApp() || !_nativePrefs.remindersEnabled || !state?.currentUser) return false;
   const notifications = getCapacitorPlugin('LocalNotifications');
   if (!notifications?.schedule || !notifications?.getPending) return false;
@@ -569,9 +617,17 @@ async function syncNativeReconciliationReminders() {
   }
   try {
     const pending = await notifications.getPending();
+    if (!isCurrent()) return false;
     const old = (pending?.notifications || []).filter(note => note?.extra?.albayanType === 'reconciliation');
     if (old.length && notifications.cancel) await notifications.cancel({ notifications: old.map(note => ({ id: note.id })) });
+    if (!isCurrent()) return false;
     if (desired.size) await notifications.schedule({ notifications: Array.from(desired.values()) });
+    if (!isCurrent()) {
+      // Calls are serialized, so no newer user's schedule can have reused these
+      // ids yet. Clean up a schedule that finished after disable/logout.
+      if (desired.size && notifications.cancel) await notifications.cancel({ notifications: Array.from(desired.keys(), id => ({ id })) });
+      return false;
+    }
     return true;
   } catch (error) {
     console.warn('[NativeNotifications] Sync failed:', error?.message || error);
@@ -580,12 +636,31 @@ async function syncNativeReconciliationReminders() {
 }
 
 function queueNativeReminderSync() {
-  if (!isPackagedMobileApp() || !_nativePrefs.remindersEnabled) return;
+  if (!isPackagedMobileApp() || !_nativePrefs.remindersEnabled || _nativeReminderSchedulingSuppressed) return;
   clearTimeout(_nativeReminderTimer);
   _nativeReminderTimer = setTimeout(() => syncNativeReconciliationReminders(), 900);
 }
 
-async function setNativeRemindersEnabled(enabled) {
+function setNativeRemindersEnabled(enabled) {
+  // Invalidate immediately, even when an OS permission/storage operation from
+  // an earlier toggle is still pending. Persist preference writes in order.
+  _nativeReminderGeneration++;
+  clearTimeout(_nativeReminderTimer);
+  _nativeReminderTimer = null;
+  if (enabled !== true) {
+    _nativeReminderSchedulingSuppressed = true;
+    // Cancellation must not wait behind secure storage. The OS work queue
+    // still orders it after any schedule already being installed.
+    if (isPackagedMobileApp()) _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
+  }
+  const context = _captureNativeReminderContext();
+  const operation = _nativeReminderSettingsWork.then(() => _setNativeRemindersEnabledOnce(enabled, context));
+  _nativeReminderSettingsWork = operation.catch(() => false);
+  return operation;
+}
+
+async function _setNativeRemindersEnabledOnce(enabled, context) {
+  if (!_nativeReminderContextIsCurrent(context)) return false;
   if (!isPackagedMobileApp()) return false;
   const notifications = getCapacitorPlugin('LocalNotifications');
   if (!notifications) return false;
@@ -593,7 +668,9 @@ async function setNativeRemindersEnabled(enabled) {
   if (next) {
     try {
       let permission = await notifications.checkPermissions();
+      if (!_nativeReminderContextIsCurrent(context)) return false;
       if (permission?.display !== 'granted') permission = await notifications.requestPermissions();
+      if (!_nativeReminderContextIsCurrent(context)) return false;
       if (permission?.display !== 'granted') {
         showNotification(
           state.language === 'ar' ? 'الإشعارات غير مسموحة' : 'Notifications not allowed',
@@ -604,16 +681,26 @@ async function setNativeRemindersEnabled(enabled) {
       }
     } catch (_) { return false; }
   }
-  if (!(await nativeSecureSet('reconciliation_reminders_enabled', next))) return false;
-  _nativePrefs.remindersEnabled = next;
-  if (next) queueNativeReminderSync();
-  else {
-    try {
-      const pending = await notifications.getPending();
-      const old = (pending?.notifications || []).filter(note => note?.extra?.albayanType === 'reconciliation');
-      if (old.length) await notifications.cancel({ notifications: old.map(note => ({ id: note.id })) });
-    } catch (_) {}
+  const saved = await nativeSecureSet('reconciliation_reminders_enabled', next);
+  if (!_nativeReminderContextIsCurrent(context)) return false;
+  if (!saved) {
+    showNotification(
+      state.language === 'ar' ? 'تعذّر حفظ إعداد التذكيرات' : 'Could not save reminder setting',
+      _nativeReminderSchedulingSuppressed
+        ? (state.language === 'ar' ? 'التذكيرات متوقفة لهذه الجلسة فقط. حاول إيقافها مرة أخرى لحفظ اختيارك.' : 'Reminders are paused for this session only. Try turning them off again to save your choice.')
+        : (state.language === 'ar' ? 'لم يتغير الإعداد المحفوظ. حاول مرة أخرى.' : 'The saved setting has not changed. Please try again.'),
+      'warning'
+    );
+    if (state.currentView === 'settings') render();
+    return false;
   }
+  _nativePrefs.remindersEnabled = next;
+  if (next) {
+    _nativeReminderSchedulingSuppressed = false;
+    queueNativeReminderSync();
+  }
+  else await _enqueueNativeReminderWork(_cancelNativeReconciliationReminders);
+  if (!_nativeReminderContextIsCurrent(context)) return false;
   if (state.currentView === 'settings') render();
   return true;
 }

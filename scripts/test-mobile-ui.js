@@ -80,7 +80,9 @@ check('workspace has one complete Advanced experience and no duplicate view swit
   !routing.includes("id: 'workspace-mode'") &&
   css.includes('.workspace-topbar'));
 check('workspace progressive panels stay accessible in the complete view',
-  views.includes('if (isAdvancedWorkspaceMode()) return true;') &&
+  !views.includes('if (isAdvancedWorkspaceMode()) return true;') &&
+  !views.includes("if (isAdvancedWorkspaceMode()) return '';") &&
+  views.includes('panels[view]') &&
   views.includes('function renderWorkspaceFilterToggle(view, activeCount = 0)') &&
   views.includes('aria-expanded="${expanded ? \'true\' : \'false\'}"') &&
   views.includes('aria-controls="${safeView}-advanced-filters"') &&
@@ -145,10 +147,15 @@ check('full workspace navigation renders an expensive view exactly once',
 
 check('table card conversion is opt-in',
   css.includes('.mobile-card-table') && !css.includes('.glass-panel table'));
-check('audit logs expose all table fields as phone cards',
-  views.includes('mobile-card-table audit-mobile-table') &&
-  views.includes('audit-description-cell') &&
-  css.includes('.audit-mobile-table'));
+check('audit timeline exposes readable activity fields and detail actions on phones',
+  views.includes('management-timeline') &&
+  views.includes('management-activity-description') &&
+  views.includes('management-activity-author') &&
+  views.includes('management-severity-tag') &&
+  views.includes('management-category-tag') &&
+  views.includes('management-resource-id') &&
+  views.includes('onclick="showLogDetails(this.dataset.logId)"') &&
+  read('assets/management-workspace.css').includes('.management-timeline-item'));
 check('hosted audit detail buttons resolve the server-visible row',
   views.includes('? (Array.isArray(state.serverLogs) ? state.serverLogs : [])') &&
   views.includes("const canViewOwnLogs = currentUserHasPermission('auditLogs', 'viewOwn');") &&
@@ -166,7 +173,7 @@ check('phone dialogs use one safe scrolling overlay',
   css.includes('.mobile-dialog-overlay') &&
   views.includes('mobile-dialog-overlay fixed inset-0') &&
   helpers.includes('mobile-dialog-overlay fixed inset-0') &&
-  modals.includes('mobile-dialog-overlay fixed inset-0'));
+  /mobile-dialog-overlay[^'\n]*fixed inset-0/.test(modals));
 check('dialogs taller than a desktop window scroll instead of clipping',
   css.split('align-items: flex-start !important').length >= 3 &&
   css.includes('margin-top: auto') &&
@@ -216,8 +223,9 @@ check('an unchanged-status receipt edit keeps the driver-owned delivery workflow
 // server's connection cap and came back as raw 503s = the red badge), records
 // WHY a tick failed, and says so on the badge with RTL-safe margins.
 check('live sync uses a bounded fan-out and the badge says why it failed',
-  liveSync.includes('async function _runWithConcurrency(items, limit, fn)') &&
-  liveSync.includes('_runWithConcurrency(\n    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince\n  )') &&
+  liveSync.includes('async function _runWithConcurrency(items, limit, fn, isAborted = () => false)') &&
+  liveSync.includes('while (next < list.length && !isAborted())') &&
+  liveSync.includes('_runWithConcurrency(\n    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince, _syncAborted\n  )') &&
   liveSync.includes('_serverLiveSync.lastFailure = {') &&
   liveSync.includes("(failure.status ? ` (${failure.status})` :") &&
   !liveSync.includes('rounded-full mr-2"></span>') &&
@@ -378,12 +386,23 @@ check('receipt filters progressively disclose advanced controls without hiding q
   helpers.includes("if (mode === 'not-collected') state.receiptCollectedFilter = 'not-collected';") &&
   helpers.includes("const newGrid = src.querySelector('#receipts-grid');") &&
   helpers.includes("const newChips = src.querySelector('#receipt-active-filters');"));
-check('receipt and delivery cards expose a tap-sized WhatsApp dispatch action',
+const deliveryWorkspaceSource = views.slice(
+  views.indexOf('function renderDeliveriesView(logOnly)'),
+  views.indexOf('function filterDeliveries(type, value)')
+);
+const deliveryWorkspaceCss = read('assets/operations-workspace.css');
+check('receipt and unified delivery cards expose a gated tap-sized WhatsApp action',
   views.includes('showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)') &&
   views.includes('data-receipt-id=') &&
   views.includes('Share delivery information to WhatsApp') &&
   views.includes('inline-flex min-h-11') &&
-  (views.match(/canShareDeliveryReceiptToWhatsApp\(/g) || []).length >= 4);
+  views.includes('canShareDeliveryReceiptToWhatsApp(receipt)') &&
+  deliveryWorkspaceSource.includes('canShareDeliveryReceiptToWhatsApp(ad)') &&
+  deliveryWorkspaceSource.includes('class="ops-button ops-button--whatsapp"') &&
+  deliveryWorkspaceSource.includes('showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)') &&
+  deliveryWorkspaceCss.includes('.ops-workspace .ops-button {') &&
+  deliveryWorkspaceCss.includes('min-height: 44px;') &&
+  views.slice(views.indexOf('function renderDeliveryDashboard()')).includes('canShareDeliveryReceiptToWhatsApp(ad)'));
 check('receipt settlement installs the Paid receipt and affected ads as one server-confirmed batch',
   serverApi.includes('async function apiSettleReceipt(payload)') &&
   serverApi.includes('/settle?include_media=false') &&
@@ -501,18 +520,35 @@ check('a genuine 409 during delivery completion rebases instead of dead-looping'
   helpers.includes('The receipt changed while this form was open — review the figures and tap Mark Delivered again.') &&
   helpers.includes('This delivery was canceled by an admin.') &&
   helpers.includes('function describeNetworkError(e)'));
-check('delivery log paginates filtered rows and exposes bilingual phone-card labels',
+check('delivery cards paginate filtered records with bilingual labels and scoped search',
   views.includes('const DELIVERIES_PAGE_SIZE = 30;') &&
   views.includes('_deliveriesShowLimit += DELIVERIES_PAGE_SIZE;') &&
-  views.includes('const deliveryFilterFingerprint = JSON.stringify([filterStatus, filterDriver, searchTerm]);') &&
-  views.includes('_deliveriesShowLimit = DELIVERIES_PAGE_SIZE;') &&
-  views.includes('const visibleDeliveryRows = filteredDeliveries.slice(0, _deliveriesShowLimit);') &&
-  views.includes('const remainingDeliveryRows = filteredDeliveries.length - visibleDeliveryRows.length;') &&
-  views.includes('onclick="loadMoreDeliveries()"') &&
-  ['Customer', 'Driver', 'Amount', 'Status', 'Office handover', 'Date', 'Actions']
-    .every(label => views.includes(`: '${label}'}`)) &&
-  views.includes('mobile-card-table delivery-mobile-table') &&
-  css.includes('content: attr(data-label)'));
+  deliveryWorkspaceSource.includes('const deliveryFilterFingerprint = JSON.stringify([filterStatus, filterDriver, searchTerm]);') &&
+  deliveryWorkspaceSource.includes('_deliveriesShowLimit = DELIVERIES_PAGE_SIZE;') &&
+  deliveryWorkspaceSource.includes('const visibleDeliveryRows = filteredDeliveries.slice(0, _deliveriesShowLimit);') &&
+  deliveryWorkspaceSource.includes('const remainingDeliveryRows = filteredDeliveries.length - visibleDeliveryRows.length;') &&
+  deliveryWorkspaceSource.includes('visibleDeliveryRows.map(renderDeliveryCard)') &&
+  deliveryWorkspaceSource.includes('data-delivery-record="${safeId}"') &&
+  deliveryWorkspaceSource.includes('onclick="loadMoreDeliveries()"') &&
+  ['Driver', 'Amount', 'Status', 'Office handover', 'Date', 'Actions']
+    .every(label => deliveryWorkspaceSource.includes(`: '${label}'}`)) &&
+  deliveryWorkspaceSource.includes("customer?.name || (isAr ? 'غير معروف' : 'Unknown')") &&
+  deliveryWorkspaceSource.includes('id="delivery-log-results"') &&
+  deliveryWorkspaceSource.includes('if (logOnlyPass) return resultsHtml;') &&
+  deliveryWorkspaceSource.indexOf('onclick="loadMoreDeliveries()"') < deliveryWorkspaceSource.indexOf('if (logOnlyPass) return resultsHtml;') &&
+  views.includes('if (newResults) results.innerHTML = newResults.innerHTML;') &&
+  !deliveryWorkspaceSource.includes('<table') &&
+  deliveryWorkspaceCss.includes('.ops-workspace .ops-delivery-grid') &&
+  deliveryWorkspaceCss.includes('@media (max-width: 380px)'));
+check('delivery cards retain assignment, status, handover, cancellation and report gates',
+  deliveryWorkspaceSource.includes("const canAssign = roleLower !== 'delivery' && can('deliveries', 'assign');") &&
+  deliveryWorkspaceSource.includes("const canOffice = roleLower !== 'delivery' && can('deliveries', 'markCollected');") &&
+  deliveryWorkspaceSource.includes("const canViewDeliveryStats = can('deliveries', 'viewStats');") &&
+  deliveryWorkspaceSource.includes("const canExportDeliveries = can('deliveries', 'viewStats') || can('receipts', 'export');") &&
+  deliveryWorkspaceSource.includes('const deliveryTarget = _getCollectionTargetCached(ad);') &&
+  deliveryWorkspaceSource.includes("roleLower === 'delivery' ? ''") &&
+  ['assignDelivery', 'updateDeliveryStatus', 'showDeliveryDetails', 'markOfficeHandover', 'undoOfficeHandover', 'removeDeliveryMission', 'openDeliveryCancelModal', 'exportDeliveryReport', 'checkStuckDeliveries']
+    .every(action => deliveryWorkspaceSource.includes(`${action}(`)));
 check('WhatsApp dispatch preview is a phone-safe consent dialog',
   helpers.includes("dialog.id = 'delivery-whatsapp-share-dialog'") &&
   helpers.includes('mobile-dialog-overlay fixed inset-0') &&
@@ -608,23 +644,28 @@ check('customer pages dialog traps focus and Escape closes it globally',
   routing.includes('stopImmediatePropagation()') &&
   routing.includes('isCommandPaletteShortcut'));
 check('ad photo viewer is a clear phone-sized action',
-  views.includes('mobile-card-table w-full') &&
+  views.includes("shellAdSummaryRow(ad, {") &&
   views.includes('ad-photo-view-button') &&
   views.includes('data-action="view-ad-photos"') &&
   views.includes('data-role="ad-creator"') &&
   css.includes('button.ad-photo-view-button') &&
   css.includes('min-height: 2.75rem'));
-check('desktop ad summary fits all information without horizontal dragging',
-  views.includes('ads-table-container glass-panel') &&
+check('ads retain the classic desktop table with responsive phone details and direct receipt links',
   views.includes('ads-summary-table mobile-card-table') &&
-  views.includes('ads-col-actions') &&
-  views.includes("${isAr ? 'السعر' : 'Rate'}:") &&
-  !views.includes('data-label="Rate"') &&
-  css.includes('#ads-table-container.ads-table-container') &&
-  css.includes('table-layout: fixed') &&
-  css.includes('overflow-x: hidden') &&
-  css.includes('.ads-summary-table tbody tr td {') &&
-  css.includes('overflow-wrap: anywhere'));
+  !views.includes('<article class="ad-campaign-card"') &&
+  views.includes('receiptExchangeRate?.toFixed(2)') &&
+  views.includes('renderMetaAdBudgetSummary(ad, isAr)') &&
+  views.includes('data-action="view-ad-receipt"') &&
+  views.includes("canOpenWorkspaceView('receipts')") &&
+  views.includes("<tr ${shellTableDetailAttrs('ads',") &&
+  css.includes('table-layout: fixed;') &&
+  read('assets/ads-workspace.css').includes('overflow-wrap: anywhere') &&
+  read('index.html').includes('assets/ads-workspace.css'));
+check('shared financial stats never ellipsize amounts and Add Ad keeps its high-contrast button',
+  views.includes('class="workspace-stat-value text-lg md:text-3xl font-bold mt-1 md:mt-2"><bdi>${value}</bdi>') &&
+  !views.includes('font-bold mt-1 md:mt-2 truncate">${value}') &&
+  read('assets/workspace-layout.css').includes('.workspace-stat-layout { flex-direction: column-reverse;') &&
+  views.includes('onclick="showAdModal()" class="btn-shine bg-indigo-600 text-white'));
 check('receipt photo viewer allows native pan and pinch zoom',
   helpers.includes('receipt-photo-stage') && css.includes('touch-action: pan-x pan-y pinch-zoom'));
 check('packaged Android handles Back in UI order before exiting',
@@ -702,7 +743,8 @@ check('clothes line items use responsive named grids',
   ['clothes-variant-row', 'clothes-shipment-subgrid', 'clothes-order-subgrid']
     .every(token => clothes.includes(token) && css.includes(`.${token}`)));
 check('Ads Studio wizard is mobile-first and touch accessible',
-  adsStudio.includes('overflow-x-auto custom-scrollbar') &&
+  adsStudio.includes('studio-section-tabs flex flex-wrap gap-2') &&
+  css.includes('.ui-workspace .studio-section-tabs { display: grid;') &&
   adsStudio.includes('touch-target min-h-12') &&
   adsStudio.includes('grid gap-3 sm:grid-cols-2') &&
   adsStudio.includes('max-w-4xl mx-auto') &&
@@ -903,7 +945,8 @@ check('Meta Ads controls are reachable outside edit and fit phone dialogs',
   metaAds.includes('min-h-11') &&
   metaAds.includes('sm:grid-cols'));
 check('Meta ad rows expose photo, total budget, duration, account and separate history',
-  views.includes('renderAdPrimaryThumbnail(ad, isAr)') &&
+  views.includes('shellAdMedia(ad, isAr)') &&
+  read('src/12d-manager-shell.js').includes('return renderAdPrimaryThumbnail(ad, isAr)') &&
   metaAds.includes('function renderAdPrimaryThumbnail(ad, isAr)') &&
   metaAds.includes("return renderMetaAdThumbnail(ad, isAr)") &&
   metaAds.includes('/api/collections/ads/${encodeURIComponent(String(ad.id || \'\'))}/primary-photo') &&
@@ -1215,7 +1258,8 @@ check('social studio ships in the studio bundle and is wired into the Ads Studio
 
 check('social studio never handles Meta credentials in the browser and only talks to its server API',
   !/accessToken|access_token|appSecret|app_secret|password/i.test(socialStudio) &&
-  socialStudio.includes("return apiJson('/api/social-studio' + path, options, extra);") &&
+  socialStudio.includes("const result = await apiJson('/api/social-studio' + path, options, extra);") &&
+  socialStudio.includes('if (!socialStudioContextIsCurrent(context)) throw makeSessionChangedError();') &&
   (socialStudio.match(/apiJson\(/g) || []).length === 1 &&
   socialStudio.includes('return isServerModeEnabled() && typeof adsStudioCanUse === \'function\' && adsStudioCanUse();') &&
   socialStudio.includes('function resetSocialStudioState()') &&
@@ -1319,22 +1363,24 @@ check('global re-skin is flat: no aurora, solid cards, brand-blue primaries and 
   managerShell.includes("shellSetTheme('") && managerShell.includes("onclick=\"toggleLanguage()\""));
 
 // ---------- compact list rows (design lists) ----------
-check('receipts, customers, pages and team render as compact rows that expand to the full card',
+check('directory cards expose labelled facts and outside actions while preserving full details',
   managerShell.includes('function shellListRow({') &&
-  managerShell.includes("${card ? `<div class=\"shell-row-body\"${open ? '' : ' hidden'}>${card}</div>` : ''}") &&
+  managerShell.includes('class="shell-row-body" aria-labelledby=') &&
+  managerShell.includes("${open ? '' : ' hidden'}>${card}</div>") &&
   managerShell.includes('function shellReceiptRow(receipt, customer, card, meta = {})') &&
   managerShell.includes('function shellCustomerRow(customer, stats, card, meta = {})') &&
   managerShell.includes('function shellPageRow(page, card, meta = {})') &&
-  managerShell.includes('function shellUserRow(user, card)') &&
+  managerShell.includes('function shellUserRow(user, card, meta = {})') &&
   views.includes('return shellReceiptRow(receipt, customer, __receiptCard, {') &&
   views.includes('return shellReceiptRow(receipt, customer, __destroyedCard, {') &&
   views.includes('return shellCustomerRow(c, stats, __customerCard, {') &&
   views.includes('return shellPageRow(p, __pageCard, {') &&
-  views.includes('return shellUserRow(u, __userCard);') &&
-  views.includes('<div id="receipts-grid" class="space-y-2">') &&
-  views.includes('<div id="customers-grid" class="space-y-2">') &&
-  views.includes('<div id="pages-grid" class="space-y-2">') &&
-  views.includes('<div id="users-grid" class="space-y-2">') &&
+  views.includes('return shellUserRow(u, __userCard, { canEditThisUser:') &&
+  views.includes('<div id="receipts-grid" class="workspace-directory-grid">') &&
+  views.includes('<div id="customers-grid" class="workspace-directory-grid">') &&
+  views.includes('<div id="pages-grid" class="workspace-directory-grid">') &&
+  views.includes('<div id="users-grid" class="workspace-directory-grid">') &&
+  managerShell.includes('workspace-record-facts') && managerShell.includes('workspace-record-actions') &&
   views.includes('data-receipt-card="true" data-receipt-id=') &&
   css.includes('.shell-row-body > .glass-panel {') &&
   read('tests/e2e/critical-flows.spec.js').includes("async function expandRow(page, kind, id) {"));
@@ -1342,20 +1388,18 @@ check('receipts, customers, pages and team render as compact rows that expand to
 check('compact rows keep money and permission rules of the cards they summarise',
   managerShell.includes("if (meta.canSeeBalance && stats) {") &&
   managerShell.includes("meta.canSeeContacts\n    ? (phones.length ?") &&
-  managerShell.includes("const spend = meta.canSeePageFinancials && meta.pageStats") &&
+  managerShell.includes('meta.canSeePageFinancials && meta.pageStats ? shellDirectoryFact') &&
   managerShell.includes("meta.hasCustomerDebt && meta.collectionTarget\n    ? Number(meta.collectionTarget.amountLocal) || 0\n    : Number(receipt?.amountLocal) || 0") &&
   managerShell.includes("(meta.receiptRecordFilter && meta.receiptRecordFilter === id)"));
 
-check('ads and deliveries tables get phone summary rows that expand to the full detail row',
-  managerShell.includes('function shellTableSummaryRow(kind, id, fields, colspan)') &&
-  managerShell.includes('function shellAdSummaryRow(ad, meta = {})') &&
-  managerShell.includes('function shellDeliverySummaryRow(item, meta = {})') &&
-  views.includes("${shellAdSummaryRow(ad, { customer, adPage, adDisplayNum, needsSetup, isAdPaid, deliveryPerson })}") &&
-  views.includes("<tr ${shellTableDetailAttrs('ads', String(ad.id || ''))}") &&
-  views.includes("${shellDeliverySummaryRow(ad, { customer, deliveryPerson, debtLocal, debtUSD })}") &&
-  views.includes("<tr ${shellTableDetailAttrs('deliveries', String(ad.id || ''))}") &&
-  css.includes('.mobile-card-table tr.shell-tr-summary { display: none !important; }') &&
-  css.includes('.mobile-card-table tbody tr[data-shell-detail]:not(.is-open) { display: none !important; }'));
+check('ads use their original table and phone summary while deliveries retain job cards',
+  views.includes('ads-summary-table mobile-card-table') &&
+  views.includes('shellAdSummaryRow(ad, {') &&
+  views.includes('<article class="ops-delivery-card') &&
+  views.includes('data-delivery-record=') &&
+  views.includes("<tr ${shellTableDetailAttrs('ads',") &&
+  !views.includes("<tr ${shellTableDetailAttrs('deliveries',") &&
+  read('index.html').includes('assets/operations-workspace.css'));
 
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;

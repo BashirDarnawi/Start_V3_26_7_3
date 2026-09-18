@@ -10,6 +10,37 @@ from typing import Any, Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 
+def enforce_ad_photo_mutation_permissions(
+    requested: dict[str, Any],
+    existing: dict[str, Any] | None,
+    *,
+    can_upload: bool,
+    can_view: bool,
+) -> None:
+    """Authorize actual uploaded-photo changes, including the legacy alias.
+
+    Old clients may echo empty/unchanged fields on a text edit. Omitted photos
+    must stay untouched; equality must be checked against the locked row for
+    updates so a stale empty array cannot erase a concurrent upload.
+    """
+    previous = existing or {}
+    for field in ("adPhotos", "photos"):
+        if field not in requested:
+            continue
+        before, after = previous.get(field), requested[field]
+        if before == after or (before in (None, "", []) and after in (None, "", [])):
+            continue
+        if not can_upload or (existing is not None and not can_view):
+            raise HTTPException(status_code=403, detail="Photo changes require Upload Photos and, for existing ads, View Photos permission")
+    if (
+        existing is not None
+        and "primaryAdPhotoIndex" in requested
+        and requested["primaryAdPhotoIndex"] != previous.get("primaryAdPhotoIndex", 0)
+        and not can_view
+    ):
+        raise HTTPException(status_code=403, detail="View Photos permission is required to choose the main photo")
+
+
 def create_ad_media_router(
     *,
     current_user_dependency: Callable[..., dict[str, Any]],

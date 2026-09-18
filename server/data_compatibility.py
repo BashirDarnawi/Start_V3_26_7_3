@@ -7,4 +7,8 @@ for an edit timestamp that a read-only compatibility rule cannot produce.
 See docs/DATA_COMPATIBILITY.md for the upgrade and regression-test contract.
 """
 
-DATA_COMPATIBILITY_VERSION = 1
+# Version 2 publishes corrected owner visibility for private campaigns after
+# older delta reads incorrectly treated them as reviewer-only tombstones.
+# Existing cached deletion markers still require an authoritative full reload;
+# a compatibility merge deliberately cannot resurrect equal-version deletions.
+DATA_COMPATIBILITY_VERSION = 2

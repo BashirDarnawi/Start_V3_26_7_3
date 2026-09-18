@@ -46,4 +46,15 @@ def upgrade_password_hash_after_login(user: dict[str, Any], password: str) -> bo
                 "old_iterations": old_iterations,
             },
         )
-    return int(result.rowcount or 0) == 1
+    updated = int(result.rowcount or 0) == 1
+    if updated:
+        # Session creation compares this verified snapshot under the user lock.
+        # Carry our transparent upgrade forward without trusting a later read
+        # that could belong to a concurrent password reset.
+        user.update({
+            "password_hash": upgraded.hash_hex,
+            "password_salt": upgraded.salt_hex,
+            "password_algo": upgraded.algo,
+            "password_iterations": upgraded.iterations,
+        })
+    return updated

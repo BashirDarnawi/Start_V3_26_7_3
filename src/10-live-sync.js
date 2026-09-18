@@ -207,6 +207,11 @@ async function clearServerCollectionsForVisibility(collections) {
 }
 
 async function apiLoadCollectionSince(collection, sinceMs) {
+  const identity = getServerSessionIdentity();
+  const pollerEpoch = _serverLiveSync.pollerEpoch;
+  const assertCurrent = () => {
+    if (serverSessionIdentityChanged(identity) || pollerEpoch !== _serverLiveSync.pollerEpoch) throw makeSessionChangedError();
+  };
   const all = [];
   const indexById = new Map();
   let afterLastModified = null;
@@ -221,14 +226,16 @@ async function apiLoadCollectionSince(collection, sinceMs) {
     }
     // Use retry logic for resilience against transient server errors/timeouts
     const items = await withRetry(
-      () => apiJson(
-      path,
-      { method: 'GET' },
-      { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
-      ),
+      () => {
+        // Check every retry/page, not only the final merged response: a
+        // stopped poll must not start more requests under a replacement login.
+        assertCurrent();
+        return apiJson(path, { method: 'GET' }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+      },
       2, // 2 retries for delta sync (less aggressive than full load)
       500 // 500ms base delay
     );
+    assertCurrent();
     if (!Array.isArray(items) || items.length === 0) break;
     let lastEntity = null;
     for (const rawEntity of items) {
@@ -404,7 +411,7 @@ async function refreshServerDataCompatibility() {
   try {
     fetched = await _runWithConcurrency(collections, SERVER_API.liveSyncConcurrency || 4, async collection => ({
       collection, records: await apiLoadCollectionSince(collection, 0)
-    }));
+    }), aborted);
   } catch (_) {
     if (aborted()) return { aborted: true };
     // Keep the previous version and every current row. Retry on the next
@@ -505,8 +512,10 @@ async function serverLiveSyncOnce() {
   // wiped state — the "logout wipe undone by an in-flight sync" bug.
   const _sessionEpoch = _serverLiveSync.sessionEpoch;
   const _pollerEpoch = _serverLiveSync.pollerEpoch;
+  const _sessionIdentity = getServerSessionIdentity();
   const _syncAborted = () => (
     !state.currentUser ||
+    serverSessionIdentityChanged(_sessionIdentity) ||
     _serverLiveSync.sessionEpoch !== _sessionEpoch ||
     _serverLiveSync.pollerEpoch !== _pollerEpoch
   );
@@ -634,6 +643,9 @@ async function serverLiveSyncOnce() {
       const records = await apiLoadCollectionSince(collection, since);
       return { collection, since, records, ok: true, forbidden: false };
     } catch (e) {
+      // A late failure belongs to the stopped poll, not the replacement
+      // session's cursors, permission results, or connection-health state.
+      if (_syncAborted()) return { collection, since, records: [], ok: false, forbidden: false };
       // Keep forbidden collections at cursor zero. If permission is granted
       // later, the next tick obtains the full newly-visible history.
       if (e?.status === 403) {
@@ -656,8 +668,9 @@ async function serverLiveSyncOnce() {
   // connection cap (uvicorn --limit-concurrency) from a SINGLE tab, and the
   // excess came back as raw 503s — the real source of the red sync badge.
   const deltaResults = await _runWithConcurrency(
-    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince
+    deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince, _syncAborted
   );
+  if (_syncAborted()) return { ok: false, skipped: true };
   const deltaByCollection = new Map(deltaResults.map(result => [result.collection, result]));
   const recordsFor = (name) => deltaByCollection.get(name)?.records || [];
   const adsDelta = recordsFor('ads');
@@ -842,12 +855,12 @@ async function serverLiveSyncOnce() {
 }
 
 // Run fn over items with at most `limit` in flight; results keep item order.
-async function _runWithConcurrency(items, limit, fn) {
+async function _runWithConcurrency(items, limit, fn, isAborted = () => false) {
   const list = Array.from(items || []);
   const results = new Array(list.length);
   let next = 0;
   const worker = async () => {
-    while (next < list.length) {
+    while (next < list.length && !isAborted()) {
       const index = next++;
       results[index] = await fn(list[index]);
     }
@@ -860,24 +873,35 @@ async function _runWithConcurrency(items, limit, fn) {
 async function serverLiveSyncTick() {
   if (_serverLiveSync.inFlight) return;
   _serverLiveSync.inFlight = true;
+  const identity = getServerSessionIdentity();
+  const pollerEpoch = _serverLiveSync.pollerEpoch;
+  const isCurrent = () => !serverSessionIdentityChanged(identity) && pollerEpoch === _serverLiveSync.pollerEpoch;
   // Expose the running tick so callers that stop the poller (tests, logout
   // paths) can await the work already in flight instead of racing it.
   let finishTick = null;
-  _serverLiveSync.tickPromise = new Promise(resolve => { finishTick = resolve; });
+  const tickPromise = new Promise(resolve => { finishTick = resolve; });
+  _serverLiveSync.tickPromise = tickPromise;
   updateSyncIndicator('syncing');
   let ok = false;
   try {
     const result = await serverLiveSyncOnce();
+    if (!isCurrent()) return;
     ok = result?.ok !== false;
     updateSyncIndicator(ok ? 'synced' : 'error');
   } catch (e) {
+    if (!isCurrent()) return;
     console.warn('[serverLiveSyncTick] Sync failed:', e?.message || e);
     updateSyncIndicator('error');
   } finally {
-    _serverLiveSync.inFlight = false;
-    _serverLiveSync.tickPromise = null;
+    // stop/start can launch a replacement before this request settles. Only
+    // that replacement owns its running flag and completion promise.
+    if (_serverLiveSync.tickPromise === tickPromise) {
+      _serverLiveSync.inFlight = false;
+      _serverLiveSync.tickPromise = null;
+    }
     if (finishTick) finishTick();
   }
+  if (!isCurrent()) return;
   // Exponential failure backoff (capped at 60s); any success resets it.
   if (ok) {
     _serverLiveSync.failStreak = 0;
@@ -1638,6 +1662,7 @@ const AUTHENTICATED_DIALOG_IDS = Object.freeze([
 ]);
 
 function closeSensitiveAuthenticatedUi() {
+  if (typeof resetNativeReminderSession === 'function') resetNativeReminderSession();
   _closeCustomerPagesDialogForStateChange();
   const closers = [
     () => closeCustomerPagesDialog(false), () => closePageAdsDialog(false),

@@ -7,7 +7,9 @@ test and reuse without importing the entire server or touching the database.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
+
+from .rbac import is_within_delivery_scope
 
 
 INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
@@ -186,3 +188,22 @@ def can_include_entity_media(
     if entity_type == "ads":
         return can_view_ad_photos
     return True
+
+
+def can_read_related_receipt(
+    entity: dict[str, Any],
+    user: dict[str, Any],
+    has_permission: Callable[..., bool],
+) -> bool:
+    """Apply receipt detail-read scope to secondary mutation responses.
+
+    An authorized ad action may legitimately adjust a linked receipt without
+    granting the caller access to that receipt's full private contents.
+    """
+    if entity.get("type") != "receipts" or entity.get("deleted"):
+        return False
+    data = entity.get("data") if isinstance(entity.get("data"), dict) else {}
+    if str(user.get("role") or "").lower() == "delivery":
+        return is_within_delivery_scope(user, data)
+    creator = entity.get("createdBy") or data.get("createdBy") or data.get("creatorId")
+    return has_permission(user, "receipts", "view", record_creator_id=str(creator or ""))
