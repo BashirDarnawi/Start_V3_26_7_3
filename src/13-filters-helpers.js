@@ -1733,7 +1733,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
                   .map(id => customersById.get(String(id))?.name || '')
                   .filter(Boolean).join(', ');
                 const adCount = can('ads', 'view') ? getAdsForPage(page.id).length : null;
-                const canMergeThisPage = !!mergeTargetId && String(page.id) !== mergeTargetId
+                const canMergeThisPage = typeof showPageMergeDialog === 'function' && !!mergeTargetId && String(page.id) !== mergeTargetId
                   && !String(page.metaPageId || '').trim();
                 return `<div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-2.5 flex flex-wrap items-center justify-between gap-2">
                   <div class="min-w-0">

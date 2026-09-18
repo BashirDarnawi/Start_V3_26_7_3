@@ -2538,7 +2538,6 @@ function renderModal() {
       updateAdDriverBudgetSummary();
       // Render funding list right away so the user always sees guidance / first allocation row
       renderAdFundingList();
-      updateAdLocalAmount();
       refreshAdFundingSummary();
       renderAdPhotoPreviews();
       // Initialize financial details for unpaid flows
@@ -4067,7 +4066,7 @@ async function handleModalSubmit() {
         // Log receipt usage for each allocation
         if (isPaid && allocations.length > 0) {
           for (const alloc of allocations) {
-            addAuditLog('receipt', alloc.receiptId, 'usage', `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, {
+            addAuditLog('receipt', alloc.receiptId, `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, { kind: 'usage',
               adId: savedAd.id,
               amountUSD: alloc.amountUSD,
               receiptId: alloc.receiptId
@@ -4479,12 +4478,12 @@ function closeModal() {
   // next ad's top-up session.
   tempTopUps = [];
   // Discard any pending (unsaved) clothes-product/shipment edits
-  _clothesTempVariants = [];
-  _clothesTempPhoto = null;
+  if (typeof _clothesTempVariants !== 'undefined') _clothesTempVariants = [];
+  if (typeof _clothesTempPhoto !== 'undefined') _clothesTempPhoto = null;
   if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken++; // invalidate pending photo callback
 
-  _clothesTempShipLines = [];
-  _clothesTempOrderLines = [];
+  if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];
+  if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
   
   // Clear URL params. If the opener pushed a history entry (albayanModal
   // stamp), consume it with history.back() instead of replaceState (which

@@ -380,7 +380,7 @@ class AdminRestoreEntityRequest(BaseModel):
     """
 
     data: dict[str, Any]
-    createdAt: Optional[int] = None
+    createdAt: Optional[int] = Field(default=None, ge=0, le=8_000_000_000_000)  # epoch ms; the column is a 64-bit integer
     createdBy: Optional[str] = None
     lastModified: Optional[int] = None
     deleted: Optional[bool] = None

@@ -610,14 +610,14 @@ async function confirmStopAd(id, source = 'modal') {
       // and shown raw in the edit form's amount inputs.
       p.alloc.amountUSD = Math.round(Math.max(p.newAmount, 0) * 100) / 100;
       if (isEditing) {
-        addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - ${delta > 0 ? 'used additional' : 'returned additional'} $${Math.abs(delta).toFixed(2)} ${delta > 0 ? 'from' : 'to'} ${poolLabel}`, {
+        addAuditLog('receipt', receipt.id, `Ad ${ad.id} updated - ${delta > 0 ? 'used additional' : 'returned additional'} $${Math.abs(delta).toFixed(2)} ${delta > 0 ? 'from' : 'to'} ${poolLabel}`, { kind: 'usage',
           adId: ad.id,
           ...(delta > 0 ? { usedAmount: Math.abs(delta) } : { returnedAmount: Math.abs(delta) }),
           spentAmount: spentUSD,
           previousSpent: previousSpentUSD
         });
       } else {
-        addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} stopped - returned $${Math.abs(delta).toFixed(2)} to ${poolLabel}`, {
+        addAuditLog('receipt', receipt.id, `Ad ${ad.id} stopped - returned $${Math.abs(delta).toFixed(2)} to ${poolLabel}`, { kind: 'usage',
           adId: ad.id,
           returnedAmount: Math.abs(delta),
           spentAmount: spentUSD
@@ -639,7 +639,7 @@ async function confirmStopAd(id, source = 'modal') {
     ad.dueAmountToUseUSD = Math.round(Math.max(ad.dueAmountToUseUSD - reductionAmount, 0) * 100) / 100;
 
     if (ad.linkedDeliveryReceiptId) {
-      addAuditLog('receipt', ad.linkedDeliveryReceiptId, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, {
+      addAuditLog('receipt', ad.linkedDeliveryReceiptId, `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, { kind: 'usage',
         adId: ad.id,
         returnedAmount: reductionAmount,
         spentAmount: spentUSD
@@ -932,6 +932,7 @@ function printCurrentPage() {
 }
 
 function exportData() {
+  const isAr = state.language === 'ar';
   // Local mode can export its complete local workspace. Server mode can only
   // export the records currently loaded in this browser; that snapshot may be
   // stale/permission-scoped and the online restore intentionally cannot write

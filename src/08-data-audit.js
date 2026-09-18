@@ -236,6 +236,7 @@ function _localLegacyDueMinor(ad) {
   if (typeof ad?.exchangeRate === 'boolean') throw new Error('Stored funding exchange rate is invalid');
   const rate = Number(ad?.exchangeRate);
   if (!Number.isFinite(rate) || rate <= 0) throw new Error('Stored funding exchange rate is invalid');
+  if (rate <= 0.001 || rate === 1) return 0;  // the 0.001 sentinel / an unset rate never converts (mirrors _financial_ad_due_usage)
   return _localFundingMinor(lyd / rate);
 }
 
@@ -266,7 +267,10 @@ function getAdLegacyDueMirrorUSD(ad, receiptId, fallbackRate = 0) {
   const direct = Number(ad?.dueAmountToUseUSD);
   if (Number.isFinite(direct) && direct > 0) return Math.round(direct * 100) / 100;
   const local = Number(ad?.dueAmountToUseLYD);
-  const rate = Number(ad?.exchangeRate) || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
+  const explicit = Number(ad?.exchangeRate);
+  // The 0.001 sentinel and an unset "1" never convert; the receipt's rate is the documented fallback (test-money A4b).
+  const trusted = Number.isFinite(explicit) && explicit > 0.001 && explicit !== 1 ? explicit : 0;
+  const rate = trusted || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
   if (!Number.isFinite(local) || local <= 0 || !Number.isFinite(rate) || rate <= 0) return 0;
   return Math.round((local / rate) * 100) / 100;
 }

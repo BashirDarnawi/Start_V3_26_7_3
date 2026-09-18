@@ -658,7 +658,7 @@ def validate_financial_amount(value: Any, field_name: str = "") -> float:
     """Validate and sanitize a financial amount."""
     try:
         amount = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # a 400-digit integer is valid JSON
         return 0.0
 
     # Check for special float values
@@ -681,7 +681,7 @@ def validate_exchange_rate(value: Any) -> float:
     """Validate and sanitize an exchange rate."""
     try:
         rate = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 1.0
 
     # Check for special float values
@@ -700,6 +700,8 @@ def validate_exchange_rate(value: Any) -> float:
 def sanitize_str(s: str, max_length: int = MAX_INPUT_LENGTH) -> str:
     # Server-side defense-in-depth (frontend already escapes output)
     s = (s or "").replace("\x00", "").strip()
+    if not s.isascii():
+        s = s.encode("utf-8", "ignore").decode("utf-8")  # a lone surrogate (valid JSON) cannot be stored or returned
     # BEST PRACTICE: Enforce maximum length to prevent DoS attacks
     if len(s) > max_length:
         s = s[:max_length]
@@ -6983,7 +6985,7 @@ def _financial_collection_payments(raw: Any) -> tuple[list[dict[str, Any]], int]
             or not rate2.is_finite()
             or amount < 0
             or rate1 < 0
-            or rate2 <= 0
+            or rate2 < Decimal(str(MIN_EXCHANGE_RATE))  # a microscopic rate makes the USD figure astronomical
             or amount > Decimal(str(MAX_FINANCIAL_AMOUNT))
             or rate1 > Decimal(str(MAX_EXCHANGE_RATE))
             or rate2 > Decimal(str(MAX_EXCHANGE_RATE))
@@ -9417,6 +9419,13 @@ def _financial_patch_receipt_atomic(
                 raise HTTPException(status_code=409, detail="A destroyed receipt is locked; delete its record to free the number")
             if str(clean.get("status") or "") == "Destroyed":
                 raise HTTPException(status_code=400, detail="A receipt cannot become destroyed; record the torn paper as a new destroyed receipt")
+            if str(old.get("status") or "") in {"Canceled", "Lost"} and str(clean.get("status") or "") in {"Not Paid", "Paid"}:
+                try:
+                    _covered_before = float(old.get("companyCoveredUSD") or 0)
+                except (TypeError, ValueError):
+                    _covered_before = 0.0
+                if _covered_before > 0:  # its ad rows were released on cancel; reopening would let the company pay the same debt twice
+                    raise HTTPException(status_code=409, detail="A canceled receipt the company already covered cannot be reopened; record a new receipt")
             _financial_normalize_receipt_paid_pair(old, clean)
             if convert_funding_to_debt:
                 # Explicit paid -> not_paid conversion (the exact REVERSE of the
@@ -9680,8 +9689,10 @@ def _receipt_payments_credit_minor(payments: Any) -> int | None:
             amount = float(entry.get("amount") or 0)
             rate = float(entry.get("rate") or 0)
             rate2 = float(entry.get("rate2") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
+        if not all(math.isfinite(v) for v in (amount, rate, rate2)):
+            return None  # "1e400" / "nan" parse but cannot be money
         if amount <= 0:
             continue
         saw_line = True
@@ -10195,7 +10206,7 @@ def create_wallet_reversal(
     saved, created = _wallet_reversal_atomic(admin, body.transactionId, body.memo)
     if created:
         audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet reversal",
-              {k: (saved.get("data") or {}).get(k) for k in ("amountMinor", "currency", "fromUserId", "toUserId", "reversesTransactionId")})
+              {k: (saved.get("data") or {}).get(k) for k in ("amountMinor", "currency", "fromUserId", "toUserId", "referenceId")})
     return EntityResponse(**saved)
 
 
@@ -13885,6 +13896,13 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 ).scalar() or 0
             if int(_open_jobs) > 0:  # the delivery board would show these jobs as unassigned
                 raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them first")
+            with db_conn() as conn:
+                _pending_pay = conn.execute(
+                    text(f"SELECT COUNT(*) FROM entities WHERE type='walletPaymentRequests' AND deleted=false AND created_by=:uid AND {json_field_sql('status')}='pending'"),
+                    {"uid": user_id},
+                ).scalar() or 0
+            if int(_pending_pay) > 0:  # a confirmation after the delete would credit a wallet nobody can use
+                raise HTTPException(status_code=409, detail="This account has payment requests waiting for confirmation; cancel them first")
             with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK), db_conn() as conn:  # a crashed approval's capture must not die with the account
                 _parked = conn.execute(
                     text(f"SELECT id, data_json FROM entities WHERE type='adCampaignRequests' AND created_by=:uid AND {json_field_sql('status')} NOT IN ('Approved','Stopped')"),

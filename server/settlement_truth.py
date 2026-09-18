@@ -229,8 +229,20 @@ def apply_coverage_settlement_truth(
             # settling just declares the shortfall resolved.
             merged["customerOutstandingUSD"] = 0.0
             return
-        # Settle: strip the company share out of the recorded customer money.
-        new_amount_minor = max(amount_minor - covered_minor, 0)
+        # Settle: the office records either the GROSS (the form prefill) or the
+        # net cash the customer actually paid. Only the gross carries the
+        # company share; subtracting it from net cash destroyed real money.
+        gross_minor = due_total(old)
+        net_expected = max(gross_minor - covered_minor, 0)
+        # The form derives amountUSD from payment rows: a rate change or cent
+        # rounding lands a little under the gross and still means "the gross".
+        gross_floor = gross_minor - max(100, gross_minor // 100)
+        if covered_minor > 0 and net_expected < amount_minor < gross_floor:
+            raise HTTPException(
+                status_code=409,
+                detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
+            )
+        new_amount_minor = max(amount_minor - covered_minor, 0) if amount_minor >= gross_floor else amount_minor
         merged["customerOutstandingUSD"] = 0.0
     else:
         if already_delivered:

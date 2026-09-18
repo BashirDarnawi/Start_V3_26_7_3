@@ -470,9 +470,14 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
                 return max(0.0, min(float(stored), ceiling)) if ceiling > 0 else max(0.0, float(stored))
             except (TypeError, ValueError):
                 pass
+        covered = max(0.0, _safe_number(row.get("companyCoveredUSD")))
+        debt = max(0.0, _safe_number(row.get("debtAmountUSD")))
+        collection_recorded = row.get("paymentResult") is not None or row.get("amountCollectedFromCustomer") is not None
+        if str(row.get("deliveryStatus") or "") == "Delivered" and debt > 0 and collection_recorded:
+            return max(0.0, debt - covered - amount)  # amountUSD is the cash the driver collected (verified completion)
         if row.get("companyCoveredUSD") is None:
             return ceiling if ceiling > 0 else 1.0  # untouched by coverage: the status decides, as before
-        return max(0.0, ceiling - max(0.0, _safe_number(row.get("companyCoveredUSD"))))
+        return max(0.0, ceiling - covered)
     # Money the company already absorbed is not "still unpaid" (the receipt keeps its Not Paid status by design).
     unpaid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "not_paid" and _customer_outstanding(row) > 0.005]
     blockers = []
@@ -494,6 +499,7 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         "totals": {
             "receiptVolumeUSD": round(receipt_total, 2),
             "paidReceiptsUSD": round(paid_total, 2),
+            "companyCoveredUSD": round(sum(max(0.0, _safe_number(row.get("companyCoveredUSD"))) for row in receipts), 2),  # canceled receipts keep their coverage
             "adSalesUSD": round(ad_sales, 2),
             "adSalesPendingUSD": round(ad_sales_pending, 2),
             "adSpendUSD": round(actual_spend, 2),

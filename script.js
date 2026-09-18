@@ -7468,6 +7468,7 @@ function _localLegacyDueMinor(ad) {
   if (typeof ad?.exchangeRate === 'boolean') throw new Error('Stored funding exchange rate is invalid');
   const rate = Number(ad?.exchangeRate);
   if (!Number.isFinite(rate) || rate <= 0) throw new Error('Stored funding exchange rate is invalid');
+  if (rate <= 0.001 || rate === 1) return 0;  // the 0.001 sentinel / an unset rate never converts (mirrors _financial_ad_due_usage)
   return _localFundingMinor(lyd / rate);
 }
 
@@ -7498,7 +7499,10 @@ function getAdLegacyDueMirrorUSD(ad, receiptId, fallbackRate = 0) {
   const direct = Number(ad?.dueAmountToUseUSD);
   if (Number.isFinite(direct) && direct > 0) return Math.round(direct * 100) / 100;
   const local = Number(ad?.dueAmountToUseLYD);
-  const rate = Number(ad?.exchangeRate) || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
+  const explicit = Number(ad?.exchangeRate);
+  // The 0.001 sentinel and an unset "1" never convert; the receipt's rate is the documented fallback (test-money A4b).
+  const trusted = Number.isFinite(explicit) && explicit > 0.001 && explicit !== 1 ? explicit : 0;
+  const rate = trusted || Number(fallbackRate) || Number(state.defaultExchangeRate) || 0;
   if (!Number.isFinite(local) || local <= 0 || !Number.isFinite(rate) || rate <= 0) return 0;
   return Math.round((local / rate) * 100) / 100;
 }
@@ -21633,8 +21637,11 @@ function _receiptCustomerOutstandingUSD(r) {
   const ceiling = Math.max(amount, Math.max(0, Number(r?.debtAmountUSD) || 0));  // after delivery, amountUSD is the cash collected
   const stored = Number(r?.customerOutstandingUSD);
   if (r?.customerOutstandingUSD != null && Number.isFinite(stored)) return ceiling > 0 ? Math.max(0, Math.min(stored, ceiling)) : Math.max(0, stored);
+  const covered = Math.max(0, Number(r?.companyCoveredUSD) || 0), debt = Math.max(0, Number(r?.debtAmountUSD) || 0);
+  const collectionRecorded = r?.paymentResult != null || r?.amountCollectedFromCustomer != null;  // a verified completion wrote the cash
+  if (String(r?.deliveryStatus || '') === 'Delivered' && debt > 0 && collectionRecorded) return Math.max(0, debt - covered - amount);
   if (r?.companyCoveredUSD == null) return ceiling;  // untouched by coverage: the whole debt is pending
-  return Math.max(0, ceiling - Math.max(0, Number(r?.companyCoveredUSD) || 0));
+  return Math.max(0, ceiling - covered);
 }
 
 async function exportAuditLogs(format) {
@@ -25906,7 +25913,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
                   .map(id => customersById.get(String(id))?.name || '')
                   .filter(Boolean).join(', ');
                 const adCount = can('ads', 'view') ? getAdsForPage(page.id).length : null;
-                const canMergeThisPage = !!mergeTargetId && String(page.id) !== mergeTargetId
+                const canMergeThisPage = typeof showPageMergeDialog === 'function' && !!mergeTargetId && String(page.id) !== mergeTargetId
                   && !String(page.metaPageId || '').trim();
                 return `<div class="rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-2.5 flex flex-wrap items-center justify-between gap-2">
                   <div class="min-w-0">
@@ -36353,7 +36360,6 @@ function setAdPaymentStatus(status) {
   }
 
   // Toggle sections
-  const wontPaySection = document.getElementById('ad-wont-pay-section');
   const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
   
   if (status === 'paid') {
@@ -36364,7 +36370,6 @@ function setAdPaymentStatus(status) {
     if (driverSettlementHint) {
       driverSettlementHint.classList.toggle('hidden', getOriginalUnpaidAdBudgetUSD() <= 0);
     }
-    if (wontPaySection) wontPaySection.classList.add('hidden');
     setAdCollectionMethod('');
     // Ensure Receipt Funding list renders immediately (prevents "blank" feeling)
     renderAdFundingList();
@@ -36397,7 +36402,6 @@ function setAdPaymentStatus(status) {
       if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
       if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     }
-    if (wontPaySection) wontPaySection.classList.add('hidden');
   } else {
     // wont_pay
     if (notPaidOptions) notPaidOptions.classList.add('hidden');
@@ -36405,7 +36409,6 @@ function setAdPaymentStatus(status) {
     if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
     if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     if (driverSettlementHint) driverSettlementHint.classList.add('hidden');
-    if (wontPaySection) wontPaySection.classList.remove('hidden');
     setAdCollectionMethod('');
   }
   
@@ -36831,19 +36834,6 @@ function removeReceiptPhoto(idx) {
 }
 
 // Update local amount display
-function updateAdLocalAmount() {
-  const amountInput = document.getElementById('ad-amount');
-  const rateInput = document.getElementById('ad-rate');
-  const displayEl = document.getElementById('ad-local-amount');
-  
-  if (!amountInput || !rateInput || !displayEl) return;
-  
-  const amount = parseFloat(amountInput.value) || 0;
-  const rate = parseFloat(rateInput.value) || 1;
-  const localAmount = amount * rate;
-  
-  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString('en-US'))} LYD</span>`;
-}
 
 function addAdFundingAllocation() {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };
@@ -40168,7 +40158,6 @@ function renderModal() {
       updateAdDriverBudgetSummary();
       // Render funding list right away so the user always sees guidance / first allocation row
       renderAdFundingList();
-      updateAdLocalAmount();
       refreshAdFundingSummary();
       renderAdPhotoPreviews();
       // Initialize financial details for unpaid flows
@@ -41697,7 +41686,7 @@ async function handleModalSubmit() {
         // Log receipt usage for each allocation
         if (isPaid && allocations.length > 0) {
           for (const alloc of allocations) {
-            addAuditLog('receipt', alloc.receiptId, 'usage', `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, {
+            addAuditLog('receipt', alloc.receiptId, `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, { kind: 'usage',
               adId: savedAd.id,
               amountUSD: alloc.amountUSD,
               receiptId: alloc.receiptId
@@ -42109,12 +42098,12 @@ function closeModal() {
   // next ad's top-up session.
   tempTopUps = [];
   // Discard any pending (unsaved) clothes-product/shipment edits
-  _clothesTempVariants = [];
-  _clothesTempPhoto = null;
+  if (typeof _clothesTempVariants !== 'undefined') _clothesTempVariants = [];
+  if (typeof _clothesTempPhoto !== 'undefined') _clothesTempPhoto = null;
   if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken++; // invalidate pending photo callback
 
-  _clothesTempShipLines = [];
-  _clothesTempOrderLines = [];
+  if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];
+  if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
   
   // Clear URL params. If the opener pushed a history entry (albayanModal
   // stamp), consume it with history.back() instead of replaceState (which
@@ -44534,14 +44523,14 @@ async function confirmStopAd(id, source = 'modal') {
       // and shown raw in the edit form's amount inputs.
       p.alloc.amountUSD = Math.round(Math.max(p.newAmount, 0) * 100) / 100;
       if (isEditing) {
-        addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} updated - ${delta > 0 ? 'used additional' : 'returned additional'} $${Math.abs(delta).toFixed(2)} ${delta > 0 ? 'from' : 'to'} ${poolLabel}`, {
+        addAuditLog('receipt', receipt.id, `Ad ${ad.id} updated - ${delta > 0 ? 'used additional' : 'returned additional'} $${Math.abs(delta).toFixed(2)} ${delta > 0 ? 'from' : 'to'} ${poolLabel}`, { kind: 'usage',
           adId: ad.id,
           ...(delta > 0 ? { usedAmount: Math.abs(delta) } : { returnedAmount: Math.abs(delta) }),
           spentAmount: spentUSD,
           previousSpent: previousSpentUSD
         });
       } else {
-        addAuditLog('receipt', receipt.id, 'usage', `Ad ${ad.id} stopped - returned $${Math.abs(delta).toFixed(2)} to ${poolLabel}`, {
+        addAuditLog('receipt', receipt.id, `Ad ${ad.id} stopped - returned $${Math.abs(delta).toFixed(2)} to ${poolLabel}`, { kind: 'usage',
           adId: ad.id,
           returnedAmount: Math.abs(delta),
           spentAmount: spentUSD
@@ -44563,7 +44552,7 @@ async function confirmStopAd(id, source = 'modal') {
     ad.dueAmountToUseUSD = Math.round(Math.max(ad.dueAmountToUseUSD - reductionAmount, 0) * 100) / 100;
 
     if (ad.linkedDeliveryReceiptId) {
-      addAuditLog('receipt', ad.linkedDeliveryReceiptId, 'usage', `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, {
+      addAuditLog('receipt', ad.linkedDeliveryReceiptId, `Ad ${ad.id} stopped - returned $${reductionAmount.toFixed(2)} to delivery receipt due balance`, { kind: 'usage',
         adId: ad.id,
         returnedAmount: reductionAmount,
         spentAmount: spentUSD
@@ -44856,6 +44845,7 @@ function printCurrentPage() {
 }
 
 function exportData() {
+  const isAr = state.language === 'ar';
   // Local mode can export its complete local workspace. Server mode can only
   // export the records currently loaded in this browser; that snapshot may be
   // stale/permission-scoped and the online restore intentionally cannot write

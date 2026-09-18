@@ -1874,7 +1874,7 @@ function renderAdsStudioWallet() {
   const history = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
     .filter(tx => tx && !tx._deleted && String(tx.currency || '').toUpperCase() === 'USD'
       && (String(tx.toUserId || '') === uid || String(tx.fromUserId || '') === uid))
-    .slice(-8).reverse();
+    .slice(0, 8);  // newest first: the ledger array is newest-first in server mode
   return `
     <div class="space-y-6">
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">

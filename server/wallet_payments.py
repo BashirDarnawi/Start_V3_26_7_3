@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
 from .db import db_conn, json_dumps, json_field_sql, json_loads, now_ms
+from .entity_projection import _inline_media_sql_projection
 from .payment_methods import (
     enabled_payment_method_ids,
     get_payment_method,
@@ -521,19 +522,20 @@ def create_wallet_payments_router(
         uid = str(user.get("id") or "")
         results: list[dict[str, Any]] = []
         with db_conn() as conn:
-            # 'mine' scopes in SQL by the real created_by column so only the
-            # caller's rows are JSON-decoded (photos make rows heavy). The
-            # admin 'pending' scope still scans — pending rows are capped at
-            # 5 per user and this endpoint is admin-rare.
+            # Filter and project in SQL: confirmed rows keep their transfer
+            # photos forever, and Ads Studio asks for this list on every open.
+            _lean = _inline_media_sql_projection(WALLET_PAYMENT_COLLECTION, "postgresql" if ctx["is_postgres"]() else "sqlite")
+            _json_col = f"{_lean[0]} AS data_json" if _lean else "data_json"
+            _columns = f"id, type, {_json_col}, deleted, created_at, created_by, last_modified"
             if want_all_pending:
                 rows = conn.execute(
-                    text("SELECT * FROM entities WHERE type = :type AND deleted = false"),
+                    text(f"SELECT {_columns} FROM entities WHERE type = :type AND deleted = false AND {json_field_sql('status')} = 'pending'"),
                     {"type": WALLET_PAYMENT_COLLECTION},
                 ).mappings().all()
             else:
                 rows = conn.execute(
                     text(
-                        "SELECT * FROM entities WHERE type = :type AND deleted = false "
+                        f"SELECT {_columns} FROM entities WHERE type = :type AND deleted = false "
                         "AND created_by = :uid"
                     ),
                     {"type": WALLET_PAYMENT_COLLECTION, "uid": uid},
@@ -654,6 +656,10 @@ def create_wallet_payments_router(
             currency = str(data.get("currency") or "USD").upper()
             if not owner or amount <= 0:
                 raise HTTPException(status_code=409, detail="Payment request is invalid")
+            try:  # a deleted account cannot receive money nobody can spend or reverse
+                ctx["lock_and_validate_wallet_users"](conn, [owner], postgres=postgres)
+            except HTTPException as owner_error:
+                raise HTTPException(status_code=409, detail="This account was deleted; cancel the request instead") from owner_error
             credit_key = f"payreq:{rid}"
             ctx["lock_idempotency_key"](conn, credit_key, postgres=postgres)
             credit = ctx["find_entity_by_idempotency"](conn, "walletTransactions", credit_key)

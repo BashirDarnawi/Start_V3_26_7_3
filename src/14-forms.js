@@ -4657,7 +4657,6 @@ function setAdPaymentStatus(status) {
   }
 
   // Toggle sections
-  const wontPaySection = document.getElementById('ad-wont-pay-section');
   const collectionMethod = document.getElementById('ad-collection-method')?.value || '';
   
   if (status === 'paid') {
@@ -4668,7 +4667,6 @@ function setAdPaymentStatus(status) {
     if (driverSettlementHint) {
       driverSettlementHint.classList.toggle('hidden', getOriginalUnpaidAdBudgetUSD() <= 0);
     }
-    if (wontPaySection) wontPaySection.classList.add('hidden');
     setAdCollectionMethod('');
     // Ensure Receipt Funding list renders immediately (prevents "blank" feeling)
     renderAdFundingList();
@@ -4701,7 +4699,6 @@ function setAdPaymentStatus(status) {
       if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
       if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     }
-    if (wontPaySection) wontPaySection.classList.add('hidden');
   } else {
     // wont_pay
     if (notPaidOptions) notPaidOptions.classList.add('hidden');
@@ -4709,7 +4706,6 @@ function setAdPaymentStatus(status) {
     if (unpaidFinancial) unpaidFinancial.classList.remove('hidden');
     if (driverBudgetSection) driverBudgetSection.classList.add('hidden');
     if (driverSettlementHint) driverSettlementHint.classList.add('hidden');
-    if (wontPaySection) wontPaySection.classList.remove('hidden');
     setAdCollectionMethod('');
   }
   
@@ -5135,19 +5131,6 @@ function removeReceiptPhoto(idx) {
 }
 
 // Update local amount display
-function updateAdLocalAmount() {
-  const amountInput = document.getElementById('ad-amount');
-  const rateInput = document.getElementById('ad-rate');
-  const displayEl = document.getElementById('ad-local-amount');
-  
-  if (!amountInput || !rateInput || !displayEl) return;
-  
-  const amount = parseFloat(amountInput.value) || 0;
-  const rate = parseFloat(rateInput.value) || 1;
-  const localAmount = amount * rate;
-  
-  displayEl.innerHTML = `${state.language === 'ar' ? 'بالعملة المحلية' : 'Local'}: <span class="font-medium text-slate-700 dark:text-slate-300">${Security.escapeHtml(localAmount.toLocaleString('en-US'))} LYD</span>`;
-}
 
 function addAdFundingAllocation() {
   state.tempAdFunding = state.tempAdFunding || { allocations: [] };

@@ -289,11 +289,17 @@ def _financial_ad_due_usage(ad: dict[str, Any], receipt_id: str) -> int:
     local = _financial_minor(ad.get("dueAmountToUseLYD"), "stored due allocation")
     if not local:
         return 0
-    return int(
-        (Decimal(local) / _financial_rate(ad.get("exchangeRate"))).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
-        )
+    raw_rate = ad.get("exchangeRate")
+    rate = _financial_rate(raw_rate)
+    trusted_rate = (
+        raw_rate is not None
+        and str(raw_rate) != ""
+        and rate > Decimal(str(MIN_EXCHANGE_RATE))
+        and rate != Decimal(1)
     )
+    if not trusted_rate:
+        return 0  # same rule as _financial_due_total: the 0.001 sentinel advertised $500,000 of debt
+    return int((Decimal(local) / rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def _financial_ad_company_usage(ad: dict[str, Any], receipt_id: str) -> int:

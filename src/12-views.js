@@ -6381,8 +6381,11 @@ function _receiptCustomerOutstandingUSD(r) {
   const ceiling = Math.max(amount, Math.max(0, Number(r?.debtAmountUSD) || 0));  // after delivery, amountUSD is the cash collected
   const stored = Number(r?.customerOutstandingUSD);
   if (r?.customerOutstandingUSD != null && Number.isFinite(stored)) return ceiling > 0 ? Math.max(0, Math.min(stored, ceiling)) : Math.max(0, stored);
+  const covered = Math.max(0, Number(r?.companyCoveredUSD) || 0), debt = Math.max(0, Number(r?.debtAmountUSD) || 0);
+  const collectionRecorded = r?.paymentResult != null || r?.amountCollectedFromCustomer != null;  // a verified completion wrote the cash
+  if (String(r?.deliveryStatus || '') === 'Delivered' && debt > 0 && collectionRecorded) return Math.max(0, debt - covered - amount);
   if (r?.companyCoveredUSD == null) return ceiling;  // untouched by coverage: the whole debt is pending
-  return Math.max(0, ceiling - Math.max(0, Number(r?.companyCoveredUSD) || 0));
+  return Math.max(0, ceiling - covered);
 }
 
 async function exportAuditLogs(format) {

@@ -913,3 +913,56 @@ Four hunters (profitability and the FIFO dollar ledger; the HTTP layer end to en
 - Operations: set `ALBAYAN_ORIGIN_SECRET` and a Cloudflare Transform Rule (or restrict the environment firewall to Cloudflare ranges) so the load balancer hostname cannot bypass the edge; set `ALBAYAN_COOKIE_SECURE=true`; `https://localhost` stays a trusted origin because the Android app uses it.
 - Health `ready` discloses the release id and metrics (used by the release checklist).
 - Purchase transaction scans the whole subscriptions table; the restore route can revive a page whose Meta id is live on another page; a hand-built import with `customers` but no `receipts` orphans live receipts; the webhook guard and backup lease hold a pooled connection idle-in-transaction; the campaign submit hold check is not serialised per user.
+
+
+## Round 12 (2026-09-19, night): runtime references, odd inputs, one-pot money, wallet charges
+
+Four hunters (a static cross-bundle reference audit with a scratch parser; server input edge cases reproduced as live 500s; a money-model regression pass that executed the real client and server readers on concrete numbers; the wallet charge-request flow). Tests: `server/test_deep_scan_round12.py`.
+
+### Fixed
+
+**Runtime references (frontend)**
+- The export-size warning added in round 10 referenced an undefined variable: exporting a workspace over the size limit would have thrown before the download with no message. Fixed.
+- Four audit calls for receipt usage passed five arguments, so their metadata (ad id, amount, receipt) was dropped and the description read "usage". Fixed.
+- The per-page "Merge into Meta" button in the duplicate-pages dialog called an admin-tools function without checking the bundle had loaded. Guarded.
+- Closing a modal reset four Clothes-bundle variables unguarded (works only because no file is strict mode). Guarded. A no-op helper and a never-rendered section were removed.
+
+**Odd inputs (server)**
+- A 400-digit integer in any money or rate field overflowed `float()` and answered 500 on every write route. Caught.
+- A microscopic second exchange rate (`1e-30`) in an ad's collection payments exceeded decimal precision and answered 500. Refused below the minimum rate.
+- `"1e400"` or `"nan"` payment rows parsed to infinity/NaN and crashed the paid-receipt raise path. Refused.
+- A lone UTF-16 surrogate in any string (valid JSON) crashed the database write. Stripped at the sanitiser.
+- The ad due-usage reader divided a LYD mirror by the 0.001 rate sentinel and advertised a 1000x debt (its twin, the receipt due total, was already guarded). Same rule applied.
+- An absurd `createdAt` on the restore route overflowed the database integer. Bounded in the schema.
+
+**One-pot money**
+- Settling a company-covered receipt subtracted the covered share from whatever amount the office typed. Recording the customer's net cash (what the form shows after coverage) destroyed real money: 60 typed on a 100 receipt with 40 covered became 20. Now only the gross carries the company share; net cash is kept as typed; an amount between the two is refused with a clear message.
+- The month-close "still unpaid" rule and the client "pending" figure now net the cash a driver collected on a delivered receipt (debt minus company share minus collected cash).
+- A canceled receipt the company already covered cannot be reopened by a status edit (its ad rows were released on cancel; a second coverage would pay the same debt twice).
+- The month close reports the company-covered total next to receipts and ad sales.
+
+**Wallet charges**
+- A charge request of a deleted account can no longer be confirmed (the credit would land in a wallet nobody can use or reverse), and an account with a request waiting for confirmation cannot be deleted.
+- The request lists filter pending rows and strip transfer photos in SQL; before, every historical photo was decoded on each Ads Studio open.
+- The reversal audit names the reversed transaction; the Ads Studio activity panel shows the newest rows (it showed the oldest eight).
+
+### Verified sound (no change)
+- 856 inline handlers resolve to defined functions; no duplicate declarations across bundles; no load-time TDZ; every `state.*` key read is written; listeners and timers are cleaned up.
+- `_financial_minor`, id validation, allocation parsing, phone canonicalisation, merge rewrites, `sanitize_json` depth and prototype guards, month-close date parsing, wallet amount parsing.
+- Delivery completion maths incl. coverage netting, due totals, coverage route guards, receipt delete release, stop/refund bounds, unsettle mirror, customer merge money rows, campaign wallet doors, LYD rounding, analytics vocabulary.
+- Payment-request lifecycle locks and idempotency, amount immutability, receipt-photo rules, reversal guards, transfer rules, hold accounting, personal scoping, client balance window.
+
+### Still open for the owner
+- Unassigned company coverage is never re-attached to a later ad's due row: after covering part of a receipt, funding a new ad from it re-promises the covered dollars as customer money (planner, settle cascade and customer card all need the same rule). This is the largest remaining money gap and needs a design decision.
+- A driver ad without a due row is counted twice on the customer card until settlement; a bare "Paid" flip on an underpaid delivery receipt whose ad holds a full due row is refused (the office must record the cash first).
+- Two client readers disagree on an underpaid receipt's pot size (display only).
+- A USD charge request created while no exchange rate exists tells the customer to pay "— LYD" (refusing it broke existing flows; the instructions template needs a USD fallback).
+- Reversing a confirmed charge credit or a plan payment leaves the request "confirmed" or the subscription active (the raw reversal stays available because it is the only refund tool; a proper refund route is a design item).
+
+**Review of these fixes (same night, 8 findings, all corrected or reverted)**
+- The USD-rate refusal and the plan-payment reversal block were reverted (existing flows and tests rely on both).
+- A "Delivered" row counts its amount as collected cash only when a verified completion recorded it (legacy rows keep their full debt); the client twin agrees.
+- The client's legacy due mirror distrusts the 0.001 sentinel and an unset "1" rate like the server; it keeps the receipt-rate fallback the money invariants pin (the server shows 0 for such rows, so a sentinel-rate legacy row still reads differently on the two sides).
+- A derived settle amount within one dollar or one percent under the gross still means the gross (rate changes and cent rounding no longer hit the refusal); the surrogate strip only runs on non-ASCII strings; the month-close company-covered total includes coverage on canceled receipts.
+- Campaign submission's money gate is not serialised per user (two quick submits over-hold; no money is lost); the customer wallet transfer form cannot find recipients without the user directory; the wallet page text contradicts the admin top-up button; the hub wallet card shows LYD only; reversing a confirmed charge credit leaves the request marked confirmed.
+- The ad form's driver pre-fill for a temp delivery receipt reads a control no template renders (dead since a refactor).
