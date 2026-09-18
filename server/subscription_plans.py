@@ -283,6 +283,7 @@ def plan_purchase_atomic(
     idempotency_key: str,
     user_id: str | None = None,
     requested_id: str | None = None,
+    expected_price_minor: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool, dict[str, Any] | None]:
     """Mint every serviceId row of one plan + at most one payment, atomically.
 
@@ -350,6 +351,8 @@ def plan_purchase_atomic(
             price_minor = int(plan.get("priceMinor") or 0)
             if price_minor < 0:
                 raise HTTPException(status_code=500, detail="Invalid server plan price")
+            if expected_price_minor is not None and int(expected_price_minor) != price_minor:
+                raise HTTPException(status_code=409, detail="The plan price changed; reload the plans and try again")
             if price_minor == 0:
                 amount = 0
             duration_days = int(plan.get("durationDays") or 0)
@@ -483,6 +486,7 @@ def create_subscription_plans_router(
             plan_id=body.planId,
             idempotency_key=body.idempotencyKey,
             user_id=body.userId,
+            expected_price_minor=body.expectedPriceMinor,  # the price the customer saw on the card
         )
         if created:
             ctx["audit"](
@@ -494,6 +498,7 @@ def create_subscription_plans_router(
                 {
                     "purchaseGroupId": body.idempotencyKey,
                     "paymentTxId": payment.get("id") if payment else None,
+                    "targetUserId": str(((rows[0] or {}).get("data") or {}).get("userId") or body.userId or user.get("id") or ""),
                 },
             )
         return {"subscriptions": rows, "payment": payment}

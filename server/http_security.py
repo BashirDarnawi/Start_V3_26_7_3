@@ -25,6 +25,10 @@ async def apply_security_headers(
         valid = bool(provided) and any(
             constant_time_equal(provided, value) for value in origin_secrets
         )
+        try:
+            request.state.origin_secret_ok = valid  # _client_ip trusts CF-Connecting-IP only behind the validated edge
+        except Exception:
+            pass
         response = (
             await call_next(request)
             if valid
@@ -56,7 +60,7 @@ def set_security_headers(request: Request, response: Response) -> Response:
             "Content-Security-Policy": (
                 "default-src 'self'; script-src 'self' 'unsafe-inline'; "
                 "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
-                "img-src 'self' data: blob: https:; connect-src 'self' https:; "
+                "img-src 'self' data: blob: https:; connect-src 'self'; "
                 "object-src 'none'; frame-src 'none'; frame-ancestors 'none'; "
                 "form-action 'self'; base-uri 'self'; manifest-src 'self';"
             ),

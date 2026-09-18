@@ -107,7 +107,15 @@ def _client_ip(request: Request) -> str:
     if TRUST_PROXY_HEADERS:
         try:
             cf = request.headers.get("cf-connecting-ip")
-            if cf and cf.strip():
+            # A request that reached the load balancer WITHOUT passing Cloudflare
+            # can carry any CF-Connecting-IP. When an origin secret is configured
+            # only requests that presented it (the Cloudflare edge) may name the
+            # client; the rest fall back to the unforgeable rightmost hop.
+            secret_configured = bool((os.getenv("ALBAYAN_ORIGIN_SECRET") or "").strip())
+            cf_trusted = bool(cf and cf.strip()) and (
+                not secret_configured or bool(getattr(getattr(request, "state", None), "origin_secret_ok", False))
+            )
+            if cf_trusted:
                 return cf.strip()
             xff = request.headers.get("x-forwarded-for")
             if xff:

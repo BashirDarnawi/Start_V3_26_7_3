@@ -860,3 +860,56 @@ Four hunters (import/export/restore paths; dates, time zones and bilingual text;
 - Client "today" and period math use the device's zone; a staff device set to another zone shifts business dates in analytics. A shared business-day helper for the client is a larger change.
 - Permission edits send the whole map (last writer wins); the webhook comment guard and the backup lease each hold a pooled connection idle-in-transaction; the campaign submit hold check is not serialised per user; the PostgreSQL fallback queries in the idempotency and balance helpers would poison the transaction on a malformed row (only reachable through an import).
 - The Control Center and dollar-purchase texts in `08-data-audit.js` wallet/subscription errors are still English-only.
+
+
+## Round 11 (2026-09-19, early morning): profitability, HTTP layer, subscriptions, data-model cascades
+
+Four hunters (profitability and the FIFO dollar ledger; the HTTP layer end to end; subscriptions and entitlements; data-model invariants and cascades). Tests: `server/test_deep_scan_round11.py` and two new cases in `scripts/test-profitability.js`.
+
+### Fixed
+
+**Profitability (admin analytics)**
+- A paid ad funded by receipts is priced at the rate the customer actually paid (weighted over its funding receipts) instead of the default rate of the day the ad was typed in. Before, a 950 LYD receipt could show as 970 LYD of revenue.
+- A written-off ad (`wont_pay`) counts its dollars as a known loss with zero revenue instead of "not yet billed"; the panel lists written-off spend separately.
+- "Pending (Receipts)" counts what the customer still owes: money the company already absorbed is not pending. The month close no longer blocks on a receipt the company fully covered.
+- Carried-balance receipts (pre-tracking credit) are out of the analytics volume and paid totals, like the month close and the hero already did.
+- The client's ad sale figure mirrors the server (legacy "Cancelled" spelling, never negative); date-only values are local calendar days like the purchase lots; the revenue card names the spend it priced; an imported dollar lot is validated like a typed one; the profitability test drives the field the code reads.
+
+**HTTP layer**
+- `CF-Connecting-IP` is believed only when the request also presented the origin secret (when one is configured). A request that reached the load balancer without passing Cloudflare could otherwise name any client address and rotate every per-IP rate limit.
+- The 10 MB write allowance needs a valid session, not merely a cookie named like one; the Meta webhook has its own 1 MB cap and a per-source ceiling before its body is read.
+- The served page's CSP `connect-src` is `'self'` (the page never talks to another host; the app shell's own meta CSP is unchanged).
+- The password-reset 429 carries `Retry-After`; "Backup now" is limited to six per hour per admin and its error text no longer leaks the database host.
+
+**Subscriptions**
+- The price the customer saw is pinned: a catalog change between opening the paywall and tapping Subscribe is a 409 ("price changed, reload"), not a surprise charge.
+- The paywall says "Prices did not load" (with Retry) or "This service is not currently sold" instead of spinning forever.
+- The purchase audit row names whose wallet was charged. (Two hunter suggestions were NOT applied because existing tests pin the opposite on purpose: a subscription row without an expiry stays open-ended, and a lapsed customer's bootstrap watermark keeps excluding campaigns.)
+
+**Data-model cascades**
+- Batch delete (the path the UI uses for every receipt delete) now releases a receipt's company-coverage rows exactly like the single-item route.
+- A customer merge no longer fails because a deleted receipt of the duplicate sits in a closed month (a tombstone moves no money).
+- A receipt or ad cannot be created for a customer that was deleted (a stale device three seconds behind could do that); a funded ad cannot be moved to another customer by a plain PATCH; a driver with open delivery jobs cannot be soft-deleted.
+
+**Review of these fixes (same night, 8 findings, all corrected)**
+- The "customer outstanding" helper (server month close and client pending) is bounded by the debt, not by `amountUSD`: after a delivery completion `amountUSD` is the driver's collected cash, so a delivered-but-unpaid receipt must still block the close. A receipt untouched by coverage keeps the status rule.
+- The paywall's "Prices did not load" branch read a state field that does not exist; it reads the module flag now.
+- The session check for large bodies runs in the thread pool, never on the event loop, and a database hiccup no longer reads as "sign in".
+- A receipt PATCH cannot re-point to a deleted customer either (the guard covered creates and ads only).
+- The breakdown dialog sums written-off losses like the panel; the funding-rate helper reads merged paid allocations and receipts without an explicit rate; the pinned price is the one rendered on the card, not the catalog at click time.
+- Two hunter suggestions were reverted after the full suite: open-ended subscription rows stay entitled, and a lapsed customer's bootstrap watermark keeps excluding campaigns (existing tests pin both on purpose).
+
+### Verified sound (no change)
+- Server lot validation, cents arithmetic, spend precedence across the three implementations, stop flow, canceled/lost exclusions, Meta start dates, deleted lots.
+- Static serving, cache-busting, API `no-store`, cookie flags and rotation, CSRF coverage of all mutating routes, proxy trust when off, error handling, pagination clamps, setup token, full-backup slot, signed media URLs, security headers.
+- Purchase money path, idempotency, admin-on-behalf rules, catalog immutability, expiry comparisons, paywall tick, server/client gates for Clothes, Ads Studio and Social Studio, data scoping, client entitlement state.
+- Temp D# generator, receipt-number uniqueness, receipt customer guard, allocation dedup, self-transfer, customer delete guards, merge lock order, product delete guards, client quarantine, ad delete money return.
+
+### Still open for the owner
+- Customers cannot reach the wallet, plans and charge-wallet pages (they are in the admin-only view set with the toast "hidden for now"), so a lapsed customer with no LYD balance cannot fund a plan self-service; the only path is an admin top-up. Remove `wallet`, `plans`, `charge-wallet` from `PLATFORM_ADMIN_ONLY_VIEWS` when self-service is wanted.
+- FIFO position of an active ad moves with every Meta sync and jumps when the ad is stopped (pricing per-sync spend deltas is a design change).
+- Company-covered ad spend is still shown as "not yet billed" (only `wont_pay` is recognised as a loss).
+- Same-day dollar lots re-order when one is deleted and re-created (tie-break is creation time).
+- Operations: set `ALBAYAN_ORIGIN_SECRET` and a Cloudflare Transform Rule (or restrict the environment firewall to Cloudflare ranges) so the load balancer hostname cannot bypass the edge; set `ALBAYAN_COOKIE_SECURE=true`; `https://localhost` stays a trusted origin because the Android app uses it.
+- Health `ready` discloses the release id and metrics (used by the release checklist).
+- Purchase transaction scans the whole subscriptions table; the restore route can revive a page whose Meta id is live on another page; a hand-built import with `customers` but no `receipts` orphans live receipts; the webhook guard and backup lease hold a pooled connection idle-in-transaction; the campaign submit hold check is not serialised per user.

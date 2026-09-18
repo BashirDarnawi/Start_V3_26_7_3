@@ -639,10 +639,12 @@ const SUBSCRIPTIONS = {
         ? 'شراء الباقات يتطلب اتصال الخادم'
         : 'Plan purchases need the server connection');
     }
+    const expectedPriceMinor = Number(opts.expectedPriceMinor);
     const payload = await apiPurchasePlan({
       planId: pid,
       idempotencyKey: idem,
-      userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined
+      userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined,
+      expectedPriceMinor: Number.isFinite(expectedPriceMinor) ? Math.max(0, Math.round(expectedPriceMinor)) : undefined  // the price shown on the card
     });
     const rows = Array.isArray(payload?.subscriptions) ? payload.subscriptions : [];
     const saved = rows.map(row => upsertServerBackedRecord('serviceSubscriptions', row));

@@ -23,7 +23,8 @@ function analyticsEscape(value) {
 }
 
 function analyticsDateValue(value) {
-  const time = new Date(value || 0).getTime();
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(value || '')) ? `${value}T00:00:00` : value;  // local midnight, like the lots
+  const time = new Date(day || 0).getTime();
   return Number.isFinite(time) && time > 0 ? time : 0;
 }
 
@@ -69,11 +70,42 @@ function getAdProfitEventTime(ad) {
   return Date.now();
 }
 
+function _adFundingReceiptRateLYD(ad) {
+  // The rate the customer actually paid: weighted over the funding receipts.
+  const receipts = state.receipts || [];
+  const find = id => (id ? receipts.find(r => r && !r._deleted && String(r.id) === String(id)) : null);
+  const rateOf = r => {
+    const explicit = analyticsNumber(r?.exchangeRate);
+    if (explicit > 0) return explicit;
+    const usd = analyticsNumber(r?.amountUSD), local = analyticsNumber(r?.amountLocal);
+    return usd > 0 && local > 0 ? local / usd : 0;
+  };
+  for (const key of ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations']) {
+    let total = 0, weighted = 0;
+    for (const alloc of (Array.isArray(ad?.[key]) ? ad[key] : [])) {
+      const rate = rateOf(find(alloc?.receiptId)), amount = analyticsNumber(alloc?.amountUSD);
+      if (rate > 0 && amount > 0) { weighted += rate * amount; total += amount; }
+    }
+    if (total > 0) return weighted / total;
+  }
+  for (const id of [ad?.fundingReceiptId, ad?.receiptId, ad?.linkedDeliveryReceiptId]) {
+    const rate = rateOf(find(id));
+    if (rate > 0) return rate;
+  }
+  return 0;
+}
+
 function getAdSaleRateLYD(ad) {
   // No local price on the ad means nobody agreed a sale rate with a customer;
   // pricing it at today's default rate would invent revenue that moves every
   // time the default rate is edited. It stays under "missing sale rate".
   if (!(analyticsNumber(ad?.amountLocal) > 0) && !(analyticsNumber(ad?.exchangeRate || ad?.rate) > 0)) return 0;
+  // A paid ad funded by receipts earned the LYD those receipts carry, not the
+  // default rate of the day the ad was typed in.
+  if (typeof getAdPaymentState === 'function' && getAdPaymentState(ad) === 'paid') {
+    const fundedRate = _adFundingReceiptRateLYD(ad);
+    if (fundedRate > 0) return fundedRate;
+  }
   const helperRate = typeof getAdSpendExchangeRate === 'function'
     ? analyticsNumber(getAdSpendExchangeRate(ad))
     : 0;
@@ -138,11 +170,13 @@ function buildAdProfitabilitySnapshot(purchases, ads) {
       : !!event.ad.isPaid;
     const saleRateLYD = getAdSaleRateLYD(event.ad);
     const recognizedRevenueLYD = paid && saleRateLYD > 0 ? (coveredCents / 100) * saleRateLYD : 0;
+    const writtenOff = !paid && typeof getAdPaymentState === 'function' && getAdPaymentState(event.ad) === 'wont_pay';  // a known loss, not "not yet billed"
     rows.push({
       ad: event.ad,
       adId: String(event.ad.id || ''),
       eventTime: event.time,
       paid,
+      writtenOff,
       soldBudgetUSD: Math.max(0, analyticsNumber(event.ad.amountUSD)),
       soldBudgetLYD: Math.max(0, analyticsNumber(event.ad.amountLocal)) || Math.max(0, analyticsNumber(event.ad.amountUSD)) * saleRateLYD,
       actualSpendUSD: event.spendCents / 100,
@@ -151,7 +185,7 @@ function buildAdProfitabilitySnapshot(purchases, ads) {
       saleRateLYD,
       costLYD,
       recognizedRevenueLYD,
-      knownProfitLYD: recognizedRevenueLYD - costLYD,
+      knownProfitLYD: paid ? recognizedRevenueLYD - costLYD : (writtenOff ? -costLYD : 0),
       allocations
     });
   }
@@ -163,6 +197,7 @@ function buildAdProfitabilitySnapshot(purchases, ads) {
   const inventoryUSD = visibleLots.reduce((sum, lot) => sum + lot.remainingUSD, 0);
   const inventoryCostLYD = visibleLots.reduce((sum, lot) => sum + lot.remainingUSD * lot.rateLYD, 0);
   const paidRows = rows.filter(row => row.paid);
+  const writtenOffRows = rows.filter(row => row.writtenOff);
   return {
     lots: visibleLots,
     rows,
@@ -176,9 +211,12 @@ function buildAdProfitabilitySnapshot(purchases, ads) {
     paidActualSpendUSD: paidRows.reduce((sum, row) => sum + row.actualSpendUSD, 0),
     paidRevenueLYD: paidRows.reduce((sum, row) => sum + row.recognizedRevenueLYD, 0),
     paidCostLYD: paidRows.reduce((sum, row) => sum + row.costLYD, 0),
-    knownGrossProfitLYD: paidRows.reduce((sum, row) => sum + row.knownProfitLYD, 0),
+    paidCoveredUSD: paidRows.reduce((sum, row) => sum + row.coveredUSD, 0),
+    writtenOffCostLYD: writtenOffRows.reduce((sum, row) => sum + row.costLYD, 0),
+    writtenOffSpendUSD: writtenOffRows.reduce((sum, row) => sum + row.actualSpendUSD, 0),
+    knownGrossProfitLYD: paidRows.reduce((sum, row) => sum + row.knownProfitLYD, 0) + writtenOffRows.reduce((sum, row) => sum + row.knownProfitLYD, 0),
     unpricedSpendUSD: rows.reduce((sum, row) => sum + row.unpricedUSD, 0),
-    unpaidSpendUSD: rows.filter(row => !row.paid).reduce((sum, row) => sum + row.actualSpendUSD, 0),
+    unpaidSpendUSD: rows.filter(row => !row.paid && !row.writtenOff).reduce((sum, row) => sum + row.actualSpendUSD, 0),
     missingSaleRateUSD: paidRows.filter(row => row.saleRateLYD <= 0).reduce((sum, row) => sum + row.coveredUSD, 0)
   };
 }
@@ -249,6 +287,7 @@ function buildAnalyticsBreakdown(metric, granularity, options = {}) {
   const ads = Array.isArray(options.ads) ? options.ads : getVisibleRecords(state.ads || []);
   const receipts = (Array.isArray(options.receipts) ? options.receipts : getVisibleRecords(state.receipts || []))
     .filter(row => row && !row._deleted && (typeof isTransferInReceipt !== 'function' || !isTransferInReceipt(row))
+      && String(row.receiptType || '') !== 'CARRIED_BALANCE'
       && !(typeof getReceiptPaymentState === 'function' && ['canceled', 'lost'].includes(getReceiptPaymentState(row))));
   const profit = options.profitSnapshot || buildAdProfitabilitySnapshot(options.purchases || state.dollarPurchases || [], ads);
   const findPeriod = time => periods.find(period => time >= period.start && time < period.end);
@@ -257,14 +296,16 @@ function buildAnalyticsBreakdown(metric, granularity, options = {}) {
     for (const ad of ads) {
       if (!ad || ad._deleted || ad.recordType === 'receipt') continue;
       const paid = typeof getAdPaymentState === 'function' ? getAdPaymentState(ad) === 'paid' : !!ad.isPaid;
-      if (!paid) continue;
+      const profitRow = profit.rowsByAdId.get(String(ad.id || ''));
+      if (!paid && !profitRow?.writtenOff) continue;
       const period = findPeriod(analyticsRecordTime(ad, 'ad'));
       if (!period) continue;
-      const profitRow = profit.rowsByAdId.get(String(ad.id || ''));
-      period.count += 1;
-      period.primaryUSD += Math.max(0, analyticsNumber(getAdSpendUSD(ad)));
-      period.secondaryUSD += profitRow?.actualSpendUSD || 0;
-      period.profitLYD += profitRow?.knownProfitLYD || 0;
+      if (paid) {
+        period.count += 1;
+        period.primaryUSD += Math.max(0, analyticsNumber(getAdSpendUSD(ad)));
+        period.secondaryUSD += profitRow?.actualSpendUSD || 0;
+      }
+      period.profitLYD += profitRow?.knownProfitLYD || 0;  // a written-off loss belongs to its period too
     }
   } else {
     for (const receipt of receipts) {
@@ -411,7 +452,7 @@ function renderProfitabilityPanel(snapshot, isAr) {
         <button type="button" onclick="openDollarPurchaseManager()" class="w-full lg:w-auto px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-lg flex items-center justify-center gap-2"><i data-lucide="badge-dollar-sign" class="w-5 h-5"></i>${isAr ? 'تسجيل شراء دولارات' : 'Record Dollar Purchase'}</button>
       </div>
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'إيراد معترف به' : 'Recognized revenue'}</p><p class="text-xl font-bold text-emerald-700">${analyticsMoney(snapshot.paidRevenueLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">$${analyticsMoney(snapshot.paidActualSpendUSD)} ${isAr ? 'إنفاق مدفوع' : 'paid spend'}</p></div>
+        <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'إيراد معترف به' : 'Recognized revenue'}</p><p class="text-xl font-bold text-emerald-700">${analyticsMoney(snapshot.paidRevenueLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">$${analyticsMoney(snapshot.paidCoveredUSD ?? snapshot.paidActualSpendUSD)} ${isAr ? 'إنفاق مدفوع مُسعَّر' : 'priced paid spend'}</p></div>
         <div class="rounded-2xl bg-rose-50 dark:bg-rose-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'تكلفة فيسبوك' : 'Facebook cost'}</p><p class="text-xl font-bold text-rose-700">${analyticsMoney(snapshot.paidCostLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'من دفعات الدولار المسجلة' : 'from recorded USD lots'}</p></div>
         <div class="rounded-2xl ${profitPositive ? 'bg-cyan-50 dark:bg-cyan-950/30' : 'bg-rose-50 dark:bg-rose-950/30'} p-4"><p class="text-xs text-slate-500">${isAr ? 'الربح الإجمالي المعروف' : 'Known gross profit'}</p><p class="text-xl font-bold ${profitPositive ? 'text-cyan-700' : 'text-rose-700'}">${analyticsMoney(snapshot.knownGrossProfitLYD)} LYD</p><p class="text-xs text-slate-500 mt-1">${isAr ? 'الإيراد ناقص تكلفة الدولار' : 'revenue minus dollar cost'}</p></div>
         <div class="rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 p-4"><p class="text-xs text-slate-500">${isAr ? 'مخزون الدولار المتبقي' : 'Remaining USD inventory'}</p><p class="text-xl font-bold text-indigo-700">$${analyticsMoney(snapshot.inventoryUSD)}</p><p class="text-xs text-slate-500 mt-1">${analyticsMoney(snapshot.inventoryCostLYD)} LYD ${isAr ? 'تكلفة' : 'cost'}</p></div>
@@ -419,6 +460,7 @@ function renderProfitabilityPanel(snapshot, isAr) {
       ${(snapshot.unpricedSpendUSD > 0 || snapshot.missingSaleRateUSD > 0 || snapshot.unpaidSpendUSD > 0) ? `<div class="mt-4 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-sm text-amber-800 dark:text-amber-200">
         <strong>${isAr ? 'يحتاج إكمال:' : 'Needs attention:'}</strong>
         ${snapshot.unpaidSpendUSD > 0 ? `${isAr ? 'إنفاق على إعلانات غير مدفوعة (دولارات استُهلكت ولم تُحصَّل بعد)' : 'spend on unpaid ads (dollars used, not yet billed)'}: $${analyticsMoney(snapshot.unpaidSpendUSD)}.` : ''}
+        ${snapshot.writtenOffSpendUSD > 0 ? ` ${isAr ? 'إنفاق مشطوب (لن يُدفع، محسوب كخسارة)' : 'written-off spend (will not be paid, counted as a loss)'}: $${analyticsMoney(snapshot.writtenOffSpendUSD)} = ${analyticsMoney(snapshot.writtenOffCostLYD)} LYD.` : ''}
         ${snapshot.unpricedSpendUSD > 0 ? `${isAr ? 'إنفاق بلا تكلفة دولار' : 'spend without a recorded dollar cost'}: $${analyticsMoney(snapshot.unpricedSpendUSD)}.` : ''}
         ${snapshot.missingSaleRateUSD > 0 ? `${isAr ? 'إنفاق مدفوع بلا سعر بيع' : 'paid spend without a sale rate'}: $${analyticsMoney(snapshot.missingSaleRateUSD)}.` : ''}
         ${isAr ? 'هذه المبالغ مستبعدة من الربح حتى تكتمل البيانات.' : 'These amounts stay out of profit until their data is complete.'}

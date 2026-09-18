@@ -1,19 +1,7 @@
-// ==========================================
-// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS
-// ==========================================
-// Split out of 12-views.js when that module passed its 475 KiB cap.
-// These screens form one product area: the service catalogue, its
-// subscription state, the plan catalog, and the wallet that pays for it.
-//
-// Design (2026-09 "Albayan Studio" refresh): ONE responsive layout for web,
-// iOS and Android — a centred phone-first column that widens into a grid on
-// desktop. No feature was removed: every old action (coming-soon toast,
-// paywall, theme/language/logout, wallet transfer, admin top-up in local
-// mode, subscription cancel, transactions) still lives on these screens.
-//
-// Money rules are untouched: prices come ONLY from the server plan catalog
-// (`state.subscriptionPlans`), purchases go through SUBSCRIPTIONS.purchasePlan
-// and the server re-reads its own catalog inside the transaction.
+// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS (split
+// out of 12-views.js). One responsive phone-first layout for web/iOS/Android;
+// every old action is kept. Prices come ONLY from the server plan catalog
+// (state.subscriptionPlans); purchases go through SUBSCRIPTIONS.purchasePlan.
 
 // ---------- shared helpers ----------
 

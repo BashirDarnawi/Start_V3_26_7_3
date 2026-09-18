@@ -581,16 +581,9 @@ async function serverLiveSyncOnce() {
     if (_syncAborted()) return { ok: false, skipped: true };
     const deliveryFetchFailed = !Array.isArray(ads) || !Array.isArray(receipts) || !Array.isArray(customers);
 
-    // Only treat the tick as "changed" when the fetched payload actually
-    // differs from the previous one. Comparing against state would always
-    // differ (migrateOldDataFormats mutates state records in place), so
-    // compare the raw fetched arrays via a signature.
-    // PERFORMANCE: use a CHEAP fingerprint (count + max/rolling-hash of
-    // id+_lastModified) instead of JSON.stringify of the whole payload. The
-    // full payload carries receiptImage base64 (~50-200KB each), so stringifying
-    // it every 3s serialized tens of MB and stalled the main thread even when
-    // nothing changed. Additions/removals change the count+hash; any edit bumps
-    // _lastModified, so this detects every real change without touching photos.
+    // "Changed" means the fetched payload differs from the previous one (state
+    // is mutated in place, so compare a CHEAP count + id/_lastModified hash of
+    // the raw arrays; stringifying photo-bearing payloads every 3 s stalled the UI).
     let sig = null;
     try {
       sig = _cheapSyncSig(ads) + '|' + _cheapSyncSig(receipts) + '|' + _cheapSyncSig(customers);

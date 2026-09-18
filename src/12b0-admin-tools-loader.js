@@ -1,15 +1,7 @@
-// ==========================================
-// ADMIN TOOLS LAZY LOADER (main bundle)
-// ==========================================
-// The Control Center and the merge tools (page / ad / merge-all dialogs) are
-// Admin-only and ship as their own bundle (admin-tools.js, see
-// src/manifest.json "lazy") so the startup bundle keeps its 2.4 MiB budget.
-// This loader stays in the main bundle: it fetches admin-tools.js once, is
-// kicked as soon as an Admin session renders (so the tools are ready before
-// the first tap), shows a bilingual loading/retry card for the Control Center
-// meanwhile, and re-renders when the bundle arrives. Every cross-bundle call
-// site is guarded with `typeof fn === 'function'`, so a slow network never
-// throws — the merge buttons simply appear once the bundle is in.
+// ADMIN TOOLS LAZY LOADER (main bundle): the Control Center and merge tools
+// ship as admin-tools.js (manifest "lazy") to keep the startup budget. This
+// loader fetches it once, warms up when an Admin session renders, shows a
+// bilingual loading/retry card meanwhile; every cross-bundle call is typeof-guarded.
 
 let _adminToolsBundlePromise = null;
 let _adminToolsBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'

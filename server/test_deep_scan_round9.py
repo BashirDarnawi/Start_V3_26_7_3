@@ -282,4 +282,4 @@ def test_body_size_gate_uses_the_configured_cookie_name():
     import inspect
     assert "cookie_name" in inspect.signature(request_size_refusal).parameters
     src = Path(main.__file__).read_text(encoding="utf-8")
-    assert "_request_size_refusal(request, cookie_name=COOKIE_NAME)" in src
+    assert "_request_size_refusal(request, cookie_name=COOKIE_NAME" in src

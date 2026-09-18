@@ -706,7 +706,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
 }
 
 let _subscribePlanBusy = false;
-async function handleSubscribePlan(planId, navigateToId) {
+async function handleSubscribePlan(planId, navigateToId, shownPriceMinor) {
   if (!state.currentUser?.id) return;
   const pid = String(planId || '');
   if (!pid) return;
@@ -718,7 +718,10 @@ async function handleSubscribePlan(planId, navigateToId) {
   const keys = state.modalData?.planIdemKeys || {};
   if (!keys[pid]) keys[pid] = Security.generateSecureId('idem');
   try {
-    await SUBSCRIPTIONS.purchasePlan(state.currentUser.id, pid, { idempotencyKey: keys[pid] });
+    const shownPlan = (state.subscriptionPlans || []).find(p => p && String(p.id) === pid);
+    const renderedPrice = Number(shownPriceMinor);  // the card's own price, not the catalog at click time
+    const expectedPriceMinor = Number.isFinite(renderedPrice) ? Math.max(0, renderedPrice) : (shownPlan ? Math.max(0, Number(shownPlan.priceMinor) || 0) : undefined);
+    await SUBSCRIPTIONS.purchasePlan(state.currentUser.id, pid, { idempotencyKey: keys[pid], expectedPriceMinor });
     closeModal();
     showNotification(
       state.language === 'ar' ? 'تم الاشتراك' : 'Subscribed',

@@ -461,7 +461,20 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         or _safe_number(row.get("amountUSD")) <= 0
         or not str(row.get("paymentStatus") or "").strip()
     ]
-    unpaid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "not_paid"]
+    def _customer_outstanding(row: dict[str, Any]) -> float:
+        amount = max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount")))
+        ceiling = max(amount, max(0.0, _safe_number(row.get("debtAmountUSD"))))  # after delivery, amountUSD is the cash collected
+        stored = row.get("customerOutstandingUSD")
+        if stored is not None:
+            try:
+                return max(0.0, min(float(stored), ceiling)) if ceiling > 0 else max(0.0, float(stored))
+            except (TypeError, ValueError):
+                pass
+        if row.get("companyCoveredUSD") is None:
+            return ceiling if ceiling > 0 else 1.0  # untouched by coverage: the status decides, as before
+        return max(0.0, ceiling - max(0.0, _safe_number(row.get("companyCoveredUSD"))))
+    # Money the company already absorbed is not "still unpaid" (the receipt keeps its Not Paid status by design).
+    unpaid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "not_paid" and _customer_outstanding(row) > 0.005]
     blockers = []
     if setup_ads:
         blockers.append({"code": "ads_need_setup", "count": len(setup_ads), "message": "Ads still need customer, amount, or payment setup"})
@@ -1051,10 +1064,15 @@ def create_operations_router(
     @router.post("/backups/run")
     def run_backup(request: Request, user: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
         require_same_origin(request)
+        from .rate_limiter import check_rate_limit
+        _ok, _left, _retry_ms = check_rate_limit(f"backup-run:{str(user.get('id') or '')}", max_attempts=6, window_ms=60 * 60 * 1000)
+        if not _ok:  # every call runs a full dump
+            raise HTTPException(status_code=429, detail="Too many manual backups this hour", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
         try:
             result = create_encrypted_backup()
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=safe_exception_text(exc, 500))
+            print(f"[albayan] Manual backup failed: {safe_exception_text(exc, 500)}")  # the detail (host names) stays in the log
+            raise HTTPException(status_code=503, detail="Backup failed; check the operations log")
         audit_fn(str(user.get("id") or ""), "backup", "operations", result["file"], "Created encrypted database backup", {"offsite": result["offsite"], "bytes": result["bytes"]})
         return {"ok": True, "backup": result, "status": _public_status()}
 

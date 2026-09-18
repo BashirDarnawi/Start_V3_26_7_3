@@ -36,7 +36,7 @@ const sandbox = {
   window: { lucide: null },
   getVisibleRecords: rows => rows.filter(row => row && !row._deleted),
   isTransferInReceipt: receipt => receipt.receiptType === 'TRANSFER_IN',
-  getAdPaymentState: ad => ad.paymentStatus === 'paid' || ad.isPaid ? 'paid' : 'unpaid',
+  getAdPaymentState: ad => ad.paymentStatus === 'wont_pay' ? 'wont_pay' : (ad.paymentStatus === 'paid' || ad.isPaid ? 'paid' : 'unpaid'),
   getAdSpendUSD: ad => Number(ad.spentUSD ?? ad.amountUSD ?? 0),
   getAdSpendExchangeRate: ad => Number(ad.exchangeRate || 0),
   isCurrentUserAdmin: () => admin,
@@ -65,6 +65,36 @@ function test(name, fn) {
   try { fn(); passed += 1; console.log(`  PASS  ${name}`); }
   catch (error) { failures.push(`${name}: ${error.message}`); console.log(`  FAIL  ${name}\n        ${error.message}`); }
 }
+
+test('a written-off (wont_pay) ad counts its dollars as a known loss, not "not yet billed"', () => {
+  const snapshot = sandbox.buildAdProfitabilitySnapshot(
+    [{ id: 'lot-w', purchaseDate: '2026-01-05', amountUSD: 1000, rateLYD: 9 }],
+    [
+      { id: 'lost-ad', status: 'Stopped', stoppedAt: '2026-01-20T10:00:00Z', spentUSD: 300, paymentStatus: 'wont_pay', amountUSD: 300, amountLocal: 2910 },
+      { id: 'paid-ad', status: 'Stopped', stoppedAt: '2026-01-21T10:00:00Z', spentUSD: 100, paymentStatus: 'paid', amountUSD: 100, amountLocal: 970, exchangeRate: 9.7 }
+    ]
+  );
+  near(snapshot.writtenOffSpendUSD, 300);
+  near(snapshot.writtenOffCostLYD, 2700);
+  near(snapshot.unpaidSpendUSD, 0);
+  near(snapshot.knownGrossProfitLYD, 970 - 900 - 2700);
+});
+
+test('a paid ad funded by a receipt is priced at the rate the customer actually paid', () => {
+  const previousReceipts = sandbox.state.receipts;
+  sandbox.state.receipts = [{ id: 'rcpt-950', exchangeRate: 9.5, amountUSD: 100, amountLocal: 950 }];
+  try {
+    const snapshot = sandbox.buildAdProfitabilitySnapshot(
+      [{ id: 'lot-r', purchaseDate: '2026-01-05', amountUSD: 100, rateLYD: 9 }],
+      [{ id: 'funded-ad', status: 'Stopped', stoppedAt: '2026-01-20T10:00:00Z', spentUSD: 100, paymentStatus: 'paid',
+         amountUSD: 100, amountLocal: 970, exchangeRate: 9.7, receiptAllocations: [{ receiptId: 'rcpt-950', amountUSD: 100 }] }]
+    );
+    near(snapshot.paidRevenueLYD, 950);
+    near(snapshot.knownGrossProfitLYD, 50);
+  } finally {
+    sandbox.state.receipts = previousReceipts;
+  }
+});
 
 test('legacy stopped spend stays final even when Meta later reports more', () => {
   near(sandbox.getAdActualSpendUSD({
@@ -118,7 +148,7 @@ test('a late sync cannot move a completed ad into a newer dollar-cost lot', () =
     [{ id: 'new-lot', purchaseDate: '2026-02-05', amountUSD: 100, rateLYD: 8 }],
     [{
       id: 'completed-ad', status: 'completed', endDate: '2026-02-03',
-      metaLastSyncedAt: '2026-02-20T12:00:00Z', metaAdId: 'm2', metaSpendMinor: 2500,
+      metaSyncedAt: '2026-02-20T12:00:00Z', metaAdId: 'm2', metaSpendMinor: 2500,
       paymentStatus: 'paid', exchangeRate: 10
     }]
   );

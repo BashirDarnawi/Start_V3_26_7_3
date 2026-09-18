@@ -1841,11 +1841,13 @@ function renderAnalyticsView() {
   // revenue nor debt, and paid/unpaid comes from the payment state (legacy
   // isPaid-only rows included), not the raw status text.
   const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r) && !['canceled', 'lost'].includes(getReceiptPaymentState(r)));
-  const totalReceiptsUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const paidReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
+  const saleReceipts = revenueReceipts.filter(r => String(r.receiptType || '') !== 'CARRIED_BALANCE');  // pre-tracking credit is not a sale
+  const totalReceiptsUSD = saleReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const paidReceipts = saleReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
   const pendingReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'not_paid');
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  // Pending is what the customer still owes: money the company already absorbed is not pending.
+  const pendingUSD = pendingReceipts.reduce((sum, r) => sum + _receiptCustomerOutstandingUSD(r), 0);
 
   // Available balance = what is still spendable across ALL paid receipts
   // INCLUDING transfer-ins: each receipt's remaining already subtracts its own
@@ -6372,6 +6374,15 @@ function showLogDetails(logId) {
   
   document.body.appendChild(modal);
   IconQueue.schedule(modal);
+}
+
+function _receiptCustomerOutstandingUSD(r) {
+  const amount = Math.max(0, Number(r?.amountUSD) || 0);
+  const ceiling = Math.max(amount, Math.max(0, Number(r?.debtAmountUSD) || 0));  // after delivery, amountUSD is the cash collected
+  const stored = Number(r?.customerOutstandingUSD);
+  if (r?.customerOutstandingUSD != null && Number.isFinite(stored)) return ceiling > 0 ? Math.max(0, Math.min(stored, ceiling)) : Math.max(0, stored);
+  if (r?.companyCoveredUSD == null) return ceiling;  // untouched by coverage: the whole debt is pending
+  return Math.max(0, ceiling - Math.max(0, Number(r?.companyCoveredUSD) || 0));
 }
 
 async function exportAuditLogs(format) {

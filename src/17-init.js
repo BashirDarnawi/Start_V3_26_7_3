@@ -107,21 +107,10 @@ async function init() {
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // Detect backend (multi-user internet mode)
   let serverOk = await apiHealthCheck();
-  // First-ever visit on this browser profile: a single 3s probe on a slow
-  // phone network silently strands the user in an empty local workspace
-  // (nothing ever re-probes). Escalate 3s → 5s → 8s before deciding, but
-  // ONLY in the ambiguous fresh-install case so returning users, desktop
-  // local testing and Capacitor keep their startup timing. With no backend
-  // at all each attempt fails fast (connection refused / 404), so the
-  // retries only spend time when requests actually hang — exactly the
-  // ambiguous case.
-  //
-  // A returning LOCAL-mode install is NOT a first-ever visit and must keep
-  // the old 3s cold start (hanging networks would otherwise block it 16s on
-  // "Connecting to server..."). Any prior snapshot (loadState() returned
-  // one) or the storage-eviction sentinel cookie (survives Safari ITP /
-  // Chrome wipes — and after a wipe the user needs the storage-loss recovery
-  // screen promptly, not more probing) proves a workspace existed here.
+  // First-ever visit with no prior local workspace (no snapshot, no storage-
+  // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
+  // network does not strand the user in an empty local workspace. Returning
+  // local installs keep the 3s cold start.
   const hadPriorLocalWorkspace = legacyCollections !== null ||
     (typeof _albayanHadDataCookie === 'function' && _albayanHadDataCookie());
   if (!serverOk && SERVER_API.enabledByDefault && !hadPriorLocalWorkspace &&

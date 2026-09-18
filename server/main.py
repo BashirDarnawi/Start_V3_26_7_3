@@ -2259,7 +2259,7 @@ from .startup_support import init_db_with_retry as _init_db_with_retry_impl
 from .health import build_health_router
 from .startup_support import install_validation_handler as _install_validation_handler
 from .startup_support import refuse_sqlite_in_production as _refuse_sqlite_in_production
-from .startup_support import request_size_refusal as _request_size_refusal
+from .startup_support import request_size_refusal as _request_size_refusal, request_size_needs_session as _request_size_needs_session
 from .startup_support import safe_exception_text as _safe_exception_text
 
 _install_validation_handler(app)
@@ -2524,6 +2524,14 @@ async def limit_request_size(request: Request, call_next):
     refusal = _request_size_refusal(request, cookie_name=COOKIE_NAME)
     if refusal is not None:
         return refusal
+    if _request_size_needs_session(request, cookie_name=COOKIE_NAME):
+        from fastapi.concurrency import run_in_threadpool
+        try:
+            valid = await run_in_threadpool(lambda: _auth_user_from_cookie(request) is not None)
+        except Exception:
+            valid = True  # a database hiccup is not a sign-in problem; the route reports it itself
+        if not valid:
+            return JSONResponse({"detail": "Sign in before sending a request this large"}, status_code=401)
     return await call_next(request)
 
 
@@ -3366,7 +3374,8 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
 
     allowed, wait_ms = _reset_rate_check(request, str(body.email))
     if not allowed:
-        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {int(wait_ms/1000)}s")
+        raise HTTPException(status_code=429, detail=f"Too many attempts. Try again in {int(wait_ms/1000)}s",
+                            headers={"Retry-After": str(max(1, int((wait_ms or 0) / 1000)))})
 
     email = str(body.email).lower()
     user = _get_user_by_email(email)
@@ -6732,6 +6741,14 @@ def _financial_apply_delivery_completion_truth(
         overpay_abs_local=_DELIVERY_OVERPAY_ABS_LOCAL,
         overpay_ratio=_DELIVERY_OVERPAY_RATIO,
     )
+
+
+def _refuse_deleted_customer(customer_id: str) -> None:
+    """A device three seconds behind may still offer a customer that was just deleted."""
+    with db_conn() as conn:
+        row = conn.execute(text("SELECT deleted FROM entities WHERE type='customers' AND id=:id LIMIT 1"), {"id": customer_id}).mappings().first()
+    if row is not None and bool(row["deleted"]):
+        raise HTTPException(status_code=409, detail="This customer was deleted; restore the customer first")
 
 
 def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
@@ -10953,7 +10970,7 @@ def _merge_customers_atomic(
                     )
                     if not changed:
                         continue  # re-pointed elsewhere before our lock landed
-                    if collection in {"receipts", "ads"}:
+                    if collection in {"receipts", "ads"} and not bool(row.get("deleted")):  # a tombstone moves no money
                         assert_financial_period_open(collection, data, conn=conn)
                     updated[collection].append(
                         _customer_merge_write_row(conn, row, data)
@@ -11586,6 +11603,8 @@ def create_collection_item(
         # enforces serviceIds immutability, version sequencing and an audit
         # entry; a raw record here would bypass all three.
         raise HTTPException(status_code=405, detail="Use PUT /api/admin/subscription-plans to change plan pricing")
+    if collection in {"receipts", "ads"} and str(generic_data.get("customerId") or "").strip():
+        _refuse_deleted_customer(str(generic_data.get("customerId")).strip())
 
     entity_id = validate_entity_id(body.id or new_id(collection[:10] or "id"))
 
@@ -11781,6 +11800,10 @@ def update_collection_item(
             )
 
     financial_updates = sanitize_json(body.data or {}) or {}
+    if collection in {"receipts", "ads"} and "customerId" in financial_updates:
+        _repointed = str(financial_updates.get("customerId") or "").strip()
+        if _repointed and _repointed != str((existing.get("data") or {}).get("customerId") or "").strip():
+            _refuse_deleted_customer(_repointed)
     if collection == "appSettings" and PLAN_SETTINGS_KEY in {str(financial_updates.get("settingKey") or ""), str((existing.get("data") or {}).get("settingKey") or "")}:
         raise HTTPException(status_code=405, detail="Use PUT /api/admin/subscription-plans to change plan pricing")
     if collection == "pages" and set(financial_updates) & META_PAGE_SERVER_FIELDS:
@@ -11788,6 +11811,12 @@ def update_collection_item(
     if collection == "ads":
         if set(financial_updates) & META_AD_SERVER_FIELDS:
             raise HTTPException(status_code=403, detail="Meta synchronization fields are server-controlled")
+        _new_customer = str(financial_updates.get("customerId") or "").strip() if "customerId" in financial_updates else ""
+        if _new_customer and _new_customer != str((existing.get("data") or {}).get("customerId") or "").strip():
+            _existing_ad = existing.get("data") or {}
+            if _financial_receipt_ids(_existing_ad) or _existing_ad.get("companyFundingAllocations"):
+                raise HTTPException(status_code=405, detail="A funded ad cannot be moved to another customer here; use the transactional ad API")
+            _refuse_deleted_customer(_new_customer)
         existing_status = str((existing.get("data") or {}).get("status") or "")
         requested_status = str(financial_updates.get("status") or "")
         collection_completion = (
@@ -12788,6 +12817,11 @@ def admin_bulk_import(
             data["id"] = rid
             if name == "appSettings" and str(data.get("settingKey") or "") == PLAN_SETTINGS_KEY:
                 raise HTTPException(status_code=405, detail="The plan catalog is edited only through the subscription-plans route; remove it from the import")
+            if name == "dollarPurchases":
+                try:  # the FIFO ledger prices every ad: a malformed lot must not enter through a backup
+                    data = {**data, **validate_dollar_purchase(data)}
+                except HTTPException as purchase_error:
+                    raise HTTPException(status_code=400, detail=f"'{name}' record '{rid}': {purchase_error.detail}") from purchase_error
             try:
                 protect_company_coverage_fields(name, data)
             except HTTPException as guard_error:
@@ -13076,6 +13110,9 @@ def batch_delete_entities(
                     continue
                 if not bool(exists["deleted"]):
                     assert_financial_period_open(col, json_loads(exists.get("data_json") or "{}") or {}, conn=conn)
+                    if col == "receipts":  # same as the single-item route: company rows on this receipt become direct coverage
+                        release_company_rows_for_receipt_delete(conn, eid, ad_rows=_financial_active_rows_for_receipt_bounded(conn, eid), lock_row=_clothes_lock_row,
+                                                                row_data=_financial_row_data, write_row=_clothes_write_row, postgres=postgres)
                 conn.execute(
                     text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
                     {"ts": now, "type": col, "id": eid},
@@ -13841,6 +13878,13 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 ).scalar() or 0
             if int(_open_campaigns) > 0:  # held or captured money would be trapped in a wallet nobody can use
                 raise HTTPException(status_code=409, detail="This account has campaigns under review or approved; decide or stop them first")
+            with db_conn() as conn:
+                _open_jobs = conn.execute(
+                    text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"),
+                    {"uid": user_id},
+                ).scalar() or 0
+            if int(_open_jobs) > 0:  # the delivery board would show these jobs as unassigned
+                raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them first")
             with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK), db_conn() as conn:  # a crashed approval's capture must not die with the account
                 _parked = conn.execute(
                     text(f"SELECT id, data_json FROM entities WHERE type='adCampaignRequests' AND created_by=:uid AND {json_field_sql('status')} NOT IN ('Approved','Stopped')"),

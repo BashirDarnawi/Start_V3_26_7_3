@@ -179,6 +179,7 @@ class PlanPurchaseRequest(BaseModel):
     planId: str = Field(min_length=2, max_length=40)
     idempotencyKey: str = Field(min_length=8, max_length=120)
     userId: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    expectedPriceMinor: Optional[int] = Field(default=None, ge=0, le=10**12)  # the price the customer saw
 
 
 class ClothesOrderMutationRequest(BaseModel):

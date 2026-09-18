@@ -5681,6 +5681,11 @@ def create_meta_ads_router(
         config = load_meta_ads_config()
         if not config.app_secret:
             raise HTTPException(status_code=503, detail="Meta webhook signing is not configured")
+        from .auth_limits import _client_ip
+        from .rate_limiter import check_rate_limit
+        _ok, _left, _retry_ms = check_rate_limit(f"meta-webhook:{_client_ip(request)}", max_attempts=300, window_ms=60 * 1000)
+        if not _ok:  # Meta retries later; a flood from anyone else is refused before the body is read
+            raise HTTPException(status_code=429, detail="Too many webhook deliveries", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
         raw_body = await request.body()
         supplied = str(request.headers.get("X-Hub-Signature-256") or "")
         expected = "sha256=" + hmac.new(

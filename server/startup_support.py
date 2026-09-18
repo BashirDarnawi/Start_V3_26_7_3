@@ -53,9 +53,12 @@ def request_size_refusal(request: Any, cookie_name: str = "albayan_session") -> 
     path = str(request.url.path)
     content_length = request.headers.get("content-length")
     max_size = 10 * 1024 * 1024
-    anonymous = path.startswith("/api/") and cookie_name not in request.cookies and not path.startswith("/api/meta-ads/webhook")
+    webhook = path.startswith("/api/meta-ads/webhook")
+    anonymous = path.startswith("/api/") and cookie_name not in request.cookies and not webhook
     if anonymous:
         max_size = 256 * 1024
+    elif webhook:
+        max_size = 1024 * 1024  # a Meta event is a few KB; the HMAC check must hold the whole body in memory
     if content_length:
         try:
             size = int(content_length)
@@ -69,6 +72,20 @@ def request_size_refusal(request: Any, cookie_name: str = "albayan_session") -> 
     if path.startswith("/api/"):
         return JSONResponse({"detail": "Length Required: Content-Length header is required for this request"}, status_code=411)
     return None
+
+
+def request_size_needs_session(request: Any, cookie_name: str = "albayan_session") -> bool:
+    """True when a write body is over the anonymous allowance: a cookie's PRESENCE is not a
+    session, so the caller must confirm the session (off the event loop) before parsing it."""
+    if request.method not in ("POST", "PUT", "PATCH"):
+        return False
+    path = str(request.url.path)
+    if not path.startswith("/api/") or path.startswith("/api/meta-ads/webhook") or cookie_name not in request.cookies:
+        return False
+    try:
+        return int(request.headers.get("content-length") or 0) > 256 * 1024
+    except (ValueError, TypeError):
+        return False
 
 
 def refuse_sqlite_in_production(dialect: str, *, debug_mode: bool, allow_env: str | None = None) -> None:

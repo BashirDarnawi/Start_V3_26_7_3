@@ -2218,7 +2218,7 @@ function renderModal() {
                 <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${planName}${isBundle ? ` <span class="ms-1 rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2 py-0.5 text-[10px] font-extrabold text-white">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}</div>
                 <div class="text-xs text-slate-500" dir="ltr">${price > 0 ? Security.escapeHtml(lockMoney(price)) : (isRTL ? 'مجاني' : 'Free')} ${Security.escapeHtml(lockPeriod(plan.durationDays))}</div>
               </div>
-              <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl px-4 text-sm font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${isRTL ? 'اشترك' : 'Subscribe'}</button>
+              <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}', ${price})" ${short ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl px-4 text-sm font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${isRTL ? 'اشترك' : 'Subscribe'}</button>
             </div>`;
         }
         return `
@@ -2230,7 +2230,7 @@ function renderModal() {
               <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${Security.escapeHtml(lockMoney(lydBalanceMinor))}</span></div>
               <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${short ? (isRTL ? 'ينقصك' : 'You need') : (isRTL ? 'الرصيد بعد' : 'Balance after')}</span><span class="font-bold ${short ? 'text-rose-600' : 'text-emerald-600'}" dir="ltr">${Security.escapeHtml(lockMoney(Math.abs(after)))}</span></div>
             </div>
-            <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
+            <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}', ${price})" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
             ${short ? `<div class="mt-2 text-center text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
           </div>`;
       };
@@ -2245,6 +2245,18 @@ function renderModal() {
           ${otherPlans.length ? `
             <div class="mt-5 mb-2 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-400">${isRTL ? 'باقات أخرى' : 'Other plans'}</div>
             <div class="space-y-2 max-h-[30dvh] overflow-y-auto custom-scrollbar pe-1">${otherPlans.map(p => planCard(p, false)).join('')}</div>` : ''}`;
+      } else if (isServerModeEnabled() && typeof subscriptionPlansLoadFailed !== 'undefined' && subscriptionPlansLoadFailed) {
+        plansBody = `
+          <div class="mb-2 rounded-2xl border border-rose-200 dark:border-rose-800 p-5 text-center text-sm text-rose-600">
+            ${isRTL ? 'تعذّر تحميل الأسعار.' : 'Prices did not load.'}
+            <div class="mt-3"><button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600">${isRTL ? 'إعادة المحاولة' : 'Retry'}</button></div>
+          </div>`;
+      } else if (isServerModeEnabled() && Array.isArray(state.subscriptionPlans) && state.subscriptionPlans.length) {
+        // The catalog loaded and no active plan includes this service.
+        plansBody = `
+          <div class="mb-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-center text-sm text-slate-500">
+            ${isRTL ? 'هذه الخدمة غير متاحة للاشتراك حالياً. تواصل مع الإدارة.' : 'This service is not currently sold. Contact the administrator.'}
+          </div>`;
       } else if (isServerModeEnabled()) {
         // Server mode with no plans yet: the catalog is still loading or the
         // fetch failed. NEVER offer a purchase button here — it would take

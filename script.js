@@ -4043,7 +4043,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
 }
 
 let _subscribePlanBusy = false;
-async function handleSubscribePlan(planId, navigateToId) {
+async function handleSubscribePlan(planId, navigateToId, shownPriceMinor) {
   if (!state.currentUser?.id) return;
   const pid = String(planId || '');
   if (!pid) return;
@@ -4055,7 +4055,10 @@ async function handleSubscribePlan(planId, navigateToId) {
   const keys = state.modalData?.planIdemKeys || {};
   if (!keys[pid]) keys[pid] = Security.generateSecureId('idem');
   try {
-    await SUBSCRIPTIONS.purchasePlan(state.currentUser.id, pid, { idempotencyKey: keys[pid] });
+    const shownPlan = (state.subscriptionPlans || []).find(p => p && String(p.id) === pid);
+    const renderedPrice = Number(shownPriceMinor);  // the card's own price, not the catalog at click time
+    const expectedPriceMinor = Number.isFinite(renderedPrice) ? Math.max(0, renderedPrice) : (shownPlan ? Math.max(0, Number(shownPlan.priceMinor) || 0) : undefined);
+    await SUBSCRIPTIONS.purchasePlan(state.currentUser.id, pid, { idempotencyKey: keys[pid], expectedPriceMinor });
     closeModal();
     showNotification(
       state.language === 'ar' ? 'تم الاشتراك' : 'Subscribed',
@@ -5370,10 +5373,12 @@ const SUBSCRIPTIONS = {
         ? 'شراء الباقات يتطلب اتصال الخادم'
         : 'Plan purchases need the server connection');
     }
+    const expectedPriceMinor = Number(opts.expectedPriceMinor);
     const payload = await apiPurchasePlan({
       planId: pid,
       idempotencyKey: idem,
-      userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined
+      userId: isAdmin && uid !== String(state.currentUser.id) ? uid : undefined,
+      expectedPriceMinor: Number.isFinite(expectedPriceMinor) ? Math.max(0, Math.round(expectedPriceMinor)) : undefined  // the price shown on the card
     });
     const rows = Array.isArray(payload?.subscriptions) ? payload.subscriptions : [];
     const saved = rows.map(row => upsertServerBackedRecord('serviceSubscriptions', row));
@@ -12848,16 +12853,9 @@ async function serverLiveSyncOnce() {
     if (_syncAborted()) return { ok: false, skipped: true };
     const deliveryFetchFailed = !Array.isArray(ads) || !Array.isArray(receipts) || !Array.isArray(customers);
 
-    // Only treat the tick as "changed" when the fetched payload actually
-    // differs from the previous one. Comparing against state would always
-    // differ (migrateOldDataFormats mutates state records in place), so
-    // compare the raw fetched arrays via a signature.
-    // PERFORMANCE: use a CHEAP fingerprint (count + max/rolling-hash of
-    // id+_lastModified) instead of JSON.stringify of the whole payload. The
-    // full payload carries receiptImage base64 (~50-200KB each), so stringifying
-    // it every 3s serialized tens of MB and stalled the main thread even when
-    // nothing changed. Additions/removals change the count+hash; any edit bumps
-    // _lastModified, so this detects every real change without touching photos.
+    // "Changed" means the fetched payload differs from the previous one (state
+    // is mutated in place, so compare a CHEAP count + id/_lastModified hash of
+    // the raw arrays; stringifying photo-bearing payloads every 3 s stalled the UI).
     let sig = null;
     try {
       sig = _cheapSyncSig(ads) + '|' + _cheapSyncSig(receipts) + '|' + _cheapSyncSig(customers);
@@ -17095,11 +17093,13 @@ function renderAnalyticsView() {
   // revenue nor debt, and paid/unpaid comes from the payment state (legacy
   // isPaid-only rows included), not the raw status text.
   const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r) && !['canceled', 'lost'].includes(getReceiptPaymentState(r)));
-  const totalReceiptsUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const paidReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
+  const saleReceipts = revenueReceipts.filter(r => String(r.receiptType || '') !== 'CARRIED_BALANCE');  // pre-tracking credit is not a sale
+  const totalReceiptsUSD = saleReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const paidReceipts = saleReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
   const pendingReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'not_paid');
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  // Pending is what the customer still owes: money the company already absorbed is not pending.
+  const pendingUSD = pendingReceipts.reduce((sum, r) => sum + _receiptCustomerOutstandingUSD(r), 0);
 
   // Available balance = what is still spendable across ALL paid receipts
   // INCLUDING transfer-ins: each receipt's remaining already subtracts its own
@@ -21628,6 +21628,15 @@ function showLogDetails(logId) {
   IconQueue.schedule(modal);
 }
 
+function _receiptCustomerOutstandingUSD(r) {
+  const amount = Math.max(0, Number(r?.amountUSD) || 0);
+  const ceiling = Math.max(amount, Math.max(0, Number(r?.debtAmountUSD) || 0));  // after delivery, amountUSD is the cash collected
+  const stored = Number(r?.customerOutstandingUSD);
+  if (r?.customerOutstandingUSD != null && Number.isFinite(stored)) return ceiling > 0 ? Math.max(0, Math.min(stored, ceiling)) : Math.max(0, stored);
+  if (r?.companyCoveredUSD == null) return ceiling;  // untouched by coverage: the whole debt is pending
+  return Math.max(0, ceiling - Math.max(0, Number(r?.companyCoveredUSD) || 0));
+}
+
 async function exportAuditLogs(format) {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
@@ -22185,22 +22194,10 @@ function renderSettingsView() {
     </div>
   `;
 }
-// ==========================================
-// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS
-// ==========================================
-// Split out of 12-views.js when that module passed its 475 KiB cap.
-// These screens form one product area: the service catalogue, its
-// subscription state, the plan catalog, and the wallet that pays for it.
-//
-// Design (2026-09 "Albayan Studio" refresh): ONE responsive layout for web,
-// iOS and Android — a centred phone-first column that widens into a grid on
-// desktop. No feature was removed: every old action (coming-soon toast,
-// paywall, theme/language/logout, wallet transfer, admin top-up in local
-// mode, subscription cancel, transactions) still lives on these screens.
-//
-// Money rules are untouched: prices come ONLY from the server plan catalog
-// (`state.subscriptionPlans`), purchases go through SUBSCRIPTIONS.purchasePlan
-// and the server re-reads its own catalog inside the transaction.
+// SERVICES HUB, SMART SYSTEMS, PLANS, CHARGE WALLET AND WALLET SCREENS (split
+// out of 12-views.js). One responsive phone-first layout for web/iOS/Android;
+// every old action is kept. Prices come ONLY from the server plan catalog
+// (state.subscriptionPlans); purchases go through SUBSCRIPTIONS.purchasePlan.
 
 // ---------- shared helpers ----------
 
@@ -23186,18 +23183,10 @@ function handleSmartSystemClick(systemId) {
   saveState();
   render();
 }
-// ==========================================
-// ADMIN TOOLS LAZY LOADER (main bundle)
-// ==========================================
-// The Control Center and the merge tools (page / ad / merge-all dialogs) are
-// Admin-only and ship as their own bundle (admin-tools.js, see
-// src/manifest.json "lazy") so the startup bundle keeps its 2.4 MiB budget.
-// This loader stays in the main bundle: it fetches admin-tools.js once, is
-// kicked as soon as an Admin session renders (so the tools are ready before
-// the first tap), shows a bilingual loading/retry card for the Control Center
-// meanwhile, and re-renders when the bundle arrives. Every cross-bundle call
-// site is guarded with `typeof fn === 'function'`, so a slow network never
-// throws — the merge buttons simply appear once the bundle is in.
+// ADMIN TOOLS LAZY LOADER (main bundle): the Control Center and merge tools
+// ship as admin-tools.js (manifest "lazy") to keep the startup budget. This
+// loader fetches it once, warms up when an Admin session renders, shows a
+// bilingual loading/retry card meanwhile; every cross-bundle call is typeof-guarded.
 
 let _adminToolsBundlePromise = null;
 let _adminToolsBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
@@ -24827,12 +24816,12 @@ function buildCustomerStatsIndex() {
 function getAdSpendUSD(ad) {
   if (!ad) return 0;
   const status = String(ad.status || '').trim().toLowerCase();
-  if (status === 'stopped' && ad.spentUSD !== undefined) return parseFloat(ad.spentUSD) || 0;
-  if (['completed', 'canceled', 'lost'].includes(status)) {
-    return ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0);
+  if (status === 'stopped' && ad.spentUSD !== undefined) return Math.max(0, parseFloat(ad.spentUSD) || 0);
+  if (['completed', 'canceled', 'cancelled', 'lost'].includes(status)) {  // legacy British spelling exists in history
+    return Math.max(0, ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0));
   }
   if (['pending', 'paused'].includes(status)) return 0;
-  return parseFloat(ad.amountUSD) || 0;
+  return Math.max(0, parseFloat(ad.amountUSD) || 0);
 }
 
 // ---------------- Liquidity coverage (owner solvency tracking) ----------------
@@ -39859,7 +39848,7 @@ function renderModal() {
                 <div class="truncate text-sm font-bold text-slate-800 dark:text-white">${planName}${isBundle ? ` <span class="ms-1 rounded-full bg-gradient-to-r from-blue-600 to-teal-400 px-2 py-0.5 text-[10px] font-extrabold text-white">${isRTL ? 'الأفضل قيمة' : 'Best value'}</span>` : ''}</div>
                 <div class="text-xs text-slate-500" dir="ltr">${price > 0 ? Security.escapeHtml(lockMoney(price)) : (isRTL ? 'مجاني' : 'Free')} ${Security.escapeHtml(lockPeriod(plan.durationDays))}</div>
               </div>
-              <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl px-4 text-sm font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${isRTL ? 'اشترك' : 'Subscribe'}</button>
+              <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}', ${price})" ${short ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl px-4 text-sm font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${isRTL ? 'اشترك' : 'Subscribe'}</button>
             </div>`;
         }
         return `
@@ -39871,7 +39860,7 @@ function renderModal() {
               <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${isRTL ? 'رصيد المحفظة' : 'Wallet balance'}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${Security.escapeHtml(lockMoney(lydBalanceMinor))}</span></div>
               <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${short ? (isRTL ? 'ينقصك' : 'You need') : (isRTL ? 'الرصيد بعد' : 'Balance after')}</span><span class="font-bold ${short ? 'text-rose-600' : 'text-emerald-600'}" dir="ltr">${Security.escapeHtml(lockMoney(Math.abs(after)))}</span></div>
             </div>
-            <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}')" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
+            <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}', ${price})" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
             ${short ? `<div class="mt-2 text-center text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
           </div>`;
       };
@@ -39886,6 +39875,18 @@ function renderModal() {
           ${otherPlans.length ? `
             <div class="mt-5 mb-2 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-400">${isRTL ? 'باقات أخرى' : 'Other plans'}</div>
             <div class="space-y-2 max-h-[30dvh] overflow-y-auto custom-scrollbar pe-1">${otherPlans.map(p => planCard(p, false)).join('')}</div>` : ''}`;
+      } else if (isServerModeEnabled() && typeof subscriptionPlansLoadFailed !== 'undefined' && subscriptionPlansLoadFailed) {
+        plansBody = `
+          <div class="mb-2 rounded-2xl border border-rose-200 dark:border-rose-800 p-5 text-center text-sm text-rose-600">
+            ${isRTL ? 'تعذّر تحميل الأسعار.' : 'Prices did not load.'}
+            <div class="mt-3"><button onclick="refreshSubscriptionPlans(true).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); })" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600">${isRTL ? 'إعادة المحاولة' : 'Retry'}</button></div>
+          </div>`;
+      } else if (isServerModeEnabled() && Array.isArray(state.subscriptionPlans) && state.subscriptionPlans.length) {
+        // The catalog loaded and no active plan includes this service.
+        plansBody = `
+          <div class="mb-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-center text-sm text-slate-500">
+            ${isRTL ? 'هذه الخدمة غير متاحة للاشتراك حالياً. تواصل مع الإدارة.' : 'This service is not currently sold. Contact the administrator.'}
+          </div>`;
       } else if (isServerModeEnabled()) {
         // Server mode with no plans yet: the catalog is still loading or the
         // fetch failed. NEVER offer a purchase button here — it would take
@@ -45726,21 +45727,10 @@ async function init() {
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // Detect backend (multi-user internet mode)
   let serverOk = await apiHealthCheck();
-  // First-ever visit on this browser profile: a single 3s probe on a slow
-  // phone network silently strands the user in an empty local workspace
-  // (nothing ever re-probes). Escalate 3s → 5s → 8s before deciding, but
-  // ONLY in the ambiguous fresh-install case so returning users, desktop
-  // local testing and Capacitor keep their startup timing. With no backend
-  // at all each attempt fails fast (connection refused / 404), so the
-  // retries only spend time when requests actually hang — exactly the
-  // ambiguous case.
-  //
-  // A returning LOCAL-mode install is NOT a first-ever visit and must keep
-  // the old 3s cold start (hanging networks would otherwise block it 16s on
-  // "Connecting to server..."). Any prior snapshot (loadState() returned
-  // one) or the storage-eviction sentinel cookie (survives Safari ITP /
-  // Chrome wipes — and after a wipe the user needs the storage-loss recovery
-  // screen promptly, not more probing) proves a workspace existed here.
+  // First-ever visit with no prior local workspace (no snapshot, no storage-
+  // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
+  // network does not strand the user in an empty local workspace. Returning
+  // local installs keep the 3s cold start.
   const hadPriorLocalWorkspace = legacyCollections !== null ||
     (typeof _albayanHadDataCookie === 'function' && _albayanHadDataCookie());
   if (!serverOk && SERVER_API.enabledByDefault && !hadPriorLocalWorkspace &&

@@ -643,12 +643,12 @@ function buildCustomerStatsIndex() {
 function getAdSpendUSD(ad) {
   if (!ad) return 0;
   const status = String(ad.status || '').trim().toLowerCase();
-  if (status === 'stopped' && ad.spentUSD !== undefined) return parseFloat(ad.spentUSD) || 0;
-  if (['completed', 'canceled', 'lost'].includes(status)) {
-    return ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0);
+  if (status === 'stopped' && ad.spentUSD !== undefined) return Math.max(0, parseFloat(ad.spentUSD) || 0);
+  if (['completed', 'canceled', 'cancelled', 'lost'].includes(status)) {  // legacy British spelling exists in history
+    return Math.max(0, ad.spentUSD !== undefined ? (parseFloat(ad.spentUSD) || 0) : (parseFloat(ad.amountUSD) || 0));
   }
   if (['pending', 'paused'].includes(status)) return 0;
-  return parseFloat(ad.amountUSD) || 0;
+  return Math.max(0, parseFloat(ad.amountUSD) || 0);
 }
 
 // ---------------- Liquidity coverage (owner solvency tracking) ----------------
