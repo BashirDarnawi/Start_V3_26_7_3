@@ -50,7 +50,7 @@ function getControlCenterFacts() {
     if (getReceiptPaymentState(receipt) !== 'not_paid') return false;
     return true;
   });
-  const metaFailures = ads.filter(ad => String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim());
+  const metaFailures = ads.filter(ad => { const code = String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim(); return code && !['pending_enrichment', 'insights_unavailable'].includes(code); });  // informational states are not failures
   let snapshot = null;
   try { snapshot = typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null; } catch (_) {}
   return {

@@ -58,11 +58,13 @@ function testWithPython() {
   // Some Windows installations deny access to the shared %TEMP% pytest
   // directory after another test process has used it. Keep pytest's scratch
   // files inside this workspace so the release check is deterministic.
-  return run(python.command, [
+  const result = run(python.command, [
     ...python.prefix,
     ...PYTEST_ARGS,
     '--basetemp', LOCAL_PYTEST_BASETEMP,
-  ]).status;
+  ]);
+  if (result.signal) return 1;  // a killed pytest (OOM, segfault) is a failure, not "no Python here"
+  return result.status;
 }
 
 function testWithDocker() {

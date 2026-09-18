@@ -632,7 +632,7 @@ function buildCustomerStatsIndex() {
   // This index belongs to ONE synchronous render: filtering, sorting, totals
   // and cards may request the same customer repeatedly. Never retain it across
   // edits/live sync; a new render builds fresh groups and fresh derived stats.
-  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, statsByCustomer: new Map() };
+  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, usageByReceipt: buildReceiptUsageAdIndex(state.ads), statsByCustomer: new Map() };
 }
 
 // Status-aware USD "spent" for a single ad — the ONE definition of how much
@@ -682,6 +682,7 @@ function getReceiptPaidDate(r) {
 }
 
 function getLiquiditySnapshot() {
+  const _usageIndex = buildReceiptUsageAdIndex(state.ads);  // one ads pass for every paid receipt below
   const config = getLiquidityTrackingConfig();
   const sinceMs = config ? new Date(config.startDate).getTime() : NaN;
   const tracking = Number.isFinite(sinceMs);
@@ -705,7 +706,7 @@ function getLiquiditySnapshot() {
     // Owed to customers: the unused credit on every paid receipt INCLUDING
     // transfer-ins — each receipt's remaining already subtracts its own usage
     // and outgoing transfers, so summing stays transfer-neutral.
-    liabilityUSD += Math.max(getReceiptUsageStats(r).remainingUSD || 0, 0);
+    liabilityUSD += Math.max(getReceiptUsageStats(r, _usageIndex).remainingUSD || 0, 0);
     if (!tracking) continue;
     // New cash only: a transfer moves existing money between receipts and a
     // CARRIED_BALANCE receipt records pre-tracking credit — neither is money
@@ -1121,7 +1122,7 @@ function getCustomerStats(customerId, statsIndex = null) {
   let receiptDebtLYD = 0;
   customerReceipts.forEach(receipt => {
     if (getReceiptDebtType(receipt) === 'none') return;
-    const target = getReceiptCollectionTarget(receipt);
+    const target = statsIndex?.usageByReceipt ? getReceiptCollectionTarget(receipt, statsIndex.usageByReceipt.get(String(receipt.id)) || []) : getReceiptCollectionTarget(receipt);
     if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
     // PERFORMANCE: with a statsIndex (list renders), the committed total is a
     // Map lookup built in ONE ads pass; without one (single-record callers),

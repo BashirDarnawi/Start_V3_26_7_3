@@ -6004,6 +6004,7 @@ function saveState() {
     // Runtime-only connectivity flag (first-visit health-probe result)
     delete toSave.serverProbeFailed;
 
+    delete toSave.serverLogs;  // server-owned, refetched (04-permissions); 14 ms + 360 KB per save otherwise
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
     // PERFORMANCE: serialize ONCE and reuse for both the size check and the
@@ -12682,6 +12683,7 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
     if (!rec || !rec.id) continue;
     const existingIndex = byId.get(rec.id);
     const existing = existingIndex !== undefined ? arr[existingIndex] : null;
+    if (existing && !_shouldApplyDeltaRecord(rec, existing, refreshEqualVersion)) continue;  // version-only check, before the sanitiser
     const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
     const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);
@@ -17181,8 +17183,9 @@ function renderAnalyticsView() {
   // availability-neutral (source −X, target +X).
   const allPaidInclTransfers = receipts.filter(r => (r.status || '').toLowerCase() === 'paid');
   let totalUsedFromReceipts = 0;
+  const _usageIndex = buildReceiptUsageAdIndex(state.ads);  // one ads pass instead of one per paid receipt
   const availableReceiptBalance = Math.max(allPaidInclTransfers.reduce((sum, r) => {
-    const stats = getReceiptUsageStats(r);
+    const stats = getReceiptUsageStats(r, _usageIndex);
     totalUsedFromReceipts += (stats.usedUSD || 0);
     return sum + (stats.remainingUSD || 0);
   }, 0), 0);
@@ -18179,20 +18182,19 @@ function renderReceiptsView() {
   });
   
   // Sort receipts
+  // Decorate once: parsing two dates per comparison was ~40% of the render.
+  const _receiptTs = new Map(filteredReceipts.map(r => [r, new Date(r.createdAt || r.startDate).getTime() || 0]));
   filteredReceipts.sort((a, b) => {
-    const dateA = new Date(a.createdAt || a.startDate);
-    const dateB = new Date(b.createdAt || b.startDate);
-    
     switch (state.receiptSortBy) {
       case 'oldest':
-        return dateA - dateB;
+        return _receiptTs.get(a) - _receiptTs.get(b);
       case 'amount-high':
         return (b.amountUSD || 0) - (a.amountUSD || 0);
       case 'amount-low':
         return (a.amountUSD || 0) - (b.amountUSD || 0);
       case 'newest':
       default:
-        return dateB - dateA;
+        return _receiptTs.get(b) - _receiptTs.get(a);
     }
   });
   
@@ -19462,11 +19464,13 @@ function loadMoreDeliveries() {
 // renderDeliveriesView pass, so data edits are always picked up and the cache
 // never outlives the pass that filled it.
 const _deliveryCollectionTargetCache = new Map();
+let _deliveryUsageIndex = null;  // rebuilt with the cache: one ads pass per deliveries render
 function _getCollectionTargetCached(item) {
   const key = String((item && item.id) || '');
   if (!key) return getReceiptCollectionTarget(item);
   if (_deliveryCollectionTargetCache.has(key)) return _deliveryCollectionTargetCache.get(key);
-  const target = getReceiptCollectionTarget(item);
+  if (!_deliveryUsageIndex) _deliveryUsageIndex = buildReceiptUsageAdIndex(state.ads);
+  const target = getReceiptCollectionTarget(item, _deliveryUsageIndex.get(key) || []);
   _deliveryCollectionTargetCache.set(key, target);
   return target;
 }
@@ -19481,6 +19485,7 @@ function _getCollectionTargetCached(item) {
 function renderDeliveriesView(logOnly) {
   const logOnlyPass = logOnly === true;
   _deliveryCollectionTargetCache.clear();
+  _deliveryUsageIndex = null;
   const isAr = state.language === 'ar';
   // Deliveries are tracked ONLY on receipts (ads are not a delivery source of truth).
   const allReceipts = getVisibleRecords(state.receipts);
@@ -20830,6 +20835,10 @@ function getAdReconciliationDisplayState(ad) {
 
 function renderReconciliationView() {
   const isAr = state.language === 'ar';
+  // Maps instead of a find() per card (3,000 finished ads x 2,000 customers was
+  // millions of row visits); the list is capped at 150 cards per render.
+  const _reconCustomersById = new Map((state.customers || []).map(c => [String(c.id), c]));
+  const _reconPagesById = new Map((state.pages || []).map(p => [String(p.id), p]));
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
     .sort((a, b) => {
@@ -20855,11 +20864,11 @@ function renderReconciliationView() {
           <p class="font-medium">${isAr ? 'لا توجد إعلانات منتهية تحتاج إلى تسوية الآن' : 'No finished ads need reconciliation now'}</p>
         </div>` : `
           <div class="ops-reconciliation-grid">
-            ${visibleAds.map(ad => {
+            ${visibleAds.slice(0, 150).map(ad => {
               const id = String(ad.id);
               const safeId = Security.escapeHtml(id);
-              const customer = state.customers.find(c => String(c.id) === String(ad.customerId));
-              const page = state.pages.find(p => String(p.id) === String(ad.pageId || ad.page));
+              const customer = _reconCustomersById.get(String(ad.customerId));
+              const page = _reconPagesById.get(String(ad.pageId || ad.page));
               // Start with Meta's synced spend, but keep the final amount
               // editable. A saved correction remains authoritative later.
               const {
@@ -24881,7 +24890,7 @@ function buildCustomerStatsIndex() {
   // This index belongs to ONE synchronous render: filtering, sorting, totals
   // and cards may request the same customer repeatedly. Never retain it across
   // edits/live sync; a new render builds fresh groups and fresh derived stats.
-  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, statsByCustomer: new Map() };
+  return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, usageByReceipt: buildReceiptUsageAdIndex(state.ads), statsByCustomer: new Map() };
 }
 
 // Status-aware USD "spent" for a single ad — the ONE definition of how much
@@ -24931,6 +24940,7 @@ function getReceiptPaidDate(r) {
 }
 
 function getLiquiditySnapshot() {
+  const _usageIndex = buildReceiptUsageAdIndex(state.ads);  // one ads pass for every paid receipt below
   const config = getLiquidityTrackingConfig();
   const sinceMs = config ? new Date(config.startDate).getTime() : NaN;
   const tracking = Number.isFinite(sinceMs);
@@ -24954,7 +24964,7 @@ function getLiquiditySnapshot() {
     // Owed to customers: the unused credit on every paid receipt INCLUDING
     // transfer-ins — each receipt's remaining already subtracts its own usage
     // and outgoing transfers, so summing stays transfer-neutral.
-    liabilityUSD += Math.max(getReceiptUsageStats(r).remainingUSD || 0, 0);
+    liabilityUSD += Math.max(getReceiptUsageStats(r, _usageIndex).remainingUSD || 0, 0);
     if (!tracking) continue;
     // New cash only: a transfer moves existing money between receipts and a
     // CARRIED_BALANCE receipt records pre-tracking credit — neither is money
@@ -25370,7 +25380,7 @@ function getCustomerStats(customerId, statsIndex = null) {
   let receiptDebtLYD = 0;
   customerReceipts.forEach(receipt => {
     if (getReceiptDebtType(receipt) === 'none') return;
-    const target = getReceiptCollectionTarget(receipt);
+    const target = statsIndex?.usageByReceipt ? getReceiptCollectionTarget(receipt, statsIndex.usageByReceipt.get(String(receipt.id)) || []) : getReceiptCollectionTarget(receipt);
     if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
     // PERFORMANCE: with a statsIndex (list renders), the committed total is a
     // Map lookup built in ONE ads pass; without one (single-record callers),

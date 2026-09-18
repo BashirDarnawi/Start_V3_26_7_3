@@ -124,7 +124,12 @@ function showClothesShipmentMutationError(error) {
 
 function showClothesOrderMutationError(error) {
   const isAr = clothesIsAr();
-  const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
+  let detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
+  const stock = detail.match(/^Insufficient stock for (\S+): (\d+) available, (\d+) requested/);
+  if (stock) {
+    const name = clothesProductNameById(stock[1]) || stock[1];
+    detail = isAr ? `المخزون غير كافٍ لـ "${name}": المتاح ${stock[2]} والمطلوب ${stock[3]}.` : `Not enough stock for "${name}": ${stock[2]} available, ${stock[3]} requested.`;
+  }
   showNotification(
     isAr ? 'تعذّر حفظ الطلب' : 'Order Not Saved',
     detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
@@ -1070,6 +1075,8 @@ function addClothesVariantRow() {
 }
 
 function removeClothesVariantRow(idx) {
+  const held = Math.max(0, Math.floor(Number(_clothesTempVariants[idx]?.qty) || 0));
+  if (held > 0 && !confirm(clothesIsAr() ? `هذا الخيار يحتوي ${held} قطعة في المخزون. حذفه يزيلها من العدّ. متابعة؟` : `This variant holds ${held} pieces in stock. Removing it drops them from the count. Continue?`)) return;
   _clothesTempVariants.splice(idx, 1);
   if (_clothesTempVariants.length === 0) _clothesTempVariants.push({ color: '', size: '', qty: 0 });
   refreshClothesVariantRows();
@@ -1156,11 +1163,16 @@ async function saveClothesProductFromModal() {
 
   // Normalize variants: trim, drop fully-empty rows, merge duplicate color+size
   const merged = new Map();
+  // A product sold without colour/size owns a ('','') variant; dropping that
+  // "empty" row after it sold out made every later edit a 409.
+  const _editingIdEarly = String(document.getElementById('clothes-product-editing-id')?.value || '').trim();
+  const _editTargetEarly = _editingIdEarly ? getVisibleClothesProducts().find(p => p.id === _editingIdEarly) : null;
+  const keepsUnspecified = !!(_editTargetEarly && (_editTargetEarly.variants || []).some(x => !String(x?.color || '').trim() && !String(x?.size || '').trim()));
   for (const v of _clothesTempVariants) {
     const color = String(v?.color || '').trim();
     const size = String(v?.size || '').trim();
     const qty = Math.max(0, Math.floor(Number(v?.qty) || 0));
-    if (!color && !size && qty === 0) continue;
+    if (!color && !size && qty === 0 && !keepsUnspecified) continue;
     const key = `${color.toLowerCase()}|${size.toLowerCase()}`;
     if (merged.has(key)) {
       merged.get(key).qty += qty;
@@ -2137,6 +2149,8 @@ async function setClothesOrderStatus(orderId, newStatus) {
 
   if (newStatus === 'Delivered' && !order.deliveredAt) {
     updates.deliveredAt = new Date().toISOString();
+  } else if (newStatus !== 'Delivered') {
+    updates.deliveredAt = null;
   }
 
   if (isServerModeEnabled()) {
@@ -2185,19 +2199,29 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
     updates.paidAt = order.paidAt || new Date().toISOString();
   } else if (newPaymentStatus === 'Not Paid') {
     updates.amountPaidLYD = 0;
+  } else if (newPaymentStatus === 'Partially Paid') {
+    const answer = prompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${totals.totalLYD.toFixed(2)} د.ل)` : `Amount paid so far (total ${totals.totalLYD.toFixed(2)} LYD)`, String(Number(order.amountPaidLYD || 0).toFixed(2)));
+    if (answer === null || !String(answer).trim()) { updateClothesOrdersFiltered(); return; }  // the select must not show a status that was not saved
+    const partial = clothesParseMoney(answer);
+    if (!(partial >= 0) || partial > totals.totalLYD + 0.005) {
+      showNotification(isAr ? 'مبلغ غير صالح' : 'Invalid amount', isAr ? 'أدخل مبلغاً بين صفر والإجمالي.' : 'Enter an amount between zero and the total.', 'error');
+      updateClothesOrdersFiltered();
+      return;
+    }
+    updates.amountPaidLYD = partial;
   }
-  // 'Partially Paid' keeps the recorded amount — edit it in the order form.
 
   if (isServerModeEnabled()) {
     let attempt = null;
     try {
       const expectedLastModified = getClothesOrderExpectedLastModified(order);
-      attempt = getClothesOrderMutationAttempt('payment', orderId, expectedLastModified, { paymentStatus: newPaymentStatus });
+      attempt = getClothesOrderMutationAttempt('payment', orderId, expectedLastModified, newPaymentStatus === 'Partially Paid' ? { paymentStatus: newPaymentStatus, amountPaidLYD: updates.amountPaidLYD } : { paymentStatus: newPaymentStatus });
       const response = await apiMutateClothesOrder({
         action: 'payment',
         orderId,
         expectedLastModified,
         paymentStatus: newPaymentStatus,
+        data: newPaymentStatus === 'Partially Paid' ? { amountPaidLYD: updates.amountPaidLYD } : {},
         idempotencyKey: attempt.idempotencyKey
       });
       applyClothesOrderMutationResponse(response);
@@ -2292,7 +2316,9 @@ function getFilteredClothesOrders() {
     items = items.filter(o => o.paymentStatus === _clothesOrderPaymentFilter);
   }
   if (q) {
+    const numQ = q.replace(/^#/, '').replace(/^0+/, '');
     items = items.filter(o => {
+      if (numQ && /^\d+$/.test(numQ) && String(Math.floor(Number(o.orderNo) || 0)) === numQ) return true;  // "#0042" or "42"
       if (foldSearchText(o.customerName).includes(q)) return true;
       if (foldSearchText(o.customerPhone).includes(q)) return true;
       const lines = Array.isArray(o.lines) ? o.lines : [];
@@ -2807,6 +2833,7 @@ function printClothesOrderSlip(orderId) {
     <div style="padding:18px;font-family:inherit;font-size:13px;">
       <div style="display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid #0f172a;padding-bottom:8px;margin-bottom:10px;">
         <div style="font-size:20px;font-weight:bold;">${isAr ? 'إيصال طلب' : 'Order Slip'} ${orderNoLabel}</div>
+        ${!clothesOrderIsActiveStatus(order.status) ? `<div style="font-size:16px;font-weight:bold;color:#b91c1c;border:2px solid #b91c1c;display:inline-block;padding:2px 10px;margin-top:4px;">${order.status === 'Returned' ? (isAr ? 'مرتجع' : 'RETURNED') : (isAr ? 'ملغى' : 'CANCELED')}</div>` : ''}
         <div>${Security.escapeHtml(dateLabel)}</div>
       </div>
       <div style="margin-bottom:10px;">
@@ -2980,6 +3007,12 @@ async function saveClothesOrderFromModal() {
 
   const totalsProbe = { lines, deliveryFeeLYD };
   const total = getClothesOrderTotals(totalsProbe).totalLYD;
+  if (paymentStatus === 'Paid' && editTarget && editTarget.paymentStatus === 'Paid' && total > getClothesOrderTotals(editTarget).totalLYD + 0.005) {
+    // More items on a paid order: the extra is still to collect, not collected.
+    paymentStatus = 'Partially Paid';
+    amountPaidLYD = Number(editTarget.amountPaidLYD || 0);
+    showNotification(isAr ? 'الطلب أصبح مدفوعاً جزئياً' : 'Order is now partially paid', isAr ? 'أضيفت قطع بعد الدفع؛ سجّل المبلغ الجديد عند تحصيله.' : 'Items were added after payment; record the extra amount when it is collected.', 'info');
+  }
   if (paymentStatus === 'Paid') amountPaidLYD = total;
   if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
   if (amountPaidLYD > total + 0.005) {

@@ -413,6 +413,7 @@ function saveState() {
     // Runtime-only connectivity flag (first-visit health-probe result)
     delete toSave.serverProbeFailed;
 
+    delete toSave.serverLogs;  // server-owned, refetched (04-permissions); 14 ms + 360 KB per save otherwise
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
     // PERFORMANCE: serialize ONCE and reuse for both the size check and the

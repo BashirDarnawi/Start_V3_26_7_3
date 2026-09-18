@@ -346,6 +346,7 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
     if (!rec || !rec.id) continue;
     const existingIndex = byId.get(rec.id);
     const existing = existingIndex !== undefined ? arr[existingIndex] : null;
+    if (existing && !_shouldApplyDeltaRecord(rec, existing, refreshEqualVersion)) continue;  // version-only check, before the sanitiser
     const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
     const clean = Security.sanitizeObject(prepared);
     const idx = byId.get(clean.id);

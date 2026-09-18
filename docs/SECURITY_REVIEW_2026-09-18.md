@@ -604,3 +604,87 @@ is still unpaid no longer slipped past the month-close blocker (fixed: only
 the sale totals exclude it); two integer settings the regex missed; a
 tautological test assertion; documentation that still promised a silent
 SQLite fallback; the index-build timeout now fits inside the probe's grace.
+
+
+---
+
+# Round 7 (same day)
+
+Four hunters: a clothes shop's normal day end to end, the mapping between
+what Meta reports and what the app stores, an audit of the test suite itself,
+and client performance at office scale. Backend fixes come with tests in
+`server/test_deep_scan_round7.py`.
+
+## Fixed
+
+### Clothes, day to day
+
+| Problem | Fix |
+| --- | --- |
+| A product sold without colour or size (bags, one-size items) owns an "unspecified" variant; the product form dropped that empty-looking row once it sold out, so every later edit (even a price change) was refused with a message about variants the user never created. | The form keeps the unspecified variant when the product already has it. |
+| Adding a piece to an order already marked Paid re-stamped the whole new total as collected, so the dashboard showed money never received. | Server and form downgrade to Partially Paid with the recorded amount; the extra is still to collect. |
+| An order whose product (or variant) had been deleted could never be canceled, returned, edited or deleted, though the delete dialog promised exactly that. | Missing products and variants restore nothing; a local-mode oversell that never took stock restores nothing either. |
+| Moving a Delivered order back kept its delivery stamp, so a later real delivery was reported in the wrong month. | Leaving Delivered clears the stamp; the re-delivery stamps afresh. |
+| A phone-number fix on an order rewrote every product in it, so a colleague's open product form hit a version conflict for nothing. | Only products whose stock actually changed are written. |
+| The payment dropdown's "Partially Paid" kept the full amount; removing a variant that still held stock was silent; stock refusals showed a raw product id in English; orders could not be found by their number; a canceled or returned slip printed like a live one. | The dropdown asks for the amount (server validates it); removal with stock asks first; refusals name the product in the user's language; `#0042` or `42` finds the order; inactive slips carry a CANCELED / RETURNED stamp. |
+
+### Meta mapping
+
+| Problem | Fix |
+| --- | --- |
+| A new ad added to an old ad set inherited the set's start date; when that month was closed the import failed silently on every pass and the ad never appeared. | An ad never starts before it was created. |
+| A first link whose insights read was throttled stored "$0 spent, synced now" as if healthy. | Unreadable insights are never stored as zero, first link included. |
+| The priority media-repair lane retried one failing fresh draft every 20 seconds and left every older draft "loading" indefinitely. | Any failed repair (except a throttle) consumes its single priority try; retries follow the normal backoff. |
+| Two live rows linked to one Meta ad were retried first on every pass, silently, starving the queue; "Import existing ads" re-created drafts the office had deleted; Graph error 100 ("invalid parameter") was treated as a permanent "ad not found". | The duplicate is parked with a clear reason; deleted drafts stay deleted; only subcode 33 / 803 / 404 mean not found. |
+| The profit panel dated active Meta spend by a field the server never writes; the Control Center counted informational sync states as failures. | It reads the real sync stamp; informational states are not counted. |
+
+### The safety net itself
+
+| Problem | Fix |
+| --- | --- |
+| Six core one-pot money invariants in the money suite were labelled "known broken" and could never fail the build, although they all pass. | Promoted to must-pass. |
+| One test module discarded the suite's shared in-memory database at teardown, so ten later modules ran on an empty database and passed only by file order. | It restores the previous engine. |
+| A tautological assertion, two "either outcome" assertions, an untested admin route that creates ads, a runner that treated a signal-killed pytest as "no Python here", and hidden collection warnings. | Pinned, tested, failed properly, and surfaced. |
+
+### Performance at office scale (measured at 3,000 ads / 5,000 receipts / 2,000 customers)
+
+| Problem | Fix |
+| --- | --- |
+| The analytics screen (the landing page for staff with analytics access) rescanned every ad for every paid receipt, twice: about 20 seconds per render on a desktop, repeated on every changed sync tick. | Both loops use the existing receipt-usage index (milliseconds). |
+| Customer totals (customers header, home hero, Collect view) rescanned all ads for zero-amount delivery receipts; the deliveries screen did the same per row. | The customer-stats index and the deliveries pass carry the usage index. |
+| The receipts sort parsed two dates per comparison (about 40 % of the render); the reconciliation screen rendered every finished ad ever with a customer and page lookup per card; every save wrote the server-owned audit log into the local snapshot; every replayed sync row was sanitised before its version was checked. | Dates are parsed once; reconciliation uses maps and shows 150 cards; the audit log is refetched, not persisted; replayed rows are dropped first. |
+
+## Still open for the owner (round 7)
+
+1. A shared ad-set or campaign budget is copied to every ad in it, so two
+   ads under one $100 ad set lock $200 of customer debt. Needs a "shared
+   budget" rule (divide, or leave manual with a warning).
+2. Subscription expiry hides orders already out for delivery (reads are
+   gated like writes; campaigns keep reads open). Decide whether reads stay
+   available after expiry.
+3. A blank Meta account currency is counted as dollars in totals; open-ended
+   imports get an end date equal to the start; Meta-deleted ads keep syncing
+   and still count as sales; the media-archive lane re-downloads closed-month
+   rows every pass.
+4. Tests: PostgreSQL-only modules never run in the release gate; the e2e
+   suite drives no money journey; several money guards are source-string
+   pins; the startup path is never exercised by a test.
+5. Performance, structural: every changed 3-second tick rebuilds and swaps the
+   whole current view; IndexedDB writes whole collections per edit and
+   checksums them on every save and load; the startup bundle carries the
+   forms and modals (a lazy bundle would cut first paint); the users view is
+   unpaginated.
+
+## Review of the round-7 fixes (same day)
+
+The adversarial pass found: the product form's new unspecified-variant check
+read a variable before it was declared, so every product save would have
+thrown (fixed; the e2e suite does not save a product, which is now on the
+list of missing journeys); a live product whose variant had been renamed or
+removed would have lost the pieces an order held (fixed: they come back under
+the original name); a relink whose insights were throttled would have
+inherited the previous Meta ad's money (fixed); a cancelled partial-payment
+prompt left the dropdown showing an unsaved status (fixed); the Paid-order
+downgrade now keys on the order growing, not on the recorded amount; a dead
+condition in the media-repair stamp was simplified; the auto-import test now
+proves the admin gate.

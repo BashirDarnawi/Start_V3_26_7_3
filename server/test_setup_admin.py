@@ -39,6 +39,7 @@ def isolated_db():
     except Exception:
         pass
     os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{_DB_FILE}"
+    _prev_engine, _prev_engine_url = db._ENGINE, db._ENGINE_URL  # the suite's shared in-memory DB must survive this module
     db._ENGINE = None
     db._ENGINE_URL = None
     db.init_db()
@@ -50,8 +51,7 @@ def isolated_db():
         os.environ["DATABASE_URL"] = prev
     else:
         os.environ.pop("DATABASE_URL", None)
-    db._ENGINE = None
-    db._ENGINE_URL = None
+    db._ENGINE, db._ENGINE_URL = _prev_engine, _prev_engine_url
     try:
         os.remove(_DB_FILE)
     except Exception:

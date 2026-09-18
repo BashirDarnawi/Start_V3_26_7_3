@@ -5199,23 +5199,25 @@ def _clothes_restore_order_stock(
         product_id = str(line.get("productId") or "")
         product_entry = products.get(product_id)
         if not product_entry or bool(product_entry[0]["deleted"]):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Cannot restore stock because product is missing: {product_id}",
-            )
+            continue  # the product was deleted: nothing to put back (the delete dialog promised exactly this)
         variant = _clothes_find_variant(product_entry[1], line.get("color"), line.get("size"))
-        if not variant:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Cannot restore stock because product variant is missing: {product_id}",
-            )
         try:
             ordered = int(line.get("qty") or 0)
             deducted = int(line.get("deductedQty", ordered))
-            available = int(variant.get("qty") or 0)
+            available = int(variant.get("qty") or 0) if variant else 0
         except (TypeError, ValueError, OverflowError):
             raise HTTPException(status_code=409, detail="Order stock history is invalid")
-        if ordered <= 0 or deducted <= 0 or deducted > ordered or available < 0:
+        if deducted <= 0:
+            continue  # a local-mode oversell never took stock
+        if not variant:
+            # The variant was renamed or removed while this order held its pieces:
+            # they come back under the original name rather than vanishing.
+            product_entry[1].setdefault("variants", []).append(
+                {"color": str(line.get("color") or ""), "size": str(line.get("size") or ""), "qty": deducted}
+            )
+            changed.add(product_id)
+            continue
+        if ordered <= 0 or deducted > ordered or available < 0:
             raise HTTPException(status_code=409, detail="Order stock history is invalid")
         variant["qty"] = available + deducted
         changed.add(product_id)
@@ -5287,6 +5289,15 @@ def _clothes_normalize_order_payload(
     if payment_status not in CLOTHES_PAYMENT_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid paymentStatus")
     amount_paid = _clothes_money(raw_data.get("amountPaidLYD"), "amountPaidLYD")
+    if payment_status == "Paid" and old_data and str(old_data.get("paymentStatus") or "") == "Paid":
+        # The customer paid the OLD total; a bigger order means more to
+        # collect, not more collected. Keep the recorded amount and downgrade.
+        old_total = round(
+            sum(int(line.get("qty") or 0) * float(line.get("priceLYD") or 0) for line in (old_data.get("lines") or []) if isinstance(line, dict))
+            + _clothes_money(old_data.get("deliveryFeeLYD"), "deliveryFeeLYD"), 2)
+        if total > old_total + 0.005:
+            payment_status = "Partially Paid"
+            amount_paid = min(_clothes_money(old_data.get("amountPaidLYD"), "amountPaidLYD"), total)
     if payment_status == "Paid":
         amount_paid = total
     elif payment_status == "Not Paid":
@@ -5497,8 +5508,12 @@ def _clothes_order_mutation_atomic(
                 if order_data.get("stockDeducted") is not True:
                     raise HTTPException(status_code=409, detail="Active order stock state is inconsistent")
                 normalized = _clothes_normalize_order_payload(clean_data, new_lines, products, order_data)
+                _stock_before = {pid: json_dumps(entry[1].get("variants")) for pid, entry in products.items()}
                 _clothes_restore_order_stock(old_lines, products, changed_products)
                 _clothes_deduct_order_stock(new_lines, products, changed_products)
+                for pid in list(changed_products):  # a phone-number fix must not conflict a colleague's product edit
+                    if json_dumps(products[pid][1].get("variants")) == _stock_before.get(pid):
+                        changed_products.discard(pid)
                 next_order = dict(order_data)
                 next_order.update(normalized)
                 next_order["stockDeducted"] = True
@@ -5527,6 +5542,8 @@ def _clothes_order_mutation_atomic(
                 next_order["status"] = next_status
                 if next_status == "Delivered" and not next_order.get("deliveredAt"):
                     next_order["deliveredAt"] = _iso_utc()
+                elif next_status != "Delivered":
+                    next_order["deliveredAt"] = None  # a job moved back is not delivered; a re-delivery gets a fresh stamp
                 order = _clothes_write_row(conn, order_row, next_order)
             elif act == "payment":
                 next_payment = str(payment_status or "")
@@ -5548,6 +5565,11 @@ def _clothes_order_mutation_atomic(
                     next_order["paidAt"] = next_order.get("paidAt") or _iso_utc()
                 elif next_payment == "Not Paid":
                     next_order["amountPaidLYD"] = 0.0
+                elif clean_data.get("amountPaidLYD") is not None:
+                    partial = _clothes_money(clean_data.get("amountPaidLYD"), "amountPaidLYD")
+                    if partial > total:
+                        raise HTTPException(status_code=400, detail="amountPaidLYD cannot exceed the order total")
+                    next_order["amountPaidLYD"] = partial
                 order = _clothes_write_row(conn, order_row, next_order)
             else:
                 if order_data.get("stockDeducted") is True:

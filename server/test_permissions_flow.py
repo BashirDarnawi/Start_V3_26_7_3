@@ -416,7 +416,7 @@ class TestCheckStuckDeliveries:
                         cookies=delivery_manager["cookies"])
         assert r.status_code == 200, f"{r.status_code} {r.text[:200]}"
         body = r.json()
-        assert body.get("hours_threshold", body.get("threshold_hours", 48)) in (48, None) or True
+        assert body.get("ok") is True and body.get("hours_threshold") == 48
 
     def test_without_assign_permission(self, minimal_user):
         r = client.post("/api/deliveries/check-stuck", json={"hours_threshold": 48},

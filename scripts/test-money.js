@@ -1343,7 +1343,7 @@ async function main() {
 
   console.log('--- B1: BUG #51 — a full refund must RETURN delivery due credit ---');
 
-  await target('B1. an ad fully funded from due credit, then fully refunded, returns the credit', async () => {
+  await must('B1. an ad fully funded from due credit, then fully refunded, returns the credit', async () => {
     resetState();
     const r = deliveryReceipt('receipt_b1', 1000, 10);   // $100 of due credit
     const ad = dueFundedAd('ad_b1', r.id, 100);          // one ad takes ALL of it
@@ -1375,7 +1375,7 @@ async function main() {
     assert(near(stats.usedUSD, 0), `getReceiptUsageStats must also see the refund, still reports ${usd(stats.usedUSD)} used`);
   });
 
-  await target('B1b. a refund that empties the LAST due allocation row must still return the credit', async () => {
+  await must('B1b. a refund that empties the LAST due allocation row must still return the credit', async () => {
     // Same bug from the other side: two ads share the due credit; refunding one
     // of them in FULL drives ITS allocation sum to 0, and the stale mirror on
     // that ad keeps the money locked. (A6 shows a PARTIAL refund works — the bug
@@ -1403,7 +1403,7 @@ async function main() {
 
   console.log('\n--- B2: CROSS-POOL DOUBLE-SPEND — $200 of ads against a $100 receipt ---');
 
-  await target('B2. due credit already spent leaves NO paid balance to spend again', () => {
+  await must('B2. due credit already spent leaves NO paid balance to spend again', () => {
     resetState();
     // A delivery receipt worth 1000 LYD @ 10 = $100 of due credit.
     const r = deliveryReceipt('receipt_b2', 1000, 10);
@@ -1431,7 +1431,7 @@ async function main() {
     );
   });
 
-  await target('B2b. spending the paid balance must SHRINK the due credit (the two readers must see each other)', () => {
+  await must('B2b. spending the paid balance must SHRINK the due credit (the two readers must see each other)', () => {
     resetState();
     const r = deliveryReceipt('receipt_b2b', 1000, 10); // $100 — one pot
     collect(r, 100);
@@ -1456,7 +1456,7 @@ async function main() {
 
   console.log('\n--- B3: ONE-POT — the two readers must not describe two capacities ---');
 
-  await target('B3. the two readers describe ONE pot: same committed, same remaining', () => {
+  await must('B3. the two readers describe ONE pot: same committed, same remaining', () => {
     resetState();
     const r = deliveryReceipt('receipt_b3', 1000, 10); // 1000 LYD @ 10 = $100
     const capacity = 100;
@@ -1488,7 +1488,7 @@ async function main() {
     );
   });
 
-  await target('B3b. the two capacities of a collected delivery receipt are the same money', () => {
+  await must('B3b. the two capacities of a collected delivery receipt are the same money', () => {
     resetState();
     const r = deliveryReceipt('receipt_b3b', 1000, 10);
     collect(r, 100);

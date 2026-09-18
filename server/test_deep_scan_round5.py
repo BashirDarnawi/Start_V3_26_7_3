@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 import server.main as main
 from server.db import db_conn, init_db, now_ms
+from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from server.startup_support import safe_exception_text
 
@@ -47,8 +48,10 @@ def test_anonymous_big_bodies_are_refused_before_parsing():
     signed_in = client.post("/api/collections/customers", content=big, headers={"Content-Type": "application/json"}, cookies=cookies)
     assert signed_in.status_code in (400, 422), signed_in.text
     # Small anonymous bodies (login) are untouched.
+    for ip in ("testclient", "192.0.2.99", "127.0.0.1"):
+        reset_rate_limit(f"login:ip:{ip}")
     small = client.post("/api/auth/login", json={"email": "nobody@example.com", "password": "x"})
-    assert small.status_code in (400, 401, 429), small.text
+    assert small.status_code == 401, small.text
 
 
 def test_validation_errors_do_not_echo_the_input():

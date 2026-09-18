@@ -1047,7 +1047,7 @@ class MetaAdsClient:
         provider_code = f"{code}.{subcode}" if subcode else code
         if status in {401, 403} or code == "190":
             return MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code=provider_code)
-        if status == 404 or code in {"100", "803"}:
+        if status == 404 or code == "803" or (code == "100" and subcode == "33"):  # plain 100 = invalid parameter, retried via the slim fallback
             return MetaAdsError("not_found", "The selected Meta ad was not found or is no longer accessible.", provider_code=provider_code)
         # 4/17/32/613 are classic Graph throttling; the 80xxx family is the
         # Marketing API's per-ad-account/business throttling, which arrives as
@@ -3019,9 +3019,11 @@ def _ensure_import_page(
 
 
 def _imported_ad_dates(snapshot: dict[str, Any]) -> tuple[str, str, int]:
-    start = _clean_time(
-        snapshot.get("metaStartTime") or snapshot.get("metaAdCreatedTime")
-    ) or _iso_now()
+    # An ad added to an old ad set inherits the set's start_time, which can
+    # sit in a closed month and make every import pass fail: it cannot have
+    # run before it was created.
+    starts = [t for t in (_clean_time(snapshot.get("metaStartTime")), _clean_time(snapshot.get("metaAdCreatedTime"))) if t]
+    start = max(starts) if starts else _iso_now()
     end = _clean_time(snapshot.get("metaEndTime")) or start
     days = _duration_days(start, end)
     return start, end, days
@@ -3651,13 +3653,13 @@ def _compute_partner_page_stats(
     return _public_partner_stats(next_state)
 
 
-def _existing_meta_ad_ids() -> set[str]:
+def _existing_meta_ad_ids(*, deleted: bool = False) -> set[str]:
     result: set[str] = set()
     with db_conn() as conn:
         rows = conn.execute(
             text(
                 f"SELECT {json_field_sql('metaAdId')} AS meta_ad_id "
-                "FROM entities WHERE type='ads' AND deleted=false AND "
+                f"FROM entities WHERE type='ads' AND deleted={'true' if deleted else 'false'} AND "
                 f"COALESCE({json_field_sql('metaAdId')}, '')<>''"
             )
         ).mappings().all()
@@ -3882,7 +3884,8 @@ def discover_meta_ads(
             raise MetaAdsError("discovery_failed", account_errors[0], retryable=True)
 
         if include_existing:
-            candidate_ids = sorted(set(found) - already_linked)
+            # A draft the office deleted stays deleted (it would come back as a duplicate).
+            candidate_ids = sorted(set(found) - already_linked - _existing_meta_ad_ids(deleted=True))
         elif baseline_complete:
             candidate_ids = sorted(set(found) - known - already_linked)
         else:
@@ -4031,13 +4034,14 @@ def apply_meta_snapshot(
         fresh_page_picture = _clean_https_url(snapshot.get("metaPagePictureUrl"))
         # Never persist the internal marker; read it first, then drop it.
         insights_unavailable = bool(snapshot.pop("_insightsUnavailable", False))
-        if previous_meta_ad_id == meta_ad_id and insights_unavailable:
+        if insights_unavailable:  # a first link with throttled insights used to store $0 / synced now
             # The ad node was readable but its RESULTS were not. Writing the
             # zeros from that pass would silently destroy real money figures
             # (spend feeds reconciliation and profit), and it would look like
             # a successful sync because no error code is set. Keep what we
             # know; the next healthy pass updates it.
             snapshot = dict(snapshot)
+            same_link = previous_meta_ad_id == meta_ad_id
             for results_key in (
                 "metaSpend",
                 "metaSpendMinor",
@@ -4048,15 +4052,15 @@ def apply_meta_snapshot(
                 "metaPrimaryResultType",
                 "metaPrimaryResultValue",
             ):
-                if results_key in data:
-                    snapshot[results_key] = data[results_key]
+                if same_link and results_key in data:
+                    snapshot[results_key] = data[results_key]  # a relink must not inherit the OLD ad's figures
             snapshot["metaTotalRemainingBudgetMinor"] = _total_remaining_budget(
                 snapshot.get("metaTotalBudgetMinor"), snapshot.get("metaSpendMinor")
             )
             # Results could not be read, so this pass is not a successful sync
             # of the money figures: keep the previous "synced at" (stop and
             # reconciliation prefill from it) and say what happened.
-            snapshot["metaSyncedAt"] = str(data.get("metaSyncedAt") or "")
+            snapshot["metaSyncedAt"] = str(data.get("metaSyncedAt") or "") if same_link else ""
             snapshot["metaSyncErrorCode"] = "insights_unavailable"
             snapshot["metaSyncError"] = "Meta results could not be read on the last pass; spend figures were kept."
         if previous_meta_ad_id == meta_ad_id:
@@ -4334,11 +4338,10 @@ def record_meta_sync_failure(
                 + _sync_failure_delay_ms(config, failures, error),
             }
         )
-        if not error.retryable:
-            # This resolver version had its one prioritized repair try;
-            # further retries follow the normal backoff clock. A transient
-            # throttle must NOT consume that single priority attempt.
-            data["metaMediaRepairVersion"] = _META_MEDIA_VERSION
+        # This resolver version had its one prioritized repair try; further
+        # retries follow the normal backoff clock. (A throttle never reaches
+        # here: rate_limited returns above without recording a failure.)
+        data["metaMediaRepairVersion"] = _META_MEDIA_VERSION
         return _thin_ad_entity(_write_ad_data(conn, row, data))
 
 
@@ -4616,8 +4619,17 @@ def _sync_due_meta_ads_unlocked(limit: int | None = None) -> list[dict[str, Any]
         except HTTPException as error:
             if error.status_code == 423:
                 _defer_meta_sync_quietly(ad_id, version, days=30)
-            if error.status_code != 409:
-                continue
+            elif error.status_code == 409:
+                # Two live rows share one Meta ad: park this one with a clear
+                # reason instead of retrying it (and its twin) first every pass.
+                failed = _record_meta_sync_failure_or_park(
+                    ad_id,
+                    MetaAdsError("duplicate_link", "Another ad is already linked to this Meta ad. Unlink one of them.", retryable=False),
+                    version,
+                )
+                if failed:
+                    updated.append(failed)
+            continue
         except MetaAdsError as error:
             if error.code == "rate_limited":
                 break

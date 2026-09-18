@@ -60,8 +60,8 @@ function getAdProfitEventTime(ad) {
   // A completed ad is priced at the date its spend finished, not the date a
   // later sync happened to read it. Active ads use the latest spend snapshot.
   const values = isFinal
-    ? [ad?.stoppedAt, ad?.endDate, ad?.metaLastSyncedAt, ad?.startDate, ad?.createdAt, ad?._created]
-    : [ad?.metaLastSyncedAt, ad?.stoppedAt, ad?.endDate, ad?.startDate, ad?.createdAt, ad?._created];
+    ? [ad?.stoppedAt, ad?.endDate, ad?.metaSyncedAt, ad?.startDate, ad?.createdAt, ad?._created]
+    : [ad?.metaSyncedAt, ad?.stoppedAt, ad?.endDate, ad?.startDate, ad?.createdAt, ad?._created];  // the server writes metaSyncedAt
   for (const value of values) {
     const time = analyticsDateValue(value);
     if (time) return time;
