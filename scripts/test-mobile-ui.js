@@ -1337,8 +1337,8 @@ check('collect-a-debt and reminders delegate to the existing money flows and nev
   managerShell.includes('if (openCustomerReceipts(cid)) {') &&
   managerShell.includes("return shellCanOpen('receipts') && (isCurrentUserAdmin() || can('customers', 'viewBalance'));") &&
   managerShell.includes("if (!can('customers', 'viewContacts')) return;") &&
-  managerShell.includes('const base = buildWhatsAppLink(phone);') &&
-  managerShell.includes('localStorage.setItem(SHELL_REMINDER_LOG_KEY, JSON.stringify(log))') &&
+  managerShell.includes("const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);") &&
+  managerShell.includes('localStorage.setItem(shellReminderLogKey(), JSON.stringify(log))') &&
   !/fetch\(|apiJson\(/.test(managerShell));
 
 check('home hero hides money without analytics.viewFinancials and onboarding only shows in the packaged app',
@@ -1400,6 +1400,51 @@ check('ads use their original table and phone summary while deliveries retain jo
   views.includes("<tr ${shellTableDetailAttrs('ads',") &&
   !views.includes("<tr ${shellTableDetailAttrs('deliveries',") &&
   read('index.html').includes('assets/operations-workspace.css'));
+
+// ---------- deep scan 2026-09-18 ----------
+const securitySrc = read('src/02-security.js');
+const controlCenterSrc = read('src/12b-control-center.js');
+check('phone header names the current view and lists remember their filter-panel choice',
+  views.includes('${Security.escapeHtml(String(getWorkspaceViewTitle()))}') &&
+  views.includes("const FILTER_PANELS_STORAGE_KEY = 'albayan_filter_panels_v1';") &&
+  views.includes('function loadWorkspaceFilterPanels()') &&
+  views.includes("if (typeof panels[view] === 'boolean') return panels[view];") &&
+  views.includes("const active = ad.deliveryStatus !== 'Delivered' && ad.deliveryStatus !== 'Canceled';"));
+
+check('wallet requests use unguessable idempotency keys and LYD previews match the server arithmetic',
+  servicesWallet.includes("const idem = Security.generateSecureId('paycreate');") &&
+  adsStudio.includes("Security.generateSecureId('paycreate')") &&
+  !adsStudio.includes('paycreate-${') && !servicesWallet.includes('paycreate-${') &&
+  adsStudio.includes('Math.ceil(Math.round(usd * 100) * rate) / 100') &&
+  adsStudio.includes('Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * rate) / 100') &&
+  controlCenterSrc.includes("if (raw === '' || !Number.isFinite(parsed)) return;") &&
+  permissionsSrc.includes("if (typeof serverLiveSyncTick === 'function' && isServerModeEnabled()) {"));
+
+check('untrusted strings never sit inside inline handlers and the stripper cannot be doubled past',
+  socialStudio.includes('onclick="socialLinkPage(this.dataset.metaPageId, this.dataset.platform, this.dataset.igUserId)"') &&
+  !socialStudio.includes("socialLinkPage('${") &&
+  modals.includes("const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name") &&
+  securitySrc.includes('for (let pass = 0; pass < 8; pass++) {') &&
+  securitySrc.includes("str = str.replace(/vbscript:/gi, '');") &&
+  socialStudio.includes("if (sameDraft()) showNotification(socialText('Saved as a draft'"));
+
+check('a failed lazy bundle is not re-requested on every render and the shell recovers honestly',
+  read('src/15b0-clothes-loader.js').includes("if (_clothesBundleState === 'failed' && Date.now() - _clothesLastFailureAt < _CLOTHES_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
+  read('src/15c0-ads-studio-loader.js').includes("if (_studioBundleState === 'failed' && Date.now() - _studioLastFailureAt < _STUDIO_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
+  adminToolsLoader.includes("if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
+  views.includes("if (app && !String(app.innerHTML || '').trim()) {") &&
+  views.includes('if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;') &&
+  servicesWallet.includes("typeof subscriptionPlansLoadFailed !== 'undefined' && subscriptionPlansLoadFailed") &&
+  stateServices.includes('let subscriptionPlansLoadFailed = false;'));
+
+check('WhatsApp reminders use international digits and per-account logs; sign-out clears searches and module caches',
+  managerShell.includes("const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';") &&
+  managerShell.includes('function shellReminderLogKey()') &&
+  managerShell.includes('localStorage.getItem(shellReminderLogKey())') &&
+  liveSync.includes("for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {") &&
+  liveSync.includes("if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null;") &&
+  liveSync.includes("if (typeof _controlCenter === 'object' && _controlCenter) {") &&
+  dataAudit.includes("const _deliveryExempt = (view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role);"));
 
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;

@@ -8,6 +8,8 @@
 
 let _clothesBundlePromise = null;
 let _clothesBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
+let _clothesLastFailureAt = 0;
+const _CLOTHES_RETRY_COOLDOWN_MS = 30000;
 
 function _clothesBundleUrl() {
   // Derive from the script tag that provably loaded: correct under any base
@@ -37,6 +39,11 @@ function ensureClothesSystemLoaded() {
     return Promise.resolve();
   }
   if (_clothesBundlePromise) return _clothesBundlePromise;
+  // After a failure, wait before asking again. Every render reaches this
+  // function (live sync repaints every few seconds), and re-requesting a
+  // bundle that just failed turned an offline phone into a request loop that
+  // never showed the Retry card.
+  if (_clothesBundleState === 'failed' && Date.now() - _clothesLastFailureAt < _CLOTHES_RETRY_COOLDOWN_MS) return Promise.resolve();
   _clothesBundleState = 'loading';
   _clothesBundlePromise = new Promise((resolve) => {
     const tag = document.createElement('script');
@@ -55,6 +62,7 @@ function ensureClothesSystemLoaded() {
       try { tag.remove(); } catch (_) {}
       _clothesBundleState = 'failed';
       _clothesBundlePromise = null;
+      _clothesLastFailureAt = Date.now();
       try { if (state.currentView === 'clothes-system') render(); } catch (_) {}
       resolve();
     };
@@ -66,6 +74,7 @@ function ensureClothesSystemLoaded() {
 function retryClothesSystemLoad() {
   _clothesBundleState = 'unloaded';
   _clothesBundlePromise = null;
+  _clothesLastFailureAt = 0;
   ensureClothesSystemLoaded();
   render();
 }

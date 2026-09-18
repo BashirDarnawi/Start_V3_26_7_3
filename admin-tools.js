@@ -736,7 +736,15 @@ async function loadPlanManager(force = false) {
 function planManagerSetField(index, field, value) {
   const plan = _planManager.plans[Number(index)];
   if (!plan) return;
-  if (field === 'priceLYD') plan.priceMinor = Math.max(0, Math.round((Number(String(value).replace(',', '.')) || 0) * 100));
+  if (field === 'priceLYD') {
+    // A half-typed or malformed price ("12.", "1,234.50", "") must never
+    // silently become 0 and turn a paid plan into a free one; keep the
+    // previous price until the input parses.
+    const raw = String(value ?? '').trim().replace(',', '.');
+    const parsed = Number(raw);
+    if (raw === '' || !Number.isFinite(parsed)) return;
+    plan.priceMinor = Math.max(0, Math.round(parsed * 100));
+  }
   else if (field === 'durationDays') plan.durationDays = Math.max(1, Math.min(3660, Math.trunc(Number(value) || 30)));
   else if (field === 'sortOrder') plan.sortOrder = Math.trunc(Number(value) || 0);
   else if (field === 'active') plan.active = value === true;

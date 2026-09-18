@@ -418,8 +418,9 @@ function renderPlansView() {
   } else if (!plans.length) {
     body = `
       <div class="hub-card p-6 text-center text-sm text-slate-500">
-        <div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        ${hubText('Loading prices…', 'جاري تحميل الأسعار…')}
+        ${(typeof subscriptionPlansLoadFailed !== 'undefined' && subscriptionPlansLoadFailed)
+          ? `<i data-lucide="cloud-off" class="w-6 h-6 mx-auto mb-2 text-slate-400"></i>${hubText('Prices did not load. Check your connection and try again.', 'لم يتم تحميل الأسعار. تحقق من الاتصال ثم أعد المحاولة.')}`
+          : `<div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>${hubText('Loading prices…', 'جاري تحميل الأسعار…')}`}
         <div class="mt-3"><button type="button" onclick="_plansViewFetchedAt = 0; plansEnsureFresh();" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600 underline">${hubText('Retry', 'إعادة المحاولة')}</button></div>
       </div>`;
   } else {
@@ -541,7 +542,7 @@ async function chargeWalletCreateRequest() {
   _chargeWallet.busy = true;
   render();
   try {
-    const idem = `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`;
+    const idem = Security.generateSecureId('paycreate');
     const created = await apiWalletPaymentRequestCreate(amountMinor, _chargeWallet.method, idem, currency);
     _chargeWallet.created = created && created.data ? created.data : created;
     showNotification(hubText('Request created', 'تم إنشاء الطلب'), chargeWalletInstructions(_chargeWallet.created), 'success');

@@ -261,7 +261,9 @@ function adsStudioMoneyWithLyd(minor) {
   const usd = adsStudioMoney(minor);
   const rate = typeof _adsStudioUsdToLydRate === 'function' ? _adsStudioUsdToLydRate() : 0;
   if (!(rate > 1)) return usd;
-  const lyd = Math.ceil((Math.max(0, Math.trunc(Number(minor) || 0)) / 100) * rate);
+  // Same arithmetic as the server's payment instruction (ceil of minor × rate),
+  // so the estimate never disagrees with the LYD figure the customer is asked to pay.
+  const lyd = (Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * rate) / 100).toFixed(2);
   return `${usd} (≈ ${lyd} ${adsStudioText('LYD', 'د.ل')})`;
 }
 
@@ -1563,7 +1565,7 @@ function adsStudioUpdateLydPreview() {
   const usd = parseFloat(document.getElementById('ads-studio-charge-amount')?.value || '0');
   const rate = _adsStudioUsdToLydRate();
   el.textContent = (Number.isFinite(usd) && usd > 0 && rate > 0)
-    ? `≈ ${(Math.ceil(usd * rate * 100) / 100).toFixed(2)} LYD @ ${rate}`
+    ? `≈ ${(Math.ceil(Math.round(usd * 100) * rate) / 100).toFixed(2)} LYD @ ${rate}`
     : '';
 }
 
@@ -1636,7 +1638,7 @@ async function adsStudioCreateWalletCharge() {
   }
   _adsStudioChargeBusy = true;
   try {
-    const created = await apiWalletPaymentRequestCreate(amountMinor, method, `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`);
+    const created = await apiWalletPaymentRequestCreate(amountMinor, method, Security.generateSecureId('paycreate'));
     const d = created?.data || {};
     const entry = _adsStudioPayMethod(d.method);
     const template = entry && entry.instructions ? String(adsStudioIsAr() ? entry.instructions.ar : entry.instructions.en) : '';
@@ -2258,7 +2260,7 @@ function renderSocialLinkSheet() {
             <div class="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3">
               <span class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${String(pg.platform) === 'ig' ? 'from-pink-500 to-orange-400' : 'from-blue-600 to-cyan-500'} text-white font-bold">${socialEsc(String(pg.name || '?').charAt(0).toUpperCase())}</span>
               <span class="min-w-0 flex-1"><span class="block truncate text-sm font-bold text-slate-800 dark:text-white">${socialEsc(pg.name || pg.metaPageId)}</span><span class="block text-[11px] text-slate-500">${socialPlatformName(pg.platform)} · <span dir="ltr">${socialEsc(pg.metaPageId)}</span></span></span>
-              <button type="button" onclick="socialLinkPage('${socialEsc(pg.metaPageId)}', '${socialEsc(pg.platform)}', '${socialEsc(pg.igUserId || '')}')" ${_social.busy ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl bg-blue-600 px-4 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50">${socialText('Link', 'ربط')}</button>
+              <button type="button" data-meta-page-id="${socialEsc(pg.metaPageId)}" data-platform="${socialEsc(pg.platform)}" data-ig-user-id="${socialEsc(pg.igUserId || '')}" onclick="socialLinkPage(this.dataset.metaPageId, this.dataset.platform, this.dataset.igUserId)" ${_social.busy ? 'disabled' : ''} class="touch-target min-h-10 rounded-xl bg-blue-600 px-4 text-sm font-bold text-white hover:bg-blue-700 disabled:opacity-50">${socialText('Link', 'ربط')}</button>
             </div>`).join('')}</div>`
           : `<div class="py-6 text-center text-sm text-slate-500">${socialText('All available pages are linked, or Meta is not connected on the server yet.', 'كل الصفحات المتاحة مرتبطة، أو أن ميتا غير متصلة على الخادم بعد.')}</div>`}
         <p class="mt-4 text-[11px] text-slate-500">${socialText('Albayan only reads comments and publishes what you approve. Unlink any time.', 'يقرأ البيان التعليقات وينشر ما توافق عليه فقط. يمكنك إلغاء الربط في أي وقت.')}</p>
@@ -2593,11 +2595,19 @@ async function socialComposerSave(action) {
     // If publishing fails after creation, retry the same saved post rather
     // than creating another copy from a draft that still has an empty id.
     if (postId) draft.id = postId;
-    if (!isCurrent()) return;
+    if (!isCurrent()) {
+      // The user kept editing while the save was in flight. The server holds
+      // the pre-edit body; say so instead of vanishing, and keep the newer
+      // text in the editor so one more Save sends it (and publishes, if asked).
+      if (sameDraft()) showNotification(socialText('Saved as a draft', 'تم الحفظ كمسودة'), socialText('You kept typing while it was saving, so your newer edits are still here. Save again to send them.', 'واصلت الكتابة أثناء الحفظ، فبقيت تعديلاتك الأحدث هنا. احفظ مرة أخرى لإرسالها.'), 'info');
+      return;
+    }
     if (action === 'now' && postId) {
       saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post') || saved;
     }
-    if (!isCurrent()) return;
+    // The post is saved (and published when asked): show the result even if a
+    // keystroke landed meanwhile — hiding a publish that happened is worse.
+    if (!sameDraft()) return;
     _social.lastDone = { action, post: saved || {}, pageNames: draft.pageIds.map(id => socialPageById(id)?.name || '').filter(Boolean), mediaCount: draft.media.length, ruleName: draft.autoReply ? (_social.rules.find(r => String(r.id) === String(draft.autoReplyRuleId))?.name || '') : '' };
     _social.composer = null;
     _social.screen = 'post-done';

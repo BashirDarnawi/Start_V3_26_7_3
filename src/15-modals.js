@@ -1740,7 +1740,7 @@ function renderModal() {
               <div class="space-y-1 text-xs text-slate-600 dark:text-slate-300 max-h-24 overflow-y-auto custom-scrollbar pr-1">
                 ${transferReceipt.transfers.map(t => {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
-                  const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
+                  const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown')));
                   return `<div class="flex justify-between">
                     <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>

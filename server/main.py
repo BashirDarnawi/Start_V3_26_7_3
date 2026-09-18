@@ -20,7 +20,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, UnidentifiedImageError
 
@@ -1025,7 +1025,7 @@ def _insert_session_conn(
     # (SESSION_DURATION_MS / SESSION_REMEMBER_DURATION_MS) — never client input.
     lifetime_ms = SESSION_DURATION_MS if duration_ms is None else max(60_000, int(duration_ms))
     expires = now + lifetime_ms
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     ua = request.headers.get("user-agent")
 
     conn.execute(
@@ -2204,7 +2204,30 @@ def soft_delete_entity(
             raise HTTPException(status_code=409, detail="Conflict: record has changed")
 
 
-app = FastAPI(title="Albayan Server", version=APP_VERSION)
+# The interactive API docs and the OpenAPI schema describe every route, body
+# field and idempotency namespace. They are a development aid, not a public
+# page: outside debug mode they do not exist.
+app = FastAPI(
+    title="Albayan Server",
+    version=APP_VERSION,
+    docs_url="/docs" if DEBUG_MODE else None,
+    redoc_url="/redoc" if DEBUG_MODE else None,
+    openapi_url="/openapi.json" if DEBUG_MODE else None,
+)
+
+
+def _safe_exception_text(exc: BaseException, limit: int = 300) -> str:
+    """Exception text for the log without bound SQL parameters.
+
+    SQLAlchemy statement errors embed ``[parameters: {...}]`` — the values of
+    the failing statement, which on the users table are password hashes and
+    salts. The message stays useful; the parameters never reach the log.
+    """
+    text_value = str(exc)
+    cut = text_value.find("[parameters:")
+    if cut >= 0:
+        text_value = text_value[:cut] + "[parameters: redacted]"
+    return text_value[:limit]
 
 # PERFORMANCE: Enable gzip compression for JSON/text responses.
 # This reduces payload sizes for large collections (receipts/ads/customers) and helps under load.
@@ -2222,8 +2245,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     request_id = getattr(request.state, "request_id", "unknown")
     try:
         # BEST PRACTICE: Include request ID in error logs for better tracing
-        print(f"[albayan] unhandled_error_id={err_id} request_id={request_id} type={type(exc).__name__} msg={str(exc)[:300]}")
-        print(traceback.format_exc())
+        print(f"[albayan] unhandled_error_id={err_id} request_id={request_id} type={type(exc).__name__} msg={_safe_exception_text(exc)}")
+        print("".join(traceback.format_tb(exc.__traceback__)) + f"{type(exc).__name__}: {_safe_exception_text(exc)}")
     except Exception:
         pass
     # This handler runs OUTSIDE the middleware chain, so nothing else will add
@@ -2640,7 +2663,10 @@ def _serve_versioned_index() -> Response:
         html = html.replace('src="script.js"', f'src="script.js?v={script_v}"')
         html = html.replace('href="style.css"', f'href="style.css?v={style_v}"')
         # Version the bundled assets the same way (fonts, tailwind, lucide).
-        for asset in ("fonts.css", "tailwind.css", "lucide.min.js"):
+        for asset in (
+            "fonts.css", "tailwind.css", "lucide.min.js", "workspace-layout.css",
+            "ads-workspace.css", "operations-workspace.css", "management-workspace.css",
+        ):
             attr = "src" if asset.endswith(".js") else "href"
             v = _asset_version(ASSETS_DIR / asset)
             html = html.replace(
@@ -3296,7 +3322,7 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
     from .rate_limiter import check_rate_limit, reset_rate_limit
     
     # Rate limit based on user ID + IP for additional protection
-    ip = request.client.host if request.client else "unknown"
+    ip = _client_ip(request)
     key = f"pwchange:{user['id']}:{ip}"
     allowed, _, retry_after_ms = check_rate_limit(key, max_attempts=5, window_ms=15*60*1000)
     if not allowed:
@@ -3384,7 +3410,7 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
     token_hash = hash_token(token)
     now = now_ms()
     expires = now + PASSWORD_RESET_TOKEN_MS
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     ua = request.headers.get("user-agent")
 
     with _auth_mutation_guard(), db_conn() as conn:
@@ -3583,7 +3609,7 @@ def app_login_handoff(
     code = secrets.token_urlsafe(32)
     code_hash = hash_token(code)
     now = now_ms()
-    ip = request.client.host if request.client else None
+    ip = _client_ip(request)
     ua = request.headers.get("user-agent")
 
     with _auth_mutation_guard(), db_conn() as conn:
@@ -13926,7 +13952,14 @@ def spa_catch_all(path: str, request: Request):
     Returns index.html for known frontend routes, 404 for unknown paths.
     """
     full_path = f"/{path}"
-    
+
+    # A trailing slash changes how the browser resolves the shell's relative
+    # asset URLs ("/studio/script.js" does not exist), leaving the page on
+    # "Loading…" forever. Send it to the slash-less route instead.
+    if len(full_path) > 1 and full_path.endswith("/") and full_path.rstrip("/") in FRONTEND_ROUTES:
+        query = f"?{request.url.query}" if request.url.query else ""
+        return RedirectResponse(url=f"{full_path.rstrip('/')}{query}", status_code=308)
+
     # Serve index.html for known frontend routes
     if full_path in FRONTEND_ROUTES:
         return _serve_versioned_index()

@@ -309,6 +309,8 @@ def test_index_references_versioned_assets():
     assert 'href="assets/tailwind.css?v=' in html
     assert 'href="assets/fonts.css?v=' in html
     assert 'src="assets/lucide.min.js?v=' in html
+    for name in ("workspace-layout.css", "ads-workspace.css", "operations-workspace.css", "management-workspace.css"):
+        assert f'href="assets/{name}?v=' in html, name
 
 
 def test_spa_routes_use_the_same_versioned_no_store_shell():

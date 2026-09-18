@@ -189,9 +189,16 @@ const Security = {
     
     // Remove script tags and event handlers if not allowed
     if (!options.allowHtml) {
-      str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-      str = str.replace(/on\w+\s*=/gi, '');
-      str = str.replace(/javascript:/gi, '');
+      // Strip until nothing changes: a single pass let "oonclick=nclick=" or
+      // "jjavascript:avascript:" reassemble the very token it had removed.
+      for (let pass = 0; pass < 8; pass++) {
+        const before = str;
+        str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+        str = str.replace(/on\w+\s*=/gi, '');
+        str = str.replace(/javascript:/gi, '');
+        str = str.replace(/vbscript:/gi, '');
+        if (str === before) break;
+      }
       if (!options.allowDataUrl) {
         str = str.replace(/data:/gi, '');
       } else {

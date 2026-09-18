@@ -1883,9 +1883,16 @@ const Security = {
     
     // Remove script tags and event handlers if not allowed
     if (!options.allowHtml) {
-      str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-      str = str.replace(/on\w+\s*=/gi, '');
-      str = str.replace(/javascript:/gi, '');
+      // Strip until nothing changes: a single pass let "oonclick=nclick=" or
+      // "jjavascript:avascript:" reassemble the very token it had removed.
+      for (let pass = 0; pass < 8; pass++) {
+        const before = str;
+        str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+        str = str.replace(/on\w+\s*=/gi, '');
+        str = str.replace(/javascript:/gi, '');
+        str = str.replace(/vbscript:/gi, '');
+        if (str === before) break;
+      }
       if (!options.allowDataUrl) {
         str = str.replace(/data:/gi, '');
       } else {
@@ -4092,6 +4099,15 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
       if (state.activeModal === 'subscription-lock') renderModal();
     }).catch(() => {});
   }
+  // The balance shown (and the Subscribe button state) come from the local
+  // ledger copy. Pull the latest rows too, so a fresh login never shows an
+  // empty wallet the server has already credited. The tick skips itself when
+  // a poll is already running, so this never doubles up work.
+  if (typeof serverLiveSyncTick === 'function' && isServerModeEnabled()) {
+    Promise.resolve().then(() => serverLiveSyncTick()).then(() => {
+      if (state.activeModal === 'subscription-lock') renderModal();
+    }).catch(() => {});
+  }
 }
 
 let _subscribePlanBusy = false;
@@ -5289,11 +5305,15 @@ async function refreshSubscriptionPlans(force = false) {
   try {
     const payload = await apiGetSubscriptionPlans();
     state.subscriptionPlans = Array.isArray(payload?.plans) ? payload.plans : [];
+    subscriptionPlansLoadFailed = false;
   } catch (_) {
     state.subscriptionPlans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+    // Callers with nothing cached can tell a failed fetch from "still loading".
+    subscriptionPlansLoadFailed = true;
   }
   return state.subscriptionPlans;
 }
+let subscriptionPlansLoadFailed = false;
 
 const SUBSCRIPTIONS = {
   // Service subscription records: { id, userId, serviceId, status, startedAt, expiresAt, price, currency }
@@ -8734,7 +8754,9 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  const _deliveryExempt = view === 'delivery-dashboard' && isDeliveryRole(state.currentUser?.role);
+  // Mirror the router: drivers always keep both their dashboard and the
+  // Deliveries tab, or the tab bounces straight back to the landing view.
+  const _deliveryExempt = (view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role);
   if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view
     state.currentView = getAlbayanManagerLandingViewForUser(state.currentUser);
@@ -13973,6 +13995,11 @@ function closeSensitiveAuthenticatedUi() {
   document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
   state.activeModal = null;
   state.modalData = null;
+  // Search boxes and the customer filter were typed by one person; they must
+  // not greet the next person who signs in on this device.
+  for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {
+    if (typeof state[key] === 'string') state[key] = '';
+  }
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
   state.tempMixedReceiptTargetUSD = null;
@@ -14046,6 +14073,16 @@ function resetAuthenticatedServerCaches() {
     metaInsightsUi.loadedAtMs = 0;
     metaInsightsUi.requestSeq += 1;
   }
+  // Hub, wallet and Control Center keep server facts in module state (some in
+  // lazy bundles): a payment reference or last month's operations must not
+  // survive into the next sign-in. Clear whatever is loaded.
+  try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}
+  try { if (typeof _walletPayMethods !== 'undefined') { _walletPayMethods = null; _walletPayRate = null; } } catch (_) {}
+  try {
+    if (typeof _controlCenter === 'object' && _controlCenter) {
+      _controlCenter.operations = null; _controlCenter.meta = null; _controlCenter.loadedAt = 0; _controlCenter.error = '';
+    }
+  } catch (_) {}
 }
 
 function discardPendingServerUserUpdates() {
@@ -15541,6 +15578,21 @@ function render() {
   } catch (e) {
     console.error('[render] Error:', e);
     if (layoutLocked) unlockLayoutAfterRender(app);
+    // A first render that throws used to leave an empty page with no hint.
+    // Only a blank screen is replaced; an existing screen stays as it was.
+    try {
+      if (app && !String(app.innerHTML || '').trim()) {
+        const isAr = state.language === 'ar';
+        app.innerHTML = `
+          <div class="min-h-screen flex items-center justify-center p-6" dir="${isAr ? 'rtl' : 'ltr'}">
+            <div class="hub-card w-full max-w-md p-6 text-center">
+              <div class="text-lg font-extrabold text-slate-900 dark:text-white mb-2">${isAr ? 'تعذر عرض هذه الصفحة' : 'This page could not be shown'}</div>
+              <div class="text-sm text-slate-500 mb-4">${isAr ? 'أعد تحميل التطبيق. بياناتك محفوظة.' : 'Reload the app. Your data is safe.'}</div>
+              <button type="button" onclick="window.location.reload()" class="touch-target min-h-11 px-5 rounded-xl bg-blue-600 text-white font-bold">${isAr ? 'إعادة التحميل' : 'Reload'}</button>
+            </div>
+          </div>`;
+      }
+    } catch (_) {}
   } finally {
     _renderInProgress = false;
   }
@@ -16498,19 +16550,47 @@ function getWorkspaceViewTitle(view = state.currentView) {
   return key ? t(key) : t('adManager');
 }
 
+const FILTER_PANELS_STORAGE_KEY = 'albayan_filter_panels_v1';
+
+function loadWorkspaceFilterPanels() {
+  if (!state.expandedFilterPanels || typeof state.expandedFilterPanels !== 'object' || Array.isArray(state.expandedFilterPanels)) {
+    state.expandedFilterPanels = {};
+  }
+  const panels = state.expandedFilterPanels;
+  if (panels.__loaded) return panels;
+  // Remember each list's choice across reloads: someone who sorts receipts
+  // every day should not have to reopen "Filters & sort" every session.
+  try {
+    const saved = JSON.parse(localStorage.getItem(FILTER_PANELS_STORAGE_KEY) || 'null');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      for (const [view, open] of Object.entries(saved)) {
+        if (typeof open === 'boolean' && panels[view] === undefined) panels[view] = open;
+      }
+    }
+  } catch (_) {}
+  Object.defineProperty(panels, '__loaded', { value: true, enumerable: false });
+  return panels;
+}
+
 function isWorkspaceFilterPanelExpanded(view) {
   // One complete workspace, with optional disclosure of the SAME filters.
   // Do not force them open based on the old Simple/Advanced preference: on a
   // phone that put a screenful of controls in front of every receipt or ad.
-  const panels = state.expandedFilterPanels;
-  return !!(panels && typeof panels === 'object' && panels[view]);
+  const panels = loadWorkspaceFilterPanels();
+  if (typeof panels[view] === 'boolean') return panels[view];
+  // No saved choice yet: a wide screen has room for the filters, as it always
+  // had; a phone starts with them folded.
+  try { return typeof window !== 'undefined' && Number(window.innerWidth) >= 768; } catch (_) { return false; }
 }
 
 function toggleWorkspaceFilterPanel(view) {
-  if (!state.expandedFilterPanels || typeof state.expandedFilterPanels !== 'object' || Array.isArray(state.expandedFilterPanels)) {
-    state.expandedFilterPanels = {};
-  }
-  state.expandedFilterPanels[view] = !state.expandedFilterPanels[view];
+  const panels = loadWorkspaceFilterPanels();
+  panels[view] = !isWorkspaceFilterPanelExpanded(view);
+  try {
+    const persisted = {};
+    for (const [key, value] of Object.entries(panels)) if (typeof value === 'boolean') persisted[key] = value;
+    localStorage.setItem(FILTER_PANELS_STORAGE_KEY, JSON.stringify(persisted));
+  } catch (_) {}
   render();
 }
 
@@ -16608,8 +16688,8 @@ function renderMainApp(viewHTML = null) {
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
           <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
           <div class="min-w-0 flex-1">
-            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${state.language === 'ar' ? 'مساحة العمل' : 'Your workspace'}</div>
-            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${t('adManager')}</div>
+            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${Security.escapeHtml(String(getWorkspaceViewTitle()))}</div>
+            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${t('adManager')}</div>
           </div>
           <div class="flex items-center gap-1">
             <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
@@ -16694,6 +16774,10 @@ function renderSidebar() {
     if (isDeliveryRole(state.currentUser?.role)) {
       if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
+
+    // Platform-owner screens (Control Center, hub, wallet) never belong in a
+    // staff sidebar: the router refuses them, so listing them made a dead link.
+    if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;
 
     // Check if user has view permission for this module
     const permModule = navItemPermissions[item.id];
@@ -19486,7 +19570,9 @@ function renderDeliveriesView(logOnly) {
     const deliveryTarget = _getCollectionTargetCached(ad);
     const debtLocal = deliveryTarget.amountLocal;
     const debtUSD = deliveryTarget.amountUSD;
-    const active = ad.deliveryStatus === 'Needs Delivery' || ad.deliveryStatus === 'In Progress';
+    // Anything not finished can still be cancelled — including the rare
+    // record that sits at the 'Office' status while still marked for delivery.
+    const active = ad.deliveryStatus !== 'Delivered' && ad.deliveryStatus !== 'Canceled';
     const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
     const safeId = esc(ad.id);
     const tone = ({ 'Needs Delivery': 'waiting', 'In Progress': 'active', 'Delivered': 'done', 'Canceled': 'canceled' })[ad.deliveryStatus] || 'neutral';
@@ -22536,8 +22622,9 @@ function renderPlansView() {
   } else if (!plans.length) {
     body = `
       <div class="hub-card p-6 text-center text-sm text-slate-500">
-        <div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        ${hubText('Loading prices…', 'جاري تحميل الأسعار…')}
+        ${(typeof subscriptionPlansLoadFailed !== 'undefined' && subscriptionPlansLoadFailed)
+          ? `<i data-lucide="cloud-off" class="w-6 h-6 mx-auto mb-2 text-slate-400"></i>${hubText('Prices did not load. Check your connection and try again.', 'لم يتم تحميل الأسعار. تحقق من الاتصال ثم أعد المحاولة.')}`
+          : `<div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>${hubText('Loading prices…', 'جاري تحميل الأسعار…')}`}
         <div class="mt-3"><button type="button" onclick="_plansViewFetchedAt = 0; plansEnsureFresh();" class="touch-target min-h-10 px-3 text-xs font-bold text-blue-600 underline">${hubText('Retry', 'إعادة المحاولة')}</button></div>
       </div>`;
   } else {
@@ -22659,7 +22746,7 @@ async function chargeWalletCreateRequest() {
   _chargeWallet.busy = true;
   render();
   try {
-    const idem = `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`;
+    const idem = Security.generateSecureId('paycreate');
     const created = await apiWalletPaymentRequestCreate(amountMinor, _chargeWallet.method, idem, currency);
     _chargeWallet.created = created && created.data ? created.data : created;
     showNotification(hubText('Request created', 'تم إنشاء الطلب'), chargeWalletInstructions(_chargeWallet.created), 'success');
@@ -23157,6 +23244,11 @@ function ensureAdminToolsLoaded() {
     return Promise.resolve();
   }
   if (_adminToolsBundlePromise) return _adminToolsBundlePromise;
+  // After a failure, wait before asking again. Every render reaches this
+  // function (live sync repaints every few seconds), and re-requesting a
+  // bundle that just failed turned an offline phone into a request loop that
+  // never showed the Retry card.
+  if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return Promise.resolve();
   _adminToolsBundleState = 'loading';
   _adminToolsBundlePromise = new Promise((resolve) => {
     const tag = document.createElement('script');
@@ -23609,12 +23701,18 @@ function openDebtorCollection(customerId) {
 
 const SHELL_REMINDER_LOG_KEY = 'albayan_debt_reminders_v1';
 
+// One log per signed-in account: the next person on this device neither sees
+// nor inherits another account's "reminded today" marks.
+function shellReminderLogKey() {
+  return `${SHELL_REMINDER_LOG_KEY}:${String(state.currentUser?.id || 'anonymous')}`;
+}
+
 function shellReminderLog() {
-  try { const raw = localStorage.getItem(SHELL_REMINDER_LOG_KEY); const parsed = raw ? JSON.parse(raw) : {}; return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
+  try { const raw = localStorage.getItem(shellReminderLogKey()); const parsed = raw ? JSON.parse(raw) : {}; return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
 }
 
 function shellReminderStamp(customerId) {
-  try { const log = shellReminderLog(); log[String(customerId)] = Date.now(); localStorage.setItem(SHELL_REMINDER_LOG_KEY, JSON.stringify(log)); } catch (_) {}
+  try { const log = shellReminderLog(); log[String(customerId)] = Date.now(); localStorage.setItem(shellReminderLogKey(), JSON.stringify(log)); } catch (_) {}
 }
 
 function shellReminderAgo(ts) {
@@ -23642,7 +23740,15 @@ function remindDebtor(customerId) {
     showNotification(shellText('No phone number', 'لا يوجد رقم هاتف'), shellText('Add a phone number to this customer first.', 'أضف رقم هاتف لهذا العميل أولاً.'), 'warning');
     return;
   }
-  const base = buildWhatsAppLink(phone);
+  // Phones are often pasted from Arabic apps (٠٩١…) or stored as local
+  // 09… numbers; wa.me needs plain international digits (218…). The customer
+  // phone normaliser already knows both, so use it before falling back.
+  const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
+  const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
+  if (!base) {
+    showNotification(shellText('Phone number not readable', 'رقم الهاتف غير مقروء'), shellText('Check this customer\'s phone number, then try again.', 'تحقق من رقم هاتف هذا العميل ثم حاول مرة أخرى.'), 'warning');
+    return;
+  }
   const url = `${base}${base.includes('?') ? '&' : '?'}text=${encodeURIComponent(shellReminderMessage(row))}`;
   const opened = window.open(url, '_blank', 'noopener');
   if (!opened) { try { window.location.href = url; } catch (_) {} }
@@ -39316,7 +39422,7 @@ function renderModal() {
               <div class="space-y-1 text-xs text-slate-600 dark:text-slate-300 max-h-24 overflow-y-auto custom-scrollbar pr-1">
                 ${transferReceipt.transfers.map(t => {
                   const targetCustomer = state.customers.find(c => c.id === t.toCustomerId);
-                  const name = targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown');
+                  const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name : (isArT ? 'غير معروف' : 'Unknown')));
                   return `<div class="flex justify-between">
                     <span>${new Date(t.date).toLocaleString(appDateLocale())}</span>
                     <span class="font-medium">$${(t.amountUSD || 0).toFixed(2)} → ${name}</span>
@@ -42618,6 +42724,8 @@ async function deleteAd(id) {
 
 let _clothesBundlePromise = null;
 let _clothesBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
+let _clothesLastFailureAt = 0;
+const _CLOTHES_RETRY_COOLDOWN_MS = 30000;
 
 function _clothesBundleUrl() {
   // Derive from the script tag that provably loaded: correct under any base
@@ -42647,6 +42755,11 @@ function ensureClothesSystemLoaded() {
     return Promise.resolve();
   }
   if (_clothesBundlePromise) return _clothesBundlePromise;
+  // After a failure, wait before asking again. Every render reaches this
+  // function (live sync repaints every few seconds), and re-requesting a
+  // bundle that just failed turned an offline phone into a request loop that
+  // never showed the Retry card.
+  if (_clothesBundleState === 'failed' && Date.now() - _clothesLastFailureAt < _CLOTHES_RETRY_COOLDOWN_MS) return Promise.resolve();
   _clothesBundleState = 'loading';
   _clothesBundlePromise = new Promise((resolve) => {
     const tag = document.createElement('script');
@@ -42665,6 +42778,7 @@ function ensureClothesSystemLoaded() {
       try { tag.remove(); } catch (_) {}
       _clothesBundleState = 'failed';
       _clothesBundlePromise = null;
+      _clothesLastFailureAt = Date.now();
       try { if (state.currentView === 'clothes-system') render(); } catch (_) {}
       resolve();
     };
@@ -42676,6 +42790,7 @@ function ensureClothesSystemLoaded() {
 function retryClothesSystemLoad() {
   _clothesBundleState = 'unloaded';
   _clothesBundlePromise = null;
+  _clothesLastFailureAt = 0;
   ensureClothesSystemLoaded();
   render();
 }
@@ -42724,6 +42839,8 @@ if (/^\/clothes-system(\/|$)/.test(window.location.pathname || '')
 
 let _studioBundlePromise = null;
 let _studioBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
+let _studioLastFailureAt = 0;
+const _STUDIO_RETRY_COOLDOWN_MS = 30000;
 
 function _studioBundleUrl() {
   // Derive from the script tag that provably loaded: correct under /studio/,
@@ -42753,6 +42870,11 @@ function ensureAdsStudioLoaded() {
     return Promise.resolve();
   }
   if (_studioBundlePromise) return _studioBundlePromise;
+  // After a failure, wait before asking again. Every render reaches this
+  // function (live sync repaints every few seconds), and re-requesting a
+  // bundle that just failed turned an offline phone into a request loop that
+  // never showed the Retry card.
+  if (_studioBundleState === 'failed' && Date.now() - _studioLastFailureAt < _STUDIO_RETRY_COOLDOWN_MS) return Promise.resolve();
   _studioBundleState = 'loading';
   _studioBundlePromise = new Promise((resolve) => {
     const tag = document.createElement('script');
@@ -42771,6 +42893,7 @@ function ensureAdsStudioLoaded() {
       try { tag.remove(); } catch (_) {}
       _studioBundleState = 'failed';
       _studioBundlePromise = null;
+      _studioLastFailureAt = Date.now();
       try { if (state.currentView === 'ads-studio') render(); } catch (_) {}
       resolve();
     };
@@ -42782,6 +42905,7 @@ function ensureAdsStudioLoaded() {
 function retryAdsStudioLoad() {
   _studioBundleState = 'unloaded';
   _studioBundlePromise = null;
+  _studioLastFailureAt = 0;
   ensureAdsStudioLoaded();
   render();
 }

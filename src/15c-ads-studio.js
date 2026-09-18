@@ -261,7 +261,9 @@ function adsStudioMoneyWithLyd(minor) {
   const usd = adsStudioMoney(minor);
   const rate = typeof _adsStudioUsdToLydRate === 'function' ? _adsStudioUsdToLydRate() : 0;
   if (!(rate > 1)) return usd;
-  const lyd = Math.ceil((Math.max(0, Math.trunc(Number(minor) || 0)) / 100) * rate);
+  // Same arithmetic as the server's payment instruction (ceil of minor × rate),
+  // so the estimate never disagrees with the LYD figure the customer is asked to pay.
+  const lyd = (Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * rate) / 100).toFixed(2);
   return `${usd} (≈ ${lyd} ${adsStudioText('LYD', 'د.ل')})`;
 }
 
@@ -1563,7 +1565,7 @@ function adsStudioUpdateLydPreview() {
   const usd = parseFloat(document.getElementById('ads-studio-charge-amount')?.value || '0');
   const rate = _adsStudioUsdToLydRate();
   el.textContent = (Number.isFinite(usd) && usd > 0 && rate > 0)
-    ? `≈ ${(Math.ceil(usd * rate * 100) / 100).toFixed(2)} LYD @ ${rate}`
+    ? `≈ ${(Math.ceil(Math.round(usd * 100) * rate) / 100).toFixed(2)} LYD @ ${rate}`
     : '';
 }
 
@@ -1636,7 +1638,7 @@ async function adsStudioCreateWalletCharge() {
   }
   _adsStudioChargeBusy = true;
   try {
-    const created = await apiWalletPaymentRequestCreate(amountMinor, method, `paycreate-${state.currentUser?.id || 'me'}-${Date.now()}`);
+    const created = await apiWalletPaymentRequestCreate(amountMinor, method, Security.generateSecureId('paycreate'));
     const d = created?.data || {};
     const entry = _adsStudioPayMethod(d.method);
     const template = entry && entry.instructions ? String(adsStudioIsAr() ? entry.instructions.ar : entry.instructions.en) : '';

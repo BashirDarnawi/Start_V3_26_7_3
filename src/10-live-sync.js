@@ -1683,6 +1683,11 @@ function closeSensitiveAuthenticatedUi() {
   document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
   state.activeModal = null;
   state.modalData = null;
+  // Search boxes and the customer filter were typed by one person; they must
+  // not greet the next person who signs in on this device.
+  for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {
+    if (typeof state[key] === 'string') state[key] = '';
+  }
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
   state.tempMixedReceiptTargetUSD = null;
@@ -1756,6 +1761,16 @@ function resetAuthenticatedServerCaches() {
     metaInsightsUi.loadedAtMs = 0;
     metaInsightsUi.requestSeq += 1;
   }
+  // Hub, wallet and Control Center keep server facts in module state (some in
+  // lazy bundles): a payment reference or last month's operations must not
+  // survive into the next sign-in. Clear whatever is loaded.
+  try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}
+  try { if (typeof _walletPayMethods !== 'undefined') { _walletPayMethods = null; _walletPayRate = null; } } catch (_) {}
+  try {
+    if (typeof _controlCenter === 'object' && _controlCenter) {
+      _controlCenter.operations = null; _controlCenter.meta = null; _controlCenter.loadedAt = 0; _controlCenter.error = '';
+    }
+  } catch (_) {}
 }
 
 function discardPendingServerUserUpdates() {

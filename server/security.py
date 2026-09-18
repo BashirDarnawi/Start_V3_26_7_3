@@ -86,3 +86,19 @@ def parse_session_cookie_value(value: str) -> tuple[str, str] | None:
     if not session_id or not token:
         return None
     return session_id, token
+
+
+def constant_time_equal(provided: str | None, expected: str | None) -> bool:
+    """Constant-time equality for secrets that never raises on odd input.
+
+    ``hmac.compare_digest`` refuses str operands containing non-ASCII
+    characters (TypeError), so a garbage signature, verify token or origin
+    header sent by an anonymous caller became an unhandled 500 instead of a
+    clean refusal. Comparing the UTF-8 bytes keeps the timing guarantee for
+    every input. An empty expected value never matches anything.
+    """
+    left = str(provided or "").encode("utf-8")
+    right = str(expected or "").encode("utf-8")
+    if not left or not right:
+        return False
+    return hmac.compare_digest(left, right)

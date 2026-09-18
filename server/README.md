@@ -90,9 +90,14 @@ This protects your logins and data traffic **even without a domain/HTTPS**.
   setup uses these fields automatically
 - **ALBAYAN_DB_PATH**: SQLite path (only used if DATABASE_URL is not set)
 - **ALBAYAN_SESSION_MS**: session duration in milliseconds
-- **ALBAYAN_TRUST_PROXY_HEADERS**: leave `false` unless the API is reachable only
+- **ALBAYAN_TRUST_PROXY_HEADERS**: set `true` when the API is reachable only
   through a trusted reverse proxy that overwrites `CF-Connecting-IP` and
-  `X-Forwarded-For`; otherwise clients can spoof rate-limit identities
+  `X-Forwarded-For` (the LibyanSpider/Jelastic container behind Cloudflare is
+  such a case). With `false` behind a proxy every visitor shares one
+  per-address login/reset allowance, so one stranger can lock the whole office
+  out of signing in; the server log prints a warning when it sees this. Keep
+  `false` only when clients connect to the server directly, because then the
+  headers could be forged to dodge rate limits
 - **ALBAYAN_ENABLE_ONLINE_IMPORT**: maintenance-only whole-backup replacement;
   defaults to `false` and should never be enabled while users are writing data
 - **ALBAYAN_SETUP_TOKEN**: optional random secret (minimum 16 characters) that

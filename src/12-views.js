@@ -294,6 +294,21 @@ function render() {
   } catch (e) {
     console.error('[render] Error:', e);
     if (layoutLocked) unlockLayoutAfterRender(app);
+    // A first render that throws used to leave an empty page with no hint.
+    // Only a blank screen is replaced; an existing screen stays as it was.
+    try {
+      if (app && !String(app.innerHTML || '').trim()) {
+        const isAr = state.language === 'ar';
+        app.innerHTML = `
+          <div class="min-h-screen flex items-center justify-center p-6" dir="${isAr ? 'rtl' : 'ltr'}">
+            <div class="hub-card w-full max-w-md p-6 text-center">
+              <div class="text-lg font-extrabold text-slate-900 dark:text-white mb-2">${isAr ? 'تعذر عرض هذه الصفحة' : 'This page could not be shown'}</div>
+              <div class="text-sm text-slate-500 mb-4">${isAr ? 'أعد تحميل التطبيق. بياناتك محفوظة.' : 'Reload the app. Your data is safe.'}</div>
+              <button type="button" onclick="window.location.reload()" class="touch-target min-h-11 px-5 rounded-xl bg-blue-600 text-white font-bold">${isAr ? 'إعادة التحميل' : 'Reload'}</button>
+            </div>
+          </div>`;
+      }
+    } catch (_) {}
   } finally {
     _renderInProgress = false;
   }
@@ -1251,19 +1266,47 @@ function getWorkspaceViewTitle(view = state.currentView) {
   return key ? t(key) : t('adManager');
 }
 
+const FILTER_PANELS_STORAGE_KEY = 'albayan_filter_panels_v1';
+
+function loadWorkspaceFilterPanels() {
+  if (!state.expandedFilterPanels || typeof state.expandedFilterPanels !== 'object' || Array.isArray(state.expandedFilterPanels)) {
+    state.expandedFilterPanels = {};
+  }
+  const panels = state.expandedFilterPanels;
+  if (panels.__loaded) return panels;
+  // Remember each list's choice across reloads: someone who sorts receipts
+  // every day should not have to reopen "Filters & sort" every session.
+  try {
+    const saved = JSON.parse(localStorage.getItem(FILTER_PANELS_STORAGE_KEY) || 'null');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      for (const [view, open] of Object.entries(saved)) {
+        if (typeof open === 'boolean' && panels[view] === undefined) panels[view] = open;
+      }
+    }
+  } catch (_) {}
+  Object.defineProperty(panels, '__loaded', { value: true, enumerable: false });
+  return panels;
+}
+
 function isWorkspaceFilterPanelExpanded(view) {
   // One complete workspace, with optional disclosure of the SAME filters.
   // Do not force them open based on the old Simple/Advanced preference: on a
   // phone that put a screenful of controls in front of every receipt or ad.
-  const panels = state.expandedFilterPanels;
-  return !!(panels && typeof panels === 'object' && panels[view]);
+  const panels = loadWorkspaceFilterPanels();
+  if (typeof panels[view] === 'boolean') return panels[view];
+  // No saved choice yet: a wide screen has room for the filters, as it always
+  // had; a phone starts with them folded.
+  try { return typeof window !== 'undefined' && Number(window.innerWidth) >= 768; } catch (_) { return false; }
 }
 
 function toggleWorkspaceFilterPanel(view) {
-  if (!state.expandedFilterPanels || typeof state.expandedFilterPanels !== 'object' || Array.isArray(state.expandedFilterPanels)) {
-    state.expandedFilterPanels = {};
-  }
-  state.expandedFilterPanels[view] = !state.expandedFilterPanels[view];
+  const panels = loadWorkspaceFilterPanels();
+  panels[view] = !isWorkspaceFilterPanelExpanded(view);
+  try {
+    const persisted = {};
+    for (const [key, value] of Object.entries(panels)) if (typeof value === 'boolean') persisted[key] = value;
+    localStorage.setItem(FILTER_PANELS_STORAGE_KEY, JSON.stringify(persisted));
+  } catch (_) {}
   render();
 }
 
@@ -1361,8 +1404,8 @@ function renderMainApp(viewHTML = null) {
         <header class="mobile-app-header sticky top-0 z-20 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 md:hidden flex justify-between items-center gap-2">
           <button type="button" onclick="${isCurrentUserAdmin() ? "navigateTo('services-hub')" : `editUser('${Security.escapeHtml(String(state.currentUser?.id || ''))}')`}" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full alb-mark text-white font-bold" aria-label="${state.language === 'ar' ? 'حسابي' : 'My account'}">${Security.escapeHtml(String(state.currentUser?.name || 'U').trim().charAt(0).toUpperCase() || 'U')}</button>
           <div class="min-w-0 flex-1">
-            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${state.language === 'ar' ? 'مساحة العمل' : 'Your workspace'}</div>
-            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${t('adManager')}</div>
+            <div class="truncate text-[15px] font-extrabold text-slate-900 dark:text-white">${Security.escapeHtml(String(getWorkspaceViewTitle()))}</div>
+            <div class="truncate text-[11px] text-slate-500 dark:text-slate-400">${t('adManager')}</div>
           </div>
           <div class="flex items-center gap-1">
             <button type="button" onclick="toggleCommandPalette()" class="touch-target flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800" aria-label="${state.language === 'ar' ? 'البحث الذكي' : 'Smart search'}"><i data-lucide="search" class="w-5 h-5"></i></button>
@@ -1447,6 +1490,10 @@ function renderSidebar() {
     if (isDeliveryRole(state.currentUser?.role)) {
       if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
+
+    // Platform-owner screens (Control Center, hub, wallet) never belong in a
+    // staff sidebar: the router refuses them, so listing them made a dead link.
+    if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;
 
     // Check if user has view permission for this module
     const permModule = navItemPermissions[item.id];
@@ -4239,7 +4286,9 @@ function renderDeliveriesView(logOnly) {
     const deliveryTarget = _getCollectionTargetCached(ad);
     const debtLocal = deliveryTarget.amountLocal;
     const debtUSD = deliveryTarget.amountUSD;
-    const active = ad.deliveryStatus === 'Needs Delivery' || ad.deliveryStatus === 'In Progress';
+    // Anything not finished can still be cancelled — including the rare
+    // record that sits at the 'Office' status while still marked for delivery.
+    const active = ad.deliveryStatus !== 'Delivered' && ad.deliveryStatus !== 'Canceled';
     const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
     const safeId = esc(ad.id);
     const tone = ({ 'Needs Delivery': 'waiting', 'In Progress': 'active', 'Delivered': 'done', 'Canceled': 'canceled' })[ad.deliveryStatus] || 'neutral';

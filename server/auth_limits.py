@@ -66,6 +66,30 @@ def _is_loopback_peer(value: str) -> bool:
         return False
 
 
+_UNTRUSTED_PROXY_WARNED = False
+
+
+def _warn_untrusted_proxy_once(request: Request) -> None:
+    """Log once when proxy headers arrive but are (by configuration) ignored."""
+    global _UNTRUSTED_PROXY_WARNED
+    if _UNTRUSTED_PROXY_WARNED:
+        return
+    try:
+        seen = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
+    except Exception:
+        seen = None
+    if not seen:
+        return
+    _UNTRUSTED_PROXY_WARNED = True
+    print(
+        "[albayan] WARNING: requests carry CF-Connecting-IP / X-Forwarded-For but "
+        "ALBAYAN_TRUST_PROXY_HEADERS is off, so every visitor shares one per-address "
+        "login/reset allowance and one bad actor can exhaust it for everybody. If this "
+        "server is reachable only through Cloudflare or the platform load balancer, set "
+        "ALBAYAN_TRUST_PROXY_HEADERS=true."
+    )
+
+
 def _client_ip(request: Request) -> str:
     """Real client IP for rate limiting, behind Cloudflare + ALB.
 
@@ -109,6 +133,8 @@ def _client_ip(request: Request) -> str:
                     return parts[-1]
         except Exception:
             pass
+    if not TRUST_PROXY_HEADERS:
+        _warn_untrusted_proxy_once(request)
     return peer
 
 

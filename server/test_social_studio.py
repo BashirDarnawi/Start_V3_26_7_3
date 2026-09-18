@@ -11,6 +11,7 @@ import hmac
 import json
 import os
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -209,6 +210,17 @@ def _webhook(payload):
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"received": True}
+
+
+def _assert_signed_media_url(url, post_id, index):
+    """A media URL carries an unexpired exp and a signature over post, index and exp."""
+    prefix = f"https://studio.example.test/api/social-studio/media/{post_id}/{index}?exp="
+    assert url.startswith(prefix), url
+    query = dict(part.split("=", 1) for part in url.split("?", 1)[1].split("&"))
+    exp = int(query["exp"])
+    assert exp > int(time.time())
+    assert query["sig"] == studio.media_signature(post_id, index, exp)
+    return exp
 
 
 def _fb_comment(page_id, comment_id, from_id, message, post_id="post_1"):
@@ -670,8 +682,7 @@ def test_publish_now_fb_photos_use_signed_media_urls(actors, graph):
         path, data = paths[index]
         assert path == "5100000000015/photos"
         assert data["published"] == "false"
-        expected = f"https://studio.example.test/api/social-studio/media/{post['id']}/{index}?sig={studio.media_signature(post['id'], index)}"
-        assert data["url"] == expected
+        _assert_signed_media_url(data["url"], post["id"], index)
     assert paths[2] == ("5100000000015/feed", {
         "message": "Two photos",
         "attached_media[0]": json.dumps({"media_fbid": "5100000000015_photos_id"}, separators=(",", ":")),
@@ -686,10 +697,11 @@ def test_publish_now_instagram_single_and_carousel(actors, graph):
     single = _post(cookies, [page["id"]], caption="IG one", media=[VALID_PNG_DATA_URL]).json()
     published = client.post(f"{API}/posts/{single['id']}/publish", cookies=cookies)
     assert published.status_code == 200, published.text
-    assert graph.paths() == [
-        ("17800000000016/media", {"image_url": studio.media_public_url(single["id"], 0), "caption": "IG one"}),
-        ("17800000000016/media_publish", {"creation_id": "17800000000016_media_id"}),
-    ]
+    ig_paths = graph.paths()
+    assert [p for p, _d in ig_paths] == ["17800000000016/media", "17800000000016/media_publish"]
+    assert ig_paths[0][1]["caption"] == "IG one"
+    _assert_signed_media_url(ig_paths[0][1]["image_url"], single["id"], 0)
+    assert ig_paths[1][1] == {"creation_id": "17800000000016_media_id"}
     assert graph.calls[0][2] == "PAGE-TOKEN-5100000000016"  # page token of the linked FB page
     assert published.json()["results"][0]["metaPostId"] == "17800000000016_media_publish_id"
 
@@ -774,18 +786,28 @@ def test_media_route_requires_valid_signature_and_no_login(actors):
     page = _link(actors, "a", "5100000000021")
     post = _post(actors["a"]["cookies"], [page["id"]], media=[VALID_PNG_DATA_URL]).json()
     anonymous = TestClient(app)
-    good = anonymous.get(f"{API}/media/{post['id']}/0", params={"sig": studio.media_signature(post["id"], 0)})
+    exp = _assert_signed_media_url(studio.media_public_url(post["id"], 0), post["id"], 0)
+    signed = {"exp": str(exp), "sig": studio.media_signature(post["id"], 0, exp)}
+    good = anonymous.get(f"{API}/media/{post['id']}/0", params=signed)
     assert good.status_code == 200, good.text
     assert good.headers["content-type"].startswith("image/png")
     assert good.headers["cache-control"] == "private, max-age=3600"
     assert good.content == base64.b64decode(VALID_PNG_DATA_URL.split(",", 1)[1])
-    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"sig": "0" * 64}).status_code == 404
+    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"exp": str(exp), "sig": "0" * 64}).status_code == 404
+    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"sig": signed["sig"]}).status_code == 404
     assert anonymous.get(f"{API}/media/{post['id']}/0").status_code == 404
-    assert anonymous.get(f"{API}/media/{post['id']}/1", params={"sig": studio.media_signature(post["id"], 1)}).status_code == 404
-    assert anonymous.get(f"{API}/media/spost_missing/0", params={"sig": studio.media_signature("spost_missing", 0)}).status_code == 404
-    # The signature is bound to the app secret.
-    with_other_secret = hmac.new(b"other", f"{post['id']}:0".encode(), hashlib.sha256).hexdigest()
-    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"sig": with_other_secret}).status_code == 404
+    # A link is bound to its expiry: once past, a genuine signature over the
+    # old expiry is dead, and moving exp forward breaks the signature.
+    stale = exp - studio.MEDIA_URL_TTL_SECONDS - 3600
+    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"exp": str(stale), "sig": studio.media_signature(post["id"], 0, stale)}).status_code == 404
+    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"exp": str(exp + 1), "sig": signed["sig"]}).status_code == 404
+    assert anonymous.get(f"{API}/media/{post['id']}/1", params={"exp": str(exp), "sig": studio.media_signature(post["id"], 1, exp)}).status_code == 404
+    assert anonymous.get(f"{API}/media/spost_missing/0", params={"exp": str(exp), "sig": studio.media_signature("spost_missing", 0, exp)}).status_code == 404
+    # Garbage that is not even ASCII is refused, never a crash into a 500.
+    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"exp": str(exp), "sig": "\u00e9" * 8}).status_code == 404
+    # The key is derived from the app secret; the raw secret itself signs nothing.
+    with_raw_secret = hmac.new(APP_SECRET.encode(), f"{post['id']}:0:{exp}".encode(), hashlib.sha256).hexdigest()
+    assert anonymous.get(f"{API}/media/{post['id']}/0", params={"exp": str(exp), "sig": with_raw_secret}).status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -1131,3 +1153,17 @@ def test_real_post_helper_sends_form_data_with_page_token_proof(monkeypatch):
     assert [r.method for r in seen] == ["GET", "POST"]
     with pytest.raises(meta_ads.MetaAdsError):
         client_obj._post("../evil", {})
+
+
+def test_webhook_signature_and_verify_token_reject_non_ascii_cleanly(monkeypatch):
+    raw = json.dumps({"object": "page", "entry": []}).encode("utf-8")
+    response = client.post(
+        "/api/meta-ads/webhook", content=raw,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": b"sha256=\xc3\xa9"},
+    )
+    assert response.status_code == 403
+    monkeypatch.setenv("ALBAYAN_META_WEBHOOK_VERIFY_TOKEN", "verify-me-please")
+    verify = client.get("/api/meta-ads/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "\u00e9", "hub.challenge": "x"})
+    assert verify.status_code == 403
+    ok = client.get("/api/meta-ads/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "verify-me-please", "hub.challenge": "x"})
+    assert ok.status_code == 200 and ok.text == "x"

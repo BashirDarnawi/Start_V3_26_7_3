@@ -8,6 +8,8 @@
 
 let _studioBundlePromise = null;
 let _studioBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
+let _studioLastFailureAt = 0;
+const _STUDIO_RETRY_COOLDOWN_MS = 30000;
 
 function _studioBundleUrl() {
   // Derive from the script tag that provably loaded: correct under /studio/,
@@ -37,6 +39,11 @@ function ensureAdsStudioLoaded() {
     return Promise.resolve();
   }
   if (_studioBundlePromise) return _studioBundlePromise;
+  // After a failure, wait before asking again. Every render reaches this
+  // function (live sync repaints every few seconds), and re-requesting a
+  // bundle that just failed turned an offline phone into a request loop that
+  // never showed the Retry card.
+  if (_studioBundleState === 'failed' && Date.now() - _studioLastFailureAt < _STUDIO_RETRY_COOLDOWN_MS) return Promise.resolve();
   _studioBundleState = 'loading';
   _studioBundlePromise = new Promise((resolve) => {
     const tag = document.createElement('script');
@@ -55,6 +62,7 @@ function ensureAdsStudioLoaded() {
       try { tag.remove(); } catch (_) {}
       _studioBundleState = 'failed';
       _studioBundlePromise = null;
+      _studioLastFailureAt = Date.now();
       try { if (state.currentView === 'ads-studio') render(); } catch (_) {}
       resolve();
     };
@@ -66,6 +74,7 @@ function ensureAdsStudioLoaded() {
 function retryAdsStudioLoad() {
   _studioBundleState = 'unloaded';
   _studioBundlePromise = null;
+  _studioLastFailureAt = 0;
   ensureAdsStudioLoaded();
   render();
 }

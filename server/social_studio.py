@@ -38,7 +38,8 @@ from sqlalchemy import text
 from . import meta_ads as _meta
 from .db import db_conn, get_engine, json_loads
 from .rate_limiter import check_rate_limit
-from .security import new_id
+from .auth_limits import _client_ip as _shared_client_ip
+from .security import constant_time_equal, new_id
 
 SETTINGS_TYPE = "socialStudioSettings"
 PAGES_TYPE = "socialPages"
@@ -161,16 +162,34 @@ def _data_url_decoded_size(value: str) -> int:
     return max(0, len(payload) * 3 // 4 - padding)
 
 
-def media_signature(post_id: str, index: int) -> str:
+# Meta fetches a post's photos once, right when the post is created, so a
+# signed link only needs to outlive that fetch (plus generous retry room).
+MEDIA_URL_TTL_SECONDS = max(600, int(os.getenv("ALBAYAN_SOCIAL_MEDIA_URL_TTL_SECONDS", "172800") or 172800))
+
+
+def _unix_now() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _media_signing_key() -> bytes:
+    # A dedicated key derived from the app secret: the secret Meta trusts us
+    # with is never used directly as the HMAC key for links we hand out.
     secret = (os.getenv("ALBAYAN_META_APP_SECRET") or "").strip() or _FALLBACK_MEDIA_SECRET
-    return hmac.new(
-        secret.encode("utf-8"), f"{post_id}:{int(index)}".encode("utf-8"), hashlib.sha256
-    ).hexdigest()
+    return hmac.new(secret.encode("utf-8"), b"albayan:social-studio:media-url", hashlib.sha256).digest()
 
 
-def media_public_url(post_id: str, index: int) -> str:
+def media_signature(post_id: str, index: int, expires_at: int) -> str:
+    message = f"{post_id}:{int(index)}:{int(expires_at)}".encode("utf-8")
+    return hmac.new(_media_signing_key(), message, hashlib.sha256).hexdigest()
+
+
+def media_public_url(post_id: str, index: int, *, expires_at: int | None = None) -> str:
     base = (os.getenv("ALBAYAN_PUBLIC_BASE_URL") or "https://albayanhub.com").strip().rstrip("/")
-    return f"{base}/api/social-studio/media/{post_id}/{int(index)}?sig={media_signature(post_id, index)}"
+    exp = int(expires_at) if expires_at is not None else _unix_now() + MEDIA_URL_TTL_SECONDS
+    return (
+        f"{base}/api/social-studio/media/{post_id}/{int(index)}"
+        f"?exp={exp}&sig={media_signature(post_id, index, exp)}"
+    )
 
 
 def evaluate_rules(
@@ -1003,7 +1022,9 @@ def process_comment(
             and _has_person_reply(owner_id, page_entity["id"], from_id)
         ) else set()
         refs = {str(post_ref or "")}
-        for post in _rows_where_json(POSTS_TYPE, "status", "published", owner_id=owner_id, limit=500):
+        # Every public comment lands here; only ids and Meta results are
+        # needed, never the base64 photos of every published post.
+        for post in _lean_posts(owner_id, "published", limit=500):
             results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
             if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):
                 refs.add(post["id"])
@@ -1139,8 +1160,10 @@ def handle_meta_webhook(payload: Any) -> int:
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    return (forwarded or (request.client.host if request.client else "") or "unknown")[:80]
+    # Same proxy-aware answer as the login limiter. The leftmost
+    # X-Forwarded-For entry is client-controlled, so keying a limit on it let
+    # a caller mint a fresh allowance with every request.
+    return (_shared_client_ip(request) or "unknown")[:80]
 
 
 def create_social_studio_router(
@@ -1496,14 +1519,22 @@ def create_social_studio_router(
 
     # ---- public signed media (fetched by Meta) ---------------------------
     @router.get("/media/{post_id}/{index}")
-    def media(post_id: str, index: str, request: Request, sig: str = Query(default="", max_length=128)):
+    def media(
+        post_id: str, index: str, request: Request,
+        sig: str = Query(default="", max_length=128), exp: str = Query(default="", max_length=20),
+    ):
         allowed, _left, _retry = check_rate_limit(f"social-studio:media:{_client_ip(request)}", 120, 60_000)
         if not allowed:
             raise HTTPException(status_code=429, detail="Too many requests")
         if not _SAFE_ID_RE.fullmatch(post_id) or not re.fullmatch(r"[0-3]", index or ""):
             raise HTTPException(status_code=404, detail="Not found")
         position = int(index)
-        if not sig or not hmac.compare_digest(sig, media_signature(post_id, position)):
+        if not re.fullmatch(r"[0-9]{1,12}", exp or ""):
+            raise HTTPException(status_code=404, detail="Not found")
+        expires_at = int(exp)
+        if expires_at < _unix_now():
+            raise HTTPException(status_code=404, detail="Not found")
+        if not constant_time_equal(sig, media_signature(post_id, position, expires_at)):
             raise HTTPException(status_code=404, detail="Not found")
         entity = ctx["get_entity"](POSTS_TYPE, post_id)
         if not entity or entity.get("deleted"):

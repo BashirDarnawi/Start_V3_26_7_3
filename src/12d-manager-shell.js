@@ -384,12 +384,18 @@ function openDebtorCollection(customerId) {
 
 const SHELL_REMINDER_LOG_KEY = 'albayan_debt_reminders_v1';
 
+// One log per signed-in account: the next person on this device neither sees
+// nor inherits another account's "reminded today" marks.
+function shellReminderLogKey() {
+  return `${SHELL_REMINDER_LOG_KEY}:${String(state.currentUser?.id || 'anonymous')}`;
+}
+
 function shellReminderLog() {
-  try { const raw = localStorage.getItem(SHELL_REMINDER_LOG_KEY); const parsed = raw ? JSON.parse(raw) : {}; return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
+  try { const raw = localStorage.getItem(shellReminderLogKey()); const parsed = raw ? JSON.parse(raw) : {}; return parsed && typeof parsed === 'object' ? parsed : {}; } catch (_) { return {}; }
 }
 
 function shellReminderStamp(customerId) {
-  try { const log = shellReminderLog(); log[String(customerId)] = Date.now(); localStorage.setItem(SHELL_REMINDER_LOG_KEY, JSON.stringify(log)); } catch (_) {}
+  try { const log = shellReminderLog(); log[String(customerId)] = Date.now(); localStorage.setItem(shellReminderLogKey(), JSON.stringify(log)); } catch (_) {}
 }
 
 function shellReminderAgo(ts) {
@@ -417,7 +423,15 @@ function remindDebtor(customerId) {
     showNotification(shellText('No phone number', 'لا يوجد رقم هاتف'), shellText('Add a phone number to this customer first.', 'أضف رقم هاتف لهذا العميل أولاً.'), 'warning');
     return;
   }
-  const base = buildWhatsAppLink(phone);
+  // Phones are often pasted from Arabic apps (٠٩١…) or stored as local
+  // 09… numbers; wa.me needs plain international digits (218…). The customer
+  // phone normaliser already knows both, so use it before falling back.
+  const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
+  const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
+  if (!base) {
+    showNotification(shellText('Phone number not readable', 'رقم الهاتف غير مقروء'), shellText('Check this customer\'s phone number, then try again.', 'تحقق من رقم هاتف هذا العميل ثم حاول مرة أخرى.'), 'warning');
+    return;
+  }
   const url = `${base}${base.includes('?') ? '&' : '?'}text=${encodeURIComponent(shellReminderMessage(row))}`;
   const opened = window.open(url, '_blank', 'noopener');
   if (!opened) { try { window.location.href = url; } catch (_) {} }

@@ -35,7 +35,7 @@ from .db import db_conn, get_engine, json_dumps, json_field_sql, json_loads, now
 from .entity_projection import _without_inline_media
 from .operations import assert_financial_period_open
 from .rate_limiter import check_rate_limit
-from .security import new_id
+from .security import constant_time_equal, new_id
 
 
 _META_ID_RE = re.compile(r"^[0-9]{1,40}$")
@@ -5585,7 +5585,7 @@ def create_meta_ads_router(
         if (
             mode != "subscribe"
             or not config.webhook_verify_token
-            or not hmac.compare_digest(verify_token, config.webhook_verify_token)
+            or not constant_time_equal(verify_token, config.webhook_verify_token)
         ):
             raise HTTPException(status_code=403, detail="Webhook verification failed")
         return Response(content=_clean_text(challenge, 500), media_type="text/plain")
@@ -5600,7 +5600,7 @@ def create_meta_ads_router(
         expected = "sha256=" + hmac.new(
             config.app_secret.encode("utf-8"), raw_body, hashlib.sha256
         ).hexdigest()
-        if not supplied or not hmac.compare_digest(supplied, expected):
+        if not constant_time_equal(supplied, expected):
             raise HTTPException(status_code=403, detail="Invalid Meta webhook signature")
         try:
             payload = json.loads(raw_body.decode("utf-8"))

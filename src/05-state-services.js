@@ -506,11 +506,15 @@ async function refreshSubscriptionPlans(force = false) {
   try {
     const payload = await apiGetSubscriptionPlans();
     state.subscriptionPlans = Array.isArray(payload?.plans) ? payload.plans : [];
+    subscriptionPlansLoadFailed = false;
   } catch (_) {
     state.subscriptionPlans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
+    // Callers with nothing cached can tell a failed fetch from "still loading".
+    subscriptionPlansLoadFailed = true;
   }
   return state.subscriptionPlans;
 }
+let subscriptionPlansLoadFailed = false;
 
 const SUBSCRIPTIONS = {
   // Service subscription records: { id, userId, serviceId, status, startedAt, expiresAt, price, currency }

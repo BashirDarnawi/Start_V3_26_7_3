@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
-import secrets
 from collections.abc import Awaitable, Callable, Collection, Sequence
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+
+from .security import constant_time_equal
 
 
 async def apply_security_headers(
@@ -22,7 +23,7 @@ async def apply_security_headers(
     if origin_secrets and request.url.path not in origin_bypass_paths:
         provided = request.headers.get(origin_secret_header)
         valid = bool(provided) and any(
-            secrets.compare_digest(provided, value) for value in origin_secrets
+            constant_time_equal(provided, value) for value in origin_secrets
         )
         response = (
             await call_next(request)
