@@ -966,3 +966,49 @@ Four hunters (a static cross-bundle reference audit with a scratch parser; serve
 - A derived settle amount within one dollar or one percent under the gross still means the gross (rate changes and cent rounding no longer hit the refusal); the surrogate strip only runs on non-ASCII strings; the month-close company-covered total includes coverage on canceled receipts.
 - Campaign submission's money gate is not serialised per user (two quick submits over-hold; no money is lost); the customer wallet transfer form cannot find recipients without the user directory; the wallet page text contradicts the admin top-up button; the hub wallet card shows LYD only; reversing a confirmed charge credit leaves the request marked confirmed.
 - The ad form's driver pre-fill for a temp delivery receipt reads a control no template renders (dead since a refactor).
+
+
+## Round 13 (2026-09-19, early morning): Clothes, Social Studio and delivery regressions
+
+Three regression hunters executed the real client and server code on concrete scenarios (Clothes System, Social Studio and the Meta webhook, the driver day end to end); a fourth audited the operations documentation against the code (applied as its own docs commit). Tests: `server/test_deep_scan_round13.py`.
+
+### Fixed
+
+**Clothes System**
+- The order edit form sent whatever version the 3-second live sync had put in memory as its baseline, so a colleague's committed change (more pieces, marked Paid) could be silently overwritten with the stale form and the collected money vanish. The form now keeps the version it opened on and refuses with a conflict.
+- After a real conflict reload, the shipment lines, product variants and order lines follow the fresh record (a second Save used to overwrite the colleague's lines with the stale rows).
+- A paid order whose total shrinks keeps the money recorded and reports the difference as owed back; before, the recorded amount was rewritten to the new total and the customer's cash disappeared from the books.
+- Marking an order Not Paid clears its paid date; the orders CSV carries the order number; the product delete dialog says up front that a used product cannot be deleted (the server refuses it anyway).
+
+**Social Studio**
+- A reply reservation could stay "processing" forever after a non-Meta failure (a database hiccup, a transport edge case, a shutdown mid-reply): the comment was never answered and that person was blocked for every once-per-person rule on the page. The claim is now released for the retry pass, and a sweep re-queues claims older than 15 minutes.
+- An interrupted republish dropped the Meta id of an unticked-but-live page from the durable results, so re-ticking that page posted it again. The carry-forward now happens before the loop.
+- The per-page durable write also refreshes the claim heartbeat (a long multi-page publish is not "stuck"); reply matching sees the newest 2,000 posts instead of 500.
+- A disconnect after the request left is treated as ambiguous like a read timeout (no blind re-post); the webhook limiter counts invalid signatures only, so Meta's own deliveries behind the proxy are never throttled.
+
+**Deliveries**
+- The `/settle` and `/unsettle` money routes now apply the same rules as the generic edit: an editor cannot hand a delivered job back to a driver, a finished job keeps its driver, and a new driver must be an active delivery user (a paid delivery could be re-queued to a deleted or non-driver account).
+- A driver completing a receipt the office already settled keeps the proof and fee fields only; the settled money is not rewritten to zero.
+- A driver with open jobs cannot lose the Delivery role (the board showed the jobs as unassigned); the assign grant may cancel an Office-status row like an editor can.
+- Every verified completion stores what the customer still owes, so an uncovered underpaid delivery no longer shows the full debt on the customer card.
+- The receipt form keeps a delivered or canceled job's driver, held cash and handover flag whatever the office does with the payment status (settling in the office used to erase the delivery record and hide the driver's held cash).
+- The permissions guard's liquidity check used the UTC date as "today", failing for two hours after local midnight.
+
+**Review of these fixes (same night, 11 findings, all corrected or documented)**
+- Recorded Clothes money is never erased: flipping a refund-carrying order to Paid or re-pricing a shrunk order upward kept the overpayment only in one branch; the rule now applies whenever an old record exists, the payment action and the client mirror it, and "owed back" is shown on the order card and in the CSV.
+- A real conflict on an order edit reloads the modal from the server (fresh lines and baseline) instead of failing forever.
+- The receipt form keeps an In Progress job's driver unconditionally too (settling in the office used to pull the job from a driver en route), and nobody, admins included, can move an accepted job back to Needs Delivery.
+- A reply interrupted after a message was already sent is not re-queued (a duplicate DM); the stuck-claim sweep matches JSON true on SQLite as well as PostgreSQL and re-queues only claims with nothing sent; the reply-matching window is the helper's real cap (1,000).
+- Left as documented: the webhook limiter decides 403 vs 429 after the HMAC check (the 1 MB body cap bounds the work); the receipt form's silent override on a canceled receipt (use "Delete mission").
+
+### Verified sound (no change)
+- Clothes: receive/un-receive/edit-received guards, order stock maths, cancel/re-activate, version conflicts and locks, subscription gating on every route, owner scoping, LYD rounding, photos.
+- Social: claim CAS, edit/untick/delete refusals while publishing, duplicate webhook drop, quiet hours, signed media URLs, per-owner scoping, no token leakage, worker single-shot flags.
+- Deliveries: "Delete mission" normalisation, handover payloads, assign-to-inactive refusals, driver read/write scope, replace-sync, D# numbering, delivery CSV rules, driver soft-delete guard.
+
+### Still open for the owner
+- Returned/Canceled Clothes orders keep their paid money without a refund record (screens disagree on whether it was refunded); the order card does not yet show "owed back".
+- Two subscribers' order numbers look identical in the admin's global list (per-owner sequences by design).
+- A driver-canceled delivery is customer debt for the customer card but "unpaid" for the month close and hero (covered and uncovered receipts land on opposite sides): choose one rule.
+- The board still offers "Assign driver" on delivered rows whose driver was deleted; a driver's own edits keep client-written history; the receipt form silently discards a re-dispatch of a driver-canceled receipt (use "Delete mission" first).
+- Social: a stuck claim recovery after 15 minutes can race a very long multi-page publish (heartbeat added, CAS chaining not); manual "Publish now" shows "Albayan will retry" although nothing retries a failed manual publish; the composer does not send its version, so two devices can overwrite each other's edits.

@@ -1510,7 +1510,8 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   read('src/12b-control-center.js').includes("function ccText(en, ar) {") &&
   socialStudio.includes("if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();") &&
   clothes.includes("updateRecord(state.clothesProducts, editTarget.id, payload, _clothesEditBaseline || undefined)") &&
-  clothes.includes("if (amountPaidLYD > total + 0.005) {") &&
+  clothes.includes("if (amountPaidLYD > total + 0.005 && amountPaidLYD > alreadyCollected + 0.005) {") &&
+  clothes.includes("amountPaidLYD = editTarget ? Math.max(total, alreadyCollected) : total;") &&
   helpers.includes("if (e?.status === 409 && isVersionConflict409(e)) {") &&
   helpers.includes("if (e?.status === 409 && /already exists/i.test(String(e?.message || ''))) {") &&
   helpers.includes("const openId = String(_deliveryCompletionOpen?.id || '');"));

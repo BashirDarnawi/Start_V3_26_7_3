@@ -893,6 +893,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               if (_latestData && state.modalData && String(state.modalData.id) === String(id)
                   && idx !== -1 && state.activeModal) {
                 state.modalData = array[idx];
+                if (typeof reseedClothesEditState === 'function') { try { reseedClothesEditState(collectionName, array[idx]); } catch (_) {} }  // temp rows + baseline follow
                 try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
               }
               // A settle/unsettle whose FIRST attempt committed but whose

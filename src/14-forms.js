@@ -2076,8 +2076,8 @@ async function _saveReceiptFromModalInner() {
   // status echoes the stored values instead of re-deriving them (a phone edit
   // used to reset a delivered job to Office or re-queue a canceled one).
   const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
-  if (editTarget && status === String(editTarget.status || '')
-      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')) {
+  if (editTarget && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')) {
+    // A driver-owned job keeps its driver, held cash and handover flag whatever the office does with the payment status.
     receiptDeliveryStatus = storedDeliveryStatus;
     receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');
     receiptIsReceivedInOffice = editTarget.isReceivedInOffice === true;

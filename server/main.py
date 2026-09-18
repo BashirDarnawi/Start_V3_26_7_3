@@ -1159,7 +1159,6 @@ def current_user(request: Request) -> dict[str, Any]:
     if _claimed and _claimed != str(user.get("id") or ""):
         # Another tab signed in as someone else: this tab's reads must not merge that account's rows
         raise HTTPException(status_code=401, detail="The signed-in account changed in another tab; sign in again")
-    # Make user id available to middleware/logging.
     try:
         request.state.user_id = str(user.get("id") or "")
     except Exception:
@@ -1212,14 +1211,12 @@ def cleanup_old_audit_logs():
     cutoff_ts = now_ms() - retention_ms
 
     with db_conn() as conn:
-        # Delete logs older than retention period
         result = conn.execute(
             text(f"DELETE FROM audit_logs WHERE ts < :cutoff AND action NOT IN {_AUDIT_KEEP_ACTIONS}"),
             {"cutoff": cutoff_ts}
         )
         deleted_by_age = result.rowcount if result else 0
 
-        # Check total count and delete oldest if exceeding max
         count_result = conn.execute(text("SELECT COUNT(*) as cnt FROM audit_logs")).first()
         total_count = count_result[0] if count_result else 0
 
@@ -5311,26 +5308,34 @@ def _clothes_normalize_order_payload(
     if payment_status not in CLOTHES_PAYMENT_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid paymentStatus")
     amount_paid = _clothes_money(raw_data.get("amountPaidLYD"), "amountPaidLYD")
+    recorded_paid = _clothes_money((old_data or {}).get("amountPaidLYD"), "amountPaidLYD") if old_data else 0.0
     if payment_status == "Paid" and old_data and str(old_data.get("paymentStatus") or "") == "Paid":
         # The customer paid the OLD total; a bigger order means more to
-        # collect, not more collected. Keep the recorded amount and downgrade.
+        # collect, not more collected. Keep the recorded amount and downgrade
+        # - unless what was collected already covers the new total.
         old_total = round(
             sum(int(line.get("qty") or 0) * float(line.get("priceLYD") or 0) for line in (old_data.get("lines") or []) if isinstance(line, dict))
             + _clothes_money(old_data.get("deliveryFeeLYD"), "deliveryFeeLYD"), 2)
-        if total > old_total + 0.005:
+        if total > old_total + 0.005 and recorded_paid < total - 0.005:
             payment_status = "Partially Paid"
-            amount_paid = min(_clothes_money(old_data.get("amountPaidLYD"), "amountPaidLYD"), total)
+            amount_paid = recorded_paid
     if payment_status == "Paid":
-        amount_paid = total
+        # Recorded money is never erased by a payment flip or a re-price: a
+        # smaller total leaves the difference owed back (refundDueLYD).
+        amount_paid = max(total, recorded_paid) if old_data else total
     elif payment_status == "Not Paid":
         amount_paid = 0.0
-    elif amount_paid > total:
+    elif amount_paid > total and not (old_data and recorded_paid >= amount_paid):
         raise HTTPException(status_code=400, detail="amountPaidLYD cannot exceed the order total")
+    refund_due = round(max(0.0, amount_paid - total), 2)  # once, after every branch
 
     paid_at = (old_data or {}).get("paidAt")
     if payment_status == "Paid" and not paid_at:
         paid_at = _iso_utc()
+    if payment_status == "Not Paid":
+        paid_at = None  # a mistaken "Paid" must not keep its date (same rule as deliveredAt)
     return {
+        "refundDueLYD": refund_due,
         "customerName": customer_name,
         "customerPhone": sanitize_str(str(raw_data.get("customerPhone") or ""), 40),
         "note": sanitize_str(str(raw_data.get("note") or ""), 500),
@@ -5583,15 +5588,17 @@ def _clothes_order_mutation_atomic(
                 )
                 next_order["paymentStatus"] = next_payment
                 if next_payment == "Paid":
-                    next_order["amountPaidLYD"] = total
+                    next_order["amountPaidLYD"] = max(total, _clothes_money(order_data.get("amountPaidLYD"), "amountPaidLYD"))  # recorded money stays
                     next_order["paidAt"] = next_order.get("paidAt") or _iso_utc()
                 elif next_payment == "Not Paid":
                     next_order["amountPaidLYD"] = 0.0
+                    next_order["paidAt"] = None
                 elif clean_data.get("amountPaidLYD") is not None:
                     partial = _clothes_money(clean_data.get("amountPaidLYD"), "amountPaidLYD")
                     if partial > total:
                         raise HTTPException(status_code=400, detail="amountPaidLYD cannot exceed the order total")
                     next_order["amountPaidLYD"] = partial
+                next_order["refundDueLYD"] = round(max(0.0, float(next_order.get("amountPaidLYD") or 0) - total), 2)
                 order = _clothes_write_row(conn, order_row, next_order)
             else:
                 if order_data.get("stockDeducted") is True:
@@ -9848,6 +9855,7 @@ def settle_receipt_and_linked_ads(
     updates = sanitize_json(body.data or {}) or {}
     current_delivery_status = str(existing_data.get("deliveryStatus") or "").strip()
     requested_delivery_status = str(updates.get("deliveryStatus") or "").strip()
+    delivery_workflow.refuse_regression(existing_data, updates, str(user.get("role") or "").lower(), active_driver=_active_delivery_user)  # same rules as PATCH
     if (
         str(existing_data.get("tempReceiptNo") or "").strip()
         and current_delivery_status != "Delivered"
@@ -9996,6 +10004,9 @@ def unsettle_receipt_and_linked_ads(
                 status_code=400,
                 detail="deliveryPersonId is required for delivery receipts",
             )
+        # A known user must be an active driver; an id the users table does not know (legacy rows) passes as before.
+        delivery_workflow.refuse_regression(existing_data, {**updates, "deliveryPersonId": _person}, str(user.get("role") or "").lower(),
+                                            active_driver=lambda uid: _active_delivery_user(uid) or _get_user_by_id(uid) is None)
         _temp_no = _canonical_receipt_number(
             updates.get("tempReceiptNo")
         ) or _canonical_receipt_number(existing_data.get("tempReceiptNo"))
@@ -10244,7 +10255,6 @@ def _owns_personal_record(collection: str, data: dict[str, Any] | None, uid: str
 
 # Fields a PATCH may touch under the deliveries.* permissions (office staff
 # managing the delivery workflow on ads/receipts without full edit rights).
-# The rules live in delivery_workflow.py (main.py is at its line cap).
 _DELIVERY_WORKFLOW_FIELDS = delivery_workflow.WORKFLOW_FIELDS
 
 # Descriptive fields a receipts PATCH may touch under receipts.markCollected
@@ -12239,13 +12249,8 @@ def update_collection_item(
 
                 # Revenue: delivery fee is NOT business revenue. Only amountCollectedFromCustomer counts.
                 updates["amountLocal"] = float(amt_collected)
-                # Convert collected LYD to USD. The receipt's exchangeRate can be
-                # missing or the clamped-invalid sentinel (0.001) when Rate 2 was
-                # left blank at creation; dividing by that fabricates enormous USD
-                # ad credit (500 LYD -> $500,000). So only trust a real rate; else
-                # derive it from the receipt's own debt baseline, and if there is
-                # no baseline either, fall back to the USD debt directly rather
-                # than storing raw LYD as USD.
+                # LYD -> USD only through a trusted rate (never the 0.001 sentinel: 500 LYD -> $500,000),
+                # else the receipt's own debt baseline, else the USD debt itself.
                 ex_rate = _as_float(data.get("exchangeRate"))
                 trusted_rate = ex_rate if (ex_rate is not None and ex_rate > MIN_EXCHANGE_RATE) else None
                 if trusted_rate is None and debt_local and debt_usd and debt_local > 0 and debt_usd > 0:
@@ -12264,6 +12269,9 @@ def update_collection_item(
                 else:
                     updates["status"] = "Not Paid"
                     updates["isPaid"] = False
+                if str(data.get("status") or "") == "Paid" or data.get("isPaid") is True:
+                    for _k in ("amountCollectedFromCustomer", "paymentResult", "overpaidAmount", "remainingDue", "amountLocal", "amountUSD", "status", "isPaid"):
+                        updates.pop(_k, None)  # paid in the office before the run: proof and fee fields stand, the settled money does not move
 
             if desired == "Canceled":
                 reason = sanitize_str(str(updates.get("deliveryCancelReason") or ""))[:500]
@@ -12339,11 +12347,7 @@ def update_collection_item(
             _next_status = str(_status_updates.get("deliveryStatus") or "").strip()
             # Anything else (an empty value, a different spelling) would revive
             # the job on the driver's list, so only these moves are accepted.
-            _allowed_next = {
-                "Delivered": {"Delivered", "Canceled", "Office"},
-                "Canceled": {"Canceled", "Delivered", "Office"},
-                "In Progress": {"In Progress", "Delivered", "Canceled", "Office"},
-            }.get(_current_status)
+            _allowed_next = delivery_workflow.STAFF_ALLOWED_NEXT.get(_current_status)  # shared with /settle and /unsettle
             if _allowed_next is not None and _next_status not in _allowed_next:
                 _existing_data = existing.get("data") or {}
                 _delivery_change = any(
@@ -12368,6 +12372,8 @@ def update_collection_item(
             _old_driver = str((existing.get("data") or {}).get("deliveryPersonId") or "").strip()
             # The delivery-workflow path insists on a real, active driver; a
             # plain edit grant must not be a way to hand a job to anyone.
+            if _new_driver and _new_driver != _old_driver and str((existing.get("data") or {}).get("deliveryStatus") or "") in {"Delivered", "Canceled"}:
+                raise HTTPException(status_code=409, detail="A finished delivery job keeps its driver")  # its cash and proof belong to that driver
             if _new_driver and _new_driver != _old_driver and not _active_delivery_user(_new_driver):
                 raise HTTPException(status_code=400, detail="deliveryPersonId must be an active delivery user")
 
@@ -13856,6 +13862,11 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
             if _is_self:
                 raise HTTPException(status_code=403, detail="You cannot change your own role")
             _need("changeRole")
+            if str(existing.get("role") or "").lower() == "delivery" and str(requested_role).lower() != "delivery":
+                with db_conn() as conn:  # the board would show this driver's jobs as unassigned
+                    _open_jobs = conn.execute(text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"), {"uid": user_id}).scalar() or 0
+                if int(_open_jobs) > 0:
+                    raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them before changing the role")
         if body.permissions is not None:
             _need("managePermissions")
         if body.deleted is not None:

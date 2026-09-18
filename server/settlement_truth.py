@@ -145,7 +145,7 @@ def apply_delivery_completion_truth(
     merged["paymentResult"] = payment_result
     merged["overpaidAmount"] = _financial_usd(overpaid)
     merged["remainingDue"] = _financial_usd(remaining_due)
-    if covered_usd > 0 or old.get("customerOutstandingUSD") is not None:
+    if True:  # always stored: an uncovered underpaid delivery used to show the FULL debt on the customer card
         # Keep the coverage summary truthful after collection: what the
         # customer still owes is the uncollected part of THEIR share.
         if remaining_due <= 0:

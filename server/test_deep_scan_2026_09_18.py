@@ -87,7 +87,7 @@ def test_untrusted_proxy_headers_are_reported_once(monkeypatch, capsys):
 
 def test_comment_webhook_matches_posts_without_loading_photos():
     source = inspect.getsource(social_studio.process_comment)
-    assert "_lean_posts(owner_id, status, limit=500)" in source
+    assert "_lean_posts(owner_id, status, limit=1000)" in source  # round 13 widened the match window; still the lean projection
     assert "_rows_where_json(POSTS_TYPE" not in source
 
 

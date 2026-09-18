@@ -299,16 +299,9 @@ function toggleLanguage() {
 // scrolling and flashed the background. Performance mode (body.perf-lite)
 // handles weak devices properly by turning effects off permanently.
 
-// Strip data-lucide from the SVGs lucide creates: the library keeps the
-// attribute on the replacement SVG, so every later createIcons() pass
-// re-matched every already-converted icon and rebuilt it (createElement +
-// replaceChild across the whole page) — repeated full-page DOM churn on every
-// render tick and search keystroke. Stripping AFTER each pass makes all the
-// existing bare createIcons() calls cheap without touching them, and keeps
-// the icon-swap pattern working (14-forms.js re-sets data-lucide on a
-// converted SVG right before calling createIcons(), so that SVG re-matches
-// for exactly that one pass). Installed lazily because lucide.min.js is a
-// DEFERRED script now and arrives after script.js evaluates.
+// Strip data-lucide from converted SVGs after each createIcons() pass: lucide keeps the
+// attribute, so every later pass rebuilt every icon (full-page DOM churn per render tick).
+// 14-forms re-sets data-lucide on one SVG to swap it. Installed lazily (lucide is deferred).
 function ensureLucideCreateIconsWrapped() {
   if (!window.lucide || lucide.__iconsWrapped) return;
   const _originalCreateIcons = lucide.createIcons.bind(lucide);

@@ -1193,7 +1193,7 @@ class MetaAdsClient:
                         response_body = _read_capped_response_body(
                             response, 6 * 1024 * 1024
                         )
-            except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError):
+            except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.CloseError):
                 # The request left the building: Meta may have applied it.
                 _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
                 _META_LAST_REMOTE_REQUEST_AT = _iso_now()
@@ -5681,17 +5681,18 @@ def create_meta_ads_router(
         config = load_meta_ads_config()
         if not config.app_secret:
             raise HTTPException(status_code=503, detail="Meta webhook signing is not configured")
-        from .auth_limits import _client_ip
-        from .rate_limiter import check_rate_limit
-        _ok, _left, _retry_ms = check_rate_limit(f"meta-webhook:{_client_ip(request)}", max_attempts=300, window_ms=60 * 1000)
-        if not _ok:  # Meta retries later; a flood from anyone else is refused before the body is read
-            raise HTTPException(status_code=429, detail="Too many webhook deliveries", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
-        raw_body = await request.body()
+        raw_body = await request.body()  # bounded to 1 MB by the body gate
         supplied = str(request.headers.get("X-Hub-Signature-256") or "")
         expected = "sha256=" + hmac.new(
             config.app_secret.encode("utf-8"), raw_body, hashlib.sha256
         ).hexdigest()
         if not constant_time_equal(supplied, expected):
+            # Only INVALID deliveries count: Meta's real ones may all arrive from one address behind the proxy.
+            from .auth_limits import _client_ip
+            from .rate_limiter import check_rate_limit
+            _ok, _left, _retry_ms = check_rate_limit(f"meta-webhook-bad:{_client_ip(request)}", max_attempts=60, window_ms=60 * 1000)
+            if not _ok:
+                raise HTTPException(status_code=429, detail="Too many invalid webhook deliveries", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
             raise HTTPException(status_code=403, detail="Invalid Meta webhook signature")
         try:
             payload = json.loads(raw_body.decode("utf-8"))

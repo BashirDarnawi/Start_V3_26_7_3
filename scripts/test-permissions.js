@@ -1453,7 +1453,8 @@ checkAsync('updateLiquidityTrackingStart refuses non-admins and validates the da
   assert(S.appSettings.length === 0, 'a PAST start date was accepted — backdating must be refused');
 
   notes.length = 0;
-  await sandbox.updateLiquidityTrackingStart(new Date().toISOString().slice(0, 10));
+  const _today = new Date();  // the LOCAL calendar day: the UTC date is "yesterday" for two hours after local midnight
+  await sandbox.updateLiquidityTrackingStart(`${_today.getFullYear()}-${String(_today.getMonth() + 1).padStart(2, '0')}-${String(_today.getDate()).padStart(2, '0')}`);
   assert(S.appSettings.length === 1 && S.appSettings[0].settingKey === 'liquidityTracking',
     'the admin start date was not recorded');
   assert(String(S.appSettings[0].setBy || '') === String(S.currentUser.id),

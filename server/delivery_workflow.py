@@ -24,7 +24,7 @@ WORKFLOW_FIELDS = {
 
 TRANSITIONS: dict[str, set[str]] = {
     "": {"Needs Delivery", "In Progress", "Office"},
-    "Office": {"Needs Delivery", "In Progress"},
+    "Office": {"Needs Delivery", "In Progress", "Canceled"},  # editors may cancel an Office row; so may the assign grant
     "Needs Delivery": {"In Progress", "Canceled", "Office"},
     "In Progress": {"Canceled"},  # Delivered uses assigned-driver proof flow.
     "Delivered": set(),
@@ -194,3 +194,42 @@ def normalize_grant_updates(
             if _text(data.get("status")) == "Not Paid" and _text(detail.get("notPaidCollection")) == "delivery":
                 out["statusDetail"] = {**detail, "notPaidCollection": "office"}
     return out
+
+
+# The staff reopen table (receipts.edit without a delivery grant): a finished job is never
+# handed back to a driver and an accepted job never moves backwards.
+STAFF_ALLOWED_NEXT: dict[str, set[str]] = {
+    "Delivered": {"Delivered", "Canceled", "Office"},
+    "Canceled": {"Canceled", "Delivered", "Office"},
+    "In Progress": {"In Progress", "Delivered", "Canceled", "Office"},
+}
+
+
+def refuse_regression(
+    existing: dict[str, Any],
+    updates: dict[str, Any],
+    role_lower: str,
+    *,
+    active_driver: Callable[[str], bool],
+) -> None:
+    """Shared by /settle, /unsettle and the generic PATCH (the money routes used to skip both rules):
+    the staff reopen table, "a finished job keeps its driver", and "a new driver must be active"."""
+    current = str(existing.get("deliveryStatus") or "").strip()
+    nxt = str(updates.get("deliveryStatus") or "").strip() if "deliveryStatus" in updates else ""
+    if role_lower != "delivery" and current == "In Progress" and nxt == "Needs Delivery":
+        # Nobody re-queues an accepted job under the driver's feet: cancel it or delete the mission.
+        raise HTTPException(status_code=400, detail="An accepted delivery job cannot move back to Needs Delivery; cancel it or delete the mission")
+    if role_lower not in {"delivery", "admin"} and "deliveryStatus" in updates:
+        allowed = STAFF_ALLOWED_NEXT.get(current)
+        if allowed is not None and nxt not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot change status from '{current}' to '{nxt}' - a delivery job cannot be reopened or moved backwards",
+            )
+    new_driver = str(updates.get("deliveryPersonId") or "").strip()
+    old_driver = str(existing.get("deliveryPersonId") or "").strip()
+    if new_driver and new_driver != old_driver and role_lower != "delivery":
+        if str(existing.get("deliveryStatus") or "").strip() in {"Delivered", "Canceled"}:
+            raise HTTPException(status_code=409, detail="A finished delivery job keeps its driver")
+        if not active_driver(new_driver):
+            raise HTTPException(status_code=400, detail="Assign an active delivery user")

@@ -820,6 +820,10 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
         client_error_retryable = bool(error.retryable)
     results: list[dict[str, Any]] = _results_holder if _results_holder is not None else []  # visible to the wrapper on a crash
     errors: list[str] = []
+    _current_ids = {str(p) for p in (data.get("pageIds") or [])}
+    for _prev_id, _prev in previous.items():
+        if _prev_id not in _current_ids:
+            results.append({**_prev, "removed": True})  # unticked, but live on Meta: its id travels with every durable write
     for page_id in [str(p) for p in (data.get("pageIds") or [])]:
         if page_id in previous:
             results.append({**previous[page_id], "removed": False})
@@ -854,13 +858,9 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
         results.append(result)
         if result.get("metaPostId"):
             try:  # durable at once: a kill before the final write must not let a retry post this page twice
-                ctx["patch_entity"](POSTS_TYPE, post_id, {"results": [dict(r) for r in results], "updatedAt": _iso_now()}, owner_id)
+                ctx["patch_entity"](POSTS_TYPE, post_id, {"results": [dict(r) for r in results], "updatedAt": _iso_now(), "publishingSince": _iso_now()}, owner_id)  # heartbeat: a long multi-page publish is not "stuck"
             except Exception:
                 pass
-    _current_ids = {str(p) for p in (data.get("pageIds") or [])}
-    for _prev_id, _prev in previous.items():
-        if _prev_id not in _current_ids:
-            results.append({**_prev, "removed": True})  # unticked, but the post is live on Meta: keep its id
     now = _iso_now()
     # A manual "Publish now" starts a fresh retry budget.
     attempts = (int(data.get("publishAttempts") or 0) if from_scheduler else 0) + 1
@@ -1132,14 +1132,14 @@ def _retry_after_iso(attempt: int) -> str:
 
 
 def _execute_rule_actions(
-    page: dict[str, Any], rule: dict[str, Any], platform: str, comment_id: str
+    page: dict[str, Any], rule: dict[str, Any], platform: str, comment_id: str, _actions_holder: list[str] | None = None
 ) -> tuple[list[str], list[str], bool]:
     """Send the DM / public reply / like for one comment.
 
     Returns (actions, errors, retryable): retryable when nothing was sent and
     every failure was a temporary Meta condition (pause, outage), so the
     scheduler may try again instead of the comment being lost."""
-    actions: list[str] = []
+    actions: list[str] = _actions_holder if _actions_holder is not None else []  # visible to the caller on a crash
     errors: list[str] = []
     failures = 0
     temporary = 0
@@ -1222,6 +1222,25 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
             ),
             {"type": LOG_TYPE, "cutoff": cutoff, "limit": max(1, int(limit))},
         ).mappings().all()
+    stuck_cutoff = _iso_at(now - timedelta(minutes=15))
+    with db_conn() as conn:  # a claim the process never finished (killed mid-reply): hand it to the retry pass
+        stuck = conn.execute(
+            text(
+                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
+                f"AND CAST(COALESCE({_json_field('processing')}, '') AS TEXT) IN ('true', '1') AND COALESCE({_json_field('retryAfter')}, '') = '' "
+                f"AND {_json_field('at')} < :stuck AND {_json_field('at')} >= :cutoff LIMIT :limit"
+            ),
+            {"type": LOG_TYPE, "stuck": stuck_cutoff, "cutoff": cutoff, "limit": max(1, int(limit))},
+        ).mappings().all()
+    for row in stuck:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        _release: dict[str, Any] = {"processing": False, "error": "interrupted"}
+        if not data.get("actions"):  # nothing was sent: the retry pass may answer; otherwise never resend blindly
+            _release.update({"retryAfter": now_iso, "attempts": int(data.get("attempts") or 0) + 1})
+        try:
+            ctx["patch_entity"](LOG_TYPE, str(row["id"]), _release, str(data.get("ownerId") or "system"))
+        except Exception:
+            pass
     for row in expired:
         # Released, so the person no longer counts as answered by a reply that
         # was never sent, and the row is not scanned again.
@@ -1310,7 +1329,7 @@ def process_comment(
         # needed, never the base64 photos of every published post. A post
         # whose OTHER page failed is still live on this one, so scan both.
         for status in ("published", "failed"):
-            for post in _lean_posts(owner_id, status, limit=500):
+            for post in _lean_posts(owner_id, status, limit=1000):  # the helper caps at 1000
                 results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
                 if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):
                     refs.add(post["id"])
@@ -1354,7 +1373,22 @@ def process_comment(
             if error.status_code == 409:
                 return None
             raise
-    actions, errors, retryable = _execute_rule_actions(page, rule, platform, str(comment_id))
+    _sent: list[str] = []
+    try:
+        actions, errors, retryable = _execute_rule_actions(page, rule, platform, str(comment_id), _actions_holder=_sent)
+    except Exception:
+        # A non-Meta failure (database hiccup, transport edge case, shutdown):
+        # release the claim; retry only when NOTHING was sent (a DM that landed
+        # must not be sent twice). A row left "processing" forever would block
+        # the person for every once-per-person rule.
+        try:
+            _patch: dict[str, Any] = {"processing": False, "actions": list(_sent), "error": "interrupted"}
+            if not _sent:
+                _patch.update({"retryAfter": _retry_after_iso(1), "attempts": 1})
+            ctx["patch_entity"](LOG_TYPE, log_id, _patch, owner_id)
+        except Exception:
+            pass
+        raise
     log_data["actions"] = actions
     log_data["error"] = "; ".join(errors)[:500]
     log_data["processing"] = False

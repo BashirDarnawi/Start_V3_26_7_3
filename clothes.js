@@ -534,9 +534,9 @@ function exportClothesShipmentsCSV() {
 function exportClothesOrdersCSV() {
   const isAr = clothesIsAr();
   const rows = [[
-    isAr ? 'الزبون' : 'Customer', isAr ? 'الهاتف' : 'Phone', isAr ? 'الحالة' : 'Status', isAr ? 'الدفع' : 'Payment',
+    isAr ? 'رقم الطلب' : 'Order no.', isAr ? 'الزبون' : 'Customer', isAr ? 'الهاتف' : 'Phone', isAr ? 'الحالة' : 'Status', isAr ? 'الدفع' : 'Payment',
     isAr ? 'القطع' : 'Pieces', isAr ? 'البضاعة د.ل' : 'Goods LYD', isAr ? 'التوصيل د.ل' : 'Delivery LYD',
-    isAr ? 'الإجمالي د.ل' : 'Total LYD', isAr ? 'المدفوع د.ل' : 'Paid LYD', isAr ? 'المتبقي د.ل' : 'Remaining LYD',
+    isAr ? 'الإجمالي د.ل' : 'Total LYD', isAr ? 'المدفوع د.ل' : 'Paid LYD', isAr ? 'المتبقي د.ل' : 'Remaining LYD', isAr ? 'مستحق للإرجاع د.ل' : 'Owed back LYD',
     isAr ? 'طريقة الدفع' : 'Method', isAr ? 'تاريخ الإنشاء' : 'Created', isAr ? 'تاريخ التسليم' : 'Delivered',
     isAr ? 'ملاحظة' : 'Note'
   ]];
@@ -545,8 +545,8 @@ function exportClothesOrdersCSV() {
     const meta = clothesOrderStatusMeta(o.status);
     const payMeta = clothesPaymentStatusMeta(o.paymentStatus);
     rows.push([
-      o.customerName || '', o.customerPhone || '', isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
-      t.pieces, t.goodsLYD, t.feeLYD, t.totalLYD, t.paidLYD, t.remainingLYD,
+      o.orderNo ?? '', o.customerName || '', o.customerPhone || '', isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
+      t.pieces, t.goodsLYD, t.feeLYD, t.totalLYD, t.paidLYD, t.remainingLYD, t.refundDueLYD,
       o.paymentMethod || '', clothesLocalDate(o.createdAt), clothesLocalDate(o.deliveredAt),
       o.note || ''
     ]);
@@ -899,6 +899,17 @@ async function deleteClothesProduct(id) {
   const activeOrders = (state.clothesOrders || []).filter(o => o && !o._deleted
     && clothesOrderIsActiveStatus(o.status)
     && Array.isArray(o.lines) && o.lines.some(l => String(l?.productId || '') === String(id))).length;
+  const referencedOrders = (state.clothesOrders || []).filter(o => o && !o._deleted
+    && Array.isArray(o.lines) && o.lines.some(l => String(l?.productId || '') === String(id))).length;
+  const referencedShipments = (state.clothesShipments || []).filter(s => s && !s._deleted
+    && Array.isArray(s.lines) && s.lines.some(l => String(l?.productId || '') === String(id))).length;
+  if (isServerModeEnabled() && (referencedOrders || referencedShipments)) {
+    // The server refuses to delete a referenced product; say so instead of a scary dialog that then fails.
+    showNotification(isAr ? 'لا يمكن الحذف' : 'Cannot delete',
+      isAr ? `المنتج مستخدم في ${referencedOrders} طلب و ${referencedShipments} شحنة؛ يبقى كسجل.` : `This product is used by ${referencedOrders} order(s) and ${referencedShipments} shipment(s); it stays for history.`,
+      'error');
+    return;
+  }
   let msg = isAr
     ? `هل تريد حذف المنتج "${name}"؟\nسيبقى في الشحنات والطلبات القديمة كسجل فقط.`
     : `Delete product "${name}"?\nOld shipments and orders will keep it for history only.`;
@@ -933,6 +944,7 @@ let _clothesTempVariants = [];
 // Version of the product the edit form opened with: a colleague's sale while
 // the form is open must produce a conflict, never a silent stock restore.
 let _clothesEditBaseline = 0;
+let _clothesOrderEditBaseline = 0;  // order version when the edit form opened (a 3 s delta must not move it)
 let _clothesTempPhoto = null;
 // Generation token for async photo compression — bumped on every product modal
 // open/close so a callback that resolves after the modal changed is discarded.
@@ -964,6 +976,31 @@ function editClothesProduct(id) {
   _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
   updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
   renderModal();
+}
+
+function reseedClothesEditState(collection, record) {
+  // A real 409 reloaded the open modal from the server: temp rows and version baseline must follow, or the
+  // next Save would pass the lock with the colleague's lines replaced by the stale ones.
+  if (!record) return;
+  if (collection === 'clothesProducts') {
+    _clothesEditBaseline = Number(record._lastModified) || 0;
+    const variants = Array.isArray(record.variants) ? record.variants : [];
+    _clothesTempVariants = variants.length
+      ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
+      : [{ color: '', size: '', qty: 0 }];
+    _clothesTempPhoto = record.photo || null;
+  } else if (collection === 'clothesShipments') {
+    const lines = Array.isArray(record.lines) ? record.lines : [];
+    _clothesTempShipLines = lines.length
+      ? lines.map(l => ({ productId: String(l?.productId || ''), color: String(l?.color || ''), size: String(l?.size || ''), qty: Math.max(0, Math.floor(Number(l?.qty) || 0)), unitCostUSD: String(l?.unitCostUSD ?? '') }))
+      : [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
+  } else if (collection === 'clothesOrders') {
+    _clothesOrderEditBaseline = Number(record._lastModified) || 0;
+    const lines = Array.isArray(record.lines) ? record.lines : [];
+    _clothesTempOrderLines = lines.length
+      ? lines.map(l => ({ productId: String(l?.productId || ''), color: String(l?.color || ''), size: String(l?.size || ''), qty: Math.max(0, Math.floor(Number(l?.qty) || 0)), priceLYD: String(l?.priceLYD ?? ''), costUSDAtSale: Number(l?.costUSDAtSale) || 0 }))
+      : [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  }
 }
 
 function renderClothesProductModal() {
@@ -2039,7 +2076,8 @@ function getClothesOrderTotals(o) {
   const totalLYD = Math.round((goodsLYD + feeLYD) * 100) / 100;
   const paidLYD = Math.round((Number(o?.amountPaidLYD) || 0) * 100) / 100;
   const remainingLYD = Math.max(0, Math.round((totalLYD - paidLYD) * 100) / 100);
-  return { pieces, goodsLYD, feeLYD, totalLYD, paidLYD, remainingLYD };
+  const refundDueLYD = Math.max(0, Math.round((paidLYD - totalLYD) * 100) / 100);  // collected more than the (lowered) total
+  return { pieces, goodsLYD, feeLYD, totalLYD, paidLYD, remainingLYD, refundDueLYD };
 }
 
 // Estimated profit of an order in LYD: goods revenue minus goods cost
@@ -2199,6 +2237,7 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
     updates.paidAt = order.paidAt || new Date().toISOString();
   } else if (newPaymentStatus === 'Not Paid') {
     updates.amountPaidLYD = 0;
+    updates.paidAt = null;
   } else if (newPaymentStatus === 'Partially Paid') {
     const answer = prompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${totals.totalLYD.toFixed(2)} د.ل)` : `Amount paid so far (total ${totals.totalLYD.toFixed(2)} LYD)`, String(Number(order.amountPaidLYD || 0).toFixed(2)));
     if (answer === null || !String(answer).trim()) { updateClothesOrdersFiltered(); return; }  // the select must not show a status that was not saved
@@ -2506,7 +2545,7 @@ function renderClothesOrderCard(o) {
           <span class="font-medium">
             <span class="text-emerald-600 dark:text-emerald-400">${clothesFmtLYD(totals.paidLYD)}</span>
             <span class="text-slate-400"> / </span>
-            <span class="${totals.remainingLYD > 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-slate-500'}">${clothesFmtLYD(totals.remainingLYD)}</span>
+            <span class="${totals.remainingLYD > 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-slate-500'}">${clothesFmtLYD(totals.remainingLYD)}</span>${totals.refundDueLYD > 0 ? `<span class="ms-2 rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-[11px] font-bold text-amber-700 dark:text-amber-300">${clothesIsAr() ? 'مستحق للإرجاع' : 'Owed back'} ${clothesFmtLYD(totals.refundDueLYD)}</span>` : ''}
           </span>
         </div>
         ${(() => {
@@ -2562,6 +2601,7 @@ function showClothesOrderModal() {
   state.activeModal = 'clothes-order';
   state.modalData = null;
   _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
+  _clothesOrderEditBaseline = 0;
   updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
   renderModal();
 }
@@ -2580,6 +2620,7 @@ function editClothesOrder(id) {
   }
   state.activeModal = 'clothes-order';
   state.modalData = order;
+  _clothesOrderEditBaseline = Number(order._lastModified) || 0;
   updateUrlParams({ modal: 'clothes-order', id }); // URL tracking
   const lines = Array.isArray(order.lines) ? order.lines : [];
   _clothesTempOrderLines = lines.length
@@ -3007,15 +3048,16 @@ async function saveClothesOrderFromModal() {
 
   const totalsProbe = { lines, deliveryFeeLYD };
   const total = getClothesOrderTotals(totalsProbe).totalLYD;
-  if (paymentStatus === 'Paid' && editTarget && editTarget.paymentStatus === 'Paid' && total > getClothesOrderTotals(editTarget).totalLYD + 0.005) {
+  const alreadyCollected = Number(editTarget?.amountPaidLYD || 0);
+  if (paymentStatus === 'Paid' && editTarget && editTarget.paymentStatus === 'Paid' && total > getClothesOrderTotals(editTarget).totalLYD + 0.005 && total > alreadyCollected + 0.005) {
     // More items on a paid order: the extra is still to collect, not collected.
     paymentStatus = 'Partially Paid';
     amountPaidLYD = Number(editTarget.amountPaidLYD || 0);
     showNotification(isAr ? 'الطلب أصبح مدفوعاً جزئياً' : 'Order is now partially paid', isAr ? 'أضيفت قطع بعد الدفع؛ سجّل المبلغ الجديد عند تحصيله.' : 'Items were added after payment; record the extra amount when it is collected.', 'info');
   }
-  if (paymentStatus === 'Paid') amountPaidLYD = total;
+  if (paymentStatus === 'Paid') amountPaidLYD = editTarget ? Math.max(total, alreadyCollected) : total;  // recorded money stays
   if (paymentStatus === 'Not Paid') amountPaidLYD = 0;
-  if (amountPaidLYD > total + 0.005) {
+  if (amountPaidLYD > total + 0.005 && amountPaidLYD > alreadyCollected + 0.005) {
     showNotification(isAr ? 'المبلغ المدفوع أكبر من الإجمالي' : 'Paid amount exceeds the total', isAr ? `الإجمالي ${total.toFixed(2)} د.ل. أدخل مبلغاً مساوياً أو أقل.` : `The order total is ${total.toFixed(2)} LYD. Enter that amount or less.`, 'error');
     return false;
   }
@@ -3026,7 +3068,7 @@ async function saveClothesOrderFromModal() {
     let attempt = null;
     try {
       const action = editTarget ? 'update' : 'create';
-      const expectedLastModified = editTarget ? getClothesOrderExpectedLastModified(editTarget) : null;
+      const expectedLastModified = editTarget ? (_clothesOrderEditBaseline || getClothesOrderExpectedLastModified(editTarget)) : null;  // the version the form was opened on
       attempt = getClothesOrderMutationAttempt(action, editTarget?.id || '', expectedLastModified, payload);
       const request = {
         action,
@@ -3050,6 +3092,17 @@ async function saveClothesOrderFromModal() {
       // Do not mutate local stock on failure. In particular, a 409 means the
       // authoritative server rejected insufficient stock or a stale edit.
       // Keeping the attempt lets a response-loss retry replay safely.
+      if (editTarget && typeof isVersionConflict409 === 'function' && isVersionConflict409(e)) {
+        try {  // a colleague saved first: show their lines and take their version as the new baseline
+          const fresh = await apiGetEntity('clothesOrders', editTarget.id);
+          if (fresh?.data) {
+            const latest = upsertServerBackedRecord('clothesOrders', fresh);
+            reseedClothesEditState('clothesOrders', latest);
+            state.modalData = latest;
+            renderModal();
+          }
+        } catch (_) {}
+      }
       showClothesOrderMutationError(e);
       return false;
     }
