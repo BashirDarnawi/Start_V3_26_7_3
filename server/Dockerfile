@@ -92,7 +92,7 @@ EXPOSE 8000
 # readiness route waits for a worker thread and a pooled connection and the
 # platform would restart a merely busy container. Startup does index and
 # backfill work on big tables, so the grace period is honest.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=6 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live', timeout=3).read()"]
 
 USER albayan
@@ -103,9 +103,11 @@ USER albayan
 # so it never appears in the app's own error metrics. One admin tab's live
 # sync fans out 14 collection GETs per tick; 12 was below a single tab and
 # painted the "Sync failed" badge on healthy servers. 64 leaves room for
-# several tabs/phones while still bounding a runaway client.
+# several tabs/phones while still bounding a runaway client; 128 keeps the
+# liveness probe answered during a short burst (uvicorn 503s it above the cap).
 # --timeout-graceful-shutdown bounds the wait for in-flight requests on redeploy
 # (Docker sends SIGKILL after 10 s anyway; without a bound uvicorn waited forever).
 # 5 s drain + worker joins (1 + 1 + 2 s) stays inside Docker's 10 s SIGKILL
-# budget; the routers' own shutdown hooks find the workers already stopped.
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "64", "--timeout-graceful-shutdown", "5", "--no-server-header"]
+# budget; the stop functions are single-shot, so the routers' own shutdown
+# hooks (which run after the app hook) add nothing even mid-backup.
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "128", "--timeout-graceful-shutdown", "5", "--no-server-header"]

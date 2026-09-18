@@ -163,6 +163,7 @@ const S = bridged.state;
 // HTML-producing helpers. Keep the real function for the focused render-
 // stability regressions, where DOM write/layout/scroll activity is measured.
 const realRender = sandbox.render;
+const realRenderModal = sandbox.renderModal;
 
 const ADMIN = { id: 'u-admin', name: 'Bashir', role: 'Admin', permissions: {} };
 const OTHER = { id: 'u-other', name: 'Abdu', role: 'Employee', permissions: {} };
@@ -6318,6 +6319,142 @@ check('company debt coverage stays admin-only and applies receipts before ads', 
   const batchApply = submitSource.indexOf("applyValidatedServerEntityBatch(entityBatch, 'receiptCompanyCoverage')");
   assert(receiptUpdates >= 0 && adUpdates > receiptUpdates, 'returned receipts are not ordered before returned ads');
   assert(batchApply > adUpdates, 'coverage response is not applied as one validated client batch');
+});
+
+console.log('\n=== USERS: the edit-user form and permissions manager follow the server grants ===');
+
+// Render through the REAL renderModal / showPermissionsModal, capturing the
+// element they build (the VM element stub keeps innerHTML as text).
+function captureModalHtml(run) {
+  const created = [];
+  const originalCreate = sandbox.document.createElement;
+  const originalGet = sandbox.document.getElementById;
+  sandbox.document.createElement = () => { const el = makeElement(); created.push(el); return el; };
+  sandbox.document.getElementById = () => null;
+  try { run(); } finally {
+    sandbox.document.createElement = originalCreate;
+    sandbox.document.getElementById = originalGet;
+    S.activeModal = null; S.modalData = null;
+  }
+  // Security.escapeHtml creates scratch elements too: pick the dialog by id.
+  const modal = created.find(el => el.id === 'app-modal');
+  return modal ? modal.innerHTML : '';
+}
+function userFormHtml(target) {
+  return captureModalHtml(() => { S.activeModal = 'user'; S.modalData = target; realRenderModal(); });
+}
+function roleSelect(html) {
+  const at = html.indexOf('<select id="user-role"');
+  assert(at >= 0, 'role select missing');
+  return html.slice(at, html.indexOf('</select>', at));
+}
+function permissionBox(html, mk, pk) {
+  return html.split('<input ').find(s => s.includes(`data-module="${mk}"`) && s.includes(`data-perm="${pk}"`)) || '';
+}
+const LOCKED = 'disabled title="You do not hold this permission"';
+
+check('a users.changeRole holder gets an enabled role select, minus the Admin role', () => {
+  loginAs(employee({ users: ['view', 'edit', 'changeRole'] }));
+  const select = roleSelect(userFormHtml(OTHER));
+  assert(!/<select id="user-role"[^>]*disabled/.test(select), 'role select is disabled for a changeRole holder');
+  assert(/<option value="Admin"[^>]*disabled/.test(select), 'Admin role is offered to a non-admin');
+  assert(!/<option value="Delivery"[^>]*disabled/.test(select), 'Delivery role is locked for a changeRole holder');
+});
+check('without users.changeRole the role select stays disabled', () => {
+  loginAs(employee({ users: ['view', 'edit', 'managePermissions'] }));
+  assert(/<select id="user-role"[^>]*disabled/.test(roleSelect(userFormHtml(OTHER))), 'role select enabled without changeRole');
+});
+check('editing yourself never offers a role change (server: "You cannot change your own role")', () => {
+  const me = employee({ users: ['changeRole'] });
+  loginAs(me);
+  assert(/<select id="user-role"[^>]*disabled/.test(roleSelect(userFormHtml(me))), 'self-edit role select is enabled');
+});
+check('an Admin keeps every role selectable', () => {
+  loginAs(ADMIN);
+  const select = roleSelect(userFormHtml(OTHER));
+  assert(!/<select id="user-role"[^>]*disabled/.test(select) && !/<option value="Admin"[^>]*disabled/.test(select), 'admin lost a role option');
+});
+check('the detailed-permissions link follows users.managePermissions, not the Admin role', () => {
+  loginAs(employee({ users: ['view', 'edit', 'managePermissions'] }));
+  assert(userFormHtml(OTHER).includes("showPermissionsModal('u-other')"), 'managePermissions holder has no link to the manager');
+  loginAs(employee({ users: ['view', 'edit'] }));
+  assert(!userFormHtml(OTHER).includes("showPermissionsModal('u-other')"), 'link offered without managePermissions');
+});
+
+check('a managePermissions holder sees the grants they do not hold as locked boxes', () => {
+  loginAs(employee({ users: ['managePermissions'], ads: ['view'] }));
+  OTHER.permissions = {};
+  const html = captureModalHtml(() => sandbox.showPermissionsModal('u-other'));
+  assert(permissionBox(html, 'ads', 'edit').includes(LOCKED), 'ads.edit is not locked for an actor without it');
+  assert(!permissionBox(html, 'ads', 'view').includes('disabled'), 'ads.view (held) is locked');
+  assert(!permissionBox(html, 'users', 'managePermissions').includes('disabled'), 'users.managePermissions (held) is locked');
+  loginAs(ADMIN);
+  assert(!captureModalHtml(() => sandbox.showPermissionsModal('u-other')).includes(LOCKED), 'an Admin sees locked boxes');
+});
+
+check('a toggle the server would refuse is refused here, before any local or server write', () => {
+  const original = {
+    saveState: sandbox.saveState, markCollectionDirty: sandbox.markCollectionDirty, flushDirtyCollections: sandbox.flushDirtyCollections,
+    addAuditLog: sandbox.addAuditLog, scheduleServerUserUpdate: sandbox.scheduleServerUserUpdate
+  };
+  let writes = 0;
+  sandbox.saveState = () => {}; sandbox.markCollectionDirty = () => {}; sandbox.flushDirtyCollections = async () => {}; sandbox.addAuditLog = () => {};
+  sandbox.scheduleServerUserUpdate = () => { writes++; return Promise.resolve(true); };
+  try {
+    loginAs(employee({ users: ['managePermissions'], ads: ['view'] }));
+    // The target already holds ads.edit, which the actor lacks: the server
+    // refuses the WHOLE map, so even granting ads.view must be refused.
+    OTHER.permissions = { ads: ['edit'] };
+    clearNotes();
+    sandbox.togglePermission('u-other', 'ads', 'view', true);
+    assert(lastNote()?.t === 'Not allowed' && lastNote().m.includes('ads.edit'), 'no refusal naming ads.edit: ' + JSON.stringify(lastNote()));
+    assert(JSON.stringify(OTHER.permissions) === '{"ads":["edit"]}' && writes === 0, 'refused toggle still changed local state or wrote');
+    OTHER.permissions = {};
+    sandbox.togglePermission('u-other', 'ads', 'view', true);
+    assert(JSON.stringify(OTHER.permissions) === '{"ads":["view"]}' && writes === 1, 'a held grant was not applied');
+    sandbox.togglePermission('u-other', 'ads', 'edit', true);
+    assert(JSON.stringify(OTHER.permissions) === '{"ads":["view"]}' && writes === 1, 'an unheld grant was applied');
+    sandbox.toggleModulePermissions('u-other', 'ads', true);
+    assert(JSON.stringify(OTHER.permissions) === '{"ads":["view"]}' && writes === 1, 'Select All granted unheld ads.* grants');
+    loginAs(ADMIN);
+    sandbox.togglePermission('u-other', 'ads', 'edit', true);
+    assert(OTHER.permissions.ads.includes('edit') && writes === 2, 'an Admin toggle was refused');
+  } finally {
+    Object.assign(sandbox, original);
+    OTHER.permissions = {};
+  }
+});
+
+checkAsync('Clear All says "Cleared" only once the server write resolved', async () => {
+  const original = {
+    saveState: sandbox.saveState, markCollectionDirty: sandbox.markCollectionDirty, flushDirtyCollections: sandbox.flushDirtyCollections,
+    addAuditLog: sandbox.addAuditLog, scheduleServerUserUpdate: sandbox.scheduleServerUserUpdate
+  };
+  let settle = null;
+  sandbox.saveState = () => {}; sandbox.markCollectionDirty = () => {}; sandbox.flushDirtyCollections = async () => {}; sandbox.addAuditLog = () => {};
+  sandbox.scheduleServerUserUpdate = () => new Promise(resolve => { settle = resolve; });
+  const cleared = () => notes.some(n => n.t === 'Cleared');
+  // The bundle's Promise lives in the VM realm, so its wrapper of this stub
+  // promise settles a few microtasks later: flush with a macrotask.
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    loginAs(ADMIN);
+    OTHER.permissions = { ads: ['view'] };
+    clearNotes();
+    sandbox.clearAllPermissions('u-other');
+    assert(JSON.stringify(OTHER.permissions) === '{}', 'local permissions were not cleared');
+    await flush();
+    assert(!cleared(), 'toasted "Cleared" before the server answered');
+    settle(true); await flush();
+    assert(cleared(), 'no "Cleared" toast after the write landed');
+    clearNotes();
+    sandbox.clearAllPermissions('u-other');
+    settle(false); await flush();
+    assert(!cleared(), 'toasted "Cleared" after the server refused');
+  } finally {
+    Object.assign(sandbox, original);
+    OTHER.permissions = {};
+  }
 });
 
 // ---------- report ----------

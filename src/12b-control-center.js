@@ -50,7 +50,8 @@ function getControlCenterFacts() {
     if (getReceiptPaymentState(receipt) !== 'not_paid') return false;
     return true;
   });
-  const metaFailures = ads.filter(ad => { const code = String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim(); return code && !['pending_enrichment', 'insights_unavailable'].includes(code); });  // informational states are not failures
+  const metaFailures = ads.filter(ad => { const code = String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim(); return code && !['pending_enrichment', 'insights_unavailable', 'duplicate_link'].includes(code); });  // informational states are not failures
+  const metaDuplicates = ads.filter(ad => String(ad.metaSyncErrorCode || '').trim() === 'duplicate_link');  // needs an unlink, not a retry
   let snapshot = null;
   try { snapshot = typeof getCurrentProfitabilitySnapshot === 'function' ? getCurrentProfitabilitySnapshot(ads) : null; } catch (_) {}
   return {
@@ -59,8 +60,9 @@ function getControlCenterFacts() {
     setupAds,
     unpaidReceipts,
     metaFailures,
+    metaDuplicates,
     snapshot,
-    attentionCount: setupAds.length + unpaidReceipts.length + metaFailures.length + ((snapshot?.unpricedSpendUSD || 0) > 0.005 ? 1 : 0)
+    attentionCount: setupAds.length + unpaidReceipts.length + metaFailures.length + metaDuplicates.length + ((snapshot?.unpricedSpendUSD || 0) > 0.005 ? 1 : 0)
   };
 }
 
@@ -359,12 +361,14 @@ function renderControlCenterView() {
   if (facts.setupAds.length) tasks.push(renderControlCenterTask('wand-sparkles', 'bg-amber-100 text-amber-700', text(`${facts.setupAds.length} ads need setup`, `${facts.setupAds.length} إعلانات تحتاج استكمال البيانات`), text('Add the customer, selling amount, payment, and receipt.', 'أضف العميل وسعر البيع وبيانات الدفع والوصل.'), `<button type="button" onclick="controlCenterOpenAds('setup')" class="min-h-11 rounded-xl bg-amber-500 px-4 py-2 text-sm font-bold text-white">${text('Open ads', 'فتح الإعلانات')}</button>`));
   if (facts.unpaidReceipts.length) tasks.push(renderControlCenterTask('receipt', 'bg-rose-100 text-rose-700', text(`${facts.unpaidReceipts.length} receipts are unpaid`, `${facts.unpaidReceipts.length} وصولات غير مدفوعة`), text('Review money that customers still owe.', 'راجع المبالغ التي لا تزال مستحقة على العملاء.'), `<button type="button" onclick="controlCenterOpenReceipts()" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white">${text('Open receipts', 'فتح الوصولات')}</button>`));
   if ((facts.snapshot?.unpricedSpendUSD || 0) > 0.005) tasks.push(renderControlCenterTask('circle-dollar-sign', 'bg-rose-100 text-rose-700', text(`$${controlCenterMoney(facts.snapshot.unpricedSpendUSD)} Meta spend has no purchase cost`, `إنفاق ميتا بقيمة ${controlCenterMoney(facts.snapshot.unpricedSpendUSD)} دولار دون تكلفة شراء مسجلة`), text('Record the real dollar purchase so profit is not guessed.', 'سجّل التكلفة الفعلية لشراء الدولار حتى لا يُحسب الربح بالتخمين.'), `<button type="button" onclick="navigateTo('analytics')" class="min-h-11 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white">${text('Fix profit data', 'استكمال بيانات الربح')}</button>`));
+  if (facts.metaDuplicates?.length) tasks.push(renderControlCenterTask('unlink', 'bg-amber-100 text-amber-700', text(`${facts.metaDuplicates.length} ads share one Meta ad`, `${facts.metaDuplicates.length} إعلانات مرتبطة بنفس إعلان ميتا`), text('Unlink the duplicate so both can sync again.', 'افصل الإعلان المكرر ليعود التزامن للاثنين.'), `<button type="button" onclick="navigateTo('ads')" class="min-h-11 rounded-xl border border-amber-300 px-4 py-2 text-sm font-bold text-amber-700">${text('Review', 'مراجعة')}</button>`));
   if (facts.metaFailures.length) tasks.push(renderControlCenterTask('refresh-cw-off', 'bg-rose-100 text-rose-700', text(`${facts.metaFailures.length} Meta sync items need retry`, `${facts.metaFailures.length} عناصر مزامنة ميتا تحتاج إعادة المحاولة`), text('The server keeps retrying; open Ads to inspect the affected rows.', 'يواصل الخادم إعادة المحاولة؛ افتح الإعلانات لمراجعة العناصر المتأثرة.'), `<button type="button" onclick="navigateTo('ads')" class="min-h-11 rounded-xl border border-rose-300 px-4 py-2 text-sm font-bold text-rose-700">${text('Review', 'مراجعة')}</button>`));
   const systemTasks = [];
   if (!meta.webhookConfigured) systemTasks.push(renderControlCenterTask('webhook', 'bg-violet-100 text-violet-700', 'Meta instant notifications need setup', 'Add ALBAYAN_META_WEBHOOK_VERIFY_TOKEN in Jelastic, then subscribe Meta to /api/meta-ads/webhook. Polling remains active until then.'));
-  if (Number(monitoring.error_rate || 0) >= 0.05 && Number(monitoring.total_requests || 0) >= 50) systemTasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', 'Server errors need attention', `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% of requests failed in this server process. Check Jelastic logs.`));
+  const _recentRate = Number(monitoring.recent_error_rate ?? monitoring.error_rate ?? 0), _recentSample = Number(monitoring.recent_sample_size ?? monitoring.total_requests ?? 0);
+  if (_recentRate >= 0.05 && _recentSample >= 50) systemTasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', 'Server errors need attention', `${(_recentRate * 100).toFixed(1)}% of recent requests failed. Check Jelastic logs.`));  // rolling window, not since-boot
   if (Number(monitoring.response_ms_p95 || 0) >= 3000 && Number(monitoring.total_requests || 0) >= 50) systemTasks.push(renderControlCenterTask('timer-off', 'bg-amber-100 text-amber-700', 'Server responses are slow', `The slowest normal requests take about ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. Check database and container resources.`));
-  (operations.setupTasks || []).forEach(task => systemTasks.push(renderControlCenterTask('shield-alert', 'bg-sky-100 text-sky-700', task, 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.')));
+  (operations.setupTasks || []).forEach(task => { const overdue = /overdue/i.test(String(task)); systemTasks.push(renderControlCenterTask(overdue ? 'alarm-clock' : 'shield-alert', overdue ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700', task, overdue ? 'The backup worker has not produced a file for two intervals. Check the operations log and the backup volume.' : 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.')); });
   const backupConfigured = backup.enabled && backup.encryptionReady && backup.offsiteConfigured;
 
   return `

@@ -4,30 +4,10 @@
 // SECURITY ENHANCED VERSION
 // ==========================================
 
-// ==========================================
-// ALBAYAN PLATFORM (FUTURE PLAN + RULES)
-// ==========================================
-// This codebase is intended to evolve into a **multi-service platform** (web now, mobile later).
-// New services must plug in cleanly without breaking existing ones (especially Albayan Manager).
-//
-// Core platform primitives (do NOT break these):
-// - Services catalog: `SERVICES` + `SMART_SYSTEMS_CHILDREN` (config-driven, stable IDs)
-// - Wallet: `walletTransactions` is an **immutable ledger** (balance is computed, not stored)
-// - Subscriptions: `serviceSubscriptions` is the source of truth for service access
-// - Server mode (FastAPI/Postgres): server is authoritative for multi-user internet usage
-//
-// Non‑negotiable rules for future edits (human + AI):
-// 1) NEVER store wallet balance as a mutable field; only append ledger transactions.
-// 2) NEVER allow editing/deleting `walletTransactions` or subscription history (use reversals/cancel records).
-// 3) NEVER change a service `id` after launch (it becomes part of URLs, mobile deep links, subscriptions).
-// 4) Any new “large” collection must be persisted in IndexedDB: add to `state` + `PERSISTED_COLLECTIONS`.
-// 5) Keep services isolated; reuse platform modules instead of copy/paste logic across services.
-// 6) No plaintext secrets (passwords, tokens, recovery keys). Keep audit logs redacted.
-//
-// Docs to read before major changes:
-// - `PLATFORM_FOUNDATION.md` (architecture + portability)
-// - `CONTRIBUTING.md` (how to extend safely)
-// - `MONEY_PLATFORM_ROADMAP.md` (payments/POS/cards roadmap + money safety rules)
+// ALBAYAN PLATFORM RULES (see PLATFORM_FOUNDATION.md, CONTRIBUTING.md, MONEY_PLATFORM_ROADMAP.md):
+// walletTransactions is an append-only ledger (balance is computed, never stored; reversals, not edits);
+// serviceSubscriptions is the source of truth for access; service ids never change after launch;
+// large collections go in state + PERSISTED_COLLECTIONS; no plaintext secrets; audit logs stay redacted.
 //
 // ==========================================
 // PLATFORM DETECTION MODULE
@@ -7290,19 +7270,13 @@ function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   return true;
 }
 
-// ==========================================
-// CREATOR NAME RESOLUTION (survives user deletion)
-// ==========================================
-// Users are only ever soft-deleted, but deleted accounts stop syncing to
-// clients (/api/users and /api/users/public filter them out) — so records
-// they created used to render as "Created by: Unknown" forever. Resolution
-// order:
-//   1. live user in state.users (deleted users also stay here in local mode)
-//   2. server tombstone directory (id -> name of soft-deleted users)
-//   3. the createdByName stamp written onto the record at creation time
-// Privacy-anonymized accounts come back as "Deleted user" from the server and
-// have their record stamps scrubbed server-side, so a verified privacy
-// erasure is never resurrected by this chain.
+// ---- CREATOR NAME RESOLUTION (survives user deletion) ----
+// Soft-deleted accounts stop syncing to clients (/api/users filters them),
+// so their records rendered "Created by: Unknown". Order: 1. live user in
+// state.users (local mode keeps deleted users) 2. server tombstone directory
+// (id -> name) 3. the createdByName stamp on the record. Privacy-anonymized
+// accounts come back as "Deleted user" with their stamps scrubbed
+// server-side, so a verified erasure is never resurrected by this chain.
 function getKnownUserNameById(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return '';
@@ -7985,16 +7959,16 @@ function updateRecord(array, id, updates, expectedLastModified) {
     //
     // EXCEPT a paid-KEEPING edit that touches only the narrow-grant fields the
     // generic PATCH route authorizes under receipts.markCollected /
-    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + _DELIVERY_WORKFLOW_FIELDS).
-    // /settle demands receipts.edit, so routing a "Mark Collected" or office
-    // hand-over click through it 403'd every staff member holding only the
-    // collect permission — for an action the server itself permits.
+    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + delivery_workflow.py,
+    // whose cancel / "Delete mission" also carry deliveryHistory + statusDetail).
+    // /settle demands receipts.edit, so routing such a click through it 403'd
+    // every staff member holding only the collect or assign permission.
     const _RECEIPT_NARROW_GRANT_FIELDS = new Set([
       'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',
       'collectedAt', 'collectedBy', 'isReceivedInOffice', 'receivedInOfficeAt',
       'officeHandover', 'officeHandoverAt', 'deliveryPersonId', 'deliveryStatus',
       'acceptedDate', 'deliveryCancelReason', 'deliveryCancelledAt', 'deliveryCancelledBy',
-      'deliveryNotes', '_lastModified'
+      'deliveryNotes', 'deliveryHistory', 'statusDetail', '_lastModified'
     ]);
     const _narrowPaidKeepingEdit = collectionName === 'receipts'
       && (_oldReceiptStatus === 'paid' || old.isPaid === true)
@@ -9987,8 +9961,23 @@ function invalidateUsersListCache() {
 // The server's audit trail. GET /api/audit enforces auditLogs.view (all rows)
 // vs auditLogs.viewOwn (own rows only), so what comes back is already scoped
 // to the caller — unlike the device-local state.logs trail.
-async function apiListAuditLogs(limit = 500) {
-  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=0`, { method: 'GET' }, { timeoutMs: 15000 });
+const _AUDIT_FINANCIAL_TYPES = new Set(['receipts', 'ads', 'walletTransactions', 'walletPaymentRequests', 'financialClosures', 'clothesOrders', 'clothesShipments', 'adCampaignRequests', 'customers', 'dollarPurchases', 'serviceSubscriptions']);
+function _auditCategoryFor(resourceType) {
+  const t = String(resourceType || '');
+  return t === 'auth' ? 'auth' : (_AUDIT_FINANCIAL_TYPES.has(t) ? 'financial' : (t ? 'data' : 'general'));
+}
+async function apiListAllAuditLogs(pageSize = 1000, maxPages = 50) {
+  // The viewer shows the newest 500; an export or backup pages the whole trail.
+  const all = [];
+  for (let page = 0; page < maxPages; page++) {
+    const rows = await apiListAuditLogs(pageSize, page * pageSize);
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+  return all;
+}
+async function apiListAuditLogs(limit = 500, offset = 0) {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`, { method: 'GET' }, { timeoutMs: 15000 });
   if (!Array.isArray(rows)) return [];
   return rows.map((r) => {
     const uid = String(r.user_id || '');
@@ -9999,7 +9988,7 @@ async function apiListAuditLogs(limit = 500) {
       userId: uid,
       userName: u?.name || (uid ? uid : 'System'),
       action: String(r.action || ''),
-      category: String(r.resource_type || 'general'),
+      category: _auditCategoryFor(r.resource_type),  // the filter offers auth/data/financial/general
       severity: 'info',
       description: String(r.message || ''),
       resourceId: String(r.resource_id || ''),
@@ -10020,26 +10009,30 @@ async function apiUpdateUser(userId, updates) {
   return res;
 }
 
-// Debounced server-side persistence for user permission changes.
-// The permissions UI currently mutates local state for immediate UX; in server mode we must also persist
-// those changes via /api/users/{id}. This avoids "permissions revert" after refresh and prevents 403
-// errors on login when a user has no saved permissions.
+// Debounced server-side persistence for user permission changes (the UI
+// mutates local state first; server mode must also PATCH /api/users/{id}).
+// Resolves true once the write landed (or local mode saved), false when it
+// was refused — callers that promise success must wait for it.
 const _serverUserUpdate = {
   timers: new Map(),
   pending: new Map(),
+  waiters: new Map(),
   debounceMs: 700
 };
 
 function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   const uid = String(userId || '');
-  if (!uid) return;
-  if (!isServerModeEnabled()) return;
+  if (!uid) return Promise.resolve(false);
+  if (!isServerModeEnabled()) return Promise.resolve(true);
   // Permission edits are made by Admins or users.managePermissions holders;
   // the server enforces the same rule.
-  if (!canManageUsersAction('managePermissions')) return;
+  if (!canManageUsersAction('managePermissions')) return Promise.resolve(false);
 
   const prev = _serverUserUpdate.pending.get(uid) || {};
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
+  const done = new Promise((resolve) => {
+    _serverUserUpdate.waiters.set(uid, [...(_serverUserUpdate.waiters.get(uid) || []), resolve]);
+  });
 
   const existingTimer = _serverUserUpdate.timers.get(uid);
   if (existingTimer) clearTimeout(existingTimer);
@@ -10048,7 +10041,11 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
     _serverUserUpdate.timers.delete(uid);
     const payload = _serverUserUpdate.pending.get(uid);
     _serverUserUpdate.pending.delete(uid);
-    if (!payload || Object.keys(payload).length === 0) return;
+    const settle = (ok) => {
+      (_serverUserUpdate.waiters.get(uid) || []).forEach(resolve => resolve(ok));
+      _serverUserUpdate.waiters.delete(uid);
+    };
+    if (!payload || Object.keys(payload).length === 0) { settle(true); return; }
 
     try {
       const updatedUser = await apiUpdateUser(uid, payload);
@@ -10059,16 +10056,19 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
         markCollectionDirty('users');
         saveState();
       }
+      settle(true);
     } catch (e) {
       // Reload users on the next tick: the grid shows a refused grant.
       try { if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0; } catch (_) {}
       if (!quiet) {
         showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
+      settle(false);
     }
   }, _serverUserUpdate.debounceMs);
 
   _serverUserUpdate.timers.set(uid, t);
+  return done;
 }
 
 // Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
@@ -10085,6 +10085,7 @@ function flushPendingUserUpdates() {
       _serverUserUpdate.timers.delete(uid);
       const payload = _serverUserUpdate.pending.get(uid);
       _serverUserUpdate.pending.delete(uid);
+      _serverUserUpdate.waiters.delete(uid); // the page is going away; nobody can toast
       if (!payload || Object.keys(payload).length === 0) continue;
       try {
         inflight.push(fetch(`${getServerBaseUrl()}/api/users/${encodeURIComponent(uid)}`, {
@@ -11746,20 +11747,14 @@ async function serverLoadAllData() {
   return { failed, forbidden };
 }
 
-// ==========================================
-// SYSTEM-BROWSER APP LOGIN (Phase 2)
-// ==========================================
-// Optional secure-browser sign-in for packaged Capacitor iOS/Android apps.
-// The normal app-owned form uses the same HttpOnly server session as the web
-// app. This alternative opens the hosted login page in Safari/Chrome for
-// password-manager, passkey, or SSO use, then returns via the albayan://auth
-// deep link carrying a ONE-TIME code. The app exchanges code+verifier
-// (PKCE-style: only the verifier's SHA-256 leaves the device) for its session.
-//
-// Two sides live here because both run from this same bundle:
-//   NATIVE side (Capacitor): startAppBrowserLogin / deep-link handling.
-//   WEB side (system browser): detects ?app_login=1 requests, mints the
-//   handoff code after login, renders the "return to app" screen.
+// ---- SYSTEM-BROWSER APP LOGIN (Phase 2) ----
+// Optional sign-in for the packaged Capacitor apps: the hosted login page
+// opens in Safari/Chrome (password managers, passkeys, SSO) and returns via
+// the albayan://auth deep link with a ONE-TIME code; the app exchanges
+// code+verifier (PKCE-style: only the verifier's SHA-256 leaves the device)
+// for the same HttpOnly session the app-owned form uses. Both sides run from
+// this bundle: NATIVE = startAppBrowserLogin / deep-link handling; WEB =
+// detects ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
 // Native app: the pending {state, verifier} is kept in Keychain/Keystore so
@@ -15941,15 +15936,10 @@ function attachFirstRunHandlers() {
   });
 }
 
-// ==========================================
-// SAVED SIGN-IN ACCOUNTS (device-local chooser)
-// ==========================================
-// Storage contract: localStorage key 'albayan_saved_accounts' holds an array
-// of AT MOST 5 entries shaped EXACTLY {name, email, lastUsedAt} — never any
-// sign-in credential, cookie value or record id. Both the read and the write
-// path re-pick exactly these three fields, so a tampered or legacy value can
-// never smuggle anything else into storage. Everything is wrapped in
-// try/catch: in private mode the chooser simply never appears.
+// SAVED SIGN-IN ACCOUNTS (device-local chooser): localStorage key
+// 'albayan_saved_accounts' holds at most 5 {name, email, lastUsedAt} entries —
+// never a credential or record id (read and write re-pick those three fields);
+// all wrapped in try/catch so private mode simply shows no chooser.
 const ALBAYAN_SAVED_ACCOUNTS_KEY = 'albayan_saved_accounts';
 const ALBAYAN_SAVED_ACCOUNTS_MAX = 5;
 
@@ -21340,10 +21330,10 @@ function renderAuditView() {
           </button>
           ` : ''}
           ${canClearLogs ? `
-          <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
+          ${isServerModeEnabled() ? '' : `<button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
             <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
-          </button>
+          </button>`}
           <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="${isAr ? 'حذف سجلات التدقيق القديمة (يحتفظ بآخر سنة)' : 'Delete old audit logs (keeps last 1 year)'}">
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
             <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
@@ -21705,13 +21695,13 @@ function showLogDetails(logId) {
   IconQueue.schedule(modal);
 }
 
-function exportAuditLogs(format) {
+async function exportAuditLogs(format) {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
     return;
   }
   // Scoped: a viewOwn-only user exports only their own entries.
-  const allLogs = getVisibleAuditLogs();
+  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
 
   let downloaded = false;
   if (format === 'csv') {
@@ -21786,7 +21776,7 @@ async function backupAuditLogs() {
     return;
   }
   // A backup is a full export — scope it exactly like the export above.
-  const allLogs = getVisibleAuditLogs();
+  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
 
   const backup = {
     version: '1.0',
@@ -26287,7 +26277,8 @@ function showPermissionsModal(userId) {
   
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
-  
+  const unheldTitle = state.language === 'ar' ? 'لا تملك هذه الصلاحية' : 'You do not hold this permission';
+
   // Preserve scroll position so toggling permissions doesn't jump to the top
   let prevScrollTop = 0;
   const existingModal = document.getElementById('app-modal');
@@ -26394,8 +26385,8 @@ function showPermissionsModal(userId) {
                     const isEnabled = modulePerms.includes(permKey);
                     return `
                       <label class="flex items-start space-x-3 p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors group">
-                        <input type="checkbox" 
-                          ${isEnabled ? 'checked' : ''} 
+                        <input type="checkbox"
+                          ${isEnabled ? 'checked' : ''} ${can(moduleKey, permKey) ? '' : `disabled title="${unheldTitle}"`}
                           onchange="togglePermission('${userId}', '${moduleKey}', '${permKey}', this.checked)"
                           data-module="${moduleKey}"
                           data-perm="${permKey}"
@@ -26487,6 +26478,38 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
   }
 }
 
+// Mirror of the server's _ensure_actor_can_grant_permissions: a non-admin may
+// only SAVE a permission map made of grants they hold themselves (the whole
+// map is sent, so a grant the target already holds counts too). Returns the
+// first grant the actor lacks, or '' when the save would be accepted.
+function _unheldGrant(permissions) {
+  if (isCurrentUserAdmin()) return '';
+  for (const [mk, list] of Object.entries(permissions || {})) {
+    for (const pk of (Array.isArray(list) ? list : [])) {
+      if (!currentUserHasPermission(mk, pk)) return `${mk}.${pk}`;
+    }
+  }
+  return '';
+}
+
+function _denyUnheldGrant(grant, userId) {
+  showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not allowed', state.language === 'ar' ? `لا يمكنك منح صلاحية لا تملكها: ${grant}` : `Cannot grant a permission you do not hold: ${grant}`, 'error');
+  _syncPermissionBoxes(userId);
+}
+
+// Re-read every checkbox from the user's STORED permissions (in place, no blinking).
+function _syncPermissionBoxes(userId) {
+  const user = state.users.find(u => u.id === userId);
+  const modal = document.getElementById('app-modal');
+  if (user && modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
+    modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
+      const mk = el.getAttribute('data-module');
+      el.checked = Array.isArray(user.permissions?.[mk]) && user.permissions[mk].includes(el.getAttribute('data-perm'));
+    });
+  }
+  refreshPermissionsModalUi(userId);
+}
+
 function togglePermission(userId, moduleKey, permKey, enabled) {
   if (!canManageUsersAction('managePermissions')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
@@ -26494,18 +26517,14 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
   }
   const user = state.users.find(u => u.id === userId);
   if (!user) return;
-  
-  if (!user.permissions) user.permissions = {};
-  if (!user.permissions[moduleKey]) user.permissions[moduleKey] = [];
-  
-  if (enabled) {
-    if (!user.permissions[moduleKey].includes(permKey)) {
-      user.permissions[moduleKey].push(permKey);
-    }
-  } else {
-    user.permissions[moduleKey] = user.permissions[moduleKey].filter(p => p !== permKey);
-  }
-  
+
+  const list = (Array.isArray(user.permissions?.[moduleKey]) ? user.permissions[moduleKey] : []).filter(p => p !== permKey);
+  if (enabled) list.push(permKey);
+  const next = { ...(user.permissions || {}), [moduleKey]: list };
+  const unheld = _unheldGrant(next);
+  if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  user.permissions = next;
+
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
@@ -26533,35 +26552,25 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
   
   const moduleConfig = PERMISSION_MODULES[moduleKey];
   if (!moduleConfig) return;
-  
-  if (!user.permissions) user.permissions = {};
-  
-  if (enableAll) {
-    user.permissions[moduleKey] = Object.keys(moduleConfig.permissions);
-  } else {
-    user.permissions[moduleKey] = [];
-  }
-  
+
+  const next = { ...(user.permissions || {}), [moduleKey]: enableAll ? Object.keys(moduleConfig.permissions) : [] };
+  const unheld = _unheldGrant(next);
+  if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  user.permissions = next;
+
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
   scheduleServerUserUpdate(userId, { permissions: user.permissions });
-  
+
   addAuditLog('update', userId, `${enableAll ? 'Granted all' : 'Revoked all'} ${moduleKey} permissions for ${user.name}`, {
     resourceType: 'user',
     module: moduleKey,
     action: enableAll ? 'grant_all' : 'revoke_all'
   });
-  
-  // Update checkbox states in-place + refresh header counts
-  const modal = document.getElementById('app-modal');
-  if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-    modal.querySelectorAll(`input[type="checkbox"][data-module="${moduleKey}"]`).forEach((el) => {
-      el.checked = !!enableAll;
-    });
-  }
-  refreshPermissionsModalUi(userId, moduleKey);
+
+  _syncPermissionBoxes(userId);
 }
 
 function applyPermissionTemplate(userId, templateKey) {
@@ -26574,31 +26583,24 @@ function applyPermissionTemplate(userId, templateKey) {
   
   const template = PERMISSION_TEMPLATES[templateKey];
   if (!template) return;
-  
-  user.permissions = JSON.parse(JSON.stringify(template.permissions));
+
+  const next = JSON.parse(JSON.stringify(template.permissions));
+  const unheld = _unheldGrant(next);
+  if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  user.permissions = next;
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
   scheduleServerUserUpdate(userId, { permissions: user.permissions });
-  
+
   addAuditLog('update', userId, `Applied permission template "${template.name}" to ${user.name}`, {
     resourceType: 'user',
     template: templateKey
   });
-  
+
   showNotification(state.language === 'ar' ? 'تم تطبيق القالب' : 'Template Applied', state.language === 'ar' ? `تم تطبيق صلاحيات "${template.name}" على ${user.name}` : `${template.name} permissions applied to ${user.name}`, 'success');
-  // Update UI in-place (no blinking)
-  const modal = document.getElementById('app-modal');
-  if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-    modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
-      const mk = el.getAttribute('data-module');
-      const pk = el.getAttribute('data-perm');
-      const allowed = Array.isArray(user.permissions?.[mk]) ? user.permissions[mk].includes(pk) : false;
-      el.checked = allowed;
-    });
-  }
-  refreshPermissionsModalUi(userId);
+  _syncPermissionBoxes(userId);
 }
 
 function clearAllPermissions(userId) {
@@ -26616,19 +26618,18 @@ function clearAllPermissions(userId) {
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
-  
+  // "Cleared" only once the server took it (local mode resolves at once);
+  // a refusal already toasts from scheduleServerUserUpdate.
+  Promise.resolve(scheduleServerUserUpdate(userId, { permissions: user.permissions })).then((ok) => {
+    if (ok !== false) showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? `تم مسح جميع صلاحيات ${user.name}` : `All permissions cleared for ${user.name}`, 'success');
+  });
+
   addAuditLog('update', userId, `Cleared all permissions for ${user.name}`, {
     resourceType: 'user',
     action: 'clear_all'
   });
-  
-  showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? `تم مسح جميع صلاحيات ${user.name}` : `All permissions cleared for ${user.name}`, 'success');
-  const modal = document.getElementById('app-modal');
-  if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-    modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => { el.checked = false; });
-  }
-  refreshPermissionsModalUi(userId);
+
+  _syncPermissionBoxes(userId);
 }
 
 function exportUserPermissions(userId) {
@@ -26686,29 +26687,22 @@ function importUserPermissions(userId) {
         if (!user) return;
         
         if (data.permissions) {
+          const unheld = _unheldGrant(data.permissions);
+          if (unheld) { _denyUnheldGrant(unheld, userId); return; }
           user.permissions = data.permissions;
           user._lastModified = getMonotonicTime();
           markCollectionDirty('users');
           saveState();
           flushDirtyCollections().catch(() => {});
           scheduleServerUserUpdate(userId, { permissions: user.permissions });
-          
+
           addAuditLog('update', userId, `Imported permissions for ${user.name}`, {
             resourceType: 'user',
             action: 'import'
           });
-          
+
           showNotification(state.language === 'ar' ? 'تم الاستيراد' : 'Imported', state.language === 'ar' ? `تم استيراد صلاحيات ${user.name}` : `Permissions imported for ${user.name}`, 'success');
-          const modal = document.getElementById('app-modal');
-          if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-            modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
-              const mk = el.getAttribute('data-module');
-              const pk = el.getAttribute('data-perm');
-              const allowed = Array.isArray(user.permissions?.[mk]) ? user.permissions[mk].includes(pk) : false;
-              el.checked = allowed;
-            });
-          }
-          refreshPermissionsModalUi(userId);
+          _syncPermissionBoxes(userId);
         }
       } catch (error) {
         showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'ملف صلاحيات غير صالح' : 'Invalid permissions file', 'error');
@@ -27206,15 +27200,11 @@ function _receiptFinalNoExists(serial, excludeId) {
   );
 }
 
-// ==========================================
-// IMAGE COMPRESSION (shared by all photo uploads)
-// ==========================================
-// A phone camera photo is often 3-6MB; stored as a base64 data URL inside a
-// record it inflates every save, sync payload and export by that amount.
-// Downscaling to max 1280px JPEG (~80% quality) keeps receipts perfectly
-// readable while shrinking payloads 10-20x. PNG stays PNG (transparency),
-// and on ANY failure we fall back to the original uncompressed data URL so
-// a photo is never lost.
+// ---- IMAGE COMPRESSION (shared by all photo uploads) ----
+// A 3-6MB camera photo stored as a base64 data URL inflates every save, sync
+// payload and export; max 1280px JPEG (~80%) keeps receipts readable at
+// 10-20x less. PNG stays PNG (transparency); on ANY failure the original
+// data URL is kept so a photo is never lost.
 const IMAGE_MAX_DIMENSION = 1280;
 const IMAGE_JPEG_QUALITY = 0.8;
 
@@ -28799,14 +28789,11 @@ async function submitReceiptDeliveryCancel(receiptId) {
       }
     }
     _clearDeliveryCompletionDraft(receipt.id);
-    // Both stacked surfaces (cancel dialog over the completion form) close in
-    // ONE task, so the body overlay observer (src/01b-mobile-runtime.js) sees
-    // a single 2->0 mutation and consumes only ONE overlay-history sentinel —
-    // stranding the second and turning the driver's next hardware Back press
-    // into a dead no-op + scroll reset. Mirror closeModal's go(-2) teardown:
-    // consume both consecutive sentinel entries in one traversal and flag the
-    // resulting popstate as bookkeeping; the observer's decrease branch is
-    // then skipped via its _overlayHistoryConsumePending() gate.
+    // Both overlays close in ONE task, so the body overlay observer
+    // (01b-mobile-runtime) would consume only one of the two history
+    // sentinels and strand the other (dead Back press + scroll reset). Mirror
+    // closeModal's go(-2): consume both here and flag the popstate as
+    // bookkeeping (the observer's _overlayHistoryConsumePending() gate).
     const cancelModalEl = document.getElementById('delivery-cancel-modal');
     const completeModalEl = document.getElementById('delivery-complete-modal');
     if (cancelModalEl && completeModalEl
@@ -37052,7 +37039,7 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
   // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
   // decimal separator too — dropping it turned "12،5" into "125" (10x error).
-  val = normalizeDigitsAscii(val).replace(/،/g, ',');
+  val = normalizeDigitsAscii(val).replace(/،/g, ',').replace(/٫/g, '.');  // U+066B is the decimal point: fold it first
   // Commas next to a dot or in groups of three ("1,250") are thousands
   // separators; only "12,5" is a decimal. "1,250" used to save as 1.25.
   if (val.includes(',')) {
@@ -37060,7 +37047,6 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
     if (val.includes('.') || grouped) val = val.split(',').join('');
     else val = val.replace(',', '.');
   }
-  val = val.replace(/٫/g, '.');
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
@@ -38757,6 +38743,9 @@ function renderModal() {
       const userData = state.modalData || {};
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
+      // Server rules: users.changeRole picks non-admin roles, never your own; only an Admin grants Admin.
+      const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole'));
+      const canOpenPerms = canManageUsersAction('managePermissions');
       const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
       const isArU = state.language === 'ar';
       modalContent = `
@@ -38794,12 +38783,12 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
-              <select id="user-role" onchange="updateUserRoleInfo(this.value)" class="w-full glass-input px-4 py-2.5 rounded-xl" ${isAdminEditor ? '' : 'disabled'}>
-                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}>${isArU ? ({ 'Admin': 'أدمن', 'Employee': 'موظف', 'Delivery': 'توصيل' }[r] || r) : r}</option>`).join('')}
+              <select id="user-role" onchange="updateUserRoleInfo(this.value)" class="w-full glass-input px-4 py-2.5 rounded-xl" ${canPickRole ? '' : 'disabled'}>
+                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}${r === 'Admin' && !isAdminEditor ? ' disabled' : ''}>${isArU ? ({ 'Admin': 'أدمن', 'Employee': 'موظف', 'Delivery': 'توصيل' }[r] || r) : r}</option>`).join('')}
               </select>
-              ${!isAdminEditor ? `
+              ${!canPickRole ? `
                 <div class="mt-1 text-[11px] text-slate-400">
-                  ${state.language === 'ar' ? 'تغيير الدور والصلاحيات للأدمن فقط' : 'Role & permissions can be changed by Admin only'}
+                  ${state.language === 'ar' ? 'تغيير الدور يحتاج صلاحية تغيير الدور' : 'Changing the role needs the Change Role permission'}
                 </div>
               ` : ''}
             </div>
@@ -38852,14 +38841,14 @@ function renderModal() {
               <div class="w-full h-2 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden mb-3">
                 <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full" style="width: ${userPermSummary.percentage}%"></div>
               </div>
-              ${isAdminEditor ? `
+              ${canOpenPerms ? `
               <button type="button" onclick="closeModal(); setTimeout(() => showPermissionsModal('${userData.id}'), 200)" class="w-full py-2 rounded-lg text-xs font-bold text-purple-600 hover:bg-purple-100 dark:hover:bg-purple-800/30 transition-colors flex items-center justify-center space-x-2">
                 <i data-lucide="settings" class="w-3 h-3"></i>
                 <span>${isArU ? 'إدارة الصلاحيات التفصيلية' : 'Manage Detailed Permissions'}</span>
               </button>
               ` : `
                 <div class="text-[11px] text-slate-500 text-center">
-                  ${state.language === 'ar' ? 'الصلاحيات لا يمكن تعديلها إلا بواسطة الأدمن' : 'Permissions can only be changed by Admin'}
+                  ${state.language === 'ar' ? 'تعديل الصلاحيات يحتاج صلاحية إدارة الصلاحيات' : 'Changing permissions needs the Manage Permissions permission'}
                 </div>
               `}
             </div>
@@ -42234,14 +42223,12 @@ function closeModal() {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
     } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
       // Phone browsers: an untracked overlay (duplicate-serial warning…)
-      // opened late over this dialog, so its sentinel sits ON TOP of the
-      // dialog's own ?modal entry — and closeModal is tearing both surfaces
-      // down at once. Consume BOTH entries: rewriting only the sentinel
-      // would leave the buried ?modal entry alive one level down, and a
-      // later Back would resurrect the dismissed dialog. The popstate that
-      // go(-2) fires is pure bookkeeping, so flag it for the router exactly
-      // like consumeOverlayHistoryEntry does. Sentinels are never pushed on
-      // desktop or in the packaged app, so this branch cannot run there.
+      // opened late, so its sentinel sits ON TOP of the dialog's ?modal
+      // entry and closeModal tears both down at once. Consume BOTH entries
+      // (rewriting only the sentinel leaves the buried ?modal entry alive and
+      // a later Back resurrects the dialog); go(-2)'s popstate is bookkeeping,
+      // flagged like consumeOverlayHistoryEntry does. Sentinels are never
+      // pushed on desktop or in the packaged app, so this cannot run there.
       _suppressOverlayPopstateUntil = Date.now() + 800;
       try {
         window.history.go(-2);

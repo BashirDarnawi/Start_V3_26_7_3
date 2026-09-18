@@ -231,8 +231,8 @@ check('live sync uses a bounded fan-out and the badge says why it failed',
   !liveSync.includes('rounded-full mr-2"></span>') &&
   liveSync.includes('rounded-full me-2"></span>'));
 check('the production server allows more connections than one tab fans out',
-  /--limit-concurrency",\s*"64"/.test(read('server/Dockerfile')) &&
-  read('deploy/albayan.service').includes('--limit-concurrency 64'));
+  /--limit-concurrency",\s*"128"/.test(read('server/Dockerfile')) &&
+  read('deploy/albayan.service').includes('--limit-concurrency 128'));
 // (3) The imported-ad page lock keys on a LIVE Facebook identity; after an
 // unlink (metaImportSource survives) the picker must reopen.
 check('imported-ad page lock keys on live Facebook identity, not import provenance',
@@ -1461,7 +1461,7 @@ check('server-mode shipments move stock through the transactional route and vali
 
 check('money boxes keep thousands separators, WhatsApp links use international digits, campaign actions replay safely',
   forms.includes("const grouped = /^\\s*\\d{1,3}(,\\d{3})+(\\.\\d*)?\\s*$/.test(val);") &&
-  forms.includes("val = val.replace(/٫/g, '.');") && forms.includes("normalizeDigitsAscii(val).replace(/،/g, ',')") &&
+  forms.includes("normalizeDigitsAscii(val).replace(/،/g, ',').replace(/٫/g, '.')") && !forms.includes("  val = val.replace(/٫/g, '.');") &&
   helpers.includes("const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';") &&
   helpers.includes("(searchPhoneKey && entry.key === searchPhoneKey)") &&
   views.includes('href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}"') &&

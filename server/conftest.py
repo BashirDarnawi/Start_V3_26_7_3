@@ -15,6 +15,8 @@ def _clear_shared_login_ceiling():
     login ceiling (120 per 15 minutes) is a production guard, not a test
     budget: clear it before each module so the suite's own growth never turns
     into 429s in whichever module happens to run late."""
-    for ip in ("testclient", "192.0.2.99", "127.0.0.1"):
+    for ip in ("testclient", "192.0.2.99", "192.0.2.88", "198.51.100.77", "127.0.0.1"):
         reset_rate_limit(f"login:ip:{ip}")
+    for email in ("admin@test.com", "testadmin@tests.albayanhub.com"):  # fixed fixture emails reused across modules
+        reset_rate_limit(f"login:email:{email}")
     yield

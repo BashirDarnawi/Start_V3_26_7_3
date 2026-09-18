@@ -1292,6 +1292,10 @@ def create_company_debt_coverage_router(
                         "updatedAdIds": [item["id"] for item in updated_ads],
                     },
                 )
+                ctx["audit"](actor_id, "company_coverage", "receipts", receipt_id,
+                             f"Company covered ${_financial_usd(int(body.amountMinorUSD)):.2f} of receipt {receipt_id}",
+                             {"amountMinorUSD": int(body.amountMinorUSD), "receiptId": receipt_id, "reason": reason,
+                              "adIds": [str(item["id"]) for item in updated_ads]}, conn=conn)
                 return ReceiptCompanyCoverageResponse(
                     coverage=EntityResponse(
                         **ctx["project_entity_media_for_user"](
@@ -1528,6 +1532,10 @@ def create_company_debt_coverage_router(
                         "updatedAdIds": [item["id"] for item in updated_ads],
                     },
                 )
+                ctx["audit"](str(admin.get("id") or ""), "company_coverage", "customers", customer_id,
+                             f"Company covered ${_financial_usd(requested_amount_minor):.2f} of customer {customer_id} ad debt",
+                             {"amountMinorUSD": requested_amount_minor, "customerId": customer_id, "coverageId": coverage_id,
+                              "adIds": [str(item["id"]) for item in updated_ads]}, conn=conn)
                 return CustomerCompanyCoverageResponse(
                     coverage=EntityResponse(
                         **ctx["project_entity_media_for_user"](

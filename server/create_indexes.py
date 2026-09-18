@@ -27,7 +27,9 @@ def create_performance_indexes():
         "ON entities (type, created_by) WHERE deleted = false"
     )
     try:
+        from .add_jsonb_indexes import _bound_ddl_locks
         with db_conn() as conn:
+            _bound_ddl_locks(conn)  # an idle-in-transaction session must not hold the boot (and every write) hostage
             conn.execute(text(sql))
         print("✅ Created index: entities_type_created_by_composite")
     except Exception as e:

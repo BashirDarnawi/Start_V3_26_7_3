@@ -27,19 +27,13 @@ function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   return true;
 }
 
-// ==========================================
-// CREATOR NAME RESOLUTION (survives user deletion)
-// ==========================================
-// Users are only ever soft-deleted, but deleted accounts stop syncing to
-// clients (/api/users and /api/users/public filter them out) — so records
-// they created used to render as "Created by: Unknown" forever. Resolution
-// order:
-//   1. live user in state.users (deleted users also stay here in local mode)
-//   2. server tombstone directory (id -> name of soft-deleted users)
-//   3. the createdByName stamp written onto the record at creation time
-// Privacy-anonymized accounts come back as "Deleted user" from the server and
-// have their record stamps scrubbed server-side, so a verified privacy
-// erasure is never resurrected by this chain.
+// ---- CREATOR NAME RESOLUTION (survives user deletion) ----
+// Soft-deleted accounts stop syncing to clients (/api/users filters them),
+// so their records rendered "Created by: Unknown". Order: 1. live user in
+// state.users (local mode keeps deleted users) 2. server tombstone directory
+// (id -> name) 3. the createdByName stamp on the record. Privacy-anonymized
+// accounts come back as "Deleted user" with their stamps scrubbed
+// server-side, so a verified erasure is never resurrected by this chain.
 function getKnownUserNameById(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return '';
@@ -722,16 +716,16 @@ function updateRecord(array, id, updates, expectedLastModified) {
     //
     // EXCEPT a paid-KEEPING edit that touches only the narrow-grant fields the
     // generic PATCH route authorizes under receipts.markCollected /
-    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + _DELIVERY_WORKFLOW_FIELDS).
-    // /settle demands receipts.edit, so routing a "Mark Collected" or office
-    // hand-over click through it 403'd every staff member holding only the
-    // collect permission — for an action the server itself permits.
+    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + delivery_workflow.py,
+    // whose cancel / "Delete mission" also carry deliveryHistory + statusDetail).
+    // /settle demands receipts.edit, so routing such a click through it 403'd
+    // every staff member holding only the collect or assign permission.
     const _RECEIPT_NARROW_GRANT_FIELDS = new Set([
       'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',
       'collectedAt', 'collectedBy', 'isReceivedInOffice', 'receivedInOfficeAt',
       'officeHandover', 'officeHandoverAt', 'deliveryPersonId', 'deliveryStatus',
       'acceptedDate', 'deliveryCancelReason', 'deliveryCancelledAt', 'deliveryCancelledBy',
-      'deliveryNotes', '_lastModified'
+      'deliveryNotes', 'deliveryHistory', 'statusDetail', '_lastModified'
     ]);
     const _narrowPaidKeepingEdit = collectionName === 'receipts'
       && (_oldReceiptStatus === 'paid' || old.isPaid === true)

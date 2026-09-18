@@ -1008,6 +1008,9 @@ function renderModal() {
       const userData = state.modalData || {};
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
+      // Server rules: users.changeRole picks non-admin roles, never your own; only an Admin grants Admin.
+      const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole'));
+      const canOpenPerms = canManageUsersAction('managePermissions');
       const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
       const isArU = state.language === 'ar';
       modalContent = `
@@ -1045,12 +1048,12 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
-              <select id="user-role" onchange="updateUserRoleInfo(this.value)" class="w-full glass-input px-4 py-2.5 rounded-xl" ${isAdminEditor ? '' : 'disabled'}>
-                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}>${isArU ? ({ 'Admin': 'أدمن', 'Employee': 'موظف', 'Delivery': 'توصيل' }[r] || r) : r}</option>`).join('')}
+              <select id="user-role" onchange="updateUserRoleInfo(this.value)" class="w-full glass-input px-4 py-2.5 rounded-xl" ${canPickRole ? '' : 'disabled'}>
+                ${USER_ROLES.map(r => `<option value="${r}" ${userData.role === r ? 'selected' : ''}${r === 'Admin' && !isAdminEditor ? ' disabled' : ''}>${isArU ? ({ 'Admin': 'أدمن', 'Employee': 'موظف', 'Delivery': 'توصيل' }[r] || r) : r}</option>`).join('')}
               </select>
-              ${!isAdminEditor ? `
+              ${!canPickRole ? `
                 <div class="mt-1 text-[11px] text-slate-400">
-                  ${state.language === 'ar' ? 'تغيير الدور والصلاحيات للأدمن فقط' : 'Role & permissions can be changed by Admin only'}
+                  ${state.language === 'ar' ? 'تغيير الدور يحتاج صلاحية تغيير الدور' : 'Changing the role needs the Change Role permission'}
                 </div>
               ` : ''}
             </div>
@@ -1103,14 +1106,14 @@ function renderModal() {
               <div class="w-full h-2 bg-purple-200 dark:bg-purple-800 rounded-full overflow-hidden mb-3">
                 <div class="h-full bg-gradient-to-r from-purple-500 to-indigo-500 rounded-full" style="width: ${userPermSummary.percentage}%"></div>
               </div>
-              ${isAdminEditor ? `
+              ${canOpenPerms ? `
               <button type="button" onclick="closeModal(); setTimeout(() => showPermissionsModal('${userData.id}'), 200)" class="w-full py-2 rounded-lg text-xs font-bold text-purple-600 hover:bg-purple-100 dark:hover:bg-purple-800/30 transition-colors flex items-center justify-center space-x-2">
                 <i data-lucide="settings" class="w-3 h-3"></i>
                 <span>${isArU ? 'إدارة الصلاحيات التفصيلية' : 'Manage Detailed Permissions'}</span>
               </button>
               ` : `
                 <div class="text-[11px] text-slate-500 text-center">
-                  ${state.language === 'ar' ? 'الصلاحيات لا يمكن تعديلها إلا بواسطة الأدمن' : 'Permissions can only be changed by Admin'}
+                  ${state.language === 'ar' ? 'تعديل الصلاحيات يحتاج صلاحية إدارة الصلاحيات' : 'Changing permissions needs the Manage Permissions permission'}
                 </div>
               `}
             </div>
@@ -4485,14 +4488,12 @@ function closeModal() {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
     } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
       // Phone browsers: an untracked overlay (duplicate-serial warning…)
-      // opened late over this dialog, so its sentinel sits ON TOP of the
-      // dialog's own ?modal entry — and closeModal is tearing both surfaces
-      // down at once. Consume BOTH entries: rewriting only the sentinel
-      // would leave the buried ?modal entry alive one level down, and a
-      // later Back would resurrect the dismissed dialog. The popstate that
-      // go(-2) fires is pure bookkeeping, so flag it for the router exactly
-      // like consumeOverlayHistoryEntry does. Sentinels are never pushed on
-      // desktop or in the packaged app, so this branch cannot run there.
+      // opened late, so its sentinel sits ON TOP of the dialog's ?modal
+      // entry and closeModal tears both down at once. Consume BOTH entries
+      // (rewriting only the sentinel leaves the buried ?modal entry alive and
+      // a later Back resurrects the dialog); go(-2)'s popstate is bookkeeping,
+      // flagged like consumeOverlayHistoryEntry does. Sentinels are never
+      // pushed on desktop or in the packaged app, so this cannot run there.
       _suppressOverlayPopstateUntil = Date.now() + 800;
       try {
         window.history.go(-2);

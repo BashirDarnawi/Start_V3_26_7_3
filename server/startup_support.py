@@ -36,7 +36,7 @@ def install_validation_handler(app: Any) -> None:
         return JSONResponse(status_code=422, content={"detail": errors})
 
 
-def request_size_refusal(request: Any) -> Any:
+def request_size_refusal(request: Any, cookie_name: str = "albayan_session") -> Any:
     """The body-size gate for POST/PUT/PATCH (returns a JSONResponse or None).
 
     Every write body is capped at 10 MB. The body is parsed BEFORE the session
@@ -53,7 +53,7 @@ def request_size_refusal(request: Any) -> Any:
     path = str(request.url.path)
     content_length = request.headers.get("content-length")
     max_size = 10 * 1024 * 1024
-    anonymous = path.startswith("/api/") and "albayan_session" not in request.cookies and not path.startswith("/api/meta-ads/webhook")
+    anonymous = path.startswith("/api/") and cookie_name not in request.cookies and not path.startswith("/api/meta-ads/webhook")
     if anonymous:
         max_size = 256 * 1024
     if content_length:

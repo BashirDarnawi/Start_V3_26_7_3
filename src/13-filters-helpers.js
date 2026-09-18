@@ -2027,7 +2027,8 @@ function showPermissionsModal(userId) {
   
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
-  
+  const unheldTitle = state.language === 'ar' ? 'لا تملك هذه الصلاحية' : 'You do not hold this permission';
+
   // Preserve scroll position so toggling permissions doesn't jump to the top
   let prevScrollTop = 0;
   const existingModal = document.getElementById('app-modal');
@@ -2134,8 +2135,8 @@ function showPermissionsModal(userId) {
                     const isEnabled = modulePerms.includes(permKey);
                     return `
                       <label class="flex items-start space-x-3 p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors group">
-                        <input type="checkbox" 
-                          ${isEnabled ? 'checked' : ''} 
+                        <input type="checkbox"
+                          ${isEnabled ? 'checked' : ''} ${can(moduleKey, permKey) ? '' : `disabled title="${unheldTitle}"`}
                           onchange="togglePermission('${userId}', '${moduleKey}', '${permKey}', this.checked)"
                           data-module="${moduleKey}"
                           data-perm="${permKey}"
@@ -2227,6 +2228,38 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
   }
 }
 
+// Mirror of the server's _ensure_actor_can_grant_permissions: a non-admin may
+// only SAVE a permission map made of grants they hold themselves (the whole
+// map is sent, so a grant the target already holds counts too). Returns the
+// first grant the actor lacks, or '' when the save would be accepted.
+function _unheldGrant(permissions) {
+  if (isCurrentUserAdmin()) return '';
+  for (const [mk, list] of Object.entries(permissions || {})) {
+    for (const pk of (Array.isArray(list) ? list : [])) {
+      if (!currentUserHasPermission(mk, pk)) return `${mk}.${pk}`;
+    }
+  }
+  return '';
+}
+
+function _denyUnheldGrant(grant, userId) {
+  showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not allowed', state.language === 'ar' ? `لا يمكنك منح صلاحية لا تملكها: ${grant}` : `Cannot grant a permission you do not hold: ${grant}`, 'error');
+  _syncPermissionBoxes(userId);
+}
+
+// Re-read every checkbox from the user's STORED permissions (in place, no blinking).
+function _syncPermissionBoxes(userId) {
+  const user = state.users.find(u => u.id === userId);
+  const modal = document.getElementById('app-modal');
+  if (user && modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
+    modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
+      const mk = el.getAttribute('data-module');
+      el.checked = Array.isArray(user.permissions?.[mk]) && user.permissions[mk].includes(el.getAttribute('data-perm'));
+    });
+  }
+  refreshPermissionsModalUi(userId);
+}
+
 function togglePermission(userId, moduleKey, permKey, enabled) {
   if (!canManageUsersAction('managePermissions')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
@@ -2234,18 +2267,14 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
   }
   const user = state.users.find(u => u.id === userId);
   if (!user) return;
-  
-  if (!user.permissions) user.permissions = {};
-  if (!user.permissions[moduleKey]) user.permissions[moduleKey] = [];
-  
-  if (enabled) {
-    if (!user.permissions[moduleKey].includes(permKey)) {
-      user.permissions[moduleKey].push(permKey);
-    }
-  } else {
-    user.permissions[moduleKey] = user.permissions[moduleKey].filter(p => p !== permKey);
-  }
-  
+
+  const list = (Array.isArray(user.permissions?.[moduleKey]) ? user.permissions[moduleKey] : []).filter(p => p !== permKey);
+  if (enabled) list.push(permKey);
+  const next = { ...(user.permissions || {}), [moduleKey]: list };
+  const unheld = _unheldGrant(next);
+  if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  user.permissions = next;
+
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
@@ -2273,35 +2302,25 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
   
   const moduleConfig = PERMISSION_MODULES[moduleKey];
   if (!moduleConfig) return;
-  
-  if (!user.permissions) user.permissions = {};
-  
-  if (enableAll) {
-    user.permissions[moduleKey] = Object.keys(moduleConfig.permissions);
-  } else {
-    user.permissions[moduleKey] = [];
-  }
-  
+
+  const next = { ...(user.permissions || {}), [moduleKey]: enableAll ? Object.keys(moduleConfig.permissions) : [] };
+  const unheld = _unheldGrant(next);
+  if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  user.permissions = next;
+
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
   scheduleServerUserUpdate(userId, { permissions: user.permissions });
-  
+
   addAuditLog('update', userId, `${enableAll ? 'Granted all' : 'Revoked all'} ${moduleKey} permissions for ${user.name}`, {
     resourceType: 'user',
     module: moduleKey,
     action: enableAll ? 'grant_all' : 'revoke_all'
   });
-  
-  // Update checkbox states in-place + refresh header counts
-  const modal = document.getElementById('app-modal');
-  if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-    modal.querySelectorAll(`input[type="checkbox"][data-module="${moduleKey}"]`).forEach((el) => {
-      el.checked = !!enableAll;
-    });
-  }
-  refreshPermissionsModalUi(userId, moduleKey);
+
+  _syncPermissionBoxes(userId);
 }
 
 function applyPermissionTemplate(userId, templateKey) {
@@ -2314,31 +2333,24 @@ function applyPermissionTemplate(userId, templateKey) {
   
   const template = PERMISSION_TEMPLATES[templateKey];
   if (!template) return;
-  
-  user.permissions = JSON.parse(JSON.stringify(template.permissions));
+
+  const next = JSON.parse(JSON.stringify(template.permissions));
+  const unheld = _unheldGrant(next);
+  if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  user.permissions = next;
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
   scheduleServerUserUpdate(userId, { permissions: user.permissions });
-  
+
   addAuditLog('update', userId, `Applied permission template "${template.name}" to ${user.name}`, {
     resourceType: 'user',
     template: templateKey
   });
-  
+
   showNotification(state.language === 'ar' ? 'تم تطبيق القالب' : 'Template Applied', state.language === 'ar' ? `تم تطبيق صلاحيات "${template.name}" على ${user.name}` : `${template.name} permissions applied to ${user.name}`, 'success');
-  // Update UI in-place (no blinking)
-  const modal = document.getElementById('app-modal');
-  if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-    modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
-      const mk = el.getAttribute('data-module');
-      const pk = el.getAttribute('data-perm');
-      const allowed = Array.isArray(user.permissions?.[mk]) ? user.permissions[mk].includes(pk) : false;
-      el.checked = allowed;
-    });
-  }
-  refreshPermissionsModalUi(userId);
+  _syncPermissionBoxes(userId);
 }
 
 function clearAllPermissions(userId) {
@@ -2356,19 +2368,18 @@ function clearAllPermissions(userId) {
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
-  
+  // "Cleared" only once the server took it (local mode resolves at once);
+  // a refusal already toasts from scheduleServerUserUpdate.
+  Promise.resolve(scheduleServerUserUpdate(userId, { permissions: user.permissions })).then((ok) => {
+    if (ok !== false) showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? `تم مسح جميع صلاحيات ${user.name}` : `All permissions cleared for ${user.name}`, 'success');
+  });
+
   addAuditLog('update', userId, `Cleared all permissions for ${user.name}`, {
     resourceType: 'user',
     action: 'clear_all'
   });
-  
-  showNotification(state.language === 'ar' ? 'تم المسح' : 'Cleared', state.language === 'ar' ? `تم مسح جميع صلاحيات ${user.name}` : `All permissions cleared for ${user.name}`, 'success');
-  const modal = document.getElementById('app-modal');
-  if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-    modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => { el.checked = false; });
-  }
-  refreshPermissionsModalUi(userId);
+
+  _syncPermissionBoxes(userId);
 }
 
 function exportUserPermissions(userId) {
@@ -2426,29 +2437,22 @@ function importUserPermissions(userId) {
         if (!user) return;
         
         if (data.permissions) {
+          const unheld = _unheldGrant(data.permissions);
+          if (unheld) { _denyUnheldGrant(unheld, userId); return; }
           user.permissions = data.permissions;
           user._lastModified = getMonotonicTime();
           markCollectionDirty('users');
           saveState();
           flushDirtyCollections().catch(() => {});
           scheduleServerUserUpdate(userId, { permissions: user.permissions });
-          
+
           addAuditLog('update', userId, `Imported permissions for ${user.name}`, {
             resourceType: 'user',
             action: 'import'
           });
-          
+
           showNotification(state.language === 'ar' ? 'تم الاستيراد' : 'Imported', state.language === 'ar' ? `تم استيراد صلاحيات ${user.name}` : `Permissions imported for ${user.name}`, 'success');
-          const modal = document.getElementById('app-modal');
-          if (modal?.dataset?.modalType === 'permissions' && String(modal.dataset.userId || '') === String(userId || '')) {
-            modal.querySelectorAll('input[type="checkbox"][data-module][data-perm]').forEach((el) => {
-              const mk = el.getAttribute('data-module');
-              const pk = el.getAttribute('data-perm');
-              const allowed = Array.isArray(user.permissions?.[mk]) ? user.permissions[mk].includes(pk) : false;
-              el.checked = allowed;
-            });
-          }
-          refreshPermissionsModalUi(userId);
+          _syncPermissionBoxes(userId);
         }
       } catch (error) {
         showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'ملف صلاحيات غير صالح' : 'Invalid permissions file', 'error');
@@ -2946,15 +2950,11 @@ function _receiptFinalNoExists(serial, excludeId) {
   );
 }
 
-// ==========================================
-// IMAGE COMPRESSION (shared by all photo uploads)
-// ==========================================
-// A phone camera photo is often 3-6MB; stored as a base64 data URL inside a
-// record it inflates every save, sync payload and export by that amount.
-// Downscaling to max 1280px JPEG (~80% quality) keeps receipts perfectly
-// readable while shrinking payloads 10-20x. PNG stays PNG (transparency),
-// and on ANY failure we fall back to the original uncompressed data URL so
-// a photo is never lost.
+// ---- IMAGE COMPRESSION (shared by all photo uploads) ----
+// A 3-6MB camera photo stored as a base64 data URL inflates every save, sync
+// payload and export; max 1280px JPEG (~80%) keeps receipts readable at
+// 10-20x less. PNG stays PNG (transparency); on ANY failure the original
+// data URL is kept so a photo is never lost.
 const IMAGE_MAX_DIMENSION = 1280;
 const IMAGE_JPEG_QUALITY = 0.8;
 
@@ -4539,14 +4539,11 @@ async function submitReceiptDeliveryCancel(receiptId) {
       }
     }
     _clearDeliveryCompletionDraft(receipt.id);
-    // Both stacked surfaces (cancel dialog over the completion form) close in
-    // ONE task, so the body overlay observer (src/01b-mobile-runtime.js) sees
-    // a single 2->0 mutation and consumes only ONE overlay-history sentinel —
-    // stranding the second and turning the driver's next hardware Back press
-    // into a dead no-op + scroll reset. Mirror closeModal's go(-2) teardown:
-    // consume both consecutive sentinel entries in one traversal and flag the
-    // resulting popstate as bookkeeping; the observer's decrease branch is
-    // then skipped via its _overlayHistoryConsumePending() gate.
+    // Both overlays close in ONE task, so the body overlay observer
+    // (01b-mobile-runtime) would consume only one of the two history
+    // sentinels and strand the other (dead Back press + scroll reset). Mirror
+    // closeModal's go(-2): consume both here and flag the popstate as
+    // bookkeeping (the observer's _overlayHistoryConsumePending() gate).
     const cancelModalEl = document.getElementById('delivery-cancel-modal');
     const completeModalEl = document.getElementById('delivery-complete-modal');
     if (cancelModalEl && completeModalEl

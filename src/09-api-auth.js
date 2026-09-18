@@ -740,8 +740,23 @@ function invalidateUsersListCache() {
 // The server's audit trail. GET /api/audit enforces auditLogs.view (all rows)
 // vs auditLogs.viewOwn (own rows only), so what comes back is already scoped
 // to the caller — unlike the device-local state.logs trail.
-async function apiListAuditLogs(limit = 500) {
-  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=0`, { method: 'GET' }, { timeoutMs: 15000 });
+const _AUDIT_FINANCIAL_TYPES = new Set(['receipts', 'ads', 'walletTransactions', 'walletPaymentRequests', 'financialClosures', 'clothesOrders', 'clothesShipments', 'adCampaignRequests', 'customers', 'dollarPurchases', 'serviceSubscriptions']);
+function _auditCategoryFor(resourceType) {
+  const t = String(resourceType || '');
+  return t === 'auth' ? 'auth' : (_AUDIT_FINANCIAL_TYPES.has(t) ? 'financial' : (t ? 'data' : 'general'));
+}
+async function apiListAllAuditLogs(pageSize = 1000, maxPages = 50) {
+  // The viewer shows the newest 500; an export or backup pages the whole trail.
+  const all = [];
+  for (let page = 0; page < maxPages; page++) {
+    const rows = await apiListAuditLogs(pageSize, page * pageSize);
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+  return all;
+}
+async function apiListAuditLogs(limit = 500, offset = 0) {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`, { method: 'GET' }, { timeoutMs: 15000 });
   if (!Array.isArray(rows)) return [];
   return rows.map((r) => {
     const uid = String(r.user_id || '');
@@ -752,7 +767,7 @@ async function apiListAuditLogs(limit = 500) {
       userId: uid,
       userName: u?.name || (uid ? uid : 'System'),
       action: String(r.action || ''),
-      category: String(r.resource_type || 'general'),
+      category: _auditCategoryFor(r.resource_type),  // the filter offers auth/data/financial/general
       severity: 'info',
       description: String(r.message || ''),
       resourceId: String(r.resource_id || ''),
@@ -773,26 +788,30 @@ async function apiUpdateUser(userId, updates) {
   return res;
 }
 
-// Debounced server-side persistence for user permission changes.
-// The permissions UI currently mutates local state for immediate UX; in server mode we must also persist
-// those changes via /api/users/{id}. This avoids "permissions revert" after refresh and prevents 403
-// errors on login when a user has no saved permissions.
+// Debounced server-side persistence for user permission changes (the UI
+// mutates local state first; server mode must also PATCH /api/users/{id}).
+// Resolves true once the write landed (or local mode saved), false when it
+// was refused — callers that promise success must wait for it.
 const _serverUserUpdate = {
   timers: new Map(),
   pending: new Map(),
+  waiters: new Map(),
   debounceMs: 700
 };
 
 function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   const uid = String(userId || '');
-  if (!uid) return;
-  if (!isServerModeEnabled()) return;
+  if (!uid) return Promise.resolve(false);
+  if (!isServerModeEnabled()) return Promise.resolve(true);
   // Permission edits are made by Admins or users.managePermissions holders;
   // the server enforces the same rule.
-  if (!canManageUsersAction('managePermissions')) return;
+  if (!canManageUsersAction('managePermissions')) return Promise.resolve(false);
 
   const prev = _serverUserUpdate.pending.get(uid) || {};
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
+  const done = new Promise((resolve) => {
+    _serverUserUpdate.waiters.set(uid, [...(_serverUserUpdate.waiters.get(uid) || []), resolve]);
+  });
 
   const existingTimer = _serverUserUpdate.timers.get(uid);
   if (existingTimer) clearTimeout(existingTimer);
@@ -801,7 +820,11 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
     _serverUserUpdate.timers.delete(uid);
     const payload = _serverUserUpdate.pending.get(uid);
     _serverUserUpdate.pending.delete(uid);
-    if (!payload || Object.keys(payload).length === 0) return;
+    const settle = (ok) => {
+      (_serverUserUpdate.waiters.get(uid) || []).forEach(resolve => resolve(ok));
+      _serverUserUpdate.waiters.delete(uid);
+    };
+    if (!payload || Object.keys(payload).length === 0) { settle(true); return; }
 
     try {
       const updatedUser = await apiUpdateUser(uid, payload);
@@ -812,16 +835,19 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
         markCollectionDirty('users');
         saveState();
       }
+      settle(true);
     } catch (e) {
       // Reload users on the next tick: the grid shows a refused grant.
       try { if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0; } catch (_) {}
       if (!quiet) {
         showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
+      settle(false);
     }
   }, _serverUserUpdate.debounceMs);
 
   _serverUserUpdate.timers.set(uid, t);
+  return done;
 }
 
 // Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
@@ -838,6 +864,7 @@ function flushPendingUserUpdates() {
       _serverUserUpdate.timers.delete(uid);
       const payload = _serverUserUpdate.pending.get(uid);
       _serverUserUpdate.pending.delete(uid);
+      _serverUserUpdate.waiters.delete(uid); // the page is going away; nobody can toast
       if (!payload || Object.keys(payload).length === 0) continue;
       try {
         inflight.push(fetch(`${getServerBaseUrl()}/api/users/${encodeURIComponent(uid)}`, {
@@ -2499,20 +2526,14 @@ async function serverLoadAllData() {
   return { failed, forbidden };
 }
 
-// ==========================================
-// SYSTEM-BROWSER APP LOGIN (Phase 2)
-// ==========================================
-// Optional secure-browser sign-in for packaged Capacitor iOS/Android apps.
-// The normal app-owned form uses the same HttpOnly server session as the web
-// app. This alternative opens the hosted login page in Safari/Chrome for
-// password-manager, passkey, or SSO use, then returns via the albayan://auth
-// deep link carrying a ONE-TIME code. The app exchanges code+verifier
-// (PKCE-style: only the verifier's SHA-256 leaves the device) for its session.
-//
-// Two sides live here because both run from this same bundle:
-//   NATIVE side (Capacitor): startAppBrowserLogin / deep-link handling.
-//   WEB side (system browser): detects ?app_login=1 requests, mints the
-//   handoff code after login, renders the "return to app" screen.
+// ---- SYSTEM-BROWSER APP LOGIN (Phase 2) ----
+// Optional sign-in for the packaged Capacitor apps: the hosted login page
+// opens in Safari/Chrome (password managers, passkeys, SSO) and returns via
+// the albayan://auth deep link with a ONE-TIME code; the app exchanges
+// code+verifier (PKCE-style: only the verifier's SHA-256 leaves the device)
+// for the same HttpOnly session the app-owned form uses. Both sides run from
+// this bundle: NATIVE = startAppBrowserLogin / deep-link handling; WEB =
+// detects ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
 // Native app: the pending {state, verifier} is kept in Keychain/Keystore so

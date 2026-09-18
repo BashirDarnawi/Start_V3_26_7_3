@@ -4,30 +4,10 @@
 // SECURITY ENHANCED VERSION
 // ==========================================
 
-// ==========================================
-// ALBAYAN PLATFORM (FUTURE PLAN + RULES)
-// ==========================================
-// This codebase is intended to evolve into a **multi-service platform** (web now, mobile later).
-// New services must plug in cleanly without breaking existing ones (especially Albayan Manager).
-//
-// Core platform primitives (do NOT break these):
-// - Services catalog: `SERVICES` + `SMART_SYSTEMS_CHILDREN` (config-driven, stable IDs)
-// - Wallet: `walletTransactions` is an **immutable ledger** (balance is computed, not stored)
-// - Subscriptions: `serviceSubscriptions` is the source of truth for service access
-// - Server mode (FastAPI/Postgres): server is authoritative for multi-user internet usage
-//
-// Non‑negotiable rules for future edits (human + AI):
-// 1) NEVER store wallet balance as a mutable field; only append ledger transactions.
-// 2) NEVER allow editing/deleting `walletTransactions` or subscription history (use reversals/cancel records).
-// 3) NEVER change a service `id` after launch (it becomes part of URLs, mobile deep links, subscriptions).
-// 4) Any new “large” collection must be persisted in IndexedDB: add to `state` + `PERSISTED_COLLECTIONS`.
-// 5) Keep services isolated; reuse platform modules instead of copy/paste logic across services.
-// 6) No plaintext secrets (passwords, tokens, recovery keys). Keep audit logs redacted.
-//
-// Docs to read before major changes:
-// - `PLATFORM_FOUNDATION.md` (architecture + portability)
-// - `CONTRIBUTING.md` (how to extend safely)
-// - `MONEY_PLATFORM_ROADMAP.md` (payments/POS/cards roadmap + money safety rules)
+// ALBAYAN PLATFORM RULES (see PLATFORM_FOUNDATION.md, CONTRIBUTING.md, MONEY_PLATFORM_ROADMAP.md):
+// walletTransactions is an append-only ledger (balance is computed, never stored; reversals, not edits);
+// serviceSubscriptions is the source of truth for access; service ids never change after launch;
+// large collections go in state + PERSISTED_COLLECTIONS; no plaintext secrets; audit logs stay redacted.
 //
 // ==========================================
 // PLATFORM DETECTION MODULE

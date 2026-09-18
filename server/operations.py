@@ -789,7 +789,13 @@ def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] 
 
 def _cleanup_old_backups(directory: Path, retention_days: int) -> None:
     cutoff = time.time() - retention_days * 86400
-    for path in directory.glob("albayan-*.backup.aesgcm"):
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+    files = sorted(directory.glob("albayan-*.backup.aesgcm"), key=_mtime, reverse=True)
+    for path in files[3:]:  # the newest three survive any age: a week of failed dumps must not empty the directory
         try:
             if path.stat().st_mtime < cutoff:
                 path.unlink()
@@ -843,8 +849,8 @@ def create_encrypted_backup() -> dict[str, Any]:
         pass
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     target = directory / f"albayan-{timestamp}-{secrets.token_hex(4)}.backup.aesgcm"
-    _cleanup_old_backups(directory, config["retentionDays"])  # free space BEFORE the dump, not only after a success
     with _backup_lease():
+        _cleanup_old_backups(directory, config["retentionDays"])  # free space BEFORE the dump (inside the lease: never sweep a running dump)
         # The plaintext dump lives next to its target (same volume): the
         # container's writable layer was a second, smaller filesystem.
         with tempfile.TemporaryDirectory(prefix="albayan-backup-", dir=str(directory)) as temp_dir:
@@ -951,18 +957,29 @@ def _backup_worker() -> None:
 
 
 def start_operations_worker() -> None:
-    global _worker_thread
+    global _worker_thread, _worker_stop_joined
     if _worker_thread and _worker_thread.is_alive():
         return
+    _worker_stop_joined = False
     _worker_stop.clear()
     _worker_thread = threading.Thread(target=_backup_worker, name="albayan-operations", daemon=True)
     _worker_thread.start()
 
 
+_worker_stop_joined = False  # the stop ran once since the last start
+
+
 def stop_operations_worker() -> None:
+    global _worker_thread, _worker_stop_joined
+    if _worker_stop_joined:
+        return  # already stopped once (start clears the flag); the second hook must not pay the join again
     _worker_stop.set()
-    if _worker_thread and _worker_thread.is_alive():
-        _worker_thread.join(timeout=2)
+    thread = _worker_thread
+    if thread and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=2)
+    _worker_stop_joined = True
+    if not (thread and thread.is_alive()):
+        _worker_thread = None  # a thread still finishing a dump stays known, so a restart cannot overlap it
 
 
 def _public_status() -> dict[str, Any]:
@@ -977,6 +994,9 @@ def _public_status() -> dict[str, Any]:
         except OSError:
             local_count = 0
     setup_tasks = []
+    _last_at = int(runtime.get("lastBackupAt") or 0)
+    if config["enabled"] and _last_at and now_ms() - _last_at > 2 * int(config.get("intervalHours") or 24) * 3600 * 1000:
+        setup_tasks.append("Last backup is overdue - check the backup worker and the log")
     if not config["enabled"]:
         setup_tasks.append("Enable encrypted daily backups")
     if not config["encryptionReady"]:
@@ -1074,7 +1094,8 @@ def create_operations_router(
                 raise HTTPException(status_code=409, detail="Resolve the closing blockers or provide a clear forceReason (at least 10 characters)")
             now = now_ms()
             history = list(existing.get("history") or []) if isinstance(existing, dict) else []
-            history.append({"action": "closed", "at": now, "by": str(user.get("id") or ""), "reason": force_reason})
+            history.append({"action": "closed", "at": now, "by": str(user.get("id") or ""), "reason": force_reason,
+                            "snapshot": snapshot})  # each close keeps its own numbers; a re-close never erases them
             saved = _save_close_record(period, {
                 "status": "closed",
                 "closedAt": now,
@@ -1083,7 +1104,9 @@ def create_operations_router(
                 "snapshot": snapshot,
                 "history": history[-50:],
             }, str(user.get("id") or ""), conn=conn)
-        audit_fn(str(user.get("id") or ""), "close", FINANCIAL_CLOSE_COLLECTION, saved["id"], f"Closed financial period {period}", {"blockers": snapshot["blockers"], "forced": bool(force_reason)})
+        audit_fn(str(user.get("id") or ""), "close", FINANCIAL_CLOSE_COLLECTION, saved["id"], f"Closed financial period {period}",
+                 {"blockers": snapshot["blockers"], "forced": bool(force_reason),
+                  "totals": {k: snapshot.get(k) for k in ("receiptVolumeUSD", "paidReceiptsUSD", "adSalesUSD", "adSpendUSD")}})
         return saved
 
     @router.post("/financial-periods/{period}/unlock")

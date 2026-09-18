@@ -150,7 +150,15 @@ def _campaign_start_is_in_future(data: dict[str, Any]) -> bool:
         start = datetime.strptime(raw, "%Y-%m-%d").date()
     except ValueError:
         return False  # unparseable start = never provably "not started yet"
-    return datetime.now(timezone.utc).date() < start
+    # The start DAY itself counts as "not yet": approval bumps a passed start to
+    # the approval day, and the callers already treat any publish marker or spend
+    # as started - a same-day self-stop of an unlaunched campaign refunds in full.
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo("Africa/Tripoli")).date()  # the business day, not the UTC day
+    except Exception:
+        today = datetime.now(timezone.utc).date()
+    return today <= start
 
 
 def _is_reviewer(ctx: dict[str, Any], user: dict[str, Any]) -> bool:

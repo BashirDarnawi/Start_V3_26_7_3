@@ -51,7 +51,13 @@ def isolated_db():
         os.environ["DATABASE_URL"] = prev
     else:
         os.environ.pop("DATABASE_URL", None)
+    _file_engine = db._ENGINE
     db._ENGINE, db._ENGINE_URL = _prev_engine, _prev_engine_url
+    try:
+        if _file_engine is not None and _file_engine is not _prev_engine:
+            _file_engine.dispose()  # Windows cannot unlink a file the pool still holds open
+    except Exception:
+        pass
     try:
         os.remove(_DB_FILE)
     except Exception:

@@ -615,15 +615,10 @@ function attachFirstRunHandlers() {
   });
 }
 
-// ==========================================
-// SAVED SIGN-IN ACCOUNTS (device-local chooser)
-// ==========================================
-// Storage contract: localStorage key 'albayan_saved_accounts' holds an array
-// of AT MOST 5 entries shaped EXACTLY {name, email, lastUsedAt} — never any
-// sign-in credential, cookie value or record id. Both the read and the write
-// path re-pick exactly these three fields, so a tampered or legacy value can
-// never smuggle anything else into storage. Everything is wrapped in
-// try/catch: in private mode the chooser simply never appears.
+// SAVED SIGN-IN ACCOUNTS (device-local chooser): localStorage key
+// 'albayan_saved_accounts' holds at most 5 {name, email, lastUsedAt} entries —
+// never a credential or record id (read and write re-pick those three fields);
+// all wrapped in try/catch so private mode simply shows no chooser.
 const ALBAYAN_SAVED_ACCOUNTS_KEY = 'albayan_saved_accounts';
 const ALBAYAN_SAVED_ACCOUNTS_MAX = 5;
 
@@ -6014,10 +6009,10 @@ function renderAuditView() {
           </button>
           ` : ''}
           ${canClearLogs ? `
-          <button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
+          ${isServerModeEnabled() ? '' : `<button onclick="restoreAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 transition-all" title="${isAr ? 'استرجاع السجلات من ملف نسخة احتياطية' : 'Restore logs from backup file'}">
             <i data-lucide="upload" class="w-4 h-4 text-blue-600"></i>
             <span class="text-blue-700 dark:text-blue-400">${isAr ? 'استرجاع' : 'Restore'}</span>
-          </button>
+          </button>`}
           <button onclick="cleanupAuditLogs()" class="glass-panel px-3 py-2 rounded-xl text-xs font-medium flex items-center space-x-2 hover:bg-rose-50 dark:hover:bg-rose-900/20 border-2 border-rose-200 dark:border-rose-800 transition-all" title="${isAr ? 'حذف سجلات التدقيق القديمة (يحتفظ بآخر سنة)' : 'Delete old audit logs (keeps last 1 year)'}">
             <i data-lucide="trash-2" class="w-4 h-4 text-rose-600"></i>
             <span class="text-rose-700 dark:text-rose-400">${isAr ? 'تنظيف' : 'Cleanup'}</span>
@@ -6379,13 +6374,13 @@ function showLogDetails(logId) {
   IconQueue.schedule(modal);
 }
 
-function exportAuditLogs(format) {
+async function exportAuditLogs(format) {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
     return;
   }
   // Scoped: a viewOwn-only user exports only their own entries.
-  const allLogs = getVisibleAuditLogs();
+  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
 
   let downloaded = false;
   if (format === 'csv') {
@@ -6460,7 +6455,7 @@ async function backupAuditLogs() {
     return;
   }
   // A backup is a full export — scope it exactly like the export above.
-  const allLogs = getVisibleAuditLogs();
+  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
 
   const backup = {
     version: '1.0',

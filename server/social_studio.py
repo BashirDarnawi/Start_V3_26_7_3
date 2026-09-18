@@ -80,6 +80,7 @@ _CTX: dict[str, Any] = {}
 _FALLBACK_MEDIA_SECRET = secrets.token_hex(32)
 _COMMENT_LOCK = threading.Lock()
 _WORKER_STOP = threading.Event()
+_STOP_JOINED = False  # the stop function ran once since the last start
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_LOCK = threading.Lock()
 WORKER_INTERVAL_SECONDS = 20
@@ -1016,6 +1017,8 @@ def _worker_loop(stop: threading.Event) -> None:
 
 
 def start_social_studio_worker() -> None:
+    global _STOP_JOINED
+    _STOP_JOINED = False
     global _WORKER_THREAD, _WORKER_STOP
     if not _meta.load_meta_ads_config().configured:
         return
@@ -1031,15 +1034,18 @@ def start_social_studio_worker() -> None:
 
 
 def stop_social_studio_worker() -> None:
-    global _WORKER_THREAD
+    global _WORKER_THREAD, _STOP_JOINED
     with _WORKER_LOCK:
         thread = _WORKER_THREAD
+        if _STOP_JOINED:
+            return  # already stopped once; the second hook must not pay the join again
         _WORKER_STOP.set()
     if thread and thread.is_alive() and thread is not threading.current_thread():
         thread.join(timeout=1)
     with _WORKER_LOCK:
+        _STOP_JOINED = True
         if _WORKER_THREAD is thread and not (thread and thread.is_alive()):
-            _WORKER_THREAD = None
+            _WORKER_THREAD = None  # a live thread stays known so a restart cannot overlap it
 
 
 def _find_page(platform: str, entry_id: str) -> dict[str, Any] | None:

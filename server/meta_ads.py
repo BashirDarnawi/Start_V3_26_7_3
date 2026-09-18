@@ -5178,6 +5178,7 @@ def _backfill_placeholder_page_names(direct_lookup_limit: int = 25) -> int:
 
 
 _WORKER_STOP = threading.Event()
+_STOP_JOINED = False  # the stop function ran once since the last start
 _WORKER_THREAD: threading.Thread | None = None
 _MEDIA_WORKER_THREAD: threading.Thread | None = None
 _WORKER_CONTROL_LOCK = threading.Lock()
@@ -5254,6 +5255,8 @@ def _media_worker_loop(stop: threading.Event) -> None:
 
 
 def start_meta_ads_worker() -> None:
+    global _STOP_JOINED
+    _STOP_JOINED = False
     global _WORKER_THREAD, _MEDIA_WORKER_THREAD, _WORKER_STARTED_AT, _WORKER_STOP
     config = load_meta_ads_config()
     if not config.configured or not config.background_sync:
@@ -5285,17 +5288,20 @@ def start_meta_ads_worker() -> None:
 
 
 def stop_meta_ads_worker() -> None:
-    global _WORKER_THREAD, _MEDIA_WORKER_THREAD
+    global _WORKER_THREAD, _MEDIA_WORKER_THREAD, _STOP_JOINED
     with _WORKER_CONTROL_LOCK:
         threads = (_WORKER_THREAD, _MEDIA_WORKER_THREAD)
+        if _STOP_JOINED:
+            return  # already stopped once; the shutdown budget is paid a single time
         _WORKER_STOP.set()
     deadline = time.monotonic() + 1  # the shutdown budget is shared with the other workers
     for thread in threads:
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=max(0, deadline - time.monotonic()))
     with _WORKER_CONTROL_LOCK:
+        _STOP_JOINED = True
         if _WORKER_THREAD is threads[0] and not (threads[0] and threads[0].is_alive()):
-            _WORKER_THREAD = None
+            _WORKER_THREAD = None  # a live thread stays known so a restart cannot overlap it
         if _MEDIA_WORKER_THREAD is threads[1] and not (threads[1] and threads[1].is_alive()):
             _MEDIA_WORKER_THREAD = None
 

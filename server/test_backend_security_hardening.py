@@ -4812,6 +4812,7 @@ class TestReceiptAndAdTransactions:
         """No Funding Ad history means $50.52 may be real manual customer debt."""
         from server.main import backfill_repair_legacy_unpaid_receipt_overgrowth
 
+        backfill_repair_legacy_unpaid_receipt_overgrowth()  # heal other modules' rows first: the zero below is about THIS receipt
         customer_id = "fin_manual_startup_customer"
         receipt_id = "fin_manual_startup_unpaid"
         self._customer(customer_id, actors)
@@ -8458,6 +8459,7 @@ class TestAdminDeliveryCompletion:
         # and the backfill must be idempotent.
         from server.main import backfill_settle_rowless_driver_receipts
 
+        backfill_settle_rowless_driver_receipts()  # heal other modules' rows first: the counts below are about THIS receipt
         self.tx._customer("adm_dc_customer_11", actors)
         driver, _ = _create_user(
             actors["admin"],

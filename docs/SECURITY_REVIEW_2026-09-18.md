@@ -751,3 +751,59 @@ error mid-publish could lose the page ids already obtained (duplicate on
 retry) - they now travel with the interruption; a re-ticked page carried a
 stale "removed" flag; the review queue still offered a reviewer their own
 campaign.
+
+
+## Round 9 (2026-09-18, evening): audit trail, operations, holistic review, permission drift
+
+Four more agents: an ops/audit hunter, a holistic reviewer over the whole day's diff (rounds 1-8 together), a test-suite cross-module reviewer, and a permission-drift fixer working in its own worktree. Tests: `server/test_deep_scan_round9.py` (14) and `server/test_permission_drift_fixes.py` (10); 8 new checks in `scripts/test-permissions.js`.
+
+### Fixed
+
+**Audit trail**
+- Company-funds coverage (receipt and customer routes) now writes an audit row inside the money transaction, with the amount, the reason and the ad ids. Before, the only trace was the coverage record itself.
+- Audit cleanup keeps 365 days and 500,000 rows (the UI says "keeps last 1 year"; the old defaults were 90 days / 100,000). Month close/unlock, imports, restores, company money, wallet releases and campaign reviews are never auto-deleted. The cleanup writes its own audit row saying what it removed.
+- Wallet transfer/top-up/reversal rows carry the amount, currency and counterparties; receipt deletes carry the amounts and customer; campaign reviews carry the wallet transaction and budget.
+- A re-closed month keeps every previous close's snapshot in its history (before, only the latest snapshot survived).
+- Client: "Export" and the device backup page the whole trail from the server instead of the 500 rows on screen; the category filter (auth/data/financial/general) now matches real categories; the "Restore" button is hidden in server mode (the server trail cannot be replaced from a file).
+
+**Operations**
+- Backup pruning keeps the newest three files whatever their age, so a week of failed dumps can never empty the directory. An overdue backup (more than two intervals late) is a setup task. The pre-dump sweep runs inside the backup lease so it can never delete a running dump's temp directory.
+- Control Center uses the rolling error rate (not since-boot) and lists ads linked to the same Meta ad as their own "unlink" task instead of counting them as sync failures.
+
+**Holistic-review corrections**
+- The boot composite index now uses the same 5 s lock timeout as the other boot DDL. Before, one idle-in-transaction session (pgAdmin left open, the old container draining) could hold the new container's boot and every write forever.
+- Worker stop functions are single-shot. The app shutdown hook stopped the workers and the routers' own hooks then joined the same threads again, which could exceed Docker's 10 s SIGKILL budget during a backup. `--limit-concurrency` is 128 and the liveness probe allows 6 retries, so a short burst does not restart a healthy container.
+- A campaign whose start day is today, with no publish marker and no spend, counts as not started: approval bumps a passed start date to the approval day, and the customer could no longer self-stop with a full refund the same morning.
+- A mixed edit (phone, notes...) from an older app build that re-derives deliveryStatus keeps a finished (Delivered/Canceled) job finished and saves the rest; a pure status move is still refused with 400.
+- Deleting an account releases any capture left by a crashed approval on its Rejected/Changes-Requested campaigns (round 4 established the release; round 8's delete guard only counted Submitted/Approved).
+- The online importer refuses the plan catalog row like PATCH/POST/restore already did.
+- Receipts delta polls with media are not throttled (old app builds poll every 3 s; a delta carries few rows).
+- The body-size gate takes the cookie name from the app instead of hardcoding it.
+- The Arabic decimal point (U+066B) folds to a dot before the thousands/decimal decision, so "1،250٫50" is 1250.50 (before: 1.25).
+- `tzdata` is pinned so the Libya business zone exists on every platform.
+
+**Permission drift**
+- Holders of `deliveries.assign` can Cancel and "Delete mission" (the two buttons the UI already showed them). The server writes the history entry itself and ignores forged history/actor/timestamps; the delivery workflow rules moved to `server/delivery_workflow.py`.
+- The edit-user modal follows the server: the role select is enabled by `users.changeRole` (never on self-edit), the Admin option is disabled for non-admins, the detailed-permissions link follows `users.managePermissions`, and grants the editor does not hold are disabled with a toast before anything is written.
+
+**Test hygiene (cross-module reviewer)**
+- `conftest.py` resets the extra login buckets (two more source IPs and the fixed fixture emails); `test_setup_admin` disposes its file engine so Windows can delete the file; the two backfill tests heal other modules' rows first; the unfunded-scan tests tolerate the example caps; the third-sync test reads with a wide limit.
+
+**Review of these fixes (same evening, 8 findings, all corrected)**
+- The receipts media-listing throttle exempts only a recent delta poll (last 24 h); an "everything since time zero" delta is a full listing and stays throttled.
+- The reopen-guard strip applies only when no other delivery field (driver, collection method, office handover) changes; an edit that re-points a canceled job at a driver is still refused with 400.
+- The orphan release on account delete holds the SQLite wallet lock like every other money path (PostgreSQL uses its advisory lock).
+- Single-shot worker stops keep a still-running thread known, so a later start cannot overlap two worker generations; a "stopped" flag replaces nulling the thread.
+- Audit cleanup measures the by-limit count from the DELETE instead of assuming the excess, so kept actions never produce a false "cleanup" row.
+- The start-day rule uses the Libya business day, not the UTC day.
+- The unreadable-ads test measures its own row; the Control Center badge counts duplicate links and an overdue backup gets its own icon and advice instead of the "Jelastic setting" text.
+
+### Verified sound (no change)
+- Client/server money twins (`getReceiptPaymentState`, ad spend, phone key, LYD rounding) are identical; social publishing recovery, absent-field tolerance and the bundle/www parity all hold (holistic reviewer).
+- The test-suite modules that now run against the shared database (after `test_setup_admin` stopped wiping it) use scoped assertions; the social autouse wipe fixture is the one load-bearing guard (documented).
+
+### Still open for the owner
+- `In Progress -> Office` ("Delete mission" on an accepted job) stays refused for assign-only holders (product decision).
+- Old Capacitor builds cut the 120 s publish wait at 30 s (needs a new native build).
+- Per-email login ceiling is not reset between test modules (no failure today).
+- The test-suite reviewer's remaining medium items (wallet listings read without a limit, duplicate fixed phone numbers across two modules, the plan catalog left mutated by `test_subscription_plans`) are latent, not failing.

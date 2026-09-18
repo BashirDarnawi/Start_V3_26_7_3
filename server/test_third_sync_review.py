@@ -191,7 +191,7 @@ def test_campaign_owner_delta_keeps_own_private_records(records, status, grant):
     cid = insert("adCampaignRequests", "campaign", data)
     save()
     user = _user(permissions={"adCampaignRequests": [grant]})
-    full = next(row for row in main.get_collection("adCampaignRequests", user=user) if row.id == cid)
+    full = next(row for row in main.get_collection("adCampaignRequests", user=user, limit=5000) if row.id == cid)
     delta = next(row for row in main.get_collection(
         "adCampaignRequests", user=user, updated_since=VERSION
     ) if row.id == cid)
@@ -262,5 +262,5 @@ def test_compatibility_version_publishes_fix_and_full_read_recovers_unchanged_ca
     # synthetic write/version increment is needed or allowed. The client must
     # use its normal full reload if it already cached an equal-version deletion.
     assert not main.get_collection("adCampaignRequests", user=user, updated_since=VERSION + 20_000)
-    restored = next(row for row in main.get_collection("adCampaignRequests", user=user) if row.id == cid)
+    restored = next(row for row in main.get_collection("adCampaignRequests", user=user, limit=5000) if row.id == cid)
     assert restored.deleted is False and restored.lastModified == VERSION

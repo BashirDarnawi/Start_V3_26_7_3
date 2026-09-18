@@ -66,6 +66,7 @@ SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_database_url, get_engine, init_db, json_dumps, json_field_sql, json_loads, json_loads_or_raw, now_ms
 from .startup_support import read_env_int
+from . import delivery_workflow
 from .meta_ads import stop_meta_ads_worker
 from .social_studio import stop_social_studio_worker
 from .rbac import VALID_USER_ROLES, _load_permissions, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
@@ -1166,9 +1167,9 @@ def require_admin(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any
     return user
 
 
-def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: str, message: str, metadata: dict[str, Any] | None = None):
+def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: str, message: str, metadata: dict[str, Any] | None = None, *, conn: Any = None):
     meta = json_dumps(metadata or {})
-    with db_conn() as conn:
+    with (nullcontext(conn) if conn is not None else db_conn()) as conn:  # same transaction when the caller passes its connection
         conn.execute(
             text(
                 """
@@ -1190,8 +1191,10 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
 
 
 # Audit log retention: keep logs for 90 days by default
-AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 90)
-AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 100000)
+AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 365)   # the UI promises "keeps last 1 year"
+AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 500000)
+# Money-history actions are never auto-deleted (closing a month, unlocking it, imports, restores, company money).
+_AUDIT_KEEP_ACTIONS = "('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review')"
 
 
 def cleanup_old_audit_logs():
@@ -1205,7 +1208,7 @@ def cleanup_old_audit_logs():
     with db_conn() as conn:
         # Delete logs older than retention period
         result = conn.execute(
-            text("DELETE FROM audit_logs WHERE ts < :cutoff"),
+            text(f"DELETE FROM audit_logs WHERE ts < :cutoff AND action NOT IN {_AUDIT_KEEP_ACTIONS}"),
             {"cutoff": cutoff_ts}
         )
         deleted_by_age = result.rowcount if result else 0
@@ -1218,21 +1221,25 @@ def cleanup_old_audit_logs():
         if total_count > AUDIT_LOG_MAX_RECORDS:
             excess = total_count - AUDIT_LOG_MAX_RECORDS
             # Delete oldest excess records
-            conn.execute(
+            limit_result = conn.execute(
                 text("""
                     DELETE FROM audit_logs
                     WHERE id IN (
                         SELECT id FROM audit_logs
+                        WHERE action NOT IN ('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review')
                         ORDER BY ts ASC
                         LIMIT :excess
                     )
                 """),
                 {"excess": excess}
             )
-            deleted_by_limit = excess
+            deleted_by_limit = max(0, int(getattr(limit_result, "rowcount", 0) or 0))  # measured: kept actions may leave the excess in place
 
         if deleted_by_age > 0 or deleted_by_limit > 0:
             print(f"[albayan] Audit log cleanup: deleted {deleted_by_age} by age, {deleted_by_limit} by limit")
+    if deleted_by_age or deleted_by_limit:  # the trail records its own trimming
+        audit(None, "cleanup", "audit_logs", "startup", "Startup audit-log cleanup",
+              {"deletedByAge": int(deleted_by_age), "deletedByLimit": int(deleted_by_limit), "retentionDays": AUDIT_LOG_RETENTION_DAYS})
 
 
 def _project_entity_contacts_for_user(
@@ -2510,7 +2517,7 @@ def _shutdown():
 @app.middleware("http")
 async def limit_request_size(request: Request, call_next):
     """Refuse oversized or unsized write bodies before they are read (startup_support)."""
-    refusal = _request_size_refusal(request)
+    refusal = _request_size_refusal(request, cookie_name=COOKIE_NAME)
     if refusal is not None:
         return refusal
     return await call_next(request)
@@ -10132,7 +10139,8 @@ def create_wallet_transfer(
         memo=body.memo,
     )
     if created:
-        audit(str(user.get("id")), "create", "walletTransactions", saved["id"], "Created wallet transfer", {})
+        audit(str(user.get("id")), "create", "walletTransactions", saved["id"], "Created wallet transfer",
+              {k: (saved.get("data") or {}).get(k) for k in ("amountMinor", "currency", "fromUserId", "toUserId", "memo")})
     return EntityResponse(**saved)
 
 
@@ -10152,7 +10160,8 @@ def create_wallet_top_up(
         memo=body.memo,
     )
     if created:
-        audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet top-up", {})
+        audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet top-up",
+              {k: (saved.get("data") or {}).get(k) for k in ("amountMinor", "currency", "toUserId", "memo")})
     return EntityResponse(**saved)
 
 
@@ -10165,7 +10174,8 @@ def create_wallet_reversal(
     require_same_origin(request)
     saved, created = _wallet_reversal_atomic(admin, body.transactionId, body.memo)
     if created:
-        audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet reversal", {})
+        audit(str(admin.get("id")), "create", "walletTransactions", saved["id"], "Created wallet reversal",
+              {k: (saved.get("data") or {}).get(k) for k in ("amountMinor", "currency", "fromUserId", "toUserId", "reversesTransactionId")})
     return EntityResponse(**saved)
 
 
@@ -10203,12 +10213,8 @@ def _owns_personal_record(collection: str, data: dict[str, Any] | None, uid: str
 
 # Fields a PATCH may touch under the deliveries.* permissions (office staff
 # managing the delivery workflow on ads/receipts without full edit rights).
-_DELIVERY_WORKFLOW_FIELDS = {
-    "deliveryPersonId", "deliveryStatus", "acceptedDate", "deliveredAt",
-    "isReceivedInOffice", "receivedInOfficeAt", "officeHandover", "officeHandoverAt",
-    "deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy",
-    "deliveryNotes", "_lastModified",
-}
+# The rules live in delivery_workflow.py (main.py is at its line cap).
+_DELIVERY_WORKFLOW_FIELDS = delivery_workflow.WORKFLOW_FIELDS
 
 # Descriptive fields a receipts PATCH may touch under receipts.markCollected
 # (the client offers a standalone "Mark Collected" capability). These record
@@ -10234,14 +10240,7 @@ _DELIVERY_PAYMENT_FIELDS = {
 # receipt's amountUSD / ads-credit math.
 _DELIVERY_FEE_PAYERS = {"customer", "shop"}
 
-_DELIVERY_TRANSITIONS: dict[str, set[str]] = {
-    "": {"Needs Delivery", "In Progress", "Office"},
-    "Office": {"Needs Delivery", "In Progress"},
-    "Needs Delivery": {"In Progress", "Canceled", "Office"},
-    "In Progress": {"Canceled"},  # Delivered uses assigned-driver proof flow.
-    "Delivered": set(),
-    "Canceled": set(),
-}
+_DELIVERY_TRANSITIONS = delivery_workflow.TRANSITIONS
 
 
 def _active_delivery_user(user_id: Any) -> bool:
@@ -10257,72 +10256,13 @@ def _active_delivery_user(user_id: Any) -> bool:
 
 
 def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], updates: dict[str, Any]) -> bool:
-    """The deliveries permission group (assign/reassign/accept/complete/
-    markCollected) previously had no server-side meaning for non-delivery
-    roles — the frontend gates delivery actions on it, but the server only
-    accepted ads/receipts edit. Allow a PATCH that touches ONLY delivery-
-    workflow fields when the caller holds the matching deliveries.* grants."""
-    keys = set(updates.keys())
-    if not keys or not keys.issubset(_DELIVERY_WORKFLOW_FIELDS):
-        return False
-
-    def has(action: str) -> bool:
-        return user_has_permission(user, "deliveries", action)
-
-    data = existing.get("data") or {}
-    current_status = str(data.get("deliveryStatus") or "").strip()
-    target_status = str(updates.get("deliveryStatus") or "").strip()
-
-    if "deliveryPersonId" in keys:
-        if current_status in {"Delivered", "Canceled"}:
-            return False
-        already = bool(str(data.get("deliveryPersonId") or "").strip())
-        if not (has("reassign") if already else has("assign")):
-            return False
-        target_driver = str(updates.get("deliveryPersonId") or "").strip()
-        if target_driver and not _active_delivery_user(target_driver):
-            return False
-
-    if target_status:
-        if target_status == "Delivered":
-            # Completion is handled only by the assigned-driver branch, which
-            # verifies final receipt number, photo and collected amounts.
-            return False
-        if target_status != current_status:
-            if target_status not in _DELIVERY_TRANSITIONS.get(current_status, set()):
-                return False
-            if target_status == "In Progress":
-                if not has("accept"):
-                    return False
-            elif not (has("assign") or has("reassign")):
-                return False
-
-    if "acceptedDate" in keys and not (target_status == "In Progress" and has("accept")):
-        return False
-
-    cancel_fields = {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"}
-    if keys & cancel_fields:
-        if current_status in {"Delivered", "Canceled"}:
-            return False
-        if target_status != "Canceled" or not (has("assign") or has("reassign")):
-            return False
-        if not str(updates.get("deliveryCancelReason") or "").strip():
-            return False
-
-    office_fields = {"isReceivedInOffice", "receivedInOfficeAt", "officeHandover", "officeHandoverAt"}
-    if keys & office_fields:
-        if not has("markCollected") or current_status != "Delivered":
-            return False
-        if "receivedInOfficeAt" in keys and "isReceivedInOffice" not in keys:
-            return False
-        if "officeHandoverAt" in keys and "officeHandover" not in keys:
-            return False
-
-    if "deliveredAt" in keys:
-        return False
-    if "deliveryNotes" in keys and not (has("accept") or has("assign") or has("reassign")):
-        return False
-    return has("accept") or has("assign") or has("reassign") or has("markCollected")
+    """Allow a PATCH that touches ONLY delivery-workflow fields when the caller
+    holds the matching deliveries.* grants (rules: delivery_workflow.py)."""
+    return delivery_workflow.patch_allowed(
+        existing, updates,
+        has=lambda action: user_has_permission(user, "deliveries", action),
+        active_driver=_active_delivery_user,
+    )
 
 
 @app.post(
@@ -10611,7 +10551,8 @@ def review_ad_campaign_request(
             AD_CAMPAIGN_COLLECTION,
             campaign_id,
             f"Reviewed campaign request {campaign_id}: {decision}",
-            {"decision": decision, "note": note, "operationId": operation_id},
+            {"decision": decision, "note": note, "operationId": operation_id, "walletPaymentTx": wallet_payment_tx,
+             "budgetMinorUSD": int(current.get("budgetMinorUSD") or 0)},
         )
     if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
         "Submitted", "Approved", "Rejected", "Stopped"
@@ -11216,7 +11157,8 @@ def get_collection(
         include_media = False
     if collection == "walletPaymentRequests":
         include_media = False  # transfer-receipt photos hydrate by id only
-    if collection == "receipts" and include_media and limit > 25:
+    _recent_delta = updated_since is not None and now_ms() - int(updated_since or 0) <= 24 * 3600 * 1000
+    if collection == "receipts" and include_media and limit > 25 and not _recent_delta:  # only a RECENT delta poll carries few rows
         from .rate_limiter import check_rate_limit  # 8 MB per photo: throttle, not refuse (older clients may still ask)
         _ok, _left, _retry_ms = check_rate_limit(f"receipts-media-list:{user['id']}", max_attempts=30, window_ms=60 * 1000)
         if not _ok:
@@ -12359,10 +12301,21 @@ def update_collection_item(
                 "In Progress": {"In Progress", "Delivered", "Canceled", "Office"},
             }.get(_current_status)
             if _allowed_next is not None and _next_status not in _allowed_next:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Cannot change status from '{_current_status}' to '{_next_status}' - a delivery job cannot be reopened or moved backwards",
+                _existing_data = existing.get("data") or {}
+                _delivery_change = any(
+                    key in _status_updates and _status_updates.get(key) != _existing_data.get(key)
+                    for key in ("deliveryPersonId", "statusDetail", "isReceivedInOffice")
                 )
+                if len(_status_updates) > 1 and not _delivery_change and isinstance(body.data, dict):
+                    # A mixed edit (phone, notes, amounts...) from an older app build that
+                    # re-derives deliveryStatus on every save: keep the finished status. An
+                    # edit that also re-points the job (driver, collection method) is refused.
+                    body.data.pop("deliveryStatus", None)
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot change status from '{_current_status}' to '{_next_status}' - a delivery job cannot be reopened or moved backwards",
+                    )
 
     if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
         _driver_updates = sanitize_json(body.data or {}) or {}
@@ -12418,34 +12371,12 @@ def update_collection_item(
         body.data.update(validated_campaign)
 
     if delivery_grant_patch:
-        # Client clocks/identities are not authoritative workflow evidence.
-        # Normalize action metadata after authorization and before persistence.
-        normalized_delivery_updates = sanitize_json(body.data or {}) or {}
-        normalized_delivery_updates.pop("_lastModified", None)
-        target_status = str(normalized_delivery_updates.get("deliveryStatus") or "").strip()
-        current_status = str((existing.get("data") or {}).get("deliveryStatus") or "").strip()
-        if target_status and target_status == current_status:
-            raise HTTPException(status_code=409, detail=f"Delivery is already '{current_status}'")
-        now_iso = _iso_utc()
-        if target_status == "In Progress":
-            normalized_delivery_updates["acceptedDate"] = now_iso
-        if target_status == "Canceled":
-            normalized_delivery_updates["deliveryCancelReason"] = sanitize_str(
-                str(normalized_delivery_updates.get("deliveryCancelReason") or "")
-            )[:500]
-            normalized_delivery_updates["deliveryCancelledAt"] = now_iso
-            normalized_delivery_updates["deliveryCancelledBy"] = str(user.get("id") or "")
-        if "isReceivedInOffice" in normalized_delivery_updates or "officeHandover" in normalized_delivery_updates:
-            received = bool(
-                normalized_delivery_updates.get(
-                    "isReceivedInOffice", normalized_delivery_updates.get("officeHandover")
-                )
-            )
-            normalized_delivery_updates["isReceivedInOffice"] = received
-            normalized_delivery_updates["receivedInOfficeAt"] = now_iso if received else ""
-            if "officeHandover" in normalized_delivery_updates:
-                normalized_delivery_updates["officeHandover"] = received
-                normalized_delivery_updates["officeHandoverAt"] = now_iso if received else ""
+        # Client clocks/identities/history are not workflow evidence: the
+        # server writes them (delivery_workflow.normalize_grant_updates).
+        normalized_delivery_updates = delivery_workflow.normalize_grant_updates(
+            user, existing, sanitize_json(body.data or {}) or {},
+            collection=collection, now_iso=_iso_utc(), sanitize=sanitize_str,
+        )
         body.data.clear()
         body.data.update(normalized_delivery_updates)
 
@@ -12851,6 +12782,8 @@ def admin_bulk_import(
                 continue
             data = sanitize_json(rec) or {}
             data["id"] = rid
+            if name == "appSettings" and str(data.get("settingKey") or "") == PLAN_SETTINGS_KEY:
+                raise HTTPException(status_code=405, detail="The plan catalog is edited only through the subscription-plans route; remove it from the import")
             try:
                 protect_company_coverage_fields(name, data)
             except HTTPException as guard_error:
@@ -13226,7 +13159,8 @@ def delete_collection_item(
         return {"ok": True, "lastModified": deleted_customer["lastModified"]}
     if collection == "receipts":
         deleted_receipt = _financial_delete_receipt_atomic(entity_id)
-        audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
+        audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}",
+              {k: (deleted_receipt.get("data") or {}).get(k) for k in ("amountUSD", "amountLocal", "customerId", "status", "serialNumber")})
         return {"ok": True, "lastModified": deleted_receipt["lastModified"]}
 
     stamp = soft_delete_entity(collection, entity_id, str(user.get("id") or "system"))
@@ -13901,6 +13835,13 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 ).scalar() or 0
             if int(_open_campaigns) > 0:  # held or captured money would be trapped in a wallet nobody can use
                 raise HTTPException(status_code=409, detail="This account has campaigns under review or approved; decide or stop them first")
+            with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK), db_conn() as conn:  # a crashed approval's capture must not die with the account
+                _parked = conn.execute(
+                    text(f"SELECT id, data_json FROM entities WHERE type='adCampaignRequests' AND created_by=:uid AND {json_field_sql('status')} NOT IN ('Approved','Stopped')"),
+                    {"uid": user_id},
+                ).mappings().all()
+                for _row in _parked:
+                    release_orphan_campaign_payment(conn, _WALLET_PAYMENTS_CTX, {**(json_loads(_row["data_json"] or "{}") or {}), "id": str(_row["id"])}, str(admin.get("id") or ""))
         update_fields["deleted"] = bool(body.deleted)
 
     update_fields["last_modified"] = now
@@ -13983,6 +13924,7 @@ def privacy_anonymize_user(
     return user_row_to_public(updated)
 
 _COMPANY_DEBT_COVERAGE_CTX = {
+    "audit": audit,
     "validate_entity_id": validate_entity_id,
     "sanitize_str": sanitize_str,
     "financial_request_hash": _financial_request_hash,
