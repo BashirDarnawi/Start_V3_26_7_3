@@ -923,11 +923,11 @@ function renderModal() {
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'البداية' : 'Start'}</label>
-                  <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? adData.startDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
+                  <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? _localDateInputValue(adData.startDate) : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'النهاية' : 'End'}</label>
-                  <input type="date" id="ad-end-date" value="${Security.escapeHtml(adData.endDate ? adData.endDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
+                  <input type="date" id="ad-end-date" value="${Security.escapeHtml(adData.endDate ? _localDateInputValue(adData.endDate) : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'الأيام' : 'Days'}</label>
@@ -2972,6 +2972,18 @@ async function applyLocalReceiptSettle(liveAd, pools) {
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
+// "YYYY-MM-DD" of the LOCAL day of a stored value. Meta-imported ads store
+// full UTC timestamps (a 00:00 Tripoli start is 22:00Z the day before); the
+// old split('T')[0] showed that earlier UTC day and an untouched save kept it.
+function _localDateInputValue(value) {
+  if (!value) return '';
+  const raw = String(value);
+  if (!raw.includes('T') || /T00:00:00(\.000)?Z$/.test(raw)) return raw.slice(0, 10);  // the app's own encoding: a plain day
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw.slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
   // Clothes saves can finish after Cancel followed by another form. The
@@ -3231,16 +3243,9 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
-      // ROOT-CAUSE FIX (false "Ad Changed" toast, part 1): live-sync REPLACES
-      // objects inside state.ads, so state.modalData is a snapshot detached at
-      // modal-OPEN time. A legitimate server-side bump while the modal is open
-      // (a receipt settlement cascading into its linked ads, a customer merge,
-      // another tab) left the snapshot's _lastModified stale and made this
-      // save 409 against a version nobody was editing. Re-point modalData at
-      // the CURRENT record so the optimistic-lock baseline — and every stored
-      // value preserved through this save (spentUSD, editHistory, top-up
-      // baselines, prior amountAdjustments…) — is read at SAVE time. Real
-      // concurrent edits are still caught by the server's row lock.
+      // Live-sync replaces objects in state.ads, so re-point modalData at the
+      // CURRENT record: the lock baseline and preserved fields are read at
+      // save time (server-side cascades bumped the version while open).
       if (isEdit && state.modalData?.id) {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
         if (liveAd) state.modalData = liveAd;
@@ -4345,7 +4350,7 @@ async function handleModalSubmit() {
       const duplicatePage = (state.pages || []).find(p =>
         p && !p._deleted &&
         String(p.id) !== editingPageId &&
-        String(p.name || '').trim().toLowerCase() === pageName.toLowerCase()
+        foldSearchText(String(p.name || '').trim()) === foldSearchText(pageName)   // ة/ه, ى/ي, hamza forms are one name
       );
       if (duplicatePage) {
         if (isCurrentUserAdmin()) {

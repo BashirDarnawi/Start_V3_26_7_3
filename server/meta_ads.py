@@ -5271,7 +5271,7 @@ def stop_meta_ads_worker() -> None:
     with _WORKER_CONTROL_LOCK:
         threads = (_WORKER_THREAD, _MEDIA_WORKER_THREAD)
         _WORKER_STOP.set()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 1  # the shutdown budget is shared with the other workers
     for thread in threads:
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=max(0, deadline - time.monotonic()))

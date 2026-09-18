@@ -21,7 +21,7 @@ function paymentMethodOptions(currentMethod) {
   return PAYMENT_METHODS;
 }
 
-const AD_STATUSES = ['Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
+const AD_STATUSES = ['Active', 'Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
 const DELIVERY_STATUSES = ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office'];
 const REFUND_TYPES = ['None', 'Full', 'Partial'];
 const PLATFORMS = ['Facebook', 'WhatsApp', 'Instagram', 'Phone'];

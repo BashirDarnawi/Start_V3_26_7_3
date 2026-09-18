@@ -64,7 +64,10 @@ RELEASE_SHA = (os.getenv("ALBAYAN_RELEASE_SHA") or "development").strip()[:64]
 ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
-from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, json_loads_or_raw, now_ms
+from .db import db_conn, get_database_url, get_engine, init_db, json_dumps, json_field_sql, json_loads, json_loads_or_raw, now_ms
+from .startup_support import read_env_int
+from .meta_ads import stop_meta_ads_worker
+from .social_studio import stop_social_studio_worker
 from .rbac import VALID_USER_ROLES, _load_permissions, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
 from .backfills import (
     backfill_covered_settled_receipts,
@@ -232,7 +235,7 @@ from .security import (
 from .auth_security import upgrade_password_hash_after_login
 from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
-from .operations import FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction
+from .operations import FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, stop_operations_worker
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
 # for an unknown email as for a known one. Without it, the known-email path runs
 # full-work-factor PBKDF2 while the unknown path returns instantly, and the timing
@@ -530,21 +533,19 @@ PRIVACY_PATH = PROJECT_ROOT / "privacy.html"
 DELETE_ACCOUNT_PATH = PROJECT_ROOT / "delete-account.html"
 
 COOKIE_NAME = "albayan_session"
-SESSION_DURATION_MS = int(os.getenv("ALBAYAN_SESSION_MS", str(8 * 60 * 60 * 1000)))
+SESSION_DURATION_MS = read_env_int("ALBAYAN_SESSION_MS", 8 * 60 * 60 * 1000)
 # Opt-in "Remember me" sessions: a login carrying rememberMe=true gets this
 # lifetime (session row expires_at AND cookie max-age) instead of the default.
 # Expiry is enforced server-side per session in _auth_user_from_cookie, so the
 # cookie lifetime is presentation only — the DB row is the authority.
-SESSION_REMEMBER_DURATION_MS = int(
-    os.getenv("ALBAYAN_SESSION_REMEMBER_MS", str(30 * 24 * 60 * 60 * 1000))
-)
+SESSION_REMEMBER_DURATION_MS = read_env_int("ALBAYAN_SESSION_REMEMBER_MS", 30 * 24 * 60 * 60 * 1000)
 # System-browser app login (Phase 2): the packaged iOS/Android apps open the
 # hosted login page in the phone's real browser (passkeys/password managers
 # work there); after the user signs in, the web session mints a ONE-TIME
 # handoff code bound to a PKCE-style SHA-256 challenge and bounces back into
 # the app (albayan://auth), which exchanges code+verifier for its own session.
 # Codes are single-use, short-lived and stored hashed (like password resets).
-APP_LOGIN_CODE_TTL_MS = int(os.getenv("ALBAYAN_APP_LOGIN_CODE_MS", str(2 * 60 * 1000)))
+APP_LOGIN_CODE_TTL_MS = read_env_int("ALBAYAN_APP_LOGIN_CODE_MS", 2 * 60 * 1000)
 # Sessions minted through the app exchange default to the long "remember me"
 # lifetime: a packaged phone app is a personal device, and re-driving the
 # whole browser round-trip every 8 hours would be hostile. Operators can
@@ -611,7 +612,7 @@ ORIGIN_BYPASS_PATHS = frozenset(
 # app-login routes below call them, and the tuning knobs travelled with them.
 # The reset-token lifetime is not a rate limit, so it stayed here with the
 # route that mints the token.
-PASSWORD_RESET_TOKEN_MS = int(os.getenv("ALBAYAN_PASSWORD_RESET_TOKEN_MS", str(15 * 60 * 1000)))
+PASSWORD_RESET_TOKEN_MS = read_env_int("ALBAYAN_PASSWORD_RESET_TOKEN_MS", 15 * 60 * 1000)
 PASSWORD_RESET_DEV_RETURN_CODE = os.getenv("ALBAYAN_DEV_PASSWORD_RESET_RETURN_CODE", "").strip().lower() in {"1", "true", "yes"}
 BLOCKED_KEYS = {"__proto__", "prototype", "constructor"}
 # Response-only hints used by lightweight collection sync. Never accept these
@@ -1189,8 +1190,8 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
 
 
 # Audit log retention: keep logs for 90 days by default
-AUDIT_LOG_RETENTION_DAYS = int(os.getenv("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", "90"))
-AUDIT_LOG_MAX_RECORDS = int(os.getenv("ALBAYAN_AUDIT_LOG_MAX_RECORDS", "100000"))
+AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 90)
+AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 100000)
 
 
 def cleanup_old_audit_logs():
@@ -1614,6 +1615,8 @@ def _canonical_customer_phone(value: Any) -> str:
     digits = re.sub(r"[^0-9]", "", display)
     if digits.startswith("00"):
         digits = digits[2:]
+    if re.fullmatch(r"0218\d{8,9}", digits):
+        digits = digits[1:]  # "0218 91…" spelling
     if digits.startswith("218"):
         national = digits[3:]
         if national.startswith("0"):
@@ -1624,6 +1627,8 @@ def _canonical_customer_phone(value: Any) -> str:
         return f"218{digits[1:]}"
     if len(digits) == 9 and digits.startswith("9"):
         return f"218{digits}"
+    if re.fullmatch(r"0[1-8]\d{7,8}", digits):
+        return f"218{digits[1:]}"  # landlines: 021 333 4455 == +218 21 333 4455
     return digits if 7 <= len(digits) <= 15 else ""
 
 
@@ -2240,7 +2245,9 @@ app = FastAPI(
 
 
 from .startup_support import init_db_with_retry as _init_db_with_retry_impl
+from .health import build_health_router
 from .startup_support import install_validation_handler as _install_validation_handler
+from .startup_support import refuse_sqlite_in_production as _refuse_sqlite_in_production
 from .startup_support import request_size_refusal as _request_size_refusal
 from .startup_support import safe_exception_text as _safe_exception_text
 
@@ -2404,16 +2411,10 @@ def _init_db_with_retry(attempts: int = 10, delay_seconds: float = 3.0) -> None:
 @app.on_event("startup")
 def _startup():
     _ensure_minified_script()
+    _refuse_sqlite_in_production(str(get_database_url()), debug_mode=DEBUG_MODE)  # before any database work
     _init_db_with_retry()
-    try:
-        if str(get_engine().dialect.name or "") == "sqlite" and not DEBUG_MODE:
-            print(
-                "[albayan] WARNING: running on SQLite. Production must set DATABASE_URL to "
-                "PostgreSQL; a container that lost that variable would start EMPTY and offer "
-                "the first-run admin setup."
-            )
-    except Exception:
-        pass
+    print(f"[albayan] boot: release={RELEASE_SHA} dialect={get_engine().dialect.name} trust_proxy={os.getenv('ALBAYAN_TRUST_PROXY_HEADERS', '')!r} "
+          f"cookie_secure={os.getenv('ALBAYAN_COOKIE_SECURE', 'auto')!r} debug={DEBUG_MODE} backup_key={'set' if os.getenv('ALBAYAN_BACKUP_KEY') else 'MISSING'}")
     _bootstrap_first_admin_if_empty()
 
     # Ensure query indexes exist (Postgres only; both are idempotent via
@@ -2491,7 +2492,12 @@ def _startup():
 
 @app.on_event("shutdown")
 def _shutdown():
-    """BEST PRACTICE: Gracefully close database connections on shutdown"""
+    """Stop the writers before closing what they write to (their own hooks run later and find them stopped)."""
+    for _stop in (stop_operations_worker, stop_meta_ads_worker, stop_social_studio_worker):
+        try:
+            _stop()
+        except Exception as e:
+            print(f"[albayan] worker stop failed: {_safe_exception_text(e)}")
     try:
         engine = get_engine()
         engine.dispose()
@@ -2606,7 +2612,8 @@ async def request_context_and_logging(request: Request, call_next):
         # Use the same hardened trust boundary as authentication rate limits.
         # Forwarded headers are ignored unless proxy trust is explicitly on.
         ip = _client_ip(request)
-
+        if request.url.path.startswith("/api/health") and status_code < 400:
+            return response  # thousands of probe lines a day say nothing
         print(
             json.dumps(
                 {
@@ -2696,73 +2703,7 @@ def serve_index(request: Request):
     return _serve_versioned_index()
 
 
-def _readiness_response():
-    """
-    Health check endpoint with database connectivity test and system metrics.
-    
-    Returns:
-        - ok: True if system is healthy
-        - ts: Current timestamp
-        - database: Database connection status
-        - metrics: Optional performance metrics (if monitoring enabled)
-    
-    Note:
-        - This endpoint bypasses CSRF checks (for load balancer health checks)
-        - Returns 500 if database is unreachable
-    """
-    # Test database connectivity
-    try:
-        with db_conn() as conn:
-            conn.execute(text("SELECT 1")).first()
-        db_status = "connected"
-    except Exception as e:
-        # Keep connection strings, hostnames, and driver details out of the
-        # public health response. The exception type is enough in server logs.
-        print(f"[albayan] Readiness database check failed: {type(e).__name__}")
-        return JSONResponse(
-            {"ok": False, "ts": now_ms(), "database": "unavailable", "version": APP_VERSION},
-            status_code=500
-        )
-    
-    response = {
-        "ok": True,
-        "ts": now_ms(),
-        "database": db_status,
-        # A container that lost its DATABASE_URL would silently come up on an
-        # empty SQLite file and look healthy; the dialect makes that visible.
-        "dialect": str(get_engine().dialect.name or ""),
-        "version": APP_VERSION,
-        "release": RELEASE_SHA,
-    }
-    
-    # Include metrics if monitoring is available
-    try:
-        from .monitoring import get_metrics
-        response["metrics"] = get_metrics()
-    except Exception as e:
-        # Log the error for debugging (don't fail the health check)
-        print(f"[albayan] Health check metrics error: {type(e).__name__}: {e}")
-        pass
-    
-    return response
-
-
-@app.get("/api/health/live")
-def liveness():
-    """Cheap process check for orchestrators; does not touch the database."""
-    return {"ok": True, "ts": now_ms(), "version": APP_VERSION, "release": RELEASE_SHA}
-
-
-@app.get("/api/health/ready")
-def readiness():
-    """Deployment readiness check including database connectivity."""
-    return _readiness_response()
-
-
-@app.get("/api/health")
-def health():
-    """Backward-compatible readiness endpoint used by existing deployments."""
-    return _readiness_response()
+app.include_router(build_health_router(APP_VERSION, RELEASE_SHA))  # /api/health, /ready, /live (server/health.py)
 
 
 @app.get("/api/admin/data-integrity")

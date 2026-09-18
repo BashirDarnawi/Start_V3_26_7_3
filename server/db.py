@@ -40,7 +40,10 @@ APP_LOGINS = "app_logins"
 def _default_sqlite_path() -> Path:
     base = Path(__file__).resolve().parent
     data_dir = base / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # resolving the URL must not fail; the engine (or the production refusal) reports it
     return data_dir / "albayan.db"
 
 
@@ -96,7 +99,10 @@ def get_database_url() -> str | URL:
     env_path = os.getenv("ALBAYAN_DB_PATH", "").strip()
     if env_path:
         p = Path(env_path).expanduser().resolve()
-        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         return _sqlite_url(p)
     return _sqlite_url(_default_sqlite_path())
 
@@ -130,6 +136,11 @@ def get_engine() -> Engine:
     url_text = str(url)
     if url_text.startswith("sqlite"):
         connect_args = {"check_same_thread": False}
+    elif url_text.startswith("postgresql"):
+        # libpq defaults wait ~2 min on a SYN timeout and keep half-open sockets
+        # for ~15 min; a boot retry or a pool slot must not hang that long.
+        connect_args = {"connect_timeout": 5, "keepalives": 1, "keepalives_idle": 30,
+                        "keepalives_interval": 10, "keepalives_count": 3}
 
     # Special case: in-memory SQLite needs a shared pool, otherwise each connection sees a blank DB.
     is_sqlite_memory = url_text.endswith(":///:memory:") or url_text.endswith("://:memory:") or url_text.endswith(":memory:")

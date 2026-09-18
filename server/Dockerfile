@@ -67,7 +67,9 @@ RUN python /app/server/image_safety.py /app
 # _cookie_secure_for in server/main.py. Forcing true here made phone logins
 # over http://<lan-ip> silently drop the cookie and loop back to the login
 # screen. Set it explicitly only to pin one behavior.
-ENV ALBAYAN_DB_PATH=/var/lib/albayan/albayan.db
+# No SQLite default: a production container without DATABASE_URL must fail
+# loudly (server/startup_support.refuse_sqlite_in_production), never start
+# empty. Test runners pass ALBAYAN_DB_PATH + ALBAYAN_ALLOW_SQLITE explicitly.
 ENV ALBAYAN_DEBUG_MODE=false
 # Print lines reach the platform log immediately, including the last ones before a crash.
 ENV PYTHONUNBUFFERED=1
@@ -80,10 +82,18 @@ RUN groupadd --system albayan \
     && mkdir -p /var/lib/albayan /app/logs \
     && chown -R albayan:albayan /var/lib/albayan /app/logs
 
+# Backups and any deliberate single-file database live here; a Dockerfile
+# volume survives a redeploy, the writable layer does not.
+VOLUME ["/var/lib/albayan"]
+
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/ready', timeout=3).read()"]
+# The probe is the async, database-free liveness route: under load the sync
+# readiness route waits for a worker thread and a pooled connection and the
+# platform would restart a merely busy container. Startup does index and
+# backfill work on big tables, so the grace period is honest.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live', timeout=3).read()"]
 
 USER albayan
 
@@ -96,4 +106,6 @@ USER albayan
 # several tabs/phones while still bounding a runaway client.
 # --timeout-graceful-shutdown bounds the wait for in-flight requests on redeploy
 # (Docker sends SIGKILL after 10 s anyway; without a bound uvicorn waited forever).
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "64", "--timeout-graceful-shutdown", "8", "--no-server-header"]
+# 5 s drain + worker joins (1 + 1 + 2 s) stays inside Docker's 10 s SIGKILL
+# budget; the routers' own shutdown hooks find the workers already stopped.
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "64", "--timeout-graceful-shutdown", "5", "--no-server-header"]

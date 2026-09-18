@@ -1337,7 +1337,7 @@ check('collect-a-debt and reminders delegate to the existing money flows and nev
   managerShell.includes('if (openCustomerReceipts(cid)) {') &&
   managerShell.includes("return shellCanOpen('receipts') && (isCurrentUserAdmin() || can('customers', 'viewBalance'));") &&
   managerShell.includes("if (!can('customers', 'viewContacts')) return;") &&
-  managerShell.includes("const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);") &&
+  managerShell.includes("const base = (digits && !digits.startsWith('0') && digits.length >= 8) ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);") &&
   managerShell.includes('localStorage.setItem(shellReminderLogKey(), JSON.stringify(log))') &&
   !/fetch\(|apiJson\(/.test(managerShell));
 
@@ -1496,6 +1496,16 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   read('src/09-api-auth.js').includes('consumeSession: !!consumeSession') &&
   read('src/10-live-sync.js').includes('maybeCompleteAppLoginHandoff(user, true)') &&
   read('src/09-api-auth.js').includes("'Sign-In Link Ignored'") &&
+  views.includes("!['canceled', 'lost'].includes(getReceiptPaymentState(r))") &&
+  views.includes("const collected = _getCollectedCashLocal(r);") &&
+  views.includes("(!raw.includes('T') || /T00:00:00(\\.000)?Z$/.test(raw)) ? raw.match(") &&
+  helpers.includes("if (/^0218\\d{8,9}$/.test(digits)) digits = digits.slice(1);") &&
+  helpers.includes("if (!digits || digits.startsWith('0') || digits.length < 8) return '';") &&
+  helpers.includes("String(ad.status || 'Active') === f.status") &&
+  read('src/01c-native-services.js').includes("if (at instanceof Date) at.setHours(9, 0, 0, 0); return { ad, at }; })") &&
+  read('src/12d-manager-shell.js').includes("r.receiptType !== 'CARRIED_BALANCE'") &&
+  modals.includes('function _localDateInputValue(value) {') &&
+  read('src/16-actions-io.js').includes('if (Array.isArray(sanitizedImport.dollarPurchases)) state.dollarPurchases = sanitizedImport.dollarPurchases;') &&
   helpers.includes("const mine = isCurrentUserAdmin() || String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');") &&
   read('src/12b-control-center.js').includes("function ccText(en, ar) {") &&
   socialStudio.includes("if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();") &&

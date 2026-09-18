@@ -15,6 +15,7 @@ function isolatedTestEnvironment(parent, databaseUrl) {
   return {
     ...env,
     DATABASE_URL: databaseUrl,
+    ALBAYAN_ALLOW_SQLITE: 'true', // test runners choose SQLite on purpose; production refuses it
     PYTHONIOENCODING: 'utf-8',
     ALBAYAN_META_ACCESS_TOKEN: '',
     ALBAYAN_META_APP_SECRET: '',

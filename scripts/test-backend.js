@@ -79,6 +79,7 @@ function testWithDocker() {
     '--env', 'ALBAYAN_COOKIE_SECURE=false',
     '--env', 'ALBAYAN_DB_PATH=/tmp/albayan-tests.db',
     '--env', 'DATABASE_URL=sqlite+pysqlite:///:memory:',
+    '--env', 'ALBAYAN_ALLOW_SQLITE=true',
     '--env', 'ALBAYAN_META_BACKGROUND_SYNC=false',
     '--env', 'ALBAYAN_META_AUTO_IMPORT=false',
     image,

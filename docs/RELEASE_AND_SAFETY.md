@@ -46,8 +46,9 @@ Linux/amd64 Docker manifest compatible with the existing Jelastic workflow.
 
 Two tags are published: `bashird/albayan:latest` and a unique
 `bashird/albayan:release-<git-revision>-<timestamp>[-dirty]` rollback reference.
-`dirty` means the build includes uncommitted changes; it is not a claim that
-GitHub contains that exact source. Save/review/commit source separately when
+`dirty` means the build includes uncommitted changes; the script refuses such a
+build unless `--allow-dirty` is passed (`npm run release:image:push -- --allow-dirty`),
+and it is not a claim that GitHub contains that exact source. Save/review/commit source separately when
 authorized. Keep the previous good release tag for rollback.
 
 Jelastic must then explicitly redeploy from Docker Hub. Verify the expected

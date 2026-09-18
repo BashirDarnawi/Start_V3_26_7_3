@@ -223,7 +223,7 @@ function getFilteredAds(customersById = null) {
   // sync by updateAdFilter(); 'all' or unset means no filtering.
   const f = state.adFilters || {};
   if (f.status && f.status !== 'all') {
-    filtered = filtered.filter(ad => String(ad.status || '') === f.status);
+    filtered = filtered.filter(ad => String(ad.status || 'Active') === f.status);  // an empty status renders as Active
   }
   if (f.payment && f.payment !== 'all') {
     filtered = filtered.filter(ad => {
@@ -257,13 +257,14 @@ function getFilteredAds(customersById = null) {
     // "#123456" search must still match the stored bare digits. A lone "#"
     // must not match everything, so keep the original term as fallback.
     const idTerm = searchTerm.replace(/^#/, '') || searchTerm;
+    const phoneDigitsTerm = searchTerm.replace(/\D/g, '').replace(/^0+/, '');  // "+218 91…" and "0912…" both match
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
         foldSearchText(customer?.name).includes(searchTerm) ||
         foldSearchText(ad.id).includes(searchTerm) ||
-        (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
+        (canSearchContacts && (foldSearchText(ad.phoneNumber).includes(searchTerm) || (phoneDigitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(ad.phoneNumber || '') || '').includes(phoneDigitsTerm)))) ||
         foldSearchText(ad.serialNumber).includes(searchTerm) ||
         foldSearchText(page?.name).includes(searchTerm) ||
         foldSearchText(ad.metaAdId).includes(idTerm) ||
@@ -312,6 +313,7 @@ function normalizeCustomerPhoneKey(value) {
 
   // International call-prefix spelling (00218...) is the same as +218....
   if (digits.startsWith('00')) digits = digits.slice(2);
+  if (/^0218\d{8,9}$/.test(digits)) digits = digits.slice(1);   // "0218 91…" spelling
   if (digits.startsWith('218')) {
     let national = digits.slice(3);
     if (national.startsWith('0')) national = national.slice(1);
@@ -321,6 +323,7 @@ function normalizeCustomerPhoneKey(value) {
   }
   if (/^09\d{8}$/.test(digits)) return `218${digits.slice(1)}`;
   if (/^9\d{8}$/.test(digits)) return `218${digits}`;
+  if (/^0[1-8]\d{7,8}$/.test(digits)) return `218${digits.slice(1)}`;  // landlines: 021 333 4455
   return digits;
 }
 
@@ -1111,19 +1114,9 @@ function getCustomerStats(customerId, statsIndex = null) {
   // can invent LYD credit even when the USD balance is exactly settled.
   let totalSpentLYD = 0;
   
-  // Standalone unpaid-receipt debt. Paid comes only from paid receipts and
-  // Spent only from ads, so a Not Paid receipt whose promised money is not
-  // committed to any ad (a plain delivery/in-shop debt) appeared in NO
-  // customer total: the card showed 0/0/+0 while the receipts view showed
-  // "Customer debt", and the "Has debt" filter missed the customer. Count the
-  // UNCOMMITTED remainder of each debt receipt exactly once:
-  //  - getReceiptCollectionTarget is the shared capacity read model
-  //    (stored debt -> receipt amounts -> linked-ads derivation);
-  //  - a 'linked_ads' target lives entirely on unpaid ads already counted in
-  //    Spent above, so the receipt itself must contribute nothing;
-  //  - money committed to ads from this receipt's due pool
-  //    (getDeliveryReceiptDueUsage.usedDueUSD) also surfaces as ad spend, so
-  //    only the remainder may be added — the same dollars never count twice.
+  // Standalone unpaid-receipt debt: count each debt receipt's UNCOMMITTED
+  // remainder once (target from getReceiptCollectionTarget; a 'linked_ads'
+  // target and money already committed to ads are counted in Spent).
   let receiptDebtUSD = 0;
   let receiptDebtLYD = 0;
   customerReceipts.forEach(receipt => {
@@ -1777,8 +1770,8 @@ function showPageDuplicates(focusPageId, triggerButton) {
 
 function getCustomerSortValue(customer, sortType, statsIndex = null) {
   // Date sorts never touch stats — skip the expensive computation entirely.
-  if (sortType === 'newest') return new Date(customer.joinDate).getTime();
-  if (sortType === 'oldest') return -new Date(customer.joinDate).getTime();
+  if (sortType === 'newest') return Number(customer._created) || Date.parse(customer.joinDate) || 0;
+  if (sortType === 'oldest') return -(Number(customer._created) || Date.parse(customer.joinDate) || 0);
 
   const stats = getCustomerStats(customer.id, statsIndex);
 
@@ -2674,7 +2667,7 @@ function buildWhatsAppLink(phone) {
   const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
   const e164 = key || normalizePhoneToE164(phone);
   const digits = String(e164 || '').replace(/[^\d]/g, '');
-  if (!digits) return '';
+  if (!digits || digits.startsWith('0') || digits.length < 8) return '';   // wa.me/0… is a dead link, not a reminder
   return `https://wa.me/${digits}`;
 }
 
@@ -2751,7 +2744,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `الهاتف: ${phone}`,
     `مكان التوصيل: ${place}`,
     `المندوب: ${driverName}`,
-    `المبلغ المطلوب تحصيله: ${money}`,
+    `المبلغ المطلوب تحصيله: \u2068${money}\u2069`,  // isolated so the ')' stays put in RTL text
     `رسوم التوصيل: ${deliveryFee.toFixed(2)} LYD`,
     'الحالة: غير مدفوع',
     `ملاحظات: ${instructions}`,
@@ -7163,20 +7156,9 @@ function removeTopUp(index) {
   renderModal();
 }
 
-// ==========================================
-// HTTP 409 DISAMBIGUATION (atomic money endpoints)
-// ==========================================
-// The server reuses status 409 for two very different refusals:
-//   1. Optimistic-lock version conflicts — the detail always starts with
-//      "Conflict:" ("Conflict: ad has changed", "Conflict: source receipt
-//      has changed", ...). Only these mean "someone else changed it".
-//   2. Business-rule refusals ("A terminal or refunded ad cannot be
-//      edited/stopped", "Idempotency key was already used", ...).
-// The catches used to label EVERY 409 as "changed on another device", which
-// sent a single-user admin chasing a phantom concurrent editor and told them
-// to refresh — advice that can never fix a rule refusal. Keep the conflict
-// wording strictly for case 1 and surface the server's real reason
-// (localized where known) for everything else.
+// HTTP 409 disambiguation: only a detail starting with "Conflict:" is a
+// version conflict; every other 409 is a rule refusal and must show the
+// server's real reason instead of "changed on another device".
 function isVersionConflict409(error) {
   return error?.status === 409 && /^conflict:/i.test(String(error?.message || '').trim());
 }
@@ -7425,14 +7407,8 @@ async function saveRefund() {
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
 
-  // The refunded money must actually RETURN in the books, and this must be
-  // IDEMPOTENT: re-opening and re-saving a refund (or changing its amount, or
-  // flipping Pending→Refunded) must reconcile to the SAME end-state — never
-  // subtract again from the already-reduced allocations. We snapshot the
-  // pre-refund allocations ONCE (refundAllocationBaseline) and always rebuild
-  // the target from that untouched baseline, mirroring confirmStopAd.
-  // Previously each re-save re-subtracted refundAmount, fabricating spendable
-  // receipt balance the customer never got back.
+  // Refunds are IDEMPOTENT: the target is always rebuilt from the frozen
+  // refundAllocationBaseline (mirrors confirmStopAd), never re-subtracted.
   // Reduce a frozen baseline array by `amount` from the tail; returns the
   // rebuilt array and how much refund is still unspent.
   const _reduceFromBaseline = (baseline, amount) => {

@@ -30,6 +30,10 @@ if (git.status !== 0 || !/^[a-f0-9]{7,40}$/.test(git.stdout.trim())) {
 }
 const status = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
 if (status.status !== 0) throw new Error('Cannot verify working-tree state');
+if (status.stdout.trim() && !process.argv.includes('--allow-dirty')) {
+  console.error('Working tree has uncommitted changes; commit them (or pass --allow-dirty for a deliberate hotfix image).');
+  process.exit(1);
+}
 const stamp = new Date().toISOString().replace(/[-:.]/g, '');
 const release = `release-${git.stdout.trim()}-${stamp}${status.stdout.trim() ? '-dirty' : ''}`;
 const versionedImage = `bashird/albayan:${release}`;

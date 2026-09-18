@@ -517,3 +517,90 @@ receipt would have settled gross (fixed: the two passes share one gate); the
 receipts-with-media refusal broke thirteen existing tests and would have
 broken older clients (changed to a per-user throttle before release); the
 setup-admin count change contradicted login and needs-setup (reverted).
+
+
+---
+
+# Round 6 (same day)
+
+Four hunters on lenses that are about correctness and operations rather than
+attackers: how production can fail or lose data, the accuracy of reports and
+exports, how lists, search and reminders behave, and client-side date, number
+and language logic. Backend fixes come with tests in
+`server/test_deep_scan_round6_ops.py`; frontend fixes have static guards.
+
+## Fixed
+
+### Deployment and operations
+
+| Problem | Fix |
+| --- | --- |
+| A container that lost its `DATABASE_URL` (a variable edit on the platform) started on an empty SQLite file inside the container, looked healthy and offered the first-run admin screen; a day of records entered there died with the next redeploy. | Production refuses to start on SQLite (`ALBAYAN_ALLOW_SQLITE=true` or debug mode opts in; every test runner sets it). The image no longer ships a SQLite default path, and `/var/lib/albayan` is a declared volume. |
+| The container health probe used the readiness route, which needs a worker thread and a pooled database connection; under a morning burst the probe starved and the platform could restart a merely busy container, killing in-flight money writes. | The probe uses the async, database-free liveness route; the startup grace period is honest (120 s) about index and backfill work on big tables. |
+| Boot-time index creation took table locks with no timeout: an idle-in-transaction session could stall the boot forever, and every write waited during a full scan. Two keyset-pagination indexes existed only in an alembic migration that never runs on the platform. | Each index statement runs with a 5 s lock timeout and a statement timeout (skip, retry next boot); the two keyset indexes are created idempotently at boot. |
+| Shutdown closed the database pool before stopping the three worker threads, and the worker joins plus the request drain exceeded Docker's 10 s kill budget; a redeploy during a backup could leave a partial temp file forever. | Workers stop first, joins are capped (1 + 1 + 2 s) with a 5 s drain; leftover temp files older than an hour are swept. |
+| The plaintext database dump was written to the container's writable layer (a second, smaller filesystem), and retention ran only after a successful backup, so a full disk failed every day the same way. | The dump is written next to its target on the volume; old backups are pruned before the dump. |
+| Every health probe and polling request printed an access-log line; a wrong non-numeric environment value (a trailing space) crashed the boot; Postgres connections had no connect timeout or keepalives; the release script would push an image built from uncommitted changes. | Probe lines are dropped; integer settings log and fall back; Postgres connects with a 5 s timeout and TCP keepalives; the release script refuses a dirty tree unless `--allow-dirty` is passed. A boot summary line prints the effective configuration. |
+
+### Reports and exports
+
+| Problem | Fix |
+| --- | --- |
+| The analytics screen counted canceled and lost receipts as volume and as "collected", while the month-close excluded them; its paid/pending split read the raw status text and missed legacy rows. | Analytics uses the same payment-state vocabulary as the month-close. |
+| A "carried balance" (a customer's pre-tracking credit) counted as money collected this month on the home hero and in the closed month. | Excluded from collected and volume totals (still part of the customer's balance). |
+| The local backup round trip dropped the dollar-purchase ledger, so a restore priced every ad's spend as "unknown"; deleted purchases leaked into a visible-only export. | The ledger is exported and restored (a pre-feature backup keeps the device's ledger). |
+| The delivery report CSV disagreed with the deliveries screen for canceled and null-collected rows, and international phone numbers exported with a visible apostrophe. | The CSV uses the screen's own cash rules; a leading `+` is written as `00`. |
+| The audit CSV omitted the metadata column (where money entries carry amounts); the Control Center's last-backup time ignored the app locale. | Both fixed. |
+| The receipts list called rolling 7- and 30-day windows "This Week" and "This Month" while the hero and analytics use calendar months. | Relabelled "Last 7 days" / "Last 30 days" (the window itself is unchanged, pending the owner's choice). |
+
+### Lists, search, reminders
+
+| Problem | Fix |
+| --- | --- |
+| Opening the app between midnight and 09:00 on a reminder day cancelled that day's native reconciliation reminder (the candidate filter compared midnight, not 09:00). | The 09:00 moment is compared. |
+| Receipts, ads and deliveries search compared phone text only: `0912345678` did not find `+218 91 234 5678`; a phone stored as an object matched nothing; the `#1234` shown on cards did not match. | Phone digits are compared canonically; `#` is stripped. |
+| The phone canonicaliser missed the `0218…` spelling and every landline, so duplicates slipped through and WhatsApp links pointed at `wa.me/0…`; a number that cannot be dialled still stamped the customer as reminded. | Both spellings fold to the international form; an undialable number produces no link. |
+| The Collect view counted receipt age in 24-hour buckets, so "overdue" and "days" were off by one around midnight. | Calendar days. |
+| The ads status filter could not select "Active", the state every ad starts in; customers without a join date sorted unstably. | "Active" is a filter option (empty status counts as Active); the sort uses the creation stamp. |
+
+### Client logic
+
+| Problem | Fix |
+| --- | --- |
+| Meta-imported ads store full UTC timestamps; the edit form and the reconciliation day read the UTC day, so completing an imported draft in the office shifted its start and end one day early. | The form shows the local calendar day and a timestamp is never read as its UTC day. |
+| The funding-receipt picker's sort mixed numeric and non-numeric serials in an order-dependent comparator, so its order changed with live sync. | Newest first, numeric tail as tiebreak. |
+| Arabic mode: an "invalid record" toast and the analytics period labels were English; Arabic WhatsApp text ended an RTL line with a stray `)`; two admin prompts rejected Arabic digits; the page duplicate guard missed Arabic spelling variants; the liquidity start date was stored as UTC midnight; a null recorded spend could blank the ads page. | All fixed. |
+
+## Still open for the owner (round 6)
+
+1. The company-funds dialog and its toasts are English-only (a full translation
+   does not fit the startup bundle budget; needs lazy-loading first).
+2. Receipts "Last 7 / 30 days" versus calendar periods: decide which the office
+   wants; the labels are now honest either way.
+3. The delivery report CSV exports every delivery, not the filtered list on
+   screen; a job assigned to a user who is no longer a driver looks unassigned
+   but is not counted as such.
+4. Encrypted backups carry no key fingerprint and are never restore-verified
+   automatically; the NDJSON snapshot has no restore script.
+5. Alembic migrations still have no path to the platform (boot creates the
+   known indexes idempotently); CI never boots the image against PostgreSQL.
+6. Every money write scans the whole ads collection under lock (bounded
+   variant exists); backups are attributed to no key version.
+
+## Review of the round-6 fixes (same day)
+
+The adversarial pass found: the SQLite refusal ran after the database
+initialisation, so a container without `DATABASE_URL` would have died in a
+misleading "database not ready" retry loop instead of printing the refusal
+(fixed: the check runs first, on the resolved URL, and resolving the default
+path never raises); the client's new phone spellings (`0218…`, landlines) were
+not mirrored by the server's identity key, so the two would have disagreed
+about duplicates and merges (fixed: same rules on both sides, tested); the
+app's own date encoding (`T00:00:00.000Z`) would have drifted one day per
+save in browsers west of UTC (fixed: only real timestamps take the local-day
+path); the CSV phone `00218…` would have lost its leading zeros in Excel
+(fixed: a space after the country code keeps it text); a carried balance that
+is still unpaid no longer slipped past the month-close blocker (fixed: only
+the sale totals exclude it); two integer settings the regex missed; a
+tautological test assertion; documentation that still promised a silent
+SQLite fallback; the index-build timeout now fits inside the probe's grace.

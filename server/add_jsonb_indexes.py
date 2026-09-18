@@ -11,6 +11,22 @@ from .db import db_conn, get_engine
 from sqlalchemy import text
 
 
+
+def _bound_ddl_locks(conn) -> None:
+    """A CREATE INDEX at boot waits on any idle-in-transaction session forever
+    and blocks every write while it scans; give up after 5 s and try next boot."""
+    try:
+        conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+        conn.execute(text("SET LOCAL statement_timeout = '120s'"))
+    except Exception:
+        pass
+
+
+KEYSET_INDEXES = (
+    ("entities_type_created_id", "entities (type, created_at, id)"),
+    ("entities_type_modified_id", "entities (type, last_modified, id)"),
+)
+
 def add_jsonb_indexes():
     """
     Add GIN indexes for Postgres JSONB queries.
@@ -69,6 +85,15 @@ def add_jsonb_indexes():
     ]
 
     print("Adding JSONB indexes for Postgres...")
+    # Alembic only runs in CI; a database created by init_db before migration
+    # 0002 never got the keyset-pagination pair. Idempotent stop-gap.
+    for index_name, target in KEYSET_INDEXES:
+        try:
+            with db_conn() as conn:
+                _bound_ddl_locks(conn)
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {target}"))
+        except Exception as e:
+            print(f"⚠️  Skipped {index_name}: {e}")
 
     for index_info in indexes:
         # All indexes are now expression-based (B-tree on JSONB fields)
@@ -83,6 +108,7 @@ def add_jsonb_indexes():
         # the whole transaction, which used to skip every later index too.
         try:
             with db_conn() as conn:
+                _bound_ddl_locks(conn)
                 conn.execute(text(sql))
             print(f"✅ Created index: {index_name}")
         except Exception as e:

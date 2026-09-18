@@ -1842,13 +1842,13 @@ function renderAnalyticsView() {
   // (they would double-count the same dollars already inside the source
   // receipt). They DO count in the availability below (the moved money is
   // still usable by the target customer).
-  const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r));
+  // Same vocabulary as the month-close: canceled/lost receipts are neither
+  // revenue nor debt, and paid/unpaid comes from the payment state (legacy
+  // isPaid-only rows included), not the raw status text.
+  const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r) && !['canceled', 'lost'].includes(getReceiptPaymentState(r)));
   const totalReceiptsUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const paidReceipts = revenueReceipts.filter(r => (r.status || '').toLowerCase() === 'paid');
-  const pendingReceipts = revenueReceipts.filter(r => {
-    const s = (r.status || '').toLowerCase();
-    return s === 'pending' || s === 'not paid';
-  });
+  const paidReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
+  const pendingReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'not_paid');
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
 
@@ -2798,7 +2798,10 @@ function renderReceiptsView() {
       const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
       const tempNo = foldSearchText(receipt.tempReceiptNo || '');
       const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
-      if (!customerName.includes(receiptSearchTerm) && !finalNo.includes(receiptSearchTerm) && !tempNo.includes(receiptSearchTerm) && !phoneNumber.includes(receiptSearchTerm)) {
+      const numTerm = receiptSearchTerm.replace(/^#/, '') || receiptSearchTerm;          // cards show "#1234"
+      const digitsTerm = receiptSearchTerm.replace(/\D/g, '').replace(/^0+/, '');
+      const phoneKeyHit = canSearchReceiptContacts && digitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(receipt.phoneNumber || '') || '').includes(digitsTerm);
+      if (!customerName.includes(receiptSearchTerm) && !finalNo.includes(numTerm) && !tempNo.includes(numTerm) && !phoneNumber.includes(receiptSearchTerm) && !phoneKeyHit) {
         return false;
       }
     }
@@ -2962,8 +2965,8 @@ function renderReceiptsView() {
             <select onchange="updateReceiptFilter('date', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptDateFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الأوقات' : 'All Time'}</option>
               <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 ${isArV ? 'اليوم' : 'Today'}</option>
-              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'هذا الأسبوع' : 'This Week'}</option>
-              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'هذا الشهر' : 'This Month'}</option>
+              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'آخر 7 أيام' : 'Last 7 days'}</option>
+              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'آخر 30 يوماً' : 'Last 30 days'}</option>
             </select>
 
             <!-- Customer Debt Source Filter -->
@@ -4027,8 +4030,8 @@ function renderAdsView() {
                       ${needsSetup ? `<div class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">${isAr ? 'يحتاج إكمال' : 'Needs setup'}</div>` : (isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : '')}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
-                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
-                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
+                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${(Number(ad.spentUSD) || 0).toFixed(2)}</div>
+                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - (Number(ad.spentUSD) || 0)).toFixed(2)}</div>
                         </div>
                       ` : ''}
                       ${renderMetaAdStatusSummary(ad, isAr)}
@@ -4248,9 +4251,13 @@ function renderDeliveriesView(logOnly) {
     filteredDeliveries = filteredDeliveries.filter(d => {
       const customer = deliveryCustomersById.get(String(d.customerId));
       const name = foldSearchText(customer?.name || '');
-      const phone = foldSearchText(d.phoneNumber || customer?.phones?.[0] || '');
+      const rawPhone = d.phoneNumber || customer?.phones?.[0] || '';
+      const phoneText = (rawPhone && typeof rawPhone === 'object') ? String(rawPhone.number || rawPhone.phone || rawPhone.phoneNumber || rawPhone.value || '') : String(rawPhone);
+      const phone = foldSearchText(phoneText);
+      const digitsTerm = term.replace(/\D/g, '').replace(/^0+/, '');
+      const phoneKeyHit = digitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(phoneText) || '').includes(digitsTerm);
       const receiptNo = foldSearchText(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '');
-      return name.includes(term) || phone.includes(term) || receiptNo.includes(term);
+      return name.includes(term) || phone.includes(term) || phoneKeyHit || receiptNo.includes(term);
     });
   }
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
@@ -4492,10 +4499,10 @@ function exportDeliveryReport() {
     const customer = state.customers.find(c => c.id === r.customerId);
     const driver = r.deliveryPersonId ? deliveryUsers.find(u => u.id === r.deliveryPersonId) : null;
     const debt = getReceiptCollectionTarget(r).amountLocal;
-    const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
-    const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
+    const collected = _getCollectedCashLocal(r);   // the deliveries screen's own rules (canceled = nothing collected)
+    const remaining = _getOutstandingDueLocal(r);
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(_deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 '))},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -4519,7 +4526,7 @@ async function checkStuckDeliveries() {
   const hoursInput = prompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
   if (!hoursInput) return;
 
-  const hours = parseInt(hoursInput);
+  const hours = parseInt(normalizeDigitsAscii(String(hoursInput || '')), 10);
   if (isNaN(hours) || hours < 1) {
     showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى ساعة واحدة' : 'Minimum 1 hour required', 'error');
     return;
@@ -4605,6 +4612,11 @@ function _isReceivedInOffice(item) {
   if (typeof item.isReceivedInOffice === 'boolean') return item.isReceivedInOffice;
   if (typeof item.officeHandover === 'boolean') return item.officeHandover;
   return false;
+}
+
+function _deliveryPhoneText(r, customer) {
+  const raw = r?.phoneNumber || customer?.phones?.[0] || '';
+  return (raw && typeof raw === 'object') ? String(raw.number || raw.phone || raw.phoneNumber || raw.value || '') : String(raw);
 }
 
 function _getCollectedCashLocal(item) {
@@ -5389,7 +5401,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 function getAdReconciliationCalendarDay(value) {
   const raw = String(value || '').trim();
   if (!raw) return null;
-  const calendar = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const calendar = (!raw.includes('T') || /T00:00:00(\.000)?Z$/.test(raw)) ? raw.match(/^(\d{4})-(\d{2})-(\d{2})/) : null;  // a real timestamp (Meta) is parsed locally below
   if (calendar) {
     const year = Number(calendar[1]);
     const month = Number(calendar[2]) - 1;
@@ -6370,7 +6382,7 @@ function exportAuditLogs(format) {
 
   let downloaded = false;
   if (format === 'csv') {
-    const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
+    const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID', 'Metadata'];
     const rows = allLogs.map(log => {
       const user = state.users.find(u => u.id === log.userId);
       const date = new Date(log.date);
@@ -6388,7 +6400,8 @@ function exportAuditLogs(format) {
         csvCell(log.category || 'general'),
         csvCell(log.severity || 'info'),
         csvCell(log.description || ''),
-        csvCell(log.resourceId || '')
+        csvCell(log.resourceId || ''),
+        csvCell(JSON.stringify(log.metadata || {}))
       ].join(',');
     });
     
@@ -6553,7 +6566,7 @@ async function cleanupAuditLogs() {
   const daysToKeep = prompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
   if (!daysToKeep) return;
 
-  const days = parseInt(daysToKeep);
+  const days = parseInt(normalizeDigitsAscii(String(daysToKeep || '')), 10);
   if (isNaN(days) || days < 30) {
     showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى 30 يوماً' : 'Minimum 30 days required', 'error');
     return;

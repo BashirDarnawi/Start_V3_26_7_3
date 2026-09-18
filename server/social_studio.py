@@ -36,6 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
 
 from . import meta_ads as _meta
+from .startup_support import read_env_int
 from .db import db_conn, get_engine, json_loads
 from .rate_limiter import check_rate_limit
 from .auth_limits import _client_ip as _shared_client_ip
@@ -165,7 +166,7 @@ def _data_url_decoded_size(value: str) -> int:
 
 # Meta fetches a post's photos once, right when the post is created, so a
 # signed link only needs to outlive that fetch (plus generous retry room).
-MEDIA_URL_TTL_SECONDS = max(600, int(os.getenv("ALBAYAN_SOCIAL_MEDIA_URL_TTL_SECONDS", "172800") or 172800))
+MEDIA_URL_TTL_SECONDS = max(600, read_env_int("ALBAYAN_SOCIAL_MEDIA_URL_TTL_SECONDS", 172800))
 
 
 def _unix_now() -> int:
@@ -981,7 +982,7 @@ def stop_social_studio_worker() -> None:
         thread = _WORKER_THREAD
         _WORKER_STOP.set()
     if thread and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=3)
+        thread.join(timeout=1)
     with _WORKER_LOCK:
         if _WORKER_THREAD is thread and not (thread and thread.is_alive()):
             _WORKER_THREAD = None

@@ -1,6 +1,10 @@
 """Shared pytest plumbing for the backend suite."""
 
+import os
+
 import pytest
+
+os.environ.setdefault("ALBAYAN_ALLOW_SQLITE", "true")  # the suite runs on SQLite on purpose
 
 from server.rate_limiter import reset_rate_limit
 

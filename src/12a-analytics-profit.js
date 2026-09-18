@@ -224,10 +224,10 @@ function analyticsPeriods(granularity, nowValue) {
       end.setDate(end.getDate() + (kind === 'week' ? 7 : 1));
     }
     const label = kind === 'month'
-      ? start.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' })
+      ? start.toLocaleDateString(typeof appDateLocale === 'function' ? appDateLocale() : 'en-GB', { month: 'short', year: 'numeric' })
       : kind === 'week'
-        ? `${start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}`
-        : start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+        ? `${start.toLocaleDateString(typeof appDateLocale === 'function' ? appDateLocale() : 'en-GB', { day: '2-digit', month: 'short' })}`
+        : start.toLocaleDateString(typeof appDateLocale === 'function' ? appDateLocale() : 'en-GB', { day: '2-digit', month: 'short' });
     periods.push({ start: start.getTime(), end: end.getTime(), label, count: 0, primaryUSD: 0, secondaryUSD: 0, profitLYD: 0 });
   }
   return periods;
@@ -248,7 +248,8 @@ function buildAnalyticsBreakdown(metric, granularity, options = {}) {
   const periods = analyticsPeriods(granularity, options.now || Date.now());
   const ads = Array.isArray(options.ads) ? options.ads : getVisibleRecords(state.ads || []);
   const receipts = (Array.isArray(options.receipts) ? options.receipts : getVisibleRecords(state.receipts || []))
-    .filter(row => row && !row._deleted && (typeof isTransferInReceipt !== 'function' || !isTransferInReceipt(row)));
+    .filter(row => row && !row._deleted && (typeof isTransferInReceipt !== 'function' || !isTransferInReceipt(row))
+      && !(typeof getReceiptPaymentState === 'function' && ['canceled', 'lost'].includes(getReceiptPaymentState(row))));
   const profit = options.profitSnapshot || buildAdProfitabilitySnapshot(options.purchases || state.dollarPurchases || [], ads);
   const findPeriod = time => periods.find(period => time >= period.start && time < period.end);
 

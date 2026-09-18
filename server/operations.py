@@ -440,8 +440,11 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         row for row in receipts
         if str(row.get("receiptType") or "") != "TRANSFER_IN" and _receipt_payment_state(row) not in ("canceled", "lost")
     ]
-    receipt_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in normal_receipts)
-    paid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "paid"]
+    # A carried balance is pre-tracking credit, not a sale: out of the volume
+    # and paid totals, but an unpaid one still blocks the close like any debt.
+    sale_receipts = [row for row in normal_receipts if str(row.get("receiptType") or "") != "CARRIED_BALANCE"]
+    receipt_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in sale_receipts)
+    paid_receipts = [row for row in sale_receipts if _receipt_payment_state(row) == "paid"]
     paid_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in paid_receipts)
     paid_ads = [row for row in ads if _ad_payment_state(row) == "paid"]
     ad_sales = sum(_ad_sale_usd(row) for row in paid_ads)
@@ -792,6 +795,16 @@ def _cleanup_old_backups(directory: Path, retention_days: int) -> None:
                 path.unlink()
         except OSError:
             continue
+    # A redeploy that killed a dump mid-write leaves a temp file behind.
+    for path in list(directory.glob("*.tmp")) + list(directory.glob("albayan-backup-*")):
+        try:
+            if path.stat().st_mtime < time.time() - 3600:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink()
+        except OSError:
+            continue
 
 
 @contextmanager
@@ -830,8 +843,11 @@ def create_encrypted_backup() -> dict[str, Any]:
         pass
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     target = directory / f"albayan-{timestamp}-{secrets.token_hex(4)}.backup.aesgcm"
+    _cleanup_old_backups(directory, config["retentionDays"])  # free space BEFORE the dump, not only after a success
     with _backup_lease():
-        with tempfile.TemporaryDirectory(prefix="albayan-backup-") as temp_dir:
+        # The plaintext dump lives next to its target (same volume): the
+        # container's writable layer was a second, smaller filesystem.
+        with tempfile.TemporaryDirectory(prefix="albayan-backup-", dir=str(directory)) as temp_dir:
             dump = Path(temp_dir) / "database.dump"
             _dump_database(dump)
             size = _encrypt_backup(dump, target, key)
@@ -946,7 +962,7 @@ def start_operations_worker() -> None:
 def stop_operations_worker() -> None:
     _worker_stop.set()
     if _worker_thread and _worker_thread.is_alive():
-        _worker_thread.join(timeout=5)
+        _worker_thread.join(timeout=2)
 
 
 def _public_status() -> dict[str, Any]:

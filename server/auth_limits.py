@@ -17,6 +17,7 @@ so a deployment can tighten or loosen without a code change.
 """
 
 import ipaddress
+from .startup_support import read_env_int
 import os
 
 from fastapi import Request
@@ -25,38 +26,38 @@ from fastapi import Request
 # overwrites these headers. See server/README.md.
 TRUST_PROXY_HEADERS = os.getenv("ALBAYAN_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
 
-_LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
-_LOGIN_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_MAX_ATTEMPTS", "20"))
+_LOGIN_WINDOW_MS = read_env_int("ALBAYAN_LOGIN_WINDOW_MS", 15 * 60 * 1000)
+_LOGIN_MAX_ATTEMPTS = read_env_int("ALBAYAN_LOGIN_MAX_ATTEMPTS", 20)
 # IP-independent per-account cap (defense against IP rotation). Higher than the
 # per-IP cap so a shared office IP with a few users' honest mistakes never trips
 # it, but far below what brute-forcing a password would need.
-_LOGIN_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", "60"))
+_LOGIN_EMAIL_MAX_ATTEMPTS = read_env_int("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", 60)
 # Global per-IP ceiling across ALL emails. The (ip,email) bucket above does not
 # stop one IP from spreading a password guess across many distinct accounts
 # (horizontal credential stuffing). Set well above a shared office's honest
 # traffic but far below a stuffing run.
-_LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_LOGIN_IP_MAX_ATTEMPTS", "120"))
+_LOGIN_IP_MAX_ATTEMPTS = read_env_int("ALBAYAN_LOGIN_IP_MAX_ATTEMPTS", 120)
 
-_RESET_WINDOW_MS = int(os.getenv("ALBAYAN_RESET_WINDOW_MS", str(15 * 60 * 1000)))
-_RESET_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_MAX_ATTEMPTS", "5"))
-_RESET_EMAIL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", "15"))
+_RESET_WINDOW_MS = read_env_int("ALBAYAN_RESET_WINDOW_MS", 15 * 60 * 1000)
+_RESET_MAX_ATTEMPTS = read_env_int("ALBAYAN_RESET_MAX_ATTEMPTS", 5)
+_RESET_EMAIL_MAX_ATTEMPTS = read_env_int("ALBAYAN_RESET_EMAIL_MAX_ATTEMPTS", 15)
 # Ceiling on reset requests from ONE source address, whatever email they name.
 # Deliberately roomy so a whole office behind a single NAT/Cloudflare address
 # is never locked out of a legitimate reset, while still bounding the limiter
 # keys and audit rows an unauthenticated stranger can create.
-_RESET_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_RESET_IP_MAX_ATTEMPTS", "60"))
+_RESET_IP_MAX_ATTEMPTS = read_env_int("ALBAYAN_RESET_IP_MAX_ATTEMPTS", 60)
 
-_SETUP_WINDOW_MS = int(os.getenv("ALBAYAN_SETUP_WINDOW_MS", str(15 * 60 * 1000)))
-_SETUP_IP_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", "10"))
-_SETUP_GLOBAL_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", "100"))
+_SETUP_WINDOW_MS = read_env_int("ALBAYAN_SETUP_WINDOW_MS", 15 * 60 * 1000)
+_SETUP_IP_MAX_ATTEMPTS = read_env_int("ALBAYAN_SETUP_IP_MAX_ATTEMPTS", 10)
+_SETUP_GLOBAL_MAX_ATTEMPTS = read_env_int("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", 100)
 
 # System-browser app-login limiter knobs. Handoff is authenticated (per-user
 # and per-IP buckets); exchange is anonymous (per-IP bucket). Codes carry
 # 256 bits of entropy, so these limits exist to bound abuse noise, not as the
 # security boundary.
-_APP_LOGIN_WINDOW_MS = int(os.getenv("ALBAYAN_APP_LOGIN_WINDOW_MS", str(15 * 60 * 1000)))
-_APP_LOGIN_HANDOFF_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", "10"))
-_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = int(os.getenv("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", "30"))
+_APP_LOGIN_WINDOW_MS = read_env_int("ALBAYAN_APP_LOGIN_WINDOW_MS", 15 * 60 * 1000)
+_APP_LOGIN_HANDOFF_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", 10)
+_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", 30)
 
 
 def _is_loopback_peer(value: str) -> bool:

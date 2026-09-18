@@ -65,6 +65,7 @@ jobs:
           docker run --detach --name albayan-release-check \
             --publish 127.0.0.1:18080:8000 \
             --env ALBAYAN_COOKIE_SECURE=false \
+            --env ALBAYAN_ALLOW_SQLITE=true \
             --env ALBAYAN_DB_PATH=/tmp/albayan-release-check.db \
             "$IMAGE:${{ github.sha }}"
           trap 'docker rm --force albayan-release-check >/dev/null 2>&1 || true' EXIT

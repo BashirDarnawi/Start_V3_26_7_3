@@ -8,7 +8,7 @@ Client‑side security (localStorage/IndexedDB) is not sufficient for internet u
 - **RBAC permissions** (Admin / Employee / Delivery)
 - **Server‑side validation + sanitization**
 - **Audit logs**
-- **Database storage** (**PostgreSQL recommended**; SQLite still works for local testing)
+- **Database storage** (**PostgreSQL required in production**; SQLite only for local testing, and only with `ALBAYAN_ALLOW_SQLITE=true` or `ALBAYAN_DEBUG_MODE=true` - a production container that lost `DATABASE_URL` refuses to start instead of coming up empty)
 
 ---
 
@@ -34,7 +34,7 @@ python -m server.create_admin --email admin@yourdomain.com --name Admin
 From the project root:
 
 ```bash
-uvicorn server.main:app --host 0.0.0.0 --port 8000
+ALBAYAN_ALLOW_SQLITE=true uvicorn server.main:app --host 0.0.0.0 --port 8000   # local SQLite run; production sets DATABASE_URL instead
 ```
 
 Open:
@@ -88,7 +88,7 @@ This protects your logins and data traffic **even without a domain/HTTPS**.
 - **ALBAYAN_DB_HOST/PORT/NAME/USER/PASSWORD**: safer alternative to
   `DATABASE_URL` when credentials contain URL punctuation; the Docker Compose
   setup uses these fields automatically
-- **ALBAYAN_DB_PATH**: SQLite path (only used if DATABASE_URL is not set)
+- **ALBAYAN_DB_PATH**: SQLite path (only used if DATABASE_URL is not set; the server refuses to start on SQLite unless `ALBAYAN_ALLOW_SQLITE=true` or debug mode)
 - **ALBAYAN_SESSION_MS**: session duration in milliseconds
 - **ALBAYAN_TRUST_PROXY_HEADERS**: set `true` when the API is reachable only
   through a trusted reverse proxy that overwrites `CF-Connecting-IP` and

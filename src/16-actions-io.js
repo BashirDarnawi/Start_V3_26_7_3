@@ -820,7 +820,8 @@ async function updateLiquidityTrackingStart(value) {
     render();
     return;
   }
-  const parsed = new Date(String(value || ''));
+  const _ymd = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const parsed = _ymd ? new Date(Number(_ymd[1]), Number(_ymd[2]) - 1, Number(_ymd[3])) : new Date(String(value || ''));  // local midnight, not UTC
   if (!value || Number.isNaN(parsed.getTime())) {
     showNotification(
       isAr ? 'خطأ في الإدخال' : 'Validation',
@@ -884,18 +885,10 @@ function printReceiptCard(btn) {
   const receiptId = card.getAttribute('data-receipt-id') || '';
   card.classList.add('print-target');
   document.body.classList.add('print-single');
-  // Phones don't block on window.print(): the native print sheet stays open
-  // while page JS keeps running, afterprint fires during pagination (sheet
-  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
-  // user picks a printer or changes paper/range in that sheet. The old
-  // afterprint/3s-timer cleanup therefore unmarked the card mid-preview and
-  // a re-paginated print regressed to the full Receipts page. Same fix as
-  // printClothesOrderSlip: re-apply the print marks on every beforeprint
-  // pass, and only tear down on the first user interaction with the page —
-  // impossible while the native sheet covers it — with a long timer as the
-  // last-resort fallback for webviews that fire no print events at all.
-  // Harmless meanwhile: every .print-single/.print-target rule lives inside
-  // @media print, so the lingering marks have zero on-screen effect.
+  // Phones re-paginate from the live DOM while the print sheet is open, so
+  // the print marks are re-applied on every beforeprint and torn down only
+  // on the first user interaction (long timer fallback); the marks live in
+  // @media print, so lingering is harmless on screen.
   const applyPrintMarkup = () => {
     if (!card.isConnected && receiptId) {
       const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
@@ -1012,6 +1005,7 @@ function exportData() {
   exportState.users = filterVisible(exportState.users);
   exportState.exchangeRateHistory = filterVisible(exportState.exchangeRateHistory);
   exportState.logs = filterVisible(exportState.logs);
+  if (Array.isArray(exportState.dollarPurchases)) exportState.dollarPurchases = filterVisible(exportState.dollarPurchases);
   exportState.walletTransactions = filterVisible(exportState.walletTransactions);
   exportState.serviceSubscriptions = filterVisible(exportState.serviceSubscriptions);
   exportState.clothesProducts = filterVisible(exportState.clothesProducts);
@@ -1523,6 +1517,8 @@ function importData() {
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
         state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
         state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
+        // The FIFO dollar ledger prices every ad's spend; a pre-feature backup keeps the device's ledger.
+        if (Array.isArray(sanitizedImport.dollarPurchases)) state.dollarPurchases = sanitizedImport.dollarPurchases;
         // Restore the liquidity tracking config from the backup, but keep the
         // device's current value when importing a pre-feature backup file.
         if (Array.isArray(sanitizedImport.appSettings)) state.appSettings = sanitizedImport.appSettings;

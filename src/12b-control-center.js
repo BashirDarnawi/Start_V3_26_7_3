@@ -33,7 +33,7 @@ function controlCenterMoney(value) {
 function controlCenterTimestamp(value) {
   const number = Number(value || 0);
   if (!Number.isFinite(number) || number <= 0) return 'Never';
-  try { return new Date(number).toLocaleString(); } catch (_) { return 'Never'; }
+  try { return new Date(number).toLocaleString(typeof appDateLocale === 'function' ? appDateLocale() : undefined); } catch (_) { return 'Never'; }
 }
 
 function getControlCenterFacts() {

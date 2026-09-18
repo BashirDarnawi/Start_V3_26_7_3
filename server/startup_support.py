@@ -71,6 +71,41 @@ def request_size_refusal(request: Any) -> Any:
     return None
 
 
+def refuse_sqlite_in_production(dialect: str, *, debug_mode: bool, allow_env: str | None = None) -> None:
+    """A container that lost DATABASE_URL used to boot on an empty SQLite file,
+    look healthy and offer the first-run admin screen; a day of records then
+    died with the container. Now it refuses to start unless a test runner or a
+    developer says SQLite is intended (ALBAYAN_ALLOW_SQLITE=true or debug)."""
+    import os
+
+    allow = (allow_env if allow_env is not None else os.getenv("ALBAYAN_ALLOW_SQLITE", "")).strip().lower()
+    if str(dialect or "").lower().startswith("sqlite") and not debug_mode and allow not in ("1", "true", "yes"):
+        raise RuntimeError(
+            "Refusing to serve on SQLite: DATABASE_URL is not set to PostgreSQL. "
+            "Set DATABASE_URL, or ALBAYAN_ALLOW_SQLITE=true for a deliberate single-file deployment."
+        )
+
+
+def read_env_int(name: str, default: int, *, lo: int | None = None, hi: int | None = None) -> int:
+    """An integer setting that logs and falls back instead of crashing the boot
+    (a trailing space in a Jelastic variable used to exit the container)."""
+    import os
+
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[albayan] CONFIG {name}={raw!r} is not a whole number; using {default}")
+        return default
+    if lo is not None and value < lo:
+        return lo
+    if hi is not None and value > hi:
+        return hi
+    return value
+
+
 def init_db_with_retry(init_db: Callable[[], object], *, attempts: int = 10, delay_seconds: float = 3.0) -> None:
     """A database that is briefly unreachable at boot must not kill the container.
 

@@ -597,7 +597,7 @@ async function _syncNativeReconciliationRemindersOnce(context) {
   const now = new Date();
   const candidates = (Array.isArray(state.ads) ? state.ads : [])
     .filter(ad => ad && !ad._deleted && typeof getAdReconciliationAvailableDay === 'function')
-    .map(ad => ({ ad, at: getAdReconciliationAvailableDay(ad) }))
+    .map(ad => { const at = getAdReconciliationAvailableDay(ad); if (at instanceof Date) at.setHours(9, 0, 0, 0); return { ad, at }; })
     .filter(item => item.at instanceof Date && Number.isFinite(item.at.getTime()) && item.at.getTime() > now.getTime())
     .sort((a, b) => a.at - b.at)
     .slice(0, NATIVE_REMINDER_LIMIT);

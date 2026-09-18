@@ -1486,7 +1486,7 @@ async function _syncNativeReconciliationRemindersOnce(context) {
   const now = new Date();
   const candidates = (Array.isArray(state.ads) ? state.ads : [])
     .filter(ad => ad && !ad._deleted && typeof getAdReconciliationAvailableDay === 'function')
-    .map(ad => ({ ad, at: getAdReconciliationAvailableDay(ad) }))
+    .map(ad => { const at = getAdReconciliationAvailableDay(ad); if (at instanceof Date) at.setHours(9, 0, 0, 0); return { ad, at }; })
     .filter(item => item.at instanceof Date && Number.isFinite(item.at.getTime()) && item.at.getTime() > now.getTime())
     .sort((a, b) => a.at - b.at)
     .slice(0, NATIVE_REMINDER_LIMIT);
@@ -3405,7 +3405,7 @@ function paymentMethodOptions(currentMethod) {
   return PAYMENT_METHODS;
 }
 
-const AD_STATUSES = ['Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
+const AD_STATUSES = ['Active', 'Pending', 'Paused', 'Completed', 'Canceled', 'Lost', 'Stopped'];
 const DELIVERY_STATUSES = ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office'];
 const REFUND_TYPES = ['None', 'Full', 'Partial'];
 const PLATFORMS = ['Facebook', 'WhatsApp', 'Instagram', 'Phone'];
@@ -17164,13 +17164,13 @@ function renderAnalyticsView() {
   // (they would double-count the same dollars already inside the source
   // receipt). They DO count in the availability below (the moved money is
   // still usable by the target customer).
-  const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r));
+  // Same vocabulary as the month-close: canceled/lost receipts are neither
+  // revenue nor debt, and paid/unpaid comes from the payment state (legacy
+  // isPaid-only rows included), not the raw status text.
+  const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r) && !['canceled', 'lost'].includes(getReceiptPaymentState(r)));
   const totalReceiptsUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const paidReceipts = revenueReceipts.filter(r => (r.status || '').toLowerCase() === 'paid');
-  const pendingReceipts = revenueReceipts.filter(r => {
-    const s = (r.status || '').toLowerCase();
-    return s === 'pending' || s === 'not paid';
-  });
+  const paidReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
+  const pendingReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'not_paid');
   const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
 
@@ -18120,7 +18120,10 @@ function renderReceiptsView() {
       const finalNo = foldSearchText(receipt.finalReceiptNo || receipt.serialNumber || '');
       const tempNo = foldSearchText(receipt.tempReceiptNo || '');
       const phoneNumber = canSearchReceiptContacts ? foldSearchText(receipt.phoneNumber || '') : '';
-      if (!customerName.includes(receiptSearchTerm) && !finalNo.includes(receiptSearchTerm) && !tempNo.includes(receiptSearchTerm) && !phoneNumber.includes(receiptSearchTerm)) {
+      const numTerm = receiptSearchTerm.replace(/^#/, '') || receiptSearchTerm;          // cards show "#1234"
+      const digitsTerm = receiptSearchTerm.replace(/\D/g, '').replace(/^0+/, '');
+      const phoneKeyHit = canSearchReceiptContacts && digitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(receipt.phoneNumber || '') || '').includes(digitsTerm);
+      if (!customerName.includes(receiptSearchTerm) && !finalNo.includes(numTerm) && !tempNo.includes(numTerm) && !phoneNumber.includes(receiptSearchTerm) && !phoneKeyHit) {
         return false;
       }
     }
@@ -18284,8 +18287,8 @@ function renderReceiptsView() {
             <select onchange="updateReceiptFilter('date', this.value)" class="px-4 py-3 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-sm font-medium focus:border-purple-500 transition-all cursor-pointer ${state.receiptDateFilter !== 'all' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' : ''}">
               <option value="all" ${state.receiptDateFilter === 'all' ? 'selected' : ''}>${isArV ? 'كل الأوقات' : 'All Time'}</option>
               <option value="today" ${state.receiptDateFilter === 'today' ? 'selected' : ''}>📅 ${isArV ? 'اليوم' : 'Today'}</option>
-              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'هذا الأسبوع' : 'This Week'}</option>
-              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'هذا الشهر' : 'This Month'}</option>
+              <option value="week" ${state.receiptDateFilter === 'week' ? 'selected' : ''}>📆 ${isArV ? 'آخر 7 أيام' : 'Last 7 days'}</option>
+              <option value="month" ${state.receiptDateFilter === 'month' ? 'selected' : ''}>🗓️ ${isArV ? 'آخر 30 يوماً' : 'Last 30 days'}</option>
             </select>
 
             <!-- Customer Debt Source Filter -->
@@ -19349,8 +19352,8 @@ function renderAdsView() {
                       ${needsSetup ? `<div class="mt-1 text-xs font-bold text-amber-600 dark:text-amber-400">${isAr ? 'يحتاج إكمال' : 'Needs setup'}</div>` : (isAdPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isAr ? 'مدفوع' : 'Paid'}</div>` : '')}
                       ${ad.status === 'Stopped' && ad.spentUSD !== undefined ? `
                         <div class="text-xs mt-1 space-y-0.5">
-                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${ad.spentUSD.toFixed(2)}</div>
-                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - ad.spentUSD).toFixed(2)}</div>
+                          <div class="text-orange-600">${isAr ? 'المصروف' : 'Spent'}: $${(Number(ad.spentUSD) || 0).toFixed(2)}</div>
+                          <div class="text-emerald-600">${isAr ? 'المتبقي' : 'Remaining'}: $${((ad.amountUSD || 0) - (Number(ad.spentUSD) || 0)).toFixed(2)}</div>
                         </div>
                       ` : ''}
                       ${renderMetaAdStatusSummary(ad, isAr)}
@@ -19570,9 +19573,13 @@ function renderDeliveriesView(logOnly) {
     filteredDeliveries = filteredDeliveries.filter(d => {
       const customer = deliveryCustomersById.get(String(d.customerId));
       const name = foldSearchText(customer?.name || '');
-      const phone = foldSearchText(d.phoneNumber || customer?.phones?.[0] || '');
+      const rawPhone = d.phoneNumber || customer?.phones?.[0] || '';
+      const phoneText = (rawPhone && typeof rawPhone === 'object') ? String(rawPhone.number || rawPhone.phone || rawPhone.phoneNumber || rawPhone.value || '') : String(rawPhone);
+      const phone = foldSearchText(phoneText);
+      const digitsTerm = term.replace(/\D/g, '').replace(/^0+/, '');
+      const phoneKeyHit = digitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(phoneText) || '').includes(digitsTerm);
       const receiptNo = foldSearchText(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '');
-      return name.includes(term) || phone.includes(term) || receiptNo.includes(term);
+      return name.includes(term) || phone.includes(term) || phoneKeyHit || receiptNo.includes(term);
     });
   }
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
@@ -19814,10 +19821,10 @@ function exportDeliveryReport() {
     const customer = state.customers.find(c => c.id === r.customerId);
     const driver = r.deliveryPersonId ? deliveryUsers.find(u => u.id === r.deliveryPersonId) : null;
     const debt = getReceiptCollectionTarget(r).amountLocal;
-    const collected = Number(r.amountCollectedFromCustomer ?? (String(r.deliveryStatus || '') === 'Delivered' ? (r.amountLocal || 0) : 0)) || 0;
-    const remaining = Number(r.remainingDue ?? Math.max(0, debt - collected)) || 0;
+    const collected = _getCollectedCashLocal(r);   // the deliveries screen's own rules (canceled = nothing collected)
+    const remaining = _getOutstandingDueLocal(r);
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(r.phoneNumber || customer?.phones?.[0] || '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(_deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 '))},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -19841,7 +19848,7 @@ async function checkStuckDeliveries() {
   const hoursInput = prompt(isAr ? 'البحث عن توصيلات عالقة لأكثر من كم ساعة؟ (الافتراضي: 72 = 3 أيام)' : 'Find deliveries stuck for more than how many hours? (default: 72 = 3 days)', '72');
   if (!hoursInput) return;
 
-  const hours = parseInt(hoursInput);
+  const hours = parseInt(normalizeDigitsAscii(String(hoursInput || '')), 10);
   if (isNaN(hours) || hours < 1) {
     showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى ساعة واحدة' : 'Minimum 1 hour required', 'error');
     return;
@@ -19927,6 +19934,11 @@ function _isReceivedInOffice(item) {
   if (typeof item.isReceivedInOffice === 'boolean') return item.isReceivedInOffice;
   if (typeof item.officeHandover === 'boolean') return item.officeHandover;
   return false;
+}
+
+function _deliveryPhoneText(r, customer) {
+  const raw = r?.phoneNumber || customer?.phones?.[0] || '';
+  return (raw && typeof raw === 'object') ? String(raw.number || raw.phone || raw.phoneNumber || raw.value || '') : String(raw);
 }
 
 function _getCollectedCashLocal(item) {
@@ -20711,7 +20723,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 function getAdReconciliationCalendarDay(value) {
   const raw = String(value || '').trim();
   if (!raw) return null;
-  const calendar = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const calendar = (!raw.includes('T') || /T00:00:00(\.000)?Z$/.test(raw)) ? raw.match(/^(\d{4})-(\d{2})-(\d{2})/) : null;  // a real timestamp (Meta) is parsed locally below
   if (calendar) {
     const year = Number(calendar[1]);
     const month = Number(calendar[2]) - 1;
@@ -21692,7 +21704,7 @@ function exportAuditLogs(format) {
 
   let downloaded = false;
   if (format === 'csv') {
-    const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID'];
+    const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID', 'Metadata'];
     const rows = allLogs.map(log => {
       const user = state.users.find(u => u.id === log.userId);
       const date = new Date(log.date);
@@ -21710,7 +21722,8 @@ function exportAuditLogs(format) {
         csvCell(log.category || 'general'),
         csvCell(log.severity || 'info'),
         csvCell(log.description || ''),
-        csvCell(log.resourceId || '')
+        csvCell(log.resourceId || ''),
+        csvCell(JSON.stringify(log.metadata || {}))
       ].join(',');
     });
     
@@ -21875,7 +21888,7 @@ async function cleanupAuditLogs() {
   const daysToKeep = prompt(isAr ? 'حذف سجلات التدقيق الأقدم من كم يوم؟ (الافتراضي: 365)' : 'Delete audit logs older than how many days? (default: 365)', '365');
   if (!daysToKeep) return;
 
-  const days = parseInt(daysToKeep);
+  const days = parseInt(normalizeDigitsAscii(String(daysToKeep || '')), 10);
   if (isNaN(days) || days < 30) {
     showNotification(isAr ? 'خطأ في التحقق' : 'Validation Error', isAr ? 'الحد الأدنى 30 يوماً' : 'Minimum 30 days required', 'error');
     return;
@@ -23357,17 +23370,9 @@ function renderAdminToolsLoadingState() {
 if (/^\/control-center(\/|$)/.test(window.location.pathname || '')) {
   try { ensureAdminToolsLoaded(); } catch (_) {}
 }
-// ==========================================
-// ALBAYAN MANAGER PHONE SHELL (2026-09 design refresh)
-// ==========================================
-// The "Albayan Studio" design gives the manager a phone-first shell: a home
-// hero with quick actions, a bottom tab bar with a centre "+", a More page,
-// a Collect-a-debt flow with WhatsApp reminders, appearance rows in Settings
-// and a one-time onboarding on the packaged app. Every piece here delegates
-// to the EXISTING flows (receipt chooser, collect modal, customer receipts,
-// theme/language toggles, logout) — nothing about money or permissions is
-// re-implemented, only presented the new way. Desktop keeps the sidebar and
-// simply shares the same cards.
+// ALBAYAN MANAGER PHONE SHELL (2026-09): phone-first home hero, tab bar,
+// More page, Collect-a-debt with WhatsApp reminders, onboarding. Everything
+// delegates to the EXISTING flows; no money or permission logic lives here.
 
 // ---------- small shared helpers ----------
 
@@ -23552,7 +23557,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
   const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
   const inWindow = (value, from, to) => { const ts = new Date(value || 0).getTime(); return Number.isFinite(ts) && ts >= from && ts < to; };
-  const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r));
+  const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r) && r.receiptType !== 'CARRIED_BALANCE');
   // "Collected this month" is about when the money came in, not when the
   // receipt was written (a debt collected on the 3rd counts on the 3rd).
   const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;
@@ -23669,7 +23674,7 @@ function shellDebtorRows() {
     const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
     let oldest = null;
     unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
-    const ageDays = oldest === null ? null : Math.max(0, Math.floor((now - oldest) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
+    const ageDays = oldest === null ? null : Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(oldest).setHours(0, 0, 0, 0)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
     const lyd = Number(stats.balanceLYD);
     const dueLyd = Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
     rows.push({
@@ -23791,7 +23796,7 @@ function remindDebtor(customerId) {
   }
   // wa.me needs international digits; the normaliser knows Arabic digits and 09… numbers.
   const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
-  const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
+  const base = (digits && !digits.startsWith('0') && digits.length >= 8) ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
   if (!base) {
     showNotification(shellText('Phone number not readable', 'رقم الهاتف غير مقروء'), shellText('Check this customer\'s phone number, then try again.', 'تحقق من رقم هاتف هذا العميل ثم حاول مرة أخرى.'), 'warning');
     return;
@@ -24467,7 +24472,7 @@ function getFilteredAds(customersById = null) {
   // sync by updateAdFilter(); 'all' or unset means no filtering.
   const f = state.adFilters || {};
   if (f.status && f.status !== 'all') {
-    filtered = filtered.filter(ad => String(ad.status || '') === f.status);
+    filtered = filtered.filter(ad => String(ad.status || 'Active') === f.status);  // an empty status renders as Active
   }
   if (f.payment && f.payment !== 'all') {
     filtered = filtered.filter(ad => {
@@ -24501,13 +24506,14 @@ function getFilteredAds(customersById = null) {
     // "#123456" search must still match the stored bare digits. A lone "#"
     // must not match everything, so keep the original term as fallback.
     const idTerm = searchTerm.replace(/^#/, '') || searchTerm;
+    const phoneDigitsTerm = searchTerm.replace(/\D/g, '').replace(/^0+/, '');  // "+218 91…" and "0912…" both match
     filtered = filtered.filter(ad => {
       const customer = custMap.get(ad.customerId);
       const page = ad.pageId ? pageMap.get(ad.pageId) : null;
       return (
         foldSearchText(customer?.name).includes(searchTerm) ||
         foldSearchText(ad.id).includes(searchTerm) ||
-        (canSearchContacts && foldSearchText(ad.phoneNumber).includes(searchTerm)) ||
+        (canSearchContacts && (foldSearchText(ad.phoneNumber).includes(searchTerm) || (phoneDigitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(ad.phoneNumber || '') || '').includes(phoneDigitsTerm)))) ||
         foldSearchText(ad.serialNumber).includes(searchTerm) ||
         foldSearchText(page?.name).includes(searchTerm) ||
         foldSearchText(ad.metaAdId).includes(idTerm) ||
@@ -24556,6 +24562,7 @@ function normalizeCustomerPhoneKey(value) {
 
   // International call-prefix spelling (00218...) is the same as +218....
   if (digits.startsWith('00')) digits = digits.slice(2);
+  if (/^0218\d{8,9}$/.test(digits)) digits = digits.slice(1);   // "0218 91…" spelling
   if (digits.startsWith('218')) {
     let national = digits.slice(3);
     if (national.startsWith('0')) national = national.slice(1);
@@ -24565,6 +24572,7 @@ function normalizeCustomerPhoneKey(value) {
   }
   if (/^09\d{8}$/.test(digits)) return `218${digits.slice(1)}`;
   if (/^9\d{8}$/.test(digits)) return `218${digits}`;
+  if (/^0[1-8]\d{7,8}$/.test(digits)) return `218${digits.slice(1)}`;  // landlines: 021 333 4455
   return digits;
 }
 
@@ -25355,19 +25363,9 @@ function getCustomerStats(customerId, statsIndex = null) {
   // can invent LYD credit even when the USD balance is exactly settled.
   let totalSpentLYD = 0;
   
-  // Standalone unpaid-receipt debt. Paid comes only from paid receipts and
-  // Spent only from ads, so a Not Paid receipt whose promised money is not
-  // committed to any ad (a plain delivery/in-shop debt) appeared in NO
-  // customer total: the card showed 0/0/+0 while the receipts view showed
-  // "Customer debt", and the "Has debt" filter missed the customer. Count the
-  // UNCOMMITTED remainder of each debt receipt exactly once:
-  //  - getReceiptCollectionTarget is the shared capacity read model
-  //    (stored debt -> receipt amounts -> linked-ads derivation);
-  //  - a 'linked_ads' target lives entirely on unpaid ads already counted in
-  //    Spent above, so the receipt itself must contribute nothing;
-  //  - money committed to ads from this receipt's due pool
-  //    (getDeliveryReceiptDueUsage.usedDueUSD) also surfaces as ad spend, so
-  //    only the remainder may be added — the same dollars never count twice.
+  // Standalone unpaid-receipt debt: count each debt receipt's UNCOMMITTED
+  // remainder once (target from getReceiptCollectionTarget; a 'linked_ads'
+  // target and money already committed to ads are counted in Spent).
   let receiptDebtUSD = 0;
   let receiptDebtLYD = 0;
   customerReceipts.forEach(receipt => {
@@ -26021,8 +26019,8 @@ function showPageDuplicates(focusPageId, triggerButton) {
 
 function getCustomerSortValue(customer, sortType, statsIndex = null) {
   // Date sorts never touch stats — skip the expensive computation entirely.
-  if (sortType === 'newest') return new Date(customer.joinDate).getTime();
-  if (sortType === 'oldest') return -new Date(customer.joinDate).getTime();
+  if (sortType === 'newest') return Number(customer._created) || Date.parse(customer.joinDate) || 0;
+  if (sortType === 'oldest') return -(Number(customer._created) || Date.parse(customer.joinDate) || 0);
 
   const stats = getCustomerStats(customer.id, statsIndex);
 
@@ -26918,7 +26916,7 @@ function buildWhatsAppLink(phone) {
   const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
   const e164 = key || normalizePhoneToE164(phone);
   const digits = String(e164 || '').replace(/[^\d]/g, '');
-  if (!digits) return '';
+  if (!digits || digits.startsWith('0') || digits.length < 8) return '';   // wa.me/0… is a dead link, not a reminder
   return `https://wa.me/${digits}`;
 }
 
@@ -26995,7 +26993,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `الهاتف: ${phone}`,
     `مكان التوصيل: ${place}`,
     `المندوب: ${driverName}`,
-    `المبلغ المطلوب تحصيله: ${money}`,
+    `المبلغ المطلوب تحصيله: \u2068${money}\u2069`,  // isolated so the ')' stays put in RTL text
     `رسوم التوصيل: ${deliveryFee.toFixed(2)} LYD`,
     'الحالة: غير مدفوع',
     `ملاحظات: ${instructions}`,
@@ -31407,20 +31405,9 @@ function removeTopUp(index) {
   renderModal();
 }
 
-// ==========================================
-// HTTP 409 DISAMBIGUATION (atomic money endpoints)
-// ==========================================
-// The server reuses status 409 for two very different refusals:
-//   1. Optimistic-lock version conflicts — the detail always starts with
-//      "Conflict:" ("Conflict: ad has changed", "Conflict: source receipt
-//      has changed", ...). Only these mean "someone else changed it".
-//   2. Business-rule refusals ("A terminal or refunded ad cannot be
-//      edited/stopped", "Idempotency key was already used", ...).
-// The catches used to label EVERY 409 as "changed on another device", which
-// sent a single-user admin chasing a phantom concurrent editor and told them
-// to refresh — advice that can never fix a rule refusal. Keep the conflict
-// wording strictly for case 1 and surface the server's real reason
-// (localized where known) for everything else.
+// HTTP 409 disambiguation: only a detail starting with "Conflict:" is a
+// version conflict; every other 409 is a rule refusal and must show the
+// server's real reason instead of "changed on another device".
 function isVersionConflict409(error) {
   return error?.status === 409 && /^conflict:/i.test(String(error?.message || '').trim());
 }
@@ -31669,14 +31656,8 @@ async function saveRefund() {
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
 
-  // The refunded money must actually RETURN in the books, and this must be
-  // IDEMPOTENT: re-opening and re-saving a refund (or changing its amount, or
-  // flipping Pending→Refunded) must reconcile to the SAME end-state — never
-  // subtract again from the already-reduced allocations. We snapshot the
-  // pre-refund allocations ONCE (refundAllocationBaseline) and always rebuild
-  // the target from that untouched baseline, mirroring confirmStopAd.
-  // Previously each re-save re-subtracted refundAmount, fabricating spendable
-  // receipt balance the customer never got back.
+  // Refunds are IDEMPOTENT: the target is always rebuilt from the frozen
+  // refundAllocationBaseline (mirrors confirmStopAd), never re-subtracted.
   // Reduce a frozen baseline array by `amount` from the tail; returns the
   // rebuilt array and how much refund is still unspent.
   const _reduceFromBaseline = (baseline, amount) => {
@@ -32876,7 +32857,7 @@ if (!window.__albayanSafeRecordActionsBound) {
     const recordId = String(actionEl.dataset.recordId || '');
     if (!Security.isValidRecordId(recordId)) {
       event.preventDefault();
-      showNotification('Invalid Record', 'This record identifier is not allowed.', 'error');
+      showNotification(state.language === 'ar' ? 'سجل غير صالح' : 'Invalid Record', state.language === 'ar' ? 'معرّف السجل غير مسموح به.' : 'This record identifier is not allowed.', 'error');
       return;
     }
     switch (actionEl.dataset.recordAction) {
@@ -33897,16 +33878,9 @@ async function _saveReceiptFromModalInner() {
     }
   }
 
-  // The delivery workflow is DRIVER-owned once a mission is underway or done.
-  // The derivation above rebuilds it from the form's status/collection inputs
-  // on EVERY save, so an office edit that touched nothing but the phone
-  // number on a Delivered (or In Progress) receipt silently reset it to
-  // Office, unassigned the driver and cleared the delivery-collected flag.
-  // When the status itself is unchanged, echo the stored workflow verbatim —
-  // the same edit-echo rule that fixed receiptType. A deliberate status
-  // change (e.g. Paid -> Canceled) still runs the derivation.
-  // A driver-canceled job is driver-owned too: re-deriving it would silently
-  // re-queue the delivery (and the server refuses that for staff editors).
+  // Driver-owned workflow (Delivered / In Progress / Canceled): an unchanged
+  // status echoes the stored values instead of re-deriving them (a phone edit
+  // used to reset a delivered job to Office or re-queue a canceled one).
   const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
   if (editTarget && status === String(editTarget.status || '')
       && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')) {
@@ -37272,12 +37246,13 @@ function renderAdFundingList() {
 
   // Prefer latest receipts first (serialNumber desc if numeric, otherwise createdAt desc)
   receipts.sort((a, b) => {
-    const aSerial = parseInt(String(a.serialNumber || ''), 10);
-    const bSerial = parseInt(String(b.serialNumber || ''), 10);
-    if (Number.isFinite(aSerial) && Number.isFinite(bSerial)) return bSerial - aSerial;
-    const aTime = new Date(a.createdAt || a.startDate || 0).getTime();
-    const bTime = new Date(b.createdAt || b.startDate || 0).getTime();
-    return bTime - aTime;
+    // Time first, numeric tail second: "S7" vs "7" vs "50" used to make the
+    // comparator order-dependent, so the picker's order changed with live sync.
+    const aTime = new Date(a.createdAt || a.startDate || 0).getTime() || 0;
+    const bTime = new Date(b.createdAt || b.startDate || 0).getTime() || 0;
+    if (bTime !== aTime) return bTime - aTime;
+    const tail = r => Number((String(r.serialNumber || '').match(/(\d+)$/) || [])[1] || 0);
+    return tail(b) - tail(a);
   });
   
   if (!customerId) {
@@ -38694,11 +38669,11 @@ function renderModal() {
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'البداية' : 'Start'}</label>
-                  <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? adData.startDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
+                  <input type="date" id="ad-start-date" value="${Security.escapeHtml(adData.startDate ? _localDateInputValue(adData.startDate) : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'النهاية' : 'End'}</label>
-                  <input type="date" id="ad-end-date" value="${Security.escapeHtml(adData.endDate ? adData.endDate.split('T')[0] : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
+                  <input type="date" id="ad-end-date" value="${Security.escapeHtml(adData.endDate ? _localDateInputValue(adData.endDate) : getTodayDateString())}" class="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 px-2 py-2 rounded-lg text-sm" onchange="updateAdDays()" />
                 </div>
                 <div>
                   <label class="block text-xs text-slate-500 mb-1">${isArAd ? 'الأيام' : 'Days'}</label>
@@ -40743,6 +40718,18 @@ async function applyLocalReceiptSettle(liveAd, pools) {
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
+// "YYYY-MM-DD" of the LOCAL day of a stored value. Meta-imported ads store
+// full UTC timestamps (a 00:00 Tripoli start is 22:00Z the day before); the
+// old split('T')[0] showed that earlier UTC day and an untouched save kept it.
+function _localDateInputValue(value) {
+  if (!value) return '';
+  const raw = String(value);
+  if (!raw.includes('T') || /T00:00:00(\.000)?Z$/.test(raw)) return raw.slice(0, 10);  // the app's own encoding: a plain day
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw.slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
   // Clothes saves can finish after Cancel followed by another form. The
@@ -41002,16 +40989,9 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
-      // ROOT-CAUSE FIX (false "Ad Changed" toast, part 1): live-sync REPLACES
-      // objects inside state.ads, so state.modalData is a snapshot detached at
-      // modal-OPEN time. A legitimate server-side bump while the modal is open
-      // (a receipt settlement cascading into its linked ads, a customer merge,
-      // another tab) left the snapshot's _lastModified stale and made this
-      // save 409 against a version nobody was editing. Re-point modalData at
-      // the CURRENT record so the optimistic-lock baseline — and every stored
-      // value preserved through this save (spentUSD, editHistory, top-up
-      // baselines, prior amountAdjustments…) — is read at SAVE time. Real
-      // concurrent edits are still caught by the server's row lock.
+      // Live-sync replaces objects in state.ads, so re-point modalData at the
+      // CURRENT record: the lock baseline and preserved fields are read at
+      // save time (server-side cascades bumped the version while open).
       if (isEdit && state.modalData?.id) {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
         if (liveAd) state.modalData = liveAd;
@@ -42116,7 +42096,7 @@ async function handleModalSubmit() {
       const duplicatePage = (state.pages || []).find(p =>
         p && !p._deleted &&
         String(p.id) !== editingPageId &&
-        String(p.name || '').trim().toLowerCase() === pageName.toLowerCase()
+        foldSearchText(String(p.name || '').trim()) === foldSearchText(pageName)   // ة/ه, ى/ي, hamza forms are one name
       );
       if (duplicatePage) {
         if (isCurrentUserAdmin()) {
@@ -44867,7 +44847,8 @@ async function updateLiquidityTrackingStart(value) {
     render();
     return;
   }
-  const parsed = new Date(String(value || ''));
+  const _ymd = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const parsed = _ymd ? new Date(Number(_ymd[1]), Number(_ymd[2]) - 1, Number(_ymd[3])) : new Date(String(value || ''));  // local midnight, not UTC
   if (!value || Number.isNaN(parsed.getTime())) {
     showNotification(
       isAr ? 'خطأ في الإدخال' : 'Validation',
@@ -44931,18 +44912,10 @@ function printReceiptCard(btn) {
   const receiptId = card.getAttribute('data-receipt-id') || '';
   card.classList.add('print-target');
   document.body.classList.add('print-single');
-  // Phones don't block on window.print(): the native print sheet stays open
-  // while page JS keeps running, afterprint fires during pagination (sheet
-  // still up), and WebKit/Blink re-paginate from the LIVE DOM whenever the
-  // user picks a printer or changes paper/range in that sheet. The old
-  // afterprint/3s-timer cleanup therefore unmarked the card mid-preview and
-  // a re-paginated print regressed to the full Receipts page. Same fix as
-  // printClothesOrderSlip: re-apply the print marks on every beforeprint
-  // pass, and only tear down on the first user interaction with the page —
-  // impossible while the native sheet covers it — with a long timer as the
-  // last-resort fallback for webviews that fire no print events at all.
-  // Harmless meanwhile: every .print-single/.print-target rule lives inside
-  // @media print, so the lingering marks have zero on-screen effect.
+  // Phones re-paginate from the live DOM while the print sheet is open, so
+  // the print marks are re-applied on every beforeprint and torn down only
+  // on the first user interaction (long timer fallback); the marks live in
+  // @media print, so lingering is harmless on screen.
   const applyPrintMarkup = () => {
     if (!card.isConnected && receiptId) {
       const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
@@ -45059,6 +45032,7 @@ function exportData() {
   exportState.users = filterVisible(exportState.users);
   exportState.exchangeRateHistory = filterVisible(exportState.exchangeRateHistory);
   exportState.logs = filterVisible(exportState.logs);
+  if (Array.isArray(exportState.dollarPurchases)) exportState.dollarPurchases = filterVisible(exportState.dollarPurchases);
   exportState.walletTransactions = filterVisible(exportState.walletTransactions);
   exportState.serviceSubscriptions = filterVisible(exportState.serviceSubscriptions);
   exportState.clothesProducts = filterVisible(exportState.clothesProducts);
@@ -45570,6 +45544,8 @@ function importData() {
         state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
         state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
         state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
+        // The FIFO dollar ledger prices every ad's spend; a pre-feature backup keeps the device's ledger.
+        if (Array.isArray(sanitizedImport.dollarPurchases)) state.dollarPurchases = sanitizedImport.dollarPurchases;
         // Restore the liquidity tracking config from the backup, but keep the
         // device's current value when importing a pre-feature backup file.
         if (Array.isArray(sanitizedImport.appSettings)) state.appSettings = sanitizedImport.appSettings;

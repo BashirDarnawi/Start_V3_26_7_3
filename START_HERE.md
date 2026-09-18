@@ -12,7 +12,7 @@ and dark mode.
   `src/manifest.json`. `npm run build` generates `script.js`, lazy bundles
   (`studio.js`, `clothes.js`), and Tailwind CSS. Never edit generated bundles.
   `index.html` and `style.css` remain editable root files.
-- **Backend:** `server/` — Python FastAPI + PostgreSQL (SQLite for dev).
+- **Backend:** `server/` — Python FastAPI + PostgreSQL (SQLite for dev with `ALBAYAN_ALLOW_SQLITE=true`).
   Serves the frontend and a JSON API with cookie-session login.
 - **Two data modes, detected automatically at startup:**
   - *Server mode* — the app is served by the backend; all devices share the

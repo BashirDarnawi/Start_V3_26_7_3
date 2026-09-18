@@ -1079,7 +1079,7 @@ if (!window.__albayanSafeRecordActionsBound) {
     const recordId = String(actionEl.dataset.recordId || '');
     if (!Security.isValidRecordId(recordId)) {
       event.preventDefault();
-      showNotification('Invalid Record', 'This record identifier is not allowed.', 'error');
+      showNotification(state.language === 'ar' ? 'سجل غير صالح' : 'Invalid Record', state.language === 'ar' ? 'معرّف السجل غير مسموح به.' : 'This record identifier is not allowed.', 'error');
       return;
     }
     switch (actionEl.dataset.recordAction) {
@@ -2100,16 +2100,9 @@ async function _saveReceiptFromModalInner() {
     }
   }
 
-  // The delivery workflow is DRIVER-owned once a mission is underway or done.
-  // The derivation above rebuilds it from the form's status/collection inputs
-  // on EVERY save, so an office edit that touched nothing but the phone
-  // number on a Delivered (or In Progress) receipt silently reset it to
-  // Office, unassigned the driver and cleared the delivery-collected flag.
-  // When the status itself is unchanged, echo the stored workflow verbatim —
-  // the same edit-echo rule that fixed receiptType. A deliberate status
-  // change (e.g. Paid -> Canceled) still runs the derivation.
-  // A driver-canceled job is driver-owned too: re-deriving it would silently
-  // re-queue the delivery (and the server refuses that for staff editors).
+  // Driver-owned workflow (Delivered / In Progress / Canceled): an unchanged
+  // status echoes the stored values instead of re-deriving them (a phone edit
+  // used to reset a delivered job to Office or re-queue a canceled one).
   const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
   if (editTarget && status === String(editTarget.status || '')
       && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')) {
@@ -5475,12 +5468,13 @@ function renderAdFundingList() {
 
   // Prefer latest receipts first (serialNumber desc if numeric, otherwise createdAt desc)
   receipts.sort((a, b) => {
-    const aSerial = parseInt(String(a.serialNumber || ''), 10);
-    const bSerial = parseInt(String(b.serialNumber || ''), 10);
-    if (Number.isFinite(aSerial) && Number.isFinite(bSerial)) return bSerial - aSerial;
-    const aTime = new Date(a.createdAt || a.startDate || 0).getTime();
-    const bTime = new Date(b.createdAt || b.startDate || 0).getTime();
-    return bTime - aTime;
+    // Time first, numeric tail second: "S7" vs "7" vs "50" used to make the
+    // comparator order-dependent, so the picker's order changed with live sync.
+    const aTime = new Date(a.createdAt || a.startDate || 0).getTime() || 0;
+    const bTime = new Date(b.createdAt || b.startDate || 0).getTime() || 0;
+    if (bTime !== aTime) return bTime - aTime;
+    const tail = r => Number((String(r.serialNumber || '').match(/(\d+)$/) || [])[1] || 0);
+    return tail(b) - tail(a);
   });
   
   if (!customerId) {

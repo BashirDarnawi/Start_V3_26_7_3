@@ -1,14 +1,6 @@
-// ==========================================
-// ALBAYAN MANAGER PHONE SHELL (2026-09 design refresh)
-// ==========================================
-// The "Albayan Studio" design gives the manager a phone-first shell: a home
-// hero with quick actions, a bottom tab bar with a centre "+", a More page,
-// a Collect-a-debt flow with WhatsApp reminders, appearance rows in Settings
-// and a one-time onboarding on the packaged app. Every piece here delegates
-// to the EXISTING flows (receipt chooser, collect modal, customer receipts,
-// theme/language toggles, logout) — nothing about money or permissions is
-// re-implemented, only presented the new way. Desktop keeps the sidebar and
-// simply shares the same cards.
+// ALBAYAN MANAGER PHONE SHELL (2026-09): phone-first home hero, tab bar,
+// More page, Collect-a-debt with WhatsApp reminders, onboarding. Everything
+// delegates to the EXISTING flows; no money or permission logic lives here.
 
 // ---------- small shared helpers ----------
 
@@ -193,7 +185,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
   const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
   const inWindow = (value, from, to) => { const ts = new Date(value || 0).getTime(); return Number.isFinite(ts) && ts >= from && ts < to; };
-  const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r));
+  const revenueReceipts = (Array.isArray(receipts) ? receipts : []).filter(r => r && !isTransferInReceipt(r) && r.receiptType !== 'CARRIED_BALANCE');
   // "Collected this month" is about when the money came in, not when the
   // receipt was written (a debt collected on the 3rd counts on the 3rd).
   const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;
@@ -310,7 +302,7 @@ function shellDebtorRows() {
     const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
     let oldest = null;
     unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
-    const ageDays = oldest === null ? null : Math.max(0, Math.floor((now - oldest) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
+    const ageDays = oldest === null ? null : Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(oldest).setHours(0, 0, 0, 0)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
     const lyd = Number(stats.balanceLYD);
     const dueLyd = Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
     rows.push({
@@ -432,7 +424,7 @@ function remindDebtor(customerId) {
   }
   // wa.me needs international digits; the normaliser knows Arabic digits and 09… numbers.
   const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
-  const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
+  const base = (digits && !digits.startsWith('0') && digits.length >= 8) ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
   if (!base) {
     showNotification(shellText('Phone number not readable', 'رقم الهاتف غير مقروء'), shellText('Check this customer\'s phone number, then try again.', 'تحقق من رقم هاتف هذا العميل ثم حاول مرة أخرى.'), 'warning');
     return;
