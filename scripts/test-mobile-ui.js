@@ -1461,7 +1461,7 @@ check('server-mode shipments move stock through the transactional route and vali
 
 check('money boxes keep thousands separators, WhatsApp links use international digits, campaign actions replay safely',
   forms.includes("const grouped = /^\\s*\\d{1,3}(,\\d{3})+(\\.\\d*)?\\s*$/.test(val);") &&
-  forms.includes("val = val.replace(/[٫،]/g, '.');") &&
+  forms.includes("val = val.replace(/٫/g, '.');") && forms.includes("normalizeDigitsAscii(val).replace(/،/g, ',')") &&
   helpers.includes("const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';") &&
   helpers.includes("(searchPhoneKey && entry.key === searchPhoneKey)") &&
   views.includes('href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}"') &&

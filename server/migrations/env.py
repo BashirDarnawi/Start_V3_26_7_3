@@ -34,10 +34,20 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+_METADATA_INDEX_NAMES = {
+    str(index.name) for table in target_metadata.tables.values() for index in table.indexes
+}
+
+
 def _include_name(name, type_, parent_names):
     # Startup-created performance/uniqueness indexes live outside the
-    # migration history on purpose; autogenerate must not propose dropping them.
-    if type_ == "index" and str(name or "").startswith(("idx_", "uq_", "entities_")):
+    # migration history on purpose; autogenerate must not propose dropping
+    # them. Indexes the metadata itself declares are still compared.
+    if (
+        type_ == "index"
+        and str(name or "") not in _METADATA_INDEX_NAMES
+        and str(name or "").startswith(("idx_", "uq_", "entities_"))
+    ):
         return False
     return True
 

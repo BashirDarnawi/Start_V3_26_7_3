@@ -82,6 +82,7 @@ function applyClothesOrderMutationResponse(response) {
 // the local one (Libya is UTC+2, so 00:30 used to display as "yesterday").
 function clothesLocalDate(value) {
   if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value);
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return String(value).split('T')[0] || '';
   const pad = number => String(number).padStart(2, '0');

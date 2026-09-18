@@ -14099,6 +14099,8 @@ function resetAuthenticatedServerCaches() {
   // Module caches (hub/wallet/Control Center) must not survive sign-out.
   try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}
   try { if (typeof _walletPayMethods !== 'undefined') { _walletPayMethods = null; _walletPayRate = null; } } catch (_) {}
+  try { if (typeof _chargeWalletIdem !== 'undefined') _chargeWalletIdem = { fingerprint: '', key: '' }; } catch (_) {}
+  try { if (typeof _adsStudioChargeIdem !== 'undefined') _adsStudioChargeIdem = { fingerprint: '', key: '' }; } catch (_) {}
   try {
     if (typeof _controlCenter === 'object' && _controlCenter) {
       _controlCenter.operations = null; _controlCenter.meta = null; _controlCenter.loadedAt = 0; _controlCenter.error = '';
@@ -22678,7 +22680,7 @@ const _chargeWallet = { amountText: '50', currency: 'LYD', method: '', busy: fal
 // One key per (amount, currency, method) until created: retries replay, never duplicate.
 let _chargeWalletIdem = { fingerprint: '', key: '' };
 function chargeWalletIdemKey(amountMinor, currency, method) {
-  const fingerprint = `${amountMinor}|${currency}|${method}`;
+  const fingerprint = `${state.currentUser?.id || ''}|${amountMinor}|${currency}|${method}`;
   if (_chargeWalletIdem.fingerprint !== fingerprint) {
     _chargeWalletIdem = { fingerprint, key: Security.generateSecureId('paycreate') };
   }
@@ -37023,7 +37025,7 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
   // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
   // decimal separator too — dropping it turned "12،5" into "125" (10x error).
-  val = normalizeDigitsAscii(val);
+  val = normalizeDigitsAscii(val).replace(/،/g, ',');
   // Commas next to a dot or in groups of three ("1,250") are thousands
   // separators; only "12,5" is a decimal. "1,250" used to save as 1.25.
   if (val.includes(',')) {
@@ -37031,7 +37033,7 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
     if (val.includes('.') || grouped) val = val.split(',').join('');
     else val = val.replace(',', '.');
   }
-  val = val.replace(/[٫،]/g, '.');
+  val = val.replace(/٫/g, '.');
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;

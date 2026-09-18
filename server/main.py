@@ -65,7 +65,7 @@ ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().low
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, now_ms
-from .rbac import VALID_USER_ROLES, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
+from .rbac import VALID_USER_ROLES, _load_permissions, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
 from .backfills import (
     backfill_covered_settled_receipts,
     backfill_customer_names,
@@ -10891,6 +10891,44 @@ def _customer_merge_write_row(
     }
 
 
+_CUSTOMER_MERGE_LINK_COLLECTIONS = ("receipts", "ads", "pages")  # canonical lock order; customers last
+
+
+def _customer_merge_linked_ids(conn: Any, duplicate_id: str, keep_id: str) -> dict[str, list[str]]:
+    """Ids of every page/receipt/ad row the merge would rewrite (media-stripped).
+
+    Runs BEFORE any row lock (discovery) and again AFTER the customer locks
+    (verification). Same projection as the money scans, so no photos travel to
+    Python; deleted rows are included on purpose (tombstones are rewritten
+    too). The "would change" decision reuses _rewrite_customer_references, so
+    nested history keys are found exactly as the write path finds them. Rows
+    read here are NEVER written back: they lack their images.
+    """
+    dialect = str(get_engine().dialect.name or "")
+    found: dict[str, list[str]] = {name: [] for name in _CUSTOMER_MERGE_LINK_COLLECTIONS}
+    for collection in _CUSTOMER_MERGE_LINK_COLLECTIONS:
+        data_expression = "data_json"
+        if INLINE_MEDIA_FIELDS.get(collection):
+            projection = _inline_media_sql_projection(collection, dialect)
+            if projection is None:
+                raise RuntimeError(
+                    f"Inline-media projection is unavailable for database dialect {dialect!r}"
+                )
+            data_expression = projection[0]
+        rows = conn.execute(
+            text(f"SELECT id,{data_expression} AS data_json FROM entities WHERE type=:type ORDER BY id"),
+            {"type": collection},
+        ).mappings().all()
+        for row in rows:
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict):
+                continue
+            _rewritten, changed = _rewrite_customer_references(data, duplicate_id, keep_id)
+            if changed:
+                found[collection].append(str(row["id"]))
+    return found
+
+
 def _merge_customers_atomic(
     actor: dict[str, Any], body: CustomerMergeRequest
 ) -> dict[str, Any]:
@@ -10902,9 +10940,29 @@ def _merge_customers_atomic(
     idem = sanitize_str(body.idempotencyKey, 120)
     request_hash = _customer_merge_request_hash(actor_id, body)
     postgres = str(get_engine().dialect.name or "") == "postgresql"
+    # SQLite: the merge rewrites receipt/ad rows, so it must hold the money
+    # guard as well (phone -> financial, the same order as upsert/patch).
     guard = nullcontext() if postgres else _SQLITE_CUSTOMER_PHONE_LOCK
+    money_guard = nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK
 
-    with guard:
+    def check_customers(keep_row: Any, duplicate_row: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        for row in (keep_row, duplicate_row):
+            if not row or bool(row["deleted"]):
+                raise HTTPException(status_code=404, detail="Customer not found")
+        if int(keep_row["last_modified"]) != int(body.expectedKeepLastModified):
+            raise HTTPException(status_code=409, detail="Conflict: customer to keep has changed")
+        if int(duplicate_row["last_modified"]) != int(body.expectedDuplicateLastModified):
+            raise HTTPException(status_code=409, detail="Conflict: duplicate customer has changed")
+        keep_data = json_loads(keep_row.get("data_json") or "{}") or {}
+        duplicate_data = json_loads(duplicate_row.get("data_json") or "{}") or {}
+        if not (_customer_phone_keys(keep_data) & _customer_phone_keys(duplicate_data)):
+            raise HTTPException(
+                status_code=409,
+                detail="Customers can only be merged when they share a phone number",
+            )
+        return keep_data, duplicate_data
+
+    with guard, money_guard:
         with db_conn() as conn:
             _lock_idempotency_key(
                 conn, idem, postgres=postgres, namespace="customerMerge"
@@ -10922,60 +10980,67 @@ def _merge_customers_atomic(
                     raise HTTPException(status_code=409, detail="Idempotency key was already used")
                 return _customer_merge_replay(conn, marker_data)
 
-            # Stable order prevents deadlocks when two admins choose opposite sides.
-            locked_customers: dict[str, Any] = {}
-            lock_suffix = " FOR UPDATE" if postgres else ""
-            for customer_id in sorted((keep_id, duplicate_id)):
-                row = conn.execute(
-                    text(
-                        "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
-                        "FROM entities WHERE type='customers' AND id=:id LIMIT 1" + lock_suffix
-                    ),
-                    {"id": customer_id},
-                ).mappings().first()
-                if not row or bool(row["deleted"]):
-                    raise HTTPException(status_code=404, detail="Customer not found")
-                locked_customers[customer_id] = row
+            # Fail fast on a stale request WITHOUT locks; re-checked under them.
+            check_customers(
+                _customer_merge_row(conn, "customers", keep_id),
+                _customer_merge_row(conn, "customers", duplicate_id),
+            )
 
+            # 1. Discover linked rows without locks, media-stripped.
+            discovered = _customer_merge_linked_ids(conn, duplicate_id, keep_id)
+
+            # 2. Money lock order: receipts -> ads -> pages, each sorted by id.
+            #    Locking the customers FIRST (the old order) deadlocked against
+            #    every money path, which locks receipts -> ads -> customers.
+            locked_rows: dict[str, dict[str, Any]] = {name: {} for name in _CUSTOMER_MERGE_LINK_COLLECTIONS}
+            for collection in _CUSTOMER_MERGE_LINK_COLLECTIONS:
+                for row_id in sorted(set(discovered[collection])):
+                    row = _clothes_lock_row(conn, collection, row_id, postgres=postgres)
+                    if row is not None:
+                        locked_rows[collection][row_id] = row
+
+            # 3. Customers LAST; the stable order still keeps two admins apart.
+            locked_customers: dict[str, Any] = {}
+            for customer_id in sorted((keep_id, duplicate_id)):
+                locked_customers[customer_id] = _clothes_lock_row(
+                    conn, "customers", customer_id, postgres=postgres
+                )
             keep_row = locked_customers[keep_id]
             duplicate_row = locked_customers[duplicate_id]
-            if int(keep_row["last_modified"]) != int(body.expectedKeepLastModified):
-                raise HTTPException(status_code=409, detail="Conflict: customer to keep has changed")
-            if int(duplicate_row["last_modified"]) != int(body.expectedDuplicateLastModified):
-                raise HTTPException(status_code=409, detail="Conflict: duplicate customer has changed")
-
-            keep_data = json_loads(keep_row.get("data_json") or "{}") or {}
-            duplicate_data = json_loads(duplicate_row.get("data_json") or "{}") or {}
-            if not (_customer_phone_keys(keep_data) & _customer_phone_keys(duplicate_data)):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Customers can only be merged when they share a phone number",
-                )
-
+            keep_data, duplicate_data = check_customers(keep_row, duplicate_row)
             merged_customer_data = _merge_customer_data(keep_data, duplicate_data)
             merged_customer_data["id"] = keep_id
 
-            linked_rows = conn.execute(
-                text(
-                    "SELECT type,id,data_json,deleted,created_at,created_by,last_modified "
-                    "FROM entities WHERE type IN ('pages','receipts','ads') "
-                    "ORDER BY type,id"
-                )
-            ).mappings().all()
+            # 4. Re-verify under the locks. A row that started referencing the
+            #    duplicate after discovery is not locked; never take a new
+            #    receipt/ad lock after the customer lock (that IS the deadlock
+            #    order) - return a retryable conflict instead.
+            current = _customer_merge_linked_ids(conn, duplicate_id, keep_id)
+            for collection in _CUSTOMER_MERGE_LINK_COLLECTIONS:
+                if set(current[collection]) - set(locked_rows[collection]):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Conflict: linked records changed during the merge; retry",
+                    )
+
+            # 5. Apply from the LOCKED, full rows (photos intact).
             updated: dict[str, list[dict[str, Any]]] = {
                 "pages": [], "receipts": [], "ads": []
             }
-            for row in linked_rows:
-                data = json_loads(row.get("data_json") or "{}") or {}
-                if not isinstance(data, dict):
-                    continue
-                data, changed = _rewrite_customer_references(
-                    data, duplicate_id, keep_id
-                )
-                if changed:
-                    if str(row["type"]) in {"receipts", "ads"}:
-                        assert_financial_period_open(str(row["type"]), data, conn=conn)
-                    updated[str(row["type"])].append(
+            for collection in _CUSTOMER_MERGE_LINK_COLLECTIONS:
+                for row_id in sorted(locked_rows[collection]):
+                    row = locked_rows[collection][row_id]
+                    data = json_loads(row.get("data_json") or "{}") or {}
+                    if not isinstance(data, dict):
+                        continue
+                    data, changed = _rewrite_customer_references(
+                        data, duplicate_id, keep_id
+                    )
+                    if not changed:
+                        continue  # re-pointed elsewhere before our lock landed
+                    if collection in {"receipts", "ads"}:
+                        assert_financial_period_open(collection, data, conn=conn)
+                    updated[collection].append(
                         _customer_merge_write_row(conn, row, data)
                     )
 
@@ -11339,9 +11404,8 @@ def _enforce_delivery_role_write_scope(
         cid = str((existing or {}).get("id") or "")
         if not cid or not _delivery_customer_is_referenced(cid, uid):
             raise HTTPException(status_code=403, detail="Forbidden")
-        return
-    if collection != "exchangeRateHistory":
-        raise HTTPException(status_code=403, detail="Forbidden")
+    # Other collections keep their own permission checks (a driver who is
+    # also a Studio subscriber may still delete their own draft).
 
 
 def _delivery_customer_is_referenced(customer_id: str, delivery_user_id: str) -> bool:
@@ -11565,9 +11629,14 @@ def create_collection_item(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     generic_data = sanitize_json(body.data or {}) or {}
-    if collection in {"ads", "receipts"} and not is_within_delivery_scope(user, generic_data):
-        # The transactional ad route already refuses this; the generic create
-        # must not be the way around it.
+    if (
+        collection in {"ads", "receipts"}
+        and str(user.get("role") or "").lower() == "delivery"
+        and str(generic_data.get("deliveryPersonId") or "")
+        and not is_within_delivery_scope(user, generic_data)
+    ):
+        # A driver may not create a job assigned to another driver through
+        # the generic route (the transactional ad route already refuses it).
         raise HTTPException(status_code=403, detail="Forbidden")
     protect_company_coverage_fields(collection, generic_data)
     if collection == "ads":
@@ -13774,17 +13843,20 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
             _need("resetPassword")
             # Setting someone's password IS taking over their account: a
             # delegated manager may never do that to a colleague who holds
-            # power the manager lacks.
-            try:
-                _ensure_actor_can_grant_permissions(
-                    admin, normalize_permissions(json_loads(existing.get("permissions_json") or "{}") or {}),
-                    explicit=False,
-                )
-            except HTTPException:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Cannot reset the password of a user who holds permissions you do not",
-                )
+            # power the manager lacks. Legacy rows are read tolerantly (retired
+            # names ignored). Delivery accounts are exempt: their grants are
+            # scoped to their own assignments, and resetting a driver's password
+            # is the everyday case for an office manager.
+            if str(existing.get("role") or "").lower() != "delivery":
+                try:
+                    _ensure_actor_can_grant_permissions(
+                        admin, _load_permissions(existing.get("permissions_json")), explicit=False
+                    )
+                except HTTPException:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Cannot reset the password of a user who holds permissions you do not",
+                    )
         if requested_role is not None and requested_role != str(existing.get("role") or ""):
             if _is_self:
                 raise HTTPException(status_code=403, detail="You cannot change your own role")

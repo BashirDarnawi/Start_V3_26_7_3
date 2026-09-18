@@ -154,6 +154,41 @@ def test_reset_password_cannot_take_over_a_more_powerful_colleague(ctx):
     client.cookies.clear()
 
 
+def test_reset_password_tolerates_legacy_rows_and_allows_drivers(ctx):
+    actor = ctx["emp_reset"]["cookies"]
+    # A colleague whose stored permissions carry a retired module name must
+    # not turn the check into a 500; with nothing the actor lacks it succeeds.
+    legacy = _mk_user(ctx["admin"], "EmpLegacy", "Employee", {})
+    with db_conn() as conn:
+        conn.execute(text("UPDATE users SET permissions_json=:p WHERE id=:id"),
+                     {"p": json_dumps({"retiredModule": ["view"], "receipts": ["view"]}), "id": legacy["id"]})
+    grant = client.patch(f"/api/users/{ctx['emp_reset']['id']}", json={"permissions": {"users": ["resetPassword"], "receipts": ["view"]}}, cookies=ctx["admin"])
+    assert grant.status_code == 200, grant.text
+    actor = _login(ctx["emp_reset"]["email"])
+    response = client.patch(f"/api/users/{legacy['id']}", json={"password": "LegacyReset!Secure99"}, cookies=actor)
+    assert response.status_code == 200, response.text
+    # Delivery accounts are exempt: their grants are scoped to their own jobs.
+    driver = client.patch(f"/api/users/{ctx['driver_b']['id']}", json={"password": "DriverReset!Secure99"}, cookies=actor)
+    assert driver.status_code == 200, driver.text
+    assert client.post("/api/auth/login", json={"email": ctx["driver_b"]["email"], "password": "DriverReset!Secure99"}).status_code == 200
+    client.cookies.clear()
+
+
+def test_driver_may_still_create_an_unassigned_receipt(ctx):
+    driver = _mk_user(ctx["admin"], "DriverC", "Delivery", {"deliveries": ["viewOwn"], "receipts": ["add"]})
+    response = client.post("/api/collections/receipts", json={"data": {
+        "customerId": ctx["c1"]["id"], "status": "Paid", "isPaid": True, "amountUSD": 5, "amountLocal": 25,
+        "exchangeRate": 5, "deliveryStatus": "Office",
+    }}, cookies=driver["cookies"])
+    assert response.status_code == 200, response.text
+    foreign = client.post("/api/collections/receipts", json={"data": {
+        "customerId": ctx["c1"]["id"], "status": "Not Paid", "deliveryStatus": "Needs Delivery",
+        "deliveryPersonId": ctx["driver_b"]["id"], "amountUSD": 5, "amountLocal": 25, "exchangeRate": 5,
+        "statusDetail": {"notPaidCollection": "delivery"},
+    }}, cookies=driver["cookies"])
+    assert foreign.status_code == 403, foreign.text
+
+
 def test_nobody_changes_their_own_role(ctx):
     me = ctx["emp_role"]
     response = client.patch(f"/api/users/{me['id']}", json={"role": "Delivery"}, cookies=me["cookies"])

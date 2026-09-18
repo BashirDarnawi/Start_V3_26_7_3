@@ -171,9 +171,13 @@ extra times (252 cases) with no flaky failure.
 
 ## Still open for the owner (round 2)
 
-1. **Customer merge lock order** can deadlock against a concurrent money
-   write on PostgreSQL (one request fails with 500, nothing corrupts).
-   Needs a careful reorder of the merge transaction.
+1. ~~Customer merge lock order~~ — fixed in the follow-up commit: the merge
+   now discovers linked rows with a media-stripped scan, locks receipts,
+   then ads, then pages, then the two customers (the same order as every
+   money path), re-verifies under the locks and returns a retryable 409 if a
+   link appeared meanwhile. Four tests in
+   `server/test_customer_merge_lock_order.py` pin the order, the money
+   conservation, the photo handling and the race.
 2. **Startup repair passes** run in full on every boot; consider a
    "done for this release" marker.
 3. **Backup now** runs inside the HTTP request (can exceed the 100 s edge
@@ -190,3 +194,18 @@ extra times (252 cases) with no flaky failure.
 8. The startup bundle sits ~5 KB under its 2.4 MiB budget and
    `server/main.py` is 111 lines under its cap: the next feature must
    lazy-load or extract something first.
+
+## Review of the fixes themselves
+
+An adversarial reviewer re-read every change from both rounds. It found and
+these were corrected before release: the password-reset guard could crash on
+a legacy permissions row and would have blocked managers from resetting
+drivers' passwords (now tolerant, and Delivery accounts are exempt because
+their grants are scoped to their own jobs); the alembic name filter would have hidden
+the metadata's own indexes; the charge-request idempotency key was not per
+user and survived sign-out; the driver delete guard reached collections that
+have their own checks; a driver holding `receipts.add` could no longer create
+an unassigned office receipt (only assigning a job to another driver is
+refused now); the Arabic comma did not follow the thousands rule; and the
+clothes date helper handled date-only values wrongly. The customer-merge
+lock-order fix landed in the same follow-up commit.

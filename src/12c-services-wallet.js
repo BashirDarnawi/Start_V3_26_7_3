@@ -456,7 +456,7 @@ const _chargeWallet = { amountText: '50', currency: 'LYD', method: '', busy: fal
 // One key per (amount, currency, method) until created: retries replay, never duplicate.
 let _chargeWalletIdem = { fingerprint: '', key: '' };
 function chargeWalletIdemKey(amountMinor, currency, method) {
-  const fingerprint = `${amountMinor}|${currency}|${method}`;
+  const fingerprint = `${state.currentUser?.id || ''}|${amountMinor}|${currency}|${method}`;
   if (_chargeWalletIdem.fingerprint !== fingerprint) {
     _chargeWalletIdem = { fingerprint, key: Security.generateSecureId('paycreate') };
   }

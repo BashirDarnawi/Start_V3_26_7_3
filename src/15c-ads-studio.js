@@ -708,7 +708,7 @@ async function adsStudioReloadCampaign(id) {
 // the admin's pending list.
 let _adsStudioChargeIdem = { fingerprint: '', key: '' };
 function adsStudioChargeIdemKey(amountMinor, method) {
-  const fingerprint = `${amountMinor}|${method}`;
+  const fingerprint = `${state.currentUser?.id || ''}|${amountMinor}|${method}`;
   if (_adsStudioChargeIdem.fingerprint !== fingerprint) {
     _adsStudioChargeIdem = { fingerprint, key: Security.generateSecureId('paycreate') };
   }

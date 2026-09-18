@@ -1763,6 +1763,8 @@ function resetAuthenticatedServerCaches() {
   // Module caches (hub/wallet/Control Center) must not survive sign-out.
   try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}
   try { if (typeof _walletPayMethods !== 'undefined') { _walletPayMethods = null; _walletPayRate = null; } } catch (_) {}
+  try { if (typeof _chargeWalletIdem !== 'undefined') _chargeWalletIdem = { fingerprint: '', key: '' }; } catch (_) {}
+  try { if (typeof _adsStudioChargeIdem !== 'undefined') _adsStudioChargeIdem = { fingerprint: '', key: '' }; } catch (_) {}
   try {
     if (typeof _controlCenter === 'object' && _controlCenter) {
       _controlCenter.operations = null; _controlCenter.meta = null; _controlCenter.loadedAt = 0; _controlCenter.error = '';
