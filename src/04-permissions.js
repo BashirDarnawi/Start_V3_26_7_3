@@ -412,6 +412,7 @@ function hasPermission(userId, module, action) {
 // Returns true when the permissions actually changed (callers use this to
 // schedule a re-render so a locked sidebar can recover without re-login).
 async function refreshCurrentUserPermissions() {
+  const sessionIdentityAtStart = typeof getServerSessionIdentity === 'function' ? getServerSessionIdentity() : undefined;
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
     const currentId = String(state.currentUser.id || '');
@@ -449,6 +450,9 @@ async function refreshCurrentUserPermissions() {
     }
   } catch (e) {
     console.warn('[Permissions] Failed to refresh:', e?.message || e);
+    if (e?.code === 'SERVER_SESSION_CHANGED' && typeof handleServerAuthExpired === 'function') {
+      handleServerAuthExpired(sessionIdentityAtStart);  // another tab signed in as someone else: tear this identity down
+    }
   }
   return false;
 }

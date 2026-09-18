@@ -5220,8 +5220,8 @@ def _worker_loop(stop_event: threading.Event | None = None, startup_cutoff: str 
                 or current - last_sync_monotonic
                 >= config.worker_sync_interval_seconds
             ):
+                last_sync_monotonic = current  # stamp first: a persistent failure waits the interval instead of retrying every 2 s
                 sync_due_meta_ads()
-                last_sync_monotonic = current
         except Exception:
             print("[albayan] Meta Ads background pass failed; it will retry.")
         stop.wait(2)

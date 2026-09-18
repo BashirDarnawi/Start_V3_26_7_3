@@ -48,21 +48,11 @@ function resetDirtyCollectionQueueForScopeChange() {
   idbSync.scopeGeneration += 1;
 }
 
-// ==========================================
-// SINGLE-WRITER TAB LOCK (multi-tab safety)
-// ==========================================
-// saveCollectionToIndexedDB rewrites whole collections from this tab's
-// in-memory arrays, so a second tab of the same origin silently overwrites
-// the first tab's records (last writer wins). BroadcastChannel and Web Locks
-// are Safari 15.4+ (above the iOS 15.0 baseline), so coordination uses
-// localStorage only: the newest tab claims the lock and older tabs stop
-// persisting until reloaded. A superseded tab deliberately never re-claims a
-// lock on its own (not even a stale one) — the other tab may have written to
-// IndexedDB, and resuming writes from this tab's stale arrays would recreate
-// the exact overwrite bug this lock exists to prevent. Reloading re-claims
-// the lock and re-reads fresh data through the normal init path. Expiry-by-
-// heartbeat (not unload cleanup) is the liveness signal because iOS kills
-// tabs without firing unload.
+// SINGLE-WRITER TAB LOCK: whole-collection IndexedDB rewrites from two tabs
+// would be last-writer-wins, so the newest tab claims a localStorage lock
+// (Safari 15 has no Web Locks) and older tabs stop persisting until reloaded;
+// a superseded tab never re-claims (its arrays may be stale); expiry is by
+// heartbeat because iOS kills tabs without firing unload.
 const TAB_LOCK_KEY = 'albayan_tab_lock';
 const TAB_LOCK_HEARTBEAT_MS = 5000;
 const _albayanTabLock = {
@@ -261,6 +251,11 @@ async function flushDirtyCollections() {
           console.warn('IndexedDB connection lost mid-flush — falling back to localStorage');
           db = null;
           saveState();
+          // onclose cannot run its reopen once db is null: reopen from here too.
+          if (typeof initIndexedDB === 'function') {
+            const recover = () => { if (typeof markAllCollectionsDirty === 'function') { markAllCollectionsDirty(); saveState(); } };
+            initIndexedDB(recover).then((reopened) => { if (reopened) recover(); }).catch(() => {});
+          }
           return;
         }
         console.warn(`IndexedDB save failed for "${name}":`, e);
@@ -382,10 +377,15 @@ function saveState() {
     // Deleting them here with no IndexedDB would leave business data in
     // memory only, and it would vanish on the next reload.
     const serverBacked = (typeof isServerModeEnabled === 'function') && isServerModeEnabled();
+    delete toSave._collectionsInline;  // never re-emit a marker loaded from an older snapshot
     if (db || serverBacked) {
       for (const key of PERSISTED_COLLECTIONS) {
         delete toSave[key];
       }
+    } else if (window.__albayanIdbOpenInconclusive !== true) {
+      // This snapshot is the newest copy: the next startup must prefer it over IndexedDB.
+      // (An inconclusive open loaded nothing, so its empty arrays must never win.)
+      toSave._collectionsInline = Date.now();
     }
     // The studio shell must never rewrite the manager's remembered page.
     if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL) {
@@ -518,6 +518,9 @@ function loadState() {
       for (const key of PERSISTED_COLLECTIONS) {
         legacyCollections[key] = Array.isArray(sanitizedData[key]) ? sanitizedData[key] : null;
       }
+      // Stamped only by a save that ran while IndexedDB was unavailable: that snapshot is the newest copy.
+      legacyCollections._collectionsInline = !!sanitizedData._collectionsInline;
+      delete sanitizedData._collectionsInline;
       // Do not merge large collections from localStorage into runtime state (they belong in IndexedDB)
       for (const key of PERSISTED_COLLECTIONS) delete sanitizedData[key];
       
@@ -675,7 +678,11 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
       }
     }
 
-    if (loaded !== null && loaded !== undefined) {
+    if (legacy._collectionsInline && Array.isArray(legacy[name]) && legacy[name].length) {
+      // Edits made while IndexedDB was unavailable live only in the snapshot: a non-empty copy wins and is re-persisted.
+      state[name] = legacy[name];
+      if (db) await saveCollectionToIndexedDB(name, state[name]);
+    } else if (loaded !== null && loaded !== undefined) {
       state[name] = loaded;
     } else if (Array.isArray(legacy[name])) {
       // Legacy migration path: seed IndexedDB from localStorage snapshot

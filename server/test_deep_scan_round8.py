@@ -188,7 +188,8 @@ def test_an_account_with_open_campaigns_cannot_be_soft_deleted_and_a_passed_star
     latest = client.get(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies).json()
     approved = _review_campaign(studio_actors, cid, latest["lastModified"], "Approved", f"r8-open-approve-{TAG}")
     assert approved.status_code == 200, approved.text
-    assert approved.json()["data"]["startDate"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from server.operations import _business_today
+    assert approved.json()["data"]["startDate"] == _business_today().strftime("%Y-%m-%d")  # the Libya day, not the UTC day
     with db_conn() as conn:  # staff marked it live on Meta
         row = conn.execute(text("SELECT data_json FROM entities WHERE id=:id"), {"id": cid}).mappings().one()
         data = json_loads(row["data_json"]); data["publishStatus"] = "live"

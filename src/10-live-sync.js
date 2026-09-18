@@ -1794,7 +1794,7 @@ async function wipeAuthenticatedServerDataFromClient() {
   state.serverLogs = [];
   state.serverLogsLoadedAt = 0;
   if (!db) return;
-  const writes = collections.map(name => saveCollectionToIndexedDB(name, []));
+  const writes = collections.map(name => saveCollectionToIndexedDB(name, [], { force: true }));  // a lost tab lock must not keep the signed-out data
   writes.push(clearIndexedDBLogs());
   await Promise.allSettled(writes);
 }

@@ -1684,39 +1684,11 @@ function getPaymentTotalsFromDom(root) {
   return { totalR1, totalR2 };
 }
 
-/**
- * Save a receipt from the modal form (create new or update existing).
- * 
- * This is the MAIN RECEIPT SAVE LOGIC - handles all receipt types:
- *   - Regular receipts (Paid, Not Paid - Office collection)
- *   - Delivery receipts (Not Paid - Delivery collection)
- *   - Temp delivery receipts (D1, D2, etc. assigned to drivers)
- *   - Refund receipts
- *   - Lost/Canceled receipts
- * 
- * Critical Validations:
- *   1. Customer must be selected
- *   2. Receipt number required (except for Not Paid status)
- *   3. Receipt number must be unique and valid (digits only, no leading zeros)
- *   4. Temp delivery receipts (D#) must have a driver assigned
- *   5. Delivery fee required for delivery receipts
- *   6. Amounts must be positive numbers
- * 
- * Special Flows:
- *   - Not Paid + Delivery: Creates temp receipt (D#) assigned to driver
- *   - Server generates D# if not provided (multi-user safe)
- *   - Paid + Delivery: Normal receipt with driver info (already collected)
- * 
- * Server Sync:
- *   - Uses apiCreateEntity() for new receipts
- *   - Server returns authoritative data (including generated D# numbers)
- *   - Frontend shows success only after server confirmation
- * 
- * Error Handling:
- *   - Validation errors: Show toast + highlight field
- *   - Server errors: Show detailed message from server
- *   - Rollback not needed (optimistic update only after server confirms)
- */
+/** Save a receipt from the modal form (create or update). Handles every receipt
+ * type (paid, not-paid office/delivery, temp D# delivery, refund, lost/canceled);
+ * validates the customer, a unique digits-only receipt number, a driver for D#,
+ * the delivery fee and positive amounts; not-paid delivery creates a temp
+ * receipt (the server generates D#); server data is authoritative on sync. */
 // Reentrancy guard: saving awaits a network call in server mode, and a second
 // click while the first is in flight created a SECOND receipt (the duplicate-
 // serial check passes for both because the first hasn't landed in state yet).

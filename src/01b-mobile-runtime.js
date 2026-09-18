@@ -167,7 +167,8 @@ async function retryMobileConnection() {
   removeMobileConnectionGate();
   if (typeof state !== 'undefined' && state.currentUser) {
     try {
-      if (typeof serverLiveSyncOnce === 'function') await serverLiveSyncOnce();
+      if (typeof serverLiveSyncTick === 'function') await serverLiveSyncTick();  // the tick keeps the in-flight guard and backoff
+      if (typeof _serverLiveSync !== 'undefined' && Number(_serverLiveSync.failStreak || 0) > 0) throw new Error('sync failed');  // the tick swallows its own errors
     } catch (_) {
       showMobileConnectivityNotice({ serverReachable: false });
       return false;
@@ -369,30 +370,12 @@ async function setupMobileRuntime() {
   }
 }
 
-// ==========================================
-// PHONE BROWSER BACK + OVERLAY HISTORY MODEL
-// ==========================================
-// DESIGN:
-// 1) Tracked #app-modal dialogs push a ?modal=&id= entry on open
-//    (updateUrlParams stamps it { albayanModal: true }); every OTHER
-//    standalone surface (photo viewer, confirm dialogs, command palette) gets
-//    one same-URL sentinel entry ({ overlaySentinel: true }) pushed centrally
-//    by the <body> observer below, so the ~19 creation sites need no edits.
-//    The nav drawer pushes its own sentinel in toggleMobileMenu because it
-//    renders inside #app where the body observer cannot see it.
-// 2) Hardware/gesture Back pops that entry; the popstate handler
-//    (setupUrlRouting, 11-routing-cloud.js) closes the top surface via
-//    closeTopMobileSurface() and stops — the view underneath never navigates
-//    and unsaved form state (temp photos, top-ups…) survives.
-// 3) Closing with X/Cancel/backdrop instead consumes the entry via
-//    history.back() (closeModal, toggleMobileMenu, the observer), and that
-//    popstate is flagged as bookkeeping so the router never re-renders or
-//    scroll-resets the unchanged view.
-// 4) A navigation that starts while a sentinel is on top REPLACES it
-//    (navigateToInternal), keeping Back balanced after drawer/palette navs.
-// 5) Capacitor keeps its native backButton path (isPackagedMobileApp() gates
-//    the sentinel/popstate logic off); desktop keeps today's behaviour — no
-//    sentinels, but closeModal still consumes its own ?modal entries.
+// PHONE BROWSER BACK + OVERLAY HISTORY MODEL: tracked #app-modal dialogs push a
+// ?modal= entry; every other overlay gets one same-URL sentinel entry (body
+// observer; the nav drawer pushes its own). Back pops the entry and closes the
+// top surface only (closeTopMobileSurface); X/Cancel consume the entry via
+// history.back() flagged as bookkeeping; a navigation on top of a sentinel
+// replaces it; Capacitor keeps its native backButton path; desktop unchanged.
 
 let _overlaySentinelDepth = 0;          // sentinels pushed and not yet consumed this session
 let _albayanLastModalUrlPushAt = 0;     // set by updateUrlParams({ modal… }) — see 11-routing-cloud.js

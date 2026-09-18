@@ -117,21 +117,10 @@ function _scopedCollectionStorageName(collectionName, capturedScope = _collectio
   return capturedScope === 'local' ? name : `${capturedScope}:${name}`;
 }
 
-/**
- * Initialize IndexedDB for large data storage and caching.
- * Creates necessary object stores and handles version upgrades.
- * Falls back gracefully if IndexedDB is not supported.
- *
- * @param {Function} [onLateOpen] - Adoption callback for an open that succeeds
- *   AFTER this promise already resolved null (watchdog / onblocked). Passing it
- *   means "adopt the late connection AND recover": the callback must re-persist
- *   the authoritative in-memory state (the onclose reopen path does this via
- *   markAllCollectionsDirty() + saveState()). Without it a late connection is
- *   closed and `db` stays null — required at startup, where the collections
- *   were already loaded WITHOUT IndexedDB and flushing them would overwrite
- *   the intact stored copies.
- * @returns {Promise<IDBDatabase|null>} Promise resolving to database instance or null if unsupported
- */
+/** Initialize IndexedDB (stores + version upgrades; null when unsupported).
+ * onLateOpen: adopt an open that succeeds AFTER this promise resolved null
+ * (watchdog/onblocked) and recover by re-persisting in-memory state; without
+ * it a late connection is closed so startup never flushes over intact stores. */
 function initIndexedDB(onLateOpen) {
   return new Promise((resolve) => {
     if (!window.indexedDB) {
@@ -438,12 +427,13 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
  * @param {Array} data - Array of items to store
  * @returns {Promise<void>} Promise resolving when all chunks are saved
  */
-async function saveCollectionToIndexedDB(collectionName, data) {
+async function saveCollectionToIndexedDB(collectionName, data, { force = false } = {}) {
   if (!db) return false;
   // MULTI-TAB SAFETY: a tab that lost the single-writer lock must never
   // rewrite a collection from its (possibly stale) in-memory array — that
   // would silently delete records the winning tab already persisted.
-  if (typeof isAnotherTabWriter === 'function' && isAnotherTabWriter()) return false;
+  // A sign-out wipe passes force: writing [] cannot damage a same-user winner.
+  if (!force && typeof isAnotherTabWriter === 'function' && isAnotherTabWriter()) return false;
   const name = String(collectionName || '');
   if (!name) return false;
   // Capture the scope before the first await. A logout/login during the write

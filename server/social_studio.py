@@ -852,6 +852,11 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
         if result["error"]:
             errors.append(result["error"])
         results.append(result)
+        if result.get("metaPostId"):
+            try:  # durable at once: a kill before the final write must not let a retry post this page twice
+                ctx["patch_entity"](POSTS_TYPE, post_id, {"results": [dict(r) for r in results], "updatedAt": _iso_now()}, owner_id)
+            except Exception:
+                pass
     _current_ids = {str(p) for p in (data.get("pageIds") or [])}
     for _prev_id, _prev in previous.items():
         if _prev_id not in _current_ids:

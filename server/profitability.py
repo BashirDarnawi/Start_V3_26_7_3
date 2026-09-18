@@ -37,7 +37,8 @@ def validate_dollar_purchase(data: Any) -> dict[str, Any]:
         parsed_date = date.fromisoformat(purchase_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="purchaseDate must be YYYY-MM-DD")
-    if parsed_date > date.today():
+    from .operations import _business_today  # the Libya day, not the container's UTC day
+    if parsed_date > _business_today():
         raise HTTPException(status_code=400, detail="purchaseDate cannot be in the future")
 
     return {

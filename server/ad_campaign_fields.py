@@ -439,8 +439,10 @@ def prepare_ad_campaign_fields(
             raise HTTPException(status_code=400, detail="endDate cannot be before startDate")
         if (end[1] - start[1]).days > 366:
             raise HTTPException(status_code=400, detail="Campaign duration cannot exceed 366 days")
-    if strict and start and start[1].date() < datetime.now(timezone.utc).date():
-        raise HTTPException(status_code=400, detail="startDate cannot be in the past")
+    if strict and start:
+        from .operations import _business_today  # the Libya day, not the UTC day
+        if start[1].date() < _business_today():
+            raise HTTPException(status_code=400, detail="startDate cannot be in the past")
 
     if "creativeAssetIds" in data:
         ids = _string_list(

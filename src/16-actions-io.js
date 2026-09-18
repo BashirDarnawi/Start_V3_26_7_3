@@ -1047,7 +1047,10 @@ function exportData() {
     checksum
   };
   
-  const dataStr = JSON.stringify(exportState, null, 2);
+  const dataStr = JSON.stringify(exportState);  // compact: photos are inline, a pretty-printed file can outgrow the import cap
+  if ((typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES) {
+    showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
+  }
 
   // FB/IG in-app browsers cannot download blob files AT ALL (their WKWebView/
   // WebView shells wire no download handler), yet the old code "succeeded":
@@ -1117,6 +1120,7 @@ function exportData() {
 }
 
 let _localDataImportGeneration = 0;
+const LOCAL_BACKUP_MAX_BYTES = 200 * 1024 * 1024;  // one limit for export and import
 
 function importData() {
   const isAr = state.language === 'ar';
@@ -1428,9 +1432,8 @@ function importData() {
     const file = e.target.files[0];
     if (!file) return;
     
-    // Validate file size (max 50MB)
-    if (file.size > 50 * 1024 * 1024) {
-      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'الملف كبير جداً. الحد الأقصى للحجم 50 ميغابايت.' : 'File too large. Maximum size is 50MB.', 'error');
+    if (file.size > LOCAL_BACKUP_MAX_BYTES) {
+      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'الملف كبير جداً. الحد الأقصى للحجم 200 ميغابايت.' : 'File too large. Maximum size is 200MB.', 'error');
       return;
     }
     
@@ -1445,15 +1448,29 @@ function importData() {
           throw new Error('Invalid data structure');
         }
         
-        // Sanitize imported data
-        const sanitizedImport = Security.sanitizeObject(imported);
+        // A wrong file (an audit-log backup, a report) must never empty the
+        // workspace: a restorable backup carries the export metadata and the
+        // five core collections.
+        const coreCollections = ['ads', 'receipts', 'customers'];  // legacy backups may lack the metadata block
+        if (!coreCollections.every(k => Array.isArray(imported[k]))) {
+          showNotification(isAr ? 'ليس ملف نسخة احتياطية' : 'Not a backup file', isAr ? 'هذا الملف لا يحتوي على نسخة احتياطية كاملة. لم يتغير شيء.' : 'This file is not a full data backup. Nothing was changed.', 'error');
+          return;
+        }
+        if (imported._exportMetadata?.authoritative === false) {
+          showNotification(isAr ? 'تقرير جزئي' : 'Partial report', isAr ? 'تقرير الخادم الجزئي ليس نسخة احتياطية قابلة للاستعادة.' : 'A partial server report is not a restorable backup.', 'error');
+          return;
+        }
+        const countOf = (k) => (Array.isArray(imported[k]) ? imported[k].length : 0);
+        if (typeof confirm === 'function' && !confirm(isAr
+          ? `سيتم استبدال بيانات هذا الجهاز بالنسخة الاحتياطية (${countOf('receipts')} إيصال، ${countOf('ads')} إعلان، ${countOf('customers')} عميل). هل تريد المتابعة؟`
+          : `This replaces the data on this device with the backup (${countOf('receipts')} receipts, ${countOf('ads')} ads, ${countOf('customers')} customers). Continue?`)) return;
 
-        // Optional integrity check (detect corrupted/edited backups)
-        if (sanitizedImport && typeof sanitizedImport === 'object' && sanitizedImport._exportMetadata?.checksum) {
-          const copy = JSON.parse(JSON.stringify(sanitizedImport));
+        // Integrity check on the file AS EXPORTED (the export hashed the raw state, before any sanitising)
+        if (imported._exportMetadata?.checksum) {
+          const copy = JSON.parse(JSON.stringify(imported));
           delete copy._exportMetadata;
           const actual = DataIntegrity.calculateChecksum(copy);
-          if (String(actual) !== String(sanitizedImport._exportMetadata.checksum)) {
+          if (String(actual) !== String(imported._exportMetadata.checksum)) {
             showNotification(
               isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
               isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية (عدم تطابق checksum). الرجاء إعادة تصدير نسخة جديدة والمحاولة مرة أخرى.' : 'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
@@ -1462,6 +1479,7 @@ function importData() {
             return;
           }
         }
+        const sanitizedImport = Security.sanitizeObject(imported);
 
         // Reject identifiers that could escape a URL/attribute/legacy inline
         // handler. Do not rewrite them: that would break cross-record links in
@@ -1510,13 +1528,11 @@ function importData() {
         state.users = importedUsers;
         state.exchangeRateHistory = Array.isArray(sanitizedImport.exchangeRateHistory) ? sanitizedImport.exchangeRateHistory : [];
         state.logs = Array.isArray(sanitizedImport.logs) ? sanitizedImport.logs : [];
-        state.walletTransactions = Array.isArray(sanitizedImport.walletTransactions) ? sanitizedImport.walletTransactions : [];
-        state.serviceSubscriptions = Array.isArray(sanitizedImport.serviceSubscriptions) ? sanitizedImport.serviceSubscriptions : [];
-        state.clothesProducts = Array.isArray(sanitizedImport.clothesProducts) ? sanitizedImport.clothesProducts : [];
-        state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
-        state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
-        state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
-        state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
+        // Collections a pre-feature backup does not carry keep the device's current data.
+        for (const key of ['walletTransactions', 'serviceSubscriptions', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'adCampaignRequests']) {
+          if (Array.isArray(sanitizedImport[key])) state[key] = sanitizedImport[key];
+          else if (!Array.isArray(state[key])) state[key] = [];
+        }
         // The FIFO dollar ledger prices every ad's spend; a pre-feature backup keeps the device's ledger.
         if (Array.isArray(sanitizedImport.dollarPurchases)) state.dollarPurchases = sanitizedImport.dollarPurchases;
         // Restore the liquidity tracking config from the backup, but keep the
@@ -1528,8 +1544,10 @@ function importData() {
           if (!Number.isNaN(rate)) state.defaultExchangeRate = rate;
         }
 
-        // Normalize legacy receipt storage
+        // Normalize legacy receipt storage, then upgrade an older backup's field
+        // names (amount -> amountUSD, phone -> phones...) in the startup order
         normalizeReceiptsFromAds();
+        if (typeof migrateOldDataFormats === 'function') migrateOldDataFormats({ persist: false });
 
         // Persist all collections to IndexedDB
         for (const name of PERSISTED_COLLECTIONS) clearCollectionCorruption(name);

@@ -485,7 +485,7 @@ function renderAdsStudioCampaignCard(campaign) {
   const paidMinorEarly = Math.max(0, parseInt(campaign.paidMinorUSD, 10) || 0);
   const spendMinorEarly = Math.max(0, parseInt(campaign.spendMinorUSD, 10) || 0);
   // Mirror of the server's owner-stop gate: instant refund only before start.
-  const ownerCanInstantStop = !isLaunched && spendMinorEarly === 0 && String(campaign.startDate || '') > _adsStudioDateOffset(0);
+  const ownerCanInstantStop = !isLaunched && spendMinorEarly === 0 && String(campaign.startDate || '') >= _adsStudioDateOffset(0);  // the start day itself is not started (server rule)
   const mayStop = canActOnRecord('adCampaignRequests', 'stop', campaign.createdBy);
   const canStop = statusValue === 'Approved' && (adsStudioCanReview() || (mayStop && ownerCanInstantStop));
   const showAskStop = statusValue === 'Approved' && !adsStudioCanReview() && mayStop && !ownerCanInstantStop;

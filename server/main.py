@@ -236,7 +236,7 @@ from .security import (
 from .auth_security import upgrade_password_hash_after_login
 from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
-from .operations import FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, stop_operations_worker
+from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, stop_operations_worker
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
 # for an unknown email as for a known one. Without it, the known-email path runs
 # full-work-factor PBKDF2 while the unknown path returns instantly, and the timing
@@ -1153,6 +1153,10 @@ def current_user(request: Request) -> dict[str, Any]:
     user = _auth_user_from_cookie(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    _claimed = str(request.headers.get("x-albayan-user") or "").strip()
+    if _claimed and _claimed != str(user.get("id") or ""):
+        # Another tab signed in as someone else: this tab's reads must not merge that account's rows
+        raise HTTPException(status_code=401, detail="The signed-in account changed in another tab; sign in again")
     # Make user id available to middleware/logging.
     try:
         request.state.user_id = str(user.get("id") or "")
@@ -2564,7 +2568,7 @@ if CORS_ORIGINS:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         # Allow tracing headers from web + Capacitor apps
-        allow_headers=["Content-Type", "Authorization", "X-Request-ID", "X-Client-Platform"],  # Specific headers only
+        allow_headers=["Content-Type", "Authorization", "X-Request-ID", "X-Client-Platform", "X-Albayan-User"],  # Specific headers only
         expose_headers=["X-Request-ID"],  # Specific headers only
     )
 
@@ -8606,8 +8610,7 @@ def _financial_ad_reconciliation_ready(ad: dict[str, Any]) -> bool:
         end_day = datetime.strptime(raw[:10], "%Y-%m-%d").date()
     except ValueError:
         return False
-    tripoli_today = (datetime.now(timezone.utc) + timedelta(hours=2)).date()
-    return tripoli_today > end_day
+    return _business_today() > end_day  # same business-day rule as the month close
 
 
 def _ad_stop_atomic(
@@ -10443,8 +10446,9 @@ def review_ad_campaign_request(
     if decision == "Approved":
         # A start date that passed while the request waited is not the
         # customer's fault: it starts on approval day (written below).
-        if str(current.get("startDate") or "")[:10] < _iso_utc()[:10] <= str(current.get("endDate") or "9999")[:10]:
-            bumped_start = _iso_utc()[:10]
+        _today_iso = _business_today().strftime("%Y-%m-%d")  # the Libya day: approval at 00:30 local is already "today"
+        if str(current.get("startDate") or "")[:10] < _today_iso <= str(current.get("endDate") or "9999")[:10]:
+            bumped_start = _today_iso
             current = {**current, "startDate": bumped_start}
         # Approval means launch-ready. Revalidate server-side so older clients
         # and legacy drafts cannot bypass today's targeting/link rules.
@@ -11469,7 +11473,7 @@ def create_collection_item(
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
         _require_ad_maker_subscription(user)
-    validate_relationship_ids(body.data)
+    validate_relationship_ids(sanitize_json(body.data or {}) or {})  # validate what will be stored (sanitising rewrites keys)
     if collection == "walletPaymentRequests":
         raise HTTPException(status_code=405, detail="Use /api/wallet/payment-requests")
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
@@ -11743,7 +11747,7 @@ def update_collection_item(
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
         _require_ad_maker_subscription(user)
-    validate_relationship_ids(body.data)
+    validate_relationship_ids(sanitize_json(body.data or {}) or {})  # validate what will be stored (sanitising rewrites keys)
     if collection == "walletPaymentRequests":
         raise HTTPException(status_code=405, detail="Use /api/wallet/payment-requests")
     if collection in CLOTHES_ORDER_SERVER_CONTROLLED_COLLECTIONS:
@@ -12482,7 +12486,7 @@ def admin_restore_collection_item(
     data until a full reload.
     """
     require_same_origin(request)
-    validate_relationship_ids(body.data)
+    validate_relationship_ids(sanitize_json(body.data or {}) or {})  # validate what will be stored (sanitising rewrites keys)
 
     entity_type = sanitize_str(collection)[:40]
     ent_id = validate_entity_id(entity_id)
@@ -12769,7 +12773,7 @@ def admin_bulk_import(
         for rec in records:
             if not isinstance(rec, dict):
                 raise HTTPException(status_code=400, detail=f"'{name}' contains a non-object record")
-            validate_relationship_ids(rec, f"{name} record")
+            validate_relationship_ids(sanitize_json(rec) or {}, f"{name} record")  # validate what will be stored
             try:
                 rid = validate_entity_id(rec.get("id"))
             except HTTPException:
@@ -12803,6 +12807,7 @@ def admin_bulk_import(
 
     summary: dict[str, dict[str, int]] = {}
     with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_FINANCIAL_LOCK), db_conn() as conn:
+        now = now_ms()  # stamped inside the transaction: every row must sort after writes that landed during validation
         # createdBy FK safety: the entities.created_by column references
         # users.id, so it may only hold ids that actually exist (deleted
         # users included — history stays attributed). Unknown creators get a
@@ -12811,8 +12816,9 @@ def admin_bulk_import(
         existing_user_ids = {str(r["id"]) for r in user_rows}
 
         for (name, _seen_ids, active) in prepared:
+            _lean = _inline_media_sql_projection(name, str(conn.engine.dialect.name or ""))  # never load every photo into Python
             existing_rows = conn.execute(
-                text("SELECT id, deleted, created_at, data_json FROM entities WHERE type = :type ORDER BY id" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
+                text(f"SELECT id, deleted, created_at, {_lean[0] if _lean else 'data_json'} AS data_json FROM entities WHERE type = :type ORDER BY id" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
                 {"type": name},
             ).mappings().all()
             assert_financial_bulk_import_open(name, existing_rows, active, conn=conn)

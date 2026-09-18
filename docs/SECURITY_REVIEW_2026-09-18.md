@@ -807,3 +807,56 @@ Four more agents: an ops/audit hunter, a holistic reviewer over the whole day's 
 - Old Capacitor builds cut the 120 s publish wait at 30 s (needs a new native build).
 - Per-email login ceiling is not reset between test modules (no failure today).
 - The test-suite reviewer's remaining medium items (wallet listings read without a limit, duplicate fixed phone numbers across two modules, the plan catalog left mutated by `test_subscription_plans`) are latent, not failing.
+
+
+## Round 10 (2026-09-18, night): import/export, business-day dates, sync/persistence, workers
+
+Four hunters (import/export/restore paths; dates, time zones and bilingual text; offline sync and IndexedDB; concurrency and workers). Tests: `server/test_deep_scan_round10.py`.
+
+### Fixed
+
+**Import, export, backups**
+- The local "Import Backup" refuses a file that is not a full data backup (no export metadata or missing core collections) and asks for confirmation with the record counts before replacing the device's data. Before, an audit-log backup or any JSON object silently replaced every collection with an empty list.
+- The backup checksum is verified on the file as exported (before sanitising), so a legitimate backup can no longer fail the integrity check.
+- The export is compact JSON, and one 200 MB limit applies to export (with a warning) and import. Before, a pretty-printed export with photos could exceed the 50 MB import cap and be unrestorable.
+- An older backup's field names are upgraded on import the same way startup does (`amount` to `amountUSD`, `phone` to `phones`...), so totals and phone lookups are right immediately.
+- Collections a pre-feature backup does not carry (wallet, subscriptions, Clothes, campaigns) keep the device's current data instead of being emptied.
+- The server bulk import validates relationship ids on the sanitised record (sanitising rewrites keys such as `customer<Id`), and so do the generic create and patch routes. It loads the existing rows without their photos, and stamps the rows inside the transaction so other devices' delta cursors see them.
+- The full backup download checks the single-stream slot before the daily quota, so a busy slot never burns one of the three daily attempts.
+- The audit export pages up to one million rows (above the retention cap); the audit restore skips damaged entries and reports real counts; the delivery CSV includes phone numbers only for users with `customers.viewContacts`.
+- Bidi control characters are stripped from WhatsApp text and CSV cells (they could reorder the rest of a line or neighbouring cells).
+
+**Business day, not the UTC day**
+- The dollar-purchase date, the campaign start-date check, the approval-day bump and the ad reconciliation readiness all use the Libya business day. Before, between midnight and 02:00 local time the server still lived in "yesterday" and refused today's date or bumped a start to a day that had already ended.
+- The Ads Studio instant-stop button matches the server rule (the start day itself is not started).
+- The dollar-purchase toasts are bilingual.
+
+**Sync and persistence**
+- A tab whose browser signed in as another account in a second tab can no longer merge that account's rows: reads carry the account the tab believes it is, and the server answers 401 when the cookie belongs to someone else; the client then tears down its identity instead of swallowing the mismatch.
+- Local mode: when IndexedDB is lost mid-session, the app now reopens it, and a snapshot that carries edits made while IndexedDB was unavailable wins on the next startup and is re-persisted. Before, the older IndexedDB copy won and the newer snapshot was deleted.
+- A sign-out wipe forces its empty writes through the multi-tab writer lock, so a tab that lost the lock no longer leaves the signed-out user's data on a shared device.
+- The mobile reconnect path uses the live-sync tick (in-flight guard and backoff) instead of a second, concurrent fan-out.
+
+**Workers**
+- Social Studio writes the Meta post ids page by page during a publish, so a process kill before the final write never lets a retry post the same page twice.
+- The Meta sync loop stamps its interval before the call, so a persistent failure waits the configured interval instead of retrying every two seconds.
+
+**Review of these fixes (same night, 8 findings, all corrected)**
+- The "snapshot wins" marker now really travels from the saved snapshot to the loader (it was dropped by the collection filter), is never re-emitted from an older snapshot, is not stamped after an inconclusive IndexedDB open, and only a non-empty inline copy wins.
+- The round-8 approval test compares with the Libya business day (it used the UTC date and would have failed two hours every night).
+- The permission-refresh teardown passes the session identity captured before its request, so it is accepted; the mobile Retry reports a failed tick instead of silently succeeding.
+- Local import normalises receipts out of the legacy ads list before the field migration (startup order); a partial server report (exported with authoritative=false) is refused; the export warning measures bytes like the import cap.
+- Deployment note: the packaged app sends the new account header on reads, so the server must be deployed before any new native build (this release ships both web and server together).
+
+### Verified sound (no change)
+- CSV formula injection, HTML injection through imported names, prototype pollution and nesting caps, encrypted backup format and restore tool, full-backup streaming, bulk-import guards, request-size gates, Meta import stamps, ad photo route.
+- Delta paging (keyset, tombstones, watermarks under REPEATABLE READ), monotonic row stamps, optimistic-write rollbacks, delete-wins rules, session epochs, IndexedDB chunk generations, timer cleanup, permission-map refresh on 403.
+- Wallet ledger locks and advisory locks on idempotency keys, campaign approve/reject/stop interleavings, receipt/ad/customer lock order, Clothes stock locks, temp receipt counter, last-admin invariant, one-shot tokens, startup/shutdown order, worker loops surviving exceptions.
+- Month-close membership, manual ad day encoding, Social scheduler and quiet hours, subscription expiry, backup interval math, money and date locale pinning, canonical status comparisons.
+
+### Still open for the owner
+- Device auto-backup stays write-only and partial (no restore path; one photo-bearing copy per day for 30 days). A restore path or a photo-free snapshot is a product decision.
+- The server bulk import has no "authoritative snapshot" guard: importing a partial export prunes everything absent (env-gated, admin-only, documented as a maintenance-window operation).
+- Client "today" and period math use the device's zone; a staff device set to another zone shifts business dates in analytics. A shared business-day helper for the client is a larger change.
+- Permission edits send the whole map (last writer wins); the webhook comment guard and the backup lease each hold a pooled connection idle-in-transaction; the campaign submit hold check is not serialised per user; the PostgreSQL fallback queries in the idempotency and balance helpers would poison the transaction on a malformed row (only reachable through an import).
+- The Control Center and dollar-purchase texts in `08-data-audit.js` wallet/subscription errors are still English-only.

@@ -87,33 +87,9 @@ function requestUserTombstoneRefresh() {
     .finally(() => { _userTombstoneRefresh.inFlight = false; });
 }
 
-/**
- * Add a new record to a collection (receipts, ads, customers, etc.).
- * 
- * Features:
- *   - Automatic ID generation if not provided
- *   - Security sanitization of all data
- *   - Server write-through in online mode
- *   - Rollback on server failure
- *   - Audit logging
- * 
- * @param {Array} array - State collection array (e.g., state.receipts)
- * @param {Object} record - Record data to add
- * 
- * Flow:
- *   1. Sanitize input data (prevent XSS/injection)
- *   2. Generate secure ID if missing
- *   3. Set timestamps and metadata
- *   4. Add to local state (optimistic)
- *   5. Sync to server (if enabled)
- *   6. On success: keep local record
- *   7. On failure: rollback local record + show error
- * 
- * Thread Safety:
- *   - Optimistic updates for fast UI
- *   - Server-side validation catches conflicts
- *   - Automatic rollback prevents data loss
- */
+/** Add a record to a collection: sanitise, generate a secure id, stamp
+ * metadata, add locally (optimistic), sync to the server; on failure roll the
+ * local record back and show the error; audit logged. */
 function addRecord(array, record) {
   if (!Array.isArray(array) || !record || typeof record !== 'object') return Promise.resolve(false);
   const collectionName = getCollectionNameFromArray(array);
@@ -608,39 +584,10 @@ function applyLocalReceiptPaidAdUpdates(plans) {
   return Array.isArray(plans) ? plans.length : 0;
 }
 
-/**
- * Update an existing record in a collection (merge semantics).
- * 
- * Features:
- *   - Merge updates into existing record (partial updates supported)
- *   - Protected fields cannot be changed (id, timestamps, ownership)
- *   - Security sanitization
- *   - Server write-through with optimistic concurrency control
- *   - Automatic rollback on conflicts or errors
- *   - Permission checks (e.g., users can't edit other users unless admin)
- * 
- * @param {Array} array - State collection array
- * @param {string} id - Record ID to update
- * @param {Object} updates - Fields to update (merged with existing data)
- * 
- * Flow:
- *   1. Find record by ID
- *   2. Sanitize updates
- *   3. Remove protected fields
- *   4. Apply updates locally (optimistic)
- *   5. Sync to server with expectedLastModified (for conflict detection)
- *   6. On success: use server version (authoritative)
- *   7. On conflict (409): reload latest from server
- *   8. On error: rollback to old version
- * 
- * Immutability Rules:
- *   - walletTransactions: Cannot be edited (immutable for audit trail)
- *   - Users: Non-admin users cannot edit role/permissions
- * 
- * Concurrency:
- *   - Uses optimistic locking (expectedLastModified timestamp)
- *   - Prevents lost updates in multi-user scenarios
- */
+/** Update a record in a collection (merge semantics): sanitise, drop protected
+ * fields (id, timestamps, ownership), apply locally (optimistic), sync with
+ * expectedLastModified; the server version wins, a 409 reloads the latest,
+ * errors roll back; permission checks apply; immutable rows are refused. */
 function updateRecord(array, id, updates, expectedLastModified) {
   if (!Array.isArray(array) || !Security.isValidRecordId(id)) {
     showNotification('Invalid Record', 'The record id is not allowed.', 'error');
@@ -1233,7 +1180,7 @@ function getVisibleRecords(array) {
 // (CSV injection). We always quote + double internal quotes, and prefix a
 // dangerous leading char with an apostrophe so it is treated as text.
 function csvCell(value) {
-  let s = (value === null || value === undefined) ? '' : String(value);
+  let s = (value === null || value === undefined) ? '' : String(value).replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');  // bidi controls reorder neighbouring cells
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   return '"' + s.replace(/"/g, '""') + '"';
 }

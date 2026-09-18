@@ -174,22 +174,24 @@ def create_full_backup_router(
         if str(request.headers.get("sec-fetch-site") or "").lower() == "cross-site":
             raise HTTPException(status_code=403, detail="Cross-site backup download blocked")
         admin_id = str(user.get("id") or "")
-        allowed, _left, retry_after_ms = check_rate_limit(
-            f"full-backup:{admin_id}", max_attempts=3, window_ms=86_400_000
-        )
-        if not allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="Full backups are limited to 3 per day.",
-                headers={"Retry-After": str(max(1, int((retry_after_ms or 0) / 1000)))},
-            )
         if not _STREAM_SLOT.acquire(blocking=False):
             # Two concurrent multi-hundred-MB streams would hold two pool
-            # connections and double the CPU on a small container.
+            # connections and double the CPU on a small container. Checked
+            # BEFORE the daily quota so a busy slot never burns an attempt.
             raise HTTPException(
                 status_code=503,
                 detail="Another backup download is already running. Try again shortly.",
                 headers={"Retry-After": "60"},
+            )
+        allowed, _left, retry_after_ms = check_rate_limit(
+            f"full-backup:{admin_id}", max_attempts=3, window_ms=86_400_000
+        )
+        if not allowed:
+            _STREAM_SLOT.release()
+            raise HTTPException(
+                status_code=429,
+                detail="Full backups are limited to 3 per day.",
+                headers={"Retry-After": str(max(1, int((retry_after_ms or 0) / 1000)))},
             )
 
         started_at = time.monotonic()

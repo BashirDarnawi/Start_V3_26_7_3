@@ -463,7 +463,8 @@ async function retryMobileConnection() {
   removeMobileConnectionGate();
   if (typeof state !== 'undefined' && state.currentUser) {
     try {
-      if (typeof serverLiveSyncOnce === 'function') await serverLiveSyncOnce();
+      if (typeof serverLiveSyncTick === 'function') await serverLiveSyncTick();  // the tick keeps the in-flight guard and backoff
+      if (typeof _serverLiveSync !== 'undefined' && Number(_serverLiveSync.failStreak || 0) > 0) throw new Error('sync failed');  // the tick swallows its own errors
     } catch (_) {
       showMobileConnectivityNotice({ serverReachable: false });
       return false;
@@ -665,30 +666,12 @@ async function setupMobileRuntime() {
   }
 }
 
-// ==========================================
-// PHONE BROWSER BACK + OVERLAY HISTORY MODEL
-// ==========================================
-// DESIGN:
-// 1) Tracked #app-modal dialogs push a ?modal=&id= entry on open
-//    (updateUrlParams stamps it { albayanModal: true }); every OTHER
-//    standalone surface (photo viewer, confirm dialogs, command palette) gets
-//    one same-URL sentinel entry ({ overlaySentinel: true }) pushed centrally
-//    by the <body> observer below, so the ~19 creation sites need no edits.
-//    The nav drawer pushes its own sentinel in toggleMobileMenu because it
-//    renders inside #app where the body observer cannot see it.
-// 2) Hardware/gesture Back pops that entry; the popstate handler
-//    (setupUrlRouting, 11-routing-cloud.js) closes the top surface via
-//    closeTopMobileSurface() and stops — the view underneath never navigates
-//    and unsaved form state (temp photos, top-ups…) survives.
-// 3) Closing with X/Cancel/backdrop instead consumes the entry via
-//    history.back() (closeModal, toggleMobileMenu, the observer), and that
-//    popstate is flagged as bookkeeping so the router never re-renders or
-//    scroll-resets the unchanged view.
-// 4) A navigation that starts while a sentinel is on top REPLACES it
-//    (navigateToInternal), keeping Back balanced after drawer/palette navs.
-// 5) Capacitor keeps its native backButton path (isPackagedMobileApp() gates
-//    the sentinel/popstate logic off); desktop keeps today's behaviour — no
-//    sentinels, but closeModal still consumes its own ?modal entries.
+// PHONE BROWSER BACK + OVERLAY HISTORY MODEL: tracked #app-modal dialogs push a
+// ?modal= entry; every other overlay gets one same-URL sentinel entry (body
+// observer; the nav drawer pushes its own). Back pops the entry and closes the
+// top surface only (closeTopMobileSurface); X/Cancel consume the entry via
+// history.back() flagged as bookkeeping; a navigation on top of a sentinel
+// replaces it; Capacitor keeps its native backButton path; desktop unchanged.
 
 let _overlaySentinelDepth = 0;          // sentinels pushed and not yet consumed this session
 let _albayanLastModalUrlPushAt = 0;     // set by updateUrlParams({ modal… }) — see 11-routing-cloud.js
@@ -2658,21 +2641,10 @@ function _scopedCollectionStorageName(collectionName, capturedScope = _collectio
   return capturedScope === 'local' ? name : `${capturedScope}:${name}`;
 }
 
-/**
- * Initialize IndexedDB for large data storage and caching.
- * Creates necessary object stores and handles version upgrades.
- * Falls back gracefully if IndexedDB is not supported.
- *
- * @param {Function} [onLateOpen] - Adoption callback for an open that succeeds
- *   AFTER this promise already resolved null (watchdog / onblocked). Passing it
- *   means "adopt the late connection AND recover": the callback must re-persist
- *   the authoritative in-memory state (the onclose reopen path does this via
- *   markAllCollectionsDirty() + saveState()). Without it a late connection is
- *   closed and `db` stays null — required at startup, where the collections
- *   were already loaded WITHOUT IndexedDB and flushing them would overwrite
- *   the intact stored copies.
- * @returns {Promise<IDBDatabase|null>} Promise resolving to database instance or null if unsupported
- */
+/** Initialize IndexedDB (stores + version upgrades; null when unsupported).
+ * onLateOpen: adopt an open that succeeds AFTER this promise resolved null
+ * (watchdog/onblocked) and recover by re-persisting in-memory state; without
+ * it a late connection is closed so startup never flushes over intact stores. */
 function initIndexedDB(onLateOpen) {
   return new Promise((resolve) => {
     if (!window.indexedDB) {
@@ -2979,12 +2951,13 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
  * @param {Array} data - Array of items to store
  * @returns {Promise<void>} Promise resolving when all chunks are saved
  */
-async function saveCollectionToIndexedDB(collectionName, data) {
+async function saveCollectionToIndexedDB(collectionName, data, { force = false } = {}) {
   if (!db) return false;
   // MULTI-TAB SAFETY: a tab that lost the single-writer lock must never
   // rewrite a collection from its (possibly stale) in-memory array — that
   // would silently delete records the winning tab already persisted.
-  if (typeof isAnotherTabWriter === 'function' && isAnotherTabWriter()) return false;
+  // A sign-out wipe passes force: writing [] cannot damage a same-user winner.
+  if (!force && typeof isAnotherTabWriter === 'function' && isAnotherTabWriter()) return false;
   const name = String(collectionName || '');
   if (!name) return false;
   // Capture the scope before the first await. A logout/login during the write
@@ -3776,6 +3749,7 @@ function hasPermission(userId, module, action) {
 // Returns true when the permissions actually changed (callers use this to
 // schedule a re-render so a locked sidebar can recover without re-login).
 async function refreshCurrentUserPermissions() {
+  const sessionIdentityAtStart = typeof getServerSessionIdentity === 'function' ? getServerSessionIdentity() : undefined;
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
   try {
     const currentId = String(state.currentUser.id || '');
@@ -3813,6 +3787,9 @@ async function refreshCurrentUserPermissions() {
     }
   } catch (e) {
     console.warn('[Permissions] Failed to refresh:', e?.message || e);
+    if (e?.code === 'SERVER_SESSION_CHANGED' && typeof handleServerAuthExpired === 'function') {
+      handleServerAuthExpired(sessionIdentityAtStart);  // another tab signed in as someone else: tear this identity down
+    }
   }
   return false;
 }
@@ -5619,21 +5596,11 @@ function resetDirtyCollectionQueueForScopeChange() {
   idbSync.scopeGeneration += 1;
 }
 
-// ==========================================
-// SINGLE-WRITER TAB LOCK (multi-tab safety)
-// ==========================================
-// saveCollectionToIndexedDB rewrites whole collections from this tab's
-// in-memory arrays, so a second tab of the same origin silently overwrites
-// the first tab's records (last writer wins). BroadcastChannel and Web Locks
-// are Safari 15.4+ (above the iOS 15.0 baseline), so coordination uses
-// localStorage only: the newest tab claims the lock and older tabs stop
-// persisting until reloaded. A superseded tab deliberately never re-claims a
-// lock on its own (not even a stale one) — the other tab may have written to
-// IndexedDB, and resuming writes from this tab's stale arrays would recreate
-// the exact overwrite bug this lock exists to prevent. Reloading re-claims
-// the lock and re-reads fresh data through the normal init path. Expiry-by-
-// heartbeat (not unload cleanup) is the liveness signal because iOS kills
-// tabs without firing unload.
+// SINGLE-WRITER TAB LOCK: whole-collection IndexedDB rewrites from two tabs
+// would be last-writer-wins, so the newest tab claims a localStorage lock
+// (Safari 15 has no Web Locks) and older tabs stop persisting until reloaded;
+// a superseded tab never re-claims (its arrays may be stale); expiry is by
+// heartbeat because iOS kills tabs without firing unload.
 const TAB_LOCK_KEY = 'albayan_tab_lock';
 const TAB_LOCK_HEARTBEAT_MS = 5000;
 const _albayanTabLock = {
@@ -5832,6 +5799,11 @@ async function flushDirtyCollections() {
           console.warn('IndexedDB connection lost mid-flush — falling back to localStorage');
           db = null;
           saveState();
+          // onclose cannot run its reopen once db is null: reopen from here too.
+          if (typeof initIndexedDB === 'function') {
+            const recover = () => { if (typeof markAllCollectionsDirty === 'function') { markAllCollectionsDirty(); saveState(); } };
+            initIndexedDB(recover).then((reopened) => { if (reopened) recover(); }).catch(() => {});
+          }
           return;
         }
         console.warn(`IndexedDB save failed for "${name}":`, e);
@@ -5953,10 +5925,15 @@ function saveState() {
     // Deleting them here with no IndexedDB would leave business data in
     // memory only, and it would vanish on the next reload.
     const serverBacked = (typeof isServerModeEnabled === 'function') && isServerModeEnabled();
+    delete toSave._collectionsInline;  // never re-emit a marker loaded from an older snapshot
     if (db || serverBacked) {
       for (const key of PERSISTED_COLLECTIONS) {
         delete toSave[key];
       }
+    } else if (window.__albayanIdbOpenInconclusive !== true) {
+      // This snapshot is the newest copy: the next startup must prefer it over IndexedDB.
+      // (An inconclusive open loaded nothing, so its empty arrays must never win.)
+      toSave._collectionsInline = Date.now();
     }
     // The studio shell must never rewrite the manager's remembered page.
     if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL) {
@@ -6089,6 +6066,9 @@ function loadState() {
       for (const key of PERSISTED_COLLECTIONS) {
         legacyCollections[key] = Array.isArray(sanitizedData[key]) ? sanitizedData[key] : null;
       }
+      // Stamped only by a save that ran while IndexedDB was unavailable: that snapshot is the newest copy.
+      legacyCollections._collectionsInline = !!sanitizedData._collectionsInline;
+      delete sanitizedData._collectionsInline;
       // Do not merge large collections from localStorage into runtime state (they belong in IndexedDB)
       for (const key of PERSISTED_COLLECTIONS) delete sanitizedData[key];
       
@@ -6246,7 +6226,11 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
       }
     }
 
-    if (loaded !== null && loaded !== undefined) {
+    if (legacy._collectionsInline && Array.isArray(legacy[name]) && legacy[name].length) {
+      // Edits made while IndexedDB was unavailable live only in the snapshot: a non-empty copy wins and is re-persisted.
+      state[name] = legacy[name];
+      if (db) await saveCollectionToIndexedDB(name, state[name]);
+    } else if (loaded !== null && loaded !== undefined) {
       state[name] = loaded;
     } else if (Array.isArray(legacy[name])) {
       // Legacy migration path: seed IndexedDB from localStorage snapshot
@@ -7330,33 +7314,9 @@ function requestUserTombstoneRefresh() {
     .finally(() => { _userTombstoneRefresh.inFlight = false; });
 }
 
-/**
- * Add a new record to a collection (receipts, ads, customers, etc.).
- * 
- * Features:
- *   - Automatic ID generation if not provided
- *   - Security sanitization of all data
- *   - Server write-through in online mode
- *   - Rollback on server failure
- *   - Audit logging
- * 
- * @param {Array} array - State collection array (e.g., state.receipts)
- * @param {Object} record - Record data to add
- * 
- * Flow:
- *   1. Sanitize input data (prevent XSS/injection)
- *   2. Generate secure ID if missing
- *   3. Set timestamps and metadata
- *   4. Add to local state (optimistic)
- *   5. Sync to server (if enabled)
- *   6. On success: keep local record
- *   7. On failure: rollback local record + show error
- * 
- * Thread Safety:
- *   - Optimistic updates for fast UI
- *   - Server-side validation catches conflicts
- *   - Automatic rollback prevents data loss
- */
+/** Add a record to a collection: sanitise, generate a secure id, stamp
+ * metadata, add locally (optimistic), sync to the server; on failure roll the
+ * local record back and show the error; audit logged. */
 function addRecord(array, record) {
   if (!Array.isArray(array) || !record || typeof record !== 'object') return Promise.resolve(false);
   const collectionName = getCollectionNameFromArray(array);
@@ -7851,39 +7811,10 @@ function applyLocalReceiptPaidAdUpdates(plans) {
   return Array.isArray(plans) ? plans.length : 0;
 }
 
-/**
- * Update an existing record in a collection (merge semantics).
- * 
- * Features:
- *   - Merge updates into existing record (partial updates supported)
- *   - Protected fields cannot be changed (id, timestamps, ownership)
- *   - Security sanitization
- *   - Server write-through with optimistic concurrency control
- *   - Automatic rollback on conflicts or errors
- *   - Permission checks (e.g., users can't edit other users unless admin)
- * 
- * @param {Array} array - State collection array
- * @param {string} id - Record ID to update
- * @param {Object} updates - Fields to update (merged with existing data)
- * 
- * Flow:
- *   1. Find record by ID
- *   2. Sanitize updates
- *   3. Remove protected fields
- *   4. Apply updates locally (optimistic)
- *   5. Sync to server with expectedLastModified (for conflict detection)
- *   6. On success: use server version (authoritative)
- *   7. On conflict (409): reload latest from server
- *   8. On error: rollback to old version
- * 
- * Immutability Rules:
- *   - walletTransactions: Cannot be edited (immutable for audit trail)
- *   - Users: Non-admin users cannot edit role/permissions
- * 
- * Concurrency:
- *   - Uses optimistic locking (expectedLastModified timestamp)
- *   - Prevents lost updates in multi-user scenarios
- */
+/** Update a record in a collection (merge semantics): sanitise, drop protected
+ * fields (id, timestamps, ownership), apply locally (optimistic), sync with
+ * expectedLastModified; the server version wins, a 409 reloads the latest,
+ * errors roll back; permission checks apply; immutable rows are refused. */
 function updateRecord(array, id, updates, expectedLastModified) {
   if (!Array.isArray(array) || !Security.isValidRecordId(id)) {
     showNotification('Invalid Record', 'The record id is not allowed.', 'error');
@@ -8476,7 +8407,7 @@ function getVisibleRecords(array) {
 // (CSV injection). We always quote + double internal quotes, and prefix a
 // dangerous leading char with an apostrophe so it is treated as text.
 function csvCell(value) {
-  let s = (value === null || value === undefined) ? '' : String(value);
+  let s = (value === null || value === undefined) ? '' : String(value).replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');  // bidi controls reorder neighbouring cells
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   return '"' + s.replace(/"/g, '""') + '"';
 }
@@ -9325,7 +9256,9 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       headers: {
         ...headers,
         'X-Request-ID': requestId,
-        'X-Client-Platform': (typeof Platform !== 'undefined' && Platform.platform) ? String(Platform.platform) : 'web'
+        'X-Client-Platform': (typeof Platform !== 'undefined' && Platform.platform) ? String(Platform.platform) : 'web',
+        // Reads name the account this tab believes it is: the server answers 401 when another tab switched accounts.
+        ...(method === 'GET' && typeof state !== 'undefined' && state.currentUser?.id ? { 'X-Albayan-User': String(state.currentUser.id) } : {})
       },
       signal: controller.signal
     };
@@ -9966,7 +9899,7 @@ function _auditCategoryFor(resourceType) {
   const t = String(resourceType || '');
   return t === 'auth' ? 'auth' : (_AUDIT_FINANCIAL_TYPES.has(t) ? 'financial' : (t ? 'data' : 'general'));
 }
-async function apiListAllAuditLogs(pageSize = 1000, maxPages = 50) {
+async function apiListAllAuditLogs(pageSize = 1000, maxPages = 1000) {  // 1M rows: above the 500k retention cap
   // The viewer shows the newest 500; an export or backup pages the whole trail.
   const all = [];
   for (let page = 0; page < maxPages; page++) {
@@ -14128,7 +14061,7 @@ async function wipeAuthenticatedServerDataFromClient() {
   state.serverLogs = [];
   state.serverLogsLoadedAt = 0;
   if (!db) return;
-  const writes = collections.map(name => saveCollectionToIndexedDB(name, []));
+  const writes = collections.map(name => saveCollectionToIndexedDB(name, [], { force: true }));  // a lost tab lock must not keep the signed-out data
   writes.push(clearIndexedDBLogs());
   await Promise.allSettled(writes);
 }
@@ -19821,7 +19754,7 @@ function exportDeliveryReport() {
     const collected = _getCollectedCashLocal(r);   // the deliveries screen's own rules (canceled = nothing collected)
     const remaining = _getOutstandingDueLocal(r);
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(_deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 '))},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 ') : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -21835,6 +21768,7 @@ function restoreAuditLogs() {
         
         for (const log of backup.logs) {
           if (!importIsCurrent()) return;
+          if (!log || typeof log !== 'object' || !log.id) continue;  // a damaged entry is skipped, not written
           if (!existingIds.has(log.id)) {
             state.logs.push(log);
             existingIds.add(log.id);
@@ -21862,7 +21796,7 @@ function restoreAuditLogs() {
           totalInBackup: backup.totalLogs
         });
         
-        showNotification(state.language === 'ar' ? 'اكتمل الاسترجاع' : 'Restore Complete', state.language === 'ar' ? `تم استيراد ${imported} سجل جديد (تم تخطي ${backup.totalLogs - imported} مكرر)` : `Imported ${imported} new logs (${backup.totalLogs - imported} duplicates skipped)`, 'success');
+        showNotification(state.language === 'ar' ? 'اكتمل الاسترجاع' : 'Restore Complete', state.language === 'ar' ? `تم استيراد ${imported} سجل جديد (تم تخطي ${backup.logs.length - imported} مكرر)` : `Imported ${imported} new logs (${backup.logs.length - imported} duplicates skipped)`, 'success');
         render();
         lucide.createIcons();
       } catch (error) {
@@ -26929,7 +26863,7 @@ function buildWhatsAppShareLink(message) {
 
 function _whatsAppShareField(value, maxLength = 350) {
   return String(value ?? '')
-    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ')  // bidi controls could reorder the rest of the line
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
@@ -33457,39 +33391,11 @@ function getPaymentTotalsFromDom(root) {
   return { totalR1, totalR2 };
 }
 
-/**
- * Save a receipt from the modal form (create new or update existing).
- * 
- * This is the MAIN RECEIPT SAVE LOGIC - handles all receipt types:
- *   - Regular receipts (Paid, Not Paid - Office collection)
- *   - Delivery receipts (Not Paid - Delivery collection)
- *   - Temp delivery receipts (D1, D2, etc. assigned to drivers)
- *   - Refund receipts
- *   - Lost/Canceled receipts
- * 
- * Critical Validations:
- *   1. Customer must be selected
- *   2. Receipt number required (except for Not Paid status)
- *   3. Receipt number must be unique and valid (digits only, no leading zeros)
- *   4. Temp delivery receipts (D#) must have a driver assigned
- *   5. Delivery fee required for delivery receipts
- *   6. Amounts must be positive numbers
- * 
- * Special Flows:
- *   - Not Paid + Delivery: Creates temp receipt (D#) assigned to driver
- *   - Server generates D# if not provided (multi-user safe)
- *   - Paid + Delivery: Normal receipt with driver info (already collected)
- * 
- * Server Sync:
- *   - Uses apiCreateEntity() for new receipts
- *   - Server returns authoritative data (including generated D# numbers)
- *   - Frontend shows success only after server confirmation
- * 
- * Error Handling:
- *   - Validation errors: Show toast + highlight field
- *   - Server errors: Show detailed message from server
- *   - Rollback not needed (optimistic update only after server confirms)
- */
+/** Save a receipt from the modal form (create or update). Handles every receipt
+ * type (paid, not-paid office/delivery, temp D# delivery, refund, lost/canceled);
+ * validates the customer, a unique digits-only receipt number, a driver for D#,
+ * the delivery fee and positive amounts; not-paid delivery creates a temp
+ * receipt (the server generates D#); server data is authoritative on sync. */
 // Reentrancy guard: saving awaits a network call in server mode, and a second
 // click while the first is in flight created a SECOND receipt (the duplicate-
 // serial check passes for both because the first hasn't landed in state yet).
@@ -45064,7 +44970,10 @@ function exportData() {
     checksum
   };
   
-  const dataStr = JSON.stringify(exportState, null, 2);
+  const dataStr = JSON.stringify(exportState);  // compact: photos are inline, a pretty-printed file can outgrow the import cap
+  if ((typeof Blob === 'function' ? new Blob([dataStr]).size : dataStr.length) > LOCAL_BACKUP_MAX_BYTES) {
+    showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
+  }
 
   // FB/IG in-app browsers cannot download blob files AT ALL (their WKWebView/
   // WebView shells wire no download handler), yet the old code "succeeded":
@@ -45134,6 +45043,7 @@ function exportData() {
 }
 
 let _localDataImportGeneration = 0;
+const LOCAL_BACKUP_MAX_BYTES = 200 * 1024 * 1024;  // one limit for export and import
 
 function importData() {
   const isAr = state.language === 'ar';
@@ -45445,9 +45355,8 @@ function importData() {
     const file = e.target.files[0];
     if (!file) return;
     
-    // Validate file size (max 50MB)
-    if (file.size > 50 * 1024 * 1024) {
-      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'الملف كبير جداً. الحد الأقصى للحجم 50 ميغابايت.' : 'File too large. Maximum size is 50MB.', 'error');
+    if (file.size > LOCAL_BACKUP_MAX_BYTES) {
+      showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'الملف كبير جداً. الحد الأقصى للحجم 200 ميغابايت.' : 'File too large. Maximum size is 200MB.', 'error');
       return;
     }
     
@@ -45462,15 +45371,29 @@ function importData() {
           throw new Error('Invalid data structure');
         }
         
-        // Sanitize imported data
-        const sanitizedImport = Security.sanitizeObject(imported);
+        // A wrong file (an audit-log backup, a report) must never empty the
+        // workspace: a restorable backup carries the export metadata and the
+        // five core collections.
+        const coreCollections = ['ads', 'receipts', 'customers'];  // legacy backups may lack the metadata block
+        if (!coreCollections.every(k => Array.isArray(imported[k]))) {
+          showNotification(isAr ? 'ليس ملف نسخة احتياطية' : 'Not a backup file', isAr ? 'هذا الملف لا يحتوي على نسخة احتياطية كاملة. لم يتغير شيء.' : 'This file is not a full data backup. Nothing was changed.', 'error');
+          return;
+        }
+        if (imported._exportMetadata?.authoritative === false) {
+          showNotification(isAr ? 'تقرير جزئي' : 'Partial report', isAr ? 'تقرير الخادم الجزئي ليس نسخة احتياطية قابلة للاستعادة.' : 'A partial server report is not a restorable backup.', 'error');
+          return;
+        }
+        const countOf = (k) => (Array.isArray(imported[k]) ? imported[k].length : 0);
+        if (typeof confirm === 'function' && !confirm(isAr
+          ? `سيتم استبدال بيانات هذا الجهاز بالنسخة الاحتياطية (${countOf('receipts')} إيصال، ${countOf('ads')} إعلان، ${countOf('customers')} عميل). هل تريد المتابعة؟`
+          : `This replaces the data on this device with the backup (${countOf('receipts')} receipts, ${countOf('ads')} ads, ${countOf('customers')} customers). Continue?`)) return;
 
-        // Optional integrity check (detect corrupted/edited backups)
-        if (sanitizedImport && typeof sanitizedImport === 'object' && sanitizedImport._exportMetadata?.checksum) {
-          const copy = JSON.parse(JSON.stringify(sanitizedImport));
+        // Integrity check on the file AS EXPORTED (the export hashed the raw state, before any sanitising)
+        if (imported._exportMetadata?.checksum) {
+          const copy = JSON.parse(JSON.stringify(imported));
           delete copy._exportMetadata;
           const actual = DataIntegrity.calculateChecksum(copy);
-          if (String(actual) !== String(sanitizedImport._exportMetadata.checksum)) {
+          if (String(actual) !== String(imported._exportMetadata.checksum)) {
             showNotification(
               isAr ? 'نسخة احتياطية غير صالحة' : 'Invalid Backup',
               isAr ? 'فشل التحقق من سلامة ملف النسخة الاحتياطية (عدم تطابق checksum). الرجاء إعادة تصدير نسخة جديدة والمحاولة مرة أخرى.' : 'Backup file integrity check failed (checksum mismatch). Please re-export a fresh backup and try again.',
@@ -45479,6 +45402,7 @@ function importData() {
             return;
           }
         }
+        const sanitizedImport = Security.sanitizeObject(imported);
 
         // Reject identifiers that could escape a URL/attribute/legacy inline
         // handler. Do not rewrite them: that would break cross-record links in
@@ -45527,13 +45451,11 @@ function importData() {
         state.users = importedUsers;
         state.exchangeRateHistory = Array.isArray(sanitizedImport.exchangeRateHistory) ? sanitizedImport.exchangeRateHistory : [];
         state.logs = Array.isArray(sanitizedImport.logs) ? sanitizedImport.logs : [];
-        state.walletTransactions = Array.isArray(sanitizedImport.walletTransactions) ? sanitizedImport.walletTransactions : [];
-        state.serviceSubscriptions = Array.isArray(sanitizedImport.serviceSubscriptions) ? sanitizedImport.serviceSubscriptions : [];
-        state.clothesProducts = Array.isArray(sanitizedImport.clothesProducts) ? sanitizedImport.clothesProducts : [];
-        state.clothesShipments = Array.isArray(sanitizedImport.clothesShipments) ? sanitizedImport.clothesShipments : [];
-        state.clothesOrders = Array.isArray(sanitizedImport.clothesOrders) ? sanitizedImport.clothesOrders : [];
-        state.clothesSettings = Array.isArray(sanitizedImport.clothesSettings) ? sanitizedImport.clothesSettings : [];
-        state.adCampaignRequests = Array.isArray(sanitizedImport.adCampaignRequests) ? sanitizedImport.adCampaignRequests : [];
+        // Collections a pre-feature backup does not carry keep the device's current data.
+        for (const key of ['walletTransactions', 'serviceSubscriptions', 'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings', 'adCampaignRequests']) {
+          if (Array.isArray(sanitizedImport[key])) state[key] = sanitizedImport[key];
+          else if (!Array.isArray(state[key])) state[key] = [];
+        }
         // The FIFO dollar ledger prices every ad's spend; a pre-feature backup keeps the device's ledger.
         if (Array.isArray(sanitizedImport.dollarPurchases)) state.dollarPurchases = sanitizedImport.dollarPurchases;
         // Restore the liquidity tracking config from the backup, but keep the
@@ -45545,8 +45467,10 @@ function importData() {
           if (!Number.isNaN(rate)) state.defaultExchangeRate = rate;
         }
 
-        // Normalize legacy receipt storage
+        // Normalize legacy receipt storage, then upgrade an older backup's field
+        // names (amount -> amountUSD, phone -> phones...) in the startup order
         normalizeReceiptsFromAds();
+        if (typeof migrateOldDataFormats === 'function') migrateOldDataFormats({ persist: false });
 
         // Persist all collections to IndexedDB
         for (const name of PERSISTED_COLLECTIONS) clearCollectionCorruption(name);

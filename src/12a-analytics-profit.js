@@ -463,7 +463,7 @@ function renderDollarPurchaseDialog() {
 }
 
 function openDollarPurchaseManager() {
-  if (!isCurrentUserAdmin()) { showNotification('Not Allowed', 'Only an Admin can manage dollar purchase costs.', 'error'); return; }
+  if (!isCurrentUserAdmin()) { showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'المدير فقط يمكنه إدارة تكاليف شراء الدولار.' : 'Only an Admin can manage dollar purchase costs.', 'error'); return; }
   closeDollarPurchaseManager(false);
   _dollarPurchaseTrigger = document.activeElement;
   const root = document.createElement('div');
@@ -500,7 +500,7 @@ async function saveDollarPurchase(event) {
   const purchaseDate = String(form.purchaseDate.value || '');
   const today = analyticsLocalDateISO();
   if (amountUSD <= 0 || rateLYD <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate) || purchaseDate > today) {
-    showNotification('Check the values', 'Enter a valid past or current date, USD amount, and market rate.', 'error');
+    showNotification(state.language === 'ar' ? 'راجع القيم' : 'Check the values', state.language === 'ar' ? 'أدخل تاريخاً حالياً أو سابقاً ومبلغاً بالدولار وسعر السوق.' : 'Enter a valid past or current date, USD amount, and market rate.', 'error');
     return;
   }
   const submit = form.querySelector('button[type="submit"]');
@@ -515,7 +515,7 @@ async function saveDollarPurchase(event) {
     createdAt: new Date().toISOString()
   });
   if (ok) {
-    showNotification('Dollar purchase saved', 'Profit and inventory were recalculated.', 'success');
+    showNotification(state.language === 'ar' ? 'تم حفظ شراء الدولار' : 'Dollar purchase saved', state.language === 'ar' ? 'أعيد حساب الربح والمخزون.' : 'Profit and inventory were recalculated.', 'success');
     renderDollarPurchaseDialog();
     if (state.currentView === 'analytics') RenderQueue.schedule('profitability-purchase');
   } else if (submit) submit.disabled = false;
@@ -526,7 +526,7 @@ async function deleteDollarPurchase(id) {
   if (!confirm('Delete this dollar purchase? Profit and inventory will be recalculated.')) return;
   const ok = await deleteRecord(state.dollarPurchases, id);
   if (ok) {
-    showNotification('Dollar purchase deleted', 'Profit and inventory were recalculated.', 'success');
+    showNotification(state.language === 'ar' ? 'تم حذف شراء الدولار' : 'Dollar purchase deleted', state.language === 'ar' ? 'أعيد حساب الربح والمخزون.' : 'Profit and inventory were recalculated.', 'success');
     renderDollarPurchaseDialog();
   }
 }

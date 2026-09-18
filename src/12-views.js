@@ -4500,7 +4500,7 @@ function exportDeliveryReport() {
     const collected = _getCollectedCashLocal(r);   // the deliveries screen's own rules (canceled = nothing collected)
     const remaining = _getOutstandingDueLocal(r);
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(_deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 '))},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 ') : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -6514,6 +6514,7 @@ function restoreAuditLogs() {
         
         for (const log of backup.logs) {
           if (!importIsCurrent()) return;
+          if (!log || typeof log !== 'object' || !log.id) continue;  // a damaged entry is skipped, not written
           if (!existingIds.has(log.id)) {
             state.logs.push(log);
             existingIds.add(log.id);
@@ -6541,7 +6542,7 @@ function restoreAuditLogs() {
           totalInBackup: backup.totalLogs
         });
         
-        showNotification(state.language === 'ar' ? 'اكتمل الاسترجاع' : 'Restore Complete', state.language === 'ar' ? `تم استيراد ${imported} سجل جديد (تم تخطي ${backup.totalLogs - imported} مكرر)` : `Imported ${imported} new logs (${backup.totalLogs - imported} duplicates skipped)`, 'success');
+        showNotification(state.language === 'ar' ? 'اكتمل الاسترجاع' : 'Restore Complete', state.language === 'ar' ? `تم استيراد ${imported} سجل جديد (تم تخطي ${backup.logs.length - imported} مكرر)` : `Imported ${imported} new logs (${backup.logs.length - imported} duplicates skipped)`, 'success');
         render();
         lucide.createIcons();
       } catch (error) {

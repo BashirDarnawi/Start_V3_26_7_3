@@ -104,7 +104,9 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       headers: {
         ...headers,
         'X-Request-ID': requestId,
-        'X-Client-Platform': (typeof Platform !== 'undefined' && Platform.platform) ? String(Platform.platform) : 'web'
+        'X-Client-Platform': (typeof Platform !== 'undefined' && Platform.platform) ? String(Platform.platform) : 'web',
+        // Reads name the account this tab believes it is: the server answers 401 when another tab switched accounts.
+        ...(method === 'GET' && typeof state !== 'undefined' && state.currentUser?.id ? { 'X-Albayan-User': String(state.currentUser.id) } : {})
       },
       signal: controller.signal
     };
@@ -745,7 +747,7 @@ function _auditCategoryFor(resourceType) {
   const t = String(resourceType || '');
   return t === 'auth' ? 'auth' : (_AUDIT_FINANCIAL_TYPES.has(t) ? 'financial' : (t ? 'data' : 'general'));
 }
-async function apiListAllAuditLogs(pageSize = 1000, maxPages = 50) {
+async function apiListAllAuditLogs(pageSize = 1000, maxPages = 1000) {  // 1M rows: above the 500k retention cap
   // The viewer shows the newest 500; an export or backup pages the whole trail.
   const all = [];
   for (let page = 0; page < maxPages; page++) {
