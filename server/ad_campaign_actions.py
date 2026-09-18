@@ -276,6 +276,7 @@ def create_ad_campaign_actions_router(
                         "stoppedAt": stopped_at,
                         "stoppedBy": actor_id,
                         "stopReason": ctx["sanitize_str"](str(body.reason or ""))[:1000],
+                        "publishStatus": "",  # a stopped campaign is not live (publishedAt/metaCampaignId stay as history)
                         "refundMinorUSD": refund,
                         "refundTransactionId": tx_id,
                         "spendMinorUSD": max(captured - refund, 0),

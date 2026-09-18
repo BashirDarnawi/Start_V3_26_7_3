@@ -410,7 +410,7 @@ function renderAdsStudioDashboard() {
           <div>
             <span class="inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-bold"><i data-lucide="shield-check" class="w-4 h-4"></i>${isAr ? 'إنشاء آمن مع مراجعة بشرية' : 'Safe creation with human review'}</span>
             <h2 class="mt-4 text-2xl sm:text-4xl font-black max-w-2xl">${isAr ? 'أنشئ إعلانك من الهاتف أو الكمبيوتر' : 'Create your next ad from phone or desktop'}</h2>
-            <p class="mt-3 max-w-2xl text-blue-50">${isAr ? 'اختر الهدف والجمهور والميزانية والصور. لن يتم صرف أي مبلغ حتى تتم المراجعة والموافقة.' : 'Choose the objective, audience, budget and creative. No money is spent by this request system.'}</p>
+            <p class="mt-3 max-w-2xl text-blue-50">${isAr ? 'اختر الهدف والجمهور والميزانية والصور. الإرسال يحجز الميزانية والموافقة تخصمها.' : 'Choose the objective, audience, budget and creative. Submitting holds the budget; approval charges it.'}</p>
           </div>
           <div class="flex flex-col gap-2 sm:flex-row">
             ${isCurrentUserAdmin() ? `<button type="button" onclick="openAdsStudioCustomerAccount()" class="touch-target min-h-12 rounded-xl border border-white/40 bg-white/10 px-5 py-3 font-black text-white hover:bg-white/20"><span class="inline-flex items-center gap-2"><i data-lucide="user-plus" class="w-5 h-5"></i>${isAr ? 'حساب عميل' : 'Customer login'}</span></button>` : ''}
@@ -937,7 +937,7 @@ function adsStudioToggleDraftArray(field, value, checked, exclusive = false) {
 
 function adsStudioSetListField(field, raw) {
   if (!_adsStudioDraft || !['locations', 'languages', 'interests'].includes(field)) return;
-  _adsStudioDraft[field] = String(raw || '').split(',').map(item => Security.sanitizeInput(item.trim(), { maxLength: 80 })).filter(Boolean).slice(0, 30);
+  _adsStudioDraft[field] = String(raw || '').split(',').map(item => Security.sanitizeInput(item.trim(), { maxLength: 80 })).filter(Boolean).slice(0, field === 'languages' ? 20 : 25);  // the server's limits
 }
 
 function adsStudioWizardSteps() {
@@ -1457,8 +1457,15 @@ async function submitAdsStudioCampaignOnce(id) {
   }
   try {
     if (isServerModeEnabled()) {
-      const operationId = Security.generateSecureId('campaign-submit');
-      const entity = await apiSubmitAdCampaignRequest(campaign.id, Number(campaign._lastModified), operationId);
+      const attempt = adsStudioActionAttempt('submit', campaign.id, Number(campaign._lastModified));
+      let entity;
+      try {
+        entity = await apiSubmitAdCampaignRequest(campaign.id, attempt.expectedLastModified, attempt.operationId);
+      } catch (e) {
+        const fresh = e?.status === 409 ? await adsStudioReloadCampaign(campaign.id) : null;
+        if (!fresh || String(fresh.data?.status || '') !== 'Submitted') throw e;
+        entity = fresh;  // the first tap already submitted it
+      }
       upsertAdsStudioEntity(entity);
     } else {
       // No server -> no wallet holds/captures: refuse instead of pretending.
@@ -1531,8 +1538,9 @@ async function openAdsStudioCreativeViewer(id, index = 0, button = null) {
 function renderAdsStudioReviewQueue() {
   const isAr = adsStudioIsAr();
   if (!adsStudioCanReview()) return renderAdsStudioEmptyState();
-  const queue = getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted');
-  return `<section><div class="mb-5"><h2 class="text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'طلبات تحتاج المراجعة' : 'Campaign review queue'}</h2><p class="text-sm text-slate-500">${isAr ? 'الموافقة هنا لا تنشر إعلاناً ولا تخصم أي مبلغ.' : 'Approval here does not publish an ad or charge money.'}</p></div><div class="space-y-5">${queue.length ? queue.map(campaign => {
+  const queue = getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted'
+    && (isCurrentUserAdmin() || String(item.createdBy || '') !== String(state.currentUser?.id || '')));  // the server refuses self-review
+  return `<section><div class="mb-5"><h2 class="text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'طلبات تحتاج المراجعة' : 'Campaign review queue'}</h2><p class="text-sm text-slate-500">${isAr ? 'الموافقة تخصم الميزانية المحجوزة من محفظة العميل؛ النشر على ميتا خطوة منفصلة.' : 'Approval charges the held budget of the customer; publishing on Meta is a separate step.'}</p></div><div class="space-y-5">${queue.length ? queue.map(campaign => {
     const safeId = Security.escapeHtml(String(campaign.id || ''));
     const note = Security.escapeHtml(String(_adsStudioReviewNotes[String(campaign.id || '')] || ''));
     return `${renderAdsStudioCampaignCard(campaign)}<div class="-mt-3 rounded-b-2xl border border-t-0 border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-900/10 p-4"><label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظة القرار' : 'Decision note'}</label><textarea id="ads-review-note-${safeId}" rows="2" maxlength="1000" oninput="setAdsStudioReviewNote('${safeId}', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اشرح أي تعديل مطلوب...' : 'Explain any requested change...'}">${note}</textarea><div class="mt-3 grid gap-2 sm:grid-cols-3"><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Changes Requested', this)" class="touch-target min-h-12 rounded-xl bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200 font-bold disabled:opacity-60">${isAr ? 'طلب تعديلات' : 'Request changes'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Rejected', this)" class="touch-target min-h-12 rounded-xl bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200 font-bold disabled:opacity-60">${isAr ? 'رفض' : 'Reject'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Approved', this)" class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${isAr ? 'موافقة' : 'Approve'}</button></div></div>`;
@@ -1570,11 +1578,18 @@ async function reviewAdsStudioCampaignOnce(id, decision) {
     showNotification(adsStudioText('Add a note', 'أضف ملاحظة'), adsStudioText('Explain what the customer should change.', 'اشرح للعميل ما الذي يجب تعديله.'), 'warning');
     return;
   }
-  if (decision === 'Approved' && !confirm(adsStudioText('Approve this request? This records approval but does not publish or spend money.', 'الموافقة على هذا الطلب؟ سيتم تسجيل الموافقة فقط ولن يتم النشر أو صرف المال.'))) return;
+  if (decision === 'Approved' && !confirm(adsStudioText('Approve this request? Approval charges the held budget from the customer wallet; publishing on Meta is a separate step.', 'الموافقة على هذا الطلب؟ الموافقة تخصم الميزانية المحجوزة من محفظة العميل؛ النشر على ميتا خطوة منفصلة.'))) return;
   try {
     if (isServerModeEnabled()) {
-      const operationId = Security.generateSecureId('campaign-review');
-      const entity = await apiReviewAdCampaignRequest(campaign.id, Number(campaign._lastModified), decision, note, operationId);
+      const attempt = adsStudioActionAttempt('review', campaign.id, Number(campaign._lastModified));
+      let entity;
+      try {
+        entity = await apiReviewAdCampaignRequest(campaign.id, attempt.expectedLastModified, decision, note, attempt.operationId);
+      } catch (e) {
+        const fresh = e?.status === 409 ? await adsStudioReloadCampaign(campaign.id) : null;
+        if (!fresh || String(fresh.data?.status || '') !== decision) throw e;
+        entity = fresh;  // the first tap already recorded this decision
+      }
       upsertAdsStudioEntity(entity);
     } else {
       const saved = await updateRecord(state.adCampaignRequests, campaign.id, { status: decision, reviewNote: note, reviewedAt: new Date().toISOString(), reviewedBy: state.currentUser?.id }, campaign._lastModified);

@@ -1041,7 +1041,7 @@ function renderModal() {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && !canManageUsersAction('resetPassword') ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>

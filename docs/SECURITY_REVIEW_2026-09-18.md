@@ -688,3 +688,66 @@ prompt left the dropdown showing an unsaved status (fixed); the Paid-order
 downgrade now keys on the order growing, not on the recorded amount; a dead
 condition in the media-repair stamp was simplified; the auto-import test now
 proves the admin gate.
+
+
+---
+
+# Round 8 (same day)
+
+Four agents: Social Studio publishing and media end to end, the Ads Studio
+campaign lifecycle from both chairs, a client/server permission drift and
+message-honesty sweep, and an author for Playwright money journeys. Backend
+fixes come with tests in `server/test_deep_scan_round8.py`.
+
+## Fixed
+
+### Social Studio publishing
+
+| Problem | Fix |
+| --- | --- |
+| A post claimed as "publishing" when the server restarted or hit an error mid-publish stayed that way forever: no buttons, every edit refused. | Claims carry a timestamp; claims older than 15 minutes are released as failed with a clear message; any server error inside a publish marks the post failed before re-raising. |
+| An ambiguous timeout on the final create call (Facebook feed, Instagram publish, replies, DMs) was retried as a fresh call, so Meta could receive the post or reply twice. | Timeouts on content-creating calls are not retried blindly; the post asks a human to check the page. |
+| Editing and republishing a partially published post silently diverged the live Facebook post from the record; unticking a live page dropped its post id and re-ticking posted again; delete claimed "deleted" while the live post stayed on Meta. | Text and photos of a post with a live page cannot be edited from here; an unticked live page keeps its id (marked removed); delete says the live post stays on Meta. |
+| The reply retry pass ignored the owner's master switch and the rule's quiet hours. | Both are honoured; parked replies wait. |
+| Every Meta rejection reached the customer as ad-sync wording; "Publish now" gave up after 20 seconds while the server kept publishing. | Meta's own rejection text (Instagram format and aspect rules) is shown; the publish call waits up to 120 seconds. |
+
+### Ads Studio lifecycle
+
+| Problem | Fix |
+| --- | --- |
+| A reviewer could create, submit, approve and launch their own campaign. | Nobody reviews their own campaign (admins excepted). |
+| The approve dialog, the queue header and the wizard said no money moves; approval captures the held budget. | The words match the money. |
+| A start date that passed while the request waited made approval impossible (400) until the customer re-dated and resubmitted. | It starts on approval day. |
+| A second tap after a lost reply on submit or review was reported as a failure though the first tap had landed. | Both reconcile with the server's current state, like stop and launch already did. |
+| Soft-deleting a customer with campaigns under review or approved trapped captured money in a wallet nobody could use; a stopped campaign still showed "live"; the wizard accepted more targeting items than the server. | Deletion is refused while campaigns are open; stop clears the live flag; the caps match. |
+
+### Permissions and messages
+
+| Problem | Fix |
+| --- | --- |
+| Every permission refusal was shown as "Server Error" with raw English text. | "Not allowed" in both languages. |
+| The duplicate-record and user-deleted toasts were English only; the edit-user form offered a password field to editors who cannot set passwords; a driver granted page viewing could list pages but not open one; a bundle error named the file on disk. | All fixed. |
+
+## Still open for the owner (round 8)
+
+1. Social Studio: one customer's page-level Meta throttle pauses publishing for every customer; a scheduled time cannot be edited within a minute of its slot; Instagram publishing does not poll container status; the platform token failing turns into customer-facing permanent failures.
+2. Ads Studio: no customer-side withdrawal of a Submitted campaign (the hold is open-ended); staff user ids are returned to customers in review fields; a photo picked while "Save draft" is finishing can be dropped silently.
+3. Permission drift (documented by the sweep, not yet changed): the deliveries assign grant's Cancel and Delete-mission buttons send fields the server only accepts with receipt editing; the "mark collected" grant and button do not match; driver-role toggles for accept/complete are not enforced; several offered grants are checked nowhere; the role dropdown ignores the change-role grant.
+4. Messages: driver-facing refusals and the company-funds dialog remain English-only; internal ids still appear in a few server messages.
+5. Playwright money journeys (`tests/e2e/money-journeys.spec.js`: driver completion, settle/unsettle, transfer, company coverage, month close and unlock, Clothes stock, wallet plan purchase) are in the suite and green.
+
+## Review of the round-8 fixes (same day)
+
+The adversarial pass found: the edit-user form referenced a variable that
+did not exist (every Edit User dialog would have failed to render) - fixed;
+the "ambiguous timeout" rule covered every transport failure, so a
+connection blip at the scheduled minute would have failed a post for good -
+now only a timeout after the request was sent is ambiguous (posts and
+replies); the edit guard on partially published posts keyed on field
+presence, which the composer always sends - it now keys on an actual text or
+photo change; the delete toast mentioned Meta for never-published drafts;
+the generic "Not allowed" hid the server's specific refusal reasons; a server
+error mid-publish could lose the page ids already obtained (duplicate on
+retry) - they now travel with the interruption; a re-ticked page carried a
+stale "removed" flag; the review queue still offered a reviewer their own
+campaign.

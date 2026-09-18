@@ -7394,7 +7394,7 @@ function addRecord(array, record) {
     return Promise.resolve(false);
   }
   if (array.some(item => item && String(item.id) === String(cleanRecord.id))) {
-    showNotification('Duplicate Record', `A record with id "${cleanRecord.id}" already exists.`, 'error');
+    showNotification(state.language === 'ar' ? 'سجل مكرر' : 'Duplicate Record', state.language === 'ar' ? 'هذا السجل موجود مسبقاً.' : 'This record already exists.', 'error');
     return Promise.resolve(false);
   }
 
@@ -8424,7 +8424,7 @@ function deleteRecord(array, id, opts) {
     } else if (isServerModeEnabled() && collectionName === 'users') {
       return apiUpdateUser(id, { deleted: true })
         .then(() => {
-          showNotification('Deleted', 'User deleted', 'success');
+          showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف المستخدم' : 'User deleted', 'success');
           render();
           return true;
         })
@@ -9083,6 +9083,8 @@ function _serverRefusalNoun(collectionName) {
 function _serverRefusalToast(action, collectionName, error) {
   const isAr = state.language === 'ar';
   const raw = String(error?.message || '').trim();
+  const forbidden = Number(error?.status) === 403;
+  if (forbidden && (!raw || /^forbidden$/i.test(raw))) return [isAr ? 'غير مسموح' : 'Not allowed', isAr ? 'ليس لديك صلاحية لهذا الإجراء.' : "You don't have permission for this action."];
   let detail = raw;
   if (isAr) {
     const known = _SERVER_REFUSAL_AR.find(([en]) => raw.startsWith(en));
@@ -9094,7 +9096,7 @@ function _serverRefusalToast(action, collectionName, error) {
   const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];
   const status = Number(error?.status) || 0;
   return [
-    isAr ? 'خطأ في الخادم' : 'Server Error',
+    forbidden ? (isAr ? 'غير مسموح' : 'Not allowed') : (isAr ? 'خطأ في الخادم' : 'Server Error'),  // a refusal names its rule, never "server error"
     `${verb} ${noun}: ${detail || (isAr ? 'خطأ' : 'Error')}${status >= 500 ? ` (${status})` : ''}`
   ];
 }
@@ -25085,14 +25087,10 @@ function getAdSpendLYD(ad) {
   return Math.round(getAdSpendUSD(ad) * getAdSpendExchangeRate(ad) * 100) / 100;
 }
 
-// One read model for the amount a Not Paid receipt represents. Most receipts
-// store that amount directly, but historical/manual Driver flows can create a
-// zero-value D receipt and keep the real customer debt on its linked ad. That
-// link is a collection target only: it must NEVER become paid receipt credit
-// or receipt usage (getReceiptUsageStats deliberately remains unchanged).
-// GROSS target: the original customer debt with NO company-coverage netting.
-// Only for frozen history writes (debtAmount* at delivery completion) and
-// capacity-style reads. Everything the customer/driver SEES or COLLECTS must
+// Read model for a Not Paid receipt's amount (a zero-value D receipt keeps the
+// debt on its linked ad: a collection target only, never paid credit/usage).
+// GROSS target = original debt, no coverage netting: history writes and
+// capacity reads only. Everything the customer/driver SEES or COLLECTS must
 // use getReceiptCollectionTarget below, which nets out company funds.
 function getReceiptGrossCollectionTarget(receipt, ads = state.ads) {
   const empty = {
@@ -37003,15 +37001,10 @@ function updateAdFundingReceipt(idx, receiptId) {
     const isSettlingUnpaidAd = originalUnpaidBudget > 0
       && String(document.getElementById('ad-payment-status')?.value || '').toLowerCase() === 'paid';
     if (isSettlingUnpaidAd) {
-      // A stored Not Paid ad can contain only a partial due allocation. When the
-      // user changes its source while settling it, that old partial amount must
-      // not become the new Paid total (for example $1.24 of a $9.00 LIVE ad).
-      // Fill this row with the exact remaining settlement amount after all OTHER
-      // rows. getOriginalUnpaidAdBudgetUSD is terminal-aware: for a TERMINAL ad
-      // the target IS that committed $1.24, because the stop already released
-      // the rest of the budget. Capacity validation still shows a shortage and
-      // lets the user split the total across receipts; it never shrinks or
-      // erases customer debt.
+      // A partial due allocation must not become the new Paid total when the
+      // source changes: fill this row with the remaining settlement after the
+      // OTHER rows (getOriginalUnpaidAdBudgetUSD is terminal-aware). Capacity
+      // validation still shows a shortage; customer debt is never shrunk.
       const otherAllocated = state.tempAdFunding.allocations.reduce((sum, row, rowIndex) => {
         if (rowIndex === idx) return sum;
         return sum + (parseFloat(row?.amountUSD) || 0);
@@ -38797,7 +38790,7 @@ function renderModal() {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && !canManageUsersAction('resetPassword') ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>

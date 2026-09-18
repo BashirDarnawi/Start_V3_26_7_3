@@ -2900,7 +2900,7 @@ def _serve_lazy_bundle(request: Request, name: str):
     # together on every deploy), so cache-match against that version.
     bundle_path = PROJECT_ROOT / name
     if not bundle_path.exists():
-        raise HTTPException(status_code=500, detail=f"{name} not found")
+        raise HTTPException(status_code=500, detail="Bundle unavailable")
     v = request.query_params.get("v")
     expected = _asset_version(_select_script_source())
     headers = _ASSET_CACHE_HEADERS if v and v == expected else _NO_STORE_HEADERS
@@ -10460,6 +10460,8 @@ def review_ad_campaign_request(
     campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
     if not campaign or campaign.get("deleted"):
         raise HTTPException(status_code=404, detail="Campaign request not found")
+    if str(user.get("role") or "").lower() != "admin" and str(campaign.get("createdBy") or "") == str(user.get("id") or ""):
+        raise HTTPException(status_code=403, detail="You cannot review your own campaign")
     decision = str(body.decision)
     if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
         # Pydantic rejects this first; keep a defense-in-depth check if the
@@ -10497,7 +10499,13 @@ def review_ad_campaign_request(
     current_status = str(current.get("status") or "Draft")
     if current_status != "Submitted":
         raise HTTPException(status_code=409, detail="Only Submitted campaigns can be reviewed")
+    bumped_start = ""
     if decision == "Approved":
+        # A start date that passed while the request waited is not the
+        # customer's fault: it starts on approval day (written below).
+        if str(current.get("startDate") or "")[:10] < _iso_utc()[:10] <= str(current.get("endDate") or "9999")[:10]:
+            bumped_start = _iso_utc()[:10]
+            current = {**current, "startDate": bumped_start}
         # Approval means launch-ready. Revalidate server-side so older clients
         # and legacy drafts cannot bypass today's targeting/link rules.
         with _ad_campaign_media_validation_slot(user):
@@ -10561,6 +10569,8 @@ def review_ad_campaign_request(
         )
     elif decision == "Rejected":
         transition_fields.update({"rejectedAt": reviewed_at, "rejectedBy": actor_id})
+    if bumped_start:
+        transition_fields["startDate"] = bumped_start
     replayed_after_conflict = False
     try:
         saved = patch_entity(
@@ -11461,8 +11471,8 @@ def get_collection_item(
         # Exchange-rate history is intentionally public to all authenticated
         # roles; every other direct collection lookup is outside a driver's
         # assigned-delivery scope.
-        if collection != "exchangeRateHistory":
-            raise HTTPException(status_code=403, detail="Forbidden")
+        if collection != "exchangeRateHistory" and not user_has_permission(user, _module_for_collection(collection), _action_for_collection(collection, "view")):
+            raise HTTPException(status_code=403, detail="Forbidden")  # a driver granted pages.view may hydrate a page by id
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -13883,6 +13893,14 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
         update_fields["password_algo"] = pw.algo
         update_fields["password_iterations"] = pw.iterations
     if body.deleted is not None:
+        if body.deleted is True:
+            with db_conn() as conn:
+                _open_campaigns = conn.execute(
+                    text(f"SELECT COUNT(*) FROM entities WHERE type='adCampaignRequests' AND deleted=false AND created_by=:uid AND {json_field_sql('status')} IN ('Submitted','Approved')"),
+                    {"uid": user_id},
+                ).scalar() or 0
+            if int(_open_campaigns) > 0:  # held or captured money would be trapped in a wallet nobody can use
+                raise HTTPException(status_code=409, detail="This account has campaigns under review or approved; decide or stop them first")
         update_fields["deleted"] = bool(body.deleted)
 
     update_fields["last_modified"] = now

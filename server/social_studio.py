@@ -769,6 +769,20 @@ def _publish_to_page(client: Any, page: dict[str, Any], post_id: str, post: dict
 
 
 def publish_post(post_id: str, *, actor_id: str = "", from_scheduler: bool = False) -> dict[str, Any]:
+    """publish_post with one guarantee: an unexpected error never leaves the post claimed."""
+    holder: list[dict[str, Any]] = []
+    try:
+        return _publish_post_inner(post_id, actor_id=actor_id, from_scheduler=from_scheduler, _results_holder=holder)
+    except HTTPException:
+        raise
+    except Exception:
+        _mark_publish_interrupted(post_id, actor_id, "Publishing was interrupted by a server error; check the page before retrying.",
+                                  results=holder or None)
+        raise
+
+
+def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: bool = False,
+                        _results_holder: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Run the publish routine for a post already claimed as ``publishing``.
 
     Pages that already succeeded in an earlier attempt keep their metaPostId
@@ -803,11 +817,11 @@ def publish_post(post_id: str, *, actor_id: str = "", from_scheduler: bool = Fal
     except _meta.MetaAdsError as error:
         client_error = error.public_message
         client_error_retryable = bool(error.retryable)
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = _results_holder if _results_holder is not None else []  # visible to the wrapper on a crash
     errors: list[str] = []
     for page_id in [str(p) for p in (data.get("pageIds") or [])]:
         if page_id in previous:
-            results.append(dict(previous[page_id]))
+            results.append({**previous[page_id], "removed": False})
             continue
         result = {"pageId": page_id, "metaPostId": "", "error": ""}
         page = ctx["get_entity"](PAGES_TYPE, page_id) if _SAFE_ID_RE.fullmatch(page_id) else None
@@ -821,8 +835,11 @@ def publish_post(post_id: str, *, actor_id: str = "", from_scheduler: bool = Fal
             try:
                 result["metaPostId"] = _publish_to_page(client, page["data"], post_id, data)
             except _meta.MetaAdsError as error:
-                result["error"] = error.public_message
-                result["retryable"] = bool(error.retryable)
+                # A timeout on the create call is AMBIGUOUS: Meta may have
+                # published; a blind retry duplicated posts. Ask a human.
+                ambiguous = error.code == "timeout"  # sent but unanswered; a connect failure ("network") is a normal retry
+                result["error"] = "Meta did not answer in time; it may have published. Check the page before retrying." if ambiguous else error.public_message
+                result["retryable"] = bool(error.retryable) and not ambiguous
                 healthy = error.code != "authorization"
             except Exception as error:  # never leak tokens/stack traces into rows
                 result["error"] = f"Publishing failed ({type(error).__name__})."
@@ -834,6 +851,10 @@ def publish_post(post_id: str, *, actor_id: str = "", from_scheduler: bool = Fal
         if result["error"]:
             errors.append(result["error"])
         results.append(result)
+    _current_ids = {str(p) for p in (data.get("pageIds") or [])}
+    for _prev_id, _prev in previous.items():
+        if _prev_id not in _current_ids:
+            results.append({**_prev, "removed": True})  # unticked, but the post is live on Meta: keep its id
     now = _iso_now()
     # A manual "Publish now" starts a fresh retry budget.
     attempts = (int(data.get("publishAttempts") or 0) if from_scheduler else 0) + 1
@@ -878,7 +899,7 @@ def _claim_post(ctx: dict[str, Any], entity: dict[str, Any], actor_id: str) -> b
         ctx["patch_entity"](
             POSTS_TYPE,
             entity["id"],
-            {"status": "publishing", "updatedAt": _iso_now()},
+            {"status": "publishing", "publishingSince": _iso_now(), "updatedAt": _iso_now()},
             actor_id,
             expected_last_modified=int(entity.get("lastModified") or 0),
         )
@@ -924,11 +945,44 @@ def _due_scheduled_posts(now: datetime, limit: int) -> list[dict[str, Any]]:
     return due
 
 
+def _mark_publish_interrupted(post_id: str, actor_id: str, message: str, results: list[dict[str, Any]] | None = None) -> None:
+    """A post must never stay claimed as ``publishing`` forever (a redeploy or a
+    server error mid-publish used to leave it without any button). Page ids
+    already obtained travel with it so a retry never posts them twice."""
+    try:
+        patch: dict[str, Any] = {"status": "failed", "lastError": message, "updatedAt": _iso_now()}
+        if results:
+            patch["results"] = [dict(r) for r in results if isinstance(r, dict)]
+        _ctx()["patch_entity"](POSTS_TYPE, post_id, patch, actor_id or "system")
+    except Exception:
+        pass
+
+
+def _recover_stuck_publishing(now: datetime, limit: int = 50) -> int:
+    """Release claims the worker never finished (process killed mid-publish)."""
+    cutoff = _iso_at(now - timedelta(minutes=15))
+    with db_conn() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT id, {_json_field('ownerId')} AS owner_id FROM entities WHERE type=:type AND deleted=false "
+                f"AND {_json_field('status')}='publishing' AND COALESCE({_json_field('publishingSince')}, {_json_field('updatedAt')}, '') < :cutoff LIMIT :limit"
+            ),
+            {"type": POSTS_TYPE, "cutoff": cutoff, "limit": max(1, int(limit))},
+        ).mappings().all()
+    for row in rows:
+        _mark_publish_interrupted(str(row["id"]), str(row.get("owner_id") or ""), "Publishing was interrupted (the server restarted); check the page before retrying.")
+    return len(rows)
+
+
 def run_scheduler_tick(*, now: datetime | None = None, limit: int = 20) -> int:
     """Publish every due scheduled post once. Returns how many were attempted."""
     ctx = _ctx()
     current = now or datetime.now(timezone.utc)
     attempted = 0
+    try:
+        _recover_stuck_publishing(current)
+    except Exception:
+        print("[albayan] Social Studio stuck-claim recovery failed; it will retry.")
     for entity in _due_scheduled_posts(current, limit):
         owner_id = str(entity["data"].get("ownerId") or "")
         if not _claim_post(ctx, entity, owner_id):
@@ -1109,7 +1163,7 @@ def _execute_rule_actions(
             except _meta.MetaAdsError as error:
                 errors.append(f"dm: {error.public_message}")
                 failures += 1
-                temporary += 1 if error.retryable else 0
+                temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
         public_reply = str(rule.get("publicReply") or "")
         if public_reply and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
             try:
@@ -1119,7 +1173,7 @@ def _execute_rule_actions(
             except _meta.MetaAdsError as error:
                 errors.append(f"public: {error.public_message}")
                 failures += 1
-                temporary += 1 if error.retryable else 0
+                temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
         if platform == "fb" and _bool(rule.get("likeComment")):
             try:
                 client._post(f"{comment_id}/likes", {}, access_token=token)
@@ -1127,7 +1181,7 @@ def _execute_rule_actions(
             except _meta.MetaAdsError as error:
                 errors.append(f"like: {error.public_message}")
                 failures += 1
-                temporary += 1 if error.retryable else 0
+                temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
     retryable = not actions and failures > 0 and temporary == failures
     return actions, errors, retryable
 
@@ -1186,6 +1240,14 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
         if not usable:
             patch: dict[str, Any] = {"retryAfter": "", "error": "Reply retry stopped: the page, rule or access is no longer available."}
         else:
+            settings = _settings_entity(ctx, owner_id)["data"]
+            if not _bool(settings.get("masterEnabled"), True):
+                patch = {"retryAfter": _iso_at(now + timedelta(hours=1))}  # paused by the owner: keep waiting
+            elif _bool(rule_entity["data"].get("quietHours")) and _in_quiet_window(settings.get("quietHours") or {}, datetime.now(_zone(settings.get("timezone")))):
+                patch = {"retryAfter": _iso_at(now + timedelta(minutes=30))}  # quiet hours: later
+            else:
+                patch = None
+        if patch is None:
             actions, errors, retryable = _execute_rule_actions(
                 page_entity["data"], rule_entity["data"], str(data.get("platform") or ""), str(data.get("commentId") or "")
             )
@@ -1656,6 +1718,12 @@ def create_social_studio_router(
         scope = _mutation(request, user, ctx, ownerId)
         entity = _load_owned(ctx, POSTS_TYPE, post_id, scope)
         _editable(entity)
+        _live = any(isinstance(r, dict) and r.get("metaPostId") for r in (entity["data"].get("results") or []))
+        _body = body or {}
+        _changed = ("caption" in _body and str(_body.get("caption") or "") != str(entity["data"].get("caption") or "")) or (
+            "media" in _body and list(_body.get("media") or []) != list(entity["data"].get("media") or []))
+        if _live and _changed:  # the composer always sends caption/media; only a real change diverges the live post
+            raise HTTPException(status_code=409, detail="A page already published this post; its text and photos cannot be changed here. Retry the failed pages, or delete the post (the live post stays on Meta).")
         owner_id = str(entity["data"].get("ownerId") or "")
         clean = {**_clean_post(ctx, owner_id, body or {}, entity["data"]), "updatedAt": _iso_now()}
         saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], clean, scope.uid,
@@ -1676,7 +1744,8 @@ def create_social_studio_router(
         ctx["soft_delete_entity"](POSTS_TYPE, entity["id"], scope.uid,
                                   expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "delete", POSTS_TYPE, entity["id"], "Deleted social post", {})
-        return {"ok": True, "id": entity["id"]}
+        return {"ok": True, "id": entity["id"],
+                "metaLive": any(isinstance(r, dict) and r.get("metaPostId") for r in (entity["data"].get("results") or []))}
 
     @router.post("/posts/{post_id}/publish")
     def publish_now(

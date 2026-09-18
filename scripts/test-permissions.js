@@ -4894,7 +4894,7 @@ check('Ads Studio header returns authorized staff to another landing view only',
 check('Ads Studio submit and review retries reuse a per-click operation id', () => {
   const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15c-ads-studio.js'), 'utf8');
   const apiSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-api-auth.js'), 'utf8');
-  assert(studioSource.includes("Security.generateSecureId('campaign-submit')") && studioSource.includes("Security.generateSecureId('campaign-review')"), 'workflow clicks do not generate operation ids');
+  assert(studioSource.includes("adsStudioActionAttempt('submit', campaign.id, Number(campaign._lastModified))") && studioSource.includes("adsStudioActionAttempt('review', campaign.id, Number(campaign._lastModified))"), 'workflow clicks do not carry a per-click operation id');
   assert(apiSource.includes('const body = { expectedLastModified, operationId };'), 'submit retry body omits operation id');
   assert(apiSource.includes('const body = { expectedLastModified, decision, note, operationId };'), 'review retry body omits operation id');
   assert(apiSource.includes('withRetry(() => apiJson(`/api/ad-studio/campaigns/'), 'workflow request is not retried with its stable body');

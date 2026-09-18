@@ -827,14 +827,10 @@ function getAdSpendLYD(ad) {
   return Math.round(getAdSpendUSD(ad) * getAdSpendExchangeRate(ad) * 100) / 100;
 }
 
-// One read model for the amount a Not Paid receipt represents. Most receipts
-// store that amount directly, but historical/manual Driver flows can create a
-// zero-value D receipt and keep the real customer debt on its linked ad. That
-// link is a collection target only: it must NEVER become paid receipt credit
-// or receipt usage (getReceiptUsageStats deliberately remains unchanged).
-// GROSS target: the original customer debt with NO company-coverage netting.
-// Only for frozen history writes (debtAmount* at delivery completion) and
-// capacity-style reads. Everything the customer/driver SEES or COLLECTS must
+// Read model for a Not Paid receipt's amount (a zero-value D receipt keeps the
+// debt on its linked ad: a collection target only, never paid credit/usage).
+// GROSS target = original debt, no coverage netting: history writes and
+// capacity reads only. Everything the customer/driver SEES or COLLECTS must
 // use getReceiptCollectionTarget below, which nets out company funds.
 function getReceiptGrossCollectionTarget(receipt, ads = state.ads) {
   const empty = {

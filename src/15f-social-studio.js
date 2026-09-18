@@ -724,7 +724,7 @@ async function socialComposerSave(action) {
       return;
     }
     if (action === 'now' && postId) {
-      saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post') || saved;
+      saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: 120000 /* a multi-page publish under Meta pacing takes longer than 20 s */ }), 'post') || saved;
     }
     // The post is saved (and published when asked): show the result even if a
     // keystroke landed meanwhile — hiding a publish that happened is worse.
@@ -840,7 +840,7 @@ async function socialPublishPost(postId) {
   _social.busy = true;
   render();
   try {
-    const res = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post') || {};
+    const res = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: 120000 /* a multi-page publish under Meta pacing takes longer than 20 s */ }), 'post') || {};
     if (!socialStudioContextIsCurrent(context)) return;
     const failed = String(res.status) === 'failed';
     showNotification(failed ? socialText('Publishing failed', 'فشل النشر') : socialText('Post published', 'تم نشر المنشور'), failed ? String(res.lastError || '') : '', failed ? 'error' : 'success');
@@ -871,9 +871,9 @@ async function socialDeletePost(postId) {
   const ok = confirm(socialText('Delete this post?', 'حذف هذا المنشور؟'));
   if (!ok) return;
   try {
-    await socialApi(`/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' });
+    const res = await socialApi(`/posts/${encodeURIComponent(postId)}`, { method: 'DELETE' });
     if (!socialStudioContextIsCurrent(context)) return;
-    showNotification(socialText('Post deleted', 'تم حذف المنشور'), '', 'success');
+    showNotification(socialText('Post deleted', 'تم حذف المنشور'), res?.metaLive ? socialText('Removed from Albayan; the published post stays live on Meta.', 'أزيل من البيان؛ المنشور المنشور يبقى على ميتا.') : '', 'success');
     socialRefreshNow();
   } catch (e) {
     if (!socialStudioContextIsCurrent(context)) return;

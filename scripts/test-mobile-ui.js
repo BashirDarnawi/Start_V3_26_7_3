@@ -810,8 +810,8 @@ check('Ads Studio subscription revocation purges protected collections immediate
 check('Ads Studio workflow buttons are single-flight and retries carry operation IDs',
   adsStudio.includes('_adsStudioSubmitPromises.has(campaignId)') &&
   adsStudio.includes('_adsStudioReviewPromises.has(campaignId)') &&
-  adsStudio.includes("Security.generateSecureId('campaign-submit')") &&
-  adsStudio.includes("Security.generateSecureId('campaign-review')") &&
+  adsStudio.includes("adsStudioActionAttempt('submit', campaign.id, Number(campaign._lastModified))") &&
+  adsStudio.includes("adsStudioActionAttempt('review', campaign.id, Number(campaign._lastModified))") &&
   serverApi.includes('body = { expectedLastModified, operationId }'));
 check('Ads Studio media requests allow realistic slow mobile uploads',
   serverApi.includes('ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000') &&

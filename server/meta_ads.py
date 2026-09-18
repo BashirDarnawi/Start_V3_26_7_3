@@ -1077,7 +1077,8 @@ class MetaAdsClient:
             or (isinstance(error, dict) and error.get("is_transient") is True)
         ):
             return MetaAdsError("temporary", "Meta is temporarily unavailable. Albayan will retry.", retryable=True, provider_code=provider_code)
-        return MetaAdsError("request_failed", "Meta could not return the requested ad information.", provider_code=provider_code)
+        user_msg = str(error.get("error_user_msg") or "").strip() if isinstance(error, dict) else ""
+        return MetaAdsError("request_failed", (_clean_text(user_msg)[:240] if user_msg else "Meta could not return the requested ad information."), provider_code=provider_code)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._request("GET", path, params=params)
@@ -1192,6 +1193,11 @@ class MetaAdsClient:
                         response_body = _read_capped_response_body(
                             response, 6 * 1024 * 1024
                         )
+            except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError):
+                # The request left the building: Meta may have applied it.
+                _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
+                _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+                raise MetaAdsError("timeout", "Meta did not answer in time. Albayan will retry.", retryable=True)
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
                 _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
                 _META_LAST_REMOTE_REQUEST_AT = _iso_now()

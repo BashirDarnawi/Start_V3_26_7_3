@@ -5215,15 +5215,10 @@ function updateAdFundingReceipt(idx, receiptId) {
     const isSettlingUnpaidAd = originalUnpaidBudget > 0
       && String(document.getElementById('ad-payment-status')?.value || '').toLowerCase() === 'paid';
     if (isSettlingUnpaidAd) {
-      // A stored Not Paid ad can contain only a partial due allocation. When the
-      // user changes its source while settling it, that old partial amount must
-      // not become the new Paid total (for example $1.24 of a $9.00 LIVE ad).
-      // Fill this row with the exact remaining settlement amount after all OTHER
-      // rows. getOriginalUnpaidAdBudgetUSD is terminal-aware: for a TERMINAL ad
-      // the target IS that committed $1.24, because the stop already released
-      // the rest of the budget. Capacity validation still shows a shortage and
-      // lets the user split the total across receipts; it never shrinks or
-      // erases customer debt.
+      // A partial due allocation must not become the new Paid total when the
+      // source changes: fill this row with the remaining settlement after the
+      // OTHER rows (getOriginalUnpaidAdBudgetUSD is terminal-aware). Capacity
+      // validation still shows a shortage; customer debt is never shrunk.
       const otherAllocated = state.tempAdFunding.allocations.reduce((sum, row, rowIndex) => {
         if (rowIndex === idx) return sum;
         return sum + (parseFloat(row?.amountUSD) || 0);

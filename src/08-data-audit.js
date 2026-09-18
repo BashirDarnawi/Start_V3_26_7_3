@@ -131,7 +131,7 @@ function addRecord(array, record) {
     return Promise.resolve(false);
   }
   if (array.some(item => item && String(item.id) === String(cleanRecord.id))) {
-    showNotification('Duplicate Record', `A record with id "${cleanRecord.id}" already exists.`, 'error');
+    showNotification(state.language === 'ar' ? 'سجل مكرر' : 'Duplicate Record', state.language === 'ar' ? 'هذا السجل موجود مسبقاً.' : 'This record already exists.', 'error');
     return Promise.resolve(false);
   }
 
@@ -1161,7 +1161,7 @@ function deleteRecord(array, id, opts) {
     } else if (isServerModeEnabled() && collectionName === 'users') {
       return apiUpdateUser(id, { deleted: true })
         .then(() => {
-          showNotification('Deleted', 'User deleted', 'success');
+          showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف المستخدم' : 'User deleted', 'success');
           render();
           return true;
         })
@@ -1820,6 +1820,8 @@ function _serverRefusalNoun(collectionName) {
 function _serverRefusalToast(action, collectionName, error) {
   const isAr = state.language === 'ar';
   const raw = String(error?.message || '').trim();
+  const forbidden = Number(error?.status) === 403;
+  if (forbidden && (!raw || /^forbidden$/i.test(raw))) return [isAr ? 'غير مسموح' : 'Not allowed', isAr ? 'ليس لديك صلاحية لهذا الإجراء.' : "You don't have permission for this action."];
   let detail = raw;
   if (isAr) {
     const known = _SERVER_REFUSAL_AR.find(([en]) => raw.startsWith(en));
@@ -1831,7 +1833,7 @@ function _serverRefusalToast(action, collectionName, error) {
   const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];
   const status = Number(error?.status) || 0;
   return [
-    isAr ? 'خطأ في الخادم' : 'Server Error',
+    forbidden ? (isAr ? 'غير مسموح' : 'Not allowed') : (isAr ? 'خطأ في الخادم' : 'Server Error'),  // a refusal names its rule, never "server error"
     `${verb} ${noun}: ${detail || (isAr ? 'خطأ' : 'Error')}${status >= 500 ? ` (${status})` : ''}`
   ];
 }
