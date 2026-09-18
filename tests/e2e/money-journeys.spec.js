@@ -213,6 +213,17 @@ async function openClothesTab(page, tab) {
   await tabBar.getByRole('button', { name: labels[tab] }).click();
 }
 
+// openClothesTab reloads the page, and the Clothes collections arrive after
+// the first paint: a modal opened before the products are in state renders an
+// empty product list and never refreshes it (the release gate hit this twice).
+async function waitForClothesProduct(page, productId) {
+  await page.waitForFunction(
+    id => typeof state !== 'undefined' && Array.isArray(state.clothesProducts) && state.clothesProducts.some(p => p && p.id === id),
+    productId,
+    { timeout: 30_000 }
+  );
+}
+
 // Open the second browser session (driver / subscriber) with the same base URL
 // and business timezone as the project under test.
 async function openSecondSession(browser, baseURL) {
@@ -670,6 +681,7 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
 
     // --- Shipment of 10 pieces, received into stock. ---
     await openClothesTab(page, 'shipments');
+    await waitForClothesProduct(page, productId);
     await page.getByRole('button', { name: /add shipment/i }).click();
     await expect(modal).toBeVisible();
     await modal.locator('#clothes-shipment-ref').fill(`E2E shipment ${tag}`);
@@ -706,6 +718,7 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
 
     // --- Order selling 2 pieces, marked Partially Paid. ---
     await openClothesTab(page, 'orders');
+    await waitForClothesProduct(page, productId);
     await page.getByRole('button', { name: /new order/i }).click();
     await expect(modal).toBeVisible();
     await modal.locator('#clothes-order-customer').fill(`E2E Buyer ${tag}`);
@@ -749,6 +762,7 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
 
     // --- Cancel the order: the 2 pieces return to stock. ---
     await openClothesTab(page, 'orders');
+    await waitForClothesProduct(page, productId);
     const orderStatus = page.locator(`select[onchange="setClothesOrderStatus('${orderId}', this.value)"]`);
     await expect(orderStatus).toBeVisible();
     const [cancelResponse] = await Promise.all([
