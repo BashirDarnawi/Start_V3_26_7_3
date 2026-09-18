@@ -26,6 +26,14 @@ and dark mode.
   `CONTRIBUTING.md` hold the platform rules (stable service IDs, append-only
   wallet ledger, etc.). Anything in `docs/archive/` is a historical report —
   do not trust it as a description of the current code.
+- **Production (Libyan Spider / Jelastic):** the Docker image `bashird/albayan`
+  runs behind Cloudflare with a separate PostgreSQL node. The app container
+  MUST have `DATABASE_URL` (or the `ALBAYAN_DB_HOST/PORT/NAME/USER/PASSWORD`
+  fields) in its Jelastic variables; without it the container refuses to start
+  instead of silently running on an empty file database. Also set
+  `ALBAYAN_TRUST_PROXY_HEADERS=true` and `ALBAYAN_COOKIE_SECURE=true`. The full
+  variable list is `deploy/albayan.env.example`; backups, alerts and the
+  Cloudflare origin secret are in `docs/OPERATIONS_SAFETY.md`.
 
 ## Run it
 
@@ -39,9 +47,11 @@ docker compose up --build
 # Visit http://127.0.0.1:8000
 ```
 
-There are **no default credentials**. Create the first admin via the
-first-run setup screen (local mode), `server/create_admin.py`, or the
-`ALBAYAN_BOOTSTRAP_ADMIN_*` environment variables (server mode).
+There are **no default credentials**. Create the first admin one of these ways:
+local mode - the first-run setup screen; server mode - `server/create_admin.py`
+inside the container, the `ALBAYAN_BOOTSTRAP_ADMIN_*` variables, or the
+browser setup form, which appears only while `ALBAYAN_SETUP_TOKEN` (16+ random
+characters) is set. Remove that variable after the first admin exists.
 
 ## Tests
 
@@ -53,6 +63,9 @@ npm run test:e2e
 # Confirm web AND Android/iOS copies include every generated bundle:
 npm run verify:mobile
 ```
+
+After pulling new code, refresh the Python packages too (`tzdata` gives Libya
+month boundaries on Windows): `.\.venv\Scripts\python.exe -m pip install -r server/requirements.txt`.
 
 ## Safe changes and releases
 

@@ -8,7 +8,7 @@ This file is a practical checklist to keep Albayan stable under load and during 
 ## ALB (Application Load Balancer)
 
 - **Target Group health check**
-  - **Path**: `/api/health`
+  - **Path**: `/api/health/live` (never the database-checking `/api/health/ready`)
   - **Port**: `8000` (must match container port)
   - **Success codes**: `200`
   - **Interval**: 15s

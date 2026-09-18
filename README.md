@@ -112,10 +112,7 @@ This is a **COMPLETE** conversion of your React application to vanilla JavaScrip
 
 ### Advanced Features
 
-- ✅ **Cloud Sync** (Simplified but functional)
-  - Auto-sync every 5 seconds
-  - Conflict resolution (last-write-wins)
-  - Manual push/pull
+- ✅ **Live sync (server mode)** - polls every 3 seconds; the old "cloud sync" is disabled
   - Sync status indicator
   
 - ✅ **Command Palette** (⌘K / Ctrl+K)
@@ -150,7 +147,7 @@ This is a **COMPLETE** conversion of your React application to vanilla JavaScrip
 
 ```
 Start_V3/
-├── index.html          # HTML entry point (Tailwind config, CDN tags)
+├── index.html          # HTML entry point (local CSS/JS only; no CDN - the CSP forbids it)
 ├── style.css           # Complete styling (glass morphism, animations)
 ├── script.js           # FULL application logic (~20,000+ lines)
 ├── www/                # Copy of the frontend used by the Capacitor mobile apps
@@ -445,7 +442,7 @@ state = {
 
 ### Tailwind Utilities
 
-Full Tailwind CSS via CDN with custom config:
+Prebuilt Tailwind CSS (assets/tailwind.css, run `npm run build:css`) with custom config:
 - Extended color palette
 - Custom animations (fade-in-up, blob, shimmer, shake)
 - Dark mode support
@@ -453,20 +450,12 @@ Full Tailwind CSS via CDN with custom config:
 
 ## 🔐 Security Notes
 
-⚠️ **Client-Side Only Application**
-
-- All data stored in localStorage
-- No server-side validation
-- Passwords in plain text locally
-- **NOT production-ready** without backend
-
-**For Production:**
-- Implement proper authentication server
-- Add encrypted data transmission
-- Use server-side validation
-- Implement database storage
-- Add API endpoints
-- Use proper session management
+Server mode is the production setup: passwords are hashed on the server
+(PBKDF2-SHA256), logins are HTTP-only cookie sessions, every write is
+validated server-side, permissions are enforced by role, and every response
+carries a strict Content-Security-Policy (the page never loads scripts, styles
+or fonts from other sites). Local mode keeps data in the browser only and is
+for one person on one device.
 
 ## 📊 Data Model
 
@@ -603,7 +592,7 @@ Same as original React version - use at your own risk.
 - Original React version: AdPulse Analytics
 - UI Framework: Tailwind CSS
 - Icons: Lucide Icons
-- Fonts: Google Fonts (Inter)
+- Fonts: bundled locally in assets/fonts.css
 
 ---
 

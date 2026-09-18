@@ -1196,7 +1196,7 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
         )
 
 
-# Audit log retention: keep logs for 90 days by default
+# Audit log retention: keep 365 days / 500,000 rows by default (the UI promises "keeps last 1 year")
 AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 365)   # the UI promises "keeps last 1 year"
 AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 500000)
 # Money-history actions are never auto-deleted (closing a month, unlocking it, imports, restores, company money).

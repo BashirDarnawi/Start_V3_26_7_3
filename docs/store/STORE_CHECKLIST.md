@@ -12,6 +12,12 @@ sequence, use [ANDROID_PERSONAL_PLAY_RELEASE.md](ANDROID_PERSONAL_PLAY_RELEASE.m
   connects to the live backend at `https://albayanhub.com`.
 - Deploying a Docker image does not update the installed Android app. Uploading
   a new `.aab` does not deploy the backend.
+- Order matters: publish and redeploy the SERVER image first, confirm
+  `/api/health/ready` shows the new release, and only then build and upload a
+  new phone app from the same source. The app sends request headers the
+  older server does not accept (for example `X-Albayan-User`), so a new app
+  talking to an old server cannot load data. The other direction (new server,
+  old app) keeps working.
 
 ## Already present in the project
 

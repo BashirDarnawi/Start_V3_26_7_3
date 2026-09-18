@@ -1,17 +1,15 @@
 # Deploy (Libyan Spider + PostgreSQL)
 
-> **Which deployment is real?** Production is hosted with **Libyan Spider**, not
-> AWS. The exact release method depends on whether the active Libyan Spider
-> service is JPaaS Git, Docker Compose, or cPanel. Confirm the service in the
-> hosting dashboard before deploying. The AWS document is historical guidance.
+> **Which deployment is real?** Production is the Docker image
+> `bashird/albayan` running on Libyan Spider Jelastic (JPaaS Docker), behind
+> Cloudflare, with a separate PostgreSQL node. You publish with
+> `npm run release:image:push` and then press Redeploy in Jelastic - see
+> `docs/RELEASE_AND_SAFETY.md`. Variables live in Jelastic under
+> Application Servers > Variables; `albayan.env.example` lists them.
+> The Caddy/systemd files here are for self-hosting on a plain Linux server
+> and are NOT used in production. The AWS document is historical.
 
-This folder contains **example** deployment files for running Albayan as an always‑online multi‑user app.
-
-Recommended stack:
-- **Ubuntu VPS**
-- **PostgreSQL**
-- **Caddy** (automatic HTTPS) or Nginx
-- **systemd** service for the app
+This folder contains **example** deployment files for self-hosting Albayan on a plain Linux server.
 
 Files:
 - `Caddyfile.example` — HTTPS reverse proxy → `127.0.0.1:8000`
@@ -61,21 +59,27 @@ setting `ALBAYAN_META_BACKGROUND_SYNC=false` on the other replicas.
 ## Database migrations
 
 Schema changes are managed with Alembic (see `server/MIGRATIONS.md`).
-After deploying new code that changes the database schema, run once:
+After deploying code that changes the database schema, run the migration
+once. On Jelastic: open the app container's Web SSH, then
 
 ```
-alembic upgrade head
+cd /app && alembic upgrade head
 ```
 
-(inside Docker: `docker compose exec albayan alembic upgrade head`).
-Back up the database first (`pg_dump`). The app intentionally does NOT
-auto-migrate at startup.
+(on a local Docker Compose stack: `docker compose exec albayan alembic upgrade head`).
+New tables are created by the app itself at start; changed columns are not -
+that is what the migration does. Back up the database first (Control Center
+> Create encrypted backup now). The app intentionally does NOT auto-migrate.
 
 ## Safe backups and restores
 
-Albayan now includes a backup command that uses the same database settings as
-the server. It creates an atomic backup, verifies that PostgreSQL can read it,
-writes a SHA-256 checksum, and removes backups older than the chosen retention.
+Production backups are made by the app itself: encrypted, every 24 hours, on
+the /var/lib/albayan volume, optionally copied off-site. Set them up with
+`docs/OPERATIONS_SAFETY.md` sections 1-3 and check them in Control Center.
+
+The command below is a second tool for a machine that has `pg_dump` and can
+reach the database (for example before a migration). It writes a plain,
+unencrypted dump, verifies it and deletes dumps older than the retention:
 
 ```bash
 python -m server.ops_backup backup --output-dir /secure/albayan-backups --retention-days 30
@@ -99,15 +103,20 @@ cannot silently rot.
 
 ## Publishing Docker Hub images
 
-The manual GitHub workflow **Publish verified Docker image** runs the safety
-tests, builds the production image, starts that exact image, checks database
-readiness, and only then pushes:
+The normal path is on your computer:
 
-- `bashird/albayan:<full-git-commit>` (immutable rollback version)
-- `bashird/albayan:latest` (only when the workflow option is enabled)
+```
+npm run release:image:push
+```
 
-Configure the GitHub `production` environment with repository secrets
-`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. Use a Docker Hub access token, not
-your account password. Jelastic still pulls the image from Docker Hub in a
-separate manual deployment step. Keep the immutable tag shown by the workflow;
-it is the safest way to roll back to the exact previous release.
+It runs every check, builds the image and pushes two tags:
+`bashird/albayan:latest` and `bashird/albayan:release-<git-sha>-<time>` (the
+rollback tag; it is printed at the end). It refuses to run with uncommitted
+changes. Docker Desktop must be logged in to Docker Hub with an access token,
+never the account password.
+
+Alternative: the manual GitHub workflow **Publish verified Docker image**
+builds on GitHub's machines and pushes `bashird/albayan:<full-git-commit>`
+(and `latest` only when its option is ticked). It needs the repository secrets
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. Use one path or the other for a
+release, not both. Jelastic still pulls the image in a separate manual step.

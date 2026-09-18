@@ -51,11 +51,30 @@ build unless `--allow-dirty` is passed (`npm run release:image:push -- --allow-d
 and it is not a claim that GitHub contains that exact source. Save/review/commit source separately when
 authorized. Keep the previous good release tag for rollback.
 
-Jelastic must then explicitly redeploy from Docker Hub. Verify the expected
-release via `/api/health/ready` and check the key live workflows. Never assume
-that pushing Git, pushing an image, or a healthy HTTP response proves the new
-version was deployed. A failed push may have partially updated registry tags;
-inspect the tags/digests before retrying. Never put passwords or tokens in chat.
+After the push, deploy it by hand in Jelastic (the script never does this):
+
+1. In the Jelastic dashboard open the albayan environment, hover the app
+   container (the bashird/albayan node) and click Redeploy.
+2. Tag: leave `latest` for the release you just pushed. To roll back, type the
+   previous good tag instead, for example `release-1a2b3c4d5e6f-20260918T2200Z`
+   (the script prints the tag; it is also listed on Docker Hub).
+3. Keep "Keep volumes data" ticked. Confirm.
+4. Open https://albayanhub.com/api/health/ready. The `release` value must be
+   the tag the script printed and `dialect` must be `postgresql`. Then sign in
+   and try one receipt, one delivery and the Control Center.
+
+What Redeploy does: it pulls the image again and replaces the running
+container. Kept: the environment variables, the PostgreSQL database (it lives
+on its own node) and the backup volume /var/lib/albayan. Lost: anything
+written inside the container outside that volume. If the container does not
+come up, open its log: the line "Refusing to serve on SQLite" means the
+DATABASE_URL variable is missing or wrong; "[albayan] boot:" shows the release,
+database type and whether the backup key is set.
+
+Never assume that pushing Git, pushing an image, or a healthy HTTP response
+proves the new version was deployed. A failed push may have partially updated
+registry tags; inspect the tags/digests before retrying. Never put passwords
+or tokens in chat.
 
 ## Backup readiness
 

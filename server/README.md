@@ -84,7 +84,9 @@ This protects your logins and data traffic **even without a domain/HTTPS**.
 ### 2) Set env vars
 
 - **ALBAYAN_COOKIE_SECURE**: set to `true` behind HTTPS
-- **DATABASE_URL**: PostgreSQL connection string (recommended)
+- **DATABASE_URL**: PostgreSQL connection string. REQUIRED in production: the
+  server refuses to start on SQLite unless `ALBAYAN_ALLOW_SQLITE=true` or debug
+  mode is set (`ALBAYAN_DATABASE_URL` is accepted as an alias)
 - **ALBAYAN_DB_HOST/PORT/NAME/USER/PASSWORD**: safer alternative to
   `DATABASE_URL` when credentials contain URL punctuation; the Docker Compose
   setup uses these fields automatically

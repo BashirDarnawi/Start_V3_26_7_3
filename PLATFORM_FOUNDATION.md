@@ -41,6 +41,15 @@ When a user clicks a service card:
 - **Requires subscription** → a modal prompts to subscribe.
 - **Subscribed** → navigation proceeds.
 
+**Current state (September 2026):** the wallet, plans and charge-wallet pages
+are visible to Admins only. Customers who open them see "These features are
+hidden for now" and are sent back to their landing page, so a customer cannot
+top up or buy a plan alone; an admin does it for them. Plan prices are stored
+on the server and set by an admin in Control Center (default plans ship at
+price 0 and the bundle ships inactive). To open self-service later, remove
+`wallet`, `plans` and `charge-wallet` from `PLATFORM_ADMIN_ONLY_VIEWS` in
+`src/08-data-audit.js` and test the purchase flow end to end.
+
 Access checks use:
 
 - **Primary**: `state.serviceSubscriptions` (ledger of subscription records)

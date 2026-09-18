@@ -82,6 +82,8 @@ official [Android App Bundle guidance](https://developer.android.com/guide/app-b
 
 From the project root in PowerShell:
 
+Before building: the server must already run the same release (see `STORE_CHECKLIST.md`).
+
 ```powershell
 npm ci
 npm run release:prepare
