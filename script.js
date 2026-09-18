@@ -15305,6 +15305,21 @@ function hasFrozenFinalAdSpend(ad) {
 function getFrozenFinalAdSpendUSD(ad) {
   return hasFrozenFinalAdSpend(ad) ? Math.max(Number(ad.spentUSD), 0) : null;
 }
+
+// Startup-bundle twin of the profit panel's getAdActualSpendUSD (same
+// precedence: frozen final -> USD Meta reading -> recorded -> terminal sale).
+function getAdActualSpendUSDLite(ad) {
+  if (!ad || ad._deleted) return 0;
+  const frozen = getFrozenFinalAdSpendUSD(ad);
+  if (frozen !== null) return frozen;
+  const minor = Number(ad.metaSpendMinor);
+  if (ad.metaAdId && Number.isFinite(minor) && minor >= 0 && String(ad.metaCurrency || 'USD').toUpperCase() === 'USD') return Math.max(0, minor / 100);
+  const recorded = Number(ad.spentUSD);
+  if (Number.isFinite(recorded) && recorded >= 0) return recorded;
+  const status = String(ad.status || '').toLowerCase();
+  if (['stopped', 'completed', 'canceled', 'cancelled', 'lost'].includes(status)) return Math.max(0, Number(getAdSpendUSD(ad)) || 0);
+  return 0;
+}
 // ==========================================
 // VIEW RENDERING FUNCTIONS  
 // ==========================================
@@ -23550,7 +23565,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
   // Same month rule as the analytics breakdown (start date first) and the
   // same "actual spend" as the profit panel when that bundle is loaded.
-  const adActual = a => (typeof getAdActualSpendUSD === 'function' ? getAdActualSpendUSD(a) : getAdSpendUSD(a));
+  const adActual = a => (typeof getAdActualSpendUSDLite === 'function' ? getAdActualSpendUSDLite(a) : getAdSpendUSD(a));
   const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.startDate || a.createdAt, monthStart, Infinity)).reduce((sum, a) => sum + adActual(a), 0);
   let owedLyd = 0;
   let owedCount = 0;
@@ -28647,7 +28662,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
         try {
           const latest = await apiGetEntity('receipts', receipt.id);
           const latestData = latest?.data ? Security.sanitizeObject(latest.data) : null;
-          const mine = String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');
+          // An admin records completions for the assigned driver, so the job
+          // is "theirs" too; only a real driver can be reassigned away.
+          const mine = isCurrentUserAdmin() || String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');
           if (latestData && (String(latestData.deliveryStatus || '') === 'Canceled' || !mine)) {
             const idxLive = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idxLive !== -1) state.receipts[idxLive] = latestData;
@@ -33911,9 +33928,11 @@ async function _saveReceiptFromModalInner() {
   // When the status itself is unchanged, echo the stored workflow verbatim —
   // the same edit-echo rule that fixed receiptType. A deliberate status
   // change (e.g. Paid -> Canceled) still runs the derivation.
+  // A driver-canceled job is driver-owned too: re-deriving it would silently
+  // re-queue the delivery (and the server refuses that for staff editors).
   const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
   if (editTarget && status === String(editTarget.status || '')
-      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress')) {
+      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')) {
     receiptDeliveryStatus = storedDeliveryStatus;
     receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');
     receiptIsReceivedInOffice = editTarget.isReceivedInOffice === true;

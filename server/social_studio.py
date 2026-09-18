@@ -82,6 +82,7 @@ _WORKER_STOP = threading.Event()
 _WORKER_THREAD: threading.Thread | None = None
 _WORKER_LOCK = threading.Lock()
 WORKER_INTERVAL_SECONDS = 20
+_RETRY_TICK = 0
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +700,7 @@ def _clean_post(
         "media": media,
         "status": status,
         "scheduledAt": scheduled_at.isoformat().replace("+00:00", "Z") if scheduled_at else "",
+        "publishAttempts": 0,
         "autoReplyRuleId": rule_id,
         "lastError": "",
     }
@@ -832,7 +834,8 @@ def publish_post(post_id: str, *, actor_id: str = "", from_scheduler: bool = Fal
             errors.append(result["error"])
         results.append(result)
     now = _iso_now()
-    attempts = int(data.get("publishAttempts") or 0) + 1
+    # A manual "Publish now" starts a fresh retry budget.
+    attempts = (int(data.get("publishAttempts") or 0) if from_scheduler else 0) + 1
     temporary_only = bool(errors) and all(bool(r.get("retryable")) for r in results if r.get("error"))
     if from_scheduler and temporary_only and attempts < 6:
         # A temporary Meta condition (pause, outage) must not turn a scheduled
@@ -934,10 +937,15 @@ def run_scheduler_tick(*, now: datetime | None = None, limit: int = 20) -> int:
             publish_post(entity["id"], actor_id=owner_id, from_scheduler=True)
         except Exception as error:
             print(f"[albayan] Social Studio publish failed for {entity['id']} ({type(error).__name__}).")
-    try:
-        _retry_pending_replies(current)
-    except Exception:
-        print("[albayan] Social Studio reply retry pass failed; it will retry.")
+    # The retry pass scans the reply log; every sixth tick (about two minutes)
+    # is plenty for delays that start at fifteen minutes.
+    global _RETRY_TICK
+    _RETRY_TICK += 1
+    if _RETRY_TICK % 6 == 1:
+        try:
+            _retry_pending_replies(current)
+        except Exception:
+            print("[albayan] Social Studio reply retry pass failed; it will retry.")
     return attempted
 
 
@@ -1016,7 +1024,7 @@ def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[s
         params = {"type": LOG_TYPE, "owner": owner_id, "page": page_id, "person": from_id, "after": ""}
         query = text(
             f"SELECT id, {_json_field('actions')} AS actions, {_json_field('processing')} AS processing, "
-            f"{_json_field('ruleId')} AS rule_id "
+            f"{_json_field('ruleId')} AS rule_id, {_json_field('retryAfter')} AS retry_after "
             f"FROM entities WHERE type=:type AND deleted=false AND created_by=:owner "
             f"AND {_json_field('ownerId')}=:owner AND {_json_field('pageId')}=:page "
             f"AND {_json_field('fromId')}=:person AND id>:after ORDER BY id ASC LIMIT 100"
@@ -1031,7 +1039,7 @@ def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[s
                         actions = json_loads(actions)
                     except ValueError:
                         actions = []
-                answered = _bool(row["processing"]) or (
+                answered = _bool(row["processing"]) or bool(row["retry_after"]) or (
                     isinstance(actions, list) and any(str(a) in ("dm", "public") for a in actions)
                 )
                 if answered:
@@ -1141,6 +1149,23 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
             ),
             {"type": LOG_TYPE, "now": now_iso, "cutoff": cutoff, "limit": max(1, int(limit))},
         ).mappings().all()
+        expired = conn.execute(
+            text(
+                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
+                f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {_json_field('at')} < :cutoff LIMIT :limit"
+            ),
+            {"type": LOG_TYPE, "cutoff": cutoff, "limit": max(1, int(limit))},
+        ).mappings().all()
+    for row in expired:
+        # Released, so the person no longer counts as answered by a reply that
+        # was never sent, and the row is not scanned again.
+        data = json_loads(row.get("data_json") or "{}") or {}
+        try:
+            ctx["patch_entity"](LOG_TYPE, str(row["id"]),
+                                {"retryAfter": "", "error": "Reply window expired (7 days)."},
+                                str(data.get("ownerId") or "") if isinstance(data, dict) else "")
+        except HTTPException:
+            pass
     attempted = 0
     for row in rows:
         data = json_loads(row.get("data_json") or "{}") or {}
@@ -1164,7 +1189,9 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 page_entity["data"], rule_entity["data"], str(data.get("platform") or ""), str(data.get("commentId") or "")
             )
             patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
-            patch["retryAfter"] = _retry_after_iso(attempts + 1) if (retryable and attempts + 1 < 6) else ""
+            # No attempt cap: the delay is capped at four hours and the pass
+            # itself gives up after seven days (Meta's private-reply window).
+            patch["retryAfter"] = _retry_after_iso(attempts + 1) if retryable else ""
         try:
             ctx["patch_entity"](LOG_TYPE, str(row["id"]), patch, owner_id)
         except HTTPException:

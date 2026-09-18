@@ -240,7 +240,7 @@ with scratch tests, now permanent in `server/test_deep_scan_round3.py`
 | --- | --- |
 | The composer's "Auto-reply on this post" choice was stored but never used; only a rule's own scope decided. | That rule is evaluated first for comments on that post. |
 | A comment arriving during a Meta pause or outage was claimed and never answered ("will resume automatically" was untrue). | Temporary failures keep the claim with a retry time; the scheduler retries with backoff for up to seven days. |
-| A scheduled post hit by a temporary Meta problem became a permanent failure. | The worker keeps it scheduled and retries with backoff (5, 10, 20 … minutes, up to five attempts). |
+| A scheduled post hit by a temporary Meta problem became a permanent failure. | The worker keeps it scheduled and retries with backoff (5, 10, 20 … minutes, up to five attempts per save; a manual publish or an edit starts a fresh budget). The card shows the last error with a "Retrying automatically" label. |
 | A "chosen posts" rule missed a post whose other page had failed (status `failed` even though this page was live), and only the newest 500 posts were scanned. | Both statuses are scanned. |
 | "Once per person" was page-wide: a generic thank-you consumed the person's one price reply; a bare like counted as an answer. | Per rule; only a sent DM or public reply counts; pre-existing history rows keep their page-wide meaning. |
 | Replies inside a thread (usually to our own auto-reply) got another auto-reply. | Nested replies are skipped. |
@@ -252,7 +252,7 @@ with scratch tests, now permanent in `server/test_deep_scan_round3.py`
 | Problem | Fix |
 | --- | --- |
 | Editing a product while a colleague sold from it could silently restore the sold quantity: the form saved with whatever version live-sync had refreshed. | The form keeps the version it opened with; a concurrent sale now produces a conflict. |
-| Order numbers were one global sequence across all businesses (a new shop's first order was numbered after other tenants' orders, revealing their volume). | One sequence per business. |
+| Order numbers were one global sequence across all businesses (a new shop's first order was numbered after other tenants' orders, revealing their volume). | The sequence follows what the user can see: staff with `clothesOrders.view` share one sequence; a subscriber with view-own numbering starts at 1 and never sees other tenants' volume. |
 | Changing an order's payment status required product-edit permission on every product in it. | Payment changes need no product permission. |
 | Overpayment was accepted in local mode and rejected by the server with a raw message. | Validated before saving, bilingual. |
 
@@ -261,7 +261,7 @@ with scratch tests, now permanent in `server/test_deep_scan_round3.py`
 | Problem | Fix |
 | --- | --- |
 | A duplicate final receipt number trapped the driver in a "receipt changed, tap again" loop: every 409 was treated as a version conflict. | Only real version conflicts are rebased; a used number shows "Receipt number already used". |
-| A staff member with `receipts.edit` could reopen a Delivered or Canceled job or move it backwards, with no validation. | Staff edits follow the same delivery state machine (terminal states are final). |
+| A staff member with `receipts.edit` could reopen a Delivered or Canceled job or move it backwards, with no validation. | A finished job cannot be handed back to a driver and an accepted job cannot go back to "Needs Delivery"; office edits that end the workflow (paid in office, refund, cancel, "Delete mission") stay allowed. |
 | When the office canceled or reassigned a job while the driver's form was open, the driver saw a raw error and a dead form. | The app re-reads the job and closes the form with a clear message. |
 | A dollar collected on a dollar debt was converted at today's default rate instead of the receipt's own rate, producing false over- or under-payment. | The receipt's rate seeds the conversion. |
 
@@ -290,3 +290,41 @@ with scratch tests, now permanent in `server/test_deep_scan_round3.py`
 6. Round-2 items still open: startup repair passes on every boot, backup-now
    inside the request, hash-locked Python dependencies, no idle session
    timeout, finished ads never leave the Meta sync queue.
+
+## Review of the round-3 fixes (same day)
+
+An adversarial reviewer read the round-3 diff before release and found eleven
+problems in the fixes themselves; all are corrected in the released build.
+
+| Reviewer finding | Correction |
+| --- | --- |
+| The staff `receipts.edit` state machine was too strict: it blocked normal office edits (marking an In Progress job paid in the office, refunding a Delivered job, "Delete mission"). | Only re-opening a finished job (Delivered/Canceled → Needs Delivery/In Progress) and moving an accepted job backwards (In Progress → Needs Delivery) are refused. |
+| The driver's completion form treated any 400 as "reassigned" for admins, because an admin is never the assigned driver. | An admin counts as the job's owner; only a real driver can be reassigned away. |
+| Per-creator order numbers split one shop's Admin and Employee into two sequences in the same list. | The sequence follows visibility (see the Clothes table above). |
+| Timezone re-bucketing (UTC → Africa/Tripoli) can move a record written between 22:00 and 00:00 UTC on the last day of a month into the next month. **One-time effect on existing data:** a closed month's membership may differ from the snapshot taken at closing time; the snapshot itself is unchanged. Owners who closed months before this release should treat the stored snapshot as the record. | Documented; no automatic rewrite of closed snapshots. |
+| Reply retries stopped after five attempts (about eight hours), not the promised seven days. | No attempt cap; the delay is capped at four hours and the pass gives up after seven days. |
+| A post's `publishAttempts` never reset, so a post that once exhausted its retries could never be retried by the scheduler again. | Every save and every manual publish resets the budget. |
+| `spentUSD: null` was "no recorded spend" on the server but "spent 0" on the screen. | The server mirrors the client (a stored null/empty value is 0). |
+| The home hero's ad spend depended on whether the lazy profit bundle had loaded. | A startup-bundle twin (`getAdActualSpendUSDLite`) with the same precedence is used always. |
+| A reply parked for retry did not count as "answered" for once-per-person, so a second rule could answer the same person while the first was waiting. | Parked rows count as answered. |
+| A rescheduled post hid the reason it moved. | The card shows the last error with a "Retrying automatically" label. |
+| The reply retry pass scanned the log on every 20-second tick. | Every sixth tick (about two minutes). |
+
+A second pass over these corrections found four more, also fixed: an empty or
+misspelled `deliveryStatus` could slip past the reopen guard (now only the
+listed moves are accepted for finished or accepted jobs); an office edit of a
+driver-canceled receipt silently re-queued it for delivery (the form now keeps
+"Canceled" like it keeps "Delivered"); a reply whose seven-day window had
+passed stayed parked forever and counted as "answered" (now released with
+"Reply window expired"); a non-numeric recorded spend froze a finished ad at
+$0 on the server while the screen used the Meta reading.
+
+Known limits, on purpose:
+
+- The reopen guard stops the one-step mistake. A staff editor can still move a
+  finished job to Office and then send it for delivery again; the deliberate
+  refund route (`/api/receipts/{id}/unsettle`) also creates a real pending
+  delivery. Both are office decisions, not driver ones.
+- Clothes order numbers are unique within a business. The platform admin's
+  list shows every business, so the same number can appear twice there from
+  two different businesses.

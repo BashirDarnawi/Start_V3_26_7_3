@@ -891,6 +891,34 @@ def test_scheduler_tick_publishes_due_posts_once(actors, graph):
     assert studio._WORKER_THREAD is None
 
 
+def test_manual_publish_and_edits_reset_the_scheduler_retry_budget(actors, graph):
+    cookies = actors["a"]["cookies"]
+    page = _link(actors, "a", "5100000000026")
+    post = _post(cookies, [page["id"]], caption="Budget", status="scheduled", scheduledAt=_future(2)).json()
+    owner = str(post["ownerId"]) if post.get("ownerId") else actors["a"]["id"]
+
+    def attempts():
+        with db_conn() as conn:
+            row = conn.execute(text("SELECT data_json FROM entities WHERE id=:id"), {"id": post["id"]}).mappings().first()
+        return json_loads(row["data_json"])
+
+    studio._ctx()["patch_entity"](studio.POSTS_TYPE, post["id"], {"publishAttempts": 5}, owner)
+    graph.fail["/feed"] = meta_ads.MetaAdsError("temporary", "Meta is temporarily unavailable.", retryable=True)
+    assert studio.run_scheduler_tick(now=datetime.now(timezone.utc) + timedelta(minutes=5)) == 1
+    assert attempts()["status"] == "failed" and attempts()["publishAttempts"] == 6   # budget exhausted
+    # "Publish now" starts fresh: the failure is recorded as attempt 1, not 7.
+    manual = client.post(f"{API}/posts/{post['id']}/publish", cookies=cookies)
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["status"] == "failed" and attempts()["publishAttempts"] == 1
+    # Editing (rescheduling) resets it too, so the scheduler can retry again.
+    edited = client.patch(f"{API}/posts/{post['id']}", json={"status": "scheduled", "scheduledAt": _future(2)}, cookies=cookies)
+    assert edited.status_code == 200, edited.text
+    assert attempts()["publishAttempts"] == 0
+    assert studio.run_scheduler_tick(now=datetime.now(timezone.utc) + timedelta(minutes=5)) == 1
+    after = attempts()
+    assert after["status"] == "scheduled" and after["publishAttempts"] == 1 and after["lastError"]
+
+
 @pytest.mark.parametrize("action", ["edit", "cancel", "delete"])
 def test_post_mutation_cannot_overwrite_a_concurrent_publish_claim(actors, monkeypatch, action):
     cookies = actors["a"]["cookies"]

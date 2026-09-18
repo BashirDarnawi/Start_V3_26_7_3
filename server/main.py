@@ -2233,18 +2233,8 @@ app = FastAPI(
 )
 
 
-def _safe_exception_text(exc: BaseException, limit: int = 300) -> str:
-    """Exception text for the log without bound SQL parameters.
-
-    SQLAlchemy statement errors embed ``[parameters: {...}]`` — the values of
-    the failing statement, which on the users table are password hashes and
-    salts. The message stays useful; the parameters never reach the log.
-    """
-    text_value = str(exc)
-    cut = text_value.find("[parameters:")
-    if cut >= 0:
-        text_value = text_value[:cut] + "[parameters: redacted]"
-    return text_value[:limit]
+from .startup_support import init_db_with_retry as _init_db_with_retry_impl
+from .startup_support import safe_exception_text as _safe_exception_text
 
 # PERFORMANCE: Enable gzip compression for JSON/text responses.
 # This reduces payload sizes for large collections (receipts/ads/customers) and helps under load.
@@ -2398,24 +2388,7 @@ def _run_page_name_backfill_quietly() -> None:
 
 
 def _init_db_with_retry(attempts: int = 10, delay_seconds: float = 3.0) -> None:
-    """A database that is briefly unreachable at boot must not kill the container.
-
-    Every other startup step is wrapped; this one used to raise straight out
-    of uvicorn's startup, and the platform does not restart an exited container."""
-    import time as _time
-
-    for attempt in range(1, attempts + 1):
-        try:
-            init_db()
-            return
-        except Exception as error:
-            if attempt >= attempts:
-                raise
-            print(
-                f"[albayan] Database not ready at startup ({type(error).__name__}); "
-                f"retry {attempt}/{attempts - 1} in {delay_seconds:g}s"
-            )
-            _time.sleep(delay_seconds)
+    _init_db_with_retry_impl(init_db, attempts=attempts, delay_seconds=delay_seconds)
 
 
 @app.on_event("startup")
@@ -5540,10 +5513,13 @@ def _clothes_order_mutation_atomic(
             if act == "create":
                 normalized = _clothes_normalize_order_payload(clean_data, new_lines, products, None)
                 _clothes_deduct_order_stock(new_lines, products, changed_products)
-                # Order numbers are per business: one owner's sequence must not
-                # depend on (or reveal) other tenants' orders. Deleted orders
-                # still count so a number is never reused.
-                order_owner = str(actor.get("id") or "")
+                # The order sequence follows what this user can see: staff who
+                # see every order share one sequence; a subscriber who sees
+                # only their own orders gets their own, so a new business
+                # starts at 1 and never learns other tenants' volume. Deleted
+                # orders still count so a number is never reused.
+                sees_all_orders = user_has_permission(actor, "clothesOrders", "view")
+                order_owner = "global" if sees_all_orders else str(actor.get("id") or "")
                 _lock_idempotency_key(
                     conn, f"owner:{order_owner}", postgres=postgres, namespace="clothesOrderNumber"
                 )
@@ -5551,9 +5527,9 @@ def _clothes_order_mutation_atomic(
                 for existing in conn.execute(
                     text(
                         f"SELECT {json_field_sql('orderNo')} AS order_no FROM entities "
-                        "WHERE type='clothesOrders' AND created_by=:owner"
+                        "WHERE type='clothesOrders'" + ("" if sees_all_orders else " AND created_by=:owner")
                     ),
-                    {"owner": order_owner},
+                    {} if sees_all_orders else {"owner": order_owner},
                 ).mappings().all():
                     try:
                         max_order_no = max(max_order_no, int(float(existing.get("order_no") or 0)))
@@ -12374,25 +12350,26 @@ def update_collection_item(
         delivery_grant_patch = _delivery_ok
 
     if collection == "receipts" and not delivery_grant_patch and role_lower not in {"delivery", "admin"}:
-        # A staff edit grant is not a way around the delivery state machine:
-        # a Delivered or Canceled job is final, and other moves follow the
-        # same transitions the deliveries.* grants follow.
+        # A staff edit grant is not a way around the delivery workflow: a
+        # finished (Delivered/Canceled) job cannot be handed back to a driver,
+        # and an accepted job cannot be moved backwards. Office edits that
+        # end the workflow (paid in the office, refund, cancel) stay allowed.
         _status_updates = sanitize_json(body.data or {}) or {}
         if "deliveryStatus" in _status_updates:
             _current_status = str((existing.get("data") or {}).get("deliveryStatus") or "").strip()
             _next_status = str(_status_updates.get("deliveryStatus") or "").strip()
-            if _next_status != _current_status:
-                if _current_status in {"Delivered", "Canceled"}:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot change status from '{_current_status}' - this is a terminal state",
-                    )
-                if _next_status != "Delivered" and _next_status not in _DELIVERY_TRANSITIONS.get(_current_status, set()):
-                    # (Delivered keeps its own rule below: completion belongs to the assigned driver.)
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid status transition from '{_current_status}' to '{_next_status}'",
-                    )
+            # Anything else (an empty value, a different spelling) would revive
+            # the job on the driver's list, so only these moves are accepted.
+            _allowed_next = {
+                "Delivered": {"Delivered", "Canceled", "Office"},
+                "Canceled": {"Canceled", "Delivered", "Office"},
+                "In Progress": {"In Progress", "Delivered", "Canceled", "Office"},
+            }.get(_current_status)
+            if _allowed_next is not None and _next_status not in _allowed_next:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot change status from '{_current_status}' to '{_next_status}' - a delivery job cannot be reopened or moved backwards",
+                )
 
     if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
         _driver_updates = sanitize_json(body.data or {}) or {}

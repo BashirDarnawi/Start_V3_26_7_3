@@ -206,7 +206,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
   // Same month rule as the analytics breakdown (start date first) and the
   // same "actual spend" as the profit panel when that bundle is loaded.
-  const adActual = a => (typeof getAdActualSpendUSD === 'function' ? getAdActualSpendUSD(a) : getAdSpendUSD(a));
+  const adActual = a => (typeof getAdActualSpendUSDLite === 'function' ? getAdActualSpendUSDLite(a) : getAdSpendUSD(a));
   const adSpendUsd = (Array.isArray(ads) ? ads : []).filter(a => a && inWindow(a.startDate || a.createdAt, monthStart, Infinity)).reduce((sum, a) => sum + adActual(a), 0);
   let owedLyd = 0;
   let owedCount = 0;

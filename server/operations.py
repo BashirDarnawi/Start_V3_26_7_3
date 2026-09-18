@@ -142,6 +142,14 @@ def _safe_number(value: Any) -> float:
     return number if number == number and abs(number) != float("inf") else 0.0
 
 
+def _numeric_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
 def _entity_rows(collection: str, conn: Any | None = None) -> list[dict[str, Any]]:
     # The month snapshot needs a few numeric fields per row; let the database
     # strip the inline photos so closing a month never materialises every
@@ -380,10 +388,11 @@ def _ad_sale_usd(row: dict[str, Any]) -> float:
     """Status-aware sale value: a stopped ad sold what it spent, not its budget."""
     status = str(row.get("status") or "").strip().lower()
     spent = row.get("spentUSD")
-    if status == "stopped" and spent is not None:
+    # Mirrors the client: a key that exists (even null) is a recorded spend of 0.
+    if status == "stopped" and "spentUSD" in row:
         return max(0.0, _safe_number(spent))
     if status in ("completed", "canceled", "cancelled", "lost"):
-        return max(0.0, _safe_number(spent if spent is not None else row.get("amountUSD")))
+        return max(0.0, _safe_number(spent if "spentUSD" in row else row.get("amountUSD")))
     if status in ("pending", "paused"):
         return 0.0
     return max(0.0, _safe_number(row.get("amountUSD")))
@@ -393,7 +402,8 @@ def _ad_actual_spend_usd(row: dict[str, Any]) -> float:
     """Frozen final spend first, then USD Meta spend, then the recorded spend."""
     status = str(row.get("status") or "").strip().lower()
     spent = row.get("spentUSD")
-    has_spent = spent not in (None, "") and _safe_number(spent) >= 0
+    spent_number = None if spent in (None, "") else _numeric_or_none(spent)
+    has_spent = spent_number is not None and spent_number >= 0
     frozen = has_spent and (
         row.get("manualSpentOverride") is True or bool(row.get("finalSpendConfirmedAt")) or status in _TERMINAL_AD_STATUSES
     )
@@ -403,8 +413,12 @@ def _ad_actual_spend_usd(row: dict[str, Any]) -> float:
     if str(row.get("metaAdId") or "") and minor not in (None, "") and _safe_number(minor) >= 0 \
             and str(row.get("metaCurrency") or "USD").upper() == "USD":
         return max(0.0, _safe_number(minor) / 100)
-    if has_spent:
-        return max(0.0, _safe_number(spent))
+    if "spentUSD" in row:
+        # Mirrors the client's Number(ad.spentUSD): null and "" are 0, a
+        # non-numeric string is NaN there and falls through.
+        recorded = 0.0 if spent in (None, "") else _numeric_or_none(spent)
+        if recorded is not None and recorded >= 0:
+            return recorded
     if status in ("stopped", "completed", "canceled", "cancelled", "lost"):
         return _ad_sale_usd(row)
     return 0.0

@@ -16,3 +16,18 @@ function hasFrozenFinalAdSpend(ad) {
 function getFrozenFinalAdSpendUSD(ad) {
   return hasFrozenFinalAdSpend(ad) ? Math.max(Number(ad.spentUSD), 0) : null;
 }
+
+// Startup-bundle twin of the profit panel's getAdActualSpendUSD (same
+// precedence: frozen final -> USD Meta reading -> recorded -> terminal sale).
+function getAdActualSpendUSDLite(ad) {
+  if (!ad || ad._deleted) return 0;
+  const frozen = getFrozenFinalAdSpendUSD(ad);
+  if (frozen !== null) return frozen;
+  const minor = Number(ad.metaSpendMinor);
+  if (ad.metaAdId && Number.isFinite(minor) && minor >= 0 && String(ad.metaCurrency || 'USD').toUpperCase() === 'USD') return Math.max(0, minor / 100);
+  const recorded = Number(ad.spentUSD);
+  if (Number.isFinite(recorded) && recorded >= 0) return recorded;
+  const status = String(ad.status || '').toLowerCase();
+  if (['stopped', 'completed', 'canceled', 'cancelled', 'lost'].includes(status)) return Math.max(0, Number(getAdSpendUSD(ad)) || 0);
+  return 0;
+}

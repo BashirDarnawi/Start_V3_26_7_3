@@ -2108,9 +2108,11 @@ async function _saveReceiptFromModalInner() {
   // When the status itself is unchanged, echo the stored workflow verbatim —
   // the same edit-echo rule that fixed receiptType. A deliberate status
   // change (e.g. Paid -> Canceled) still runs the derivation.
+  // A driver-canceled job is driver-owned too: re-deriving it would silently
+  // re-queue the delivery (and the server refuses that for staff editors).
   const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');
   if (editTarget && status === String(editTarget.status || '')
-      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress')) {
+      && (storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')) {
     receiptDeliveryStatus = storedDeliveryStatus;
     receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');
     receiptIsReceivedInOffice = editTarget.isReceivedInOffice === true;

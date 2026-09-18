@@ -4418,7 +4418,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
         try {
           const latest = await apiGetEntity('receipts', receipt.id);
           const latestData = latest?.data ? Security.sanitizeObject(latest.data) : null;
-          const mine = String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');
+          // An admin records completions for the assigned driver, so the job
+          // is "theirs" too; only a real driver can be reassigned away.
+          const mine = isCurrentUserAdmin() || String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');
           if (latestData && (String(latestData.deliveryStatus || '') === 'Canceled' || !mine)) {
             const idxLive = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
             if (idxLive !== -1) state.receipts[idxLive] = latestData;

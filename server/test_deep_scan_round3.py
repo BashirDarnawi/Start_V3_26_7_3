@@ -17,6 +17,7 @@ from server import operations
 from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 
+
 client = TestClient(main.app, headers={"Origin": "http://testserver"}, client=("192.0.2.99", 50000))
 PW = "RoundThreePassword123!"
 TAG = secrets.token_hex(4)
@@ -126,13 +127,15 @@ def test_person_history_counts_only_sent_replies_per_rule():
         (f"srl_{TAG}_2", {"ownerId": owner, "pageId": page, "fromId": "77", "ruleId": "rule_b", "actions": ["like"]}),
         (f"srl_{TAG}_3", {"ownerId": owner, "pageId": page, "fromId": "77", "actions": ["dm"]}),
         (f"srl_{TAG}_4", {"ownerId": owner, "pageId": page, "fromId": "78", "ruleId": "rule_c", "actions": ["public"]}),
+        # A reply parked for retry counts as answered: the retry pass will send it.
+        (f"srl_{TAG}_5", {"ownerId": owner, "pageId": page, "fromId": "77", "ruleId": "rule_d", "actions": [], "retryAfter": "2099-01-01T00:00:00Z"}),
     ]
     with db_conn() as conn:
         for row_id, data in rows:
             conn.execute(text("INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
                               "VALUES ('socialReplyLog',:id,:data,false,:t,:owner,:t)"),
                          {"id": row_id, "data": json_dumps({"id": row_id, **data}), "t": stamp, "owner": owner})
-    assert studio._person_replied_rule_ids(owner, page, "77") == {"rule_a", "*"}
+    assert studio._person_replied_rule_ids(owner, page, "77") == {"rule_a", "rule_d", "*"}
     assert studio._has_person_reply(owner, page, "78") is True
     assert studio._has_person_reply(owner, page, "79") is False
 
@@ -189,6 +192,91 @@ def test_temporary_reply_failures_are_retried_by_the_scheduler(monkeypatch):
                 conn.execute(text("DELETE FROM entities WHERE id=:id"), {"id": entity_id})
 
 
+def test_reply_retries_continue_past_six_attempts_within_the_window(monkeypatch):
+    owner = f"owner_retry7_{TAG}"
+    page_id = f"spg_retry7_{TAG}"
+    rule_id = f"srule_retry7_{TAG}"
+    log_id = f"srl_retry7_{TAG}"
+    stamp = now_ms()
+    past = studio._iso_at(datetime.now(timezone.utc) - timedelta(minutes=1))
+    with db_conn() as conn:
+        for entity_type, entity_id, data in (
+            ("socialPages", page_id, {"ownerId": owner, "metaPageId": "5100000000078", "platform": "fb", "name": "P"}),
+            ("socialReplyRules", rule_id, {"ownerId": owner, "enabled": True, "platform": "fb", "publicReply": "Thanks"}),
+            ("socialReplyLog", log_id, {"ownerId": owner, "pageId": page_id, "platform": "fb", "ruleId": rule_id,
+                                        "commentId": "5100000000078_5", "fromId": "9078", "actions": [], "processing": False,
+                                        "error": "Meta paused", "retryAfter": past, "attempts": 7, "at": studio._iso_now()}),
+        ):
+            conn.execute(text("INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                              "VALUES (:type,:id,:data,false,:t,:owner,:t)"),
+                         {"type": entity_type, "id": entity_id, "data": json_dumps({"id": entity_id, **data}), "t": stamp, "owner": owner})
+    monkeypatch.setattr(studio, "_owner_can_automate", lambda owner_id: owner_id == owner)
+    monkeypatch.setattr(studio, "_execute_rule_actions", lambda page, rule, platform, comment_id: ([], ["Meta still paused"], True))
+    try:
+        assert studio._retry_pending_replies(datetime.now(timezone.utc)) >= 1
+        with db_conn() as conn:
+            row = conn.execute(text("SELECT data_json FROM entities WHERE id=:id"), {"id": log_id}).mappings().first()
+        data = json_loads(row["data_json"])
+        assert data["attempts"] == 8 and data["retryAfter"] != ""      # still parked, not abandoned after ~8 hours
+        assert data["retryAfter"] > studio._iso_at(datetime.now(timezone.utc) + timedelta(hours=3, minutes=50))
+    finally:
+        with db_conn() as conn:
+            for entity_id in (page_id, rule_id, log_id):
+                conn.execute(text("DELETE FROM entities WHERE id=:id"), {"id": entity_id})
+
+
+def test_retry_pass_runs_every_sixth_tick(monkeypatch):
+    calls = []
+    monkeypatch.setattr(studio, "_RETRY_TICK", 0)
+    monkeypatch.setattr(studio, "_retry_pending_replies", lambda now, limit=20: calls.append(now) or 0)
+    for _ in range(7):
+        studio.run_scheduler_tick(now=datetime.now(timezone.utc))
+    assert len(calls) == 2                                            # ticks 1 and 7
+
+
+def test_expired_reply_retries_are_released(monkeypatch):
+    owner = f"owner_expired_{TAG}"
+    page_id = f"spg_expired_{TAG}"
+    log_id = f"srl_expired_{TAG}"
+    stamp = now_ms()
+    past = studio._iso_at(datetime.now(timezone.utc) - timedelta(minutes=1))
+    with db_conn() as conn:
+        conn.execute(text("INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                          "VALUES ('socialReplyLog',:id,:data,false,:t,:owner,:t)"),
+                     {"id": log_id, "data": json_dumps({"id": log_id, "ownerId": owner, "pageId": page_id, "platform": "fb",
+                                                        "ruleId": "rule_x", "commentId": "5100000000079_5", "fromId": "9079",
+                                                        "actions": [], "processing": False, "error": "Meta paused",
+                                                        "retryAfter": past, "attempts": 3,
+                                                        "at": studio._iso_at(datetime.now(timezone.utc) - timedelta(days=8))}),
+                      "t": stamp, "owner": owner})
+    monkeypatch.setattr(studio, "_execute_rule_actions", lambda *a: (_ for _ in ()).throw(AssertionError("must not retry")))
+    try:
+        assert "rule_x" in studio._person_replied_rule_ids(owner, page_id, "9079")     # parked = answered ...
+        studio._retry_pending_replies(datetime.now(timezone.utc))
+        with db_conn() as conn:
+            row = conn.execute(text("SELECT data_json FROM entities WHERE id=:id"), {"id": log_id}).mappings().first()
+        data = json_loads(row["data_json"])
+        assert data["retryAfter"] == "" and "expired" in data["error"]
+        assert "rule_x" not in studio._person_replied_rule_ids(owner, page_id, "9079")  # ... until the window passes
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE id=:id"), {"id": log_id})
+
+
+def test_null_recorded_spend_matches_the_client():
+    # The client reads Number(ad.spentUSD): a null/empty value that IS stored means "spent 0".
+    stopped_null = {"status": "stopped", "amountUSD": 500, "spentUSD": None}
+    stopped_missing = {"status": "stopped", "amountUSD": 500}
+    assert operations._ad_sale_usd(stopped_null) == 0.0
+    assert operations._ad_actual_spend_usd(stopped_null) == 0.0
+    assert operations._ad_sale_usd(stopped_missing) == 500.0
+    assert operations._ad_actual_spend_usd({"status": "active", "amountUSD": 300, "spentUSD": ""}) == 0.0
+    assert operations._ad_actual_spend_usd({"status": "active", "amountUSD": 300, "spentUSD": "abc"}) == 0.0
+    assert operations._ad_actual_spend_usd({"status": "active", "amountUSD": 300, "spentUSD": "12.5"}) == 12.5
+    # A garbage value never freezes a finished ad at $0 when Meta reported real spend.
+    assert operations._ad_actual_spend_usd({"status": "stopped", "spentUSD": "abc", "metaAdId": "1", "metaSpendMinor": 1250}) == 12.5
+
+
 # ---------------------------------------------------------------- Clothes: order numbers per business
 
 def _seed_admin(name):
@@ -227,14 +315,24 @@ def _clothes_order(actor, product_id, qty):
     return response.json()["order"]["data"]
 
 
-def test_order_numbers_are_per_business():
-    first = _seed_admin("shop-one")
-    second = _seed_admin("shop-two")
-    one_a = _clothes_order(first, f"cp_one_a_{TAG}", 1)
-    one_b = _clothes_order(first, f"cp_one_b_{TAG}", 1)
-    two_a = _clothes_order(second, f"cp_two_a_{TAG}", 1)
-    assert one_b["orderNo"] == one_a["orderNo"] + 1
-    assert two_a["orderNo"] == 1                      # a new business starts at 1, whatever others did
+def test_order_numbers_follow_what_the_user_can_see(monkeypatch):
+    staff = _seed_admin("shop-staff")
+    staff_two = _seed_admin("shop-staff-two")
+    one_a = _clothes_order(staff, f"cp_one_a_{TAG}", 1)
+    one_b = _clothes_order(staff_two, f"cp_one_b_{TAG}", 1)
+    assert one_b["orderNo"] == one_a["orderNo"] + 1      # staff who see every order share one sequence
+    # A subscriber who sees only their own orders starts their own sequence at 1.
+    monkeypatch.setattr(main, "_require_clothes_subscription", lambda user: None)
+    email = f"r3-subscriber-{TAG}@tests.albayanhub.com"
+    created = client.post("/api/users", json={"name": "Subscriber", "email": email, "password": PW, "role": "Employee",
+                                              "permissions": {"clothesProducts": ["viewOwn", "add", "editOwn"], "clothesOrders": ["viewOwn", "add", "editOwn"]}},
+                          cookies=staff["cookies"])
+    assert created.status_code == 200, created.text
+    login = client.post("/api/auth/login", json={"email": email, "password": PW})
+    subscriber = {"cookies": {"albayan_session": login.cookies.get("albayan_session")}}
+    client.cookies.clear()
+    two_a = _clothes_order(subscriber, f"cp_two_a_{TAG}", 1)
+    assert two_a["orderNo"] == 1
 
 
 # ---------------------------------------------------------------- deliveries: staff edits follow the state machine
@@ -262,7 +360,7 @@ def test_staff_edit_grant_cannot_reopen_a_delivered_job():
     rid = delivered.json()["id"]
     reopen = client.patch(f"/api/collections/receipts/{rid}", json={"data": {"deliveryStatus": "In Progress"}}, cookies=editor_cookies)
     assert reopen.status_code == 400, reopen.text
-    assert "terminal" in reopen.text
+    assert "reopened" in reopen.text
     # A legal move is still allowed for the same grant.
     pending = client.post("/api/collections/receipts", json={"data": {
         "customerId": customer.json()["id"], "status": "Not Paid", "amountUSD": 20, "amountLocal": 100, "exchangeRate": 5,
@@ -273,3 +371,9 @@ def test_staff_edit_grant_cannot_reopen_a_delivered_job():
     assert accept.status_code == 200, accept.text
     backwards = client.patch(f"/api/collections/receipts/{pending.json()['id']}", json={"data": {"deliveryStatus": "Needs Delivery"}}, cookies=editor_cookies)
     assert backwards.status_code == 400, backwards.text
+    # Ending the workflow from the office ("Delete mission", paid in office) stays allowed.
+    office = client.patch(f"/api/collections/receipts/{pending.json()['id']}", json={"data": {"deliveryStatus": "Office", "deliveryPersonId": ""}}, cookies=editor_cookies)
+    assert office.status_code == 200, office.text
+    refund = client.patch(f"/api/collections/receipts/{rid}", json={"data": {"deliveryStatus": "Office", "status": "Canceled"}}, cookies=editor_cookies)
+    assert refund.status_code in (200, 409), refund.text  # 409 only if a money rule objects; never the reopen refusal
+    assert "reopened" not in refund.text

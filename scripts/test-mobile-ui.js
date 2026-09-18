@@ -216,7 +216,7 @@ check('a still-linking Meta draft blocks submit with its own message, bilinguall
 // finished deliveries to Office and unassigned the driver).
 check('an unchanged-status receipt edit keeps the driver-owned delivery workflow',
   forms.includes("const storedDeliveryStatus = String(editTarget?.deliveryStatus || '');") &&
-  forms.includes("(storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress')") &&
+  forms.includes("(storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')") &&
   forms.includes('receiptDeliveryStatus = storedDeliveryStatus;') &&
   forms.includes("receiptDeliveryPersonId = String(editTarget.deliveryPersonId || '');"));
 // (2) Live sync fans out through a bounded pool (14 parallel GETs exceeded the
@@ -1480,7 +1480,10 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   read('src/12a-analytics-profit.js').includes("if (!(analyticsNumber(ad?.amountLocal) > 0) && !(analyticsNumber(ad?.exchangeRate || ad?.rate) > 0)) return 0;") &&
   read('src/12a-analytics-profit.js').includes("snapshot.unpaidSpendUSD > 0 ? `${isAr ?") &&
   managerShell.includes("const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;") &&
-  managerShell.includes("const adActual = a => (typeof getAdActualSpendUSD === 'function' ? getAdActualSpendUSD(a) : getAdSpendUSD(a));") &&
+  managerShell.includes("const adActual = a => (typeof getAdActualSpendUSDLite === 'function' ? getAdActualSpendUSDLite(a) : getAdSpendUSD(a));") &&
+  read('src/11b-ad-final-spend.js').includes('function getAdActualSpendUSDLite(ad) {') &&
+  read('src/14-forms.js').includes("(storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')") &&
+  helpers.includes("const mine = isCurrentUserAdmin() || String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');") &&
   read('src/12b-control-center.js').includes("function ccText(en, ar) {") &&
   socialStudio.includes("if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();") &&
   clothes.includes("updateRecord(state.clothesProducts, editTarget.id, payload, _clothesEditBaseline || undefined)") &&
