@@ -78,6 +78,49 @@ function applyClothesOrderMutationResponse(response) {
   return savedOrder;
 }
 
+// Stamps are stored as UTC ISO strings; the calendar day people see must be
+// the local one (Libya is UTC+2, so 00:30 used to display as "yesterday").
+function clothesLocalDate(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value).split('T')[0] || '';
+  const pad = number => String(number).padStart(2, '0');
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`;
+}
+
+function applyClothesShipmentMutationResponse(response) {
+  const shipmentEntity = response?.shipment;
+  const productEntities = Array.isArray(response?.updatedProducts) ? response.updatedProducts : [];
+  if (!shipmentEntity?.data) throw new Error('Invalid clothes shipment response');
+  const upsert = (collectionName, entity) => {
+    const saved = Security.sanitizeObject(entity?.data || {});
+    if (!saved.id || !Security.isValidRecordId(saved.id)) throw new Error('Invalid clothes shipment response');
+    if (!Array.isArray(state[collectionName])) state[collectionName] = [];
+    const array = state[collectionName];
+    const index = array.findIndex(row => row && String(row.id) === String(saved.id));
+    if (index === -1) array.unshift(saved);
+    else array[index] = saved;
+    clearCollectionCorruption(collectionName);
+    markCollectionDirty(collectionName);
+    return saved;
+  };
+  for (const product of productEntities) upsert('clothesProducts', product);
+  const savedShipment = upsert('clothesShipments', shipmentEntity);
+  saveState();
+  RenderQueue.schedule('clothesShipmentMutation');
+  return savedShipment;
+}
+
+function showClothesShipmentMutationError(error) {
+  const isAr = clothesIsAr();
+  const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
+  showNotification(
+    isAr ? 'تعذّر حفظ الشحنة' : 'Shipment Not Saved',
+    detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
+    'error'
+  );
+}
+
 function showClothesOrderMutationError(error) {
   const isAr = clothesIsAr();
   const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
@@ -475,7 +518,7 @@ function exportClothesShipmentsCSV() {
     const meta = clothesShipmentStatusMeta(s.status);
     rows.push([
       s.ref || '', s.supplier || '', isAr ? meta.labelAr : meta.label,
-      s.orderedAt || '', s.receivedAt ? String(s.receivedAt).split('T')[0] : '',
+      s.orderedAt || '', clothesLocalDate(s.receivedAt),
       t.pieces, t.goodsUSD, t.shippingUSD, t.totalUSD, s.note || ''
     ]);
   }
@@ -498,7 +541,7 @@ function exportClothesOrdersCSV() {
     rows.push([
       o.customerName || '', o.customerPhone || '', isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
       t.pieces, t.goodsLYD, t.feeLYD, t.totalLYD, t.paidLYD, t.remainingLYD,
-      o.paymentMethod || '', o.createdAt ? String(o.createdAt).split('T')[0] : '', o.deliveredAt ? String(o.deliveredAt).split('T')[0] : '',
+      o.paymentMethod || '', clothesLocalDate(o.createdAt), clothesLocalDate(o.deliveredAt),
       o.note || ''
     ]);
   }
@@ -1273,16 +1316,14 @@ async function setClothesShipmentStatus(shipmentId, newStatus) {
   const shipment = getVisibleClothesShipments().find(s => s.id === shipmentId);
   if (!shipment || shipment.status === newStatus) return;
 
-  const updates = { status: newStatus };
-  if (newStatus === 'Received' && !shipment.stockApplied) {
+  const receiving = newStatus === 'Received' && !shipment.stockApplied;
+  const unreceiving = shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied;
+  if (receiving) {
     const ok = confirm(isAr
       ? 'تأكيد استلام الشحنة؟ سيتم إضافة الكميات إلى المخزون.'
       : 'Confirm receiving this shipment? Quantities will be ADDED to stock.');
     if (!ok) { updateClothesShipmentsFiltered(); return; }
-    if (!await applyClothesShipmentStockDelta(shipment, 1)) return;
-    updates.stockApplied = true;
-    updates.receivedAt = new Date().toISOString();
-  } else if (shipment.status === 'Received' && newStatus !== 'Received' && shipment.stockApplied) {
+  } else if (unreceiving) {
     // Un-receiving removes this shipment's pieces from stock. If some of those
     // pieces were already SOLD, the removal would floor at zero and silently
     // under-remove — and a later order cancel would then restore full
@@ -1304,13 +1345,41 @@ async function setClothesShipmentStatus(shipmentId, newStatus) {
       ? 'إرجاع الشحنة إلى حالة سابقة؟ سيتم خصم كمياتها من المخزون مرة أخرى.'
       : 'Move this shipment back? Its quantities will be REMOVED from stock again.');
     if (!ok) { updateClothesShipmentsFiltered(); return; }
-    if (!await applyClothesShipmentStockDelta(shipment, -1)) return;
-    updates.stockApplied = false;
-    updates.receivedAt = null;
   }
 
-  const saved = await updateRecord(state.clothesShipments, shipmentId, updates);
-  if (!saved) return;
+  if (isServerModeEnabled()) {
+    // The server moves the stock and the status in ONE transaction. Moving
+    // the stock here first and then PATCHing the shipment was refused by the
+    // server (405) after the stock had already changed — and a retry moved
+    // it again.
+    try {
+      const response = await apiMutateClothesShipment({
+        action: 'status',
+        shipmentId: String(shipmentId),
+        status: newStatus,
+        expectedLastModified: Number(shipment._lastModified) || 0,
+        idempotencyKey: Security.generateSecureId('shipment')
+      });
+      applyClothesShipmentMutationResponse(response);
+    } catch (e) {
+      showClothesShipmentMutationError(e);
+      updateClothesShipmentsFiltered();
+      return;
+    }
+  } else {
+    const updates = { status: newStatus };
+    if (receiving) {
+      if (!await applyClothesShipmentStockDelta(shipment, 1)) return;
+      updates.stockApplied = true;
+      updates.receivedAt = new Date().toISOString();
+    } else if (unreceiving) {
+      if (!await applyClothesShipmentStockDelta(shipment, -1)) return;
+      updates.stockApplied = false;
+      updates.receivedAt = null;
+    }
+    const saved = await updateRecord(state.clothesShipments, shipmentId, updates);
+    if (!saved) return;
+  }
   const meta = clothesShipmentStatusMeta(newStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
@@ -1335,8 +1404,23 @@ async function deleteClothesShipment(id) {
   }
   const ok = confirm(isAr ? 'هل تريد حذف هذه الشحنة؟' : 'Delete this shipment?');
   if (!ok) return;
-  const deleted = await deleteRecord(state.clothesShipments, id);
-  if (!deleted) return;
+  if (isServerModeEnabled()) {
+    try {
+      const response = await apiMutateClothesShipment({
+        action: 'delete',
+        shipmentId: String(id),
+        expectedLastModified: Number(shipment._lastModified) || 0,
+        idempotencyKey: Security.generateSecureId('shipment')
+      });
+      applyClothesShipmentMutationResponse(response);
+    } catch (e) {
+      showClothesShipmentMutationError(e);
+      return;
+    }
+  } else {
+    const deleted = await deleteRecord(state.clothesShipments, id);
+    if (!deleted) return;
+  }
   showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الشحنة.' : 'Shipment deleted.', 'success');
   updateClothesShipmentsFiltered();
 }
@@ -1545,7 +1629,7 @@ function renderClothesShipmentCard(s) {
         ${s.receivedAt ? `
         <div class="flex justify-between gap-2">
           <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ الاستلام' : 'Received at'}</span>
-          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(String(s.receivedAt).split('T')[0])}</span>
+          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(clothesLocalDate(s.receivedAt))}</span>
         </div>` : ''}
       </div>
 
@@ -2403,7 +2487,7 @@ function renderClothesOrderCard(o) {
         ${o.deliveredAt ? `
         <div class="flex justify-between gap-2">
           <span class="text-slate-500 dark:text-slate-400">${isAr ? 'تاريخ التسليم' : 'Delivered at'}</span>
-          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(String(o.deliveredAt).split('T')[0])}</span>
+          <span class="font-medium text-emerald-600 dark:text-emerald-400">${Security.escapeHtml(clothesLocalDate(o.deliveredAt))}</span>
         </div>` : ''}
       </div>
 
@@ -2686,7 +2770,7 @@ function printClothesOrderSlip(orderId) {
   const lines = Array.isArray(order.lines) ? order.lines : [];
   const payMeta = clothesPaymentStatusMeta(order.paymentStatus);
   const orderNoLabel = order.orderNo ? `#${String(Math.floor(Number(order.orderNo))).padStart(4, '0')}` : '';
-  const dateLabel = String(order.createdAt || '').split('T')[0] || '';
+  const dateLabel = clothesLocalDate(order.createdAt);
 
   const rowsHtml = lines.map((line, i) => {
     const variant = [line.color, line.size].map(x => String(x || '').trim()).filter(Boolean).join(' · ');

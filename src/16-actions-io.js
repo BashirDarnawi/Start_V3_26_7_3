@@ -65,7 +65,11 @@ function stopAd(id) {
   const finalSpendFrozen = frozenFinalSpendUSD !== null;
   const manualSpentOverride = ad.manualSpentOverride === true;
   const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
-  const initialSpentUSD = finalSpendFrozen ? frozenFinalSpendUSD : (metaSpendAuto ? metaSpendUSD : currentSpentUSD);
+  // Meta above budget: start at the budget, never at a stale 0.
+  const metaOverspend = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD > adAmountUSD + 0.005;
+  const initialSpentUSD = finalSpendFrozen
+    ? frozenFinalSpendUSD
+    : (metaSpendAuto ? metaSpendUSD : (metaOverspend ? adAmountUSD : currentSpentUSD));
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
   // The checkbox must describe the remainder ACTUALLY on screen. A saved

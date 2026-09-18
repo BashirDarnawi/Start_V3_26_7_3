@@ -5276,8 +5276,15 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
   // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
   // decimal separator too — dropping it turned "12،5" into "125" (10x error).
-  val = normalizeDigitsAscii(val)
-    .replace(/[,٫،]/g, '.'); // comma / Arabic decimal separator U+066B / Arabic comma U+060C -> dot
+  val = normalizeDigitsAscii(val);
+  // Commas next to a dot or in groups of three ("1,250") are thousands
+  // separators; only "12,5" is a decimal. "1,250" used to save as 1.25.
+  if (val.includes(',')) {
+    const grouped = /^\s*\d{1,3}(,\d{3})+(\.\d*)?\s*$/.test(val);
+    if (val.includes('.') || grouped) val = val.split(',').join('');
+    else val = val.replace(',', '.');
+  }
+  val = val.replace(/[٫،]/g, '.');
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;

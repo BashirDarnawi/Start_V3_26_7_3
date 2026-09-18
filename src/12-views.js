@@ -294,8 +294,7 @@ function render() {
   } catch (e) {
     console.error('[render] Error:', e);
     if (layoutLocked) unlockLayoutAfterRender(app);
-    // A first render that throws used to leave an empty page with no hint.
-    // Only a blank screen is replaced; an existing screen stays as it was.
+    // Blank first render: show a reload card (an existing screen stays).
     try {
       if (app && !String(app.innerHTML || '').trim()) {
         const isAr = state.language === 'ar';
@@ -1274,8 +1273,7 @@ function loadWorkspaceFilterPanels() {
   }
   const panels = state.expandedFilterPanels;
   if (panels.__loaded) return panels;
-  // Remember each list's choice across reloads: someone who sorts receipts
-  // every day should not have to reopen "Filters & sort" every session.
+  // Remembered across reloads.
   try {
     const saved = JSON.parse(localStorage.getItem(FILTER_PANELS_STORAGE_KEY) || 'null');
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
@@ -1294,8 +1292,7 @@ function isWorkspaceFilterPanelExpanded(view) {
   // phone that put a screenful of controls in front of every receipt or ad.
   const panels = loadWorkspaceFilterPanels();
   if (typeof panels[view] === 'boolean') return panels[view];
-  // No saved choice yet: a wide screen has room for the filters, as it always
-  // had; a phone starts with them folded.
+  // Default: open on wide screens, folded on phones.
   try { return typeof window !== 'undefined' && Number(window.innerWidth) >= 768; } catch (_) { return false; }
 }
 
@@ -1491,8 +1488,7 @@ function renderSidebar() {
       if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
 
-    // Platform-owner screens (Control Center, hub, wallet) never belong in a
-    // staff sidebar: the router refuses them, so listing them made a dead link.
+    // The router refuses platform-owner views for staff: never list them.
     if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;
 
     // Check if user has view permission for this module
@@ -1708,7 +1704,7 @@ async function walletTransferFromUi() {
 
     const amt = Number(amountValue);
     const amountMinor = walletToMinor(amt, currency);
-    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
+    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error(state.language === 'ar' ? 'المبلغ غير صالح' : 'Invalid amount');
     const fingerprint = `${state.currentUser.id}|${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
@@ -1767,7 +1763,7 @@ async function walletTopUpFromUi() {
 
     const amt = Number(amountValue);
     const amountMinor = walletToMinor(amt, currency);
-    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
+    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error(state.language === 'ar' ? 'المبلغ غير صالح' : 'Invalid amount');
     const fingerprint = `${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
@@ -4286,8 +4282,7 @@ function renderDeliveriesView(logOnly) {
     const deliveryTarget = _getCollectionTargetCached(ad);
     const debtLocal = deliveryTarget.amountLocal;
     const debtUSD = deliveryTarget.amountUSD;
-    // Anything not finished can still be cancelled — including the rare
-    // record that sits at the 'Office' status while still marked for delivery.
+    // Anything not finished can still be cancelled (incl. the rare 'Office' status).
     const active = ad.deliveryStatus !== 'Delivered' && ad.deliveryStatus !== 'Canceled';
     const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
     const safeId = esc(ad.id);
@@ -5045,7 +5040,7 @@ function renderDeliveryDashboard() {
                         <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
                         ${phone ? `
                           <div class="flex items-center gap-2 flex-shrink-0">
-                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
+                            <a href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
                             ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
                             <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? ${JSON.stringify(isAr ? 'تم النسخ' : 'Copied')} : ${JSON.stringify(isAr ? 'فشل النسخ' : 'Copy Failed')}, ok ? ${JSON.stringify(isAr ? 'تم نسخ رقم الهاتف' : 'Phone number copied')} : ${JSON.stringify(isAr ? 'تعذّر نسخ رقم الهاتف' : 'Could not copy phone number')}, ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">${isAr ? 'نسخ' : 'Copy'}</button>
                           </div>
@@ -5478,9 +5473,11 @@ function getAdReconciliationDisplayState(ad) {
   const finalSpendFrozen = frozenFinalSpendUSD !== null;
   const manualSpentOverride = ad?.manualSpentOverride === true;
   const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
+  // Meta above budget: the budget is the most that can be recorded.
+  const metaOverspend = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD > amountUSD + 0.005;
   const displaySpentUSD = finalSpendFrozen
     ? frozenFinalSpendUSD
-    : (metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null));
+    : (metaSpendAuto ? metaSpendUSD : (metaOverspend ? amountUSD : (hasSavedSpend ? savedSpentUSD : null)));
   const informedApplies = displaySpentUSD !== null
     && getAdCustomerConfirmationState(ad, displaySpentUSD, amountUSD).existingConfirmationApplies === true;
   return {

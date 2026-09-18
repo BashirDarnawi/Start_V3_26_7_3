@@ -39,10 +39,7 @@ function ensureAdsStudioLoaded() {
     return Promise.resolve();
   }
   if (_studioBundlePromise) return _studioBundlePromise;
-  // After a failure, wait before asking again. Every render reaches this
-  // function (live sync repaints every few seconds), and re-requesting a
-  // bundle that just failed turned an offline phone into a request loop that
-  // never showed the Retry card.
+  // Cooldown after a failure: every render calls this, and re-requesting looped offline.
   if (_studioBundleState === 'failed' && Date.now() - _studioLastFailureAt < _STUDIO_RETRY_COOLDOWN_MS) return Promise.resolve();
   _studioBundleState = 'loading';
   _studioBundlePromise = new Promise((resolve) => {

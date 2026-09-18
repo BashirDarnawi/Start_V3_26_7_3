@@ -154,6 +154,8 @@ def get_engine() -> Engine:
             except Exception:
                 return default
 
+        # Conservative defaults for small containers; a busy office should set
+        # ALBAYAN_DB_POOL_SIZE=5 / ALBAYAN_DB_MAX_OVERFLOW=5 (see the env example).
         pool_size = _int_env("ALBAYAN_DB_POOL_SIZE", 3, min_v=1, max_v=50)
         max_overflow = _int_env("ALBAYAN_DB_MAX_OVERFLOW", 2, min_v=0, max_v=100)
         pool_timeout = _int_env("ALBAYAN_DB_POOL_TIMEOUT", 30, min_v=1, max_v=120)

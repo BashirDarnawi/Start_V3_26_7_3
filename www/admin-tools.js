@@ -39,7 +39,8 @@ function getAdActualSpendUSD(ad) {
   const frozenFinalSpend = getFrozenFinalAdSpendUSD(ad);
   if (frozenFinalSpend !== null) return frozenFinalSpend;
   const metaMinor = Number(ad.metaSpendMinor);
-  if (ad.metaAdId && Number.isFinite(metaMinor) && metaMinor >= 0) {
+  // Meta reports in the ad account's currency; only USD accounts are dollars.
+  if (ad.metaAdId && Number.isFinite(metaMinor) && metaMinor >= 0 && String(ad.metaCurrency || 'USD').toUpperCase() === 'USD') {
     return Math.max(0, metaMinor / 100);
   }
   const recorded = Number(ad.spentUSD);

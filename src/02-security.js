@@ -154,14 +154,6 @@ const Security = {
       .replace(/'/g, '&#39;');
   },
   
-  // Unescape HTML (for display in input fields)
-  // XSS-SAFE: Uses textContent extraction (no script execution)
-  unescapeHtml: (str) => {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.innerHTML = str;  // Safe: immediately extract as text
-    return div.textContent || div.innerText || '';
-  },
 
   // Return a URL safe to put in an href/src, or '#' for an unsafe scheme.
   // escapeHtml alone does NOT neutralize javascript:/data:/vbscript: URLs, so
@@ -189,8 +181,7 @@ const Security = {
     
     // Remove script tags and event handlers if not allowed
     if (!options.allowHtml) {
-      // Strip until nothing changes: a single pass let "oonclick=nclick=" or
-      // "jjavascript:avascript:" reassemble the very token it had removed.
+      // Strip until stable: one pass let "oonclick=nclick=" reassemble itself.
       for (let pass = 0; pass < 8; pass++) {
         const before = str;
         str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
@@ -534,19 +525,6 @@ const Security = {
     });
   },
 
-  // Create safe element with escaped text content
-  createSafeElement: (tag, textContent, attributes = {}) => {
-    const element = document.createElement(tag);
-    element.textContent = textContent; // textContent is automatically escaped
-    for (const [key, value] of Object.entries(attributes)) {
-      // Only allow safe attributes
-      const safeAttrs = ['id', 'class', 'style', 'type', 'name', 'value', 'placeholder', 'disabled', 'readonly', 'data-id'];
-      if (safeAttrs.includes(key) || key.startsWith('data-')) {
-        element.setAttribute(key, Security.sanitizeInput(value));
-      }
-    }
-    return element;
-  },
 
   // Validate that data hasn't been tampered with
   validateDataIntegrity: (data, expectedChecksum) => {

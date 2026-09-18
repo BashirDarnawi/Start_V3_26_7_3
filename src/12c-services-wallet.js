@@ -453,6 +453,15 @@ function openPlanPaywall(planId) {
 // ---------- Charge wallet ----------
 
 const _chargeWallet = { amountText: '50', currency: 'LYD', method: '', busy: false, created: null };
+// One key per (amount, currency, method) until created: retries replay, never duplicate.
+let _chargeWalletIdem = { fingerprint: '', key: '' };
+function chargeWalletIdemKey(amountMinor, currency, method) {
+  const fingerprint = `${amountMinor}|${currency}|${method}`;
+  if (_chargeWalletIdem.fingerprint !== fingerprint) {
+    _chargeWalletIdem = { fingerprint, key: Security.generateSecureId('paycreate') };
+  }
+  return _chargeWalletIdem.key;
+}
 let _walletPayMethods = null;
 let _walletPayRate = null;
 let _walletPayMethodsBusy = false;
@@ -542,8 +551,9 @@ async function chargeWalletCreateRequest() {
   _chargeWallet.busy = true;
   render();
   try {
-    const idem = Security.generateSecureId('paycreate');
+    const idem = chargeWalletIdemKey(amountMinor, currency, _chargeWallet.method);
     const created = await apiWalletPaymentRequestCreate(amountMinor, _chargeWallet.method, idem, currency);
+    _chargeWalletIdem = { fingerprint: '', key: '' };
     _chargeWallet.created = created && created.data ? created.data : created;
     showNotification(hubText('Request created', 'تم إنشاء الطلب'), chargeWalletInstructions(_chargeWallet.created), 'success');
   } catch (e) {

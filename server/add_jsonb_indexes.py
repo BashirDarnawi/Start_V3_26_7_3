@@ -70,21 +70,23 @@ def add_jsonb_indexes():
 
     print("Adding JSONB indexes for Postgres...")
 
-    with db_conn() as conn:
-        for index_info in indexes:
-            # All indexes are now expression-based (B-tree on JSONB fields)
-            index_name, entity_type, expression = index_info
-            sql = f"""
-            CREATE INDEX IF NOT EXISTS {index_name}
-            ON entities ({expression})
-            WHERE type = '{entity_type}' AND deleted = false
-            """
+    for index_info in indexes:
+        # All indexes are now expression-based (B-tree on JSONB fields)
+        index_name, entity_type, expression = index_info
+        sql = f"""
+        CREATE INDEX IF NOT EXISTS {index_name}
+        ON entities ({expression})
+        WHERE type = '{entity_type}' AND deleted = false
+        """
 
-            try:
+        # One transaction per statement: on PostgreSQL a single failure aborts
+        # the whole transaction, which used to skip every later index too.
+        try:
+            with db_conn() as conn:
                 conn.execute(text(sql))
-                print(f"✅ Created index: {index_name}")
-            except Exception as e:
-                print(f"⚠️  Skipped {index_name}: {e}")
+            print(f"✅ Created index: {index_name}")
+        except Exception as e:
+            print(f"⚠️  Skipped {index_name}: {e}")
 
     # The Delivery role's poll (every 3s per driver) filters ads/receipts by
     # deliveryPersonId and customers by a correlated EXISTS over BOTH types in

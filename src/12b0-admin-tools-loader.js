@@ -49,10 +49,7 @@ function ensureAdminToolsLoaded() {
     return Promise.resolve();
   }
   if (_adminToolsBundlePromise) return _adminToolsBundlePromise;
-  // After a failure, wait before asking again. Every render reaches this
-  // function (live sync repaints every few seconds), and re-requesting a
-  // bundle that just failed turned an offline phone into a request loop that
-  // never showed the Retry card.
+  // Cooldown after a failure: every render calls this, and re-requesting looped offline.
   if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return Promise.resolve();
   _adminToolsBundleState = 'loading';
   _adminToolsBundlePromise = new Promise((resolve) => {

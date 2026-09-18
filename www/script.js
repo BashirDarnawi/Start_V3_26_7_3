@@ -1848,14 +1848,6 @@ const Security = {
       .replace(/'/g, '&#39;');
   },
   
-  // Unescape HTML (for display in input fields)
-  // XSS-SAFE: Uses textContent extraction (no script execution)
-  unescapeHtml: (str) => {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.innerHTML = str;  // Safe: immediately extract as text
-    return div.textContent || div.innerText || '';
-  },
 
   // Return a URL safe to put in an href/src, or '#' for an unsafe scheme.
   // escapeHtml alone does NOT neutralize javascript:/data:/vbscript: URLs, so
@@ -1883,8 +1875,7 @@ const Security = {
     
     // Remove script tags and event handlers if not allowed
     if (!options.allowHtml) {
-      // Strip until nothing changes: a single pass let "oonclick=nclick=" or
-      // "jjavascript:avascript:" reassemble the very token it had removed.
+      // Strip until stable: one pass let "oonclick=nclick=" reassemble itself.
       for (let pass = 0; pass < 8; pass++) {
         const before = str;
         str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
@@ -2228,19 +2219,6 @@ const Security = {
     });
   },
 
-  // Create safe element with escaped text content
-  createSafeElement: (tag, textContent, attributes = {}) => {
-    const element = document.createElement(tag);
-    element.textContent = textContent; // textContent is automatically escaped
-    for (const [key, value] of Object.entries(attributes)) {
-      // Only allow safe attributes
-      const safeAttrs = ['id', 'class', 'style', 'type', 'name', 'value', 'placeholder', 'disabled', 'readonly', 'data-id'];
-      if (safeAttrs.includes(key) || key.startsWith('data-')) {
-        element.setAttribute(key, Security.sanitizeInput(value));
-      }
-    }
-    return element;
-  },
 
   // Validate that data hasn't been tampered with
   validateDataIntegrity: (data, expectedChecksum) => {
@@ -4099,10 +4077,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
       if (state.activeModal === 'subscription-lock') renderModal();
     }).catch(() => {});
   }
-  // The balance shown (and the Subscribe button state) come from the local
-  // ledger copy. Pull the latest rows too, so a fresh login never shows an
-  // empty wallet the server has already credited. The tick skips itself when
-  // a poll is already running, so this never doubles up work.
+  // Refresh the local ledger so a fresh login never shows an empty wallet.
   if (typeof serverLiveSyncTick === 'function' && isServerModeEnabled()) {
     Promise.resolve().then(() => serverLiveSyncTick()).then(() => {
       if (state.activeModal === 'subscription-lock') renderModal();
@@ -8754,8 +8729,7 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  // Mirror the router: drivers always keep both their dashboard and the
-  // Deliveries tab, or the tab bounces straight back to the landing view.
+  // Mirror the router: drivers keep both their dashboard and the Deliveries tab.
   const _deliveryExempt = (view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role);
   if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view
@@ -9429,6 +9403,24 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
  * Retry helper with exponential backoff for transient failures.
  * Retries network errors, 500s, and timeouts (not 4xx client errors).
  */
+// `detail` is a string for refusals but a LIST for 422 validation errors.
+function apiDetailMessage(data, fallback) {
+  const detail = data && typeof data === 'object' ? data.detail : null;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(item => {
+      if (!item || typeof item !== 'object') return String(item);
+      const where = Array.isArray(item.loc) ? item.loc.filter(part => part !== 'body').join('.') : '';
+      const reason = String(item.msg || item.type || 'invalid');
+      return where ? `${where}: ${reason}` : reason;
+    }).join('; ');
+  }
+  if (detail && typeof detail === 'object') {
+    try { return JSON.stringify(detail); } catch (_) {}
+  }
+  return fallback;
+}
+
 async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
   let lastError;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -9505,7 +9497,7 @@ async function apiJson(path, options = {}, timeout = {}) {
   if (resp.status === 429) {
     const retryAfter = parseInt(resp.headers.get('Retry-After') || '60', 10);
     setRateLimitCooldown(path, retryAfter);
-    const msg = (data && typeof data === 'object' && data.detail) ? data.detail : `Rate limited. Try again in ${retryAfter} seconds.`;
+    const msg = apiDetailMessage(data, `Rate limited. Try again in ${retryAfter} seconds.`);
     const err = new Error(msg);
     err.status = 429;
     err.retryAfter = retryAfter;
@@ -9513,7 +9505,7 @@ async function apiJson(path, options = {}, timeout = {}) {
   }
   
   if (!resp.ok) {
-    const msg = (data && typeof data === 'object' && data.detail) ? data.detail : (resp.statusText || 'Request failed');
+    const msg = apiDetailMessage(data, resp.statusText || 'Request failed');
     // A definitive 401 during an authenticated request means cached business
     // data must not remain visible indefinitely. Login/setup failures and the
     // user's own logout request are intentionally excluded.
@@ -10065,6 +10057,8 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
         saveState();
       }
     } catch (e) {
+      // Reload users on the next tick: the grid shows a refused grant.
+      try { if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0; } catch (_) {}
       if (!quiet) {
         showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
@@ -10094,7 +10088,8 @@ function flushPendingUserUpdates() {
           method: 'PATCH',
           credentials: 'include',
           keepalive: true,
-          headers: { 'Content-Type': 'application/json' },
+          // Native requests carry no Origin; the request id is the proof.
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId() },
           body: JSON.stringify(payload)
         }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
       } catch (_) {}
@@ -11236,6 +11231,35 @@ async function apiMutateClothesOrder(payload) {
     validateServerEntityResponse('clothesProducts', entity, `${action}.updatedProducts[${index}]`)
   );
   return { order, updatedProducts, replayed: response.replayed === true };
+}
+
+// Shipment status/delete moves stock in one server transaction (generic routes 405).
+async function apiMutateClothesShipment(payload) {
+  const action = String(payload?.action || '');
+  if (!['status', 'delete'].includes(action)) {
+    throw new Error('Invalid clothes shipment action');
+  }
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/clothes/shipments/mutate', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid clothes shipment mutation response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const shipment = validateServerEntityResponse('clothesShipments', response.shipment, `${action}.shipment`);
+  if (!Array.isArray(response.updatedProducts)) {
+    const error = new Error('Invalid clothes shipment products response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedProducts = response.updatedProducts.map((entity, index) =>
+    validateServerEntityResponse('clothesProducts', entity, `${action}.updatedProducts[${index}]`)
+  );
+  return { shipment, updatedProducts, replayed: response.replayed === true };
 }
 
 // Ads Studio workflow transitions are server-controlled. Customers may save
@@ -13995,8 +14019,7 @@ function closeSensitiveAuthenticatedUi() {
   document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
   state.activeModal = null;
   state.modalData = null;
-  // Search boxes and the customer filter were typed by one person; they must
-  // not greet the next person who signs in on this device.
+  // Typed searches must not greet the next person on this device.
   for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {
     if (typeof state[key] === 'string') state[key] = '';
   }
@@ -14073,9 +14096,7 @@ function resetAuthenticatedServerCaches() {
     metaInsightsUi.loadedAtMs = 0;
     metaInsightsUi.requestSeq += 1;
   }
-  // Hub, wallet and Control Center keep server facts in module state (some in
-  // lazy bundles): a payment reference or last month's operations must not
-  // survive into the next sign-in. Clear whatever is loaded.
+  // Module caches (hub/wallet/Control Center) must not survive sign-out.
   try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}
   try { if (typeof _walletPayMethods !== 'undefined') { _walletPayMethods = null; _walletPayRate = null; } } catch (_) {}
   try {
@@ -15578,8 +15599,7 @@ function render() {
   } catch (e) {
     console.error('[render] Error:', e);
     if (layoutLocked) unlockLayoutAfterRender(app);
-    // A first render that throws used to leave an empty page with no hint.
-    // Only a blank screen is replaced; an existing screen stays as it was.
+    // Blank first render: show a reload card (an existing screen stays).
     try {
       if (app && !String(app.innerHTML || '').trim()) {
         const isAr = state.language === 'ar';
@@ -16558,8 +16578,7 @@ function loadWorkspaceFilterPanels() {
   }
   const panels = state.expandedFilterPanels;
   if (panels.__loaded) return panels;
-  // Remember each list's choice across reloads: someone who sorts receipts
-  // every day should not have to reopen "Filters & sort" every session.
+  // Remembered across reloads.
   try {
     const saved = JSON.parse(localStorage.getItem(FILTER_PANELS_STORAGE_KEY) || 'null');
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
@@ -16578,8 +16597,7 @@ function isWorkspaceFilterPanelExpanded(view) {
   // phone that put a screenful of controls in front of every receipt or ad.
   const panels = loadWorkspaceFilterPanels();
   if (typeof panels[view] === 'boolean') return panels[view];
-  // No saved choice yet: a wide screen has room for the filters, as it always
-  // had; a phone starts with them folded.
+  // Default: open on wide screens, folded on phones.
   try { return typeof window !== 'undefined' && Number(window.innerWidth) >= 768; } catch (_) { return false; }
 }
 
@@ -16775,8 +16793,7 @@ function renderSidebar() {
       if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
 
-    // Platform-owner screens (Control Center, hub, wallet) never belong in a
-    // staff sidebar: the router refuses them, so listing them made a dead link.
+    // The router refuses platform-owner views for staff: never list them.
     if (PLATFORM_ADMIN_ONLY_VIEWS.has(item.id)) return false;
 
     // Check if user has view permission for this module
@@ -16992,7 +17009,7 @@ async function walletTransferFromUi() {
 
     const amt = Number(amountValue);
     const amountMinor = walletToMinor(amt, currency);
-    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
+    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error(state.language === 'ar' ? 'المبلغ غير صالح' : 'Invalid amount');
     const fingerprint = `${state.currentUser.id}|${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
@@ -17051,7 +17068,7 @@ async function walletTopUpFromUi() {
 
     const amt = Number(amountValue);
     const amountMinor = walletToMinor(amt, currency);
-    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error('Invalid amount');
+    if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error(state.language === 'ar' ? 'المبلغ غير صالح' : 'Invalid amount');
     const fingerprint = `${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
@@ -19570,8 +19587,7 @@ function renderDeliveriesView(logOnly) {
     const deliveryTarget = _getCollectionTargetCached(ad);
     const debtLocal = deliveryTarget.amountLocal;
     const debtUSD = deliveryTarget.amountUSD;
-    // Anything not finished can still be cancelled — including the rare
-    // record that sits at the 'Office' status while still marked for delivery.
+    // Anything not finished can still be cancelled (incl. the rare 'Office' status).
     const active = ad.deliveryStatus !== 'Delivered' && ad.deliveryStatus !== 'Canceled';
     const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
     const safeId = esc(ad.id);
@@ -20329,7 +20345,7 @@ function renderDeliveryDashboard() {
                         <h3 class="font-bold text-base md:text-lg truncate">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
                         ${phone ? `
                           <div class="flex items-center gap-2 flex-shrink-0">
-                            <a href="tel:${encodeURIComponent(phone)}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
+                            <a href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}" class="text-xs font-bold text-blue-600 hover:text-blue-700 px-2 py-1 bg-blue-50 rounded-lg">${isAr ? 'اتصال' : 'Call'}</a>
                             ${wa ? `<a href="${wa}" target="_blank" rel="noopener noreferrer" class="text-xs font-bold text-emerald-600 hover:text-emerald-700 px-2 py-1 bg-emerald-50 rounded-lg">WhatsApp</a>` : ''}
                             <button type="button" data-phone="${Security.escapeHtml(phone)}" onclick='copyTextToClipboard(this.dataset.phone).then(ok => showNotification(ok ? ${JSON.stringify(isAr ? 'تم النسخ' : 'Copied')} : ${JSON.stringify(isAr ? 'فشل النسخ' : 'Copy Failed')}, ok ? ${JSON.stringify(isAr ? 'تم نسخ رقم الهاتف' : 'Phone number copied')} : ${JSON.stringify(isAr ? 'تعذّر نسخ رقم الهاتف' : 'Could not copy phone number')}, ok ? "success" : "error"))' class="text-xs font-bold text-slate-600 hover:text-slate-700 px-2 py-1 bg-slate-100 rounded-lg">${isAr ? 'نسخ' : 'Copy'}</button>
                           </div>
@@ -20762,9 +20778,11 @@ function getAdReconciliationDisplayState(ad) {
   const finalSpendFrozen = frozenFinalSpendUSD !== null;
   const manualSpentOverride = ad?.manualSpentOverride === true;
   const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= amountUSD + 0.005;
+  // Meta above budget: the budget is the most that can be recorded.
+  const metaOverspend = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD > amountUSD + 0.005;
   const displaySpentUSD = finalSpendFrozen
     ? frozenFinalSpendUSD
-    : (metaSpendAuto ? metaSpendUSD : (hasSavedSpend ? savedSpentUSD : null));
+    : (metaSpendAuto ? metaSpendUSD : (metaOverspend ? amountUSD : (hasSavedSpend ? savedSpentUSD : null)));
   const informedApplies = displaySpentUSD !== null
     && getAdCustomerConfirmationState(ad, displaySpentUSD, amountUSD).existingConfirmationApplies === true;
   return {
@@ -22657,6 +22675,15 @@ function openPlanPaywall(planId) {
 // ---------- Charge wallet ----------
 
 const _chargeWallet = { amountText: '50', currency: 'LYD', method: '', busy: false, created: null };
+// One key per (amount, currency, method) until created: retries replay, never duplicate.
+let _chargeWalletIdem = { fingerprint: '', key: '' };
+function chargeWalletIdemKey(amountMinor, currency, method) {
+  const fingerprint = `${amountMinor}|${currency}|${method}`;
+  if (_chargeWalletIdem.fingerprint !== fingerprint) {
+    _chargeWalletIdem = { fingerprint, key: Security.generateSecureId('paycreate') };
+  }
+  return _chargeWalletIdem.key;
+}
 let _walletPayMethods = null;
 let _walletPayRate = null;
 let _walletPayMethodsBusy = false;
@@ -22746,8 +22773,9 @@ async function chargeWalletCreateRequest() {
   _chargeWallet.busy = true;
   render();
   try {
-    const idem = Security.generateSecureId('paycreate');
+    const idem = chargeWalletIdemKey(amountMinor, currency, _chargeWallet.method);
     const created = await apiWalletPaymentRequestCreate(amountMinor, _chargeWallet.method, idem, currency);
+    _chargeWalletIdem = { fingerprint: '', key: '' };
     _chargeWallet.created = created && created.data ? created.data : created;
     showNotification(hubText('Request created', 'تم إنشاء الطلب'), chargeWalletInstructions(_chargeWallet.created), 'success');
   } catch (e) {
@@ -23244,10 +23272,7 @@ function ensureAdminToolsLoaded() {
     return Promise.resolve();
   }
   if (_adminToolsBundlePromise) return _adminToolsBundlePromise;
-  // After a failure, wait before asking again. Every render reaches this
-  // function (live sync repaints every few seconds), and re-requesting a
-  // bundle that just failed turned an offline phone into a request loop that
-  // never showed the Retry card.
+  // Cooldown after a failure: every render calls this, and re-requesting looped offline.
   if (_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return Promise.resolve();
   _adminToolsBundleState = 'loading';
   _adminToolsBundlePromise = new Promise((resolve) => {
@@ -23701,8 +23726,7 @@ function openDebtorCollection(customerId) {
 
 const SHELL_REMINDER_LOG_KEY = 'albayan_debt_reminders_v1';
 
-// One log per signed-in account: the next person on this device neither sees
-// nor inherits another account's "reminded today" marks.
+// One log per account: no inherited "reminded today" marks.
 function shellReminderLogKey() {
   return `${SHELL_REMINDER_LOG_KEY}:${String(state.currentUser?.id || 'anonymous')}`;
 }
@@ -23717,7 +23741,9 @@ function shellReminderStamp(customerId) {
 
 function shellReminderAgo(ts) {
   if (!ts) return shellText('never', 'لا يوجد');
-  const days = Math.floor((Date.now() - Number(ts)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
+  // Calendar days, not 24-hour buckets.
+  const startOfDay = value => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(new Date(Number(ts)))) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
   if (days <= 0) return shellText('today', 'اليوم');
   if (days === 1) return shellText('yesterday', 'أمس');
   return shellText(`${days} days ago`, `قبل ${days} يوماً`);
@@ -23740,9 +23766,7 @@ function remindDebtor(customerId) {
     showNotification(shellText('No phone number', 'لا يوجد رقم هاتف'), shellText('Add a phone number to this customer first.', 'أضف رقم هاتف لهذا العميل أولاً.'), 'warning');
     return;
   }
-  // Phones are often pasted from Arabic apps (٠٩١…) or stored as local
-  // 09… numbers; wa.me needs plain international digits (218…). The customer
-  // phone normaliser already knows both, so use it before falling back.
+  // wa.me needs international digits; the normaliser knows Arabic digits and 09… numbers.
   const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
   const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
   if (!base) {
@@ -26071,11 +26095,15 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
+  // A typed local number must match the stored international one.
+  const searchPhoneKey = searchPhoneDigits.length >= 9 && typeof normalizeCustomerPhoneKey === 'function'
+    ? String(normalizeCustomerPhoneKey(searchTerm) || '')
+    : '';
 
   if (searchTerm) {
     filtered = filtered.filter(c =>
       foldSearchText(c.name).includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
       foldSearchText(c.platform).includes(searchTerm)
     );
   }
@@ -26883,7 +26911,9 @@ function normalizePhoneToE164(phone) {
 }
 
 function buildWhatsAppLink(phone) {
-  const e164 = normalizePhoneToE164(phone);
+  // Normalise first (Arabic digits, local 09… -> 218…); E.164 strip is the fallback.
+  const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
+  const e164 = key || normalizePhoneToE164(phone);
   const digits = String(e164 || '').replace(/[^\d]/g, '');
   if (!digits) return '';
   return `https://wa.me/${digits}`;
@@ -36993,8 +37023,15 @@ function sanitizeMoneyInput(input, maxDecimals = 2) {
   // The Arabic comma U+060C '،' (full Arabic keyboard comma key on iOS/Gboard,
   // and amounts pasted from Arabic WhatsApp/Messenger chats) counts as a
   // decimal separator too — dropping it turned "12،5" into "125" (10x error).
-  val = normalizeDigitsAscii(val)
-    .replace(/[,٫،]/g, '.'); // comma / Arabic decimal separator U+066B / Arabic comma U+060C -> dot
+  val = normalizeDigitsAscii(val);
+  // Commas next to a dot or in groups of three ("1,250") are thousands
+  // separators; only "12,5" is a decimal. "1,250" used to save as 1.25.
+  if (val.includes(',')) {
+    const grouped = /^\s*\d{1,3}(,\d{3})+(\.\d*)?\s*$/.test(val);
+    if (val.includes('.') || grouped) val = val.split(',').join('');
+    else val = val.replace(',', '.');
+  }
+  val = val.replace(/[٫،]/g, '.');
 
   // Preserve cursor position
   const cursorPos = input.selectionStart || 0;
@@ -42087,88 +42124,6 @@ async function handleModalSubmit() {
       }
       break;
     }
-    case 'receipt':
-      const isArSubR = state.language === 'ar';
-      const receiptAmountEl = document.getElementById('receipt-amount');
-      const receiptRateEl = document.getElementById('receipt-rate');
-      const receiptFeeEl = document.getElementById('receipt-fee');
-      const receiptDiscountEl = document.getElementById('receipt-discount');
-      if (!receiptAmountEl || !receiptRateEl) {
-        showNotification(isArSubR ? 'خطأ' : 'Error', isArSubR ? 'عناصر نموذج الوصل غير موجودة' : 'Receipt form elements not found', 'error');
-        return;
-      }
-      const receiptAmountUSD = parseFloat(receiptAmountEl.value);
-      const receiptRate = parseFloat(receiptRateEl.value);
-      const officeFee = parseFloat(receiptFeeEl?.value || '0') || 0;
-      const discount = parseFloat(receiptDiscountEl?.value || '0') || 0;
-      const localAmount = (receiptAmountUSD * receiptRate) + officeFee - discount;
-      const receiptPaid = document.getElementById('receipt-paid').checked;
-      const receiptOffice = document.getElementById('receipt-office').checked;
-      const receiptImageInput = document.getElementById('receipt-image');
-      const receiptImage = receiptImageInput?.dataset.imageData || receiptData.receiptImage || '';
-      const receiptStartDate = document.getElementById('receipt-start-date').value;
-      const receiptEndDate = document.getElementById('receipt-end-date').value;
-      
-      // Get customer ID from searchable dropdown hidden field
-      const receiptCustomerId = document.getElementById('receipt-customer-id').value;
-      if (!receiptCustomerId) {
-        showNotification(isArSubR ? 'خطأ' : 'Error', isArSubR ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
-        return;
-      }
-      
-      // Validate serial number: if editing and old receipt had a serial, new serial cannot be empty
-      const newSerialNumber = (document.getElementById('receipt-serial').value || '').trim();
-      const oldSerialNumber = isEdit ? (state.modalData?.serialNumber || '').trim() : '';
-      
-      if (isEdit && oldSerialNumber && !newSerialNumber) {
-        showNotification(isArSubR ? 'خطأ في الإدخال' : 'Validation Error', isArSubR ? 'لا يمكن حذف رقم الوصل الموجود' : 'Cannot remove existing receipt serial number. Please enter a serial number.', 'error');
-        return;
-      }
-      
-      const receiptUpdates = {
-        customerId: receiptCustomerId,
-        pageId: document.getElementById('receipt-page')?.value || '',
-        amountUSD: receiptAmountUSD,
-        exchangeRate: receiptRate,
-        amountLocal: localAmount,
-        paymentMethod: document.getElementById('receipt-payment').value,
-        status: document.getElementById('receipt-status').value,
-        isPaid: receiptPaid,
-        isReceivedInOffice: receiptOffice,
-        serialNumber: newSerialNumber,
-        officeFee: officeFee,
-        discount: discount,
-        phoneNumber: document.getElementById('receipt-phone').value || '',
-        adLink: document.getElementById('receipt-ad-link').value || '',
-        receiptImage: receiptImage,
-        startDate: receiptStartDate ? new Date(receiptStartDate).toISOString() : new Date().toISOString(),
-        endDate: receiptEndDate ? new Date(receiptEndDate).toISOString() : new Date().toISOString()
-      };
-      
-      if (receiptPaid && (!state.modalData || !state.modalData.collectionDate)) {
-        receiptUpdates.collectionDate = new Date().toISOString();
-      }
-      
-      if (isEdit) {
-        const savedOk = await updateRecord(state.receipts, state.modalData.id, receiptUpdates);
-        if (!savedOk) return;
-        showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث الوصل بنجاح!' : 'Receipt updated successfully!', 'success');
-      } else {
-        const receipt = {
-          id: generateId('receipt'),
-          recordType: 'receipt',
-          creatorId: state.currentUser?.id || '',
-          deliveryStatus: 'Office',
-          createdAt: new Date().toISOString(),
-          payments: [],
-          topUps: [],
-          ...receiptUpdates
-        };
-        const savedOk = await addRecord(state.receipts, receipt);
-        if (!savedOk) return;
-        showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-      }
-      break;
   }
   closeModal();
   render();
@@ -42755,10 +42710,7 @@ function ensureClothesSystemLoaded() {
     return Promise.resolve();
   }
   if (_clothesBundlePromise) return _clothesBundlePromise;
-  // After a failure, wait before asking again. Every render reaches this
-  // function (live sync repaints every few seconds), and re-requesting a
-  // bundle that just failed turned an offline phone into a request loop that
-  // never showed the Retry card.
+  // Cooldown after a failure: every render calls this, and re-requesting looped offline.
   if (_clothesBundleState === 'failed' && Date.now() - _clothesLastFailureAt < _CLOTHES_RETRY_COOLDOWN_MS) return Promise.resolve();
   _clothesBundleState = 'loading';
   _clothesBundlePromise = new Promise((resolve) => {
@@ -42870,10 +42822,7 @@ function ensureAdsStudioLoaded() {
     return Promise.resolve();
   }
   if (_studioBundlePromise) return _studioBundlePromise;
-  // After a failure, wait before asking again. Every render reaches this
-  // function (live sync repaints every few seconds), and re-requesting a
-  // bundle that just failed turned an offline phone into a request loop that
-  // never showed the Retry card.
+  // Cooldown after a failure: every render calls this, and re-requesting looped offline.
   if (_studioBundleState === 'failed' && Date.now() - _studioLastFailureAt < _STUDIO_RETRY_COOLDOWN_MS) return Promise.resolve();
   _studioBundleState = 'loading';
   _studioBundlePromise = new Promise((resolve) => {
@@ -44119,7 +44068,11 @@ function stopAd(id) {
   const finalSpendFrozen = frozenFinalSpendUSD !== null;
   const manualSpentOverride = ad.manualSpentOverride === true;
   const metaSpendAuto = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD <= adAmountUSD + 0.005;
-  const initialSpentUSD = finalSpendFrozen ? frozenFinalSpendUSD : (metaSpendAuto ? metaSpendUSD : currentSpentUSD);
+  // Meta above budget: start at the budget, never at a stale 0.
+  const metaOverspend = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD > adAmountUSD + 0.005;
+  const initialSpentUSD = finalSpendFrozen
+    ? frozenFinalSpendUSD
+    : (metaSpendAuto ? metaSpendUSD : (metaOverspend ? adAmountUSD : currentSpentUSD));
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
   // The checkbox must describe the remainder ACTUALLY on screen. A saved

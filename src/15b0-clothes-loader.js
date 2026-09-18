@@ -39,10 +39,7 @@ function ensureClothesSystemLoaded() {
     return Promise.resolve();
   }
   if (_clothesBundlePromise) return _clothesBundlePromise;
-  // After a failure, wait before asking again. Every render reaches this
-  // function (live sync repaints every few seconds), and re-requesting a
-  // bundle that just failed turned an offline phone into a request loop that
-  // never showed the Retry card.
+  // Cooldown after a failure: every render calls this, and re-requesting looped offline.
   if (_clothesBundleState === 'failed' && Date.now() - _clothesLastFailureAt < _CLOTHES_RETRY_COOLDOWN_MS) return Promise.resolve();
   _clothesBundleState = 'loading';
   _clothesBundlePromise = new Promise((resolve) => {

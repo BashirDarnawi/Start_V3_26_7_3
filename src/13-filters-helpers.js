@@ -1874,11 +1874,15 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
+  // A typed local number must match the stored international one.
+  const searchPhoneKey = searchPhoneDigits.length >= 9 && typeof normalizeCustomerPhoneKey === 'function'
+    ? String(normalizeCustomerPhoneKey(searchTerm) || '')
+    : '';
 
   if (searchTerm) {
     filtered = filtered.filter(c =>
       foldSearchText(c.name).includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)))) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
       foldSearchText(c.platform).includes(searchTerm)
     );
   }
@@ -2686,7 +2690,9 @@ function normalizePhoneToE164(phone) {
 }
 
 function buildWhatsAppLink(phone) {
-  const e164 = normalizePhoneToE164(phone);
+  // Normalise first (Arabic digits, local 09… -> 218…); E.164 strip is the fallback.
+  const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
+  const e164 = key || normalizePhoneToE164(phone);
   const digits = String(e164 || '').replace(/[^\d]/g, '');
   if (!digits) return '';
   return `https://wa.me/${digits}`;

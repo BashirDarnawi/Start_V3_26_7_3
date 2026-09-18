@@ -32,7 +32,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from .db import db_conn, json_dumps, json_loads, now_ms
+from .db import db_conn, json_dumps, json_field_sql, json_loads, now_ms
 from .payment_methods import (
     enabled_payment_method_ids,
     get_payment_method,
@@ -94,19 +94,19 @@ def wallet_campaign_holds_minor(conn: Any, user_id: str) -> int:
     never a moment where the budget is both 'available' and 'promised'.
     """
     total = 0
+    # Filter and project in SQL: this runs under the user's FOR UPDATE lock on
+    # every debit, and campaigns carry base64 creative images.
     rows = conn.execute(
         text(
-            "SELECT data_json FROM entities WHERE type = 'adCampaignRequests' "
-            "AND deleted = false AND created_by = :uid"
+            f"SELECT {json_field_sql('budgetMinorUSD')} AS budget FROM entities "
+            "WHERE type = 'adCampaignRequests' AND deleted = false AND created_by = :uid "
+            f"AND {json_field_sql('status')} = 'Submitted'"
         ),
         {"uid": str(user_id or "")},
     ).mappings().all()
     for row in rows:
-        data = json_loads(row.get("data_json") or "{}") or {}
-        if str(data.get("status") or "") != "Submitted":
-            continue
         try:
-            total += max(int(data.get("budgetMinorUSD") or 0), 0)
+            total += max(int(float(row.get("budget") or 0)), 0)
         except (TypeError, ValueError, OverflowError):
             continue
     return total
@@ -475,7 +475,7 @@ def create_wallet_payments_router(
                 # creation time. Presentation + cash guidance only — the
                 # wallet credit stays the USD amountMinor, never restamped.
                 # An LYD charge needs no conversion: it already IS the cash.
-                rate = latest_usd_lyd_rate() if cur == "USD" else None
+                rate = latest_usd_lyd_rate(conn) if cur == "USD" else None
                 if cur == "LYD":
                     data["amountMinorLYD"] = amount
                 if rate:

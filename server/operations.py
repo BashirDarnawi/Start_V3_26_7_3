@@ -36,6 +36,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy import text
 
 from .db import db_conn, get_engine, json_dumps, json_loads, now_ms
+from .entity_projection import _inline_media_sql_projection
 from .monitoring import get_metrics
 
 
@@ -142,10 +143,16 @@ def _safe_number(value: Any) -> float:
 
 
 def _entity_rows(collection: str, conn: Any | None = None) -> list[dict[str, Any]]:
+    # The month snapshot needs a few numeric fields per row; let the database
+    # strip the inline photos so closing a month never materialises every
+    # base64 image in memory under the exclusive period lock.
+    projection = _inline_media_sql_projection(collection, str(get_engine().dialect.name or ""))
+    data_expression = projection[0] if projection else "data_json"
+
     def read_rows(active_conn: Any) -> list[Any]:
         return active_conn.execute(
             text(
-                "SELECT id, data_json, created_at, created_by, last_modified "
+                f"SELECT id, {data_expression} AS data_json, created_at, created_by, last_modified "
                 "FROM entities WHERE type=:type AND deleted=false"
             ),
             {"type": collection},
@@ -321,7 +328,13 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
     paid_receipts = [row for row in normal_receipts if row.get("isPaid") is True or str(row.get("status") or "").lower() == "paid"]
     paid_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in paid_receipts)
     ad_sales = sum(max(0.0, _safe_number(row.get("amountUSD"))) for row in ads)
-    meta_spend = sum(max(0.0, _safe_number(row.get("metaSpendMinor")) / 100) for row in ads)
+    # Meta reports spend in the ad account's currency; only USD accounts may
+    # be summed as dollars (the client applies the same rule).
+    meta_spend = sum(
+        max(0.0, _safe_number(row.get("metaSpendMinor")) / 100)
+        for row in ads
+        if str(row.get("metaCurrency") or "USD").upper() == "USD"
+    )
     purchase_usd = sum(max(0.0, _safe_number(row.get("amountUSD"))) for row in purchases)
     purchase_cost_lyd = sum(max(0.0, _safe_number(row.get("totalLYD"))) for row in purchases)
     setup_ads = [
@@ -726,9 +739,36 @@ def create_encrypted_backup() -> dict[str, Any]:
     return result
 
 
+def _seed_last_backup_from_disk() -> None:
+    """Continue the schedule from the newest file on disk after a restart,
+    instead of taking a fresh full backup twenty seconds after every boot."""
+    with _state_lock:
+        if _status.get("lastBackupAt"):
+            return
+    newest: tuple[int, str] | None = None
+    try:
+        for path in _backup_directory().glob("albayan-*.backup.aesgcm"):
+            try:
+                stamp = int(path.stat().st_mtime * 1000)
+            except OSError:
+                continue
+            if newest is None or stamp > newest[0]:
+                newest = (stamp, path.name)
+    except OSError:
+        return
+    if newest is None:
+        return
+    with _state_lock:
+        _status.update({"lastBackupAt": newest[0], "lastBackupFile": newest[1]})
+
+
 def _backup_worker() -> None:
     with _state_lock:
         _status["workerRunning"] = True
+    try:
+        _seed_last_backup_from_disk()
+    except Exception:
+        pass
     try:
         # Let startup/migrations settle before touching the database.
         if _worker_stop.wait(20):
@@ -750,8 +790,13 @@ def _backup_worker() -> None:
             minimum_requests = _env_int("ALBAYAN_ALERT_MIN_REQUESTS", 50, 10, 1000000)
             error_rate_limit = _env_float("ALBAYAN_ALERT_ERROR_RATE", 0.05, 0.001, 1.0)
             p95_limit_ms = _env_int("ALBAYAN_ALERT_P95_MS", 3000, 250, 120000)
-            if int(metrics.get("total_requests") or 0) >= minimum_requests:
-                if float(metrics.get("error_rate") or 0) >= error_rate_limit:
+            # Judge the recent window, not the ratio since boot: an old
+            # incident must stop alerting once it is over, and a fresh burst
+            # must alert even after millions of good requests.
+            recent_sample = int(metrics.get("recent_sample_size") or 0)
+            recent_rate = float(metrics.get("recent_error_rate") or 0)
+            if recent_sample >= minimum_requests:
+                if recent_rate >= error_rate_limit:
                     _send_alert(
                         "high_error_rate",
                         "high",

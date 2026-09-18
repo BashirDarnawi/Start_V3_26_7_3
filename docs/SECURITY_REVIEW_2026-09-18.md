@@ -87,3 +87,106 @@ login error shape and response headers of the live site were inspected.
    inline handlers; moving to delegated handlers with a nonce is a larger
    refactor.
 7. Sessions have no idle timeout and no "sign out other devices" action.
+
+
+---
+
+# Round 2 (same day)
+
+Six further hunters with new lenses: frontend/backend API contracts,
+database concurrency and dialect differences, forms/dates/Arabic input,
+the Meta integration, operations/deployment and supply chain, and a
+route-by-route permission matrix. Findings were verified against the code
+(several with scratch tests that are now permanent regression tests in
+`server/test_deep_scan_round2.py`). The browser suite was also run three
+extra times (252 cases) with no flaky failure.
+
+## Fixed
+
+### Permissions (proven by tests)
+
+| Problem | Fix |
+| --- | --- |
+| A driver holding a broad grant could delete, batch-delete or create ads/receipts outside their assignment, and edit customers not referenced by their deliveries, through the generic collection routes (reads were already scoped). | The write routes apply the same assignment boundary as reads. |
+| A staff member holding only `users.resetPassword` could set the password of a more privileged colleague and sign in as them. | Password reset is refused when the target holds any permission the actor lacks. |
+| A user with `users.changeRole` could change their own role. | Self role change refused. |
+| `ads.edit` / `receipts.edit` alone could hand a delivery to a non-driver. | The generic edit path validates the target is an active Delivery user. |
+
+### Meta integration (proven by tests)
+
+| Problem | Fix |
+| --- | --- |
+| An ad dated in a closed accounting month stayed first in the spend-sync queue forever: every pass asked Meta about it, the write was refused (423), nothing changed, and live ads behind it never synced. A failure on such an ad even aborted the whole batch. | The ad is parked for 30 days without touching its version; failure recording cannot raise out of the loop. |
+| When discovery failed (expired token, outage) the background worker retried it every two seconds and never ran the spend sync; the reason was invisible in the status. | The discovery interval applies to failures too; the last error is stored for the connection status. |
+| Every Page/Instagram comment webhook also triggered an ad-account discovery read. | Comment webhooks return after the Social Studio dispatch. |
+| "Sync due now" returned an opaque 500 when discovery raised. | The sync still runs; the discovery error is returned as text. |
+| A pass whose results could not be read was stored as a successful "$0 spent" sync, which the stop/reconciliation forms prefilled. | Such a pass keeps the previous synced-at stamp and records `insights_unavailable`. |
+| Month totals and profit analytics treated Meta spend in any currency as dollars. | Only USD accounts are summed. |
+| Meta reporting slightly more than the budget left the spend prefill blank/zero. | The prefill starts at the budget (the most that can be booked). |
+
+### Database and operations
+
+| Problem | Fix |
+| --- | --- |
+| The temp receipt counter, the USD charge-request rate lookup, and receipt-number collision scans opened a second pooled connection inside a locked transaction (proven to time out with a small pool); the number scans also loaded every receipt's photos. | The open connection is reused; the scans select only the number fields. Pool sizing (5+5) documented for the Jelastic node. |
+| Campaign hold totals loaded every campaign with its images on every wallet debit. | Filtered and projected in SQL. |
+| `COALESCE()` around indexed JSON expressions defeated the wallet indexes on PostgreSQL. | Bare expressions. |
+| Bulk import and anonymisation locked rows in heap order. | `ORDER BY` before `FOR UPDATE`. |
+| Month preview/close loaded every receipt and ad with their photos under the exclusive period lock. | Media-stripped projection. |
+| A briefly unreachable database at boot exited the container (the platform does not restart it). | Ten retries with a three-second pause. |
+| `create_indexes.py` used PostgreSQL syntax that cannot work on a text column, and one failure aborted every later index in the same transaction. | Only the composite index remains; every index statement runs in its own transaction. |
+| Backups restarted their schedule from zero on every boot. | The schedule continues from the newest file on disk. |
+| The error-rate alert judged the ratio since boot and counted health probes. | Rolling window; probes excluded. |
+| Alembic autogenerate would propose dropping the startup-created indexes. | Name filter in the migration environment. |
+| Container logs were block-buffered; no graceful-shutdown bound. | `PYTHONUNBUFFERED=1`, `--timeout-graceful-shutdown 8`. |
+| Readiness could not tell an empty SQLite fallback from PostgreSQL. | Readiness reports the dialect; startup warns on SQLite. |
+
+### Frontend
+
+| Problem | Fix |
+| --- | --- |
+| Marking a Clothes shipment received in server mode added the stock, then the shipment update was refused (405); a retry added the stock again. Deleting a shipment was impossible. | Status and delete go through the transactional shipment route; verified in a browser (3 → 7 → 7 → 3, delete accepted). |
+| Server validation errors showed as "[object Object]". | Field and reason are named. |
+| A pasted "1,250" in any money box saved 1.25. | Commas in groups of three or next to a dot are thousands separators; "12,5" stays a decimal. |
+| Deliveries WhatsApp/Call links broke for local `09…` and Arabic-digit numbers. | International digits everywhere. |
+| Typing a local number did not find a customer stored internationally. | Search compares the canonical phone key. |
+| The refund prompt rejected Arabic digits. | Digits folded. |
+| Clothes dates showed the UTC day (a day early after midnight). | Local calendar day. |
+| Stop / Mark-launched minted a new operation id per click with no retry; a lost reply became a false "Conflict". | One operation per campaign version, retried, 409 checked against the server. |
+| Wallet charge requests regenerated their idempotency key per click. | One key per amount/currency/method until created. |
+| The phone's keepalive permission flush lacked the request-id header the CSRF check needs. | Header added. |
+| A refused permission grant stayed on screen for 30 s. | Users reload on the next tick. |
+| Ads Studio wizard fields had no ids, so a live-sync repaint closed the keyboard mid-typing. | Stable ids. |
+| Native HTTP read timeout (30 s) was shorter than the app's own budgets. | 120 s (needs a new native build). |
+| Removed dead code: two unused security helpers and an unreachable receipt-submit branch (kept the startup bundle inside its budget). | |
+
+## Verified and left as is (round 2)
+
+- Money paths: row locks, compare-and-swap writes, idempotency namespaces,
+  single-transaction captures/refunds, receipt→ads→customers lock order.
+- Meta Graph: pagination bounds, rate-limit backoff, token never logged,
+  SSRF guards, snapshot idempotency, staff fields never overwritten by sync.
+- Route map: every frontend call resolves to a server route; dead server
+  routes listed in the hunter report are external or diagnostic by design.
+
+## Still open for the owner (round 2)
+
+1. **Customer merge lock order** can deadlock against a concurrent money
+   write on PostgreSQL (one request fails with 500, nothing corrupts).
+   Needs a careful reorder of the merge transaction.
+2. **Startup repair passes** run in full on every boot; consider a
+   "done for this release" marker.
+3. **Backup now** runs inside the HTTP request (can exceed the 100 s edge
+   timeout on large databases); off-site backups are never pruned.
+4. **Python dependencies** are pinned only at the top level; a hash-locked
+   requirements file and digest-pinned base image would make builds
+   reproducible.
+5. **Control Center** toasts are English-only.
+6. Linked ads are never retired from the Meta sync queue (finished ads still
+   refresh every 15 minutes).
+7. Sessions: no idle timeout; `users.edit` lets a non-admin change another
+   non-admin's email; audit log entries include emails and amounts for any
+   `auditLogs.view` holder.
+8. The startup bundle sits ~5 KB under its 2.4 MiB budget and
+   `server/main.py` is 111 lines under its cap: the next feature must
+   lazy-load or extract something first.

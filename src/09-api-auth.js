@@ -158,6 +158,24 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
  * Retry helper with exponential backoff for transient failures.
  * Retries network errors, 500s, and timeouts (not 4xx client errors).
  */
+// `detail` is a string for refusals but a LIST for 422 validation errors.
+function apiDetailMessage(data, fallback) {
+  const detail = data && typeof data === 'object' ? data.detail : null;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    return detail.map(item => {
+      if (!item || typeof item !== 'object') return String(item);
+      const where = Array.isArray(item.loc) ? item.loc.filter(part => part !== 'body').join('.') : '';
+      const reason = String(item.msg || item.type || 'invalid');
+      return where ? `${where}: ${reason}` : reason;
+    }).join('; ');
+  }
+  if (detail && typeof detail === 'object') {
+    try { return JSON.stringify(detail); } catch (_) {}
+  }
+  return fallback;
+}
+
 async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
   let lastError;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -234,7 +252,7 @@ async function apiJson(path, options = {}, timeout = {}) {
   if (resp.status === 429) {
     const retryAfter = parseInt(resp.headers.get('Retry-After') || '60', 10);
     setRateLimitCooldown(path, retryAfter);
-    const msg = (data && typeof data === 'object' && data.detail) ? data.detail : `Rate limited. Try again in ${retryAfter} seconds.`;
+    const msg = apiDetailMessage(data, `Rate limited. Try again in ${retryAfter} seconds.`);
     const err = new Error(msg);
     err.status = 429;
     err.retryAfter = retryAfter;
@@ -242,7 +260,7 @@ async function apiJson(path, options = {}, timeout = {}) {
   }
   
   if (!resp.ok) {
-    const msg = (data && typeof data === 'object' && data.detail) ? data.detail : (resp.statusText || 'Request failed');
+    const msg = apiDetailMessage(data, resp.statusText || 'Request failed');
     // A definitive 401 during an authenticated request means cached business
     // data must not remain visible indefinitely. Login/setup failures and the
     // user's own logout request are intentionally excluded.
@@ -794,6 +812,8 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
         saveState();
       }
     } catch (e) {
+      // Reload users on the next tick: the grid shows a refused grant.
+      try { if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0; } catch (_) {}
       if (!quiet) {
         showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
@@ -823,7 +843,8 @@ function flushPendingUserUpdates() {
           method: 'PATCH',
           credentials: 'include',
           keepalive: true,
-          headers: { 'Content-Type': 'application/json' },
+          // Native requests carry no Origin; the request id is the proof.
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId() },
           body: JSON.stringify(payload)
         }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
       } catch (_) {}
@@ -1965,6 +1986,35 @@ async function apiMutateClothesOrder(payload) {
     validateServerEntityResponse('clothesProducts', entity, `${action}.updatedProducts[${index}]`)
   );
   return { order, updatedProducts, replayed: response.replayed === true };
+}
+
+// Shipment status/delete moves stock in one server transaction (generic routes 405).
+async function apiMutateClothesShipment(payload) {
+  const action = String(payload?.action || '');
+  if (!['status', 'delete'].includes(action)) {
+    throw new Error('Invalid clothes shipment action');
+  }
+  const identity = getServerSessionIdentity();
+  const response = await apiJson('/api/clothes/shipments/mutate', {
+    method: 'POST',
+    body: payload
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  if (!response || typeof response !== 'object' || Array.isArray(response)) {
+    const error = new Error('Invalid clothes shipment mutation response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const shipment = validateServerEntityResponse('clothesShipments', response.shipment, `${action}.shipment`);
+  if (!Array.isArray(response.updatedProducts)) {
+    const error = new Error('Invalid clothes shipment products response');
+    error.code = 'INVALID_ENTITY_RESPONSE';
+    throw error;
+  }
+  const updatedProducts = response.updatedProducts.map((entity, index) =>
+    validateServerEntityResponse('clothesProducts', entity, `${action}.updatedProducts[${index}]`)
+  );
+  return { shipment, updatedProducts, replayed: response.replayed === true };
 }
 
 // Ads Studio workflow transitions are server-controlled. Customers may save

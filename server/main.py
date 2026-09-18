@@ -254,6 +254,18 @@ def _canonical_receipt_number(value: Any) -> str:
     return normalized[:80]
 
 
+def _receipt_number_scan_sql() -> str:
+    """Only the three number fields, never the photos, for collision scans."""
+    columns = ", ".join(
+        f"{json_field_sql(field)} AS n{index}" for index, field in enumerate(_RECEIPT_NUMBER_FIELDS)
+    )
+    return f"SELECT id, {columns} FROM entities WHERE type='receipts' AND deleted=false"
+
+
+def _receipt_number_row_fields(row: Any) -> dict[str, Any]:
+    return {field: row.get(f"n{index}") for index, field in enumerate(_RECEIPT_NUMBER_FIELDS)}
+
+
 def _receipt_number_keys(data: Any) -> set[str]:
     source = data if isinstance(data, dict) else {}
     return {
@@ -300,34 +312,37 @@ def _validate_receipt_number_change_conn(
         return
     _lock_receipt_number_keys_conn(conn, introduced, postgres=postgres)
     rows = conn.execute(
-        text(
-            "SELECT id,data_json FROM entities "
-            "WHERE type='receipts' AND deleted=false AND id<>:receipt_id"
-        ),
+        text(_receipt_number_scan_sql() + " AND id<>:receipt_id"),
         {"receipt_id": receipt_id},
     ).mappings().all()
     for row in rows:
-        other = json_loads(row.get("data_json") or "{}") or {}
-        if introduced & _receipt_number_keys(other):
+        if introduced & _receipt_number_keys(_receipt_number_row_fields(row)):
             raise HTTPException(status_code=409, detail="Receipt number already exists")
 
 
-def _receipt_number_exists(number: str, *, exclude_id: str | None = None) -> bool:
+def _receipt_number_exists(
+    number: str, *, exclude_id: str | None = None, conn: Any | None = None
+) -> bool:
     key = _canonical_receipt_number(number)
     if not key:
         return False
     excluded = str(exclude_id or "").strip()
-    with db_conn() as conn:
-        rows = conn.execute(
-            text("SELECT id,data_json FROM entities WHERE type='receipts' AND deleted=false")
-        ).mappings().all()
+
+    def scan(active: Any) -> bool:
+        rows = active.execute(text(_receipt_number_scan_sql())).mappings().all()
         for row in rows:
             if excluded and str(row.get("id") or "") == excluded:
                 continue
-            data = json_loads(row.get("data_json") or "{}") or {}
-            if key in _receipt_number_keys(data):
+            if key in _receipt_number_keys(_receipt_number_row_fields(row)):
                 return True
-    return False
+        return False
+
+    # Callers inside a locked transaction pass their connection: opening a
+    # second pooled connection there starved the small pool under load.
+    if conn is not None:
+        return scan(conn)
+    with db_conn() as active:
+        return scan(active)
 
 
 def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> bool:
@@ -370,9 +385,11 @@ def _validate_receipt_number_fields(data: Any) -> None:
             raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
 
 
-def _temp_receipt_no_exists(temp_no: str, *, exclude_id: str | None = None) -> bool:
+def _temp_receipt_no_exists(
+    temp_no: str, *, exclude_id: str | None = None, conn: Any | None = None
+) -> bool:
     """Compatibility helper for preflight messages; transaction guard is authoritative."""
-    return _receipt_number_exists(temp_no, exclude_id=exclude_id)
+    return _receipt_number_exists(temp_no, exclude_id=exclude_id, conn=conn)
 
 
 def _next_temp_delivery_receipt_no(created_by: str | None = None) -> str:
@@ -460,7 +477,7 @@ def _next_temp_delivery_receipt_no_inner(created_by: str | None, dialect: str, n
 
         next_n = last_n + 1
         # Defense-in-depth: ensure uniqueness even if counter got out of sync.
-        while _temp_receipt_no_exists(f"D{next_n}"):
+        while _temp_receipt_no_exists(f"D{next_n}", conn=conn):
             next_n += 1
 
         payload = {"last": int(next_n), "updatedAt": now}
@@ -2380,10 +2397,40 @@ def _run_page_name_backfill_quietly() -> None:
         print(f"[albayan] page-name backfill failed: {type(e).__name__}: {e}")
 
 
+def _init_db_with_retry(attempts: int = 10, delay_seconds: float = 3.0) -> None:
+    """A database that is briefly unreachable at boot must not kill the container.
+
+    Every other startup step is wrapped; this one used to raise straight out
+    of uvicorn's startup, and the platform does not restart an exited container."""
+    import time as _time
+
+    for attempt in range(1, attempts + 1):
+        try:
+            init_db()
+            return
+        except Exception as error:
+            if attempt >= attempts:
+                raise
+            print(
+                f"[albayan] Database not ready at startup ({type(error).__name__}); "
+                f"retry {attempt}/{attempts - 1} in {delay_seconds:g}s"
+            )
+            _time.sleep(delay_seconds)
+
+
 @app.on_event("startup")
 def _startup():
     _ensure_minified_script()
-    init_db()
+    _init_db_with_retry()
+    try:
+        if str(get_engine().dialect.name or "") == "sqlite" and not DEBUG_MODE:
+            print(
+                "[albayan] WARNING: running on SQLite. Production must set DATABASE_URL to "
+                "PostgreSQL; a container that lost that variable would start EMPTY and offer "
+                "the first-run admin setup."
+            )
+    except Exception:
+        pass
     _bootstrap_first_admin_if_empty()
 
     # Ensure query indexes exist (Postgres only; both are idempotent via
@@ -2588,7 +2635,10 @@ async def request_context_and_logging(request: Request, call_next):
         status_code = int(getattr(response, "status_code", 0) or 0)
         from .monitoring import observe_request
 
-        observe_request(status_code, duration_ms)
+        # Container and platform health probes are not user traffic; counting
+        # them diluted the error rate the alert watches.
+        if not request.url.path.startswith("/api/health"):
+            observe_request(status_code, duration_ms)
         user_id = getattr(request.state, "user_id", None)
         # Use the same hardened trust boundary as authentication rate limits.
         # Forwarded headers are ignored unless proxy trust is explicitly on.
@@ -2715,6 +2765,9 @@ def _readiness_response():
         "ok": True,
         "ts": now_ms(),
         "database": db_status,
+        # A container that lost its DATABASE_URL would silently come up on an
+        # empty SQLite file and look healthy; the dialect makes that visible.
+        "dialect": str(get_engine().dialect.name or ""),
         "version": APP_VERSION,
         "release": RELEASE_SHA,
     }
@@ -4047,7 +4100,7 @@ def _find_entity_by_idempotency(conn: Any, collection: str, key: str) -> dict[st
         rows = conn.execute(
             text(
                 "SELECT * FROM entities WHERE type = :type AND deleted = false "
-                f"AND COALESCE({key_expr}, '') = :key"
+                f"AND {key_expr} = :key"
             ),
             {"type": collection, "key": key},
         ).mappings().all()
@@ -4088,8 +4141,8 @@ def _wallet_balance_minor(conn: Any, user_id: str, currency: str) -> int:
                 "SELECT data_json FROM entities "
                 "WHERE type = 'walletTransactions' AND deleted = false "
                 f"AND UPPER(COALESCE({json_field_sql('currency')}, '')) = :cur "
-                f"AND (COALESCE({json_field_sql('toUserId')}, '') = :uid "
-                f"OR COALESCE({json_field_sql('fromUserId')}, '') = :uid)"
+                f"AND ({json_field_sql('toUserId')} = :uid "
+                f"OR {json_field_sql('fromUserId')} = :uid)"
             ),
             {"cur": currency, "uid": user_id},
         ).mappings().all()
@@ -11264,6 +11317,33 @@ def get_collection(
     ]
 
 
+def _enforce_delivery_role_write_scope(
+    user: dict[str, Any], collection: str, existing: dict[str, Any] | None
+) -> None:
+    """Drivers may write only what they may read: their own assignments.
+
+    Reads and the ads/receipts PATCH already applied this boundary; delete,
+    batch delete, the generic create and the customers PATCH did not, so a
+    driver holding a broad grant could reach another driver's receipt or an
+    unreferenced customer through them.
+    """
+    if str(user.get("role") or "").lower() != "delivery":
+        return
+    uid = str(user.get("id") or "")
+    data = (existing or {}).get("data") or {}
+    if collection in {"ads", "receipts"}:
+        if str(data.get("deliveryPersonId") or "") != uid:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+    if collection == "customers":
+        cid = str((existing or {}).get("id") or "")
+        if not cid or not _delivery_customer_is_referenced(cid, uid):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return
+    if collection != "exchangeRateHistory":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 def _delivery_customer_is_referenced(customer_id: str, delivery_user_id: str) -> bool:
     """Whether an active assigned ad/receipt references this customer."""
     customer_id = validate_entity_id(customer_id)
@@ -11485,6 +11565,10 @@ def create_collection_item(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     generic_data = sanitize_json(body.data or {}) or {}
+    if collection in {"ads", "receipts"} and not is_within_delivery_scope(user, generic_data):
+        # The transactional ad route already refuses this; the generic create
+        # must not be the way around it.
+        raise HTTPException(status_code=403, detail="Forbidden")
     protect_company_coverage_fields(collection, generic_data)
     if collection == "ads":
         enforce_ad_photo_mutation_permissions(
@@ -11775,6 +11859,8 @@ def update_collection_item(
         raise HTTPException(status_code=405, detail="Payment requests change only through /api/wallet/payment-requests")
 
     role_lower = str(user.get("role") or "").lower()
+    if role_lower == "delivery" and collection == "customers":
+        _enforce_delivery_role_write_scope(user, collection, existing)
     admin_completion = is_admin_receipt_completion(role_lower, collection, sanitize_json(body.data or {}) or {}, existing)
     if (role_lower == "delivery" or admin_completion) and collection in {"ads", "receipts"}:  # delivery: own assignments only; admin: verified completion entry
         data = existing.get("data") or {}
@@ -12208,6 +12294,16 @@ def update_collection_item(
         if not _mark_collected_patch and not _delivery_ok:
             raise HTTPException(status_code=403, detail="Forbidden")
         delivery_grant_patch = _delivery_ok
+
+    if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
+        _driver_updates = sanitize_json(body.data or {}) or {}
+        if "deliveryPersonId" in _driver_updates:
+            _new_driver = str(_driver_updates.get("deliveryPersonId") or "").strip()
+            _old_driver = str((existing.get("data") or {}).get("deliveryPersonId") or "").strip()
+            # The delivery-workflow path insists on a real, active driver; a
+            # plain edit grant must not be a way to hand a job to anyone.
+            if _new_driver and _new_driver != _old_driver and not _active_delivery_user(_new_driver):
+                raise HTTPException(status_code=400, detail="deliveryPersonId must be an active delivery user")
 
     if collection == AD_CAMPAIGN_COLLECTION:
         # Ads Studio uses a status machine (Draft -> Submitted -> Reviewed).
@@ -12707,7 +12803,7 @@ def admin_bulk_import(
 
         for (name, _seen_ids, active) in prepared:
             existing_rows = conn.execute(
-                text("SELECT id, deleted, created_at, data_json FROM entities WHERE type = :type" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
+                text("SELECT id, deleted, created_at, data_json FROM entities WHERE type = :type ORDER BY id" + (" FOR UPDATE" if str(conn.engine.dialect.name or "") == "postgresql" else "")),
                 {"type": name},
             ).mappings().all()
             assert_financial_bulk_import_open(name, existing_rows, active, conn=conn)
@@ -12858,6 +12954,10 @@ def batch_delete_entities(
             creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
             if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
                 raise HTTPException(status_code=403, detail=f"Forbidden: {col}/{eid}")
+        if str(user.get("role") or "").lower() == "delivery":
+            scoped_existing = campaign_existing or get_entity(col, eid)
+            if scoped_existing:
+                _enforce_delivery_role_write_scope(user, col, scoped_existing)
         if (
             col == AD_CAMPAIGN_COLLECTION
             and campaign_existing
@@ -13023,6 +13123,11 @@ def delete_collection_item(
         creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
         if not user_has_permission(user, module, delete_action, record_creator_id=str(creator or "")):
             raise HTTPException(status_code=403, detail="Forbidden")
+    if str(user.get("role") or "").lower() == "delivery":
+        scoped_existing = get_entity(collection, entity_id)
+        if not scoped_existing:
+            raise HTTPException(status_code=404, detail="Not found")
+        _enforce_delivery_role_write_scope(user, collection, scoped_existing)
 
     if collection == AD_CAMPAIGN_COLLECTION and str(user.get("role") or "").lower() != "admin":
         campaign = get_entity(collection, entity_id)
@@ -13404,7 +13509,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
             text(
                 "SELECT type, id, data_json, created_by FROM entities "
                 "WHERE created_by = :id "
-                "   OR (created_by IS NULL AND data_json LIKE :pat)" + suffix
+                "   OR (created_by IS NULL AND data_json LIKE :pat) ORDER BY type, id" + suffix
             ),
             {"id": user_id, "pat": f"%{user_id}%"},
         ).mappings().all()
@@ -13667,7 +13772,22 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 # Self password changes must verify the current password.
                 raise HTTPException(status_code=400, detail="Use /api/auth/password-change to change your own password")
             _need("resetPassword")
+            # Setting someone's password IS taking over their account: a
+            # delegated manager may never do that to a colleague who holds
+            # power the manager lacks.
+            try:
+                _ensure_actor_can_grant_permissions(
+                    admin, normalize_permissions(json_loads(existing.get("permissions_json") or "{}") or {}),
+                    explicit=False,
+                )
+            except HTTPException:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cannot reset the password of a user who holds permissions you do not",
+                )
         if requested_role is not None and requested_role != str(existing.get("role") or ""):
+            if _is_self:
+                raise HTTPException(status_code=403, detail="You cannot change your own role")
             _need("changeRole")
         if body.permissions is not None:
             _need("managePermissions")

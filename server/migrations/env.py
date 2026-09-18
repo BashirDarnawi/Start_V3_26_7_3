@@ -34,11 +34,21 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _include_name(name, type_, parent_names):
+    # Startup-created performance/uniqueness indexes live outside the
+    # migration history on purpose; autogenerate must not propose dropping them.
+    if type_ == "index" and str(name or "").startswith(("idx_", "uq_", "entities_")):
+        return False
+    return True
+
+
 def run_migrations_online() -> None:
     """Run migrations against the real database."""
     engine = create_engine(get_database_url(), poolclass=pool.NullPool)
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection, target_metadata=target_metadata, include_name=_include_name
+        )
         with context.begin_transaction():
             context.run_migrations()
     engine.dispose()

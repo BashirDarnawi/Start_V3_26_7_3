@@ -162,19 +162,24 @@ def public_payment_methods() -> list[dict]:
     return out
 
 
-def latest_usd_lyd_rate() -> tuple[float, str] | None:
+def latest_usd_lyd_rate(conn=None) -> tuple[float, str] | None:
     """Newest exchangeRateHistory row by data.date — the same rule the client
-    uses for state.defaultExchangeRate. None until a rate exists."""
+    uses for state.defaultExchangeRate. None until a rate exists.
+
+    A caller already inside a transaction passes its connection; opening a
+    second pooled connection under its locks starved the pool."""
     from sqlalchemy import text
 
     from .db import db_conn, json_loads
     from .financial_core import MAX_EXCHANGE_RATE, MIN_EXCHANGE_RATE
 
+    query = text("SELECT data_json FROM entities WHERE type='exchangeRateHistory' AND deleted=false")
     try:
-        with db_conn() as conn:
-            rows = conn.execute(
-                text("SELECT data_json FROM entities WHERE type='exchangeRateHistory' AND deleted=false")
-            ).mappings().all()
+        if conn is not None:
+            rows = conn.execute(query).mappings().all()
+        else:
+            with db_conn() as active:
+                rows = active.execute(query).mappings().all()
         best = None
         for row in rows:
             data = json_loads(row.get("data_json") or "{}") or {}

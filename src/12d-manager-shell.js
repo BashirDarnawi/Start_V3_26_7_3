@@ -384,8 +384,7 @@ function openDebtorCollection(customerId) {
 
 const SHELL_REMINDER_LOG_KEY = 'albayan_debt_reminders_v1';
 
-// One log per signed-in account: the next person on this device neither sees
-// nor inherits another account's "reminded today" marks.
+// One log per account: no inherited "reminded today" marks.
 function shellReminderLogKey() {
   return `${SHELL_REMINDER_LOG_KEY}:${String(state.currentUser?.id || 'anonymous')}`;
 }
@@ -400,7 +399,9 @@ function shellReminderStamp(customerId) {
 
 function shellReminderAgo(ts) {
   if (!ts) return shellText('never', 'لا يوجد');
-  const days = Math.floor((Date.now() - Number(ts)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
+  // Calendar days, not 24-hour buckets.
+  const startOfDay = value => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(new Date(Number(ts)))) / TIME_CONSTANTS.MILLISECONDS_PER_DAY);
   if (days <= 0) return shellText('today', 'اليوم');
   if (days === 1) return shellText('yesterday', 'أمس');
   return shellText(`${days} days ago`, `قبل ${days} يوماً`);
@@ -423,9 +424,7 @@ function remindDebtor(customerId) {
     showNotification(shellText('No phone number', 'لا يوجد رقم هاتف'), shellText('Add a phone number to this customer first.', 'أضف رقم هاتف لهذا العميل أولاً.'), 'warning');
     return;
   }
-  // Phones are often pasted from Arabic apps (٠٩١…) or stored as local
-  // 09… numbers; wa.me needs plain international digits (218…). The customer
-  // phone normaliser already knows both, so use it before falling back.
+  // wa.me needs international digits; the normaliser knows Arabic digits and 09… numbers.
   const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';
   const base = digits ? `https://wa.me/${digits}` : buildWhatsAppLink(phone);
   if (!base) {

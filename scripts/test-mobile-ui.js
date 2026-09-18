@@ -1412,8 +1412,8 @@ check('phone header names the current view and lists remember their filter-panel
   views.includes("const active = ad.deliveryStatus !== 'Delivered' && ad.deliveryStatus !== 'Canceled';"));
 
 check('wallet requests use unguessable idempotency keys and LYD previews match the server arithmetic',
-  servicesWallet.includes("const idem = Security.generateSecureId('paycreate');") &&
-  adsStudio.includes("Security.generateSecureId('paycreate')") &&
+  servicesWallet.includes("const idem = chargeWalletIdemKey(amountMinor, currency, _chargeWallet.method);") &&
+  adsStudio.includes("adsStudioChargeIdemKey(amountMinor, method)") &&
   !adsStudio.includes('paycreate-${') && !servicesWallet.includes('paycreate-${') &&
   adsStudio.includes('Math.ceil(Math.round(usd * 100) * rate) / 100') &&
   adsStudio.includes('Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * rate) / 100') &&
@@ -1445,6 +1445,34 @@ check('WhatsApp reminders use international digits and per-account logs; sign-ou
   liveSync.includes("if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null;") &&
   liveSync.includes("if (typeof _controlCenter === 'object' && _controlCenter) {") &&
   dataAudit.includes("const _deliveryExempt = (view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role);"));
+
+// ---------- deep scan round 2 (2026-09-18) ----------
+check('server-mode shipments move stock through the transactional route and validation errors are readable',
+  serverApi.includes("async function apiMutateClothesShipment(payload) {") &&
+  serverApi.includes("apiJson('/api/clothes/shipments/mutate', {") &&
+  clothes.includes("const response = await apiMutateClothesShipment({") &&
+  clothes.includes("function applyClothesShipmentMutationResponse(response) {") &&
+  clothes.includes("function clothesLocalDate(value) {") &&
+  !clothes.includes("String(s.receivedAt).split('T')[0]") &&
+  serverApi.includes('function apiDetailMessage(data, fallback) {') &&
+  serverApi.includes("const msg = apiDetailMessage(data, resp.statusText || 'Request failed');") &&
+  serverApi.includes("headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId() },") &&
+  serverApi.includes("if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0;"));
+
+check('money boxes keep thousands separators, WhatsApp links use international digits, campaign actions replay safely',
+  forms.includes("const grouped = /^\\s*\\d{1,3}(,\\d{3})+(\\.\\d*)?\\s*$/.test(val);") &&
+  forms.includes("val = val.replace(/[٫،]/g, '.');") &&
+  helpers.includes("const key = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';") &&
+  helpers.includes("(searchPhoneKey && entry.key === searchPhoneKey)") &&
+  views.includes('href="tel:${encodeURIComponent(normalizeDigitsAscii(phone))}"') &&
+  adsStudio.includes("function adsStudioActionAttempt(kind, id, expectedLastModified) {") &&
+  adsStudio.includes("const attempt = adsStudioActionAttempt('stop', campaign.id, Number(campaign._lastModified));") &&
+  adsStudio.includes("const attempt = adsStudioActionAttempt('publish', campaign.id, Number(campaign._lastModified));") &&
+  adsStudio.includes("let cleaned = normalizeDigitsAscii(String(answer)).replace(/[٫،]/g, ',').replace(/\\s+/g, '');") &&
+  adsStudio.includes('id="ads-studio-field-name"') && adsStudio.includes('id="ads-studio-field-budgetMinorUSD"') &&
+  actionsIo.includes("const metaOverspend = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD > adAmountUSD + 0.005;") &&
+  read('src/12a-analytics-profit.js').includes("String(ad.metaCurrency || 'USD').toUpperCase() === 'USD'") &&
+  read('capacitor.config.json').includes('"readTimeout": 120000'));
 
 const openBraces = (css.match(/\{/g) || []).length;
 const closeBraces = (css.match(/\}/g) || []).length;

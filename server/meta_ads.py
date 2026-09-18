@@ -3874,6 +3874,11 @@ def discover_meta_ads(
                     "Meta synchronization is paused safely and will resume automatically.",
                     retryable=True,
                 )
+            try:
+                # Leave the reason where the connection status can show it.
+                _save_import_state({**state, "lastError": _clean_text(account_errors[0], 300), "lastErrorAt": _iso_now()})
+            except Exception:
+                pass
             raise MetaAdsError("discovery_failed", account_errors[0], retryable=True)
 
         if include_existing:
@@ -4048,6 +4053,12 @@ def apply_meta_snapshot(
             snapshot["metaTotalRemainingBudgetMinor"] = _total_remaining_budget(
                 snapshot.get("metaTotalBudgetMinor"), snapshot.get("metaSpendMinor")
             )
+            # Results could not be read, so this pass is not a successful sync
+            # of the money figures: keep the previous "synced at" (stop and
+            # reconciliation prefill from it) and say what happened.
+            snapshot["metaSyncedAt"] = str(data.get("metaSyncedAt") or "")
+            snapshot["metaSyncErrorCode"] = "insights_unavailable"
+            snapshot["metaSyncError"] = "Meta results could not be read on the last pass; spend figures were kept."
         if previous_meta_ad_id == meta_ad_id:
             # Re-syncing the same Meta ad: a pass that could not resolve the
             # photo or page identity this time must not erase values an
@@ -4252,6 +4263,38 @@ def _sync_failure_delay_ms(
     return min(
         base * (2 ** min(max(failure_count - 1, 0), 4)), 6 * 60 * 60_000
     )
+
+
+def _defer_meta_sync_quietly(ad_id: str, expected_last_modified: int | None, *, days: int) -> None:
+    """Push metaNextSyncAt forward WITHOUT touching the ad's version.
+
+    Used only for ads whose accounting month is closed: their figures are
+    frozen, so the normal write path refuses them (423), and without this the
+    row stayed first in the queue and was asked of Meta on every single pass
+    while live ads behind it never got a turn. The row must not look modified
+    to delta sync, and the period lock is bypassed for nothing but this one
+    scheduling stamp.
+    """
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    guard = nullcontext() if postgres else _META_WRITE_LOCK
+    try:
+        with guard, db_conn() as conn:
+            row = _lock_ad_row(conn, _local_id(ad_id), postgres=postgres)
+            if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
+                return
+            data = json_loads(row.get("data_json") or "{}") or {}
+            if not isinstance(data, dict):
+                return
+            data["metaNextSyncAt"] = now_ms() + int(days) * 86_400_000
+            conn.execute(
+                text(
+                    "UPDATE entities SET data_json=:data "
+                    "WHERE type='ads' AND id=:id AND last_modified=:baseline"
+                ),
+                {"data": json_dumps(data), "id": str(row["id"]), "baseline": int(row["last_modified"])},
+            )
+    except Exception:
+        print("[albayan] Could not park a closed-period ad's Meta sync; it will be retried.")
 
 
 def record_meta_sync_failure(
@@ -4571,24 +4614,40 @@ def _sync_due_meta_ads_unlocked(limit: int | None = None) -> list[dict[str, Any]
             )
             updated.append(entity)
         except HTTPException as error:
+            if error.status_code == 423:
+                _defer_meta_sync_quietly(ad_id, version, days=30)
             if error.status_code != 409:
                 continue
         except MetaAdsError as error:
             if error.code == "rate_limited":
                 break
-            failed = record_meta_sync_failure(ad_id, error, expected_last_modified=version)
+            failed = _record_meta_sync_failure_or_park(ad_id, error, version)
             if failed:
                 updated.append(failed)
         except Exception:
             # Never leak third-party exception text into logs or ad data.
-            failed = record_meta_sync_failure(
+            failed = _record_meta_sync_failure_or_park(
                 ad_id,
                 MetaAdsError("unexpected", "Meta synchronization failed. Albayan will retry.", retryable=True),
-                expected_last_modified=version,
+                version,
             )
             if failed:
                 updated.append(failed)
     return updated
+
+
+def _record_meta_sync_failure_or_park(ad_id: str, error: MetaAdsError, version: int) -> dict[str, Any] | None:
+    """Recording a failure is itself a write; on a closed month it raised 423
+    out of the loop and aborted the rest of the batch."""
+    try:
+        return record_meta_sync_failure(ad_id, error, expected_last_modified=version)
+    except HTTPException as write_error:
+        if write_error.status_code == 423:
+            _defer_meta_sync_quietly(ad_id, version, days=30)
+            return None
+        if write_error.status_code == 409:
+            return None
+        raise
 
 
 def _is_placeholder_page_name(name: Any, meta_page_id: str) -> bool:
@@ -5131,9 +5190,12 @@ def _worker_loop(stop_event: threading.Event | None = None, startup_cutoff: str 
                 or current - last_discovery_monotonic
                 >= config.discovery_interval_seconds
             ):
-                discover_meta_ads(startup_cutoff=startup_cutoff if startup_cutoff is not None else _WORKER_STARTED_AT)
+                # Stamp first: a discovery that fails (expired token, outage)
+                # must wait for the configured interval like a successful one,
+                # not retry every two seconds while the spend sync starves.
                 last_discovery_monotonic = current
                 discovery_ran = True
+                discover_meta_ads(startup_cutoff=startup_cutoff if startup_cutoff is not None else _WORKER_STARTED_AT)
             if not discovery_ran and (
                 not last_sync_monotonic
                 or current - last_sync_monotonic
@@ -5612,6 +5674,8 @@ def create_meta_ads_router(
             from . import social_studio
 
             background_tasks.add_task(social_studio.handle_meta_webhook, payload)
+            # A comment says nothing about ad accounts: no discovery read.
+            return {"received": True}
         account_ids: list[str] = []
         if isinstance(payload, dict) and payload.get("object") == "ad_account":
             for entry in payload.get("entry") or []:
@@ -5784,15 +5848,22 @@ def create_meta_ads_router(
         _rate_limit_or_429(f"meta-sync-due:{admin.get('id')}", 6, 60_000)
         if not load_meta_ads_config().configured:
             raise HTTPException(status_code=503, detail="Meta Ads connection is not configured")
-        discovery = discover_meta_ads(
-            startup_cutoff=_WORKER_STARTED_AT or None, force=True
-        )
+        discovery_error = ""
+        try:
+            discovery = discover_meta_ads(
+                startup_cutoff=_WORKER_STARTED_AT or None, force=True
+            )
+        except MetaAdsError as error:
+            # The due-ad spend sync can still run; say why discovery did not.
+            discovery = {"imported": [], "state": _public_import_state()}
+            discovery_error = error.public_message
         config = load_meta_ads_config()
         safe_limit = min(body.limit, max(1, config.sync_batch_size * 2))
         return {
             "ads": sync_due_meta_ads(safe_limit),
             "imported": discovery.get("imported", []),
             "importState": discovery.get("state", {}),
+            "discoveryError": discovery_error,
         }
 
     @router.post("/auto-import/run")

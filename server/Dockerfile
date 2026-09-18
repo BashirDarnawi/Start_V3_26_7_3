@@ -69,6 +69,8 @@ RUN python /app/server/image_safety.py /app
 # screen. Set it explicitly only to pin one behavior.
 ENV ALBAYAN_DB_PATH=/var/lib/albayan/albayan.db
 ENV ALBAYAN_DEBUG_MODE=false
+# Print lines reach the platform log immediately, including the last ones before a crash.
+ENV PYTHONUNBUFFERED=1
 
 # Run the service without root privileges. Only the data directory and the
 # runtime log directory need to be writable by the application user (there is no
@@ -92,4 +94,6 @@ USER albayan
 # sync fans out 14 collection GETs per tick; 12 was below a single tab and
 # painted the "Sync failed" badge on healthy servers. 64 leaves room for
 # several tabs/phones while still bounding a runaway client.
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "64", "--no-server-header"]
+# --timeout-graceful-shutdown bounds the wait for in-flight requests on redeploy
+# (Docker sends SIGKILL after 10 s anyway; without a bound uvicorn waited forever).
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--limit-concurrency", "64", "--timeout-graceful-shutdown", "8", "--no-server-header"]

@@ -1467,8 +1467,7 @@ function enforceSecretFeaturesGate() {
   }
   // Also check if user has permission for the current Albayan Manager view
   const view = String(state.currentView || '');
-  // Mirror the router: drivers always keep both their dashboard and the
-  // Deliveries tab, or the tab bounces straight back to the landing view.
+  // Mirror the router: drivers keep both their dashboard and the Deliveries tab.
   const _deliveryExempt = (view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role);
   if (view && !_deliveryExempt && view !== 'no-access' && !userCanAccessView(state.currentUser, view)) {
     // User doesn't have permission for this view, find first allowed view

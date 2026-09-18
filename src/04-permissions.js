@@ -693,10 +693,7 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
       if (state.activeModal === 'subscription-lock') renderModal();
     }).catch(() => {});
   }
-  // The balance shown (and the Subscribe button state) come from the local
-  // ledger copy. Pull the latest rows too, so a fresh login never shows an
-  // empty wallet the server has already credited. The tick skips itself when
-  // a poll is already running, so this never doubles up work.
+  // Refresh the local ledger so a fresh login never shows an empty wallet.
   if (typeof serverLiveSyncTick === 'function' && isServerModeEnabled()) {
     Promise.resolve().then(() => serverLiveSyncTick()).then(() => {
       if (state.activeModal === 'subscription-lock') renderModal();

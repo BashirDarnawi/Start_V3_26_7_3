@@ -35,6 +35,7 @@ class ApplicationMonitor:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._durations: deque[float] = deque(maxlen=max(10, int(sample_size)))
+        self._recent_errors: deque[bool] = deque(maxlen=max(10, int(sample_size)))
         self.request_count = 0
         self.error_count = 0
         self.start_time = time.monotonic()
@@ -45,6 +46,7 @@ class ApplicationMonitor:
             self.request_count += 1
             if int(status) >= 500:
                 self.error_count += 1
+            self._recent_errors.append(int(status) >= 500)
             self._durations.append(max(0.0, float(duration_ms)))
 
     def log_request(
@@ -102,6 +104,7 @@ class ApplicationMonitor:
             request_count = self.request_count
             error_count = self.error_count
             durations = list(self._durations)
+            recent = list(self._recent_errors)
         uptime_seconds = max(0.0, time.monotonic() - self.start_time)
         return {
             "uptime_seconds": round(uptime_seconds, 2),
@@ -109,6 +112,8 @@ class ApplicationMonitor:
             "total_requests": request_count,
             "total_errors": error_count,
             "error_rate": round(error_count / max(request_count, 1), 6),
+            "recent_error_rate": round(sum(1 for failed in recent if failed) / max(len(recent), 1), 6),
+            "recent_sample_size": len(recent),
             "requests_per_minute": round(request_count / max(uptime_seconds / 60, 1), 3),
             "response_ms_p50": _percentile(durations, 0.50),
             "response_ms_p95": _percentile(durations, 0.95),
