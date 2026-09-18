@@ -324,35 +324,12 @@ function normalizeCustomerPhoneKey(value) {
   return digits;
 }
 
-// Compare-time search normalizer, applied to BOTH the query and the haystack
-// at every search/filter site (never to stored values or the visible input —
-// rewriting the user's typed ٠-٩ mid-typing would visibly mutate the field):
-//  - Arabic-Indic ٠-٩ / Persian ۰-۹ digits fold to ASCII (normalizeDigitsAscii,
-//    the same write-side normalizer used by money/receipt-number inputs), so a
-//    Gboard/iOS Arabic-keyboard query like ١٢٣ matches stored "123";
-//  - toLowerCase() for Latin;
-//  - conservative Arabic letter folding so the standard unhamza'd keyboard
-//    spellings match: hamza alif forms آأإٱ -> ا, ة -> ه, ى -> ي, and
-//    tashkeel/tatweel stripped (U+064B-U+0655 includes the combining
-//    hamza/madda so decomposed forms fold too, U+0670 dagger alif, U+0640
-//    tatweel).
-// NFKC first folds full-width digits and Arabic presentation forms; guarded
-// because very old engines lack String.normalize.
-// Memo in front of the folder below. It is a PURE function of one string, so
-// caching cannot change which records match. It runs per FIELD per RECORD on
-// every debounced keystroke (the ads filter folds up to 11 fields per ad),
-// measured at ~19 ms per pass over 3000 ads on a desktop — several times that
-// on a phone, and that cost lands between keypresses.
-// TWO generations instead of one capped Map: a cache smaller than the working
-// set thrashes and ends up no faster than no cache at all. On overflow the
-// current generation becomes the old one and lookups fall through to it, so it
-// degrades gracefully. Memory stays bounded at 2 x MAX entries.
-// `var` + lazy creation, and the limits inlined as literals, ON PURPOSE:
-// foldSearchText is a hoisted function declaration, so it is callable from the
-// moment the bundle starts executing — earlier than this line. With `const`
-// state it would throw "cannot access before initialization" for any caller
-// that runs during startup. `var` hoists, and the null check builds the maps
-// on first real use, so the memo is safe no matter who calls first.
+// Compare-time search normalizer for BOTH query and haystack (never stored
+// values): Arabic-Indic/Persian digits -> ASCII, lowercase Latin, hamza alif
+// forms -> ا, ة -> ه, ى -> ي, tashkeel/tatweel stripped; NFKC first (guarded).
+// Memoised in two generations (bounded at 2 x MAX, degrades gracefully).
+// `var` + lazy creation ON PURPOSE: foldSearchText is hoisted and may run
+// before this line; `const` state would throw during startup.
 var _foldCache = null; // { cur: Map, prev: Map }
 
 function foldSearchText(value) {

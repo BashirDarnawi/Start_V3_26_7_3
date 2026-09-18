@@ -12,6 +12,7 @@
 let _adsStudioActiveTab = 'dashboard';
 let _adsStudioWizardStep = 1;
 let _adsStudioEditingId = '';
+let _adsStudioEditingBaseline = 0;
 let _adsStudioDraft = null;
 let _adsStudioSearch = '';
 let _adsStudioPhotoToken = 0;
@@ -39,6 +40,7 @@ function resetAdsStudioSessionState() {
   _adsStudioActiveTab = 'dashboard';
   _adsStudioWizardStep = 1;
   _adsStudioEditingId = '';
+  _adsStudioEditingBaseline = 0;
   _adsStudioDraft = null;
   _adsStudioSearch = '';
   _adsStudioConfirmationChecked = false;
@@ -263,7 +265,7 @@ function adsStudioMoneyWithLyd(minor) {
   if (!(rate > 1)) return usd;
   // Same arithmetic as the server's payment instruction (ceil of minor × rate),
   // so the estimate never disagrees with the LYD figure the customer is asked to pay.
-  const lyd = (Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * rate) / 100).toFixed(2);
+  const lyd = (Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * Math.round(rate * 10000) / 10000) / 100).toFixed(2);
   return `${usd} (≈ ${lyd} ${adsStudioText('LYD', 'د.ل')})`;
 }
 
@@ -781,6 +783,7 @@ async function duplicateAdsStudioCampaign(id, button = null, extend = false) {
     } catch (_) {}
     _adsStudioPhotoToken++;
     _adsStudioEditingId = '';
+    _adsStudioEditingBaseline = 0;
     _adsStudioWizardStep = 1;
     _adsStudioConfirmationChecked = false;
     _adsStudioDraft = {
@@ -865,6 +868,7 @@ function onAdsStudioSearch(value) {
 function beginAdsStudioCampaign() {
   _adsStudioPhotoToken++;
   _adsStudioEditingId = '';
+  _adsStudioEditingBaseline = 0;
   _adsStudioWizardStep = 1;
   _adsStudioDraft = newAdsStudioDraft();
   _adsStudioConfirmationChecked = false;
@@ -887,6 +891,7 @@ async function startAdsStudioCampaign(id) {
     return;
   }
   _adsStudioEditingId = String(campaign.id || '');
+  _adsStudioEditingBaseline = Number(campaign._lastModified) || 0; // open-time version
   _adsStudioWizardStep = 1;
   _adsStudioConfirmationChecked = false;
   _adsStudioDraft = {
@@ -1358,12 +1363,14 @@ async function saveAdsStudioDraftOnce(closeAfter = true, stabilityAttempt = 0) {
       showNotification(adsStudioText('Cannot save', 'تعذر الحفظ'), adsStudioText('This campaign is no longer editable. Refresh the list.', 'لم تعد هذه الحملة قابلة للتعديل. حدّث القائمة.'), 'error');
       return null;
     }
-    saved = await updateRecord(state.adCampaignRequests, id, payload, current._lastModified);
+    saved = await updateRecord(state.adCampaignRequests, id, payload, _adsStudioEditingBaseline || current._lastModified);
   } else {
     id = Security.generateSecureId('campaign');
     saved = await addRecord(state.adCampaignRequests, { id, ...payload, status: 'Draft', createdAt: new Date().toISOString() });
   }
   if (!saved) return null;
+  // The echo installed the new server version: the next save must build on it.
+  _adsStudioEditingBaseline = Number(findVisibleAdsStudioCampaign(id)?._lastModified) || 0;
   const current = findVisibleAdsStudioCampaign(id);
   // Network completion must not overwrite fields typed while this save was in
   // flight, and must never resurrect a draft after an auth/session reset.
@@ -1465,6 +1472,7 @@ async function submitAdsStudioCampaignOnce(id) {
     showNotification(adsStudioText('Sent for review', 'تم الإرسال للمراجعة'), adsStudioText('Your team can now review this campaign.', 'يمكن للفريق الآن مراجعة هذه الحملة.'), 'success');
     _adsStudioDraft = null;
     _adsStudioEditingId = '';
+    _adsStudioEditingBaseline = 0;
     _adsStudioConfirmationChecked = false;
     _adsStudioActiveTab = 'campaigns';
     try { updateUrlParams({ tab: 'campaigns' }, true); } catch (_) {}
@@ -1617,7 +1625,7 @@ function adsStudioUpdateLydPreview() {
   const usd = parseFloat(document.getElementById('ads-studio-charge-amount')?.value || '0');
   const rate = _adsStudioUsdToLydRate();
   el.textContent = (Number.isFinite(usd) && usd > 0 && rate > 0)
-    ? `≈ ${(Math.ceil(Math.round(usd * 100) * rate) / 100).toFixed(2)} LYD @ ${rate}`
+    ? `≈ ${(Math.ceil(Math.round(usd * 100) * Math.round(rate * 10000) / 10000) / 100).toFixed(2)} LYD @ ${rate}`
     : '';
 }
 

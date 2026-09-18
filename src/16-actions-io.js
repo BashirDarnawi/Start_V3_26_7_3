@@ -1392,6 +1392,8 @@ function importData() {
         bulkImported = true;
       } catch (e) {
         if (e?.status === 404 || e?.status === 405) {
+          // A 405 with a reason is the server refusing THIS backup, not an old server.
+          if (e?.status === 405 && /coverage/i.test(String(e?.message || ''))) throw new Error(String(e.message));
           throw new Error(isAr ? 'هذا الخادم لا يدعم الاستيراد الذري الآمن. حدّث الخادم أولاً.' : 'This server does not support safe transactional import. Update the server first.');
         }
         throw e;

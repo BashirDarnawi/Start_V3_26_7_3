@@ -1113,11 +1113,8 @@ function deleteRecord(array, id, opts) {
     const old = { ...array[index] };
     array[index]._deleted = true;
     array[index]._lastModified = getMonotonicTime();
-    // Identity of the exact object this call marked deleted. Every rollback
-    // below may only restore the slot while it STILL holds this object: if
-    // live-sync installed a fresh copy mid-flight, writing the stale open-time
-    // snapshot back would clobber a newer committed change (the same guard
-    // updateRecord already uses).
+    // Rollbacks below may only restore the slot while it still holds this
+    // object (live-sync may install a newer copy mid-flight).
     const _optimisticRecord = array[index];
     if (collectionName) markCollectionDirty(collectionName);
     saveState();
@@ -1137,12 +1134,14 @@ function deleteRecord(array, id, opts) {
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
       return apiDeleteEntity(collectionName, id)
-        .then(() => {
-          // ok
+        .then((res) => {
+          const i = array.findIndex(x => x && x.id === id);
+          if (i !== -1 && array[i] === _optimisticRecord && Number(res?.lastModified) > 0) array[i]._lastModified = Number(res.lastModified);
           render();
           return true;
         })
         .catch((e) => {
+          if (e?.status === 404) { render(); return true; } // already gone server-side
           // Rollback on failure, only while the slot still holds this call's
           // own object (see _optimisticRecord above).
           const idx = array.findIndex(x => x && x.id === id);

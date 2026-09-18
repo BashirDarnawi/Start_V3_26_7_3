@@ -328,3 +328,98 @@ Known limits, on purpose:
 - Clothes order numbers are unique within a business. The platform admin's
   list shows every business, so the same number can appear twice there from
   two different businesses.
+
+
+---
+
+# Round 4 (same day)
+
+Four hunters on lenses not yet covered: money movement in the services wallet
+and campaign captures, data durability (backup / restore / import), offline
+and live-sync conflict handling, and a full sweep of uploads, media and every
+HTML sink in the frontend. Backend findings come with permanent tests in
+`server/test_deep_scan_round4.py`; frontend fixes have static guards in
+`scripts/test-mobile-ui.js`.
+
+## Fixed
+
+### Wallet and campaign money
+
+| Problem | Fix |
+| --- | --- |
+| A capture left behind by an approval that crashed half-way had a recovery door only while the campaign was still Submitted. Once the campaign was Rejected or Changes Requested, archiving it stranded the customer's money with the system, and resubmitting charged the customer a second time on the next approval (proven with a scratch test: $50 wallet ended at $25). | Archiving any non-Approved campaign returns an open capture; resubmitting returns the previous cycle's capture before the new hold; a capture already refunded by a stop is never released again; every such release is audited. |
+| The LYD payment instruction was computed with floating-point ceil: a $1.00 charge at rate 4.9 asked for 4.91 LYD. | Integer arithmetic on the server and the same on the client preview (`lyd_minor_for`). |
+
+### Data durability
+
+| Problem | Fix |
+| --- | --- |
+| The plan catalog (what customers are charged) could be replaced through the raw admin restore route or a generic PATCH of the live catalog record, skipping the catalog endpoint's immutability, version and audit rules. | Both paths answer 405 and point to the catalog endpoint. |
+| A per-record restore refused any record created by staff who had since left (400), while the bulk importer accepted them. | Restore keeps history attributed to deleted staff, like the importer. |
+| A backup containing company-coverage fields was refused with a message blaming the server version ("update the server first"). | The refusal names the real reason (the online importer cannot restore coverage fields; use the encrypted database backup) and the client shows it. |
+
+### Live sync and conflicts
+
+| Problem | Fix |
+| --- | --- |
+| Customer, page, shipment and campaign edit forms saved against the version live-sync had installed in the meantime, not the version the form opened with, so a colleague's change in those three seconds was silently overwritten (receipts and products already did this right). | Each form saves with its open-time version; a concurrent change now conflicts. |
+| Navigating to another screen aborted in-flight writes, and the retry re-sent them: a committed delete came back as "Failed to delete" with the record reappearing, and a committed save as a false "changed by another user". | Navigation aborts reads only; a delete answered "not found" counts as done. |
+| The local tombstone of a deleted record kept the device's clock time as its version, so on a fast clock a later restore from another device was ignored. | The server's delete answer carries the tombstone stamp and the client adopts it (generic collections included). |
+| A catch-up delta of more than about 65,000 records threw inside the sync tick (argument-list limit), leaving "Sync failed" every three seconds. | Records are inserted in chunks. |
+
+## Verified sound (no change)
+
+- Uploads and media: every stored image path validates format, size and
+  pixel count before decoding; served media is raster-only with `nosniff`;
+  signed URLs, rate limits and ownership checks hold; Meta image archival is
+  SSRF-guarded.
+- XSS: every `innerHTML`/`insertAdjacentHTML` sink and every interpolated
+  handler in `src/` was enumerated; all user-controlled text is escaped at
+  render and stripped of angle brackets at write time; URLs go through
+  `safeUrl` or an https/wa.me allow-list.
+- Wallet: idempotency keys, holds, replays, admin-only operations and
+  server-side paywall enforcement for `clothes_system` and `ad_maker` hold.
+- Backups: encrypted per-record backups, retention, the full NDJSON snapshot,
+  month-close locking and CSV formula escaping hold.
+
+## Still open for the owner (round 4)
+
+1. **Permissions are saved as a whole map.** Two admins editing the same
+   user's permissions within a minute overwrite each other; a revoke can be
+   undone silently. Fix: send grant/revoke deltas, or a version check on the
+   user row (server + client change).
+2. **Admin "subscribe another user" debits that user's wallet**, not the
+   admin's. Decide whether that is the intended meaning and label it.
+3. The global `adCampaignRequests.stop` grant behaves like a customer stop
+   (full refund only, refused after launch); the grant text promises more.
+4. The online importer cannot restore backups that contain company-coverage
+   fields (by design, pinned by a test) and refuses while any month is closed.
+   The encrypted database backup is the restore path.
+5. The local-mode daily device backup is written but nothing restores it; the
+   owner's NDJSON snapshot has no restore script either (data copy only).
+6. Small photos and GIFs keep their EXIF/GPS data (large ones are
+   re-encoded); generic `photos` fields are not decoded server-side (served
+   only as raster, so not exploitable).
+7. Mutation echoes are installed without a "not older" check, and an ad
+   create that times out twice can duplicate if the user edits before
+   retrying (rare; both self-heal within the sync overlap).
+8. Self-stop "not started yet" uses the UTC day, not the Libya day.
+
+## Review of the round-4 fixes (same day)
+
+An adversarial pass over the round-4 diff found five problems in the fixes,
+all corrected before release: the widened archive-time release would have
+refunded a **Stopped** campaign whose budget was fully spent (a stop with
+refund 0 writes no refund marker) - Stopped cycles are now excluded; the
+campaign editor kept its open-time version after a successful save, so a
+second save or Submit in the same session would always report "changed by
+another user" - the version now follows every save and is cleared with the
+editor; the server rounded the exchange rate half-to-even while the client
+rounds half-up (5-decimal rates ending in 5 disagreed by one) - the server now
+rounds like the client; the restore guard looked only at the incoming
+`settingKey`, so the live plan-catalog row could still be overwritten by id -
+it now checks the row being replaced too; a test cleaned up its forged catalog
+row only on success. Minor and left as is: the catalog guard on generic PATCH
+runs before the permission gate, so an authenticated user could learn that a
+guessed appSettings id is the catalog row (same class as the existing Meta
+field guards).

@@ -372,7 +372,7 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
   // per-record unshift left the last delta record at the very front.
   if (newOnes.length) {
     newOnes.reverse();
-    arr.unshift(...newOnes);
+    for (let i = 0; i < newOnes.length; i += 5000) arr.splice(i, 0, ...newOnes.slice(i, i + 5000)); // spread limit
   }
   return changed;
 }

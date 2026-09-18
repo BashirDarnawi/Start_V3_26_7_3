@@ -207,6 +207,11 @@ def capture_campaign_budget(
     return str(saved.get("id") or "")
 
 
+def lyd_minor_for(amount_minor: int, rate: float) -> int:
+    """ceil(amount x rate) in integer arithmetic; float ceil turned 100 x 4.9 into 491."""
+    return -(-int(amount_minor) * int(math.floor(float(rate) * 10000 + 0.5)) // 10000)  # half-up like Math.round
+
+
 def release_orphan_campaign_payment(
     conn: Any, ctx: dict[str, Any], campaign: dict[str, Any], actor_id: str
 ) -> str:
@@ -227,6 +232,8 @@ def release_orphan_campaign_payment(
         # An admin already returned this capture with the raw reversal tool
         # (legacy door, now closed for campaign rows) — never pay twice.
         return ""
+    if ctx["find_entity_by_idempotency"](conn, "walletTransactions", f"stoprefund:{pay_key}"):
+        return ""  # the stop already returned this capture
     paid = prior.get("data") or {}
     idem = f"rel:{pay_key}"
     ctx["lock_idempotency_key"](conn, idem, postgres=ctx["is_postgres"]())
@@ -482,7 +489,7 @@ def create_wallet_payments_router(
                     data["lydRate"] = rate[0]
                     data["lydRateDate"] = rate[1]
                     # ceil: never tell an LYD figure that under-covers the USD.
-                    data["amountMinorLYD"] = int(math.ceil(amount * rate[0]))
+                    data["amountMinorLYD"] = lyd_minor_for(amount, rate[0])
                 saved = ctx["insert_entity_in_transaction"](
                     conn, WALLET_PAYMENT_COLLECTION, None, data, uid
                 )

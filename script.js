@@ -8375,11 +8375,8 @@ function deleteRecord(array, id, opts) {
     const old = { ...array[index] };
     array[index]._deleted = true;
     array[index]._lastModified = getMonotonicTime();
-    // Identity of the exact object this call marked deleted. Every rollback
-    // below may only restore the slot while it STILL holds this object: if
-    // live-sync installed a fresh copy mid-flight, writing the stale open-time
-    // snapshot back would clobber a newer committed change (the same guard
-    // updateRecord already uses).
+    // Rollbacks below may only restore the slot while it still holds this
+    // object (live-sync may install a newer copy mid-flight).
     const _optimisticRecord = array[index];
     if (collectionName) markCollectionDirty(collectionName);
     saveState();
@@ -8399,12 +8396,14 @@ function deleteRecord(array, id, opts) {
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
       return apiDeleteEntity(collectionName, id)
-        .then(() => {
-          // ok
+        .then((res) => {
+          const i = array.findIndex(x => x && x.id === id);
+          if (i !== -1 && array[i] === _optimisticRecord && Number(res?.lastModified) > 0) array[i]._lastModified = Number(res.lastModified);
           render();
           return true;
         })
         .catch((e) => {
+          if (e?.status === 404) { render(); return true; } // already gone server-side
           // Rollback on failure, only while the slot still holds this call's
           // own object (see _optimisticRecord above).
           const idx = array.findIndex(x => x && x.id === id);
@@ -9353,9 +9352,10 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       },
       signal: controller.signal
     };
-    // Abort requests when user navigates to a different view
+    // Navigation aborts READS only: an aborted write is retried, and a retry
+    // of a committed write reads as a false conflict or a "failed" delete.
     try {
-      const navSignal = (typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;
+      const navSignal = (method === 'GET' && typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;
       if (navSignal && navSignal.aborted) controller.abort();
       if (navSignal) navSignal.addEventListener('abort', () => controller.abort(), { once: true });
     } catch (_) {}
@@ -12708,7 +12708,7 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
   // per-record unshift left the last delta record at the very front.
   if (newOnes.length) {
     newOnes.reverse();
-    arr.unshift(...newOnes);
+    for (let i = 0; i < newOnes.length; i += 5000) arr.splice(i, 0, ...newOnes.slice(i, i + 5000)); // spread limit
   }
   return changed;
 }
@@ -24568,35 +24568,12 @@ function normalizeCustomerPhoneKey(value) {
   return digits;
 }
 
-// Compare-time search normalizer, applied to BOTH the query and the haystack
-// at every search/filter site (never to stored values or the visible input —
-// rewriting the user's typed ٠-٩ mid-typing would visibly mutate the field):
-//  - Arabic-Indic ٠-٩ / Persian ۰-۹ digits fold to ASCII (normalizeDigitsAscii,
-//    the same write-side normalizer used by money/receipt-number inputs), so a
-//    Gboard/iOS Arabic-keyboard query like ١٢٣ matches stored "123";
-//  - toLowerCase() for Latin;
-//  - conservative Arabic letter folding so the standard unhamza'd keyboard
-//    spellings match: hamza alif forms آأإٱ -> ا, ة -> ه, ى -> ي, and
-//    tashkeel/tatweel stripped (U+064B-U+0655 includes the combining
-//    hamza/madda so decomposed forms fold too, U+0670 dagger alif, U+0640
-//    tatweel).
-// NFKC first folds full-width digits and Arabic presentation forms; guarded
-// because very old engines lack String.normalize.
-// Memo in front of the folder below. It is a PURE function of one string, so
-// caching cannot change which records match. It runs per FIELD per RECORD on
-// every debounced keystroke (the ads filter folds up to 11 fields per ad),
-// measured at ~19 ms per pass over 3000 ads on a desktop — several times that
-// on a phone, and that cost lands between keypresses.
-// TWO generations instead of one capped Map: a cache smaller than the working
-// set thrashes and ends up no faster than no cache at all. On overflow the
-// current generation becomes the old one and lookups fall through to it, so it
-// degrades gracefully. Memory stays bounded at 2 x MAX entries.
-// `var` + lazy creation, and the limits inlined as literals, ON PURPOSE:
-// foldSearchText is a hoisted function declaration, so it is callable from the
-// moment the bundle starts executing — earlier than this line. With `const`
-// state it would throw "cannot access before initialization" for any caller
-// that runs during startup. `var` hoists, and the null check builds the maps
-// on first real use, so the memo is safe no matter who calls first.
+// Compare-time search normalizer for BOTH query and haystack (never stored
+// values): Arabic-Indic/Persian digits -> ASCII, lowercase Latin, hamza alif
+// forms -> ا, ة -> ه, ى -> ي, tashkeel/tatweel stripped; NFKC first (guarded).
+// Memoised in two generations (bounded at 2 x MAX, degrades gracefully).
+// `var` + lazy creation ON PURPOSE: foldSearchText is hoisted and may run
+// before this line; `const` state would throw during startup.
 var _foldCache = null; // { cur: Map, prev: Map }
 
 function foldSearchText(value) {
@@ -41004,7 +40981,7 @@ async function handleModalSubmit() {
           platform: document.getElementById('customer-platform').value,
           joinDate: joinDate,
           profileLinks: profileLinks
-        });
+        }, state.modalData._lastModified || undefined);
         if (!customerSaved) return;
         showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
       } else {
@@ -42178,7 +42155,7 @@ async function handleModalSubmit() {
           name: pageName,
           category: pageCategory,
           customerIds: selectedCustomers
-        });
+        }, state.modalData._lastModified || undefined);
         if (!pageSaved) return;
         showNotification(isArPage ? 'تم التحديث' : 'Updated', isArPage ? 'تم تحديث الصفحة بنجاح' : 'Page updated successfully', 'success');
         addLog('update', 'page', state.modalData.id, `Updated page: ${pageName}`);
@@ -42260,19 +42237,11 @@ function closeModal() {
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   
-  // Clear URL params (modal, id). When this dialog's opener pushed a history
-  // entry (albayanModal stamp — see updateUrlParams), consume that entry with
-  // history.back() instead: replaceState alone rewrote the entry's URL but
-  // left it stacked, so every open/close cycle cost one dead hardware-Back
-  // press on phones. Skipped when Back itself already popped the entry
-  // (_closingSurfaceFromPopstate, set by the popstate handler) — the new top
-  // entry may be a previous ?modal entry that must survive for back/forward
-  // restore. Openers that never pushed (boot deep-link error paths) fall
-  // through to the old replaceState behaviour.
-  // Defence in depth for the same double-close hazard: if a bookkeeping pop
-  // from a closeModal earlier in this tick has not landed yet, history.state
-  // still shows the ?modal entry even though it is already being popped.
-  // Consuming again would rewind a REAL view entry and move the user.
+  // Clear URL params. If the opener pushed a history entry (albayanModal
+  // stamp), consume it with history.back() instead of replaceState (which
+  // left a dead hardware-Back press). Skipped when Back already popped it
+  // (_closingSurfaceFromPopstate) or a pop from an earlier closeModal in
+  // this tick has not landed yet: consuming again would move the user.
   const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
     && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;
@@ -45470,6 +45439,8 @@ function importData() {
         bulkImported = true;
       } catch (e) {
         if (e?.status === 404 || e?.status === 405) {
+          // A 405 with a reason is the server refusing THIS backup, not an old server.
+          if (e?.status === 405 && /coverage/i.test(String(e?.message || ''))) throw new Error(String(e.message));
           throw new Error(isAr ? 'هذا الخادم لا يدعم الاستيراد الذري الآمن. حدّث الخادم أولاً.' : 'This server does not support safe transactional import. Update the server first.');
         }
         throw e;

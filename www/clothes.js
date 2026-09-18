@@ -1738,6 +1738,7 @@ function renderClothesShipmentModal() {
     </h2>
     <form id="modal-form" class="space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar ${isAr ? 'pl-2' : 'pr-2'}">
       <input type="hidden" id="clothes-shipment-editing-id" value="${Security.escapeHtml(String(isEdit ? (data.id || '') : ''))}" />
+      <input type="hidden" id="clothes-shipment-editing-version" value="${isEdit ? (Number(data._lastModified) || 0) : 0}" />
 
       <div class="grid grid-cols-2 gap-3">
         <div>
@@ -1943,7 +1944,9 @@ async function saveClothesShipmentFromModal() {
   const payload = { ref, supplier, orderedAt, shippingCostUSD, note, lines };
 
   if (editTarget) {
-    const saved = await updateRecord(state.clothesShipments, editTarget.id, payload);
+    // Open-time version: a colleague's edit since then must conflict, not vanish.
+    const editingVersion = Number(document.getElementById('clothes-shipment-editing-version')?.value) || 0;
+    const saved = await updateRecord(state.clothesShipments, editTarget.id, payload, editingVersion || undefined);
     if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث الشحنة.' : 'Shipment updated.', 'success');
   } else {

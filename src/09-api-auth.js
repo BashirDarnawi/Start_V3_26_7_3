@@ -108,9 +108,10 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       },
       signal: controller.signal
     };
-    // Abort requests when user navigates to a different view
+    // Navigation aborts READS only: an aborted write is retried, and a retry
+    // of a committed write reads as a false conflict or a "failed" delete.
     try {
-      const navSignal = (typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;
+      const navSignal = (method === 'GET' && typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;
       if (navSignal && navSignal.aborted) controller.abort();
       if (navSignal) navSignal.addEventListener('abort', () => controller.abort(), { once: true });
     } catch (_) {}

@@ -2213,12 +2213,14 @@ def soft_delete_entity(
             raise HTTPException(status_code=409, detail="Conflict: record has changed")
         if not bool(exists["deleted"]):
             assert_financial_period_open(entity_type, json_loads(exists.get("data_json") or "{}") or {}, conn=conn)
+        stamp = max(now_ms(), baseline + 1)
         result = conn.execute(
             text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id AND last_modified = :baseline"),
-            {"ts": max(now_ms(), baseline + 1), "type": entity_type, "id": entity_id, "baseline": baseline},
+            {"ts": stamp, "type": entity_type, "id": entity_id, "baseline": baseline},
         )
         if result.rowcount != 1:
             raise HTTPException(status_code=409, detail="Conflict: record has changed")
+    return stamp
 
 
 # The interactive API docs and the OpenAPI schema describe every route, body
@@ -5020,10 +5022,12 @@ def _soft_delete_ad_campaign_atomic(
                     status_code=409,
                     detail="Submitted campaigns cannot be deleted while under review",
                 )
-            if str(data.get("status") or "") == "Submitted":
-                # An admin deleting a Submitted campaign: refund any capture a
-                # crashed approval left for this cycle, or the customer's
-                # money would be stranded forever (idempotent, usually no-op).
+            if str(data.get("status") or "") not in {"Approved", "Stopped"}:
+                # Archiving a Submitted, Rejected or Changes Requested campaign:
+                # refund any capture a crashed approval left for its cycle, or
+                # the customer's money is stranded forever (idempotent, no-op).
+                # A Stopped cycle was settled by the stop itself (refund 0 when
+                # the budget was spent) - never "orphaned".
                 release_orphan_campaign_payment(
                     conn, _WALLET_PAYMENTS_CTX, {**data, "id": campaign_id},
                     str(user.get("id") or "system"),
@@ -10420,6 +10424,12 @@ def submit_ad_campaign_request(
             )
 
     actor_id = str(user.get("id") or "system")
+    # A capture left by a crashed approval of the PREVIOUS cycle would be
+    # charged twice on approval of this one (new key): return it first.
+    with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK), db_conn() as conn:
+        released_tx = release_orphan_campaign_payment(conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id}, actor_id)
+    if released_tx:
+        audit(actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id, f"Returned an orphan capture for {campaign_id}", {"transactionId": released_tx})
     replayed_after_conflict = False
     try:
         saved = patch_entity(
@@ -10616,9 +10626,9 @@ def review_ad_campaign_request(
         # for this cycle (the capture verifies live status under lock): any
         # capture found here is a crashed approval's orphan — refund it.
         with _wallet_guard, db_conn() as conn:
-            release_orphan_campaign_payment(
-                conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id}, actor_id
-            )
+            released_tx = release_orphan_campaign_payment(conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id}, actor_id)
+        if released_tx:
+            audit(actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id, f"Returned an orphan capture for {campaign_id}", {"transactionId": released_tx})
     if not replayed_after_conflict:
         audit(
             actor_id,
@@ -11844,6 +11854,8 @@ def update_collection_item(
             )
 
     financial_updates = sanitize_json(body.data or {}) or {}
+    if collection == "appSettings" and PLAN_SETTINGS_KEY in {str(financial_updates.get("settingKey") or ""), str((existing.get("data") or {}).get("settingKey") or "")}:
+        raise HTTPException(status_code=405, detail="Use PUT /api/admin/subscription-plans to change plan pricing")
     if collection == "pages" and set(financial_updates) & META_PAGE_SERVER_FIELDS:
         raise HTTPException(status_code=403, detail="Meta page identity fields are server-controlled")
     if collection == "ads":
@@ -12587,6 +12599,8 @@ def admin_restore_collection_item(
 
     # Sanitize record body
     data = sanitize_json(body.data or {}) or {}
+    if entity_type == "appSettings" and str(data.get("settingKey") or "") == PLAN_SETTINGS_KEY:
+        raise HTTPException(status_code=405, detail="Use PUT /api/admin/subscription-plans to change plan pricing")
     if entity_type == "customers":
         data = _normalize_customer_phone_storage(
             data, modern_authoritative="phones" in data
@@ -12621,6 +12635,8 @@ def admin_restore_collection_item(
             .first()
         )
 
+        if entity_type == "appSettings" and existing and str((json_loads(existing.get("data_json") or "{}") or {}).get("settingKey") or "") == PLAN_SETTINGS_KEY:
+            raise HTTPException(status_code=405, detail="Use PUT /api/admin/subscription-plans to change plan pricing")
         # Fallback to existing metadata when not provided
         created_at = created_at_in_i if created_at_in_i is not None else (int(existing["created_at"]) if existing else None)
         created_by = created_by_in if body.createdBy is not None else (existing.get("created_by") if existing else None)
@@ -12636,7 +12652,7 @@ def admin_restore_collection_item(
         if created_by is not None:
             ok = (
                 conn.execute(
-                    text("SELECT id FROM users WHERE id = :id AND deleted = false LIMIT 1"),
+                    text("SELECT id FROM users WHERE id = :id LIMIT 1"),  # deleted staff keep their history
                     {"id": str(created_by)},
                 )
                 .mappings()
@@ -12854,7 +12870,10 @@ def admin_bulk_import(
                 continue
             data = sanitize_json(rec) or {}
             data["id"] = rid
-            protect_company_coverage_fields(name, data)
+            try:
+                protect_company_coverage_fields(name, data)
+            except HTTPException as guard_error:
+                raise HTTPException(status_code=405, detail=f"'{name}' record '{rid}' carries company-coverage fields, which the online importer cannot restore (restore the encrypted database backup instead)") from guard_error
             # A backup obeys the destroyed-receipt shape too: a Destroyed row
             # carrying money would silently hide it from every reader.
             if name == "receipts":
@@ -13229,9 +13248,9 @@ def delete_collection_item(
         audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
         return {"ok": True, "lastModified": deleted_receipt["lastModified"]}
 
-    soft_delete_entity(collection, entity_id, str(user.get("id") or "system"))
+    stamp = soft_delete_entity(collection, entity_id, str(user.get("id") or "system"))
     audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
-    return {"ok": True}
+    return {"ok": True, "lastModified": stamp}
 
 
 @app.get("/api/audit")

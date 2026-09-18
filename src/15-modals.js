@@ -3210,7 +3210,7 @@ async function handleModalSubmit() {
           platform: document.getElementById('customer-platform').value,
           joinDate: joinDate,
           profileLinks: profileLinks
-        });
+        }, state.modalData._lastModified || undefined);
         if (!customerSaved) return;
         showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
       } else {
@@ -4384,7 +4384,7 @@ async function handleModalSubmit() {
           name: pageName,
           category: pageCategory,
           customerIds: selectedCustomers
-        });
+        }, state.modalData._lastModified || undefined);
         if (!pageSaved) return;
         showNotification(isArPage ? 'تم التحديث' : 'Updated', isArPage ? 'تم تحديث الصفحة بنجاح' : 'Page updated successfully', 'success');
         addLog('update', 'page', state.modalData.id, `Updated page: ${pageName}`);
@@ -4466,19 +4466,11 @@ function closeModal() {
   _clothesTempShipLines = [];
   _clothesTempOrderLines = [];
   
-  // Clear URL params (modal, id). When this dialog's opener pushed a history
-  // entry (albayanModal stamp — see updateUrlParams), consume that entry with
-  // history.back() instead: replaceState alone rewrote the entry's URL but
-  // left it stacked, so every open/close cycle cost one dead hardware-Back
-  // press on phones. Skipped when Back itself already popped the entry
-  // (_closingSurfaceFromPopstate, set by the popstate handler) — the new top
-  // entry may be a previous ?modal entry that must survive for back/forward
-  // restore. Openers that never pushed (boot deep-link error paths) fall
-  // through to the old replaceState behaviour.
-  // Defence in depth for the same double-close hazard: if a bookkeeping pop
-  // from a closeModal earlier in this tick has not landed yet, history.state
-  // still shows the ?modal entry even though it is already being popped.
-  // Consuming again would rewind a REAL view entry and move the user.
+  // Clear URL params. If the opener pushed a history entry (albayanModal
+  // stamp), consume it with history.back() instead of replaceState (which
+  // left a dead hardware-Back press). Skipped when Back already popped it
+  // (_closingSurfaceFromPopstate) or a pop from an earlier closeModal in
+  // this tick has not landed yet: consuming again would move the user.
   const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
     && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;

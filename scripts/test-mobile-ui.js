@@ -1415,8 +1415,8 @@ check('wallet requests use unguessable idempotency keys and LYD previews match t
   servicesWallet.includes("const idem = chargeWalletIdemKey(amountMinor, currency, _chargeWallet.method);") &&
   adsStudio.includes("adsStudioChargeIdemKey(amountMinor, method)") &&
   !adsStudio.includes('paycreate-${') && !servicesWallet.includes('paycreate-${') &&
-  adsStudio.includes('Math.ceil(Math.round(usd * 100) * rate) / 100') &&
-  adsStudio.includes('Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * rate) / 100') &&
+  adsStudio.includes('Math.ceil(Math.round(usd * 100) * Math.round(rate * 10000) / 10000) / 100') &&
+  adsStudio.includes('Math.ceil(Math.max(0, Math.trunc(Number(minor) || 0)) * Math.round(rate * 10000) / 10000) / 100') &&
   controlCenterSrc.includes("if (raw === '' || !Number.isFinite(parsed)) return;") &&
   permissionsSrc.includes("if (typeof serverLiveSyncTick === 'function' && isServerModeEnabled()) {"));
 
@@ -1483,6 +1483,15 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   managerShell.includes("const adActual = a => (typeof getAdActualSpendUSDLite === 'function' ? getAdActualSpendUSDLite(a) : getAdSpendUSD(a));") &&
   read('src/11b-ad-final-spend.js').includes('function getAdActualSpendUSDLite(ad) {') &&
   read('src/14-forms.js').includes("(storedDeliveryStatus === 'Delivered' || storedDeliveryStatus === 'In Progress' || storedDeliveryStatus === 'Canceled')") &&
+  modals.includes("}, state.modalData._lastModified || undefined);") &&
+  read('src/09-api-auth.js').includes("const navSignal = (method === 'GET' && typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;") &&
+  read('src/08-data-audit.js').includes("if (e?.status === 404) { render(); return true; }") &&
+  read('src/08-data-audit.js').includes("Number(res?.lastModified) > 0) array[i]._lastModified = Number(res.lastModified);") &&
+  read('src/10-live-sync.js').includes("arr.splice(i, 0, ...newOnes.slice(i, i + 5000));") &&
+  read('src/15c-ads-studio.js').includes("_adsStudioEditingBaseline || current._lastModified") &&
+  read('src/15c-ads-studio.js').includes("Math.round(rate * 10000) / 10000) / 100") &&
+  clothes.includes("clothes-shipment-editing-version") &&
+  read('src/16-actions-io.js').includes("if (e?.status === 405 && /coverage/i.test(String(e?.message || ''))) throw new Error(String(e.message));") &&
   helpers.includes("const mine = isCurrentUserAdmin() || String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');") &&
   read('src/12b-control-center.js').includes("function ccText(en, ar) {") &&
   socialStudio.includes("if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();") &&
