@@ -3,6 +3,8 @@
 from typing import Any
 
 from fastapi import HTTPException
+
+from .startup_support import safe_exception_text
 from sqlalchemy import text
 
 from .db import json_loads
@@ -220,7 +222,7 @@ def settle_rowless_driver_receipts(
     except Exception as exc:
         print(
             "[albayan] rowless-settlement scan skipped/failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {safe_exception_text(exc)}"
         )
         return 0
 
@@ -251,7 +253,7 @@ def settle_rowless_driver_receipts(
         except Exception as exc:
             print(
                 f"[albayan] rowless-settlement skipped {receipt_id}: "
-                f"{type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {safe_exception_text(exc)}"
             )
     if healed:
         print(f"[albayan] Settled rowless driver ads on {healed} paid receipt(s)")

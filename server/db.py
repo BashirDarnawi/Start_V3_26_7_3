@@ -5,7 +5,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import (
     BigInteger,
@@ -185,6 +185,19 @@ def json_dumps(obj) -> str:
 
 def json_loads(s: str):
     return json.loads(s) if s else None
+
+
+def json_loads_or_raw(value: Any):
+    """A JSON field read as text: parse it, or keep the raw scalar (a legacy
+    ``phones: "0912..."`` string is not JSON and must stay a candidate)."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
 
 
 _JSON_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

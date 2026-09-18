@@ -41,6 +41,9 @@ def apply_delivery_completion_truth(
     if (
         str(merged.get("deliveryStatus") or "").strip() != "Delivered"
         or str(old.get("deliveryStatus") or "").strip() == "Delivered"
+        # A bare status flip on a receipt already paid in the office keeps its
+        # payment (the completion form's own pre-computed money still applies).
+        or (str(old.get("status") or "") == "Paid" and bool(old.get("isPaid")))
     ):
         return
 
@@ -169,6 +172,7 @@ def apply_delivery_completion_truth(
 def apply_coverage_settlement_truth(
     old: dict[str, Any], merged: dict[str, Any], *,
     due_total: Callable[[dict[str, Any]], int],
+    delivery_truth_allowed: bool | None = None,
 ) -> None:
     """Keep amountUSD = CUSTOMER cash across settle/unsettle of a covered receipt.
 
@@ -188,6 +192,9 @@ def apply_coverage_settlement_truth(
     delivery_truth_ran = (
         str(merged.get("deliveryStatus") or "").strip() == "Delivered"
         and str(old.get("deliveryStatus") or "").strip() != "Delivered"
+        # The caller gates the delivery pass (only a verified completion runs
+        # it); when it was skipped, the covered share still has to be netted here.
+        and (delivery_truth_allowed is None or bool(delivery_truth_allowed))
     )
     if delivery_truth_ran:
         return

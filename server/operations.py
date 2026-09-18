@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy import text
 
+from .startup_support import safe_exception_text
 from .db import db_conn, get_engine, json_dumps, json_loads, now_ms
 from .entity_projection import _inline_media_sql_projection
 from .monitoring import get_metrics
@@ -849,10 +850,10 @@ def create_encrypted_backup() -> dict[str, Any]:
             with _state_lock:
                 _status.update({"lastOffsiteAt": now_ms(), "lastOffsiteError": ""})
         except Exception as exc:
-            result["offsiteError"] = str(exc)[:500]
+            result["offsiteError"] = safe_exception_text(exc, 500)
             with _state_lock:
-                _status["lastOffsiteError"] = str(exc)[:500]
-            _send_alert("backup_offsite_failed", "high", "Encrypted backup was created but off-site upload failed", {"error": str(exc)[:300]})
+                _status["lastOffsiteError"] = safe_exception_text(exc, 500)
+            _send_alert("backup_offsite_failed", "high", "Encrypted backup was created but off-site upload failed", {"error": safe_exception_text(exc, 300)})
     return result
 
 
@@ -901,8 +902,8 @@ def _backup_worker() -> None:
                         create_encrypted_backup()
                     except Exception as exc:
                         with _state_lock:
-                            _status["lastBackupError"] = str(exc)[:500]
-                        _send_alert("backup_failed", "critical", "Albayan encrypted backup failed", {"error": str(exc)[:300]})
+                            _status["lastBackupError"] = safe_exception_text(exc, 500)
+                        _send_alert("backup_failed", "critical", "Albayan encrypted backup failed", {"error": safe_exception_text(exc, 300)})
             metrics = get_metrics()
             minimum_requests = _env_int("ALBAYAN_ALERT_MIN_REQUESTS", 50, 10, 1000000)
             error_rate_limit = _env_float("ALBAYAN_ALERT_ERROR_RATE", 0.05, 0.001, 1.0)
@@ -1017,7 +1018,7 @@ def create_operations_router(
         try:
             result = create_encrypted_backup()
         except Exception as exc:
-            raise HTTPException(status_code=503, detail=str(exc)[:500])
+            raise HTTPException(status_code=503, detail=safe_exception_text(exc, 500))
         audit_fn(str(user.get("id") or ""), "backup", "operations", result["file"], "Created encrypted database backup", {"offsite": result["offsite"], "bytes": result["bytes"]})
         return {"ok": True, "backup": result, "status": _public_status()}
 

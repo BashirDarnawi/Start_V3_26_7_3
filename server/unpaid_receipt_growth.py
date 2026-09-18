@@ -15,6 +15,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from .startup_support import safe_exception_text
+
 from .financial_core import (
     _financial_ad_company_usage,
     _financial_ad_due_usage,
@@ -130,7 +132,7 @@ def repair_legacy_unpaid_receipt_overgrowth(
         stats["failed"] += 1
         print(
             "[albayan] unpaid-receipt overgrowth discovery failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {safe_exception_text(exc)}"
         )
         return stats
 
@@ -333,7 +335,7 @@ def run_legacy_unpaid_receipt_overgrowth_backfill(
     except Exception as exc:
         print(
             "[albayan] unpaid receipt overgrowth backfill failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {safe_exception_text(exc)}"
         )
         return {"scanned": 0, "repaired": 0, "skipped": 0, "failed": 1}
     if stats["repaired"]:

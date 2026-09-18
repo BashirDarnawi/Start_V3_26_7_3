@@ -64,7 +64,7 @@ RELEASE_SHA = (os.getenv("ALBAYAN_RELEASE_SHA") or "development").strip()[:64]
 ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
-from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, now_ms
+from .db import db_conn, get_engine, init_db, json_dumps, json_field_sql, json_loads, json_loads_or_raw, now_ms
 from .rbac import VALID_USER_ROLES, _load_permissions, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
 from .backfills import (
     backfill_covered_settled_receipts,
@@ -939,6 +939,8 @@ def require_same_origin(request: Request):
     # they legitimately call the API from a different origin.
     if _is_trusted_app_origin(origin):
         return
+    if not host:  # nothing to compare against; browsers always send one
+        raise HTTPException(status_code=403, detail="Missing host header")
 
     # Check origin if present
     if origin and host:
@@ -1716,13 +1718,15 @@ def _validate_customer_phone_change_conn(
     _lock_customer_phone_keys_conn(conn, introduced, postgres=postgres)
     rows = conn.execute(
         text(
-            "SELECT id,data_json FROM entities "
+            f"SELECT id, {json_field_sql('phones')} AS phones, {json_field_sql('phone')} AS phone, "
+            f"{json_field_sql('phoneNumber')} AS phone_number FROM entities "
             "WHERE type='customers' AND deleted=false AND id<>:customer_id"
         ),
         {"customer_id": customer_id},
     ).mappings().all()
-    for row in rows:
-        other = json_loads(row.get("data_json") or "{}") or {}
+    for row in rows:  # only the phone fields travel, not every note the office ever typed
+        raw_phones = row.get("phones")
+        other = {"phone": row.get("phone"), "phoneNumber": row.get("phone_number"), "phones": json_loads_or_raw(raw_phones)}
         if introduced & _customer_phone_keys(other):
             # Intentionally omit the phone, customer id and customer name. This
             # remains safe even when the caller lacks customers.viewContacts.
@@ -2236,7 +2240,11 @@ app = FastAPI(
 
 
 from .startup_support import init_db_with_retry as _init_db_with_retry_impl
+from .startup_support import install_validation_handler as _install_validation_handler
+from .startup_support import request_size_refusal as _request_size_refusal
 from .startup_support import safe_exception_text as _safe_exception_text
+
+_install_validation_handler(app)
 
 # PERFORMANCE: Enable gzip compression for JSON/text responses.
 # This reduces payload sizes for large collections (receipts/ads/customers) and helps under load.
@@ -2386,7 +2394,7 @@ def _run_page_name_backfill_quietly() -> None:
         from .meta_ads import backfill_placeholder_page_names
         backfill_placeholder_page_names()
     except Exception as e:
-        print(f"[albayan] page-name backfill failed: {type(e).__name__}: {e}")
+        print(f"[albayan] page-name backfill failed: {type(e).__name__}: {_safe_exception_text(e)}")
 
 
 def _init_db_with_retry(attempts: int = 10, delay_seconds: float = 3.0) -> None:
@@ -2418,7 +2426,7 @@ def _startup():
         create_performance_indexes()
         add_jsonb_indexes()
     except Exception as e:
-        print(f"[albayan] Index creation skipped/failed: {type(e).__name__}: {e}")
+        print(f"[albayan] Index creation skipped/failed: {type(e).__name__}: {_safe_exception_text(e)}")
 
     # BEST PRACTICE: Clean up expired sessions on startup
     try:
@@ -2430,13 +2438,13 @@ def _startup():
             if result.rowcount > 0:
                 print(f"[albayan] Cleaned up {result.rowcount} expired sessions")
     except Exception as e:
-        print(f"[albayan] Session cleanup failed: {e}")
+        print(f"[albayan] Session cleanup failed: {_safe_exception_text(e)}")
 
     # Clean up old audit logs to prevent unbounded growth
     try:
         cleanup_old_audit_logs()
     except Exception as e:
-        print(f"[albayan] Audit log cleanup failed: {e}")
+        print(f"[albayan] Audit log cleanup failed: {_safe_exception_text(e)}")
 
     # Denormalize customerName onto legacy receipts/ads so a receipts/ads-only
     # role can read the customer's name. Idempotent — a no-op once complete.
@@ -2445,14 +2453,14 @@ def _startup():
         backfill_relink_baselines(_SQLITE_FINANCIAL_LOCK)
         backfill_covered_settled_receipts(_SQLITE_FINANCIAL_LOCK)
     except Exception as e:
-        print(f"[albayan] customerName backfill failed: {e}")
+        print(f"[albayan] customerName backfill failed: {_safe_exception_text(e)}")
 
     # Zero-click healing: settle rowless driver-linked ads on receipts that
     # were already Paid before the paid cascade learned this shape.
     try:
         backfill_settle_rowless_driver_receipts()
     except Exception as e:
-        print(f"[albayan] rowless settlement backfill failed: {e}")
+        print(f"[albayan] rowless settlement backfill failed: {_safe_exception_text(e)}")
 
     # Normalize the one proven legacy pseudo-payment shape before debt
     # reconciliation.  Otherwise the reconciliation correctly refuses to
@@ -2461,11 +2469,11 @@ def _startup():
     try:
         backfill_normalize_legacy_unpaid_receipt_payment_plans()
     except Exception as e:
-        print(f"[albayan] unpaid payment-plan backfill failed: {e}")
+        print(f"[albayan] unpaid payment-plan backfill failed: {_safe_exception_text(e)}")
     try:
         backfill_repair_legacy_unpaid_receipt_overgrowth()
     except Exception as e:
-        print(f"[albayan] unpaid receipt overgrowth backfill failed: {e}")
+        print(f"[albayan] unpaid receipt overgrowth backfill failed: {_safe_exception_text(e)}")
 
     # Give placeholder-named Meta pages their real Facebook name (bounded;
     # also re-runs inside the Meta background worker). On a daemon thread:
@@ -2478,7 +2486,7 @@ def _startup():
             daemon=True,
         ).start()
     except Exception as e:
-        print(f"[albayan] page-name backfill failed: {e}")
+        print(f"[albayan] page-name backfill failed: {_safe_exception_text(e)}")
 
 
 @app.on_event("shutdown")
@@ -2489,35 +2497,16 @@ def _shutdown():
         engine.dispose()
         print("[albayan] Database connections closed gracefully")
     except Exception as e:
-        print(f"[albayan] Shutdown error: {e}")
+        print(f"[albayan] Shutdown error: {_safe_exception_text(e)}")
 
 
 # SECURITY FIX: Request size limiting to prevent DoS attacks
 @app.middleware("http")
 async def limit_request_size(request: Request, call_next):
-    """Prevent DoS via large payloads (max 10 MB)"""
-    if request.method in ["POST", "PUT", "PATCH"]:
-        content_length = request.headers.get("content-length")
-        max_size = 10 * 1024 * 1024  # 10 MB
-        if content_length:
-            try:
-                size = int(content_length)
-                if size > max_size:
-                    return JSONResponse(
-                        {"detail": f"Request too large (max {max_size/1024/1024:.0f} MB)"},
-                        status_code=413
-                    )
-            except (ValueError, TypeError):
-                pass  # Invalid content-length, let request proceed (will fail later if truly invalid)
-        elif request.url.path.startswith("/api/"):
-            # No Content-Length on an API write means a chunked/streamed body,
-            # which bypasses the size check above and lets a client stream an
-            # unbounded body into memory. All legitimate app clients (browser
-            # fetch, CapacitorHttp) send Content-Length for JSON, so require it.
-            return JSONResponse(
-                {"detail": "Length Required: Content-Length header is required for this request"},
-                status_code=411,
-            )
+    """Refuse oversized or unsized write bodies before they are read (startup_support)."""
+    refusal = _request_size_refusal(request)
+    if refusal is not None:
+        return refusal
     return await call_next(request)
 
 
@@ -2550,7 +2539,6 @@ MOBILE_APP_ORIGINS = [
     "capacitor://localhost",   # iOS WebView
     "ionic://localhost",
     "https://localhost",       # Android WebView (androidScheme: 'https' in capacitor.config.json)
-    "http://localhost",        # Android WebView (legacy androidScheme: 'http')
 ]
 for mobile_origin in MOBILE_APP_ORIGINS:
     if mobile_origin not in CORS_ORIGINS:
@@ -3332,7 +3320,8 @@ def logout(request: Request, user: dict[str, Any] = Depends(current_user)):
             conn.execute(text("DELETE FROM app_logins WHERE user_id=:uid"), {"uid": user["id"]})
 
     resp = JSONResponse(content={"ok": True})
-    resp.delete_cookie(COOKIE_NAME, path="/")
+    resp.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=_cookie_secure_for(request),
+                       samesite="none" if _is_trusted_app_origin(request.headers.get("origin") or "") else "lax")
     audit(user.get("id"), "logout", "auth", str(user.get("id")), "User logged out", {})
     return resp
 
@@ -3414,7 +3403,8 @@ def change_password(body: ChangePasswordRequest, request: Request, user: dict[st
     
     # Delete session cookie to force re-authentication
     resp = JSONResponse(content={"ok": True, "requires_reauth": True})
-    resp.delete_cookie(COOKIE_NAME, path="/")
+    resp.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=_cookie_secure_for(request),
+                       samesite="none" if _is_trusted_app_origin(request.headers.get("origin") or "") else "lax")
     return resp
 
 
@@ -3649,6 +3639,11 @@ def app_login_handoff(
         ).first()
         if not current or not session:
             raise HTTPException(status_code=401, detail="Sign in again before connecting the app")
+        if body.consumeSession:  # the tab only existed to sign the app in: no lock-free session left behind
+            conn.execute(
+                text("UPDATE sessions SET expires_at=:cap WHERE id=:sid AND user_id=:uid AND expires_at>:cap"),
+                {"cap": now + 10 * 60 * 1000, "sid": str(user.get("session_id") or ""), "uid": user["id"]},
+            )
         # One live code per user, plus opportunistic cleanup of dead codes —
         # same atomic single-statement pattern as password_resets.
         conn.execute(
@@ -3885,6 +3880,10 @@ def _bootstrap_fetch_scoped(collection: str, user: dict[str, Any]) -> list[dict[
 def bootstrap(user: dict[str, Any] = Depends(current_user)):
     # For huge datasets, prefer the paginated endpoints.
     # This endpoint returns all records and is best for small/medium deployments.
+    from .rate_limiter import check_rate_limit
+    _allowed, _left, _retry_ms = check_rate_limit(f"bootstrap:{user['id']}", max_attempts=30, window_ms=60 * 1000)
+    if not _allowed:  # seconds of CPU and pool time per call; a human reloads a few times, not thirty
+        raise HTTPException(status_code=429, detail="Too many full reloads; wait a moment", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
     ads = _bootstrap_fetch_scoped("ads", user)
     receipts = _bootstrap_fetch_scoped("receipts", user)
     customers = _bootstrap_fetch_scoped("customers", user)
@@ -8543,7 +8542,7 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
             status_code=409,
             detail="Final spend cannot be less than recorded company funding; reconcile company coverage separately first",
         )
-    if pool_total + company_minor > 0 and spent_minor > pool_total + company_minor:
+    if pool_total > 0 and spent_minor > pool_total + company_minor:  # coverage alone (receipt canceled) must not cap the real spend
         raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
     customer_spent = max(spent_minor - company_minor, 0)  # only the customer's pools shrink on a stop
     is_mixed_shop_debt = (
@@ -8822,6 +8821,8 @@ def _financial_release_canceled_due(
                 for entry in ad["refundDueBaseline"]
                 if isinstance(entry, dict) and str(entry.get("receiptId") or "") != receipt_id
             ]
+        assert_financial_period_open("ads", _financial_row_data(ad_row), conn=conn)  # closed month: 423, not a silent rewrite
+        assert_financial_period_open("ads", ad, conn=conn)
         saved.append(_clothes_write_row(conn, ad_row, ad))
     return saved
 
@@ -9509,10 +9510,11 @@ def _financial_patch_receipt_atomic(
             # In particular, a historical zero-value D receipt may derive its
             # cash target from linked unpaid Driver ads, but that target never
             # enters _financial_due_total before collection.
-            _financial_apply_delivery_completion_truth(
-                receipt_id, old, merged, ad_rows
-            )
-            _apply_coverage_settlement_truth(old, merged, due_total=_financial_due_total)
+            _truth_allowed = ("amountCollectedFromCustomer" in clean or bool(completion_recorded_by)) and not (
+                str(old.get("status") or "") == "Paid" and bool(old.get("isPaid")))  # a bare "Delivered" flip zeroed Paid receipts
+            if _truth_allowed:
+                _financial_apply_delivery_completion_truth(receipt_id, old, merged, ad_rows)
+            _apply_coverage_settlement_truth(old, merged, due_total=_financial_due_total, delivery_truth_allowed=_truth_allowed)
             canceled_due_source = (
                 (
                     str(merged.get("deliveryStatus") or "") == "Canceled"
@@ -11241,6 +11243,12 @@ def get_collection(
         include_media = False
     if collection == "walletPaymentRequests":
         include_media = False  # transfer-receipt photos hydrate by id only
+    if collection == "receipts" and include_media and limit > 25:
+        from .rate_limiter import check_rate_limit  # 8 MB per photo: throttle, not refuse (older clients may still ask)
+        _ok, _left, _retry_ms = check_rate_limit(f"receipts-media-list:{user['id']}", max_attempts=30, window_ms=60 * 1000)
+        if not _ok:
+            raise HTTPException(status_code=429, detail="Too many receipt listings with media; hydrate photos by id",
+                                headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
 
     full_pair = before_created_at is not None or before_id is not None
     delta_pair = after_last_modified is not None or after_id is not None

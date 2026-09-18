@@ -32,6 +32,9 @@ class AppLoginHandoffRequest(BaseModel):
 
     challenge: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     platform: Optional[str] = Field(default=None, max_length=32)
+    # True only from the fresh-login path: the browser tab existed to sign the
+    # app in, so its own session is capped to ten minutes after the handoff.
+    consumeSession: bool = False
 
 
 class AppLoginExchangeRequest(BaseModel):

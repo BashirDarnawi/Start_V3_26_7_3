@@ -1096,7 +1096,7 @@ check('web login page captures the app request, scrubs the URL, and hands off a 
   init.includes('detectAppLoginRequestFromUrl') &&
   serverApi.includes('sessionStorage.setItem(APP_LOGIN_WEB_REQUEST_KEY') &&
   serverApi.includes("['app_login', 'app_state', 'app_challenge', 'app_platform'].forEach((k) => params.delete(k));") &&
-  liveSync.includes('await maybeCompleteAppLoginHandoff(user);') &&
+  liveSync.includes('await maybeCompleteAppLoginHandoff(user, true);') &&
   serverApi.includes("'/api/auth/app-login/handoff'") &&
   views.includes('Signing in to the Albayan app'));
 
@@ -1492,6 +1492,10 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   read('src/15c-ads-studio.js').includes("Math.round(rate * 10000) / 10000) / 100") &&
   clothes.includes("clothes-shipment-editing-version") &&
   read('src/16-actions-io.js').includes("if (e?.status === 405 && /coverage/i.test(String(e?.message || ''))) throw new Error(String(e.message));") &&
+  read('src/01c-native-services.js').includes('androidBiometryStrength: 1') &&
+  read('src/09-api-auth.js').includes('consumeSession: !!consumeSession') &&
+  read('src/10-live-sync.js').includes('maybeCompleteAppLoginHandoff(user, true)') &&
+  read('src/09-api-auth.js').includes("'Sign-In Link Ignored'") &&
   helpers.includes("const mine = isCurrentUserAdmin() || String(latestData?.deliveryPersonId || '') === String(state.currentUser?.id || '');") &&
   read('src/12b-control-center.js').includes("function ccText(en, ar) {") &&
   socialStudio.includes("if (!(c.mediaUnknown && !c.media.length)) body.media = c.media.slice();") &&

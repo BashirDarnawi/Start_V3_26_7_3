@@ -435,7 +435,7 @@ async function authenticateNativeDevice(reason = '') {
       androidTitle: state.language === 'ar' ? 'افتح البيان' : 'Unlock Albayan',
       androidSubtitle: state.language === 'ar' ? 'استخدم البصمة أو رمز الجهاز' : 'Use biometrics or your device credential',
       androidConfirmationRequired: false,
-      androidBiometryStrength: 0
+      androidBiometryStrength: 1 // strong: a photo-spoofable face class must not open the workspace
     });
     return true;
   } catch (error) {

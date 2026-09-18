@@ -14,6 +14,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from .startup_support import safe_exception_text
+
 
 NORMALIZATION_VERSION = "unpaid-in-shop-plan-v1"
 _LYD_BANK_TRANSFER = "Bank Transfer (LYD)"
@@ -325,7 +327,7 @@ def run_legacy_unpaid_receipt_payment_plan_backfill(
     except Exception as exc:
         print(
             "[albayan] unpaid receipt payment-plan backfill failed: "
-            f"{type(exc).__name__}: {exc}"
+            f"{type(exc).__name__}: {safe_exception_text(exc)}"
         )
         return {"scanned": 0, "repaired": 0, "skipped": 0, "failed": 1}
     if stats["repaired"]:

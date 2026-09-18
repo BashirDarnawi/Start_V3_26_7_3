@@ -1234,7 +1234,7 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
       // the packaged app to sign in. Hand the session back to the app with a
       // one-time code instead of loading the workspace here.
       if (typeof maybeCompleteAppLoginHandoff === 'function') {
-        const handedOff = await maybeCompleteAppLoginHandoff(user);
+        const handedOff = await maybeCompleteAppLoginHandoff(user, true); // fresh login: this tab's session is short-lived
         if (handedOff) return true;
         if (!loginAttemptIsCurrent(loginGeneration)) return false;
       }

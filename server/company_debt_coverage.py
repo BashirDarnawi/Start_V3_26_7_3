@@ -946,13 +946,22 @@ def release_company_rows_for_receipt_delete(
         locked_map = _financial_allocation_map(
             locked_data.get("companyFundingAllocations")
         )
-        if locked_map.pop(receipt_id, 0) <= 0:
+        released_minor = locked_map.pop(receipt_id, 0)
+        if released_minor <= 0:
             continue
+        # The company's money was really spent on this ad: it moves to the
+        # receipt-less direct-coverage bucket instead of vanishing (which
+        # minted the same debt again for the customer to be covered twice).
+        assert_financial_period_open("ads", locked_data, conn=conn)
         next_ad = dict(locked_data)
         next_ad["companyFundingAllocations"] = _financial_rows_from_allocation_map(
             locked_map
         )
         next_ad["companyFundedUSD"] = _financial_usd(sum(locked_map.values()))
+        next_ad["companyDirectCoverageUSD"] = _financial_usd(
+            _financial_ad_direct_coverage(locked_data) + released_minor
+        )
+        assert_financial_period_open("ads", next_ad, conn=conn)
         write_row(conn, locked_ad, next_ad)
         released += 1
     return released

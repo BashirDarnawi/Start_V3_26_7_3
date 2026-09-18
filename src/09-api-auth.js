@@ -2817,12 +2817,12 @@ async function _processAppLoginCallback(url) {
   const pending = await readAppLoginPendingAsync();
   const isAr = typeof state !== 'undefined' && state.language === 'ar';
   if (!parsed || !pending || parsed.state !== pending.state) {
-    // Unknown/expired/foreign link: never exchange a code this app did not
-    // request (state binding), and burn any stale pending request.
-    clearAppBrowserLoginPending();
+    // Never exchange a code this app did not request (state binding). A
+    // foreign or stale link must not cancel a real pending sign-in either:
+    // any page could otherwise open albayan://auth and burn it.
     showNotification(
-      isAr ? 'انتهت صلاحية الرابط' : 'Sign-In Link Expired',
-      isAr ? 'ابدأ تسجيل الدخول من التطبيق مرة أخرى.' : 'Start the sign-in from the app again.',
+      isAr ? 'رابط غير مطابق' : 'Sign-In Link Ignored',
+      isAr ? 'هذا الرابط لا يطابق طلب تسجيل الدخول الحالي. ابدأ من التطبيق مرة أخرى.' : 'This link does not match the current sign-in request. Start from the app again.',
       'error'
     );
     if (typeof render === 'function') render();
@@ -2941,10 +2941,10 @@ function clearPendingAppLoginRequest() {
   try { sessionStorage.removeItem(APP_LOGIN_WEB_REQUEST_KEY); } catch (_) {}
 }
 
-async function apiAppLoginHandoff(challenge, platform) {
+async function apiAppLoginHandoff(challenge, platform, consumeSession) {
   const res = await apiJson(
     '/api/auth/app-login/handoff',
-    { method: 'POST', body: { challenge: challenge, platform: platform || null } },
+    { method: 'POST', body: { challenge: challenge, platform: platform || null, consumeSession: !!consumeSession } },
     { timeoutMs: 12000 }
   );
   return (res && res.code) || '';
@@ -3015,11 +3015,11 @@ function renderAppLoginReturnScreen(user, code, stateToken) {
 // Hook for the login flows: when this browser tab is an app sign-in
 // round-trip, mint the one-time code and bounce back instead of loading the
 // full workspace here. Returns true when the handoff took over the screen.
-async function maybeCompleteAppLoginHandoff(user) {
+async function maybeCompleteAppLoginHandoff(user, consumeSession) {
   const request = getPendingAppLoginRequest();
   if (!request) return false;
   try {
-    const code = await apiAppLoginHandoff(request.challenge, request.platform);
+    const code = await apiAppLoginHandoff(request.challenge, request.platform, consumeSession);
     if (!code) throw new Error('No handoff code returned');
     clearPendingAppLoginRequest();
     renderAppLoginReturnScreen(user, code, request.state);

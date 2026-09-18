@@ -423,3 +423,97 @@ row only on success. Minor and left as is: the catalog guard on generic PATCH
 runs before the permission gate, so an authenticated user could learn that a
 guessed appSettings id is the catalog row (same class as the existing Meta
 field guards).
+
+
+---
+
+# Round 5 (same day)
+
+Four hunters on the session lifecycle, the native app surface, receipt
+money-state sequences, and resource exhaustion plus log privacy. Backend
+findings come with permanent tests in `server/test_deep_scan_round5.py` and
+`server/test_deep_scan_round5_money.py`; frontend fixes have static guards.
+
+## Fixed
+
+### Receipt money (conservation)
+
+| Problem | Fix |
+| --- | --- |
+| Marking a receipt "Delivered" without the driver's completion form (paid in office, goods handed over) ran the delivery-completion maths with "collected = 0" and turned a Paid $100 receipt into an unpaid, zeroed one; the settle route did the same for a Not Paid office receipt collected in the office. | The completion maths runs only when a verified completion supplies the collected amount, and never re-derives a receipt that is already paid. |
+| Deleting a canceled receipt stripped the company's funding rows from its ad: the ad forgot the money the company had spent, and the "cover" button offered the same amount again. | The released company money moves to the ad's direct-coverage bucket, so the ad's funded total is unchanged and nothing is offered twice. |
+| A company-covered ad whose receipt was canceled could not record its real spend (the coverage alone capped it). | The cap applies only while a live customer pool backs the ad. |
+| Canceling or deleting a receipt silently rewrote linked ads that live in a closed month. | Those cascades assert the ad's month is open (423 like every other closed-month edit). |
+
+### Resource exhaustion and log privacy
+
+| Problem | Fix |
+| --- | --- |
+| Any caller, signed in or not, could send a 10 MB JSON body that the server fully parsed before checking the session (150 MB of objects per request; a handful in parallel could exhaust the container). | Without a session cookie, an API write body over 256 KB is refused before it is read (every sign-in-free route sends a small body; the Meta webhook is exempt). |
+| Validation errors echoed the offending input, including a password sent in the wrong shape. | The 422 body carries only the field location, message and type. |
+| A receipts viewer could ask for every receipt with all photos in one request (hundreds of megabytes; pins the whole connection pool). | Receipt listings with media of more than 25 rows are throttled to 30 per minute per user (a refusal would break older clients; the app hydrates photos by id anyway). |
+| The phone-collision check on every customer write loaded every customer's whole record. | It reads only the three phone fields. |
+| A user could hammer the full-reload endpoint. | Throttled to 30 per minute per user. |
+| Startup and backup error logs could carry bound SQL parameters (password hashes, receipt JSON). | Every such message goes through the parameter-redacting formatter. |
+
+### Sessions and the native app
+
+| Problem | Fix |
+| --- | --- |
+| Signing the app in through the phone's browser left a second, fully valid (up to 30-day) session in that browser, outside the app's lock. | The fresh-login handoff caps the browser tab's own session to ten minutes; the "continue to the app" path for an existing session is unchanged. |
+| Plain `http://localhost` was a trusted, credentialed origin in production (any local process could call the API with a signed-in user's cookie). | Removed; `capacitor://localhost` and `https://localhost` stay for the packaged app. |
+| The app lock accepted weak-class biometrics (photo-spoofable face unlock on some phones). | Strong biometrics only; the device PIN fallback stays. |
+| Any page or app could open the sign-in deep link with a wrong state and cancel a real pending sign-in. | A non-matching link is ignored; the pending request survives. |
+| The origin check passed any Origin when the Host header was missing (non-browser bypass). | Missing Host is refused. |
+| The logout / password-change cookie deletion lacked the live cookie's attributes, so the app's WebView kept a dead cookie. | Deleted with matching attributes. |
+
+## Verified sound (no change)
+
+- Sessions: password change, admin reset, reset-by-token, deletion and
+  anonymisation revoke every session and pending code in one transaction;
+  role and permission changes apply on the next request; reset tokens are
+  256-bit, hashed, single-use, 15 minutes; no session-bearing query tokens;
+  every cookie-authenticated mutation checks the origin; CORS is an explicit
+  list.
+- Native: no cleartext traffic, no exported components beyond the launcher,
+  the deep-link handler never navigates the WebView, PKCE binds the one-time
+  code, secrets are not in the bundle, sessions never touch JS storage, the
+  lock overlay paints before any data.
+- Money: transfers, settle replays, deletes of funding receipts, refunds
+  across two receipts, merges during transfers, lock ordering and rounding
+  all conserve money; server invariants match the client's test-money rules.
+- Logs: the access log carries no query strings, emails or phones; Meta
+  tokens never reach logs or responses; the webhook verifies its signature
+  before any work; workers survive a poisoned record.
+
+## Still open for the owner (round 5)
+
+1. Sessions are static bearer tokens: never rotated, no per-user cap, and a
+   new login leaves older sessions alive (no "sign out other devices" yet).
+2. The app sign-in return link is a custom scheme (`albayan://auth`); a
+   verified App Link / Universal Link would stop impostor apps from
+   intercepting it (the code is useless without the verifier, so the risk is
+   a cancelled sign-in, not a stolen session).
+3. Set `ALBAYAN_COOKIE_SECURE=true` on the app node so the cookie's Secure
+   flag never depends on a forwarded-proto header.
+4. Failed logins are not audited; the login-timing equaliser uses the default
+   work factor (legacy-hash accounts answer slightly faster).
+5. Every receipt or ad money write still scans the whole ads collection under
+   lock (bounded variant exists); an authenticated user can keep the pool
+   busy with large but legal listings.
+6. The driver's completion form on a receipt already paid in the office, with
+   nothing collected, still records it as unpaid and zeroed (pre-existing; the
+   form pre-computes the money before the server's guard).
+7. First-run setup can be reopened when every account has been soft-deleted
+   and the setup token is known (kept so a wiped office can recover).
+
+## Review of the round-5 fixes (same day)
+
+The adversarial pass found: the narrowed phone-collision scan crashed on a
+legacy scalar `phones` value (fixed: non-JSON text stays a candidate); the
+coverage settlement pass assumed the delivery pass had run whenever a receipt
+turned Delivered, so an office "paid + delivered" on a company-covered
+receipt would have settled gross (fixed: the two passes share one gate); the
+receipts-with-media refusal broke thirteen existing tests and would have
+broken older clients (changed to a per-user throttle before release); the
+setup-admin count change contradicted login and needs-setup (reverted).

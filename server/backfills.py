@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from .startup_support import safe_exception_text
 from .db import db_conn, get_engine, json_dumps, json_loads, now_ms
 from .operations import financial_period_is_closed
 from .startup_financial_scan import active_row_batches
@@ -133,7 +134,7 @@ def backfill_customer_names(sqlite_financial_lock=None) -> int:
         if stamped:
             print(f"[albayan] Backfilled customerName on {stamped} receipts/ads")
     except Exception as e:
-        print(f"[albayan] customerName backfill skipped/failed: {type(e).__name__}: {e}")
+        print(f"[albayan] customerName backfill skipped/failed: {type(e).__name__}: {safe_exception_text(e)}")
     return stamped
 
 
@@ -207,7 +208,7 @@ def backfill_covered_settled_receipts(sqlite_financial_lock=None) -> int:
         if fixed:
             print(f"[albayan] Normalized {fixed} covered receipt(s) settled before the coverage-aware settle")
     except Exception as e:
-        print(f"[albayan] covered-settled backfill skipped/failed: {type(e).__name__}: {e}")
+        print(f"[albayan] covered-settled backfill skipped/failed: {type(e).__name__}: {safe_exception_text(e)}")
     return fixed
 
 
@@ -311,5 +312,5 @@ def backfill_relink_baselines(sqlite_financial_lock=None) -> int:
         if repaired:
             print(f"[albayan] Retargeted stale relink baselines on {repaired} ads")
     except Exception as e:
-        print(f"[albayan] relink-baseline backfill skipped/failed: {type(e).__name__}: {e}")
+        print(f"[albayan] relink-baseline backfill skipped/failed: {type(e).__name__}: {safe_exception_text(e)}")
     return repaired
