@@ -157,12 +157,14 @@ function restoreAdsStudioTabFromUrl() {
 }
 
 function _adsStudioDateOffset(days) {
-  const date = new Date();
-  date.setDate(date.getDate() + Number(days || 0));
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  // The server judges "today" in Libya time (Africa/Tripoli); a phone in another
+  // timezone must agree with it, or the card offers a stop the server refuses.
+  const date = new Date(Date.now() + Number(days || 0) * 86400000);
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Tripoli', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  } catch (_) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
 }
 
 function newAdsStudioDraft() {
@@ -322,7 +324,7 @@ function renderAdsStudioTabBar() {
           return `
             <button type="button" role="tab" aria-selected="${active}" onclick="setAdsStudioTab('${tab.id}')" class="touch-target inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition-colors ${active ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-lg' : 'bg-white/70 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 border border-white/60 dark:border-slate-700'}">
               <i data-lucide="${tab.icon}" class="w-4 h-4"></i><span>${isAr ? tab.labelAr : tab.label}</span>
-              ${tab.id === 'review' ? `<span class="rounded-full bg-white/20 px-1.5 py-0.5 text-[10px]">${getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted').length}</span>` : ''}
+              ${tab.id === 'review' ? `<span class="rounded-full bg-white/20 px-1.5 py-0.5 text-[10px]">${adsStudioReviewQueue().length}</span>` : ''}
             </button>
           `;
         }).join('')}
@@ -364,7 +366,9 @@ function renderAdsStudioView() {
           <div class="mt-6">${renderAdsStudioSubscriptionGate()}</div>
         </div>`;
     }
-    return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}</div>`;
+    // In the studio shell the paywall's "Charge wallet" has nowhere else to go: keep the wallet form reachable.
+    const shellWallet = IS_STUDIO_SHELL && adsStudioCanViewOwn() ? `<div class="mt-6">${renderAdsStudioWallet()}</div>` : '';
+    return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}${shellWallet}</div>`;
   }
 
   let content = '';
@@ -478,7 +482,7 @@ function renderAdsStudioCampaignCard(campaign) {
   const canEdit = editableStatus && canActOnRecord('adCampaignRequests', 'edit', campaign.createdBy);
   const canSubmit = editableStatus && canActOnRecord('adCampaignRequests', 'submit', campaign.createdBy);
   const canDuplicate = adsStudioCanCreate() && canActOnRecord('adCampaignRequests', 'add', campaign.createdBy);
-  const isLaunched = !!String(campaign.publishStatus || '').trim();
+  const isLaunched = !!(String(campaign.publishStatus || '').trim() || String(campaign.metaCampaignId || '').trim());  // same predicate as the stop prompt and the server
   const photoCount = getEntityPhotoCountHint('adCampaignRequests', campaign);
   const safeId = Security.escapeHtml(String(campaign.id || ''));
   const platforms = (Array.isArray(campaign.platforms) ? campaign.platforms : []).map(item => String(item)).join(' + ');
@@ -487,8 +491,9 @@ function renderAdsStudioCampaignCard(campaign) {
   // Mirror of the server's owner-stop gate: instant refund only before start.
   const ownerCanInstantStop = !isLaunched && spendMinorEarly === 0 && String(campaign.startDate || '') >= _adsStudioDateOffset(0);  // the start day itself is not started (server rule)
   const mayStop = canActOnRecord('adCampaignRequests', 'stop', campaign.createdBy);
-  const canStop = statusValue === 'Approved' && (adsStudioCanReview() || (mayStop && ownerCanInstantStop));
-  const showAskStop = statusValue === 'Approved' && !adsStudioCanReview() && mayStop && !ownerCanInstantStop;
+  const staffHere = adsStudioCanReview() && String(campaign.createdBy || '') !== String(state.currentUser?.id || '');  // own campaigns follow the customer rule (server)
+  const canStop = statusValue === 'Approved' && (staffHere || (mayStop && ownerCanInstantStop));
+  const showAskStop = statusValue === 'Approved' && !staffHere && mayStop && !ownerCanInstantStop;
   // Archiving an Approved campaign with captured money would forfeit it —
   // the server refuses; do not offer the dead-end button.
   const canDelete = ['Draft', 'Changes Requested', 'Approved', 'Rejected', 'Stopped'].includes(statusValue)
@@ -531,7 +536,7 @@ function renderAdsStudioCampaignCard(campaign) {
           ${photoCount ? `<button type="button" onclick="openAdsStudioCreativeViewer('${safeId}', 0, this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-cyan-50 dark:bg-cyan-900/20 px-3 text-sm font-bold text-cyan-700 dark:text-cyan-300"><i data-lucide="images" class="w-4 h-4"></i><span>${isAr ? 'الصور' : 'Creative'} ${photoCount}</span></button>` : ''}
           ${canEdit ? `<button type="button" onclick="startAdsStudioCampaign('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-blue-50 dark:bg-blue-900/20 px-3 text-sm font-bold text-blue-700 dark:text-blue-300"><i data-lucide="pencil" class="w-4 h-4"></i>${isAr ? 'تعديل' : 'Edit'}</button>` : ''}
           ${canSubmit ? `<button type="button" onclick="submitAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-3 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'إرسال' : 'Submit'}</button>` : ''}
-          ${canStop ? `<button type="button" onclick="stopAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/30 px-3 text-sm font-bold text-rose-700 dark:text-rose-200 disabled:opacity-60"><i data-lucide="circle-stop" class="w-4 h-4"></i>${isAr ? 'إيقاف واسترداد' : 'Stop & refund'}</button>` : ''}
+          ${canStop ? `<button type="button" onclick="stopAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/30 px-3 text-sm font-bold text-rose-700 dark:text-rose-200 disabled:opacity-60"><i data-lucide="circle-stop" class="w-4 h-4"></i>${isLaunched ? (isAr ? 'إغلاق الحملة' : 'Close campaign') : (isAr ? 'إيقاف واسترداد' : 'Stop & refund')}</button>` : ''}
           ${showAskStop ? `<button type="button" onclick="showNotification('${isAr ? 'الإعلان بدأ بالفعل' : 'This ad already started'}', '${isAr ? 'راسلنا لنوقفه ونعيد الجزء غير المصروف إلى محفظتك.' : 'Message us — we stop it and refund the unspent part to your wallet.'}', 'info')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="circle-help" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask us to stop it'}</button>` : ''}
           ${statusValue === 'Approved' && adsStudioCanReview() && !isLaunched ? `<button type="button" onclick="markAdsStudioCampaignLaunched('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 px-3 text-sm font-bold text-emerald-700 dark:text-emerald-300 disabled:opacity-60"><i data-lucide="radio" class="w-4 h-4"></i>${isAr ? 'تم الإطلاق' : 'Mark launched'}</button>` : ''}
           ${canDuplicate && ['Approved', 'Stopped'].includes(statusValue) ? `<button type="button" onclick="duplicateAdsStudioCampaign('${safeId}', this, true)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-900/20 px-3 text-sm font-bold text-indigo-700 dark:text-indigo-300 disabled:opacity-60"><i data-lucide="calendar-plus" class="w-4 h-4"></i>${isAr ? 'تمديد' : 'Extend'}</button>` : ''}
@@ -606,10 +611,32 @@ function stopAdsStudioCampaign(id, button = null) {
   return operation;
 }
 
+// Server refusals a customer can hit in the studio, in their language.
+const _ADS_STUDIO_REFUSAL_AR = [
+  ['Insufficient wallet balance', 'رصيد المحفظة لا يكفي لهذه الميزانية — اشحن المحفظة أولاً'],
+  ['already started', 'بدأ هذا الإعلان بالفعل — اطلب منا إيقافه واسترداد الجزء غير المصروف'],
+  ['Conflict: record has changed', 'تغيّر السجل — حدّث الصفحة وحاول مرة أخرى'],
+  ['Stop the campaign first', 'أوقف الحملة أولاً حتى تعود الميزانية غير المصروفة إلى المحفظة'],
+  ['ad_maker subscription is required', 'يلزم اشتراك نشط في استوديو الإعلانات'],
+  ['plan price changed', 'تغيّر سعر الباقة — أعد تحميل الباقات وحاول مرة أخرى'],
+  ['dates have passed', 'انتهت تواريخ الحملة — اطلب تعديلات ليضبط العميل التاريخ'],
+  ['startDate cannot be in the past', 'لا يمكن أن يكون تاريخ البدء في الماضي'],
+  ['storage quota reached', 'امتلأت مساحة استوديو الإعلانات — احذف صوراً أو أرشف حملة منتهية (اطلب منا إغلاق حملة تعمل أولاً)'],
+  ['refundMinorUSD is required', 'أدخل المبلغ غير المصروف المراد استرداده (0 للإغلاق دون استرداد)'],
+  ['Only Approved campaigns can be stopped', 'لا يمكن إيقاف إلا الحملات المعتمدة'],
+];
+function adsStudioRefusalText(detail) {
+  const text = String(detail || '');
+  if (!adsStudioIsAr()) return text;
+  const hit = _ADS_STUDIO_REFUSAL_AR.find(([needle]) => text.includes(needle));
+  return hit ? hit[1] : text;
+}
+
 async function stopAdsStudioCampaignOnce(id) {
   const campaign = findVisibleAdsStudioCampaign(id);
   if (!campaign || String(campaign.status || '') !== 'Approved') return false;
-  const staff = adsStudioCanReview();
+  const own = String(campaign.createdBy || '') === String(state.currentUser?.id || '');
+  const staff = adsStudioCanReview() && !own;  // the server applies the customer rule to a reviewer's own campaign
   if (!staff && !canActOnRecord('adCampaignRequests', 'stop', campaign.createdBy)) return false;
   if (!isServerModeEnabled()) {
     showNotification(
@@ -624,12 +651,15 @@ async function stopAdsStudioCampaignOnce(id) {
   let refundMinor = null;
   if (staff) {
     const remaining = paid - spent;
+    const launched = !!(String(campaign.publishStatus || '').trim() || String(campaign.metaCampaignId || '').trim());
+    // A launched campaign has spent on Meta and nothing records that spend: never
+    // pre-fill the whole budget (the server refuses a blind default too).
     const answer = prompt(
       adsStudioText(
-        `Refund amount in USD (0 to ${(remaining / 100).toFixed(2)}):`,
-        `مبلغ الاسترداد بالدولار (من 0 إلى ${(remaining / 100).toFixed(2)}):`
+        `${launched ? 'Close this campaign. Unspent budget to refund' : 'Refund amount'} in USD (0 to ${(remaining / 100).toFixed(2)}):`,
+        `${launched ? 'إغلاق هذه الحملة. المبلغ غير المصروف المراد استرداده' : 'مبلغ الاسترداد'} بالدولار (من 0 إلى ${(remaining / 100).toFixed(2)}):`
       ),
-      (remaining / 100).toFixed(2)
+      launched ? '0.00' : (remaining / 100).toFixed(2)
     );
     if (answer === null) return false;
     // "1,000" is a thousand, "12,50" is a decimal — never silently under-refund.
@@ -676,7 +706,7 @@ async function stopAdsStudioCampaignOnce(id) {
     return true;
   } catch (e) {
     const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'));
-    showNotification(adsStudioText('Could not stop the campaign', 'تعذر إيقاف الحملة'), String(detail), 'error');
+    showNotification(adsStudioText('Could not stop the campaign', 'تعذر إيقاف الحملة'), adsStudioRefusalText(detail), 'error');
     return false;
   }
 }
@@ -709,6 +739,14 @@ async function adsStudioReloadCampaign(id) {
 // a lost reply replays the same request instead of piling up duplicates on
 // the admin's pending list.
 let _adsStudioChargeIdem = { fingerprint: '', key: '' };
+function adsStudioOpenChargeForm() {
+  // The studio shell has no wallet page: the charge form lives on the Overview
+  // tab, or under the activate card for a lapsed customer.
+  _adsStudioActiveTab = 'dashboard';
+  if (state.currentView !== 'ads-studio') navigateTo('ads-studio'); else render();
+  setTimeout(() => { try { document.getElementById('ads-studio-charge-amount')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {} }, 150);
+}
+
 function adsStudioChargeIdemKey(amountMinor, method) {
   const fingerprint = `${state.currentUser?.id || ''}|${amountMinor}|${method}`;
   if (_adsStudioChargeIdem.fingerprint !== fingerprint) {
@@ -749,7 +787,7 @@ async function markAdsStudioCampaignLaunched(id, button = null) {
     return true;
   } catch (e) {
     const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || '');
-    showNotification(adsStudioText('Could not mark launched', 'تعذر تسجيل الإطلاق'), String(detail), 'error');
+    showNotification(adsStudioText('Could not mark launched', 'تعذر تسجيل الإطلاق'), adsStudioRefusalText(detail), 'error');
     return false;
   } finally {
     setAdsStudioActionButtonBusy(button, false);
@@ -1368,7 +1406,18 @@ async function saveAdsStudioDraftOnce(closeAfter = true, stabilityAttempt = 0) {
     id = Security.generateSecureId('campaign');
     saved = await addRecord(state.adCampaignRequests, { id, ...payload, status: 'Draft', createdAt: new Date().toISOString() });
   }
-  if (!saved) return null;
+  if (!saved) {
+    // A real conflict installed the other device's version in memory (updateRecord says
+    // "We loaded the latest version") while the form still held this device's text.
+    // Reload the form from it, like the modal path does — bumping only the baseline would
+    // let the next Save overwrite that version. A plain failure leaves the form alone.
+    const fresh = id ? findVisibleAdsStudioCampaign(id) : null;
+    if (fresh && _adsStudioEditingBaseline > 0 && _adsStudioEditingId === String(id) && (Number(fresh._lastModified) || 0) !== _adsStudioEditingBaseline) {
+      await startAdsStudioCampaign(id);
+      showNotification(adsStudioText('Draft reloaded', 'أعيد تحميل المسودة'), adsStudioText('This draft was changed on another device. The form now shows that version; re-apply your edits.', 'تغيّرت هذه المسودة على جهاز آخر. يعرض النموذج الآن تلك النسخة؛ أعد إدخال تعديلاتك.'), 'warning');
+    }
+    return null;
+  }
   // The echo installed the new server version: the next save must build on it.
   _adsStudioEditingBaseline = Number(findVisibleAdsStudioCampaign(id)?._lastModified) || 0;
   const current = findVisibleAdsStudioCampaign(id);
@@ -1486,7 +1535,7 @@ async function submitAdsStudioCampaignOnce(id) {
     render();
     return true;
   } catch (error) {
-    showNotification(adsStudioText('Could not submit', 'تعذر الإرسال'), error?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
+    showNotification(adsStudioText('Could not submit', 'تعذر الإرسال'), adsStudioRefusalText(error?.payload?.detail || error?.message) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
     return false;
   }
 }
@@ -1535,11 +1584,15 @@ async function openAdsStudioCreativeViewer(id, index = 0, button = null) {
   }
 }
 
+function adsStudioReviewQueue() {  // the server refuses self-review: a reviewer's own Submitted campaign is not a queue item
+  return getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted'
+    && (isCurrentUserAdmin() || String(item.createdBy || '') !== String(state.currentUser?.id || '')));
+}
+
 function renderAdsStudioReviewQueue() {
   const isAr = adsStudioIsAr();
   if (!adsStudioCanReview()) return renderAdsStudioEmptyState();
-  const queue = getVisibleAdsStudioCampaigns().filter(item => item.status === 'Submitted'
-    && (isCurrentUserAdmin() || String(item.createdBy || '') !== String(state.currentUser?.id || '')));  // the server refuses self-review
+  const queue = adsStudioReviewQueue();
   return `<section><div class="mb-5"><h2 class="text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'طلبات تحتاج المراجعة' : 'Campaign review queue'}</h2><p class="text-sm text-slate-500">${isAr ? 'الموافقة تخصم الميزانية المحجوزة من محفظة العميل؛ النشر على ميتا خطوة منفصلة.' : 'Approval charges the held budget of the customer; publishing on Meta is a separate step.'}</p></div><div class="space-y-5">${queue.length ? queue.map(campaign => {
     const safeId = Security.escapeHtml(String(campaign.id || ''));
     const note = Security.escapeHtml(String(_adsStudioReviewNotes[String(campaign.id || '')] || ''));
@@ -1599,7 +1652,7 @@ async function reviewAdsStudioCampaignOnce(id, decision) {
     showNotification(adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`Campaign marked ${decision}.`, `تم تحديث حالة الحملة: ${decision}.`), 'success');
     render();
   } catch (error) {
-    showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), error?.message || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
+    showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), adsStudioRefusalText(error?.payload?.detail || error?.message) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
   }
 }
 
@@ -1639,7 +1692,8 @@ function adsStudioUpdateLydPreview() {
   if (!el) return;
   const usd = parseFloat(document.getElementById('ads-studio-charge-amount')?.value || '0');
   const rate = _adsStudioUsdToLydRate();
-  el.textContent = (Number.isFinite(usd) && usd > 0 && rate > 0)
+  const lydMode = String(document.getElementById('ads-studio-charge-currency')?.value || 'USD') === 'LYD';
+  el.textContent = (!lydMode && Number.isFinite(usd) && usd > 0 && rate > 0)
     ? `≈ ${(Math.ceil(Math.round(usd * 100) * Math.round(rate * 10000) / 10000) / 100).toFixed(2)} LYD @ ${rate}`
     : '';
 }
@@ -1701,10 +1755,11 @@ async function adsStudioCreateWalletCharge() {
   if (_adsStudioChargeBusy) return;
   const input = document.getElementById('ads-studio-charge-amount');
   const method = String(document.querySelector('input[name="ads-studio-charge-method"]:checked')?.value || '');
+  const currency = String(document.getElementById('ads-studio-charge-currency')?.value || 'USD') === 'LYD' ? 'LYD' : 'USD';
   const amountUSD = parseFloat(input?.value || '0');
   const amountMinor = Math.round((Number.isFinite(amountUSD) ? amountUSD : 0) * 100);
   if (amountMinor < 100) {
-    showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText('Minimum charge is $1.00', 'أقل مبلغ للشحن هو 1 دولار'), 'error');
+    showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), currency === 'LYD' ? adsStudioText('Minimum charge is 1.00 LYD', 'أقل مبلغ للشحن هو دينار واحد') : adsStudioText('Minimum charge is $1.00', 'أقل مبلغ للشحن هو 1 دولار'), 'error');
     return;
   }
   if (!method || !_adsStudioPayMethod(method)) {
@@ -1713,7 +1768,7 @@ async function adsStudioCreateWalletCharge() {
   }
   _adsStudioChargeBusy = true;
   try {
-    const created = await apiWalletPaymentRequestCreate(amountMinor, method, adsStudioChargeIdemKey(amountMinor, method));
+    const created = await apiWalletPaymentRequestCreate(amountMinor, method, adsStudioChargeIdemKey(amountMinor, `${method}|${currency}`), currency);
     _adsStudioChargeIdem = { fingerprint: '', key: '' };
     const d = created?.data || {};
     const entry = _adsStudioPayMethod(d.method);
@@ -1723,7 +1778,7 @@ async function adsStudioCreateWalletCharge() {
       message = template
         .split('{reference}').join(String(d.reference || ''))
         .split('{amountLYD}').join(d.amountMinorLYD ? (d.amountMinorLYD / 100).toFixed(2) : '—')
-        .split('{amountUSD}').join((Number(d.amountMinor || 0) / 100).toFixed(2))
+        .split('{amountUSD}').join(`${(Number(d.amountMinor || 0) / 100).toFixed(2)}${String(d.currency || 'USD').toUpperCase() === 'LYD' ? ' LYD' : ''}`)
         .split('{rate}').join(String(d.lydRate || ''));
     } else {
       message = adsStudioText(
@@ -1887,7 +1942,9 @@ function renderAdsStudioWallet() {
         <h3 class="font-bold text-slate-800 dark:text-white mb-1">${adsStudioText('Add money', 'إضافة رصيد')}</h3>
         <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
         <div class="mb-4">
-          <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount (USD)', 'المبلغ (دولار)')}</label>
+          <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount', 'المبلغ')}
+            <select id="ads-studio-charge-currency" onchange="adsStudioUpdateLydPreview()" class="ml-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200"><option value="USD">${adsStudioText('USD (campaigns)', 'دولار (الحملات)')}</option><option value="LYD">${adsStudioText('LYD (subscription plans)', 'دينار (باقات الاشتراك)')}</option></select>
+          </label>
           <div class="studio-wallet-charge-preview flex flex-wrap items-center gap-3">
             <input id="ads-studio-charge-amount" type="number" min="1" step="0.01" placeholder="50.00" oninput="adsStudioUpdateLydPreview()"
               class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />

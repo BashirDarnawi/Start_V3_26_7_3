@@ -201,13 +201,8 @@ document.addEventListener('visibilitychange', () => {
 // ==========================================
 // PERFORMANCE MODE (for weak/old devices)
 // ==========================================
-// The default look leans hard on the GPU: a viewport-sized aurora layer under
-// filter:blur(110px) animating forever, a full-screen backdrop-blur overlay,
-// and backdrop-filter blur(14px) on every glass panel. On an old laptop or a
-// cheap phone that turns every scroll and repaint into a slideshow.
-// body.perf-lite (style.css) keeps ALL features and the same layout but turns
-// those decorations off. Preference is per-device (localStorage); lite is the
-// DEFAULT — only an explicit 'full' choice in Settings enables the effects.
+// body.perf-lite (style.css) keeps ALL features but turns the GPU-heavy decorations off
+// (aurora blur, backdrop blur). Per-device preference; lite is the DEFAULT.
 
 function isPerformanceModeOn() {
   let pref = null;
@@ -742,14 +737,9 @@ function markOverlayPopClose(closed) {
 // ==========================================
 // CENTRAL OVERLAY OBSERVER (history + iOS body scroll lock)
 // ==========================================
-// Every standalone surface is appended directly to <body> (verified across
-// src/), so one childList observer is the single hook for all creation
-// sites: it pushes/consumes the sentinel entries above and toggles a body
-// scroll lock while any dialog is open. The lock matters on iOS < 16, where
-// overscroll-behavior (style.css) is unsupported: drags inside a dialog
-// scrolled the page underneath, and at scrollTop 0 triggered pull-to-refresh
-// — reloading the SPA and discarding half-filled forms. The existing CSS
-// stays as the iOS 16+/Android fast path.
+// Every standalone surface is appended to <body>, so one childList observer pushes/consumes
+// the sentinel entries and toggles a body scroll lock while any dialog is open (iOS < 16
+// lacks overscroll-behavior: drags in a dialog scrolled the page / pull-to-refreshed).
 
 let _overlayObservedCount = 0;
 let _scrollLockActive = false;
@@ -2708,16 +2698,10 @@ function initIndexedDB(onLateOpen) {
 
     request.onsuccess = (event) => {
       const database = event.target.result;
-      // LATE OPEN (the watchdog or onblocked already resolved this promise
-      // with null): adopting the connection is only safe when the caller can
-      // recover, because `db` truthiness makes saveState() drop the business
-      // collections from the localStorage snapshot and re-enables the dirty
-      // flush — with in-memory arrays that were loaded WITHOUT IndexedDB.
-      // At startup (no onLateOpen) close the connection and stay in the
-      // db === null snapshot mode for the whole session; the intact
-      // IndexedDB dataset survives untouched until the next reload. The
-      // onclose reopen path passes a recovery callback instead: there the
-      // in-memory state IS authoritative, so adopt and re-persist it.
+      // LATE OPEN (the watchdog/onblocked already resolved with null): adopt the connection
+      // only when the caller can recover (`db` truthiness drops the business collections from
+      // the localStorage snapshot). At startup (no onLateOpen) close it and stay in snapshot
+      // mode; the onclose reopen path adopts and re-persists the authoritative in-memory state.
       if (settled && typeof onLateOpen !== 'function') {
         try { database.close(); } catch (_) {}
         return;
@@ -4068,6 +4052,9 @@ async function handleSubscribePlan(planId, navigateToId, shownPriceMinor) {
     if (navigateToId) openServiceById(navigateToId);
   } catch (error) {
     const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
+    if (/price changed/i.test(String(detail))) {  // the sheet shows the old price: reload the catalog in place
+      Promise.resolve(refreshSubscriptionPlans(true)).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); }).catch(() => {});
+    }
     showNotification(
       state.language === 'ar' ? 'تعذر الاشتراك' : 'Could not subscribe',
       String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),
@@ -6683,14 +6670,9 @@ async function ensureUsersHavePasswordHashes(users = state.users, { persist = tr
 // ==========================================
 // LIFECYCLE FLUSH (phone browsers)
 // ==========================================
-// Phone browsers freeze all timers the instant the page is hidden, and iOS
-// jettisons backgrounded tabs before they resume — losing whatever sat in the
-// 800ms-debounced IndexedDB flush and the 300ms-debounced saveState (in local
-// mode with IndexedDB, that debounced flush is the ONLY durable copy of the
-// business collections). visibilitychange:hidden is the last moment IndexedDB
-// transactions can still start on iOS app-switch; pagehide covers real
-// navigations/reloads. Double-firing is harmless: flushDirtyCollections is
-// re-entrancy-guarded and a no-op when nothing is dirty.
+// Phone browsers freeze timers when hidden and iOS jettisons background tabs, losing the
+// debounced IndexedDB/saveState flush (the ONLY durable copy in local mode).
+// visibilitychange:hidden + pagehide; double-firing is harmless (re-entrancy guard).
 function flushPersistenceNow() {
   try {
     if (_saveStateTimer) { clearTimeout(_saveStateTimer); _saveStateTimer = null; }
@@ -7886,16 +7868,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
     const _nextReceiptStatus = collectionName === 'receipts'
       ? String(sanitizedUpdates.status ?? old.status ?? '').trim().toLowerCase()
       : '';
-    // Route EVERY resulting Paid receipt through the cascade endpoint, not only
-    // a fresh transition. This repairs old Paid receipts whose ads still carry
-    // legacy due rows and returns those repaired ads immediately to the UI.
-    //
-    // EXCEPT a paid-KEEPING edit that touches only the narrow-grant fields the
-    // generic PATCH route authorizes under receipts.markCollected /
-    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + delivery_workflow.py,
-    // whose cancel / "Delete mission" also carry deliveryHistory + statusDetail).
-    // /settle demands receipts.edit, so routing such a click through it 403'd
-    // every staff member holding only the collect or assign permission.
+    // Route EVERY resulting Paid receipt through the cascade endpoint (repairs old Paid
+    // receipts whose ads still carry legacy due rows) — EXCEPT a paid-keeping edit that
+    // touches only the narrow-grant fields the generic PATCH authorizes under
+    // receipts.markCollected / deliveries.* (/settle demands receipts.edit and 403'd them).
     const _RECEIPT_NARROW_GRANT_FIELDS = new Set([
       'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',
       'collectedAt', 'collectedBy', 'isReceivedInOffice', 'receivedInOfficeAt',
@@ -8067,15 +8043,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
               saveState();
             }
           }
-          // Settle/convert skipped the optimistic paint, so this echo is the
-          // FIRST paint of the committed multi-entity state (receipt + ads +
-          // customer debt + reconciliation): keep the full render. A plain
-          // PATCH echo was already painted optimistically 100-500ms ago —
-          // schedule a normal render instead so the identical-HTML skip turns
-          // the common byte-identical echo into a no-DOM-op rather than a
-          // second full innerHTML swap (double entry-animation + icon flash
-          // on phones); when the server echo really drifted, only the view
-          // container repaints via the partial path.
+          // Settle/convert skipped the optimistic paint, so this echo is the FIRST paint of the
+          // committed multi-entity state: keep the full render. A plain PATCH echo was already
+          // painted; schedule a normal render so a byte-identical echo is a no-DOM-op.
           if (_settlesReceipt || _convertsReceipt) {
             forceFullRender();
           } else {
@@ -8121,17 +8091,11 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (typeof reseedClothesEditState === 'function') { try { reseedClothesEditState(collectionName, array[idx]); } catch (_) {} }  // temp rows + baseline follow
                 try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
               }
-              // A settle/unsettle whose FIRST attempt committed but whose
-              // response was lost lands here on the user's manual retry: the
-              // fresh idempotency key bypasses the server replay marker and
-              // the stale modal baseline 409s. Claim "already saved" ONLY
-              // when the stored record actually matches what THIS save
-              // intended field-by-field — the status boolean alone misfired
-              // for any concurrent edit on a Paid receipt (every paid-keeping
-              // edit routes through the settle path), showing a success toast
-              // for an edit that was never saved. Volatile server-stamped
-              // keys are excluded; a too-strict match only downgrades to the
-              // honest conflict warning, never to a false success.
+              // A settle/unsettle whose FIRST attempt committed but whose response was lost lands
+              // here on the manual retry (fresh key, stale baseline 409). Claim "already saved" ONLY
+              // when the stored record matches what THIS save intended field-by-field (volatile
+              // server-stamped keys excluded); a too-strict match only downgrades to the honest
+              // conflict warning, never to a false success.
               const _volatileMatchKeys = ['_lastModified', 'lastModified', 'updatedAt', 'editHistory', 'editCount', 'collectionDate', 'deliveryHistory', 'customerName', 'createdByName'];
               const _intentMatchesLatest = () => {
                 try {
@@ -8599,8 +8563,10 @@ function userCanAccessView(user, view) {
 function getAlbayanManagerLandingViewForUser(user) {
   const role = String(user?.role || '');
   if (isDeliveryRole(role)) return 'delivery-dashboard';
-  // Pick the first view they are allowed to open
+  // Pick the first view they are allowed to open (the router bounces staff off admin-only views)
+  const staff = role.toLowerCase() !== 'admin';
   for (const view of ALBAYAN_MANAGER_VIEW_ORDER) {
+    if (staff && PLATFORM_ADMIN_ONLY_VIEWS.has(view)) continue;
     if (userCanAccessView(user, view)) return view;
   }
   return 'no-access';
@@ -8765,20 +8731,10 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       return sum + explicitAllocations;
     }
 
-    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY when the ad carries no
-    // allocation data at all (legacy records that predate allocations). If the
-    // ad HAS allocation entries — they just point at OTHER receipts — then a
-    // zero sum for THIS receipt means this receipt funded nothing; charging the
-    // full ad spend here would count the same dollars on two receipts at once
-    // (e.g. a delivery ad matched via linkedDeliveryReceiptId but funded
-    // entirely from a merged paid receipt).
-    // "Has allocation data" means the arrays are PRESENT — even when empty.
-    // Empty arrays happen when a funding receipt was deleted and the cleanup
-    // stripped its rows; falling back to the full ad spend then would charge
-    // the WHOLE ad to some other linked receipt (e.g. the delivery receipt
-    // matched via ad.receiptId), inventing usage out of nothing. The
-    // spentUSD/amountUSD fallback is only for legacy records that predate
-    // allocations entirely (no arrays at all).
+    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY for legacy ads with no allocation
+    // arrays at all. Present-but-empty arrays (funding receipt deleted) or rows pointing at
+    // OTHER receipts mean this receipt funded nothing; charging the full spend would count
+    // the same dollars on two receipts at once.
     const hasAllocationData =
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations) ||
@@ -8843,16 +8799,8 @@ function getDeliveryReceiptDueUsage(receipt) {
     return { totalDueUSD: 0, usedDueUSD: 0, remainingDueUSD: 0, fundedAds: [] };
   }
 
-  // ONE POT. A receipt is a single sum of money; "delivery due" and "paid balance" are
-  // two NAMES for it at two moments in time, not two pots. This function used to keep a
-  // second, independent ledger: it counted ONLY dueAllocations and read the frozen debt
-  // as a capacity of its own. So once a driver collected a receipt, the same money was
-  // advertised twice — once as due credit here, once as paid balance by
-  // getReceiptUsageStats — and two ads could each spend it.
-  //
-  // Both readers are now views over the SAME committed total. getReceiptUsageStats
-  // already sums every commitment against a receipt (receiptAllocations + dueAllocations
-  // + the legacy mirror), so defer to it rather than maintaining a rival count.
+  // ONE POT: "delivery due" and "paid balance" are two names for one sum. Both readers are
+  // views over the SAME committed total (getReceiptUsageStats sums every commitment).
   const exchangeRate = receiptObj.exchangeRate || state.defaultExchangeRate || 1;
   const dueAmountLocal = Number(receiptObj.debtAmountLocal ?? receiptObj.amountLocal ?? 0) || 0;
   const debtUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
@@ -17092,10 +17040,11 @@ function renderAnalyticsView() {
   // isPaid-only rows included), not the raw status text.
   const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r) && !['canceled', 'lost'].includes(getReceiptPaymentState(r)));
   const saleReceipts = revenueReceipts.filter(r => String(r.receiptType || '') !== 'CARRIED_BALANCE');  // pre-tracking credit is not a sale
-  const totalReceiptsUSD = saleReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const underpaidCash = r => !!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID';  // amountUSD = cash collected, debtAmountUSD = the sale
+  const totalReceiptsUSD = saleReceipts.reduce((sum, r) => sum + (underpaidCash(r) ? Math.max(r.amountUSD || 0, r.debtAmountUSD || 0) : (r.amountUSD || 0)), 0);
   const paidReceipts = saleReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
   const pendingReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'not_paid');
-  const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0) + pendingReceipts.filter(underpaidCash).reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   // Pending is what the customer still owes: money the company already absorbed is not pending.
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + _receiptCustomerOutstandingUSD(r), 0);
 
@@ -21627,6 +21576,7 @@ function showLogDetails(logId) {
 }
 
 function _receiptCustomerOutstandingUSD(r) {
+  if (r?.isPaid === true || ['Paid', 'Canceled', 'Lost', 'Destroyed'].includes(String(r?.status || ''))) return 0;  // callers filter; safe for the rest
   const amount = Math.max(0, Number(r?.amountUSD) || 0);
   const ceiling = Math.max(amount, Math.max(0, Number(r?.debtAmountUSD) || 0));  // after delivery, amountUSD is the cash collected
   const stored = Number(r?.customerOutstandingUSD);
@@ -23486,8 +23436,9 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   // "Collected this month" is about when the money came in, not when the
   // receipt was written (a debt collected on the 3rd counts on the 3rd).
   const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;
-  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), monthStart, Infinity));
-  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), prevStart, monthStart));
+  const cashIn = r => getReceiptPaymentState(r) === 'paid' || (!!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID');  // driver-collected cash counts (liquidity rule L8)
+  const paidThisMonth = revenueReceipts.filter(r => cashIn(r) && inWindow(paidOn(r), monthStart, Infinity));
+  const paidLastMonth = revenueReceipts.filter(r => cashIn(r) && inWindow(paidOn(r), prevStart, monthStart));
   const collectedLyd = paidThisMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
@@ -23595,15 +23546,15 @@ function shellDebtorRows() {
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
-    if (!(stats.balance < -0.005)) return;
+    if (!(stats.balanceUSD < -0.005)) return;  // the USD balance is the canonical one-pot value (printed below)
     const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
     let oldest = null;
     unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
     const ageDays = oldest === null ? null : Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(oldest).setHours(0, 0, 0, 0)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
     const lyd = Number(stats.balanceLYD);
-    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
+    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd < 0 ? lyd : stats.balanceUSD * (Number(state.defaultExchangeRate) || 0));
     rows.push({
-      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balance),
+      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balanceUSD),
       overdue: ageDays !== null && ageDays > SHELL_OVERDUE_DAYS,
       number: unpaid.length ? shellReceiptNumber(unpaid.slice().sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0))[0]) : ''
     });
@@ -25258,12 +25209,11 @@ function getCustomerStats(customerId, statsIndex = null) {
   const paidReceipts = customerReceipts.filter(r => {
     const st = String(r.status || '');
     if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
-    return st === 'Paid' || r.isPaid === true;
+    // A verified UNDERPAID completion rewrote amountUSD to the cash the driver
+    // collected: real customer cash (liquidity rule L8), whatever the status says.
+    return st === 'Paid' || r.isPaid === true || (!!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID');
   });
-  // Money transferred OUT to another customer is no longer this customer's
-  // credit — the recipient's transferred-in receipt counts it instead.
-  // Without this deduction the same dollars showed as credit on BOTH
-  // customer cards at once (double-counted per-customer credit).
+  // Money transferred OUT is the recipient's credit (its transferred-in receipt), not this customer's.
   let transferredOutUSD = 0;
   let transferredOutLYD = 0;
   paidReceipts.forEach(receipt => {
@@ -25290,30 +25240,41 @@ function getCustomerStats(customerId, statsIndex = null) {
   // target and money already committed to ads are counted in Spent).
   let receiptDebtUSD = 0;
   let receiptDebtLYD = 0;
+  let unassignedCreditUSD = 0;
+  let unassignedCreditLYD = 0;
   customerReceipts.forEach(receipt => {
     if (getReceiptDebtType(receipt) === 'none') return;
     const target = statsIndex?.usageByReceipt ? getReceiptCollectionTarget(receipt, statsIndex.usageByReceipt.get(String(receipt.id)) || []) : getReceiptCollectionTarget(receipt);
+    // Coverage recorded on the receipt but never attached to an ad row (the
+    // "unassigned" part) still funds the commitments that exceed the customer's
+    // remaining share; the server's coverage readers already credit it.
+    const coveredOnReceiptUSD = Math.max(parseFloat(receipt.companyCoveredUSD) || 0, 0);
+    if (coveredOnReceiptUSD > 0 && target.source !== 'linked_ads') {
+      const rid = String(receipt.id || '');
+      const assignedUSD = customerAds.reduce((s, ad) => s + (Array.isArray(ad.companyFundingAllocations) ? ad.companyFundingAllocations : []).filter(a => String(a?.receiptId || '') === rid).reduce((x, a) => x + Math.max(parseFloat(a?.amountUSD) || 0, 0), 0), 0);
+      const unassignedUSD = Math.max(coveredOnReceiptUSD - assignedUSD, 0);
+      if (unassignedUSD > 0) {
+        const committedHere = (statsIndex && statsIndex.committedUSDByReceiptId) ? (statsIndex.committedUSDByReceiptId.get(rid) || 0) : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
+        const storedHere = Number(receipt.customerOutstandingUSD);
+        const outstandingHere = receipt.customerOutstandingUSD != null && Number.isFinite(storedHere) ? Math.max(storedHere, 0) : Math.max(target.debtUSD, 0);
+        const extraUSD = Math.min(unassignedUSD, Math.max(committedHere - outstandingHere, 0));
+        if (extraUSD > 0) { unassignedCreditUSD += extraUSD; unassignedCreditLYD += extraUSD * (Number(receipt.exchangeRate || state.defaultExchangeRate || 0)); }
+      }
+    }
     if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
-    // PERFORMANCE: with a statsIndex (list renders), the committed total is a
-    // Map lookup built in ONE ads pass; without one (single-record callers),
-    // keep the exact per-receipt scan. Same number either way — the index
-    // mirrors getDeliveryReceiptDueUsage.usedDueUSD bit for bit.
+    // statsIndex (list renders): one-pass Map mirroring getDeliveryReceiptDueUsage.usedDueUSD bit for bit.
     const committedUSD = (statsIndex && statsIndex.committedUSDByReceiptId)
       ? (statsIndex.committedUSDByReceiptId.get(String(receipt.id || '')) || 0)
       : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
-    // COMPANY COVERAGE: the server stores the customer's true remaining
-    // liability in customerOutstandingUSD (gross minus every coverage, minus
-    // any driver-collected cash). The collection target above is ALSO net of
-    // coverage now, so the two agree; the stored value stays preferred
-    // because it additionally nets collected cash on Delivered receipts.
-    // Without this netting the card over-reported debt (e.g. $100 debt,
-    // company covers $40, card showed -$140 instead of -$60). Outstanding is
-    // server-controlled (protect_company_coverage_fields) and capped for
-    // safety.
+    // customerOutstandingUSD (server-controlled) is the true remaining liability: net of
+    // every coverage and of driver-collected cash; preferred over the target, capped for safety.
     const storedOutstanding = Number(receipt.customerOutstandingUSD);
     const outstandingUSD = receipt.customerOutstandingUSD != null && Number.isFinite(storedOutstanding)
       ? Math.min(Math.max(storedOutstanding, 0), target.debtUSD)
       : target.debtUSD;
+    // A rowless not_paid driver ad stays a SEPARATE debt while its delivery receipt is
+    // unpaid (provenance, not a commitment: server _financial_ad_committed; pinned by
+    // test-permissions). Settlement links the two when the driver collects.
     const uncommittedUSD = Math.max(outstandingUSD - committedUSD, 0);
     if (uncommittedUSD <= 0) return;
     receiptDebtUSD += uncommittedUSD;
@@ -25325,13 +25286,8 @@ function getCustomerStats(customerId, statsIndex = null) {
   receiptDebtUSD = Math.round(receiptDebtUSD * 100) / 100;
   receiptDebtLYD = Math.round(receiptDebtLYD * 100) / 100;
 
-  // COMPANY COVERAGE credit for the committed side. When coverage moves a due
-  // row into ad.companyFundingAllocations, the ad's Spent stays the REAL ad
-  // spend (business metric) — but the moved dollars are no longer the
-  // customer's liability. Without this credit the balance would keep charging
-  // the customer for money the company already absorbed. Uncommitted coverage
-  // never lands in these rows (it only shrinks customerOutstandingUSD above),
-  // so each covered dollar is credited exactly once.
+  // Coverage moved into ad.companyFundingAllocations keeps Spent at the real ad spend
+  // but is no longer the customer's liability: credit it once here.
   const customerReceiptIds = new Set(customerReceipts.map(r => String(r.id || '')));
   const customerReceiptsById = new Map(customerReceipts.map(r => [String(r.id || ''), r]));
   const receiptRateById = new Map(customerReceipts.map(r => {
@@ -25426,8 +25382,8 @@ function getCustomerStats(customerId, statsIndex = null) {
       totalSpentLYD += creditableUSD * (receiptRateById.get(linkedReceiptId) || fallbackRate);
     }
   });
-  companyFundedUSD = Math.round(companyFundedUSD * 100) / 100;
-  companyFundedLYD = Math.round(companyFundedLYD * 100) / 100;
+  companyFundedUSD = Math.round((companyFundedUSD + unassignedCreditUSD) * 100) / 100;
+  companyFundedLYD = Math.round((companyFundedLYD + unassignedCreditLYD) * 100) / 100;
 
   // Calculate balance (paid - spent - uncommitted receipt debt + company-covered ad funding)
   // Money is 2dp. The proportional/derived terms above leave float residue,
@@ -26414,6 +26370,21 @@ function _unheldGrant(permissions) {
     }
   }
   return '';
+}
+
+// Server twin (_refuse_unheld_target): may the current user re-role / reset the password of
+// `user`? A held full action covers its Own variant; a driver's own-scope grants do not count.
+function _targetOutranksEditor(user) {
+  if (isCurrentUserAdmin()) return false;
+  const driver = isDeliveryRole(user?.role);
+  for (const [mk, list] of Object.entries(user?.permissions || {})) {
+    for (const pk of (Array.isArray(list) ? list : [])) {
+      if (driver && mk === 'deliveries' && (pk === 'viewOwn' || pk === 'complete')) continue;
+      const base = String(pk).endsWith('Own') ? String(pk).slice(0, -3) : String(pk);
+      if (!currentUserHasPermission(mk, pk) && !(base !== pk && currentUserHasPermission(mk, base))) return true;
+    }
+  }
+  return false;
 }
 
 function _denyUnheldGrant(grant, userId) {
@@ -28923,6 +28894,7 @@ let _companyDebtCoverageDialogState = null;
 
 function _getCompanyCoverableOutstandingUSD(receipt, collectionTarget = null) {
   if (!receipt || receipt._deleted) return 0;
+  if (receipt.isPaid === true || ['Paid', 'Canceled', 'Lost', 'Destroyed'].includes(String(receipt.status || ''))) return 0;  // server twin: 0
   const stored = Number(receipt.customerOutstandingUSD);
   if (receipt.customerOutstandingUSD != null && Number.isFinite(stored)) {
     return Math.max(Math.round(stored * 100) / 100, 0);
@@ -38623,7 +38595,9 @@ function renderModal() {
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
       // Server rules: users.changeRole picks non-admin roles, never your own; only an Admin grants Admin.
-      const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole'));
+      // A colleague who holds a grant you lack cannot be re-roled or have their password reset by you (server rule).
+      const targetOutranks = isEdit && !isAdminEditor && _targetOutranksEditor(userData);
+      const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole') && !targetOutranks);
       const canOpenPerms = canManageUsersAction('managePermissions');
       const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
       const isArU = state.language === 'ar';
@@ -38658,7 +38632,7 @@ function renderModal() {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && !canManageUsersAction('resetPassword') ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && (!canManageUsersAction('resetPassword') || (targetOutranks && !isDeliveryRole(userData.role))) ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
@@ -39813,7 +39787,7 @@ function renderModal() {
         return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
       };
       const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
-      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
 
       const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
@@ -42279,15 +42253,9 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
   return touched;
 }
 
-// If `receipt` is a transferred-in receipt, give the money BACK to the source
-// receipt by removing the paired transfers[] entry (the deduction). Without
-// this, deleting a transferred-in receipt made the money vanish: the target
-// lost it AND the source still showed it as transferred away.
-// Money the target ALREADY SPENT on ads stays deducted at the source — only
-// the unspent remainder returns (the entry shrinks instead of disappearing).
-// IMPORTANT: callers must run this BEFORE cleanupAdFundingLinks, because the
-// spent amount is read from the allocations that cleanup strips.
-// Returns the source receipt when money was returned, else null.
+// If `receipt` is a transferred-in receipt, give the UNSPENT money back to the source by
+// shrinking/removing the paired transfers[] entry. Run BEFORE cleanupAdFundingLinks (the
+// spent amount is read from the allocations it strips). Returns the source or null.
 async function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
@@ -42386,15 +42354,9 @@ async function deleteCustomer(id) {
     }
   }
   if (confirm(warning)) {
-    // Cascade delete: the customer's ADS first, then their receipts. Deleting
-    // the ads first releases the money they spent, so the transfer undo below
-    // returns the full unspent amount to other customers' source receipts.
-    // deleteRecord (instead of a bare _deleted flag with a fire-and-forget
-    // server call) gives every cascaded record the standard server push with
-    // rollback, error notification and audit log.
-    // Every soft-delete of the cascade is collected and pushed to the server
-    // as ONE all-or-nothing batch — a flaky connection can no longer leave
-    // the customer half-deleted with some records resurrecting later.
+    // Cascade delete: ADS first (releases the money they spent so the transfer undo below
+    // returns the full unspent amount), then receipts, via deleteRecord (rollback, toast,
+    // audit); every soft-delete is pushed as ONE all-or-nothing batch.
     const batchDeleteOps = { collectServerOps: [] };
     for (const ad of linkedAds) {
       if (!await deleteRecord(state.ads, ad.id, batchDeleteOps)) return;
