@@ -446,14 +446,9 @@ function markOverlayPopClose(closed) {
 // ==========================================
 // CENTRAL OVERLAY OBSERVER (history + iOS body scroll lock)
 // ==========================================
-// Every standalone surface is appended directly to <body> (verified across
-// src/), so one childList observer is the single hook for all creation
-// sites: it pushes/consumes the sentinel entries above and toggles a body
-// scroll lock while any dialog is open. The lock matters on iOS < 16, where
-// overscroll-behavior (style.css) is unsupported: drags inside a dialog
-// scrolled the page underneath, and at scrollTop 0 triggered pull-to-refresh
-// — reloading the SPA and discarding half-filled forms. The existing CSS
-// stays as the iOS 16+/Android fast path.
+// Every standalone surface is appended to <body>, so one childList observer pushes/consumes
+// the sentinel entries and toggles a body scroll lock while any dialog is open (iOS < 16
+// lacks overscroll-behavior: drags in a dialog scrolled the page / pull-to-refreshed).
 
 let _overlayObservedCount = 0;
 let _scrollLockActive = false;

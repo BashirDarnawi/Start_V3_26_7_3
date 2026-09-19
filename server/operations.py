@@ -443,9 +443,13 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
     # A carried balance is pre-tracking credit, not a sale: out of the volume
     # and paid totals, but an unpaid one still blocks the close like any debt.
     sale_receipts = [row for row in normal_receipts if str(row.get("receiptType") or "") != "CARRIED_BALANCE"]
-    receipt_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in sale_receipts)
+    def _amt(row: dict[str, Any]) -> float:
+        return max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount")))
+    def _underpaid_cash(row: dict[str, Any]) -> bool:  # verified UNDERPAID completion: amountUSD is the cash collected, debtAmountUSD the sale
+        return bool(row.get("deliveredAt")) and str(row.get("paymentResult") or "") == "UNDERPAID"
+    receipt_total = sum(max(_amt(row), _safe_number(row.get("debtAmountUSD"))) if _underpaid_cash(row) else _amt(row) for row in sale_receipts)
     paid_receipts = [row for row in sale_receipts if _receipt_payment_state(row) == "paid"]
-    paid_total = sum(max(0.0, _safe_number(row.get("amountUSD") if row.get("amountUSD") is not None else row.get("amount"))) for row in paid_receipts)
+    paid_total = sum(_amt(row) for row in paid_receipts) + sum(_amt(row) for row in sale_receipts if _underpaid_cash(row) and _receipt_payment_state(row) == "not_paid")
     paid_ads = [row for row in ads if _ad_payment_state(row) == "paid"]
     ad_sales = sum(_ad_sale_usd(row) for row in paid_ads)
     ad_sales_pending = sum(_ad_sale_usd(row) for row in ads if _ad_payment_state(row) == "not_paid")

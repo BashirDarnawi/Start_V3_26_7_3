@@ -189,8 +189,9 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   // "Collected this month" is about when the money came in, not when the
   // receipt was written (a debt collected on the 3rd counts on the 3rd).
   const paidOn = r => (typeof getReceiptPaidDate === 'function' ? getReceiptPaidDate(r) : null) || r.createdAt || r.startDate;
-  const paidThisMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), monthStart, Infinity));
-  const paidLastMonth = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'paid' && inWindow(paidOn(r), prevStart, monthStart));
+  const cashIn = r => getReceiptPaymentState(r) === 'paid' || (!!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID');  // driver-collected cash counts (liquidity rule L8)
+  const paidThisMonth = revenueReceipts.filter(r => cashIn(r) && inWindow(paidOn(r), monthStart, Infinity));
+  const paidLastMonth = revenueReceipts.filter(r => cashIn(r) && inWindow(paidOn(r), prevStart, monthStart));
   const collectedLyd = paidThisMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
@@ -298,15 +299,15 @@ function shellDebtorRows() {
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
-    if (!(stats.balance < -0.005)) return;
+    if (!(stats.balanceUSD < -0.005)) return;  // the USD balance is the canonical one-pot value (printed below)
     const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
     let oldest = null;
     unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
     const ageDays = oldest === null ? null : Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(oldest).setHours(0, 0, 0, 0)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
     const lyd = Number(stats.balanceLYD);
-    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
+    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd < 0 ? lyd : stats.balanceUSD * (Number(state.defaultExchangeRate) || 0));
     rows.push({
-      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balance),
+      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balanceUSD),
       overdue: ageDays !== null && ageDays > SHELL_OVERDUE_DAYS,
       number: unpaid.length ? shellReceiptNumber(unpaid.slice().sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0))[0]) : ''
     });

@@ -1130,14 +1130,9 @@ async function ensureUsersHavePasswordHashes(users = state.users, { persist = tr
 // ==========================================
 // LIFECYCLE FLUSH (phone browsers)
 // ==========================================
-// Phone browsers freeze all timers the instant the page is hidden, and iOS
-// jettisons backgrounded tabs before they resume — losing whatever sat in the
-// 800ms-debounced IndexedDB flush and the 300ms-debounced saveState (in local
-// mode with IndexedDB, that debounced flush is the ONLY durable copy of the
-// business collections). visibilitychange:hidden is the last moment IndexedDB
-// transactions can still start on iOS app-switch; pagehide covers real
-// navigations/reloads. Double-firing is harmless: flushDirtyCollections is
-// re-entrancy-guarded and a no-op when nothing is dirty.
+// Phone browsers freeze timers when hidden and iOS jettisons background tabs, losing the
+// debounced IndexedDB/saveState flush (the ONLY durable copy in local mode).
+// visibilitychange:hidden + pagehide; double-firing is harmless (re-entrancy guard).
 function flushPersistenceNow() {
   try {
     if (_saveStateTimer) { clearTimeout(_saveStateTimer); _saveStateTimer = null; }

@@ -1842,10 +1842,11 @@ function renderAnalyticsView() {
   // isPaid-only rows included), not the raw status text.
   const revenueReceipts = receipts.filter(r => !isTransferInReceipt(r) && !['canceled', 'lost'].includes(getReceiptPaymentState(r)));
   const saleReceipts = revenueReceipts.filter(r => String(r.receiptType || '') !== 'CARRIED_BALANCE');  // pre-tracking credit is not a sale
-  const totalReceiptsUSD = saleReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const underpaidCash = r => !!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID';  // amountUSD = cash collected, debtAmountUSD = the sale
+  const totalReceiptsUSD = saleReceipts.reduce((sum, r) => sum + (underpaidCash(r) ? Math.max(r.amountUSD || 0, r.debtAmountUSD || 0) : (r.amountUSD || 0)), 0);
   const paidReceipts = saleReceipts.filter(r => getReceiptPaymentState(r) === 'paid');
   const pendingReceipts = revenueReceipts.filter(r => getReceiptPaymentState(r) === 'not_paid');
-  const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  const paidUSD = paidReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0) + pendingReceipts.filter(underpaidCash).reduce((sum, r) => sum + (r.amountUSD || 0), 0);
   // Pending is what the customer still owes: money the company already absorbed is not pending.
   const pendingUSD = pendingReceipts.reduce((sum, r) => sum + _receiptCustomerOutstandingUSD(r), 0);
 
@@ -6377,6 +6378,7 @@ function showLogDetails(logId) {
 }
 
 function _receiptCustomerOutstandingUSD(r) {
+  if (r?.isPaid === true || ['Paid', 'Canceled', 'Lost', 'Destroyed'].includes(String(r?.status || ''))) return 0;  // callers filter; safe for the rest
   const amount = Math.max(0, Number(r?.amountUSD) || 0);
   const ceiling = Math.max(amount, Math.max(0, Number(r?.debtAmountUSD) || 0));  // after delivery, amountUSD is the cash collected
   const stored = Number(r?.customerOutstandingUSD);

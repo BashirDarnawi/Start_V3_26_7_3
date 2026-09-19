@@ -731,6 +731,9 @@ async function handleSubscribePlan(planId, navigateToId, shownPriceMinor) {
     if (navigateToId) openServiceById(navigateToId);
   } catch (error) {
     const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
+    if (/price changed/i.test(String(detail))) {  // the sheet shows the old price: reload the catalog in place
+      Promise.resolve(refreshSubscriptionPlans(true)).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); }).catch(() => {});
+    }
     showNotification(
       state.language === 'ar' ? 'تعذر الاشتراك' : 'Could not subscribe',
       String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),

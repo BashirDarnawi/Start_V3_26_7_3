@@ -1009,7 +1009,9 @@ function renderModal() {
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
       // Server rules: users.changeRole picks non-admin roles, never your own; only an Admin grants Admin.
-      const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole'));
+      // A colleague who holds a grant you lack cannot be re-roled or have their password reset by you (server rule).
+      const targetOutranks = isEdit && !isAdminEditor && _targetOutranksEditor(userData);
+      const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole') && !targetOutranks);
       const canOpenPerms = canManageUsersAction('managePermissions');
       const userPermSummary = isEdit && !isAdminRole(userData.role) ? getPermissionSummary(userData.permissions || {}) : null;
       const isArU = state.language === 'ar';
@@ -1044,7 +1046,7 @@ function renderModal() {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && !canManageUsersAction('resetPassword') ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && (!canManageUsersAction('resetPassword') || (targetOutranks && !isDeliveryRole(userData.role))) ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
@@ -2199,7 +2201,7 @@ function renderModal() {
         return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
       };
       const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
-      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
 
       const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
@@ -4665,15 +4667,9 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
   return touched;
 }
 
-// If `receipt` is a transferred-in receipt, give the money BACK to the source
-// receipt by removing the paired transfers[] entry (the deduction). Without
-// this, deleting a transferred-in receipt made the money vanish: the target
-// lost it AND the source still showed it as transferred away.
-// Money the target ALREADY SPENT on ads stays deducted at the source — only
-// the unspent remainder returns (the entry shrinks instead of disappearing).
-// IMPORTANT: callers must run this BEFORE cleanupAdFundingLinks, because the
-// spent amount is read from the allocations that cleanup strips.
-// Returns the source receipt when money was returned, else null.
+// If `receipt` is a transferred-in receipt, give the UNSPENT money back to the source by
+// shrinking/removing the paired transfers[] entry. Run BEFORE cleanupAdFundingLinks (the
+// spent amount is read from the allocations it strips). Returns the source or null.
 async function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
@@ -4772,15 +4768,9 @@ async function deleteCustomer(id) {
     }
   }
   if (confirm(warning)) {
-    // Cascade delete: the customer's ADS first, then their receipts. Deleting
-    // the ads first releases the money they spent, so the transfer undo below
-    // returns the full unspent amount to other customers' source receipts.
-    // deleteRecord (instead of a bare _deleted flag with a fire-and-forget
-    // server call) gives every cascaded record the standard server push with
-    // rollback, error notification and audit log.
-    // Every soft-delete of the cascade is collected and pushed to the server
-    // as ONE all-or-nothing batch — a flaky connection can no longer leave
-    // the customer half-deleted with some records resurrecting later.
+    // Cascade delete: ADS first (releases the money they spent so the transfer undo below
+    // returns the full unspent amount), then receipts, via deleteRecord (rollback, toast,
+    // audit); every soft-delete is pushed as ONE all-or-nothing batch.
     const batchDeleteOps = { collectServerOps: [] };
     for (const ad of linkedAds) {
       if (!await deleteRecord(state.ads, ad.id, batchDeleteOps)) return;

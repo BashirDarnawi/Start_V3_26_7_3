@@ -184,16 +184,10 @@ function initIndexedDB(onLateOpen) {
 
     request.onsuccess = (event) => {
       const database = event.target.result;
-      // LATE OPEN (the watchdog or onblocked already resolved this promise
-      // with null): adopting the connection is only safe when the caller can
-      // recover, because `db` truthiness makes saveState() drop the business
-      // collections from the localStorage snapshot and re-enables the dirty
-      // flush — with in-memory arrays that were loaded WITHOUT IndexedDB.
-      // At startup (no onLateOpen) close the connection and stay in the
-      // db === null snapshot mode for the whole session; the intact
-      // IndexedDB dataset survives untouched until the next reload. The
-      // onclose reopen path passes a recovery callback instead: there the
-      // in-memory state IS authoritative, so adopt and re-persist it.
+      // LATE OPEN (the watchdog/onblocked already resolved with null): adopt the connection
+      // only when the caller can recover (`db` truthiness drops the business collections from
+      // the localStorage snapshot). At startup (no onLateOpen) close it and stay in snapshot
+      // mode; the onclose reopen path adopts and re-persists the authoritative in-memory state.
       if (settled && typeof onLateOpen !== 'function') {
         try { database.close(); } catch (_) {}
         return;

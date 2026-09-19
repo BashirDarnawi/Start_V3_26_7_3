@@ -218,6 +218,44 @@ async function main() {
     assert.equal((await sandbox.serverLiveSyncOnce()).skipped, true);
     assert.equal(reloads, 0);
   });
+  await test('customer card credits the cash a driver collected on an underpaid delivery; Collect prints its USD', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'en';
+    state.defaultExchangeRate = 10;
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser];
+    state.customers = [{ id: 'c1', name: 'Under Paid' }];
+    state.pages = [];
+    const now = new Date().toISOString();
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', exchangeRate: 10, payments: [], transfers: [], createdAt: now,
+      statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'Delivered', deliveredAt: now,
+      amountUSD: 70, amountLocal: 700, debtAmountUSD: 100, debtAmountLocal: 1000, amountCollectedFromCustomer: 700, paymentResult: 'UNDERPAID',
+      remainingDue: 300, customerOutstandingUSD: 30, status: 'Not Paid', isPaid: false }];
+    state.ads = [{ id: 'a1', recordType: 'ad', customerId: 'c1', amountUSD: 100, amountLocal: 1000, exchangeRate: 10, spentUSD: 100, status: 'Active',
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop', receiptId: 'r1', receiptAllocations: [],
+      dueAllocations: [{ receiptId: 'r1', amountUSD: 100 }], dueAmountToUseUSD: 100, startDate: now, createdAt: now }];
+    const stats = sandbox.getCustomerStats('c1');
+    near(stats.totalPaidUSD, 70);
+    near(stats.balanceUSD, -30);   // before: -100 — the $70 the driver collected was credited nowhere
+    const rows = sandbox.shellDebtorRows();
+    assert.equal(rows.length, 1);
+    near(rows[0].dueUsd, 30);      // before: the LYD balance printed as dollars
+    near(rows[0].dueLyd, 300);
+  });
+  await test('user form: a target outranks the editor only by grants the editor does not cover', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.currentUser = { id: 'mgr', role: 'Employee', permissions: { users: ['view', 'changeRole', 'resetPassword'], customers: ['view', 'viewContacts'], deliveries: ['view', 'assign', 'accept', 'markCollected'], ads: ['view'] } };
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Employee', permissions: { customers: ['viewOwn'] } }), false);       // view covers viewOwn
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Delivery', permissions: { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'] } }), false);  // template driver
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Employee', permissions: { receipts: ['view'] } }), true);
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Employee', permissions: { deliveries: ['complete'] } }), true);      // office account: complete is not covered
+  });
+  await test('an employee with analytics.view lands on Analytics, never on the admin-only Control Center', async () => {
+    const { sandbox } = loadBrowserSource();
+    assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Employee', permissions: { analytics: ['view'], customers: ['view'] } }), 'analytics');
+    assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Employee', permissions: { customers: ['view'] } }), 'customers');
+    assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Admin', permissions: {} }), 'control-center');
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

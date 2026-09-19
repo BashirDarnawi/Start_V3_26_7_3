@@ -243,11 +243,17 @@ def create_ad_campaign_actions_router(
                 captured = int(((paid_row or {}).get("data") or {}).get("amountMinor") or 0)
                 spent = min(max(int(data.get("spendMinorUSD") or 0), 0), max(captured, 0))
                 if staff:
-                    refund = (
-                        int(body.refundMinorUSD)
-                        if body.refundMinorUSD is not None
-                        else captured - spent
+                    launched = bool(
+                        str(data.get("publishStatus") or "").strip() or str(data.get("metaCampaignId") or "").strip()
                     )
+                    if body.refundMinorUSD is None and launched:
+                        # A launched campaign has (almost surely) spent on Meta and nothing
+                        # records that spend: defaulting to the whole budget refunded it.
+                        raise HTTPException(
+                            status_code=400,
+                            detail="refundMinorUSD is required for a launched campaign (0 closes it without a refund)",
+                        )
+                    refund = int(body.refundMinorUSD) if body.refundMinorUSD is not None else captured - spent
                     if refund < 0 or refund > captured - spent:
                         raise HTTPException(
                             status_code=400,

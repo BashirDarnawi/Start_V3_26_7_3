@@ -4806,7 +4806,7 @@ def _enforce_ad_campaign_owner_quota_conn(
     if stored_bytes + proposed_bytes > MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail="Ads Studio storage quota reached. Remove images or archive an older reviewed campaign.",
+            detail="Ads Studio storage quota reached. Remove images, or archive a finished campaign (ask us to close a running one first).",
         )
 
 
@@ -6853,6 +6853,8 @@ def _receipt_transfer_atomic(
             if int(source_row["last_modified"]) != int(body.expectedSourceLastModified):
                 raise HTTPException(status_code=409, detail="Conflict: source receipt has changed")
             source = _financial_row_data(source_row)
+            if not is_within_delivery_scope(actor, source) or not user_has_permission(actor, "receipts", "view", record_creator_id=str(source_row.get("created_by") or source.get("creatorId") or "")):
+                raise HTTPException(status_code=403, detail="Forbidden")  # transfer only from a receipt you can see
             assert_financial_period_open("receipts", source, conn=conn)
             source_status = str(source.get("status") or "")
             if source_status in {"Canceled", "Lost", "Destroyed"} or not (
@@ -8678,6 +8680,8 @@ def _ad_stop_atomic(
             if not initial or bool(initial["deleted"]):
                 raise HTTPException(status_code=404, detail="Ad not found")
             initial_data = _financial_row_data(initial)
+            if not user_has_permission(actor, "ads", "view", record_creator_id=str(initial.get("created_by") or initial_data.get("creatorId") or "")):
+                raise HTTPException(status_code=403, detail="Forbidden")  # stop only an ad you can see (viewOwn + stopAd)
             assert_financial_period_open("ads", initial_data, conn=conn)
             locked_receipts = _financial_lock_receipts(
                 conn, _financial_receipt_ids(initial_data), postgres=postgres
@@ -10488,6 +10492,8 @@ def review_ad_campaign_request(
         if str(current.get("startDate") or "")[:10] < _today_iso <= str(current.get("endDate") or "9999")[:10]:
             bumped_start = _today_iso
             current = {**current, "startDate": bumped_start}
+        elif str(current.get("endDate") or "9999")[:10] < _today_iso:
+            raise HTTPException(status_code=409, detail="The campaign dates have passed; request changes so the customer can re-date it")
         # Approval means launch-ready. Revalidate server-side so older clients
         # and legacy drafts cannot bypass today's targeting/link rules.
         with _ad_campaign_media_validation_slot(user):
@@ -11143,17 +11149,11 @@ def get_sync_watermarks(user: dict[str, Any] = Depends(current_user)):
                         conn, collection, personal_user_id=uid
                     )
                 continue
-            if role_lower == "delivery":
-                if collection in {"ads", "receipts"}:
-                    watermarks[collection] = _sync_watermark_max(
-                        conn, collection, assigned_to=uid
-                    )
-                elif collection == "customers":
-                    watermarks[collection] = _sync_watermark_max(
-                        conn, collection, referenced_customer_by=uid
-                    )
-                elif collection == "exchangeRateHistory":
-                    watermarks[collection] = _sync_watermark_max(conn, collection)
+            if role_lower == "delivery" and collection in {"ads", "receipts", "customers"}:  # other grants use the generic rule
+                if collection == "customers":
+                    watermarks[collection] = _sync_watermark_max(conn, collection, referenced_customer_by=uid)
+                else:
+                    watermarks[collection] = _sync_watermark_max(conn, collection, assigned_to=uid)
                 continue
 
             module = _module_for_collection(collection)
@@ -13277,11 +13277,7 @@ def cleanup_audit_logs(
     user: dict[str, Any] = Depends(current_user),
     request: Request = None,
 ):
-    """
-    Delete audit logs older than specified days (default: 1 year).
-    Requires the auditLogs.clear permission (admins pass automatically).
-    CSRF-protected.
-    """
+    """Delete audit logs older than N days (auditLogs.clear; CSRF-protected). Money-trail actions are kept forever."""
     require_same_origin(request)
     if not user_has_permission(user, "auditLogs", "clear"):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -13300,14 +13296,14 @@ def cleanup_audit_logs(
     with db_conn() as conn:
         # Count logs to be deleted
         count_row = conn.execute(
-            text("SELECT COUNT(*) as cnt FROM audit_logs WHERE ts < :cutoff"),
+            text(f"SELECT COUNT(*) as cnt FROM audit_logs WHERE ts < :cutoff AND action NOT IN {_AUDIT_KEEP_ACTIONS}"),
             {"cutoff": cutoff_ts}
         ).mappings().first()
         deleted_count = int(count_row.get("cnt") or 0) if count_row else 0
         
-        # Delete old logs
+        # Delete old logs (same protected set as the retention job: close/import/coverage/... rows stay)
         conn.execute(
-            text("DELETE FROM audit_logs WHERE ts < :cutoff"),
+            text(f"DELETE FROM audit_logs WHERE ts < :cutoff AND action NOT IN {_AUDIT_KEEP_ACTIONS}"),
             {"cutoff": cutoff_ts}
         )
     
@@ -13630,6 +13626,22 @@ def _validated_permission_payload(raw_permissions: Any) -> dict[str, list[str]]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _refuse_unheld_target(actor: dict[str, Any], target: dict[str, Any], detail: str) -> None:
+    """Takeover guard: a delegated manager may not act on a colleague who holds a grant the manager lacks.
+    A held full action covers its Own variant; a driver's own-scope grants (deliveries.viewOwn/complete)
+    are not power an office account could inherit. Client twin: _targetOutranksEditor."""
+    if str(actor.get("role") or "").lower() == "admin":
+        return
+    driver = str(target.get("role") or "").lower() == "delivery"
+    for module, actions in _load_permissions(target.get("permissions_json")).items():
+        for action in actions:
+            if driver and module == "deliveries" and action in ("viewOwn", "complete"):
+                continue
+            base = action[:-3] if action.endswith("Own") else action
+            if not user_has_permission(actor, module, action) and not (base != action and user_has_permission(actor, module, base)):
+                raise HTTPException(status_code=403, detail=detail)
+
+
 def _ensure_actor_can_grant_permissions(
     actor: dict[str, Any], permissions: dict[str, list[str]], *, explicit: bool
 ) -> None:
@@ -13842,26 +13854,17 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                 # Self password changes must verify the current password.
                 raise HTTPException(status_code=400, detail="Use /api/auth/password-change to change your own password")
             _need("resetPassword")
-            # Setting someone's password IS taking over their account: a
-            # delegated manager may never do that to a colleague who holds
-            # power the manager lacks. Legacy rows are read tolerantly (retired
-            # names ignored). Delivery accounts are exempt: their grants are
-            # scoped to their own assignments, and resetting a driver's password
-            # is the everyday case for an office manager.
+            # Setting someone's password IS taking over their account: never for a
+            # colleague who holds power the manager lacks (legacy names ignored).
+            # Delivery accounts are exempt (grants scoped to their own assignments).
             if str(existing.get("role") or "").lower() != "delivery":
-                try:
-                    _ensure_actor_can_grant_permissions(
-                        admin, _load_permissions(existing.get("permissions_json")), explicit=False
-                    )
-                except HTTPException:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Cannot reset the password of a user who holds permissions you do not",
-                    )
+                _refuse_unheld_target(admin, existing, "Cannot reset the password of a user who holds permissions you do not")
         if requested_role is not None and requested_role != str(existing.get("role") or ""):
             if _is_self:
                 raise HTTPException(status_code=403, detail="You cannot change your own role")
             _need("changeRole")
+            # The role-flip chain (-> Delivery, reset the password, -> back) must not beat the guard above.
+            _refuse_unheld_target(admin, existing, "Cannot change the role of a user who holds permissions you do not")
             if str(existing.get("role") or "").lower() == "delivery" and str(requested_role).lower() != "delivery":
                 with db_conn() as conn:  # the board would show this driver's jobs as unassigned
                     _open_jobs = conn.execute(text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"), {"uid": user_id}).scalar() or 0

@@ -201,13 +201,8 @@ document.addEventListener('visibilitychange', () => {
 // ==========================================
 // PERFORMANCE MODE (for weak/old devices)
 // ==========================================
-// The default look leans hard on the GPU: a viewport-sized aurora layer under
-// filter:blur(110px) animating forever, a full-screen backdrop-blur overlay,
-// and backdrop-filter blur(14px) on every glass panel. On an old laptop or a
-// cheap phone that turns every scroll and repaint into a slideshow.
-// body.perf-lite (style.css) keeps ALL features and the same layout but turns
-// those decorations off. Preference is per-device (localStorage); lite is the
-// DEFAULT — only an explicit 'full' choice in Settings enables the effects.
+// body.perf-lite (style.css) keeps ALL features but turns the GPU-heavy decorations off
+// (aurora blur, backdrop blur). Per-device preference; lite is the DEFAULT.
 
 function isPerformanceModeOn() {
   let pref = null;

@@ -1084,12 +1084,11 @@ function getCustomerStats(customerId, statsIndex = null) {
   const paidReceipts = customerReceipts.filter(r => {
     const st = String(r.status || '');
     if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
-    return st === 'Paid' || r.isPaid === true;
+    // A verified UNDERPAID completion rewrote amountUSD to the cash the driver
+    // collected: real customer cash (liquidity rule L8), whatever the status says.
+    return st === 'Paid' || r.isPaid === true || (!!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID');
   });
-  // Money transferred OUT to another customer is no longer this customer's
-  // credit — the recipient's transferred-in receipt counts it instead.
-  // Without this deduction the same dollars showed as credit on BOTH
-  // customer cards at once (double-counted per-customer credit).
+  // Money transferred OUT is the recipient's credit (its transferred-in receipt), not this customer's.
   let transferredOutUSD = 0;
   let transferredOutLYD = 0;
   paidReceipts.forEach(receipt => {
@@ -1116,30 +1115,41 @@ function getCustomerStats(customerId, statsIndex = null) {
   // target and money already committed to ads are counted in Spent).
   let receiptDebtUSD = 0;
   let receiptDebtLYD = 0;
+  let unassignedCreditUSD = 0;
+  let unassignedCreditLYD = 0;
   customerReceipts.forEach(receipt => {
     if (getReceiptDebtType(receipt) === 'none') return;
     const target = statsIndex?.usageByReceipt ? getReceiptCollectionTarget(receipt, statsIndex.usageByReceipt.get(String(receipt.id)) || []) : getReceiptCollectionTarget(receipt);
+    // Coverage recorded on the receipt but never attached to an ad row (the
+    // "unassigned" part) still funds the commitments that exceed the customer's
+    // remaining share; the server's coverage readers already credit it.
+    const coveredOnReceiptUSD = Math.max(parseFloat(receipt.companyCoveredUSD) || 0, 0);
+    if (coveredOnReceiptUSD > 0 && target.source !== 'linked_ads') {
+      const rid = String(receipt.id || '');
+      const assignedUSD = customerAds.reduce((s, ad) => s + (Array.isArray(ad.companyFundingAllocations) ? ad.companyFundingAllocations : []).filter(a => String(a?.receiptId || '') === rid).reduce((x, a) => x + Math.max(parseFloat(a?.amountUSD) || 0, 0), 0), 0);
+      const unassignedUSD = Math.max(coveredOnReceiptUSD - assignedUSD, 0);
+      if (unassignedUSD > 0) {
+        const committedHere = (statsIndex && statsIndex.committedUSDByReceiptId) ? (statsIndex.committedUSDByReceiptId.get(rid) || 0) : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
+        const storedHere = Number(receipt.customerOutstandingUSD);
+        const outstandingHere = receipt.customerOutstandingUSD != null && Number.isFinite(storedHere) ? Math.max(storedHere, 0) : Math.max(target.debtUSD, 0);
+        const extraUSD = Math.min(unassignedUSD, Math.max(committedHere - outstandingHere, 0));
+        if (extraUSD > 0) { unassignedCreditUSD += extraUSD; unassignedCreditLYD += extraUSD * (Number(receipt.exchangeRate || state.defaultExchangeRate || 0)); }
+      }
+    }
     if (target.source === 'linked_ads' || !(target.debtUSD > 0)) return;
-    // PERFORMANCE: with a statsIndex (list renders), the committed total is a
-    // Map lookup built in ONE ads pass; without one (single-record callers),
-    // keep the exact per-receipt scan. Same number either way — the index
-    // mirrors getDeliveryReceiptDueUsage.usedDueUSD bit for bit.
+    // statsIndex (list renders): one-pass Map mirroring getDeliveryReceiptDueUsage.usedDueUSD bit for bit.
     const committedUSD = (statsIndex && statsIndex.committedUSDByReceiptId)
       ? (statsIndex.committedUSDByReceiptId.get(String(receipt.id || '')) || 0)
       : (getDeliveryReceiptDueUsage(receipt).usedDueUSD || 0);
-    // COMPANY COVERAGE: the server stores the customer's true remaining
-    // liability in customerOutstandingUSD (gross minus every coverage, minus
-    // any driver-collected cash). The collection target above is ALSO net of
-    // coverage now, so the two agree; the stored value stays preferred
-    // because it additionally nets collected cash on Delivered receipts.
-    // Without this netting the card over-reported debt (e.g. $100 debt,
-    // company covers $40, card showed -$140 instead of -$60). Outstanding is
-    // server-controlled (protect_company_coverage_fields) and capped for
-    // safety.
+    // customerOutstandingUSD (server-controlled) is the true remaining liability: net of
+    // every coverage and of driver-collected cash; preferred over the target, capped for safety.
     const storedOutstanding = Number(receipt.customerOutstandingUSD);
     const outstandingUSD = receipt.customerOutstandingUSD != null && Number.isFinite(storedOutstanding)
       ? Math.min(Math.max(storedOutstanding, 0), target.debtUSD)
       : target.debtUSD;
+    // A rowless not_paid driver ad stays a SEPARATE debt while its delivery receipt is
+    // unpaid (provenance, not a commitment: server _financial_ad_committed; pinned by
+    // test-permissions). Settlement links the two when the driver collects.
     const uncommittedUSD = Math.max(outstandingUSD - committedUSD, 0);
     if (uncommittedUSD <= 0) return;
     receiptDebtUSD += uncommittedUSD;
@@ -1151,13 +1161,8 @@ function getCustomerStats(customerId, statsIndex = null) {
   receiptDebtUSD = Math.round(receiptDebtUSD * 100) / 100;
   receiptDebtLYD = Math.round(receiptDebtLYD * 100) / 100;
 
-  // COMPANY COVERAGE credit for the committed side. When coverage moves a due
-  // row into ad.companyFundingAllocations, the ad's Spent stays the REAL ad
-  // spend (business metric) — but the moved dollars are no longer the
-  // customer's liability. Without this credit the balance would keep charging
-  // the customer for money the company already absorbed. Uncommitted coverage
-  // never lands in these rows (it only shrinks customerOutstandingUSD above),
-  // so each covered dollar is credited exactly once.
+  // Coverage moved into ad.companyFundingAllocations keeps Spent at the real ad spend
+  // but is no longer the customer's liability: credit it once here.
   const customerReceiptIds = new Set(customerReceipts.map(r => String(r.id || '')));
   const customerReceiptsById = new Map(customerReceipts.map(r => [String(r.id || ''), r]));
   const receiptRateById = new Map(customerReceipts.map(r => {
@@ -1252,8 +1257,8 @@ function getCustomerStats(customerId, statsIndex = null) {
       totalSpentLYD += creditableUSD * (receiptRateById.get(linkedReceiptId) || fallbackRate);
     }
   });
-  companyFundedUSD = Math.round(companyFundedUSD * 100) / 100;
-  companyFundedLYD = Math.round(companyFundedLYD * 100) / 100;
+  companyFundedUSD = Math.round((companyFundedUSD + unassignedCreditUSD) * 100) / 100;
+  companyFundedLYD = Math.round((companyFundedLYD + unassignedCreditLYD) * 100) / 100;
 
   // Calculate balance (paid - spent - uncommitted receipt debt + company-covered ad funding)
   // Money is 2dp. The proportional/derived terms above leave float residue,
@@ -2240,6 +2245,21 @@ function _unheldGrant(permissions) {
     }
   }
   return '';
+}
+
+// Server twin (_refuse_unheld_target): may the current user re-role / reset the password of
+// `user`? A held full action covers its Own variant; a driver's own-scope grants do not count.
+function _targetOutranksEditor(user) {
+  if (isCurrentUserAdmin()) return false;
+  const driver = isDeliveryRole(user?.role);
+  for (const [mk, list] of Object.entries(user?.permissions || {})) {
+    for (const pk of (Array.isArray(list) ? list : [])) {
+      if (driver && mk === 'deliveries' && (pk === 'viewOwn' || pk === 'complete')) continue;
+      const base = String(pk).endsWith('Own') ? String(pk).slice(0, -3) : String(pk);
+      if (!currentUserHasPermission(mk, pk) && !(base !== pk && currentUserHasPermission(mk, base))) return true;
+    }
+  }
+  return false;
 }
 
 function _denyUnheldGrant(grant, userId) {
@@ -4749,6 +4769,7 @@ let _companyDebtCoverageDialogState = null;
 
 function _getCompanyCoverableOutstandingUSD(receipt, collectionTarget = null) {
   if (!receipt || receipt._deleted) return 0;
+  if (receipt.isPaid === true || ['Paid', 'Canceled', 'Lost', 'Destroyed'].includes(String(receipt.status || ''))) return 0;  // server twin: 0
   const stored = Number(receipt.customerOutstandingUSD);
   if (receipt.customerOutstandingUSD != null && Number.isFinite(stored)) {
     return Math.max(Math.round(stored * 100) / 100, 0);

@@ -661,16 +661,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
     const _nextReceiptStatus = collectionName === 'receipts'
       ? String(sanitizedUpdates.status ?? old.status ?? '').trim().toLowerCase()
       : '';
-    // Route EVERY resulting Paid receipt through the cascade endpoint, not only
-    // a fresh transition. This repairs old Paid receipts whose ads still carry
-    // legacy due rows and returns those repaired ads immediately to the UI.
-    //
-    // EXCEPT a paid-KEEPING edit that touches only the narrow-grant fields the
-    // generic PATCH route authorizes under receipts.markCollected /
-    // deliveries.* (server _RECEIPT_COLLECTION_FIELDS + delivery_workflow.py,
-    // whose cancel / "Delete mission" also carry deliveryHistory + statusDetail).
-    // /settle demands receipts.edit, so routing such a click through it 403'd
-    // every staff member holding only the collect or assign permission.
+    // Route EVERY resulting Paid receipt through the cascade endpoint (repairs old Paid
+    // receipts whose ads still carry legacy due rows) — EXCEPT a paid-keeping edit that
+    // touches only the narrow-grant fields the generic PATCH authorizes under
+    // receipts.markCollected / deliveries.* (/settle demands receipts.edit and 403'd them).
     const _RECEIPT_NARROW_GRANT_FIELDS = new Set([
       'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',
       'collectedAt', 'collectedBy', 'isReceivedInOffice', 'receivedInOfficeAt',
@@ -842,15 +836,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
               saveState();
             }
           }
-          // Settle/convert skipped the optimistic paint, so this echo is the
-          // FIRST paint of the committed multi-entity state (receipt + ads +
-          // customer debt + reconciliation): keep the full render. A plain
-          // PATCH echo was already painted optimistically 100-500ms ago —
-          // schedule a normal render instead so the identical-HTML skip turns
-          // the common byte-identical echo into a no-DOM-op rather than a
-          // second full innerHTML swap (double entry-animation + icon flash
-          // on phones); when the server echo really drifted, only the view
-          // container repaints via the partial path.
+          // Settle/convert skipped the optimistic paint, so this echo is the FIRST paint of the
+          // committed multi-entity state: keep the full render. A plain PATCH echo was already
+          // painted; schedule a normal render so a byte-identical echo is a no-DOM-op.
           if (_settlesReceipt || _convertsReceipt) {
             forceFullRender();
           } else {
@@ -896,17 +884,11 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (typeof reseedClothesEditState === 'function') { try { reseedClothesEditState(collectionName, array[idx]); } catch (_) {} }  // temp rows + baseline follow
                 try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
               }
-              // A settle/unsettle whose FIRST attempt committed but whose
-              // response was lost lands here on the user's manual retry: the
-              // fresh idempotency key bypasses the server replay marker and
-              // the stale modal baseline 409s. Claim "already saved" ONLY
-              // when the stored record actually matches what THIS save
-              // intended field-by-field — the status boolean alone misfired
-              // for any concurrent edit on a Paid receipt (every paid-keeping
-              // edit routes through the settle path), showing a success toast
-              // for an edit that was never saved. Volatile server-stamped
-              // keys are excluded; a too-strict match only downgrades to the
-              // honest conflict warning, never to a false success.
+              // A settle/unsettle whose FIRST attempt committed but whose response was lost lands
+              // here on the manual retry (fresh key, stale baseline 409). Claim "already saved" ONLY
+              // when the stored record matches what THIS save intended field-by-field (volatile
+              // server-stamped keys excluded); a too-strict match only downgrades to the honest
+              // conflict warning, never to a false success.
               const _volatileMatchKeys = ['_lastModified', 'lastModified', 'updatedAt', 'editHistory', 'editCount', 'collectionDate', 'deliveryHistory', 'customerName', 'createdByName'];
               const _intentMatchesLatest = () => {
                 try {
@@ -1374,8 +1356,10 @@ function userCanAccessView(user, view) {
 function getAlbayanManagerLandingViewForUser(user) {
   const role = String(user?.role || '');
   if (isDeliveryRole(role)) return 'delivery-dashboard';
-  // Pick the first view they are allowed to open
+  // Pick the first view they are allowed to open (the router bounces staff off admin-only views)
+  const staff = role.toLowerCase() !== 'admin';
   for (const view of ALBAYAN_MANAGER_VIEW_ORDER) {
+    if (staff && PLATFORM_ADMIN_ONLY_VIEWS.has(view)) continue;
     if (userCanAccessView(user, view)) return view;
   }
   return 'no-access';
@@ -1540,20 +1524,10 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       return sum + explicitAllocations;
     }
 
-    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY when the ad carries no
-    // allocation data at all (legacy records that predate allocations). If the
-    // ad HAS allocation entries — they just point at OTHER receipts — then a
-    // zero sum for THIS receipt means this receipt funded nothing; charging the
-    // full ad spend here would count the same dollars on two receipts at once
-    // (e.g. a delivery ad matched via linkedDeliveryReceiptId but funded
-    // entirely from a merged paid receipt).
-    // "Has allocation data" means the arrays are PRESENT — even when empty.
-    // Empty arrays happen when a funding receipt was deleted and the cleanup
-    // stripped its rows; falling back to the full ad spend then would charge
-    // the WHOLE ad to some other linked receipt (e.g. the delivery receipt
-    // matched via ad.receiptId), inventing usage out of nothing. The
-    // spentUSD/amountUSD fallback is only for legacy records that predate
-    // allocations entirely (no arrays at all).
+    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY for legacy ads with no allocation
+    // arrays at all. Present-but-empty arrays (funding receipt deleted) or rows pointing at
+    // OTHER receipts mean this receipt funded nothing; charging the full spend would count
+    // the same dollars on two receipts at once.
     const hasAllocationData =
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations) ||
@@ -1618,16 +1592,8 @@ function getDeliveryReceiptDueUsage(receipt) {
     return { totalDueUSD: 0, usedDueUSD: 0, remainingDueUSD: 0, fundedAds: [] };
   }
 
-  // ONE POT. A receipt is a single sum of money; "delivery due" and "paid balance" are
-  // two NAMES for it at two moments in time, not two pots. This function used to keep a
-  // second, independent ledger: it counted ONLY dueAllocations and read the frozen debt
-  // as a capacity of its own. So once a driver collected a receipt, the same money was
-  // advertised twice — once as due credit here, once as paid balance by
-  // getReceiptUsageStats — and two ads could each spend it.
-  //
-  // Both readers are now views over the SAME committed total. getReceiptUsageStats
-  // already sums every commitment against a receipt (receiptAllocations + dueAllocations
-  // + the legacy mirror), so defer to it rather than maintaining a rival count.
+  // ONE POT: "delivery due" and "paid balance" are two names for one sum. Both readers are
+  // views over the SAME committed total (getReceiptUsageStats sums every commitment).
   const exchangeRate = receiptObj.exchangeRate || state.defaultExchangeRate || 1;
   const dueAmountLocal = Number(receiptObj.debtAmountLocal ?? receiptObj.amountLocal ?? 0) || 0;
   const debtUSD = exchangeRate > 0 ? dueAmountLocal / exchangeRate : 0;
