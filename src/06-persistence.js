@@ -298,12 +298,8 @@ async function flushDirtyCollections() {
 // ==========================================
 // STORAGE-EVICTION DETECTION (local mode)
 // ==========================================
-// iOS Safari's ITP deletes ALL script-writable storage (localStorage AND
-// IndexedDB, including the in-app backups store) for an origin after 7 days
-// of Safari use without a visit; Chrome/Android can evict non-persistent
-// origins under disk pressure. After such a wipe the app is indistinguishable
-// from a fresh install — except for this cookie, which browsers do not evict
-// with site storage (best-effort on iOS, where ITP caps JS cookies at 7 days).
+// iOS ITP (7 days unvisited) and Android disk pressure can wipe localStorage AND IndexedDB;
+// this cookie (not evicted with site storage, best-effort on iOS) tells a wipe from a fresh install.
 let _hadDataSentinelSet = false;
 function _maybeSetHadDataSentinel() {
   if (_hadDataSentinelSet) return;

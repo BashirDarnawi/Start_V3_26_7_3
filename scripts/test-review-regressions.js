@@ -256,6 +256,36 @@ async function main() {
     assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Employee', permissions: { customers: ['view'] } }), 'customers');
     assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Admin', permissions: {} }), 'control-center');
   });
+  await test('Meta Insights shows the money inside each ad account, escaped, with a failing account kept visible', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.language = 'en';
+    state.ads = [{ id: 'a1', metaAdAccountId: '555555555555555', metaAdAccountName: 'Prepaid Balance 3' }];
+    // The harness's fake DOM has no innerHTML escaping; use a real escaper so the escaping assertions mean something.
+    run("Security.escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')");
+    run(`metaInsightsUi.funds = ${JSON.stringify({
+      fetchedAt: '2026-09-23T09:00:00Z', truncated: false,
+      accounts: [
+        { id: '555555555555555', name: 'Ad account 555555555555555', error: 'Meta said "no" & stopped' },
+        { id: '222222222222222', name: 'View only "A&B"', currency: 'USD', fundsText: '', fundsMinor: null, fundsHidden: true, capRemainingMinor: null, amountDueMinor: 0 },
+        { id: '444444444444444', name: 'Prepaid Balance 2', currency: 'USD', fundsText: 'Available Balance ($200.00 USD)', fundsMinor: 20000, capRemainingMinor: null, amountDueMinor: 0 },
+        { id: '333333333333333', name: 'Card account', currency: 'USD', fundsText: '<img src=x onerror=alert(1)>', fundsMinor: null, capRemainingMinor: 37655, amountDueMinor: 700 },
+        { id: '111111111111111', name: 'Paused account', currency: 'USD', fundsText: 'Available Balance ($50.00 USD)', fundsMinor: 5000, stale: true, staleReason: 'Meta is temporarily limiting synchronization.' }
+      ]
+    })}`);
+    const html = sandbox.metaInsightsFundsCard(false);
+    assert.ok(html.includes('Money in the ad accounts'));
+    assert.ok(html.includes('text-sky-700 dark:text-sky-300">$200.00</span>'), 'prepaid funds drawn as the big amount');
+    assert.ok(html.indexOf('Prepaid Balance 2') < html.indexOf('Prepaid Balance 3'), 'accounts holding money are listed first');
+    assert.ok(html.includes('Prepaid Balance 3'), 'an unreadable account keeps the name the ads know it by');
+    assert.ok(html.includes('Meta said &quot;no&quot; &amp; stopped') && !html.includes('Meta said "no"'), 'the error is shown, escaped');
+    assert.ok(html.includes('View only &quot;A&amp;B&quot;') && html.includes('Full control'), 'hidden funds explain the access Meta needs');
+    assert.ok(html.includes('Last known amount') && html.includes('$50.00'), 'a paused re-read keeps the last good amount');
+    assert.ok(html.includes('Spend limit left') && html.includes('$376.55') && html.includes('Amount due') && html.includes('$7.00'));
+    assert.ok(!html.includes('<img src=x'), 'Meta text is escaped');
+    assert.ok(sandbox.metaInsightsFundsCard(true).includes('الأموال في حسابات الإعلانات'), 'Arabic title');
+    sandbox.resetAuthenticatedServerCaches();
+    assert.equal(run('metaInsightsUi.funds'), null, 'account money never survives logout');
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

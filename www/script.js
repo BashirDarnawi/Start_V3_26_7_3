@@ -3124,14 +3124,9 @@ async function loadCollectionFromIndexedDB(collectionName) {
         }
       }
 
-      // A missing chunk, or a loaded record-count that doesn't match what was
-      // saved, means the data we could read is INCOMPLETE. Returning it as if
-      // complete would let the caller adopt a truncated collection and re-save
-      // it, wiping the unread records. Flag corruption (blocks re-save) and
-      // throw so the loader can fall back / warn instead of silently truncating.
-      // A checksum mismatch with all chunks present AND a matching record count
-      // is treated as a soft warning only (avoids false positives from checksum
-      // nuances bricking otherwise-complete data).
+      // A missing chunk or a record-count mismatch means INCOMPLETE data: flag corruption (blocks
+      // re-save) and throw, never adopt a truncated collection. A checksum-only mismatch with every
+      // chunk present and matching counts is a soft warning.
       const recordCountMismatch = Number.isFinite(meta.recordCount) && chunks.length !== meta.recordCount;
       if (missingChunk || recordCountMismatch || (checksumMismatch && recordCountMismatch)) {
         // The caller still receives the original read's error, but it must not
@@ -5838,12 +5833,8 @@ async function flushDirtyCollections() {
 // ==========================================
 // STORAGE-EVICTION DETECTION (local mode)
 // ==========================================
-// iOS Safari's ITP deletes ALL script-writable storage (localStorage AND
-// IndexedDB, including the in-app backups store) for an origin after 7 days
-// of Safari use without a visit; Chrome/Android can evict non-persistent
-// origins under disk pressure. After such a wipe the app is indistinguishable
-// from a fresh install — except for this cookie, which browsers do not evict
-// with site storage (best-effort on iOS, where ITP caps JS cookies at 7 days).
+// iOS ITP (7 days unvisited) and Android disk pressure can wipe localStorage AND IndexedDB;
+// this cookie (not evicted with site storage, best-effort on iOS) tells a wipe from a fresh install.
 let _hadDataSentinelSet = false;
 function _maybeSetHadDataSentinel() {
   if (_hadDataSentinelSet) return;
@@ -6927,14 +6918,8 @@ function applyTheme() {
     root.classList.remove('dark');
   }
 
-  // Keep the browser's used color-scheme in sync with the APP theme (the
-  // app theme is a manual light/dark/system toggle, not the OS scheme).
-  // Without this, UA-rendered widgets (<select> panes, Android date-picker
-  // dialogs, scrollbars, autofill) stay WHITE against the app's dark UI on
-  // Chromium Android + FB/IG webviews, and Chrome/Samsung "auto dark" would
-  // algorithmically invert the light theme. Complements the static
-  // <meta name="color-scheme" content="light dark"> in index.html, which
-  // covers the pre-JS first paint; this inline style then wins per-theme.
+  // Keep the used color-scheme in sync with the APP theme so native widgets (selects, date
+  // pickers, scrollbars) are not white on dark and Chrome auto-dark does not invert the light theme.
   try { root.style.colorScheme = isDark ? 'dark' : 'light'; } catch (_) {}
 
   // The two media-keyed theme-color metas in index.html track the OS scheme
@@ -7003,15 +6988,8 @@ function ensureLucideCreateIconsWrapped() {
 }
 ensureLucideCreateIconsWrapped();
 
-// Debounced icon refresh (batches multiple calls).
-// EXECUTION ORDER (why flush() must retry): lucide.min.js is a deferred
-// <head> script, while script.js is a CLASSIC end-of-body script — per the
-// HTML spec a classic script executes DURING parsing, BEFORE deferred
-// scripts run. So window.lucide may not exist yet when early code schedules
-// icons; the old `if (!window.lucide) return;` also left `timer` set, which
-// wedged the queue forever. flush() now keeps the queue and retries until
-// the library arrives (deferred scripts are guaranteed to run before
-// DOMContentLoaded, so this resolves within the load phase).
+// Debounced icon refresh. lucide.min.js is deferred and runs AFTER this classic script, so
+// flush() keeps the queue and retries until the library arrives (before DOMContentLoaded).
 const IconQueue = {
   pending: new Set(),
   timer: null,
@@ -8077,14 +8055,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              // Reload the OPEN modal from the fresh copy — form fields AND
-              // baseline together. Refreshing only the version stamp under a
-              // form that still displays the stale snapshot was a silent
-              // lost-update: the next Save would pass the optimistic lock and
-              // overwrite the other user's committed change with old values.
-              // A full reload makes "We loaded the latest version" true and
-              // keeps the lock meaningful (unsaved edits are discarded — the
-              // honest cost of a real conflict).
+              // Reload the OPEN modal from the fresh copy (fields AND baseline): refreshing only the stamp
+              // under stale fields let the next Save overwrite the other user's change. Unsaved edits are
+              // discarded — the honest cost of a real conflict.
               if (_latestData && state.modalData && String(state.modalData.id) === String(id)
                   && idx !== -1 && state.activeModal) {
                 state.modalData = array[idx];
@@ -10982,6 +10955,14 @@ async function apiRunMetaAutoImport() {
     busy: response?.busy === true,
     state: response?.state && typeof response.state === 'object' ? response.state : {}
   };
+}
+
+async function apiMetaAccountFunds(refresh = false) {
+  // Money Meta reports in each ad account (short server cache; refresh is a same-origin POST).
+  const response = refresh
+    ? await apiJson('/api/meta-ads/account-funds/refresh', { method: 'POST', body: {} }, { timeoutMs: 120000 })
+    : await apiJson('/api/meta-ads/account-funds', { method: 'GET' }, { timeoutMs: 120000 });
+  return response && typeof response === 'object' ? response : {};
 }
 
 async function apiMetaPartnerPages(refresh = false) {
@@ -13971,6 +13952,7 @@ function resetAuthenticatedServerCaches() {
     metaInsightsUi.refreshing = false;
     metaInsightsUi.loadedAtMs = 0;
     metaInsightsUi.requestSeq += 1;
+    Object.assign(metaInsightsUi, { funds: null, fundsError: '', fundsLoading: false, fundsAtMs: 0, fundsSeq: metaInsightsUi.fundsSeq + 1 });
   }
   // Module caches (hub/wallet/Control Center) must not survive sign-out.
   try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}
@@ -14374,15 +14356,9 @@ function setupUrlRouting() {
     // router would only re-render and scroll-reset the unchanged view.
     if (typeof shouldSuppressOverlayPopstate === 'function' && shouldSuppressOverlayPopstate()) return;
 
-    // Phone browsers: hardware/gesture Back closes the top-most open
-    // overlay/modal/drawer — the same order as the packaged app's native
-    // Back handler — instead of navigating the screen underneath it. The
-    // popped entry is the surface's own sentinel/?modal entry, so the
-    // address bar is already back at the pre-overlay URL and the pop is
-    // fully consumed by the close. Desktop and Capacitor behaviour are
-    // unchanged. Never call history.back()/forward() from here: the
-    // re-fired popstate would re-run restoreModalFromUrl's opener and
-    // clobber unsaved form state.
+    // Phone browsers: Back closes the top-most overlay (same order as the native app); the popped
+    // entry is the surface's own sentinel. Never call history.back()/forward() here (the re-fired
+    // popstate would re-run the opener and clobber unsaved form state).
     if (typeof closeTopMobileSurface === 'function'
         && typeof isPhoneBrowserHistoryManaged === 'function'
         && isPhoneBrowserHistoryManaged()) {
@@ -14530,14 +14506,9 @@ function restoreModalFromUrl() {
   }
 }
 
-// A closeModal() consume (history.back()/go(-2)) issued in this same task has
-// not landed yet — history traversal is async, so pushing the new view NOW
-// would stack it on top of the very entries the traversal is about to pop,
-// and the traversal would then strand the user on a stale ?modal entry that a
-// later Back resurrects (e.g. duplicate-serial warning → "View Customer").
-// Wait for the suppressed bookkeeping popstate before stamping the URL, with
-// a short fallback timeout in case the traversal is silently dropped at the
-// session-history edge. See the overlay history model in 01b-mobile-runtime.js.
+// A closeModal() history consume from this same task has not landed yet (traversal is async):
+// wait for its popstate (short fallback timeout) before stamping the URL, or the new view is
+// stranded under a stale ?modal entry. See the overlay history model in 01b-mobile-runtime.js.
 function _pushViewUrlAfterHistoryConsume(view) {
   let done = false;
   let fallbackTimer = null;
@@ -27116,15 +27087,9 @@ async function compressImageToDataUrl(file) {
   let originalDataUrl = await readFileAsDataUrl(file);
   try {
     let type = String(file.type || '').toLowerCase();
-    // Android SAF/content-provider pickers (third-party file managers, Drive
-    // routes, FB/IG WebView choosers) hand over real JPEGs with a BLANK or
-    // generic MIME type; readAsDataURL then emits data:application/octet-stream
-    // and isSafeReceiptPhotoSource rejects a perfectly decodable photo as
-    // "unsupported". Sniff the base64 magic bytes and rewrite the prefix so
-    // EVERY exit path below (GIF keep-original, small-file keep-original,
-    // larger-output keep-original, catch fallback) emits a proper
-    // data:image/... URL. Genuinely non-image files sniff to nothing and are
-    // rejected exactly as before.
+    // Android pickers (SAF, Drive, FB/IG WebViews) hand over real JPEGs with a blank MIME type:
+    // sniff the magic bytes and fix the data: prefix so every exit path below emits data:image/...
+    // (non-image files still sniff to nothing and are rejected).
     if (!type || type === 'application/octet-stream') {
       const b64 = originalDataUrl.slice(originalDataUrl.indexOf(',') + 1);
       if (b64.startsWith('/9j/')) type = 'image/jpeg';
@@ -27604,14 +27569,8 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
   });
 }
 
-// ---- Delivery completion draft (survives Android camera round-trips) -------------
-// Tapping the photo input launches the camera activity; on low-RAM phones and
-// inside Facebook/Instagram in-app WebViews the OS routinely kills the browser
-// process while the camera is foreground, cold-reloading the SPA and destroying
-// the transient completion modal. Persist a draft of the typed fields (and the
-// already-delivered photo) so reopening the modal restores the driver's work.
-// localStorage, NOT sessionStorage: in-app WebView sessionStorage is process
-// memory and dies with exactly the kill being defended against.
+// ---- Delivery completion draft: phones kill the browser during the camera round-trip; keep
+// the typed fields and delivered photo in localStorage (sessionStorage dies with the process).
 const _DELIVERY_DRAFT_PREFIX = 'albayan_delivery_draft_';
 const _DELIVERY_DRAFT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let _deliveryDraftSaveTimer = null;
@@ -30527,16 +30486,9 @@ function getMetaAdHistoryEntries(ad) {
     });
 }
 
-// Who turned a Meta-imported draft into a real ad, for showing on the ads list
-// without opening the ad. An imported row is created by the automation, so its
-// "Created by" is the importer, never a person — this answers "who did the
-// setup?".
-//
-// The server stamps metaImportCompletedBy inside the guarded
-// needs_completion -> complete transition. Ads completed BEFORE that stamp
-// existed fall back to their own history: the first human edit of a draft IS
-// the completion. Meta's sync rows are excluded, so an automatic budget or
-// spend update is never mistaken for a person.
+// Who completed a Meta-imported draft (its "Created by" is the importer, never a person): the
+// server's metaImportCompletedBy stamp, else the first human edit in its history (Meta sync
+// rows excluded, so an automatic budget/spend update is never mistaken for a person).
 function getAdCompletedByName(ad) {
   if (!ad || typeof ad !== 'object') return '';
   const stampedId = String(ad.metaImportCompletedBy || '').trim();
@@ -31671,15 +31623,8 @@ async function saveRefund() {
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
 // ==========================================
 
-// Click outside to close dropdown.
-// CAPTURE phase (the `true`) is required: every suggestion dropdown lives
-// inside a modal panel that carries onclick="event.stopPropagation()" (to keep
-// inside-clicks from closing the modal), so a bubble-phase document listener
-// never fires for taps inside the form — on phones (no Esc key, no hover) the
-// open dropdown then covers the inputs below until the whole modal is lost.
-// Capture fires on the way DOWN to the target, before that stopPropagation
-// runs. Same fix as the delegated record-action listener further below.
-// Selection still works: taps inside the dropdown are skipped by contains().
+// Click outside to close dropdown. CAPTURE phase is required: modal panels stopPropagation
+// inside-clicks, so a bubble listener never fired and the dropdown covered the form on phones.
 document.addEventListener('click', function(e) {
   const dropdowns = document.querySelectorAll('[id$="-dropdown"]');
   dropdowns.forEach(dropdown => {
@@ -32732,14 +32677,8 @@ function removePageCustomer(customerId) {
   }
 }
 
-// Delegated record actions keep untrusted ids out of executable JavaScript.
-// Dynamic dropdowns can be re-rendered freely without re-binding handlers.
-// CAPTURE phase (the `true` below) is essential: modal panels carry
-// onclick="event.stopPropagation()" to stop inside-clicks from closing the modal,
-// which also stops the click ever bubbling to document. A capture-phase listener on
-// document fires on the way DOWN to the target, before that bubble-phase
-// stopPropagation runs — so page/customer dropdown selections work inside modals
-// again. (Bubble phase silently broke every in-modal selection.)
+// Delegated record actions keep untrusted ids out of executable JavaScript. CAPTURE phase:
+// modal panels stopPropagation their clicks, which silently broke every in-modal selection.
 if (!window.__albayanSafeRecordActionsBound) {
   window.__albayanSafeRecordActionsBound = true;
   document.addEventListener('click', (event) => {
@@ -32957,15 +32896,9 @@ function onPaymentMethodChange(selectElement) {
   updateReceiptTotals();
 }
 
-// Keep the Receipt Number field consistent with the selected payment methods.
-//
-// reissue=true  — the user just CHANGED the payment methods (picked another
-//                 method, added/removed a split row). The number must follow
-//                 the new methods, even on a saved receipt: switching a cash
-//                 receipt (paper number 12851) to Bank Transfer means there is
-//                 no paper receipt any more, so it takes a B number.
-// reissue=false — the form merely opened; never renumber an existing receipt,
-//                 only fill a blank field.
+// Keep the Receipt Number consistent with the payment methods. reissue=true: the methods
+// CHANGED, so the number follows them even on a saved receipt (cash 12851 -> Bank Transfer
+// takes a B number). reissue=false: the form merely opened; only fill a blank field.
 function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
@@ -33836,14 +33769,9 @@ async function _saveReceiptFromModalInner() {
     serialNumber: isTempDelivery ? '' : serialFinal,
     finalReceiptNo: finalReceiptNo,
     tempReceiptNo: tempReceiptNo,
-    // A carried "existing balance" receipt is an ordinary Paid receipt that is only
-    // TAGGED so its card shows the existing-balance colour/badge; it counts as revenue
-    // and funds ads exactly like any other receipt. The tag only applies to a NEW,
-    // non-delivery receipt. An EDIT must echo the STORED type verbatim: the
-    // server 405s any client CHANGE of receiptType, and legacy temp receipts
-    // predate the DELIVERY_TEMP stamp — recomputing the tag from tempReceiptNo
-    // here turned every edit of such a receipt into a forbidden ''→DELIVERY_TEMP
-    // change ("Receipt type is server-controlled"), blocking the save entirely.
+    // A carried "existing balance" receipt is an ordinary Paid receipt, only TAGGED for its badge;
+    // the tag applies to a NEW non-delivery receipt. An EDIT echoes the STORED type verbatim (the
+    // server 405s any receiptType change; recomputing it from tempReceiptNo blocked legacy saves).
     receiptType: editTarget
       ? (editTarget.receiptType || '')
       : (tempReceiptNo ? 'DELIVERY_TEMP' : (_newReceiptCarried ? 'CARRIED_BALANCE' : '')),
@@ -40431,15 +40359,9 @@ function terminalSettleOnlyChangesFundingAndPayment(liveAd, adUpdates, photosDir
   return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
 }
 
-// Local-mode counterpart of the server relink primitive: re-point the funding
-// allocations and their derived mirrors WITHOUT touching amountUSD/spentUSD/
-// status (updateRecord merges, so any field left out keeps its stored value).
-// Mirrors the server's baseline retarget in _financial_apply_relink: the
-// stop/refund baselines still name the VACATED receipt, and the delete guard
-// counts baselines as live links — without this the freed receipt could never
-// be deleted ("linked to ad funding"). Amounts untouched; only receiptId
-// strings move, and only when the mapping is unambiguous (exactly one newly
-// introduced receipt).
+// Retarget the stop/refund baselines that still name the VACATED receipt to the single newly
+// introduced receipt (mirrors _financial_apply_relink; the delete guard counts baselines as links,
+// else the freed receipt can never be deleted). Only receiptId strings move; no-op unless exactly one is new.
 function _relinkBaselineUpdates(liveAd, pools) {
   const oldIds = new Set();
   ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
@@ -43067,7 +42989,12 @@ const metaInsightsUi = {
   error: '',
   stats: null,
   loadedAtMs: 0,
-  requestSeq: 0
+  requestSeq: 0,
+  funds: null,
+  fundsLoading: false,
+  fundsError: '',
+  fundsAtMs: 0,
+  fundsSeq: 0
 };
 const META_INSIGHTS_CLIENT_CACHE_MS = 5 * 60 * 1000;
 
@@ -43136,6 +43063,9 @@ function openMetaInsightsModal() {
   metaInsightsUi.open = true;
   metaInsightsUi.error = '';
   metaInsightsRenderModal();
+  metaInsightsUi.fundsError = '';
+  const fundsTtl = (metaInsightsUi.funds?.accounts || []).some(a => a && (a.error || a.stale)) ? 30000 : META_INSIGHTS_CLIENT_CACHE_MS;
+  if (!metaInsightsUi.funds || Date.now() - metaInsightsUi.fundsAtMs >= fundsTtl) metaInsightsLoadFunds(false);
   // The server already caches the statistics; do not spend a request (or the
   // rate budget) when this browser fetched them moments ago.
   if (metaInsightsUi.stats && Date.now() - metaInsightsUi.loadedAtMs < META_INSIGHTS_CLIENT_CACHE_MS) return;
@@ -43165,6 +43095,60 @@ async function metaInsightsLoad(refresh) {
       metaInsightsRenderModal();
     }
   }
+}
+
+async function metaInsightsLoadFunds(refresh) {
+  const ui = metaInsightsUi;
+  if (ui.fundsLoading) return;
+  const seq = ++ui.fundsSeq;
+  ui.fundsLoading = true;
+  ui.fundsError = '';
+  metaInsightsRenderModal();
+  try {
+    const result = await apiMetaAccountFunds(refresh === true);
+    if (seq === ui.fundsSeq) { ui.funds = result; ui.fundsAtMs = Date.now(); }
+  } catch (error) {
+    if (seq === ui.fundsSeq) ui.fundsError = metaAdsErrorMessage(error);
+  } finally {
+    if (seq === ui.fundsSeq) { ui.fundsLoading = false; metaInsightsRenderModal(); }
+  }
+}
+
+// Money Meta reports INSIDE each ad account (prepaid available funds, spend limit
+// left, amount due) — not the remaining budget of the active ads above.
+function metaInsightsFundsCard(isAr) {
+  const ui = metaInsightsUi;
+  const names = new Map((state.ads || []).filter(a => a && a.metaAdAccountId && a.metaAdAccountName).map(a => [String(a.metaAdAccountId), String(a.metaAdAccountName)]));
+  const rows = (Array.isArray(ui.funds?.accounts) ? ui.funds.accounts : []).slice().sort((a, b) => (Number(b.fundsMinor) || 0) - (Number(a.fundsMinor) || 0));
+  const esc = value => Security.escapeHtml(String(value ?? ''));
+  const money = (minor, cur) => esc(metaAdsFormatMoney(minor, cur || 'USD'));
+  const row = a => {
+    const name = /^Ad account \d+$/.test(String(a.name || '')) ? (names.get(String(a.id)) || a.name) : (a.name || `#${a.id}`);
+    // Only the amount sits in the right column; every sentence wraps under the name (phone width).
+    const main = a.error ? '' : a.fundsMinor != null ? `<span class="text-lg font-black text-sky-700 dark:text-sky-300">${money(a.fundsMinor, a.currency)}</span>`
+      : a.fundsText || a.fundsHidden ? '' : `<span class="text-xs text-slate-400">${isAr ? 'لم تذكر Meta رصيداً' : 'No balance reported by Meta'}</span>`;
+    const note = a.error ? [a.error, 'text-rose-600']
+      : a.stale ? [`${isAr ? 'آخر رصيد معروف' : 'Last known amount'}: ${a.staleReason || ''}`, 'text-amber-700 dark:text-amber-300']
+      : a.fundsMinor == null && a.fundsText ? [a.fundsText, 'text-slate-600 dark:text-slate-300']
+      : a.fundsMinor == null && a.fundsHidden ? [isAr ? 'لم تشارك Meta رصيد هذا الحساب. تعرضه فقط إذا كان لاتصال Albayan صلاحية "التحكم الكامل" على الحساب.' : 'Meta did not share this account\'s funds. It shows them only when the Albayan connection has Full control (Manage) on the account.', 'text-amber-700 dark:text-amber-300']
+      : null;
+    const extra = [
+      a.capRemainingMinor != null ? `${isAr ? 'المتبقي من حد الإنفاق' : 'Spend limit left'}: ${money(a.capRemainingMinor, a.currency)}` : '',
+      Number(a.amountDueMinor) > 0 ? `${isAr ? 'مستحق الدفع' : 'Amount due'}: ${money(a.amountDueMinor, a.currency)}` : ''
+    ].filter(Boolean).join(' · ');
+    return `<div class="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2 dark:bg-slate-900/40" title="${esc(a.fundsText)}"><div class="min-w-0"><div class="break-words text-sm font-bold text-slate-800 dark:text-white">${esc(name)}</div><div class="font-mono text-[10px] text-slate-500">#${esc(a.id)}</div>${extra ? `<div class="text-[11px] text-slate-500">${extra}</div>` : ''}${note ? `<div class="mt-0.5 break-words text-xs font-bold ${note[1]}">${esc(note[0])}</div>` : ''}</div><div class="shrink-0 text-end">${main}</div></div>`;
+  };
+  return `<div data-role="meta-account-funds" class="mt-4 rounded-xl border border-sky-200 bg-sky-50/50 p-4 dark:border-sky-800 dark:bg-sky-950/20">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex items-center gap-2 font-black text-sky-800 dark:text-sky-200"><i data-lucide="banknote" class="h-4 w-4"></i>${isAr ? 'الأموال في حسابات الإعلانات' : 'Money in the ad accounts'}</div>
+      <button type="button" onclick="metaInsightsLoadFunds(true)" ${ui.fundsLoading ? 'disabled' : ''} class="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-200 px-2.5 text-xs font-bold text-sky-700 hover:bg-sky-100 disabled:opacity-60 dark:border-sky-800 dark:text-sky-300"><i data-lucide="refresh-cw" class="h-3.5 w-3.5 ${ui.fundsLoading ? 'animate-spin' : ''}"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
+    </div>
+    <p class="mt-1 text-xs text-slate-500">${isAr ? 'ما تذكره Meta كرصيد في كل حساب (المال الذي أضفته ولم يُصرف بعد)، وهو غير ميزانية الإعلانات أعلاه.' : 'What Meta reports inside each account (money you added that is not spent yet). This is not the ads budget above.'}</p>
+    ${ui.fundsError ? `<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${esc(ui.fundsError)}</div>` : ''}
+    ${ui.fundsLoading && !ui.funds ? `<div class="mt-3 flex items-center justify-center gap-2 p-4 text-sm text-slate-500"><i data-lucide="loader-circle" class="h-4 w-4 animate-spin"></i>${isAr ? 'جارٍ القراءة من Meta...' : 'Reading from Meta...'}</div>` : ''}
+    ${rows.length ? `<div class="mt-3 space-y-1.5">${rows.map(row).join('')}</div>` : (ui.funds && !ui.fundsLoading ? `<div class="mt-3 text-xs text-slate-500">${isAr ? 'لا توجد حسابات إعلانية مرتبطة.' : 'No ad accounts are connected.'}</div>` : '')}
+    ${ui.funds?.fetchedAt ? `<div class="mt-2 text-[10px] text-slate-400">${isAr ? 'آخر قراءة' : 'Last read'}: ${esc(metaAdsFormatDate(ui.funds.fetchedAt, true))}${ui.funds.truncated ? (isAr ? ' — أول 25 حساباً فقط' : ' — first 25 accounts only') : ''}</div>` : ''}
+  </div>`;
 }
 
 function metaInsightsPageRow(page, isAr, currency) {
@@ -43225,6 +43209,8 @@ function metaInsightsRenderModal() {
       <div class="mt-1 text-xs text-slate-500">${isAr ? `${summary.count} إعلان نشط على Meta الآن (المستوردة تلقائياً + المربوطة يدوياً)` : `${summary.count} ad(s) currently ACTIVE on Meta (auto-imported + manually linked)`}${summary.openEnded ? ` · ${isAr ? `${summary.openEnded} إعلان مفتوح بدون ميزانية إجمالية (غير محسوب)` : `${summary.openEnded} open-ended ad(s) without a total budget (not counted)`}` : ''}</div>
       ${summary.byAccount.length ? `<div class="mt-3 space-y-1.5">${summary.byAccount.map(account => `<div class="flex items-center justify-between gap-2 rounded-lg bg-white/70 px-3 py-1.5 text-xs dark:bg-slate-900/40"><span class="min-w-0 break-words font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(account.name)} <span class="font-normal text-slate-400">(${account.count})</span></span><span class="shrink-0 font-black text-emerald-700 dark:text-emerald-300">${Security.escapeHtml(metaAdsFormatMoney(account.totalMinor, summary.currency))}</span></div>`).join('')}</div>` : ''}
     </div>
+
+    ${metaInsightsFundsCard(isAr)}
 
     <div data-role="meta-active-pages" class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-800 dark:bg-indigo-950/20">
       <div class="flex flex-wrap items-center justify-between gap-2">
@@ -44329,14 +44315,9 @@ async function confirmStopAd(id, source = 'modal') {
   const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
   const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
 
-  // MONEY-MATH: snapshot the funding proportions the FIRST time the ad is
-  // stopped. Stopping with a low spend shrinks (possibly zeroes) the live
-  // allocations, so a later stop-EDIT cannot recover each receipt's original
-  // share from the live values alone (a fully-returned pool sums to 0 and
-  // blocks all redistribution). With this baseline, an edit recomputes each
-  // receipt's allocation as ORIGINAL share × (new spent / original pool) —
-  // mathematically identical to the old adjust-by-difference math in the
-  // normal case, but still correct after a zero/low-spend stop.
+  // MONEY-MATH: snapshot the funding proportions at the FIRST stop; a low-spend stop shrinks the
+  // live allocations, so a later stop-edit recomputes each share as ORIGINAL share x (new spent /
+  // original pool) — same as adjust-by-difference normally, still right after a zero-spend stop.
   if (!isEditing && !ad.stopAllocationBaseline) {
     const snap = (arr) => Array.isArray(arr)
       ? arr.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }))

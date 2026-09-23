@@ -1881,6 +1881,14 @@ async function apiRunMetaAutoImport() {
   };
 }
 
+async function apiMetaAccountFunds(refresh = false) {
+  // Money Meta reports in each ad account (short server cache; refresh is a same-origin POST).
+  const response = refresh
+    ? await apiJson('/api/meta-ads/account-funds/refresh', { method: 'POST', body: {} }, { timeoutMs: 120000 })
+    : await apiJson('/api/meta-ads/account-funds', { method: 'GET' }, { timeoutMs: 120000 });
+  return response && typeof response === 'object' ? response : {};
+}
+
 async function apiMetaPartnerPages(refresh = false) {
   // Meta Business Partner "active pages" metric: pages with over 100 USD ad
   // spend in the last 90 days. A plain GET serves the cached statistics; a

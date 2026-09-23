@@ -610,14 +610,9 @@ async function loadCollectionFromIndexedDB(collectionName) {
         }
       }
 
-      // A missing chunk, or a loaded record-count that doesn't match what was
-      // saved, means the data we could read is INCOMPLETE. Returning it as if
-      // complete would let the caller adopt a truncated collection and re-save
-      // it, wiping the unread records. Flag corruption (blocks re-save) and
-      // throw so the loader can fall back / warn instead of silently truncating.
-      // A checksum mismatch with all chunks present AND a matching record count
-      // is treated as a soft warning only (avoids false positives from checksum
-      // nuances bricking otherwise-complete data).
+      // A missing chunk or a record-count mismatch means INCOMPLETE data: flag corruption (blocks
+      // re-save) and throw, never adopt a truncated collection. A checksum-only mismatch with every
+      // chunk present and matching counts is a soft warning.
       const recordCountMismatch = Number.isFinite(meta.recordCount) && chunks.length !== meta.recordCount;
       if (missingChunk || recordCountMismatch || (checksumMismatch && recordCountMismatch)) {
         // The caller still receives the original read's error, but it must not

@@ -2845,15 +2845,9 @@ function terminalSettleOnlyChangesFundingAndPayment(liveAd, adUpdates, photosDir
   return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
 }
 
-// Local-mode counterpart of the server relink primitive: re-point the funding
-// allocations and their derived mirrors WITHOUT touching amountUSD/spentUSD/
-// status (updateRecord merges, so any field left out keeps its stored value).
-// Mirrors the server's baseline retarget in _financial_apply_relink: the
-// stop/refund baselines still name the VACATED receipt, and the delete guard
-// counts baselines as live links — without this the freed receipt could never
-// be deleted ("linked to ad funding"). Amounts untouched; only receiptId
-// strings move, and only when the mapping is unambiguous (exactly one newly
-// introduced receipt).
+// Retarget the stop/refund baselines that still name the VACATED receipt to the single newly
+// introduced receipt (mirrors _financial_apply_relink; the delete guard counts baselines as links,
+// else the freed receipt can never be deleted). Only receiptId strings move; no-op unless exactly one is new.
 function _relinkBaselineUpdates(liveAd, pools) {
   const oldIds = new Set();
   ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {

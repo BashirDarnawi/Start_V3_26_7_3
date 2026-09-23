@@ -82,6 +82,24 @@ _PARTNER_AD_PAGE_MAP_LIMIT = 5_000
 _PARTNER_AD_PAGE_MISS_LIMIT = 2_000
 _PARTNER_MISS_RETRY_MS = 24 * 60 * 60 * 1000
 _META_PARTNER_LOCK = threading.Lock()
+# Money Meta reports in each ad account (Meta Insights, admin read-only). One small
+# GET per account; cached briefly so opening the dialog never re-reads Meta.
+_META_FUNDS_LOCK = threading.Lock()
+_META_FUNDS_CACHE: dict[str, Any] = {}
+_META_FUNDS_TTL_MS = 5 * 60 * 1000
+_META_FUNDS_ERROR_TTL_MS = 30 * 1000
+_META_FUNDS_MAX_ACCOUNTS = 25
+# Funding type 20 is Meta's STORED_BALANCE (prepaid "available funds").
+_META_STORED_BALANCE_TYPE = 20
+# en-US amounts only (the read asks Meta for locale en_US): "1,234.56" or "200". A decimal
+# comma ("200,50") or any other shape matches nothing, so the raw text is shown instead.
+_FUNDS_NUMBER = r"(?<![0-9,.])((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]{1,2})?)(?![0-9,.])"
+_FUNDS_TEXT_AMOUNT_RE = re.compile(
+    r"[$\u20ac\u00a3]\s?" + _FUNDS_NUMBER
+    + r"|" + _FUNDS_NUMBER + r"\s?(?:USD|EUR|GBP|LYD)\b"
+    + r"|\b(?:USD|EUR|GBP|LYD)\s?" + _FUNDS_NUMBER,
+    re.IGNORECASE,
+)
 _META_MEDIA_VERSION = 7
 _META_DISCOVERABLE_EFFECTIVE_STATUSES = (
     "ACTIVE",
@@ -912,6 +930,23 @@ def _decimal_amount(value: Any) -> tuple[float, int]:
     return float(rounded), int((rounded * 100).to_integral_value(rounding=ROUND_HALF_UP))
 
 
+def _funds_text_minor(value: Any) -> int | None:
+    """Minor units of the money amount inside Meta's funding text, e.g.
+    "Available Balance ($200.00 USD)" -> 20000; None when the text holds no amount."""
+    text_value = _clean_text(value, 200)
+    match = _FUNDS_TEXT_AMOUNT_RE.search(text_value)
+    if not match or text_value[: match.start()].rstrip().endswith("-"):
+        return None  # no amount, or a negative one ("-$5.00") that must not read as +$5.00
+    raw = (match.group(1) or match.group(2) or match.group(3) or "").replace(",", "")
+    try:
+        amount = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite() or amount < 0 or amount > Decimal("1000000000"):
+        return None
+    return int((amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
 def _metric_int(value: Any) -> int:
     try:
         parsed = int(Decimal(str(value or "0")))
@@ -1560,6 +1595,53 @@ class MetaAdsClient:
         }
         self._account_cache[account_id] = normalized
         return normalized
+
+    def get_account_funds(self, account_id: Any) -> dict[str, Any]:
+        """What Meta reports about the money in one ad account (read-only).
+
+        funding_source_details carries the prepaid "available funds" text; Meta can
+        refuse that field for some tokens, so a refused read is retried once without it.
+        Amounts are the account currency's minor units, as Meta sends them.
+        """
+        account_id = self._ensure_allowed_account(account_id)
+        # Meta shares funding_source_details only with MANAGE (Full control) and
+        # is_prepay_account with ADVERTISE/MANAGE on the account, so the fallback asks
+        # for neither: a view-only connection still gets the spend limit and amount due.
+        slim = "id,account_id,name,account_status,currency,balance,amount_spent,spend_cap"
+        refused = False
+        try:
+            row = self._get(f"act_{account_id}", {"fields": slim + ",is_prepay_account,funding_source_details", "locale": "en_US"})
+        except MetaAdsError as error:
+            if error.retryable or error.provider_code.startswith("190"):
+                raise  # throttled/down, or a dead token: a second read cannot help
+            refused = True
+            row = self._get(f"act_{account_id}", {"fields": slim, "locale": "en_US"})
+        details = row.get("funding_source_details")
+        details = details if isinstance(details, dict) else {}
+        funds_text = _clean_text(details.get("display_string"), 160)
+        is_prepay = row.get("is_prepay_account")
+        # Read an amount only from a prepaid / stored-balance source: a card's
+        # text ("Visa *1234") is not money.
+        prepaid_source = _metric_int(details.get("type")) == _META_STORED_BALANCE_TYPE or is_prepay is True
+        spend_cap = _minor_units(row.get("spend_cap"))
+        spent = _minor_units(row.get("amount_spent"))
+        return {
+            "id": account_id,
+            "name": _clean_text(row.get("name"), 160) or f"Ad account {account_id}",
+            "currency": _clean_text(row.get("currency"), 12).upper() or "USD",
+            "status": _metric_int(row.get("account_status")),
+            "isPrepay": is_prepay if isinstance(is_prepay, bool) else None,
+            "fundsText": funds_text,
+            "fundsMinor": _funds_text_minor(funds_text) if prepaid_source else None,
+            # Meta refused or left out the funding details: it shows funds only with Full control.
+            "fundsHidden": refused or not details,
+            "readAt": _iso_now(),
+            "spendCapMinor": spend_cap,
+            "amountSpentMinor": spent,
+            "capRemainingMinor": max(spend_cap - spent, 0) if spend_cap > 0 else None,
+            "amountDueMinor": _minor_units(row.get("balance")),
+            "error": "",
+        }
 
     def _get_ad_image_url(
         self, account_id: str, image_hashes: list[str]
@@ -3370,6 +3452,69 @@ def _public_partner_stats(state: dict[str, Any]) -> dict[str, Any]:
         ],
         "accountsScanned": _metric_int(state.get("accountsScanned")),
     }
+
+
+def get_meta_account_funds(*, refresh: bool = False) -> dict[str, Any]:
+    """Money Meta reports in each allowed ad account, for the admin's Meta Insights.
+
+    Read-only. Cached for a few minutes (30 seconds when an account could not be
+    read); the lock keeps two admins from reading the same accounts twice.
+    """
+    config = load_meta_ads_config()
+    if not config.configured:
+        raise MetaAdsError("not_configured", "Meta Ads connection is not configured")
+    with _META_FUNDS_LOCK:
+        cached = _META_FUNDS_CACHE.get("result")
+        age_ms = now_ms() - int(_META_FUNDS_CACHE.get("at") or 0)
+        if cached and not refresh and age_ms < int(_META_FUNDS_CACHE.get("ttl") or 0):
+            return {**cached, "cached": True}
+        client = get_meta_ads_client()
+        account_ids = list(config.allowed_account_ids)
+        names: dict[str, str] = {}
+        if not account_ids:
+            listed = client.list_accounts()
+            account_ids = [str(row.get("id")) for row in listed if row.get("id")]
+            names = {str(row.get("id")): str(row.get("name") or "") for row in listed}
+        # The last good reading per account survives a Meta pause (shown as "last known").
+        previous = {
+            str(row.get("id")): row
+            for row in ((cached or {}).get("accounts") or [])
+            if isinstance(row, dict) and not row.get("error")
+        }
+        accounts: list[dict[str, Any]] = []
+        pause: MetaAdsError | None = None
+        for account_id in account_ids[:_META_FUNDS_MAX_ACCOUNTS]:
+            error: MetaAdsError | None = pause
+            if error is None:
+                try:
+                    accounts.append(client.get_account_funds(account_id))
+                    continue
+                except MetaAdsError as caught:
+                    error = caught
+                    if caught.retryable:
+                        pause = caught  # throttled or unreachable: do not queue the other accounts behind it
+                except Exception:  # an unreadable answer must not lose every other account
+                    error = MetaAdsError("unreadable", "Meta returned an unreadable answer for this account.")
+            if error.retryable and account_id in previous:
+                accounts.append({**previous[account_id], "stale": True, "staleReason": error.public_message})
+            else:
+                accounts.append({
+                    "id": account_id,
+                    "name": names.get(account_id) or f"Ad account {account_id}",
+                    "error": error.public_message,
+                })
+        result = {
+            "accounts": accounts,
+            "fetchedAt": _iso_now(),
+            "truncated": len(account_ids) > _META_FUNDS_MAX_ACCOUNTS,
+            "cached": False,
+        }
+        _META_FUNDS_CACHE.update({
+            "result": result,
+            "at": now_ms(),
+            "ttl": _META_FUNDS_ERROR_TTL_MS if any(row.get("error") or row.get("stale") for row in accounts) else _META_FUNDS_TTL_MS,
+        })
+        return result
 
 
 def get_meta_partner_page_stats(*, refresh: bool = False) -> dict[str, Any]:
@@ -5776,6 +5921,27 @@ def create_meta_ads_router(
         _rate_limit_or_429(f"meta-partner-refresh:{admin.get('id')}", 6, 60_000)
         try:
             return get_meta_partner_page_stats(refresh=True)
+        except MetaAdsError as error:
+            raise _partner_error(error)
+
+    @router.get("/account-funds")
+    def account_funds(admin: dict[str, Any] = Depends(require_meta_admin)):
+        # Served from the short cache; a cold cache reads each allowed account once.
+        _rate_limit_or_429(f"meta-funds:{admin.get('id')}", 30, 60_000)
+        try:
+            return get_meta_account_funds(refresh=False)
+        except MetaAdsError as error:
+            raise _partner_error(error)
+
+    @router.post("/account-funds/refresh")
+    def account_funds_refresh(
+        request: Request,
+        admin: dict[str, Any] = Depends(require_meta_admin),
+    ):
+        require_same_origin(request)
+        _rate_limit_or_429(f"meta-funds-refresh:{admin.get('id')}", 6, 60_000)
+        try:
+            return get_meta_account_funds(refresh=True)
         except MetaAdsError as error:
             raise _partner_error(error)
 

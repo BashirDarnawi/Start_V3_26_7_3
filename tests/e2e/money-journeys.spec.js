@@ -748,6 +748,15 @@ test('clothes stock survives a received shipment, a partially paid order, a pric
 
     // --- Editing the product price must succeed while pieces are sold. ---
     await openClothesTab(page, 'products');
+    // The order moved the product to a new version on the server. The reloaded page can
+    // paint the cached copy first; editing that stale copy is (correctly) a 409 conflict,
+    // so wait until the browser holds the version with the sold pieces taken out.
+    await page.waitForFunction(
+      id => typeof state !== 'undefined' && Array.isArray(state.clothesProducts)
+        && state.clothesProducts.some(p => p && p.id === id && Number((p.variants || [])[0]?.qty || 0) === 8),
+      productId,
+      { timeout: 30_000 }
+    );
     await page.locator(`button[onclick="editClothesProduct('${productId}')"]`).click();
     await expect(modal).toBeVisible();
     await modal.locator('#clothes-product-price').fill('75');

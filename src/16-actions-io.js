@@ -460,14 +460,9 @@ async function confirmStopAd(id, source = 'modal') {
   const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
   const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
 
-  // MONEY-MATH: snapshot the funding proportions the FIRST time the ad is
-  // stopped. Stopping with a low spend shrinks (possibly zeroes) the live
-  // allocations, so a later stop-EDIT cannot recover each receipt's original
-  // share from the live values alone (a fully-returned pool sums to 0 and
-  // blocks all redistribution). With this baseline, an edit recomputes each
-  // receipt's allocation as ORIGINAL share × (new spent / original pool) —
-  // mathematically identical to the old adjust-by-difference math in the
-  // normal case, but still correct after a zero/low-spend stop.
+  // MONEY-MATH: snapshot the funding proportions at the FIRST stop; a low-spend stop shrinks the
+  // live allocations, so a later stop-edit recomputes each share as ORIGINAL share x (new spent /
+  // original pool) — same as adjust-by-difference normally, still right after a zero-spend stop.
   if (!isEditing && !ad.stopAllocationBaseline) {
     const snap = (arr) => Array.isArray(arr)
       ? arr.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }))

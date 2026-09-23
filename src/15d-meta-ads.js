@@ -317,7 +317,12 @@ const metaInsightsUi = {
   error: '',
   stats: null,
   loadedAtMs: 0,
-  requestSeq: 0
+  requestSeq: 0,
+  funds: null,
+  fundsLoading: false,
+  fundsError: '',
+  fundsAtMs: 0,
+  fundsSeq: 0
 };
 const META_INSIGHTS_CLIENT_CACHE_MS = 5 * 60 * 1000;
 
@@ -386,6 +391,9 @@ function openMetaInsightsModal() {
   metaInsightsUi.open = true;
   metaInsightsUi.error = '';
   metaInsightsRenderModal();
+  metaInsightsUi.fundsError = '';
+  const fundsTtl = (metaInsightsUi.funds?.accounts || []).some(a => a && (a.error || a.stale)) ? 30000 : META_INSIGHTS_CLIENT_CACHE_MS;
+  if (!metaInsightsUi.funds || Date.now() - metaInsightsUi.fundsAtMs >= fundsTtl) metaInsightsLoadFunds(false);
   // The server already caches the statistics; do not spend a request (or the
   // rate budget) when this browser fetched them moments ago.
   if (metaInsightsUi.stats && Date.now() - metaInsightsUi.loadedAtMs < META_INSIGHTS_CLIENT_CACHE_MS) return;
@@ -415,6 +423,60 @@ async function metaInsightsLoad(refresh) {
       metaInsightsRenderModal();
     }
   }
+}
+
+async function metaInsightsLoadFunds(refresh) {
+  const ui = metaInsightsUi;
+  if (ui.fundsLoading) return;
+  const seq = ++ui.fundsSeq;
+  ui.fundsLoading = true;
+  ui.fundsError = '';
+  metaInsightsRenderModal();
+  try {
+    const result = await apiMetaAccountFunds(refresh === true);
+    if (seq === ui.fundsSeq) { ui.funds = result; ui.fundsAtMs = Date.now(); }
+  } catch (error) {
+    if (seq === ui.fundsSeq) ui.fundsError = metaAdsErrorMessage(error);
+  } finally {
+    if (seq === ui.fundsSeq) { ui.fundsLoading = false; metaInsightsRenderModal(); }
+  }
+}
+
+// Money Meta reports INSIDE each ad account (prepaid available funds, spend limit
+// left, amount due) — not the remaining budget of the active ads above.
+function metaInsightsFundsCard(isAr) {
+  const ui = metaInsightsUi;
+  const names = new Map((state.ads || []).filter(a => a && a.metaAdAccountId && a.metaAdAccountName).map(a => [String(a.metaAdAccountId), String(a.metaAdAccountName)]));
+  const rows = (Array.isArray(ui.funds?.accounts) ? ui.funds.accounts : []).slice().sort((a, b) => (Number(b.fundsMinor) || 0) - (Number(a.fundsMinor) || 0));
+  const esc = value => Security.escapeHtml(String(value ?? ''));
+  const money = (minor, cur) => esc(metaAdsFormatMoney(minor, cur || 'USD'));
+  const row = a => {
+    const name = /^Ad account \d+$/.test(String(a.name || '')) ? (names.get(String(a.id)) || a.name) : (a.name || `#${a.id}`);
+    // Only the amount sits in the right column; every sentence wraps under the name (phone width).
+    const main = a.error ? '' : a.fundsMinor != null ? `<span class="text-lg font-black text-sky-700 dark:text-sky-300">${money(a.fundsMinor, a.currency)}</span>`
+      : a.fundsText || a.fundsHidden ? '' : `<span class="text-xs text-slate-400">${isAr ? 'لم تذكر Meta رصيداً' : 'No balance reported by Meta'}</span>`;
+    const note = a.error ? [a.error, 'text-rose-600']
+      : a.stale ? [`${isAr ? 'آخر رصيد معروف' : 'Last known amount'}: ${a.staleReason || ''}`, 'text-amber-700 dark:text-amber-300']
+      : a.fundsMinor == null && a.fundsText ? [a.fundsText, 'text-slate-600 dark:text-slate-300']
+      : a.fundsMinor == null && a.fundsHidden ? [isAr ? 'لم تشارك Meta رصيد هذا الحساب. تعرضه فقط إذا كان لاتصال Albayan صلاحية "التحكم الكامل" على الحساب.' : 'Meta did not share this account\'s funds. It shows them only when the Albayan connection has Full control (Manage) on the account.', 'text-amber-700 dark:text-amber-300']
+      : null;
+    const extra = [
+      a.capRemainingMinor != null ? `${isAr ? 'المتبقي من حد الإنفاق' : 'Spend limit left'}: ${money(a.capRemainingMinor, a.currency)}` : '',
+      Number(a.amountDueMinor) > 0 ? `${isAr ? 'مستحق الدفع' : 'Amount due'}: ${money(a.amountDueMinor, a.currency)}` : ''
+    ].filter(Boolean).join(' · ');
+    return `<div class="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2 dark:bg-slate-900/40" title="${esc(a.fundsText)}"><div class="min-w-0"><div class="break-words text-sm font-bold text-slate-800 dark:text-white">${esc(name)}</div><div class="font-mono text-[10px] text-slate-500">#${esc(a.id)}</div>${extra ? `<div class="text-[11px] text-slate-500">${extra}</div>` : ''}${note ? `<div class="mt-0.5 break-words text-xs font-bold ${note[1]}">${esc(note[0])}</div>` : ''}</div><div class="shrink-0 text-end">${main}</div></div>`;
+  };
+  return `<div data-role="meta-account-funds" class="mt-4 rounded-xl border border-sky-200 bg-sky-50/50 p-4 dark:border-sky-800 dark:bg-sky-950/20">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex items-center gap-2 font-black text-sky-800 dark:text-sky-200"><i data-lucide="banknote" class="h-4 w-4"></i>${isAr ? 'الأموال في حسابات الإعلانات' : 'Money in the ad accounts'}</div>
+      <button type="button" onclick="metaInsightsLoadFunds(true)" ${ui.fundsLoading ? 'disabled' : ''} class="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-200 px-2.5 text-xs font-bold text-sky-700 hover:bg-sky-100 disabled:opacity-60 dark:border-sky-800 dark:text-sky-300"><i data-lucide="refresh-cw" class="h-3.5 w-3.5 ${ui.fundsLoading ? 'animate-spin' : ''}"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
+    </div>
+    <p class="mt-1 text-xs text-slate-500">${isAr ? 'ما تذكره Meta كرصيد في كل حساب (المال الذي أضفته ولم يُصرف بعد)، وهو غير ميزانية الإعلانات أعلاه.' : 'What Meta reports inside each account (money you added that is not spent yet). This is not the ads budget above.'}</p>
+    ${ui.fundsError ? `<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${esc(ui.fundsError)}</div>` : ''}
+    ${ui.fundsLoading && !ui.funds ? `<div class="mt-3 flex items-center justify-center gap-2 p-4 text-sm text-slate-500"><i data-lucide="loader-circle" class="h-4 w-4 animate-spin"></i>${isAr ? 'جارٍ القراءة من Meta...' : 'Reading from Meta...'}</div>` : ''}
+    ${rows.length ? `<div class="mt-3 space-y-1.5">${rows.map(row).join('')}</div>` : (ui.funds && !ui.fundsLoading ? `<div class="mt-3 text-xs text-slate-500">${isAr ? 'لا توجد حسابات إعلانية مرتبطة.' : 'No ad accounts are connected.'}</div>` : '')}
+    ${ui.funds?.fetchedAt ? `<div class="mt-2 text-[10px] text-slate-400">${isAr ? 'آخر قراءة' : 'Last read'}: ${esc(metaAdsFormatDate(ui.funds.fetchedAt, true))}${ui.funds.truncated ? (isAr ? ' — أول 25 حساباً فقط' : ' — first 25 accounts only') : ''}</div>` : ''}
+  </div>`;
 }
 
 function metaInsightsPageRow(page, isAr, currency) {
@@ -475,6 +537,8 @@ function metaInsightsRenderModal() {
       <div class="mt-1 text-xs text-slate-500">${isAr ? `${summary.count} إعلان نشط على Meta الآن (المستوردة تلقائياً + المربوطة يدوياً)` : `${summary.count} ad(s) currently ACTIVE on Meta (auto-imported + manually linked)`}${summary.openEnded ? ` · ${isAr ? `${summary.openEnded} إعلان مفتوح بدون ميزانية إجمالية (غير محسوب)` : `${summary.openEnded} open-ended ad(s) without a total budget (not counted)`}` : ''}</div>
       ${summary.byAccount.length ? `<div class="mt-3 space-y-1.5">${summary.byAccount.map(account => `<div class="flex items-center justify-between gap-2 rounded-lg bg-white/70 px-3 py-1.5 text-xs dark:bg-slate-900/40"><span class="min-w-0 break-words font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(account.name)} <span class="font-normal text-slate-400">(${account.count})</span></span><span class="shrink-0 font-black text-emerald-700 dark:text-emerald-300">${Security.escapeHtml(metaAdsFormatMoney(account.totalMinor, summary.currency))}</span></div>`).join('')}</div>` : ''}
     </div>
+
+    ${metaInsightsFundsCard(isAr)}
 
     <div data-role="meta-active-pages" class="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-800 dark:bg-indigo-950/20">
       <div class="flex flex-wrap items-center justify-between gap-2">

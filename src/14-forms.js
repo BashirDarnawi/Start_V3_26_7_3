@@ -2,15 +2,8 @@
 // CUSTOMER SEARCH / DROPDOWN UTILITIES
 // ==========================================
 
-// Click outside to close dropdown.
-// CAPTURE phase (the `true`) is required: every suggestion dropdown lives
-// inside a modal panel that carries onclick="event.stopPropagation()" (to keep
-// inside-clicks from closing the modal), so a bubble-phase document listener
-// never fires for taps inside the form — on phones (no Esc key, no hover) the
-// open dropdown then covers the inputs below until the whole modal is lost.
-// Capture fires on the way DOWN to the target, before that stopPropagation
-// runs. Same fix as the delegated record-action listener further below.
-// Selection still works: taps inside the dropdown are skipped by contains().
+// Click outside to close dropdown. CAPTURE phase is required: modal panels stopPropagation
+// inside-clicks, so a bubble listener never fired and the dropdown covered the form on phones.
 document.addEventListener('click', function(e) {
   const dropdowns = document.querySelectorAll('[id$="-dropdown"]');
   dropdowns.forEach(dropdown => {
@@ -1063,14 +1056,8 @@ function removePageCustomer(customerId) {
   }
 }
 
-// Delegated record actions keep untrusted ids out of executable JavaScript.
-// Dynamic dropdowns can be re-rendered freely without re-binding handlers.
-// CAPTURE phase (the `true` below) is essential: modal panels carry
-// onclick="event.stopPropagation()" to stop inside-clicks from closing the modal,
-// which also stops the click ever bubbling to document. A capture-phase listener on
-// document fires on the way DOWN to the target, before that bubble-phase
-// stopPropagation runs — so page/customer dropdown selections work inside modals
-// again. (Bubble phase silently broke every in-modal selection.)
+// Delegated record actions keep untrusted ids out of executable JavaScript. CAPTURE phase:
+// modal panels stopPropagation their clicks, which silently broke every in-modal selection.
 if (!window.__albayanSafeRecordActionsBound) {
   window.__albayanSafeRecordActionsBound = true;
   document.addEventListener('click', (event) => {
@@ -1288,15 +1275,9 @@ function onPaymentMethodChange(selectElement) {
   updateReceiptTotals();
 }
 
-// Keep the Receipt Number field consistent with the selected payment methods.
-//
-// reissue=true  — the user just CHANGED the payment methods (picked another
-//                 method, added/removed a split row). The number must follow
-//                 the new methods, even on a saved receipt: switching a cash
-//                 receipt (paper number 12851) to Bank Transfer means there is
-//                 no paper receipt any more, so it takes a B number.
-// reissue=false — the form merely opened; never renumber an existing receipt,
-//                 only fill a blank field.
+// Keep the Receipt Number consistent with the payment methods. reissue=true: the methods
+// CHANGED, so the number follows them even on a saved receipt (cash 12851 -> Bank Transfer
+// takes a B number). reissue=false: the form merely opened; only fill a blank field.
 function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
@@ -2167,14 +2148,9 @@ async function _saveReceiptFromModalInner() {
     serialNumber: isTempDelivery ? '' : serialFinal,
     finalReceiptNo: finalReceiptNo,
     tempReceiptNo: tempReceiptNo,
-    // A carried "existing balance" receipt is an ordinary Paid receipt that is only
-    // TAGGED so its card shows the existing-balance colour/badge; it counts as revenue
-    // and funds ads exactly like any other receipt. The tag only applies to a NEW,
-    // non-delivery receipt. An EDIT must echo the STORED type verbatim: the
-    // server 405s any client CHANGE of receiptType, and legacy temp receipts
-    // predate the DELIVERY_TEMP stamp — recomputing the tag from tempReceiptNo
-    // here turned every edit of such a receipt into a forbidden ''→DELIVERY_TEMP
-    // change ("Receipt type is server-controlled"), blocking the save entirely.
+    // A carried "existing balance" receipt is an ordinary Paid receipt, only TAGGED for its badge;
+    // the tag applies to a NEW non-delivery receipt. An EDIT echoes the STORED type verbatim (the
+    // server 405s any receiptType change; recomputing it from tempReceiptNo blocked legacy saves).
     receiptType: editTarget
       ? (editTarget.receiptType || '')
       : (tempReceiptNo ? 'DELIVERY_TEMP' : (_newReceiptCarried ? 'CARRIED_BALANCE' : '')),

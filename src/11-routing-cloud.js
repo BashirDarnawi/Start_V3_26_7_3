@@ -240,15 +240,9 @@ function setupUrlRouting() {
     // router would only re-render and scroll-reset the unchanged view.
     if (typeof shouldSuppressOverlayPopstate === 'function' && shouldSuppressOverlayPopstate()) return;
 
-    // Phone browsers: hardware/gesture Back closes the top-most open
-    // overlay/modal/drawer — the same order as the packaged app's native
-    // Back handler — instead of navigating the screen underneath it. The
-    // popped entry is the surface's own sentinel/?modal entry, so the
-    // address bar is already back at the pre-overlay URL and the pop is
-    // fully consumed by the close. Desktop and Capacitor behaviour are
-    // unchanged. Never call history.back()/forward() from here: the
-    // re-fired popstate would re-run restoreModalFromUrl's opener and
-    // clobber unsaved form state.
+    // Phone browsers: Back closes the top-most overlay (same order as the native app); the popped
+    // entry is the surface's own sentinel. Never call history.back()/forward() here (the re-fired
+    // popstate would re-run the opener and clobber unsaved form state).
     if (typeof closeTopMobileSurface === 'function'
         && typeof isPhoneBrowserHistoryManaged === 'function'
         && isPhoneBrowserHistoryManaged()) {
@@ -396,14 +390,9 @@ function restoreModalFromUrl() {
   }
 }
 
-// A closeModal() consume (history.back()/go(-2)) issued in this same task has
-// not landed yet — history traversal is async, so pushing the new view NOW
-// would stack it on top of the very entries the traversal is about to pop,
-// and the traversal would then strand the user on a stale ?modal entry that a
-// later Back resurrects (e.g. duplicate-serial warning → "View Customer").
-// Wait for the suppressed bookkeeping popstate before stamping the URL, with
-// a short fallback timeout in case the traversal is silently dropped at the
-// session-history edge. See the overlay history model in 01b-mobile-runtime.js.
+// A closeModal() history consume from this same task has not landed yet (traversal is async):
+// wait for its popstate (short fallback timeout) before stamping the URL, or the new view is
+// stranded under a stale ?modal entry. See the overlay history model in 01b-mobile-runtime.js.
 function _pushViewUrlAfterHistoryConsume(view) {
   let done = false;
   let fallbackTimer = null;

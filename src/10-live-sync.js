@@ -1753,6 +1753,7 @@ function resetAuthenticatedServerCaches() {
     metaInsightsUi.refreshing = false;
     metaInsightsUi.loadedAtMs = 0;
     metaInsightsUi.requestSeq += 1;
+    Object.assign(metaInsightsUi, { funds: null, fundsError: '', fundsLoading: false, fundsAtMs: 0, fundsSeq: metaInsightsUi.fundsSeq + 1 });
   }
   // Module caches (hub/wallet/Control Center) must not survive sign-out.
   try { if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null; _chargeWallet.busy = false; } } catch (_) {}

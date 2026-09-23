@@ -26,7 +26,8 @@ customer, receipt, debt, exchange rate, local status, photos, or notes.
 
 1. Create or select a Meta app that can access your business ad accounts.
 2. Create a long-lived server/system-user access token with read access to the
-   required ad accounts (`ads_read`). Do not use your Facebook password.
+   required ad accounts (`ads_read`). To show an account's prepaid "available funds" in Meta Insights, Meta also
+   requires the system user to have Full control (Manage ad account) on that ad account. Do not use your Facebook password.
 3. In the Jelastic container environment, add:
 
    ```text

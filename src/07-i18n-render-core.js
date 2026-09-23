@@ -238,14 +238,8 @@ function applyTheme() {
     root.classList.remove('dark');
   }
 
-  // Keep the browser's used color-scheme in sync with the APP theme (the
-  // app theme is a manual light/dark/system toggle, not the OS scheme).
-  // Without this, UA-rendered widgets (<select> panes, Android date-picker
-  // dialogs, scrollbars, autofill) stay WHITE against the app's dark UI on
-  // Chromium Android + FB/IG webviews, and Chrome/Samsung "auto dark" would
-  // algorithmically invert the light theme. Complements the static
-  // <meta name="color-scheme" content="light dark"> in index.html, which
-  // covers the pre-JS first paint; this inline style then wins per-theme.
+  // Keep the used color-scheme in sync with the APP theme so native widgets (selects, date
+  // pickers, scrollbars) are not white on dark and Chrome auto-dark does not invert the light theme.
   try { root.style.colorScheme = isDark ? 'dark' : 'light'; } catch (_) {}
 
   // The two media-keyed theme-color metas in index.html track the OS scheme
@@ -314,15 +308,8 @@ function ensureLucideCreateIconsWrapped() {
 }
 ensureLucideCreateIconsWrapped();
 
-// Debounced icon refresh (batches multiple calls).
-// EXECUTION ORDER (why flush() must retry): lucide.min.js is a deferred
-// <head> script, while script.js is a CLASSIC end-of-body script — per the
-// HTML spec a classic script executes DURING parsing, BEFORE deferred
-// scripts run. So window.lucide may not exist yet when early code schedules
-// icons; the old `if (!window.lucide) return;` also left `timer` set, which
-// wedged the queue forever. flush() now keeps the queue and retries until
-// the library arrives (deferred scripts are guaranteed to run before
-// DOMContentLoaded, so this resolves within the load phase).
+// Debounced icon refresh. lucide.min.js is deferred and runs AFTER this classic script, so
+// flush() keeps the queue and retries until the library arrives (before DOMContentLoaded).
 const IconQueue = {
   pending: new Set(),
   timer: null,

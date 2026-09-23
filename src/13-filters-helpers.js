@@ -2991,15 +2991,9 @@ async function compressImageToDataUrl(file) {
   let originalDataUrl = await readFileAsDataUrl(file);
   try {
     let type = String(file.type || '').toLowerCase();
-    // Android SAF/content-provider pickers (third-party file managers, Drive
-    // routes, FB/IG WebView choosers) hand over real JPEGs with a BLANK or
-    // generic MIME type; readAsDataURL then emits data:application/octet-stream
-    // and isSafeReceiptPhotoSource rejects a perfectly decodable photo as
-    // "unsupported". Sniff the base64 magic bytes and rewrite the prefix so
-    // EVERY exit path below (GIF keep-original, small-file keep-original,
-    // larger-output keep-original, catch fallback) emits a proper
-    // data:image/... URL. Genuinely non-image files sniff to nothing and are
-    // rejected exactly as before.
+    // Android pickers (SAF, Drive, FB/IG WebViews) hand over real JPEGs with a blank MIME type:
+    // sniff the magic bytes and fix the data: prefix so every exit path below emits data:image/...
+    // (non-image files still sniff to nothing and are rejected).
     if (!type || type === 'application/octet-stream') {
       const b64 = originalDataUrl.slice(originalDataUrl.indexOf(',') + 1);
       if (b64.startsWith('/9j/')) type = 'image/jpeg';
@@ -3479,14 +3473,8 @@ function handleDeliveryReceiptPhotoUpload(fileList) {
   });
 }
 
-// ---- Delivery completion draft (survives Android camera round-trips) -------------
-// Tapping the photo input launches the camera activity; on low-RAM phones and
-// inside Facebook/Instagram in-app WebViews the OS routinely kills the browser
-// process while the camera is foreground, cold-reloading the SPA and destroying
-// the transient completion modal. Persist a draft of the typed fields (and the
-// already-delivered photo) so reopening the modal restores the driver's work.
-// localStorage, NOT sessionStorage: in-app WebView sessionStorage is process
-// memory and dies with exactly the kill being defended against.
+// ---- Delivery completion draft: phones kill the browser during the camera round-trip; keep
+// the typed fields and delivered photo in localStorage (sessionStorage dies with the process).
 const _DELIVERY_DRAFT_PREFIX = 'albayan_delivery_draft_';
 const _DELIVERY_DRAFT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let _deliveryDraftSaveTimer = null;
@@ -6402,16 +6390,9 @@ function getMetaAdHistoryEntries(ad) {
     });
 }
 
-// Who turned a Meta-imported draft into a real ad, for showing on the ads list
-// without opening the ad. An imported row is created by the automation, so its
-// "Created by" is the importer, never a person — this answers "who did the
-// setup?".
-//
-// The server stamps metaImportCompletedBy inside the guarded
-// needs_completion -> complete transition. Ads completed BEFORE that stamp
-// existed fall back to their own history: the first human edit of a draft IS
-// the completion. Meta's sync rows are excluded, so an automatic budget or
-// spend update is never mistaken for a person.
+// Who completed a Meta-imported draft (its "Created by" is the importer, never a person): the
+// server's metaImportCompletedBy stamp, else the first human edit in its history (Meta sync
+// rows excluded, so an automatic budget/spend update is never mistaken for a person).
 function getAdCompletedByName(ad) {
   if (!ad || typeof ad !== 'object') return '';
   const stampedId = String(ad.metaImportCompletedBy || '').trim();

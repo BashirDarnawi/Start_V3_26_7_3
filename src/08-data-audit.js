@@ -870,14 +870,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              // Reload the OPEN modal from the fresh copy — form fields AND
-              // baseline together. Refreshing only the version stamp under a
-              // form that still displays the stale snapshot was a silent
-              // lost-update: the next Save would pass the optimistic lock and
-              // overwrite the other user's committed change with old values.
-              // A full reload makes "We loaded the latest version" true and
-              // keeps the lock meaningful (unsaved edits are discarded — the
-              // honest cost of a real conflict).
+              // Reload the OPEN modal from the fresh copy (fields AND baseline): refreshing only the stamp
+              // under stale fields let the next Save overwrite the other user's change. Unsaved edits are
+              // discarded — the honest cost of a real conflict.
               if (_latestData && state.modalData && String(state.modalData.id) === String(id)
                   && idx !== -1 && state.activeModal) {
                 state.modalData = array[idx];
