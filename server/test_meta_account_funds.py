@@ -12,7 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server.meta_ads as meta_ads
-from server.db import init_db
+from sqlalchemy import text
+
+from server.db import db_conn, init_db
 from server.main import app
 from server.test_meta_ads import _insert_user, _login, _real_client
 
@@ -133,17 +135,30 @@ def _row(account_id, amount=20000):
 class _FundsFake:
     def __init__(self):
         self.calls: list[str] = []
+        self.headroom: list[bool] = []
         self.fail: dict[str, BaseException] = {}
         self.listed: list[dict] = []
 
     def list_accounts(self):
         return self.listed
 
-    def get_account_funds(self, account_id):
+    def get_account_funds(self, account_id, use_headroom=False):
         self.calls.append(account_id)
+        self.headroom.append(use_headroom)
         if account_id in self.fail:
             raise self.fail[account_id]
         return _row(account_id)
+
+
+def _forget_funds():
+    meta_ads._META_FUNDS_CACHE.clear()
+    init_db()
+    with db_conn() as conn:
+        conn.execute(text("DELETE FROM entities WHERE type=:t"), {"t": meta_ads._META_FUNDS_STATE_TYPE})
+
+
+def _age_last_read(ms):
+    meta_ads._META_FUNDS_CACHE["at"] -= ms
 
 
 @pytest.fixture()
@@ -154,9 +169,9 @@ def funds_env(monkeypatch):
     monkeypatch.setenv("ALBAYAN_META_AD_ACCOUNT_IDS", "444444444444444,555555555555555")
     monkeypatch.setenv("ALBAYAN_META_BACKGROUND_SYNC", "false")
     monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: fake)
-    meta_ads._META_FUNDS_CACHE.clear()
+    _forget_funds()
     yield fake
-    meta_ads._META_FUNDS_CACHE.clear()
+    _forget_funds()
 
 
 @pytest.fixture(scope="module")
@@ -200,9 +215,14 @@ def test_cache_lifetimes_and_refresh(people, funds_env):
     expired = client.get("/api/meta-ads/account-funds", cookies=people["admin"])
     assert expired.json()["cached"] is False and len(funds_env.calls) == 4
     assert meta_ads._META_FUNDS_CACHE["ttl"] == meta_ads._META_FUNDS_TTL_MS            # all clean: five minutes
+    quick = client.post("/api/meta-ads/account-funds/refresh", json={}, cookies=people["admin"])
+    assert quick.json()["cached"] is True and len(funds_env.calls) == 4                # a tap-happy Refresh costs Meta nothing
+    _age_last_read(meta_ads._META_FUNDS_MIN_REFRESH_MS + 1)
     fresh = client.post("/api/meta-ads/account-funds/refresh", json={}, cookies=people["admin"])
     assert fresh.status_code == 200, fresh.text
     assert fresh.json()["cached"] is False and len(funds_env.calls) == 6
+    assert all(funds_env.headroom), "the owner's own read may use Albayan's safety margin"
+    assert fresh.json()["provider"]["state"] in {"ready", "paused"}
 
 
 def test_a_meta_pause_keeps_the_last_good_reading_and_stops_the_scan(people, funds_env):
@@ -211,6 +231,7 @@ def test_a_meta_pause_keeps_the_last_good_reading_and_stops_the_scan(people, fun
     pause = meta_ads.MetaAdsError("rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True)
     funds_env.fail["444444444444444"] = pause
     funds_env.fail["555555555555555"] = pause
+    _age_last_read(meta_ads._META_FUNDS_MIN_REFRESH_MS + 1)
     body = client.post("/api/meta-ads/account-funds/refresh", json={}, cookies=people["admin"]).json()
     assert funds_env.calls == ["444444444444444"]            # the second account is not queued behind the pause
     rows = {row["id"]: row for row in body["accounts"]}
@@ -242,3 +263,77 @@ def test_not_configured_is_a_clear_503(people, funds_env, monkeypatch):
     monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", "")
     response = client.get("/api/meta-ads/account-funds", cookies=people["admin"])
     assert response.status_code == 503 and funds_env.calls == []
+
+
+def test_the_stored_reading_survives_a_restart_and_shows_during_a_pause(people, funds_env):
+    assert client.get("/api/meta-ads/account-funds", cookies=people["admin"]).status_code == 200
+    meta_ads._META_FUNDS_CACHE.clear()                       # a restart forgets memory, not the database
+    pause = meta_ads.MetaAdsError("rate_limited", "Meta synchronization is paused safely and will resume automatically.", retryable=True)
+    funds_env.fail["444444444444444"] = pause
+    funds_env.fail["555555555555555"] = pause
+    rows = {row["id"]: row for row in client.get("/api/meta-ads/account-funds", cookies=people["admin"]).json()["accounts"]}
+    for account_id in ("444444444444444", "555555555555555"):
+        assert rows[account_id]["stale"] is True and rows[account_id]["fundsMinor"] == 20000
+        assert rows[account_id]["readAt"] == "2026-09-23T09:00:00Z"   # the time of the real reading
+
+
+def test_an_account_never_read_waits_for_meta_instead_of_failing(people, funds_env):
+    funds_env.fail["444444444444444"] = meta_ads.MetaAdsError("rate_limited", "Meta synchronization is paused safely and will resume automatically.", retryable=True)
+    rows = {row["id"]: row for row in client.get("/api/meta-ads/account-funds", cookies=people["admin"]).json()["accounts"]}
+    assert rows["444444444444444"]["waiting"] is True and rows["444444444444444"]["error"]
+    funds_env.fail["444444444444444"] = meta_ads.MetaAdsError("request_failed", "Meta could not return the requested ad information.")
+    _age_last_read(meta_ads._META_FUNDS_MIN_REFRESH_MS + 1)
+    rows = {row["id"]: row for row in client.post("/api/meta-ads/account-funds/refresh", json={}, cookies=people["admin"]).json()["accounts"]}
+    assert rows["444444444444444"]["waiting"] is False             # a real refusal is not "waiting"
+
+
+def test_the_worker_reads_the_funds_in_a_gap_and_retries_soon_after_a_cut_short_read(funds_env, monkeypatch):
+    monkeypatch.setattr(meta_ads, "_META_FUNDS_WORKER_LAST", 0.0)
+    meta_ads._maybe_refresh_meta_funds()
+    assert funds_env.calls == ["444444444444444", "555555555555555"] and funds_env.headroom == [False, False]
+    meta_ads._maybe_refresh_meta_funds()                            # not again within ten minutes
+    assert len(funds_env.calls) == 2
+    stored = meta_ads._load_funds_state()
+    assert [row["id"] for row in stored["accounts"]] == ["444444444444444", "555555555555555"]
+    # a pause cut the next read short: try again after one minute, not ten
+    funds_env.fail["555555555555555"] = meta_ads.MetaAdsError("rate_limited", "paused", retryable=True)
+    monkeypatch.setattr(meta_ads, "_META_FUNDS_WORKER_LAST", 0.0)
+    meta_ads._maybe_refresh_meta_funds()
+    waited = meta_ads.time.monotonic() - meta_ads._META_FUNDS_WORKER_LAST
+    assert meta_ads._META_FUNDS_WORKER_INTERVAL_S - waited <= meta_ads._META_FUNDS_WORKER_RETRY_S + 1
+
+
+def test_the_worker_never_waits_behind_an_admin_read(funds_env, monkeypatch):
+    monkeypatch.setattr(meta_ads, "_META_FUNDS_WORKER_LAST", 0.0)
+    assert meta_ads._META_FUNDS_LOCK.acquire(blocking=False)
+    try:
+        meta_ads._maybe_refresh_meta_funds()
+    finally:
+        meta_ads._META_FUNDS_LOCK.release()
+    assert funds_env.calls == []
+
+
+@pytest.mark.parametrize("reason,usage,use_headroom,expect_call", [
+    ("usage_high", 90, True, True),     # Albayan's own margin: the owner's read goes through
+    ("usage_high", 90, False, False),   # the background sync keeps waiting
+    ("usage_high", 97, True, False),    # too close to Meta's limit
+    ("meta_80004", 0, True, False),     # Meta refused: always respected
+])
+def test_only_albayans_own_pause_leaves_headroom(monkeypatch, reason, usage, use_headroom, expect_call):
+    seen = []
+
+    def handler(request):
+        seen.append(1)
+        return httpx.Response(200, json=_account_payload("444444444444444", amount_spent="0", spend_cap="0", balance="0"))
+
+    real = _real_client(monkeypatch, handler)
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", meta_ads.time.monotonic() + 600)
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_REASON", reason)
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_USAGE_PERCENT", usage)
+    if expect_call:
+        assert real.get_account_funds("444444444444444", use_headroom=use_headroom)["id"] == "444444444444444"
+        assert len(seen) == 1
+    else:
+        with pytest.raises(meta_ads.MetaAdsError) as caught:
+            real.get_account_funds("444444444444444", use_headroom=use_headroom)
+        assert caught.value.code == "rate_limited" and seen == []

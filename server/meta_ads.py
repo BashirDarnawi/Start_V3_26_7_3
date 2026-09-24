@@ -89,6 +89,19 @@ _META_FUNDS_CACHE: dict[str, Any] = {}
 _META_FUNDS_TTL_MS = 5 * 60 * 1000
 _META_FUNDS_ERROR_TTL_MS = 30 * 1000
 _META_FUNDS_MAX_ACCOUNTS = 25
+# A manual Refresh within this window is answered from the last read.
+_META_FUNDS_MIN_REFRESH_MS = 30 * 1000
+# The background worker re-reads the funds at most this often (sooner after a
+# pause cut a read short), so the dialog has a recent reading even when Meta is
+# pausing Albayan at the moment the owner opens it.
+_META_FUNDS_WORKER_INTERVAL_S = 10 * 60
+_META_FUNDS_WORKER_RETRY_S = 60
+_META_FUNDS_WORKER_LAST = 0.0
+_META_FUNDS_STATE_TYPE = "metaFundsState"
+_META_FUNDS_STATE_ID = "accounts"
+# Albayan pauses itself at high usage BEFORE Meta refuses anything; that pause
+# still leaves room for a few small reads the owner asked for.
+_META_HEADROOM_MAX_USAGE_PERCENT = 95
 # Funding type 20 is Meta's STORED_BALANCE (prepaid "available funds").
 _META_STORED_BALANCE_TYPE = 20
 # en-US amounts only (the read asks Meta for locale en_US): "1,234.56" or "200". A decimal
@@ -220,6 +233,16 @@ def _meta_remote_backoff_remaining() -> int:
     with _META_REMOTE_BACKOFF_LOCK:
         remaining = _META_REMOTE_BACKOFF_UNTIL - time.monotonic()
     return max(0, int(math.ceil(remaining)))
+
+
+def _meta_pause_leaves_headroom() -> bool:
+    """True when the current pause is Albayan's own safety margin (usage over the
+    threshold, nothing refused by Meta) and usage still leaves room."""
+    with _META_REMOTE_BACKOFF_LOCK:
+        return (
+            _META_REMOTE_BACKOFF_REASON == "usage_high"
+            and _META_REMOTE_USAGE_PERCENT < _META_HEADROOM_MAX_USAGE_PERCENT
+        )
 
 
 def _server_token_matches(config: "MetaAdsConfig") -> bool:
@@ -1115,8 +1138,10 @@ class MetaAdsClient:
         user_msg = str(error.get("error_user_msg") or "").strip() if isinstance(error, dict) else ""
         return MetaAdsError("request_failed", (_clean_text(user_msg)[:240] if user_msg else "Meta could not return the requested ad information."), provider_code=provider_code)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._request("GET", path, params=params)
+    def _get(
+        self, path: str, params: dict[str, Any] | None = None, *, use_headroom: bool = False
+    ) -> dict[str, Any]:
+        return self._request("GET", path, params=params, use_headroom=use_headroom)
 
     def _post(
         self,
@@ -1174,6 +1199,7 @@ class MetaAdsClient:
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         access_token: str | None = None,
+        use_headroom: bool = False,
     ) -> dict[str, Any]:
         safe_path = str(path or "").strip("/")
         if not safe_path or ".." in safe_path or not re.fullmatch(r"[A-Za-z0-9_/-]+", safe_path):
@@ -1200,7 +1226,7 @@ class MetaAdsClient:
             server_config = _server_token_matches(self.config)
             if server_config:
                 _refresh_meta_provider_state()
-            if _meta_remote_backoff_remaining():
+            if _meta_remote_backoff_remaining() and not (use_headroom and _meta_pause_leaves_headroom()):
                 raise MetaAdsError(
                     "rate_limited",
                     "Meta synchronization is paused safely and will resume automatically.",
@@ -1596,7 +1622,7 @@ class MetaAdsClient:
         self._account_cache[account_id] = normalized
         return normalized
 
-    def get_account_funds(self, account_id: Any) -> dict[str, Any]:
+    def get_account_funds(self, account_id: Any, *, use_headroom: bool = False) -> dict[str, Any]:
         """What Meta reports about the money in one ad account (read-only).
 
         funding_source_details carries the prepaid "available funds" text; Meta can
@@ -1610,12 +1636,12 @@ class MetaAdsClient:
         slim = "id,account_id,name,account_status,currency,balance,amount_spent,spend_cap"
         refused = False
         try:
-            row = self._get(f"act_{account_id}", {"fields": slim + ",is_prepay_account,funding_source_details", "locale": "en_US"})
+            row = self._get(f"act_{account_id}", {"fields": slim + ",is_prepay_account,funding_source_details", "locale": "en_US"}, use_headroom=use_headroom)
         except MetaAdsError as error:
             if error.retryable or error.provider_code.startswith("190"):
                 raise  # throttled/down, or a dead token: a second read cannot help
             refused = True
-            row = self._get(f"act_{account_id}", {"fields": slim, "locale": "en_US"})
+            row = self._get(f"act_{account_id}", {"fields": slim, "locale": "en_US"}, use_headroom=use_headroom)
         details = row.get("funding_source_details")
         details = details if isinstance(details, dict) else {}
         funds_text = _clean_text(details.get("display_string"), 160)
@@ -3454,31 +3480,81 @@ def _public_partner_stats(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_meta_account_funds(*, refresh: bool = False) -> dict[str, Any]:
+def _load_funds_state() -> dict[str, Any]:
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT data_json FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"),
+                {"type": _META_FUNDS_STATE_TYPE, "id": _META_FUNDS_STATE_ID},
+            ).mappings().first()
+    except Exception:
+        return {}
+    data = json_loads(row.get("data_json") or "{}") if row else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_funds_state(result: dict[str, Any]) -> None:
+    """Keep the last reading across restarts, so a Meta pause shows it (best effort)."""
+    clean = {"recordType": _META_FUNDS_STATE_TYPE, "updatedAt": _iso_now(),
+             "accounts": [row for row in result.get("accounts") or [] if isinstance(row, dict)][:_META_FUNDS_MAX_ACCOUNTS]}
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+                ),
+                {"type": _META_FUNDS_STATE_TYPE, "id": _META_FUNDS_STATE_ID},
+            ).mappings().first()
+            if row:
+                _write_entity_data(conn, row, clean)
+            else:
+                _insert_internal_entity(conn, _META_FUNDS_STATE_TYPE, _META_FUNDS_STATE_ID, clean)
+    except Exception:
+        return
+
+
+def get_meta_account_funds(*, refresh: bool = False, interactive: bool = True) -> dict[str, Any] | None:
     """Money Meta reports in each allowed ad account, for the admin's Meta Insights.
 
     Read-only. Cached for a few minutes (30 seconds when an account could not be
-    read); the lock keeps two admins from reading the same accounts twice.
+    read); the lock keeps two admins from reading the same accounts twice. The last
+    good reading is stored, so while Meta pauses Albayan the dialog shows it with
+    its time instead of an error. An interactive read may use the headroom of
+    Albayan's own usage pause; a pause Meta imposed is always respected. The
+    background worker calls this with interactive=False and never waits for the lock
+    (it returns None when an admin's read is already running).
     """
     config = load_meta_ads_config()
     if not config.configured:
         raise MetaAdsError("not_configured", "Meta Ads connection is not configured")
-    with _META_FUNDS_LOCK:
+    if not _META_FUNDS_LOCK.acquire(blocking=interactive):
+        return None
+    try:
         cached = _META_FUNDS_CACHE.get("result")
         age_ms = now_ms() - int(_META_FUNDS_CACHE.get("at") or 0)
-        if cached and not refresh and age_ms < int(_META_FUNDS_CACHE.get("ttl") or 0):
-            return {**cached, "cached": True}
+        if cached and (
+            (not refresh and age_ms < int(_META_FUNDS_CACHE.get("ttl") or 0))
+            or (refresh and interactive and age_ms < _META_FUNDS_MIN_REFRESH_MS)
+        ):
+            return {**cached, "cached": True, "provider": _public_meta_provider_state()}
+        stored = cached or _load_funds_state()
         client = get_meta_ads_client()
         account_ids = list(config.allowed_account_ids)
         names: dict[str, str] = {}
         if not account_ids:
-            listed = client.list_accounts()
+            try:
+                listed = client.list_accounts()
+            except MetaAdsError:
+                listed = [row for row in stored.get("accounts") or [] if isinstance(row, dict)]
+                if not listed:
+                    raise
             account_ids = [str(row.get("id")) for row in listed if row.get("id")]
             names = {str(row.get("id")): str(row.get("name") or "") for row in listed}
         # The last good reading per account survives a Meta pause (shown as "last known").
         previous = {
             str(row.get("id")): row
-            for row in ((cached or {}).get("accounts") or [])
+            for row in (stored.get("accounts") or [])
             if isinstance(row, dict) and not row.get("error")
         }
         accounts: list[dict[str, Any]] = []
@@ -3487,7 +3563,7 @@ def get_meta_account_funds(*, refresh: bool = False) -> dict[str, Any]:
             error: MetaAdsError | None = pause
             if error is None:
                 try:
-                    accounts.append(client.get_account_funds(account_id))
+                    accounts.append(client.get_account_funds(account_id, use_headroom=interactive))
                     continue
                 except MetaAdsError as caught:
                     error = caught
@@ -3502,6 +3578,7 @@ def get_meta_account_funds(*, refresh: bool = False) -> dict[str, Any]:
                     "id": account_id,
                     "name": names.get(account_id) or f"Ad account {account_id}",
                     "error": error.public_message,
+                    "waiting": bool(error.retryable),  # Meta is busy: read later, not a failure
                 })
         result = {
             "accounts": accounts,
@@ -3514,7 +3591,24 @@ def get_meta_account_funds(*, refresh: bool = False) -> dict[str, Any]:
             "at": now_ms(),
             "ttl": _META_FUNDS_ERROR_TTL_MS if any(row.get("error") or row.get("stale") for row in accounts) else _META_FUNDS_TTL_MS,
         })
-        return result
+        _save_funds_state(result)
+        return {**result, "provider": _public_meta_provider_state()}
+    finally:
+        _META_FUNDS_LOCK.release()
+
+
+def _maybe_refresh_meta_funds() -> None:
+    """Worker: read the account funds in a gap between Meta pauses, at most every
+    ten minutes, one minute after a read that a pause cut short."""
+    global _META_FUNDS_WORKER_LAST
+    current = time.monotonic()
+    if _META_FUNDS_WORKER_LAST and current - _META_FUNDS_WORKER_LAST < _META_FUNDS_WORKER_INTERVAL_S:
+        return
+    _META_FUNDS_WORKER_LAST = current  # stamp first: a failing read waits like a good one
+    result = get_meta_account_funds(refresh=True, interactive=False)
+    rows = (result or {}).get("accounts") or []
+    if result is None or any(row.get("error") or row.get("stale") for row in rows):
+        _META_FUNDS_WORKER_LAST = current - _META_FUNDS_WORKER_INTERVAL_S + _META_FUNDS_WORKER_RETRY_S
 
 
 def get_meta_partner_page_stats(*, refresh: bool = False) -> dict[str, Any]:
@@ -5347,6 +5441,12 @@ def _worker_loop(stop_event: threading.Event | None = None, startup_cutoff: str 
             if remote_pause:
                 stop.wait(min(max(remote_pause, 2), 60))
                 continue
+            try:
+                # A few small reads first, so the funds are fresh even when the
+                # ad sync keeps Meta near its limit.
+                _maybe_refresh_meta_funds()
+            except Exception:
+                print("[albayan] Meta ad-account funds read failed; it will retry.")
             current = time.monotonic()
             discovery_ran = False
             if config.auto_import and (

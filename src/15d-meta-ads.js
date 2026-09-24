@@ -455,8 +455,10 @@ function metaInsightsFundsCard(isAr) {
     // Only the amount sits in the right column; every sentence wraps under the name (phone width).
     const main = a.error ? '' : a.fundsMinor != null ? `<span class="text-lg font-black text-sky-700 dark:text-sky-300">${money(a.fundsMinor, a.currency)}</span>`
       : a.fundsText || a.fundsHidden ? '' : `<span class="text-xs text-slate-400">${isAr ? 'لم تذكر Meta رصيداً' : 'No balance reported by Meta'}</span>`;
-    const note = a.error ? [a.error, 'text-rose-600']
-      : a.stale ? [`${isAr ? 'آخر رصيد معروف' : 'Last known amount'}: ${a.staleReason || ''}`, 'text-amber-700 dark:text-amber-300']
+    const amber = 'text-amber-700 dark:text-amber-300';
+    const note = a.error && a.waiting ? [isAr ? 'بانتظار Meta. يقرأ Albayan هذا الحساب تلقائياً عندما تسمح Meta.' : 'Waiting for Meta. Albayan reads this account automatically as soon as Meta allows.', amber]
+      : a.error ? [a.error, 'text-rose-600']
+      : a.stale ? [`${isAr ? 'آخر رصيد معروف، قُرئ في' : 'Last known amount, read'} ${metaAdsFormatDate(a.readAt, true)}`, amber]
       : a.fundsMinor == null && a.fundsText ? [a.fundsText, 'text-slate-600 dark:text-slate-300']
       : a.fundsMinor == null && a.fundsHidden ? [isAr ? 'لم تشارك Meta رصيد هذا الحساب. تعرضه فقط إذا كان لاتصال Albayan صلاحية "التحكم الكامل" على الحساب.' : 'Meta did not share this account\'s funds. It shows them only when the Albayan connection has Full control (Manage) on the account.', 'text-amber-700 dark:text-amber-300']
       : null;
@@ -472,6 +474,7 @@ function metaInsightsFundsCard(isAr) {
       <button type="button" onclick="metaInsightsLoadFunds(true)" ${ui.fundsLoading ? 'disabled' : ''} class="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-sky-200 px-2.5 text-xs font-bold text-sky-700 hover:bg-sky-100 disabled:opacity-60 dark:border-sky-800 dark:text-sky-300"><i data-lucide="refresh-cw" class="h-3.5 w-3.5 ${ui.fundsLoading ? 'animate-spin' : ''}"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
     </div>
     <p class="mt-1 text-xs text-slate-500">${isAr ? 'ما تذكره Meta كرصيد في كل حساب (المال الذي أضفته ولم يُصرف بعد)، وهو غير ميزانية الإعلانات أعلاه.' : 'What Meta reports inside each account (money you added that is not spent yet). This is not the ads budget above.'}</p>
+    ${ui.funds?.provider?.paused && rows.some(a => a.stale || a.waiting) ? `<div class="mt-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">${isAr ? `طلبت Meta من Albayan التمهل الآن. المحاولة التلقائية التالية بعد نحو ${Math.max(1, Math.ceil((Number(ui.funds.provider.retryAfterSeconds) || 0) / 60))} دقيقة.` : `Meta asked Albayan to slow down right now. Next automatic try in about ${Math.max(1, Math.ceil((Number(ui.funds.provider.retryAfterSeconds) || 0) / 60))} min.`}</div>` : ''}
     ${ui.fundsError ? `<div role="alert" class="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-200">${esc(ui.fundsError)}</div>` : ''}
     ${ui.fundsLoading && !ui.funds ? `<div class="mt-3 flex items-center justify-center gap-2 p-4 text-sm text-slate-500"><i data-lucide="loader-circle" class="h-4 w-4 animate-spin"></i>${isAr ? 'جارٍ القراءة من Meta...' : 'Reading from Meta...'}</div>` : ''}
     ${rows.length ? `<div class="mt-3 space-y-1.5">${rows.map(row).join('')}</div>` : (ui.funds && !ui.fundsLoading ? `<div class="mt-3 text-xs text-slate-500">${isAr ? 'لا توجد حسابات إعلانية مرتبطة.' : 'No ad accounts are connected.'}</div>` : '')}

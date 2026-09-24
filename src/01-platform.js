@@ -67,14 +67,9 @@ const Platform = {
       (isTouch && window.innerWidth < 768)
     );
 
-    // Detect in-app browsers (webviews embedded inside other apps). Users
-    // arrive from Facebook ads, so the FB/IG/Messenger in-app browsers are a
-    // primary environment — and they silently break blob downloads,
-    // window.print() and target=_blank handoffs. Detection is deliberately
-    // token-based (explicit app UA markers only): NO generic "iOS without a
-    // Safari/ token" heuristic, because the installed PWA also drops the
-    // Safari/ token and would be misclassified. Capacitor is excluded first:
-    // its Android shell UA carries the same '; wv)' WebView marker.
+    // Detect in-app browsers (FB/IG/Messenger break downloads, print and _blank). Token-based
+    // only: no "iOS without Safari/" guess (the installed PWA drops that token too). Capacitor is
+    // excluded first: its Android shell UA carries the same '; wv)' marker.
     let isInAppBrowser = false;
     let inAppBrowserKind = null;
     if (!isCapacitor) {

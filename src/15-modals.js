@@ -3260,14 +3260,9 @@ async function handleModalSubmit() {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
         if (liveAd) state.modalData = liveAd;
       }
-      // A terminal/refunded ad still accepts TWO money-safe edits: relinking
-      // its funding receipt (free the old receipt, move the spent amount to a
-      // new one) and SETTLING its paid-off debt (flip not_paid -> paid while
-      // the committed total moves onto paid receipts). So the "terminal ads
-      // cannot be edited" decision is deferred until after the funding form
-      // is read — see the terminal-ad branch at save time, which dispatches a
-      // pure funding/settle change and blocks anything else with the
-      // "Ad Finished — use Refund" notice.
+      // A terminal/refunded ad still accepts two money-safe edits (relink its funding receipt, or
+      // settle its paid-off debt), so the "cannot edit" decision waits for the funding form: the
+      // terminal-ad branch at save time allows only those and shows "Ad Finished — use Refund".
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
