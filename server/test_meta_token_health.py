@@ -5,8 +5,11 @@ system token and the app secret must never appear in stored data, logs,
 responses, audit rows or exception texts.
 """
 
+import hashlib
+import hmac
 import logging
 import secrets
+import threading
 import time
 
 import httpx
@@ -59,15 +62,17 @@ def graph(monkeypatch):
     monkeypatch.setenv("ALBAYAN_META_APP_ID", APP_ID)
     monkeypatch.setenv("ALBAYAN_META_BACKGROUND_SYNC", "false")
     monkeypatch.delenv("ALBAYAN_META_GRAPH_API_VERSION", raising=False)
-    fake = {"requests": [], "status": 200, "body": {"data": _debug_data()}}
+    fake = {"requests": [], "status": 200, "body": {"data": _debug_data()}, "delay": 0.0}
 
     def handler(request):
         fake["requests"].append(request)
+        time.sleep(fake["delay"])
         return httpx.Response(fake["status"], json=fake["body"])
 
     real_client_class = httpx.Client
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(token_health.httpx, "Client", lambda **kwargs: real_client_class(transport=transport, **kwargs))
+    monkeypatch.setattr(token_health, "_LAST_CHECK", {"fingerprint": "", "at": 0.0})  # no reuse across tests
     _forget_token_state()
     yield fake
     _forget_token_state()
@@ -254,3 +259,123 @@ def test_refresh_is_rate_limited_and_same_origin(graph, people, fresh_limits):
     assert limited.status_code == 429 and limited.headers.get("Retry-After")
     assert len(graph["requests"]) == 3
     assert client.get(URL, cookies=people["admin"]).status_code == 200  # reading stays available
+
+
+# ---------------------------------------------------------------------------
+# A reading is tied to the token it checked (one-way fingerprint, never returned),
+# and check_token_now limits itself to one Graph call per 10 minutes per token.
+# ---------------------------------------------------------------------------
+
+OTHER_TOKEN = f"EAAGreplacedtoken{TAG}mustneverleak"
+READING_FIELDS = ("isValid", "type", "application", "appMatches", "expiresAt", "expiresNever", "daysLeft",
+                  "dataAccessExpiresAt", "dataAccessExpiresNever", "dataAccessDaysLeft", "scopes",
+                  "missingScopes", "pagesCoveredByScope", "errorCode", "lastCheckError", "lastCheckErrorAt")
+
+
+def _fingerprint(token):
+    return hmac.new(APP_SECRET.encode(), token.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def test_reading_of_another_token_is_stale(graph, people, fresh_limits, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    checked = client.get(f"{URL}?refresh=1", cookies=people["admin"])
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["checked"] is True and checked.json()["stale"] is False
+    stored = json_loads(_stored_token_json()["data_json"])
+    assert stored["tokenFingerprint"] == _fingerprint(SYSTEM_TOKEN)  # one-way, keyed with the app secret
+    assert SYSTEM_TOKEN not in _stored_token_json()["data_json"]
+    for response in (checked, client.get(URL, cookies=people["admin"])):
+        assert "tokenFingerprint" not in response.json()
+        assert stored["tokenFingerprint"] not in response.text
+    assert stored["tokenFingerprint"] not in caplog.text
+
+    # The token is replaced in Jelastic: the old token's reading is not shown as the new one's.
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", OTHER_TOKEN)
+    stale = client.get(URL, cookies=people["admin"])
+    assert stale.status_code == 200, stale.text
+    body = stale.json()
+    assert body["configured"] is True and body["checked"] is False and body["stale"] is True
+    assert not set(READING_FIELDS) & set(body) and "checkedAt" not in body
+    assert "webhookCounts" in body and stored["tokenFingerprint"] not in stale.text
+    assert len(graph["requests"]) == 1  # a plain read never calls Meta
+
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", SYSTEM_TOKEN)
+    assert client.get(URL, cookies=people["admin"]).json()["checked"] is True
+    # A reading saved before readings carried a fingerprint cannot be tied to any token.
+    meta_ads.save_meta_health_state("token", lambda current: {k: v for k, v in current.items() if k != "tokenFingerprint"})
+    legacy = client.get(URL, cookies=people["admin"]).json()
+    assert legacy["stale"] is True and legacy["checked"] is False and "isValid" not in legacy
+
+
+def test_failure_after_a_token_change_drops_the_old_reading(graph, people, fresh_limits, monkeypatch):
+    assert client.get(f"{URL}?refresh=1", cookies=people["admin"]).status_code == 200
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", OTHER_TOKEN)
+    graph["status"], graph["body"] = 400, {"error": {"code": 190, "message": "Invalid token"}}
+    failed = client.get(f"{URL}?refresh=1", cookies=people["admin"])
+    assert failed.status_code == 502, failed.text
+    assert graph["requests"][-1].url.params.get("input_token") == OTHER_TOKEN
+
+    stored = json_loads(_stored_token_json()["data_json"])
+    assert stored["lastCheckError"] == "check_failed:190" and stored["tokenFingerprint"] == _fingerprint(OTHER_TOKEN)
+    for field in ("isValid", "scopes", "expiresAt", "dataAccessExpiresAt", "checkedAt", "pagesCoveredByScope"):
+        assert field not in stored, field  # the first token's reading is gone
+    body = client.get(URL, cookies=people["admin"]).json()
+    assert body["stale"] is False and body["checked"] is False and body["checkedAt"] == ""
+    assert body["isValid"] is False and body["scopes"] == [] and body["dataAccessExpiresAt"] == ""
+    assert body["lastCheckError"] == "check_failed:190"
+
+
+def test_check_token_now_calls_meta_at_most_once_per_ten_minutes(graph, monkeypatch):
+    first = token_health.check_token_now()
+    again = token_health.check_token_now()
+    assert len(graph["requests"]) == 1  # two calls within 10 minutes: one Graph call
+    assert again == first and "tokenFingerprint" not in again
+
+    token_health.check_token_now(max_age_seconds=0)  # what ?refresh=1 passes: always asks
+    assert len(graph["requests"]) == 2
+    token_health._LAST_CHECK["at"] -= 601  # the last check is now older than 10 minutes
+    token_health.check_token_now()
+    assert len(graph["requests"]) == 3
+
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", OTHER_TOKEN)  # a changed token is always checked
+    changed = token_health.check_token_now()
+    assert len(graph["requests"]) == 4 and changed["isValid"] is True
+    assert graph["requests"][-1].url.params.get("input_token") == OTHER_TOKEN
+
+    # A failed check counts too: the saved reading (with its error) comes back without a call.
+    graph["status"], graph["body"] = 500, {"error": {"code": 2, "message": "Service unavailable"}}
+    with pytest.raises(meta_ads.MetaAdsError):
+        token_health.check_token_now(max_age_seconds=0)
+    assert len(graph["requests"]) == 5
+    after_failure = token_health.check_token_now()
+    assert len(graph["requests"]) == 5
+    assert after_failure["lastCheckError"] == "check_failed:2" and after_failure["isValid"] is True
+    for secret in (SYSTEM_TOKEN, OTHER_TOKEN, APP_SECRET, _fingerprint(OTHER_TOKEN)):
+        assert secret not in str(after_failure)
+
+
+def test_refresh_route_always_asks_meta(graph, people, fresh_limits):
+    token_health.check_token_now()
+    assert len(graph["requests"]) == 1
+    assert client.get(f"{URL}?refresh=1", cookies=people["admin"]).status_code == 200
+    assert len(graph["requests"]) == 2  # the admin's re-check skips the 10-minute reuse
+
+
+def test_simultaneous_checks_cost_one_graph_call(graph):
+    graph["delay"] = 0.2
+    results, errors = [], []
+
+    def check():
+        try:
+            results.append(token_health.check_token_now())
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=check) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert errors == [] and len(results) == 4
+    assert len(graph["requests"]) == 1  # the lock let one caller reach Meta; the rest reused it
+    assert all(result["isValid"] is True for result in results)

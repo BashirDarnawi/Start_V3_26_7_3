@@ -497,7 +497,7 @@ def test_page_comment_webhook_does_not_trigger_ad_discovery(meta_env, monkeypatc
 
 
 def test_unreadable_results_are_not_recorded_as_a_zero_spend_sync(meta_env):
-    row = {"id": "933333333333333", "name": "New client ad", "effectiveStatus": "ACTIVE",
+    row = {"id": "933333333333333", "name": "New client ad", "effectiveStatus": "ACTIVE", "campaignName": "Client campaign",
            "pageId": "777777777777777", "pageName": "Client Page", "createdTime": "2026-09-18T09:00:00Z"}
     pending = meta_ads._pending_meta_snapshot(
         row, "444444444444444", meta_ads.MetaAdsError("pending_enrichment", "loading", retryable=True), "USD")

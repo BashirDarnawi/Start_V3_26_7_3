@@ -3205,6 +3205,14 @@ def import_meta_ad_draft(snapshot: dict[str, Any]) -> dict[str, Any]:
             "This Meta ad belongs to Albayan Studio (its campaign name carries the studio code ALB-S-), "
             "so it is not imported into Albayan Manager.",
         )
+    if not _clean_text(snapshot.get("metaCampaignName")):
+        # Fail closed: without its campaign name the ad cannot be shown not to be a studio ad.
+        raise MetaAdsError(
+            "campaign_name_unknown",
+            "Albayan could not read this Meta ad's campaign name to confirm it is not an Albayan Studio ad, "
+            "so it is not imported yet. Albayan will retry.",
+            retryable=True,
+        )
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     with _META_WRITE_LOCK, db_conn() as conn:
         if postgres:
@@ -4389,7 +4397,8 @@ def discover_meta_ads(
         # D26: an ad whose Meta campaign name carries the studio code belongs to
         # Albayan Studio and never becomes a Manager "ads" row. The slim fallback
         # read has no campaign names, so a few are read here; an ad whose campaign
-        # name stays unknown waits for a later pass instead of being imported.
+        # name stays unknown (including one with no readable campaign id) waits
+        # for a later pass instead of being imported unchecked.
         campaign_names: dict[str, str] = {}
         name_lookups_left = _STUDIO_NAME_LOOKUPS_PER_PASS
         name_getter = getattr(client, "get_campaign_name", None)
@@ -4398,8 +4407,10 @@ def discover_meta_ads(
             nonlocal name_lookups_left
             name = _clean_text(row.get("campaignName"), 240)
             campaign_id = _clean_text(row.get("campaignId"), 40)
-            if name or not _META_ID_RE.fullmatch(campaign_id):
+            if name:
                 return name
+            if not _META_ID_RE.fullmatch(campaign_id):
+                return None  # fail closed: nothing to read the name from
             if campaign_id not in campaign_names:
                 if name_lookups_left <= 0 or not callable(name_getter):
                     return None
@@ -6257,7 +6268,10 @@ def create_meta_ads_router(
     ):
         _rate_limit_or_429(f"meta-list:{admin.get('id')}", 30, 60_000)
         try:
-            return {"ads": configured_client().list_ads(account_id, search)}
+            ads = configured_client().list_ads(account_id, search)
+            # D26: studio ads show only in Albayan Studio. Hidden here so picking one cannot
+            # spend paced Graph reads; the link route's refusal stays the authoritative guard.
+            return {"ads": [row for row in ads if not is_studio_campaign_name(row.get("campaignName"))]}
         except MetaAdsError as error:
             raise HTTPException(status_code=502 if error.retryable else 400, detail=error.public_message)
 
@@ -6324,7 +6338,8 @@ def create_meta_ads_router(
         """P0-14 + P0-13: the system token's validity, expiry and permissions, and webhook counts.
 
         A plain read shows the stored reading; ?refresh=1 asks Meta again (same-origin,
-        rate limited, audited). Never returns the token or the app secret.
+        rate limited, audited; it skips check_token_now's 10-minute reuse, having its own
+        limit). Never returns the token or the app secret.
         """
         from . import meta_token_health  # imports this module, so it is loaded on first use
 
@@ -6334,7 +6349,7 @@ def create_meta_ads_router(
             _rate_limit_or_429(f"meta-token-health-refresh:{admin.get('id')}", 3, 10 * 60_000)
             actor = str(admin.get("id") or "") or None
             try:
-                result = meta_token_health.check_token_now()
+                result = meta_token_health.check_token_now(max_age_seconds=0)
             except MetaAdsError as error:
                 _audit(actor, "meta_token_health_check", "token", "Meta token health check failed",
                        {"error": error.code, "providerCode": error.provider_code}, resource_type=_META_HEALTH_STATE_TYPE)

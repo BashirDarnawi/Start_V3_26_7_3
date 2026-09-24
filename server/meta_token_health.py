@@ -26,15 +26,25 @@ an option, and httpx writes every request URL at INFO level
 3. Network errors are replaced by fixed texts (``raise ... from None``); Meta's own
    error messages are never kept, only its numeric error code.
 4. Every text that is stored or returned is scrubbed of both secrets as a last guard.
+
+Which token a reading belongs to
+--------------------------------
+A stored reading also carries ``tokenFingerprint``: the first 16 hex of an HMAC-SHA256
+of the system token keyed with the app secret, computed in memory. When the token is
+replaced in Jelastic, the old reading no longer matches and is reported as stale
+instead of as the new token's health. The fingerprint is never returned or logged.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import math
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -49,6 +59,17 @@ _MAX_RESPONSE_BYTES = 256 * 1024
 _SCOPE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _TYPE_RE = re.compile(r"[A-Z][A-Z_]{0,39}")
 _LAST_UNIX_SECOND = 4_102_444_800  # 2100-01-01; anything later is not a real expiry
+_CHECK_MAX_AGE_SECONDS = 600  # PLAN §7.2/§7.4: check_token_now() runs at most once per 10 min
+_FINGERPRINT_SALT = b"albayan-meta-token-health-fingerprint-v1"  # only when there is no app secret
+# What check_token_now may hand back from the store (never the fingerprint):
+_READING_KEYS = (
+    "isValid", "type", "application", "appMatches", "expiresAt", "expiresNever",
+    "dataAccessExpiresAt", "dataAccessExpiresNever", "issuedAt", "scopes", "missingScopes",
+    "pagesCoveredByScope", "errorCode", "checkedAt", "lastCheckError", "lastCheckErrorAt",
+)
+# One Graph check at a time per process, and when (monotonic) and for which token the last one ran.
+_CHECK_LOCK = threading.Lock()
+_LAST_CHECK: dict[str, Any] = {"fingerprint": "", "at": 0.0}
 
 # The permissions Albayan's system token is expected to hold (PLAN.md §7.7, P0-01 k/l):
 EXPECTED_SCOPES = (
@@ -135,6 +156,24 @@ def _configuration() -> tuple[meta_ads.MetaAdsConfig, str, dict[str, Any] | None
     if problem:
         return config, app_id, {"configured": False, "reason": problem[0], "message": problem[1]}
     return config, app_id, None
+
+
+def _token_fingerprint(config: meta_ads.MetaAdsConfig) -> str:
+    """A one-way tag of the system token, so a stored reading is tied to the token it checked.
+
+    Keyed with the app secret: the stored tag cannot be tested against a guessed token
+    without it. Stored only; never returned or logged.
+    """
+    token = config.access_token.encode("utf-8")
+    if config.app_secret:
+        return hmac.new(config.app_secret.encode("utf-8"), token, hashlib.sha256).hexdigest()[:16]
+    return hashlib.sha256(_FINGERPRINT_SALT + token).hexdigest()[:16]
+
+
+def _same_token(stored: dict[str, Any], fingerprint: str) -> bool:
+    """True when the stored reading checked this token (a reading without a fingerprint never does)."""
+    saved = stored.get("tokenFingerprint")
+    return isinstance(saved, str) and hmac.compare_digest(saved.encode("utf-8"), fingerprint.encode("utf-8"))
 
 
 def _unix_to_iso(value: Any) -> tuple[str, bool]:
@@ -258,29 +297,66 @@ def read_token_debug() -> dict[str, Any]:
     config, app_id, unconfigured = _configuration()
     if unconfigured is not None:
         return unconfigured
+    return _read_checked(config, app_id)
+
+
+def _read_checked(config: meta_ads.MetaAdsConfig, app_id: str) -> dict[str, Any]:
     return _scrub(_parse_debug_token(_graph_debug_token(config, app_id), app_id), _secrets(config))
 
 
-def check_token_now() -> dict[str, Any]:
-    """Read the token now and store the result in metaHealthState/"token" (the store is best effort)."""
-    try:
-        result = read_token_debug()
-    except MetaAdsError as error:
-        failure = {
-            "lastCheckError": meta_ads._clean_text(f"{error.code}:{error.provider_code}" if error.provider_code else error.code, 60),
-            "lastCheckErrorAt": meta_ads._iso_now(),
-        }
+def _saved_reading(config: meta_ads.MetaAdsConfig, fingerprint: str) -> dict[str, Any] | None:
+    """The stored reading of this same token, shaped like a fresh one (None for another token)."""
+    stored = meta_ads.load_meta_health_state(_STATE_ID)
+    if not _same_token(stored, fingerprint):
+        return None
+    reading = {key: stored[key] for key in _READING_KEYS if key in stored}
+    return _scrub({"configured": True, **reading}, _secrets(config))
+
+
+def _with_failure(current: dict[str, Any], failure: dict[str, Any], fingerprint: str) -> dict[str, Any]:
+    """A failed check keeps the last good reading of the same token, never another token's."""
+    if _same_token(current, fingerprint):
+        return {**current, **failure}
+    return {**failure, "tokenFingerprint": fingerprint}
+
+
+def check_token_now(max_age_seconds: float = _CHECK_MAX_AGE_SECONDS) -> dict[str, Any]:
+    """Read the token now and store the result in metaHealthState/"token" (the store is best effort).
+
+    Self-limiting, as it also runs on authorization failures: when this process checked
+    the SAME token less than max_age_seconds ago (successfully or not), the saved reading
+    is returned without calling Meta; after a failed check it carries lastCheckError.
+    A changed token is always checked, and max_age_seconds=0 always checks. The lock
+    lets one caller at a time reach Meta, so a burst of callers costs one call.
+    """
+    config, app_id, unconfigured = _configuration()
+    if unconfigured is not None:
+        return unconfigured
+    fingerprint = _token_fingerprint(config)
+    with _CHECK_LOCK:
+        age = time.monotonic() - float(_LAST_CHECK["at"])
+        if max_age_seconds > 0 and _LAST_CHECK["fingerprint"] == fingerprint and 0 <= age < max_age_seconds:
+            saved = _saved_reading(config, fingerprint)
+            if saved is not None:
+                return saved
+        _LAST_CHECK.update(fingerprint=fingerprint, at=time.monotonic())
         try:
-            meta_ads.save_meta_health_state(_STATE_ID, lambda current: {**current, **failure})
+            result = _read_checked(config, app_id)
+        except MetaAdsError as error:
+            failure = {
+                "lastCheckError": meta_ads._clean_text(f"{error.code}:{error.provider_code}" if error.provider_code else error.code, 60),
+                "lastCheckErrorAt": meta_ads._iso_now(),
+            }
+            try:
+                meta_ads.save_meta_health_state(_STATE_ID, lambda current: _with_failure(current, failure, fingerprint))
+            except Exception:
+                pass
+            raise
+        try:
+            meta_ads.save_meta_health_state(_STATE_ID, lambda _current: {**result, "tokenFingerprint": fingerprint})
         except Exception:
             pass
-        raise
-    if result.get("configured"):
-        try:
-            meta_ads.save_meta_health_state(_STATE_ID, lambda _current: dict(result))
-        except Exception:
-            pass
-    return result
+        return result
 
 
 def _days_left(iso_value: str, now: float) -> int | None:
@@ -294,7 +370,11 @@ def _days_left(iso_value: str, now: float) -> int | None:
 
 
 def token_health_report() -> dict[str, Any]:
-    """What the admin route returns: the stored reading, days left, missing permissions, webhook counts."""
+    """What the admin route returns: the stored reading, days left, missing permissions, webhook counts.
+
+    A reading stored for another token (or before readings carried a fingerprint) is
+    reported as stale: checked=False and none of its validity, expiry or scopes.
+    """
     config, _app_id, unconfigured = _configuration()
     report: dict[str, Any] = {
         "expectedScopes": list(EXPECTED_SCOPES),
@@ -304,6 +384,15 @@ def token_health_report() -> dict[str, Any]:
         report.update(unconfigured)
         return _scrub(report, _secrets(config))
     stored = meta_ads.load_meta_health_state(_STATE_ID)
+    if stored and not _same_token(stored, _token_fingerprint(config)):
+        # The saved reading checked another token (it was replaced since): none of it is shown.
+        report.update({
+            "configured": True,
+            "checked": False,
+            "stale": True,
+            "message": "The saved reading is for an earlier token. Re-check to read the current one.",
+        })
+        return _scrub(report, _secrets(config))
     now = time.time()
     scopes = _scopes(stored.get("scopes"))
     expires_at = meta_ads._clean_time(stored.get("expiresAt"))
@@ -311,6 +400,7 @@ def token_health_report() -> dict[str, Any]:
     report.update({
         "configured": True,
         "checked": bool(meta_ads._clean_time(stored.get("checkedAt"))),
+        "stale": False,
         "checkedAt": meta_ads._clean_time(stored.get("checkedAt")),
         "isValid": stored.get("isValid") is True,
         "type": str(stored.get("type") or "") if _TYPE_RE.fullmatch(str(stored.get("type") or "")) else "",

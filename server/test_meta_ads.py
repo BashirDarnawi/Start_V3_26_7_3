@@ -3554,6 +3554,72 @@ def test_import_meta_ad_draft_refuses_studio_campaigns(actors):
     assert not any((json_loads(p["data_json"]) or {}).get("metaPageId") == "924000000000077" for p in pages)
 
 
+def test_import_meta_ad_draft_refuses_an_unknown_campaign_name(actors):
+    # Fail closed: an ad whose campaign name is unknown cannot be shown not to be a studio ad.
+    for name in ("", "   ", "<>"):
+        row = {
+            "id": "924000000000002", "name": "Nameless draft", "effectiveStatus": "ACTIVE",
+            "campaignId": "924000000000008", "campaignName": name,
+            "pageId": "924000000000078", "pageName": "Unchecked Page", "createdTime": "2026-09-24T10:00:00Z",
+        }
+        pending = meta_ads._pending_meta_snapshot(
+            row, "444444444444444", meta_ads.MetaAdsError("pending_enrichment", "loading", retryable=True), "USD"
+        )
+        with pytest.raises(meta_ads.MetaAdsError) as refused:
+            meta_ads.import_meta_ad_draft(pending)
+        assert refused.value.code == "campaign_name_unknown" and refused.value.retryable
+    assert _core_ads_for({"924000000000002"}) == {}
+    with db_conn() as conn:
+        pages = conn.execute(
+            text("SELECT data_json FROM entities WHERE type='pages' AND deleted=false")
+        ).mappings().all()
+    assert not any((json_loads(p["data_json"]) or {}).get("metaPageId") == "924000000000078" for p in pages)
+
+
+def test_discovery_waits_when_neither_campaign_name_nor_id_is_readable(actors, configured_meta):
+    # Before: no name and no valid campaign id returned "" and the ad was imported unchecked.
+    _clear_auto_import_rows()
+    no_id, bad_id = "926000000000001", "926000000000002"
+    lookups = []
+    configured_meta.get_campaign_name = lambda campaign_id: lookups.append(campaign_id) or "Agency campaign"
+    try:
+        meta_ads.discover_meta_ads(force=True)  # baseline pass
+        configured_meta.rows[:0] = [
+            {**_discovery_row(no_id, "2026-09-24T11:00:00Z"), "campaignName": ""},
+            {**_discovery_row(bad_id, "2026-09-24T11:01:00Z"), "campaignName": "", "campaignId": "not-an-id"},
+        ]
+        result = meta_ads.discover_meta_ads(force=True)
+        assert result["imported"] == [] and result["studioSkipped"] == 0
+        assert _core_ads_for({no_id, bad_id}) == {} and lookups == []
+        state = meta_ads._load_import_state()
+        assert not {no_id, bad_id} & set(state["knownMetaAdIds"])  # retried by a later pass
+        assert "campaign name" in state["lastError"]
+
+        configured_meta.rows[0]["campaignName"] = "Readable agency campaign"
+        meta_ads.discover_meta_ads(force=True)
+        assert set(_core_ads_for({no_id, bad_id})) == {no_id}
+        assert _core_ads_for({no_id})[no_id][0]["metaCampaignName"] == "Readable agency campaign"
+    finally:
+        _clear_auto_import_rows()
+
+
+def test_manager_ad_picker_hides_studio_campaigns(actors, configured_meta):
+    studio, typed, core = "927000000000001", "927000000000002", "927000000000003"
+    configured_meta.rows[:0] = [
+        {**_discovery_row(studio, "2026-09-24T12:00:00Z"), "campaignName": "ALB-S-7KQ2MX9P · Studio"},
+        {**_discovery_row(typed, "2026-09-24T12:01:00Z"), "campaignName": "offer alb-s-7kq2mx9p"},
+        _discovery_row(core, "2026-09-24T12:02:00Z"),
+    ]
+    url = "/api/meta-ads/accounts/444444444444444/ads"
+    listed = client.get(url, cookies=actors["admin"])
+    assert listed.status_code == 200, listed.text
+    ids = [row["id"] for row in listed.json()["ads"]]
+    assert core in ids and "111111111111111" in ids
+    assert studio not in ids and typed not in ids
+    searched = client.get(f"{url}?search=ALB-S-", cookies=actors["admin"])
+    assert searched.status_code == 200 and searched.json()["ads"] == []
+
+
 def test_manager_link_refuses_albayan_studio_campaigns(actors, configured_meta):
     ad_id = "meta_test_studio_link"
     meta_id = "925000000000001"
