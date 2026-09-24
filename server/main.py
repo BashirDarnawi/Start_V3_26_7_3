@@ -3873,7 +3873,7 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
 # shadow entities (e.g. a junk type="users" row that never reaches the real auth
 # users table). Real accounts, deliveries, audit logs and settings each have
 # their own dedicated, properly-gated endpoints.
-_NON_STORE_COLLECTIONS = frozenset({"users", "deliveries", "settings", "analytics", "auditLogs"}) | (
+_NON_STORE_COLLECTIONS = frozenset({"users", "deliveries", "settings", "analytics", "auditLogs", "metaHealthState"}) | (
     SOCIAL_STUDIO_COLLECTIONS  # router-only: /api/social-studio validates ownership + Meta ids
 )
 

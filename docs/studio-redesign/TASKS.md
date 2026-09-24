@@ -19,12 +19,12 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P0-05a | Done | stage 3 | `GET /api/studio/admin/diagnostics` (admin only, counts only) |
 | P0-05b | Done | stage 3 | Baselines B1–B6 (archived requests included in the history baselines) + top-up preset source (most common confirmed top-up amounts, counts only) |
 | P0-08 | Done | stage 3 | `studio_errors.py`; `scripts/studio_detail_inventory.py` lists studio, wallet and plan refusals (report only) |
-| P0-09a | Done | stage 3 | Discovery, import and link skip or refuse `ALB-S-` campaigns (fail closed when the name is unknown); Manager's ad picker hides them. Rename on link = P0-09b |
+| P0-09a | Done | stage 3 | Discovery, import and link skip or refuse `ALB-S-` campaigns (fail closed when the name is unknown); Manager's ad picker hides them (best effort: not in Meta's slim fallback read, where the link refusal still holds). Rename on link = P0-09b |
 | P0-11a | Done | stage 3 | CI runs the architecture, mobile-config, profitability and system-boundary guards |
 | P0-12 | Done | stage 3 | Privacy page: 365-day audit retention, the exact kept entries (test compares with the server's keep list), Ads Studio data and comment processing |
 | P0-13 | Done | stage 3 | Webhook delivery counter (counts only, after the signature check, flushed once a minute) |
 | P0-14 | Done | stage 3 | `GET /api/meta-ads/token-health` (platform route), reading tied to the key it checked, at most one Meta check per 10 min except the admin refresh; needs `ALBAYAN_META_APP_ID` |
-| D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system |
+| D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
 ## 10. TASKS
 

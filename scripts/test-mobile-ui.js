@@ -1528,16 +1528,32 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const days = (mainPy.match(/AUDIT_LOG_RETENTION_DAYS = read_env_int\("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", (\d+)\)/) || [])[1];
   check('privacy retention matches server default', Boolean(days) && privacy.includes(`${days} days`) && privacy.includes(`${days} يوماً`)
     && !privacy.includes('90 days') && privacy.includes('kept permanently'), `server default ${days}`);
-  // Every audit action the server keeps forever is named on the page, and the page names no kept entry the server deletes.
+  // The kept-forever list on the page (English and Arabic) names exactly the server's _AUDIT_KEEP_ACTIONS: every kept
+  // action has its wording inside the list, and nothing else is left in the list once those are taken out.
   const kept = ((mainPy.match(/_AUDIT_KEEP_ACTIONS = "\(([^)]*)\)"/) || [])[1] || '').split(',').map(a => a.trim().replace(/'/g, '')).filter(Boolean);
-  const keptWording = { close: 'closing or unlocking a month', unlock: 'closing or unlocking a month', cleanup: null, import: 'imports',
-    restore: 'restores', company_coverage: 'company-funded debt coverage', wallet_release: 'returned wallet captures',
-    review: 'advertisement-request review decisions', studio_setting: 'changes to Ads Studio settings' };
-  const unnamed = kept.filter(a => !(a in keptWording) || (keptWording[a] && !privacy.includes(keptWording[a])));
-  const notKept = Object.keys(keptWording).filter(a => keptWording[a] && !kept.includes(a) && privacy.includes(keptWording[a]));
-  check('privacy page names exactly the audit entries kept permanently', kept.length > 0 && !unnamed.length && !notKept.length
-    && privacy.includes('including wallet top-ups, payment confirmations and receipt settlements, follow the retention setting'),
-    `unnamed: ${unnamed.join(', ')}; claimed but deleted: ${notKept.join(', ')}`);
+  const keptWording = {
+    close: ['closing or unlocking a month', 'إقفال شهر أو إعادة فتحه'], unlock: ['closing or unlocking a month', 'إقفال شهر أو إعادة فتحه'],
+    cleanup: ['the audit-log cleanup records themselves', 'سجلات تنظيف سجل التدقيق نفسه'], import: ['backup imports', 'استيراد النسخ الاحتياطية'],
+    restore: ['restores of deleted records', 'استعادة السجلات المحذوفة'], company_coverage: ['company-funded debt coverage', 'تغطية الديون من أموال الشركة'],
+    wallet_release: ['returned wallet captures', 'إرجاع المبالغ المخصومة من المحفظة'],
+    review: ['advertisement-request review decisions', 'قرارات مراجعة طلبات الإعلانات'],
+    studio_setting: ['changes to Ads Studio settings', 'تغيير إعدادات استوديو الإعلانات'],
+  };
+  const keptLists = [(privacy.match(/settings actions \(([^)]*)\) are kept permanently/) || [])[1], (privacy.match(/وعمليات الإعدادات \(([^)]*)\) فتُحفظ/) || [])[1]];
+  const keptProblems = kept.filter(a => !keptWording[a]).map(a => `no wording for ${a}`);
+  keptLists.forEach((list, lang) => {
+    if (!list) { keptProblems.push(`kept list missing (${lang ? 'ar' : 'en'})`); return; }
+    let rest = list;
+    for (const phrase of new Set(kept.filter(a => keptWording[a]).map(a => keptWording[a][lang]))) {
+      if (!rest.includes(phrase)) keptProblems.push(`not named: ${phrase}`);
+      rest = rest.split(phrase).join('');
+    }
+    rest = rest.replace(/\band\b/g, '').replace(/[,،\sو]/g, '');
+    if (rest) keptProblems.push(`claimed but not kept: ${rest}`);
+  });
+  check('privacy page names exactly the audit entries kept permanently', kept.length > 0 && !keptProblems.length
+    && privacy.includes('including wallet top-ups, payment confirmations and receipt settlements, follow the retention setting')
+    && privacy.includes('ومنها شحن المحفظة وتأكيد المدفوعات وتسوية الإيصالات، لمدة الاحتفاظ نفسها'), keptProblems.join('; '));
   check('privacy page covers Ads Studio comment processing', privacy.includes('Ads Studio') && privacy.includes('comment text'));
 }
 

@@ -43,10 +43,27 @@ KEY_ACCESS = {"get", "pop", "setdefault"}
 # (prose such as "must come from the site" is not SQL). Then FROM/JOIN/UPDATE/INTO <table>, in
 # any case, must name "entities"; "FOR UPDATE SKIP ...", "DO UPDATE SET" and functions such as
 # "JOIN LATERAL jsonb_to_record(...)" are not tables. An f-string part {...} becomes DYNAMIC_TABLE.
+# A string assigned to a name that a SQL call uses, or to a name ending in SQL/QUERY, is SQL too.
+# Every table of a comma join counts; EXTRACT(x FROM col), IS DISTINCT FROM and CTE names are not tables.
 SQL_CALLS = {"text", "execute", "exec_driver_sql"}
-SQL_KEYWORD = re.compile(r"\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|JOIN|INTO)\b")
-SQL_TABLE = re.compile(r"\b(?:from|join|update|into)\s+(?:(?:lateral|only)\s+)?\"?([A-Za-z_][\w.]*)(?![\w.])\"?(?!\s*\()", re.IGNORECASE)
-NOT_TABLES = {"set", "skip", "nowait", "of", "select", "values", "lateral", "only"}
+SQL_KEYWORD = re.compile(r"\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|JOIN|INTO|TRUNCATE)\b")
+SQL_TABLE = re.compile(
+    r"\b(?:from|join|update|into|using|truncate(?:\s+table)?)\s+(?:(?:lateral|only)\s+)?\"?([A-Za-z_][\w.]*)(?![\w.])\"?(?!\s*\()",
+    re.IGNORECASE,
+)
+NOT_TABLES = {"set", "skip", "nowait", "of", "select", "values", "lateral", "only", "table"}
+SQL_NAME = re.compile(r"(?:^|_)(?:SQL|QUERY)$", re.IGNORECASE)
+SQL_NOISE = (
+    (re.compile(r"\b(extract|substring|trim|overlay|position)\s*\([^()]*\)", re.IGNORECASE), r"\1()"),
+    (re.compile(r"\bis\s+(?:not\s+)?distinct\s+from\b", re.IGNORECASE), "is_distinct"),
+)
+CTE_NAME = re.compile(r"(?:\bwith\s+(?:recursive\s+)?|,\s*)([A-Za-z_]\w*)\s+as\s+(?:(?:not\s+)?materialized\s+)?\(", re.IGNORECASE)
+FROM_LIST = re.compile(
+    r"\bfrom\s+(.*?)(?=\b(?:where|group|order|limit|having|union|join|left|right|inner|outer|cross|full|natural|on|for|"
+    r"offset|returning|window|using)\b|;|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+PAREN_GROUP = re.compile(r"\(([^()]*)\)")
 DYNAMIC_TABLE = "__dynamic__"
 
 
@@ -98,15 +115,43 @@ def _docstrings(tree: ast.AST) -> set[int]:
     return found
 
 
+def _sql_tables(sql: str) -> list[str]:
+    """Lower-case names of the tables a SQL text reads or writes (CTE names left out)."""
+    for pattern, replacement in SQL_NOISE:
+        sql = pattern.sub(replacement, sql)
+    ctes = {m.group(1).lower() for m in CTE_NAME.finditer(sql)}
+    found = [m.group(1) for m in SQL_TABLE.finditer(sql)]
+    # The 2nd, 3rd... table of "FROM a, b" at every nesting level; "§" marks a (...) group.
+    segments, flat = [], sql
+    while (group := PAREN_GROUP.search(flat)):
+        segments.append(group.group(1))
+        flat = flat[: group.start()] + "§" + flat[group.end():]
+    for segment in [*segments, flat]:
+        for match in FROM_LIST.finditer(segment):
+            for item in match.group(1).split(",")[1:]:
+                word = re.match(r"\s*(?:lateral\s+)?\"?([A-Za-z_][\w.]*)\"?(\s*§)?", item, re.IGNORECASE)
+                if word and not word.group(2):  # a function or subquery is not a table
+                    found.append(word.group(1))
+    names = [name.split(".")[-1].lower() for name in found]
+    return [name for name in names if name not in ctes and name not in NOT_TABLES]
+
+
 def _sql_table_problems(tree: ast.AST, docstrings: set[int]) -> list[str]:
     in_sql_call: set[int] = set()
     fstring_parts: set[int] = set()
+    sql_names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _callee(node.func) in SQL_CALLS:
             for arg in [*node.args, *(k.value for k in node.keywords)]:
                 in_sql_call.update(id(n) for n in ast.walk(arg))
+                sql_names.update(n.id for n in ast.walk(arg) if isinstance(n, ast.Name))
         elif isinstance(node, ast.JoinedStr):
             fstring_parts.update(id(v) for v in node.values)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and (t.id in sql_names or SQL_NAME.search(t.id)) for t in targets):
+                in_sql_call.update(id(n) for n in ast.walk(node.value))
     not_sql = docstrings | fstring_parts  # an f-string is read whole, below
     problems = []
     for node in ast.walk(tree):
@@ -118,8 +163,7 @@ def _sql_table_problems(tree: ast.AST, docstrings: set[int]) -> list[str]:
             continue
         if id(node) not in in_sql_call and not SQL_KEYWORD.search(sql):
             continue
-        for match in SQL_TABLE.finditer(sql):
-            table = match.group(1).split(".")[-1].lower()
+        for table in _sql_tables(sql):
             if table == DYNAMIC_TABLE:
                 problems.append(f"line {node.lineno}: SQL on a table named at run time (only 'entities' is allowed)")
             elif table != "entities" and table not in NOT_TABLES:
@@ -238,10 +282,15 @@ def test_the_guard_catches_violations():
         "sql = f\"SELECT * FROM entities WHERE type='clothesShipments' AND id='{x}'\"\n"
         "USER_SQL = 'SELECT id, role FROM users WHERE id = :id'\n"
         "conn.execute(text('select e.id from entities e join audit_logs a on a.resource_id = e.id'))\n"
+        "conn.execute(text('SELECT e.id FROM entities e, users u WHERE u.id = e.created_by'))\n"
+        "OWNER_SQL = 'select id from users where id = :id'\n"
+        "q = 'select id, role from users'\nconn.execute(text(q))\n"
+        "conn.execute(text('DELETE FROM entities USING audit_logs WHERE entities.id = audit_logs.resource_id'))\n"
+        "conn.execute(text('TRUNCATE audit_logs'))\n"
     )
     foreign = set().union(*NOT_YET_MOVED.values())
     found = boundary_violations(bad, "server.systems.ads_studio", "ads_studio", foreign, {"clothes"})
-    assert len(found) == 13, "\n".join(found)
+    assert len(found) == 18, "\n".join(found)
     assert any("'users' table" in p for p in found) and any("'audit_logs' table" in p for p in found)
     clean = (
         '"""Mentions ads and pages in prose."""\n'
@@ -252,5 +301,11 @@ def test_the_guard_catches_violations():
         "conn.execute(text('SELECT id FROM entities WHERE type = :t LIMIT 1 FOR UPDATE SKIP LOCKED'))\n"
         "rows = conn.execute(text(f'SELECT {cols} FROM entities WHERE {where} OFFSET 0'))\n"
         "studio_error(403, 'CROSS_SITE', 'This change must come from the Albayan site itself')\n"
+        "studio_error(400, 'PICK', 'Please select a page from the list')\n"
+        "conn.execute(text('SELECT EXTRACT(EPOCH FROM created_at) FROM entities'))\n"
+        "conn.execute(text('SELECT id FROM entities WHERE created_by IS DISTINCT FROM owner_id'))\n"
+        "conn.execute(text('WITH picked AS (SELECT id FROM entities) SELECT id FROM picked'))\n"
+        "conn.execute(text('SELECT e.id FROM entities e, jsonb_each(e.data) AS j'))\n"
+        "conn.execute(text('SELECT s.a FROM (SELECT a, b FROM entities WHERE 1 = 1) AS s'))\n"
     )
     assert boundary_violations(clean, "server.systems.ads_studio", "ads_studio", foreign, {"clothes"}) == []

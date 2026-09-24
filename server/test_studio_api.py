@@ -467,12 +467,14 @@ def test_soft_deleted_setting_never_blocks_a_save(actors):
     _error(_put(admin, "intake", {"open": False}, expected_version=1), 409, "VERSION_CONFLICT")
     revived = _put(admin, "intake", {"open": False}, expected_version=0)
     assert revived.status_code == 200, revived.text
-    assert revived.json()["version"] == 1 and revived.json()["value"] == {"open": False, "maxSubmissionsPerDay": 5}
+    # Version 1 was handed out before the delete, so the revive is version 2 and a page still holding 1 gets 409.
+    assert revived.json()["version"] == 2 and revived.json()["value"] == {"open": False, "maxSubmissionsPerDay": 5}
     rows = _settings_rows()
     assert len(rows) == 1 and not rows[0]["deleted"] and rows[0]["created_at"] == created  # the same row, revived
     assert json_loads(rows[0]["data_json"])["_deleted"] is False
     assert _me(actors["customer"])["intake"] == {"open": False}
-    assert _put(admin, "intake", {"open": True}, expected_version=1).json()["version"] == 2
+    _error(_put(admin, "intake", {"open": True}, expected_version=1), 409, "VERSION_CONFLICT")
+    assert _put(admin, "intake", {"open": True}, expected_version=2).json()["version"] == 3
 
 
 # ------------------------------------------------ the generic API refuses studio types

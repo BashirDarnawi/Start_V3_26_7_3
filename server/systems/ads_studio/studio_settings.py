@@ -324,11 +324,14 @@ def save_setting(
             )
         value = validate_setting(key, raw_value, before["value"], id_validator)
         stamp = now_ms()
+        # A soft-deleted row reads as version 0, but its old numbers were handed out: count on from
+        # them, so a page still holding a pre-delete version gets 409 instead of overwriting the revive.
+        used = _record(key, json_loads(row["data_json"]))["version"] if row else 0
         data = {
             "id": setting_id(key),
             "recordType": STUDIO_SETTINGS_TYPE,
             "settingKey": key,
-            "version": before["version"] + 1,
+            "version": max(before["version"], used) + 1,
             "value": value,
             "updatedAt": iso_now,
             "updatedBy": str(actor_id or ""),

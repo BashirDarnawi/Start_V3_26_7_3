@@ -6271,6 +6271,7 @@ def create_meta_ads_router(
             ads = configured_client().list_ads(account_id, search)
             # D26: studio ads show only in Albayan Studio. Hidden here so picking one cannot
             # spend paced Graph reads; the link route's refusal stays the authoritative guard.
+            # Best effort: the slim fallback read carries no campaign names, so nothing is hidden then.
             return {"ads": [row for row in ads if not is_studio_campaign_name(row.get("campaignName"))]}
         except MetaAdsError as error:
             raise HTTPException(status_code=502 if error.retryable else 400, detail=error.public_message)

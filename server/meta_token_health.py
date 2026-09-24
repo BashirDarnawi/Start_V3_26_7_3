@@ -32,7 +32,8 @@ Which token a reading belongs to
 A stored reading also carries ``tokenFingerprint``: the first 16 hex of an HMAC-SHA256
 of the system token keyed with the app secret, computed in memory. When the token is
 replaced in Jelastic, the old reading no longer matches and is reported as stale
-instead of as the new token's health. The fingerprint is never returned or logged.
+instead of as the new token's health. The fingerprint stays in the database (and so in full backups);
+it is never in an API response or a log, and the generic collections API refuses metaHealthState.
 """
 
 from __future__ import annotations
@@ -162,7 +163,7 @@ def _token_fingerprint(config: meta_ads.MetaAdsConfig) -> str:
     """A one-way tag of the system token, so a stored reading is tied to the token it checked.
 
     Keyed with the app secret: the stored tag cannot be tested against a guessed token
-    without it. Stored only; never returned or logged.
+    without it. Stored only; never in an API response or a log.
     """
     token = config.access_token.encode("utf-8")
     if config.app_secret:
@@ -328,6 +329,8 @@ def check_token_now(max_age_seconds: float = _CHECK_MAX_AGE_SECONDS) -> dict[str
     is returned without calling Meta; after a failed check it carries lastCheckError.
     A changed token is always checked, and max_age_seconds=0 always checks. The lock
     lets one caller at a time reach Meta, so a burst of callers costs one call.
+    A reading without checkedAt has no validity (isValid is present only after a successful
+    check): callers must read that as "unknown", never as an invalid token.
     """
     config, app_id, unconfigured = _configuration()
     if unconfigured is not None:
