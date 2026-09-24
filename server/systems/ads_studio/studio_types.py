@@ -5,8 +5,9 @@
   ``<prefix>_`` + the first 40 hex characters of sha256, at most 57 characters, and always
   passes main.validate_entity_id (``^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$``).
 * ``created_by_or_none(conn, user_id)``: the ``entities.created_by`` column is a foreign key to
-  ``users.id`` (server/db.py). A new row gets a real user id or NULL (a system row), never a
-  made-up value such as ``"system"``.
+  ``users.id`` (server/db.py). A new row gets the id of a real, not deleted user or NULL (a
+  system row), never a made-up value such as ``"system"``. The users table is read through the
+  platform door server/user_directory.py (D36).
 * ``studio_ref(campaign_id)``: the studio code ``ALB-S-XXXXXXXX`` that goes into a studio
   campaign's Meta name (PLAN.md §6, D26).
 """
@@ -15,7 +16,7 @@ import hashlib
 import re
 from typing import Any
 
-from sqlalchemy import text
+from ...user_directory import user_exists
 
 # Record types this module family writes (all listed in the package OWNED_TYPES).
 STUDIO_SETTINGS_TYPE = "studioSettings"
@@ -66,7 +67,8 @@ def looks_like_user_id(value: Any) -> bool:
 
 
 def created_by_or_none(conn: Any, user_id: Any) -> str | None:
-    """The value for ``entities.created_by``: the id of a user that really exists, else None.
+    """The value for ``entities.created_by``: the id of a user that exists and is not deleted,
+    else None.
 
     Pass the connection of the transaction that will insert the row, so the check and the
     insert see the same users table.
@@ -74,8 +76,7 @@ def created_by_or_none(conn: Any, user_id: Any) -> str | None:
     raw = str(user_id or "")
     if not looks_like_user_id(raw):
         return None
-    row = conn.execute(text("SELECT id FROM users WHERE id = :id LIMIT 1"), {"id": raw}).first()
-    return raw if row is not None else None
+    return raw if user_exists(conn, raw) else None
 
 
 def studio_ref(campaign_id: Any, attempt: int = 0) -> str:

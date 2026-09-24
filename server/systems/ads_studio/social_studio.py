@@ -41,6 +41,7 @@ from ...db import db_conn, get_engine, json_loads
 from ...rate_limiter import check_rate_limit
 from ...auth_limits import _client_ip as _shared_client_ip
 from ...security import constant_time_equal, new_id
+from ...user_directory import access_row, user_exists
 from .studio_types import STUDIO_ROUTER_ONLY_TYPES
 
 SETTINGS_TYPE = "socialStudioSettings"
@@ -412,11 +413,7 @@ def _lean_posts(owner_id: str | None, status: str = "", *, limit: int = 500) -> 
 
 def _owner_exists(owner_id: str) -> bool:
     with db_conn() as conn:
-        row = conn.execute(
-            text("SELECT id FROM users WHERE id = :id AND deleted = false LIMIT 1"),
-            {"id": owner_id},
-        ).first()
-    return bool(row)
+        return user_exists(conn, owner_id)
 
 
 def _owner_can_automate(owner_id: str) -> bool:
@@ -424,15 +421,12 @@ def _owner_can_automate(owner_id: str) -> bool:
     if not owner_id:
         return False
     with db_conn() as conn:
-        row = conn.execute(
-            text("SELECT id,role,permissions_json FROM users WHERE id=:id AND deleted=false LIMIT 1"),
-            {"id": owner_id},
-        ).mappings().first()
+        row = access_row(conn, owner_id)
     if not row:
         return False
     # Match the internal auth identity shape, including permissions_json for
     # the existing staff-reviewer exemption; public API user shapes differ.
-    return bool(_ctx()["has_ad_maker_subscription"](dict(row)))
+    return bool(_ctx()["has_ad_maker_subscription"](row))
 
 
 # ---------------------------------------------------------------------------

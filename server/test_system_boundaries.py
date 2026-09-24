@@ -5,6 +5,8 @@ platform doors (PLATFORM_DOORS). It must never import main.py (it gets helpers t
 ctx), another system's package or a module that is not a platform door, and it must never name
 another system's record type: not as a value (call argument, including ctx["get_entity"](...)
 calls, SQL bound parameter, assignment, comparison, collection element) and not inside SQL text.
+Its SQL may read and write only the ``entities`` table: users, sessions, audit_logs and every
+other platform table are reached through a platform door (e.g. user_directory, ctx["audit"]).
 """
 
 import ast
@@ -33,9 +35,19 @@ PLATFORM_TYPES = {
 PLATFORM_DOORS = {
     "db", "schemas", "wallet_payments", "payment_methods", "subscription_plans", "operations", "meta_ads",
     "startup_support", "rate_limiter", "auth_limits", "security", "rbac", "entity_projection", "http_security",
+    "user_directory",
 }
 # Dictionary access by key is not a use of a record type ("pages" as a JSON key, row.get("ads")).
 KEY_ACCESS = {"get", "pop", "setdefault"}
+# SQL text: a string inside one of these calls, or any string holding an upper-case SQL keyword
+# (prose such as "must come from the site" is not SQL). Then FROM/JOIN/UPDATE/INTO <table>, in
+# any case, must name "entities"; "FOR UPDATE SKIP ...", "DO UPDATE SET" and functions such as
+# "JOIN LATERAL jsonb_to_record(...)" are not tables. An f-string part {...} becomes DYNAMIC_TABLE.
+SQL_CALLS = {"text", "execute", "exec_driver_sql"}
+SQL_KEYWORD = re.compile(r"\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|JOIN|INTO)\b")
+SQL_TABLE = re.compile(r"\b(?:from|join|update|into)\s+(?:(?:lateral|only)\s+)?\"?([A-Za-z_][\w.]*)(?![\w.])\"?(?!\s*\()", re.IGNORECASE)
+NOT_TABLES = {"set", "skip", "nowait", "of", "select", "values", "lateral", "only"}
+DYNAMIC_TABLE = "__dynamic__"
 
 
 def _system_folders() -> list[Path]:
@@ -86,11 +98,41 @@ def _docstrings(tree: ast.AST) -> set[int]:
     return found
 
 
+def _sql_table_problems(tree: ast.AST, docstrings: set[int]) -> list[str]:
+    in_sql_call: set[int] = set()
+    fstring_parts: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _callee(node.func) in SQL_CALLS:
+            for arg in [*node.args, *(k.value for k in node.keywords)]:
+                in_sql_call.update(id(n) for n in ast.walk(arg))
+        elif isinstance(node, ast.JoinedStr):
+            fstring_parts.update(id(v) for v in node.values)
+    not_sql = docstrings | fstring_parts  # an f-string is read whole, below
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            sql = "".join(v.value if isinstance(v, ast.Constant) else DYNAMIC_TABLE for v in node.values)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in not_sql:
+            sql = node.value
+        else:
+            continue
+        if id(node) not in in_sql_call and not SQL_KEYWORD.search(sql):
+            continue
+        for match in SQL_TABLE.finditer(sql):
+            table = match.group(1).split(".")[-1].lower()
+            if table == DYNAMIC_TABLE:
+                problems.append(f"line {node.lineno}: SQL on a table named at run time (only 'entities' is allowed)")
+            elif table != "entities" and table not in NOT_TABLES:
+                problems.append(f"line {node.lineno}: SQL on the {table!r} table (only 'entities'; use a platform door)")
+    return problems
+
+
 def boundary_violations(source: str, package: str, system: str, foreign: set[str], other_systems: set[str]) -> list[str]:
     """Pure checker (also used by the self-test below)."""
     problems: list[str] = []
     tree = ast.parse(source)
     skip = _docstrings(tree)
+    problems.extend(_sql_table_problems(tree, set(skip)))
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             skip.update(id(k) for k in node.keys if isinstance(k, ast.Constant))
@@ -194,14 +236,21 @@ def test_the_guard_catches_violations():
         "rows = [r for r in rows if r['type'] == 'dollarPurchases']\n"
         "importlib.import_module('server.main')\n"
         "sql = f\"SELECT * FROM entities WHERE type='clothesShipments' AND id='{x}'\"\n"
+        "USER_SQL = 'SELECT id, role FROM users WHERE id = :id'\n"
+        "conn.execute(text('select e.id from entities e join audit_logs a on a.resource_id = e.id'))\n"
     )
     foreign = set().union(*NOT_YET_MOVED.values())
     found = boundary_violations(bad, "server.systems.ads_studio", "ads_studio", foreign, {"clothes"})
-    assert len(found) == 11, "\n".join(found)
+    assert len(found) == 13, "\n".join(found)
+    assert any("'users' table" in p for p in found) and any("'audit_logs' table" in p for p in found)
     clean = (
         '"""Mentions ads and pages in prose."""\n'
         "from ...db import db_conn\nfrom ... import meta_ads\nfrom .social_studio import x\n"
         "LOG_TYPE = 'socialReplyLog'\n"
         "payload = {'pages': [], 'ads': 1}\nrow.get('pages')\nrow['ads']\n"
+        'def f():\n    """Never runs SELECT id FROM users itself."""\n'
+        "conn.execute(text('SELECT id FROM entities WHERE type = :t LIMIT 1 FOR UPDATE SKIP LOCKED'))\n"
+        "rows = conn.execute(text(f'SELECT {cols} FROM entities WHERE {where} OFFSET 0'))\n"
+        "studio_error(403, 'CROSS_SITE', 'This change must come from the Albayan site itself')\n"
     )
     assert boundary_violations(clean, "server.systems.ads_studio", "ads_studio", foreign, {"clothes"}) == []

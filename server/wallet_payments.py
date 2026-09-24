@@ -32,7 +32,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from .db import db_conn, json_dumps, json_field_sql, json_loads, now_ms
+from .db import db_conn, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from .entity_projection import _inline_media_sql_projection
 from .payment_methods import (
     enabled_payment_method_ids,
@@ -119,6 +119,35 @@ def wallet_available_minor(conn: Any, ctx: dict[str, Any], user_id: str, currenc
     if str(currency or "").upper() == "USD":
         balance -= wallet_campaign_holds_minor(conn, user_id)
     return balance
+
+
+def confirmed_top_up_amounts(conn: Any, currency: str = "USD", limit: int = 5) -> dict[str, Any]:
+    """The most common CONFIRMED top-up amounts in one currency, as counts only (read only).
+
+    ``{"amounts": [{"amountMinor": 2500, "count": 7}, ...], "sample": 31}``: at most ``limit``
+    amounts, most common first (a tie goes to the smaller amount); ``sample`` counts the
+    confirmed top-ups behind the ranking. No ids, users, dates or references: the Studio's
+    "Add money" presets come from Albayan's own payment history (plan task P0-05b, D25).
+    A request without a currency is USD, as in the confirm path. Only three fields are read
+    (never the receipt photo), each row's JSON parsed once.
+    """
+    want = str(currency or "").strip().upper()
+    rows = conn.execute(
+        text(json_fields_select_sql(("status", "currency", "amountMinor"), (), "type = :type AND deleted = false")),
+        {"type": WALLET_PAYMENT_COLLECTION},
+    ).mappings().all()
+    counts: dict[int, int] = {}
+    for row in rows:
+        if str(row.get("f_status") or "") != "confirmed" or str(row.get("f_currency") or "USD").strip().upper() != want:
+            continue
+        try:
+            amount = int(float(row.get("f_amountminor") or 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if amount > 0:
+            counts[amount] = counts.get(amount, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[: max(int(limit), 0)]
+    return {"amounts": [{"amountMinor": amount, "count": count} for amount, count in ranked], "sample": sum(counts.values())}
 
 
 def _campaign_payment_key(campaign: dict[str, Any]) -> str:

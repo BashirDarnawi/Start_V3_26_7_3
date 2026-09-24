@@ -1201,7 +1201,7 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
 AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 365)   # the UI promises "keeps last 1 year"
 AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 500000)
 # Money-history actions are never auto-deleted (closing a month, unlocking it, imports, restores, company money).
-_AUDIT_KEEP_ACTIONS = "('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review')"
+_AUDIT_KEEP_ACTIONS = "('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review','studio_setting')"
 
 
 def cleanup_old_audit_logs():

@@ -1,4 +1,4 @@
-"""/api/studio foundation (Albayan Studio plan tasks P0-03, P0-04, P0-05a/b, P0-08).
+"""/api/studio foundation (Albayan Studio plan tasks P0-03, P0-04, P0-05a/b, P0-08; D36 doors).
 
 Every test creates its own users (unique e-mails per run), removes the studioSettings rows it
 wrote, restores what was there before, and never depends on counts left by other modules.
@@ -20,7 +20,8 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
+import server.main as main_module
+from server.db import db_conn, init_db, json_dumps, json_fields_select_sql, json_loads, now_ms
 from server.main import app, validate_entity_id
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -35,6 +36,8 @@ from server.systems.ads_studio.studio_types import (
     is_studio_ref,
     studio_ref,
 )
+from server.user_directory import access_row, account_created_at, user_exists
+from server.wallet_payments import WALLET_PAYMENT_COLLECTION, confirmed_top_up_amounts
 
 TAG = secrets.token_hex(4)
 PASSWORD = "StudioApiPassword123!"
@@ -46,7 +49,9 @@ def _ms(iso: str) -> int:
     return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
 
 
-def _insert_user(label: str, role: str, permissions: dict, *, created_at: int | None = None, name: str | None = None) -> dict:
+def _insert_user(
+    label: str, role: str, permissions: dict, *, created_at: int | None = None, name: str | None = None, deleted: bool = False
+) -> dict:
     password_hash = hash_password(PASSWORD, iterations=PBKDF2_ITERATIONS_DEFAULT)
     stamp = now_ms()
     user_id = new_id("studio_user")
@@ -56,13 +61,13 @@ def _insert_user(label: str, role: str, permissions: dict, *, created_at: int | 
             text(
                 "INSERT INTO users (id,name,email,role,permissions_json,password_hash,password_salt,"
                 "password_algo,password_iterations,deleted,created_at,created_by,last_modified) "
-                "VALUES (:id,:name,:email,:role,:permissions,:hash,:salt,:algo,:iterations,false,:created,NULL,:stamp)"
+                "VALUES (:id,:name,:email,:role,:permissions,:hash,:salt,:algo,:iterations,:deleted,:created,NULL,:stamp)"
             ),
             {
                 "id": user_id, "name": name or f"Studio {label}", "email": email, "role": role,
                 "permissions": json_dumps(permissions), "hash": password_hash.hash_hex,
                 "salt": password_hash.salt_hex, "algo": password_hash.algo,
-                "iterations": password_hash.iterations, "created": created_at or stamp, "stamp": stamp,
+                "iterations": password_hash.iterations, "deleted": deleted, "created": created_at or stamp, "stamp": stamp,
             },
         )
     return {"id": user_id, "email": email}
@@ -181,7 +186,9 @@ def test_me_reflects_safe_defaults(actors):
         "ui": "classic",
         "services": {"help": False, "stopRequest": False, "tiktok": False},
         "staffDesk": "classic",
-        "capabilities": {"fbReplies": "gated", "igReplies": "unavailable", "privateMessages": "unavailable", "tiktok": "unavailable"},
+        # PLAN.md §7.1 keys; defaults from §8.2 and D8a/D24b/D34 (see studio_settings.DEFAULTS)
+        "capabilities": {"fbPublicReply": "gated", "fbPrivateReply": "unavailable", "igPublicReply": "unavailable",
+                         "igPrivateReply": "unavailable", "tiktokService": "off"},
         "intake": {"open": True},
         "isAdmin": False,
         "isStaff": False,
@@ -192,6 +199,8 @@ def test_me_reflects_safe_defaults(actors):
     assert admin["isStaff"] is True and admin["isAdmin"] is True and admin["ui"] == "classic"
     record = client.get("/api/studio/admin/settings/intake", cookies=actors["admin"]["cookies"]).json()
     assert record["version"] == 0 and record["value"] == {"open": True, "maxSubmissionsPerDay": 5}
+    rollout = client.get("/api/studio/admin/settings/rollout", cookies=actors["admin"]["cookies"]).json()
+    assert rollout["value"]["services"] == {"help": "off", "stopRequest": "off", "tiktok": "off"}
 
 
 def test_kill_switch_wins(actors, monkeypatch):
@@ -253,6 +262,38 @@ def test_staff_desk_switch_independent(actors, monkeypatch):
     assert _me(actors["staff2"])["staffDesk"] == "classic"
 
 
+def test_services_follow_the_pilot_allowlist(actors, monkeypatch):
+    """PLAN.md §7.1: services off|pilot|on; pilot follows the customer allowlist, never the layout."""
+    pilot = actors["customer"]["id"]
+    saved = _put(actors["admin"], "rollout", {"uiAllowlist": [pilot], "services": {"help": "pilot", "stopRequest": "on"}})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["value"]["services"] == {"help": "pilot", "stopRequest": "on", "tiktok": "off"}
+    assert saved.json()["value"]["ui"] == "off"  # the customer layout stays classic for everyone
+    for env in ("off", "pilot", "on"):  # the kill switch never touches services
+        monkeypatch.setenv(studio_settings.ENV_SWITCH, env)
+        me = _me(actors["customer"])
+        assert me["ui"] == "classic" and me["services"] == {"help": True, "stopRequest": True, "tiktok": False}, env
+        assert _me(actors["customer2"])["services"] == {"help": False, "stopRequest": True, "tiktok": False}, env
+    assert _me(actors["staff"])["services"]["help"] is False  # pilot = the allowlist, not the staff
+    assert _put(actors["admin"], "rollout", {"services": {"help": "on", "stopRequest": "off"}}, expected_version=1).status_code == 200
+    assert _me(actors["customer2"])["services"] == {"help": True, "stopRequest": False, "tiktok": False}
+
+
+def test_legacy_service_flags_read_as_modes(actors):
+    """The first shape stored services as true/false: sent or stored, true is on and false is off."""
+    saved = _put(actors["admin"], "rollout", {"services": {"help": True, "tiktok": False}})
+    assert saved.status_code == 200 and saved.json()["value"]["services"] == {"help": "on", "stopRequest": "off", "tiktok": "off"}
+    stamp = now_ms()
+    data = {"settingKey": "rollout", "version": 4, "value": {"services": {"help": True, "stopRequest": False, "tiktok": True}}}
+    _replace_settings_rows([{
+        "type": STUDIO_SETTINGS_TYPE, "id": derived_id("sts", "rollout"), "data_json": json_dumps(data),
+        "deleted": False, "created_at": stamp, "created_by": None, "last_modified": stamp,
+    }])
+    record = client.get("/api/studio/admin/settings/rollout", cookies=actors["admin"]["cookies"]).json()
+    assert record["version"] == 4 and record["value"]["services"] == {"help": "on", "stopRequest": "off", "tiktok": "on"}
+    assert _me(actors["customer2"])["services"] == {"help": True, "stopRequest": False, "tiktok": True}
+
+
 # ------------------------------------------------------------- settings
 
 def test_rollout_admin_only(actors):
@@ -290,8 +331,9 @@ def test_settings_version_conflict_and_audit(actors):
             ),
             {"t": STUDIO_SETTINGS_TYPE, "r": derived_id("sts", "intake"), "u": actors["admin"]["id"], "started": started},
         ).mappings().all()
-    audits = [json_loads(r["metadata_json"]) for r in rows if r["action"] == "update"]
-    assert len(audits) == 2  # the refused save wrote no audit entry
+    assert [r["action"] for r in rows] == ["studio_setting", "studio_setting"]  # the refused save wrote none
+    assert "'studio_setting'" in main_module._AUDIT_KEEP_ACTIONS  # settings history is never cleaned up
+    audits = [json_loads(r["metadata_json"]) for r in rows]
     assert audits[-1]["before"] == {"open": True, "maxSubmissionsPerDay": 8}
     assert audits[-1]["after"] == {"open": False, "maxSubmissionsPerDay": 8} and audits[-1]["version"] == 2
     # One record per key, with created_by NULL (a system row) and a fixed derived id.
@@ -308,6 +350,8 @@ def test_settings_version_conflict_and_audit(actors):
     ("rollout", {"uiAllowlist": ["system"]}, "INVALID_VALUE"),
     ("rollout", {"uiAllowlist": [f"user_{i}" for i in range(201)]}, "INVALID_VALUE"),
     ("rollout", {"services": {"help": "yes"}}, "INVALID_VALUE"),
+    ("rollout", {"services": {"help": 1}}, "INVALID_VALUE"),
+    ("rollout", {"services": "on"}, "INVALID_VALUE"),
     ("rollout", {"services": {"chat": True}}, "UNKNOWN_FIELD"),
     ("rollout", {"everyone": True}, "UNKNOWN_FIELD"),
     ("rollout", ["ui", "on"], "INVALID_REQUEST"),
@@ -316,9 +360,12 @@ def test_settings_version_conflict_and_audit(actors):
     ("intake", {"maxSubmissionsPerDay": 501}, "INVALID_VALUE"),
     ("intake", {"maxSubmissionsPerDay": True}, "INVALID_VALUE"),
     ("intake", {"maxSubmissionsPerDay": 5.5}, "INVALID_VALUE"),
-    ("capabilities", {"fbReplies": "poll"}, "INVALID_VALUE"),  # poll is Instagram road 1 only
-    ("capabilities", {"privateMessages": "yes"}, "INVALID_VALUE"),
+    ("capabilities", {"fbPublicReply": "poll"}, "INVALID_VALUE"),  # poll is Instagram road 1 only
+    ("capabilities", {"igPrivateReply": "poll"}, "INVALID_VALUE"),
+    ("capabilities", {"tiktokService": "poll"}, "INVALID_VALUE"),
+    ("capabilities", {"fbPrivateReply": "yes"}, "INVALID_VALUE"),
     ("capabilities", {"whatsapp": "on"}, "UNKNOWN_FIELD"),
+    ("capabilities", {"fbReplies": "on"}, "UNKNOWN_FIELD"),  # the first draft's key, not PLAN.md §7.1
 ])
 def test_invalid_values_are_refused_with_codes(actors, key, value, code):
     _error(_put(actors["admin"], key, value), 400, code)
@@ -335,9 +382,9 @@ def test_settings_request_shape_and_unknown_key(actors):
     _error(client.put(url, json=[1, 2], cookies=admin["cookies"]), 400, "INVALID_REQUEST")
     _error(_put(admin, "limits", {"x": 1}), 404, "UNKNOWN_SETTING")
     _error(client.get("/api/studio/admin/settings/limits", cookies=admin["cookies"]), 404, "UNKNOWN_SETTING")
-    good = _put(admin, "capabilities", {"igReplies": "poll", "fbReplies": "on"})
-    assert good.status_code == 200 and good.json()["value"]["igReplies"] == "poll"
-    assert _me(actors["customer"])["capabilities"]["fbReplies"] == "on"
+    good = _put(admin, "capabilities", {"igPublicReply": "poll", "fbPublicReply": "on"})
+    assert good.status_code == 200 and good.json()["value"]["igPublicReply"] == "poll"
+    assert _me(actors["customer"])["capabilities"]["fbPublicReply"] == "on"
 
 
 def test_settings_writes_are_rate_limited(actors):
@@ -364,6 +411,68 @@ def test_stored_garbage_falls_back_to_safe_defaults(actors):
     assert me["staffDesk"] == "v2"
     record = client.get("/api/studio/admin/settings/rollout", cookies=actors["admin"]["cookies"]).json()
     assert record["version"] == 3 and "junk" not in record["value"]
+    assert record["value"]["services"] == {"help": "on", "stopRequest": "off", "tiktok": "off"}  # legacy true = on
+
+
+def test_audit_failure_rolls_back_the_save(actors):
+    """The setting and its audit entry commit together: a failing audit leaves the switch unchanged."""
+    admin = actors["admin"]
+    assert _put(admin, "intake", {"maxSubmissionsPerDay": 9}).json()["version"] == 1
+
+    def broken_audit(*_args, **_kwargs):
+        raise RuntimeError("audit log unavailable")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(main_module, "audit", broken_audit)  # ctx["audit"] looks main.audit up at call time
+        try:
+            response = _put(admin, "intake", {"open": False}, expected_version=1)
+        except RuntimeError:
+            response = None  # the test client re-raises server errors
+        assert response is None or response.status_code == 500
+    record = client.get("/api/studio/admin/settings/intake", cookies=admin["cookies"]).json()
+    assert record["version"] == 1 and record["value"] == {"open": True, "maxSubmissionsPerDay": 9}
+    assert _put(admin, "intake", {"open": False}, expected_version=1).json()["version"] == 2  # no 409 on the retry
+
+    def refuse(conn, before, after):
+        raise RuntimeError("audit refused")
+
+    with pytest.raises(RuntimeError):  # a first save rolls back too: no row is left behind
+        studio_settings.save_setting("capabilities", {"fbPublicReply": "on"}, 0, admin["id"], "2026-09-25T00:00:00Z", audit=refuse)
+    assert studio_settings.read_setting("capabilities")["version"] == 0
+    assert [r["id"] for r in _settings_rows()] == [derived_id("sts", "intake")]
+    seen = {}
+
+    def check_same_transaction(conn, before, after):
+        row = conn.execute(text("SELECT data_json FROM entities WHERE type=:t AND id=:id"),
+                           {"t": STUDIO_SETTINGS_TYPE, "id": after["id"]}).mappings().first()
+        seen.update(before=before["version"], after=after["version"], stored=json_loads(row["data_json"])["version"])
+
+    studio_settings.save_setting("capabilities", {"fbPublicReply": "on"}, 0, admin["id"], "2026-09-25T00:00:00Z",
+                                 audit=check_same_transaction)
+    assert seen == {"before": 0, "after": 1, "stored": 1}  # the audit callback sees the new row, uncommitted
+
+
+def test_soft_deleted_setting_never_blocks_a_save(actors):
+    """After an admin restore with deleted:true (or a batch delete) the next save brings the row back."""
+    admin = actors["admin"]
+    assert _put(admin, "intake", {"maxSubmissionsPerDay": 7}).json()["version"] == 1
+    created = _settings_rows()[0]["created_at"]
+    with db_conn() as conn:
+        conn.execute(
+            text("UPDATE entities SET deleted = true, last_modified = last_modified + 1 WHERE type=:t AND id=:id"),
+            {"t": STUDIO_SETTINGS_TYPE, "id": derived_id("sts", "intake")},
+        )
+    record = client.get("/api/studio/admin/settings/intake", cookies=admin["cookies"]).json()
+    assert record["version"] == 0 and record["value"] == {"open": True, "maxSubmissionsPerDay": 5}  # reads as never saved
+    _error(_put(admin, "intake", {"open": False}, expected_version=1), 409, "VERSION_CONFLICT")
+    revived = _put(admin, "intake", {"open": False}, expected_version=0)
+    assert revived.status_code == 200, revived.text
+    assert revived.json()["version"] == 1 and revived.json()["value"] == {"open": False, "maxSubmissionsPerDay": 5}
+    rows = _settings_rows()
+    assert len(rows) == 1 and not rows[0]["deleted"] and rows[0]["created_at"] == created  # the same row, revived
+    assert json_loads(rows[0]["data_json"])["_deleted"] is False
+    assert _me(actors["customer"])["intake"] == {"open": False}
+    assert _put(admin, "intake", {"open": True}, expected_version=1).json()["version"] == 2
 
 
 # ------------------------------------------------ the generic API refuses studio types
@@ -408,6 +517,23 @@ def test_derived_ids_fit_entity_id_rule(actors):
         assert created_by_or_none(conn, actors["customer"]["id"]) == actors["customer"]["id"]
         for fake in ("system", "SYSTEM", "team", "", None, "user_that_does_not_exist", "bad id"):
             assert created_by_or_none(conn, fake) is None
+
+
+def test_user_directory_door(actors):
+    """D36: system code reads users only through server/user_directory.py; deleted users do not count."""
+    gone = _insert_user("gone", "Employee", {}, deleted=True, created_at=_ms("2026-01-02T00:00:00Z"))
+    live = actors["staff"]
+    with db_conn() as conn:
+        assert user_exists(conn, live["id"]) is True
+        for missing in (gone["id"], "user_missing", "", None):
+            assert user_exists(conn, missing) is False
+        assert created_by_or_none(conn, gone["id"]) is None  # a deleted account is never a new row's creator
+        stamps = account_created_at(conn, [live["id"], gone["id"], "user_missing", ""])
+        assert set(stamps) == {live["id"], gone["id"]} and int(stamps[gone["id"]]) == _ms("2026-01-02T00:00:00Z")
+        row = access_row(conn, live["id"])
+        assert set(row) == {"id", "role", "permissions_json"} and row["role"] == "Employee"
+        assert json_loads(row["permissions_json"]) == {CAMPAIGNS: ["view", "review"]}
+        assert access_row(conn, gone["id"]) is None and access_row(conn, "") is None
 
 
 def test_studio_ref_is_stable_and_prefixed():
@@ -513,10 +639,10 @@ def test_baselines_from_timestamps(actors):
     try:
         with db_conn() as conn:  # the real SQL projection, limited to this test's owners
             rows = [r for r in studio_diagnostics.load_campaign_rows(conn) if r["ownerId"] in {o1, o2}]
-            joined = studio_diagnostics.load_account_created(conn, [o1, o2])
+            joined = account_created_at(conn, [o1, o2])
         assert len(rows) == len(seed)
         report = studio_diagnostics.compute_diagnostics(rows, joined, now)
-        assert report["campaigns"] == {"total": 9, "byStatus": {
+        assert report["campaigns"] == {"total": 9, "archived": 0, "byStatus": {
             "Draft": 1, "Submitted": 3, "Changes Requested": 0, "Approved": 3, "Rejected": 1, "Stopped": 1, "other": 0}}
         assert report["holds"] == {"count": 2}
         b = report["baselines"]
@@ -535,6 +661,133 @@ def test_baselines_from_timestamps(actors):
         assert all(live["baselines"][k] is not None for k in ("B1", "B2", "B5", "B6"))
     finally:
         _delete_campaigns([s[0] for s in seed])
+
+
+def test_archived_requests_keep_history_baselines(actors):
+    """An archived request still happened: B1, B2, B5, B6 keep it; byStatus, total, holds, B3, B4 do not."""
+    owner = _insert_user("archiver", "Employee", {}, created_at=_ms("2026-09-01T00:00:00Z"))["id"]
+    t = f"arc_{TAG}_"
+    first = t + "first"  # sent back, then approved: its owner's earliest approval
+    _insert_campaign(first, owner, "2026-09-02T00:00:00Z",
+                     status="Approved", budgetMinorUSD=1000, submittedAt="2026-09-03T00:00:00Z",
+                     reviewedAt="2026-09-03T04:00:00Z", approvedAt="2026-09-03T04:00:00Z", endDate="2026-09-10",
+                     reviewHistory=[{"decision": "Changes Requested", "reviewedAt": "2026-09-02T10:00:00Z"},
+                                    {"decision": "Approved", "reviewedAt": "2026-09-03T04:00:00Z"}])
+    _insert_campaign(t + "later", owner, "2026-09-05T00:00:00Z",
+                     status="Approved", budgetMinorUSD=500, submittedAt="2026-09-05T02:00:00Z",
+                     reviewedAt="2026-09-05T12:00:00Z", approvedAt="2026-09-05T12:00:00Z", endDate="2026-09-30",
+                     reviewHistory=[{"decision": "Approved", "reviewedAt": "2026-09-05T12:00:00Z"}])
+    _insert_campaign(t + "hold", owner, "2026-09-06T00:00:00Z",
+                     status="Submitted", budgetMinorUSD=700, submittedAt="2026-09-06T01:00:00Z")
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+
+    def report() -> dict:
+        with db_conn() as conn:
+            rows = [r for r in studio_diagnostics.load_campaign_rows(conn) if r["ownerId"] == owner]
+            joined = account_created_at(conn, [owner])
+        return studio_diagnostics.compute_diagnostics(rows, joined, now)
+
+    try:
+        before = report()
+        assert before["campaigns"]["total"] == 3 and before["campaigns"]["archived"] == 0
+        assert before["campaigns"]["byStatus"]["Approved"] == 2 and before["holds"] == {"count": 1}
+        assert before["baselines"]["B2"] == {"value": 33.3, "unit": "percent", "sample": 3}  # 1 of 3 sent back
+        assert before["baselines"]["B6"] == {"value": 52.0, "unit": "hours", "sample": 1}    # 09-01 00:00 -> 09-03 04:00
+        assert before["baselines"]["B4"] == {"value": 1, "unit": "count", "sample": 2}
+        for campaign_id in (first, t + "hold"):  # the real archive route (an admin may archive any status)
+            response = client.delete(f"/api/collections/{CAMPAIGNS}/{campaign_id}", cookies=actors["admin"]["cookies"])
+            assert response.status_code == 200, response.text
+        with db_conn() as conn:
+            archived = conn.execute(text("SELECT deleted FROM entities WHERE type=:t AND id=:id"),
+                                    {"t": CAMPAIGNS, "id": first}).scalar()
+        assert bool(archived)
+        after = report()
+        assert after["campaigns"]["total"] == 1 and after["campaigns"]["archived"] == 2
+        assert after["campaigns"]["byStatus"]["Approved"] == 1 and after["campaigns"]["byStatus"]["Submitted"] == 0
+        assert after["holds"] == {"count": 0} and after["baselines"]["B3"] == {"value": 0, "unit": "count", "sample": 0}
+        assert after["baselines"]["B4"] == {"value": 0, "unit": "count", "sample": 1}
+        for key in ("B1", "B2", "B5", "B6"):  # the history is unchanged by archiving
+            assert after["baselines"][key] == before["baselines"][key], key
+    finally:
+        _delete_campaigns([first, t + "later", t + "hold"])
+
+
+def test_campaign_rows_sql_parses_json_once_on_postgresql():
+    """PostgreSQL casts data_json to jsonb once per row (not once per field); SQLite keeps json_extract."""
+    fields = ", ".join(f"(doc ->> '{f}') AS f_{f.lower()}" for f in studio_diagnostics._FIELDS)
+    assert studio_diagnostics.campaign_rows_sql("postgresql") == (
+        f"SELECT created_at, created_by, deleted, {fields} FROM (SELECT created_at, created_by, deleted, "
+        "data_json::jsonb AS doc FROM entities WHERE type = :type OFFSET 0) AS parsed_once"
+    )
+    sqlite = studio_diagnostics.campaign_rows_sql("sqlite")
+    assert "::jsonb" not in sqlite and "json_extract(data_json, '$.reviewHistory') AS f_reviewhistory" in sqlite
+    for sql in (sqlite, studio_diagnostics.campaign_rows_sql("postgresql")):
+        assert "creativeImages" not in sql and "deleted = false" not in sql  # archived rows are read too
+    for bad_fields, bad_columns in ((["x'y"], []), (["ok"], ["data_json; DROP"]), ([], [])):
+        with pytest.raises(ValueError):
+            json_fields_select_sql(bad_fields, bad_columns, "type = :type", "postgresql")
+
+
+def _insert_payment(row_id: str, owner_id: str, *, deleted: bool = False, **data) -> None:
+    stamp = now_ms()
+    body = {"id": row_id, "recordType": "walletPaymentRequest", "userId": owner_id, "reference": f"PAY-{row_id[-8:]}",
+            "receiptPhoto": "data:image/png;base64," + "A" * 4000, **data}
+    with db_conn() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                "VALUES (:type,:id,:data,:deleted,:stamp,:owner,:stamp)"
+            ),
+            {"type": WALLET_PAYMENT_COLLECTION, "id": row_id, "data": json_dumps(body), "deleted": deleted,
+             "stamp": stamp, "owner": owner_id},
+        )
+
+
+def test_top_up_presets_are_counts_only(actors):
+    """P0-05b, D25: the most common confirmed USD top-ups from Albayan's own history, amounts and counts only."""
+    payer = actors["customer"]["id"]
+    common = 1_000_000 + int(TAG, 16) % 100_000 * 10  # amounts no other module uses
+    second = common + 5
+    ids = []
+
+    def add(amount: int, status: str, currency: str | None = "USD", deleted: bool = False) -> None:
+        row_id = f"wpr_{TAG}_{len(ids)}"
+        ids.append(row_id)
+        extra = {"currency": currency} if currency else {}  # a request without a currency is legacy USD
+        _insert_payment(row_id, payer, deleted=deleted, amountMinor=amount, status=status, **extra)
+
+    for _ in range(3):
+        add(common, "confirmed")
+        add(second, "confirmed")
+    add(common, "confirmed", currency=None)
+    add(common, "pending")
+    add(common, "canceled")
+    add(second, "confirmed", deleted=True)
+    for _ in range(5):
+        add(common, "confirmed", currency="LYD")
+    try:
+        with db_conn() as conn:
+            usd = confirmed_top_up_amounts(conn, "USD", limit=100_000)
+            lyd = confirmed_top_up_amounts(conn, "LYD", limit=100_000)
+            top_one = confirmed_top_up_amounts(conn, "USD", limit=1)
+        counts = {e["amountMinor"]: e["count"] for e in usd["amounts"]}
+        assert counts[common] == 4 and counts[second] == 3  # pending, canceled, deleted and LYD rows left out
+        assert usd["amounts"] == sorted(usd["amounts"], key=lambda e: (-e["count"], e["amountMinor"]))
+        assert usd["sample"] == sum(counts.values()) and len(top_one["amounts"]) == 1
+        assert {e["amountMinor"]: e["count"] for e in lyd["amounts"]}[common] == 5
+
+        response = client.get("/api/studio/admin/diagnostics", cookies=actors["admin"]["cookies"])
+        assert response.status_code == 200, response.text
+        presets = response.json()["topUpPresets"]
+        assert presets["currency"] == "USD" and presets["sample"] >= 7 and 1 <= len(presets["amounts"]) <= 5
+        for entry in presets["amounts"]:
+            assert set(entry) == {"amountMinor", "count"} and all(isinstance(v, int) and v > 0 for v in entry.values())
+        for secret in [payer, "PAY-", "base64", *ids]:
+            assert secret not in json.dumps(presets), secret
+    finally:
+        with db_conn() as conn:
+            for row_id in ids:
+                conn.execute(text("DELETE FROM entities WHERE type=:t AND id=:id"), {"t": WALLET_PAYMENT_COLLECTION, "id": row_id})
 
 
 def test_missing_data_gives_null_baselines_not_a_crash():

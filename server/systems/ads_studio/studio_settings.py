@@ -3,28 +3,31 @@
 Each setting is one ``studioSettings`` record in the entities table, found by a fixed id
 (``derived_id("sts", key)``). A record keeps the current value and a version number; every save
 must name the version it read (``expectedVersion``), so two admins can never overwrite each
-other without seeing it (409). The audit log keeps the value before and after every save.
+other without seeing it (409). Every save writes its audit entry (action ``studio_setting``,
+the value before and after) in the SAME transaction: both are kept or neither is. A record
+that was soft-deleted (an admin restore, a batch delete) reads as never saved (version 0), and
+the next save with ``expectedVersion`` 0 brings the same row back.
 
 Keys (anything else is refused):
 
 * ``rollout``: ``ui`` (customer layout ``off|pilot|on`` + ``uiAllowlist`` of user ids),
-  ``services`` (``help``, ``stopRequest``, ``tiktok``: true/false, shown in BOTH layouts),
-  ``staffDesk`` (``off|pilot|on`` + ``staffAllowlist``; its own switch, independent of the
-  customer layout and of the env kill switch).
+  ``services`` (``help``, ``stopRequest``, ``tiktok``: each ``off|pilot|on``, shown in BOTH
+  layouts; ``pilot`` = only the users in ``uiAllowlist``; a stored or sent true/false from the
+  first shape reads as on/off), ``staffDesk`` (``off|pilot|on`` + ``staffAllowlist``; its own
+  switch, independent of the customer layout and of the env kill switch).
 * ``intake``: ``open`` (new submissions allowed) and ``maxSubmissionsPerDay`` (1-500).
-* ``capabilities``: reply-channel labels ``fbReplies``, ``igReplies``, ``privateMessages``,
-  ``tiktok``, each ``on|gated|off|unavailable``; ``poll`` is allowed only for ``igReplies``.
+* ``capabilities``: the PLAN.md §7.1 labels ``fbPublicReply``, ``fbPrivateReply``,
+  ``igPublicReply``, ``igPrivateReply``, ``tiktokService``, each ``on|gated|off|unavailable``;
+  ``poll`` (Instagram road 1) is allowed only for ``igPublicReply``.
 
 Safe defaults (used until an admin saves, and for any stored field that is unreadable):
-everything off / classic, intake open with a cap of 5, capabilities as PLAN.md §8.2 and
-DECISIONS D8a say: Facebook replies ``gated`` until fact P0-01(g) passes; Instagram replies,
-private messages and TikTok ``unavailable`` (Business Verification is postponed, nothing is
-waiting at Meta, and TikTok has no reply scopes).
+everything off / classic, intake open with a cap of 5, capabilities as in ``DEFAULTS`` below.
 
 Env kill switch ``ALBAYAN_STUDIO_V2`` (read on every request): ``off`` (also when unset or
 misspelt) forces the classic customer layout whatever the record says; ``pilot`` allows the new
 layout only for the allowlist; ``on`` follows the record. It never touches services or the
-staff desk, so switching the layout back to classic never hides a ticket or the staff queue.
+staff desk, so switching the layout back to classic never hides a ticket or the staff queue
+(PLAN.md §12.2(b)).
 """
 
 import copy
@@ -45,10 +48,11 @@ SERVICE_NAMES = ("help", "stopRequest", "tiktok")
 CAPABILITY_STATES = ("on", "gated", "off", "unavailable")
 # channel -> the states it may take (poll = "checked every few minutes", Instagram road 1 only)
 CAPABILITY_CHANNELS: dict[str, tuple[str, ...]] = {
-    "fbReplies": CAPABILITY_STATES,
-    "igReplies": ("on", "poll", "gated", "off", "unavailable"),
-    "privateMessages": CAPABILITY_STATES,
-    "tiktok": CAPABILITY_STATES,
+    "fbPublicReply": CAPABILITY_STATES,
+    "fbPrivateReply": CAPABILITY_STATES,
+    "igPublicReply": ("on", "poll", "gated", "off", "unavailable"),
+    "igPrivateReply": CAPABILITY_STATES,
+    "tiktokService": CAPABILITY_STATES,
 }
 MAX_ALLOWLIST = 200
 MIN_SUBMISSIONS_PER_DAY = 1
@@ -58,16 +62,28 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "rollout": {
         "ui": "off",
         "uiAllowlist": [],
-        "services": {"help": False, "stopRequest": False, "tiktok": False},
+        "services": {"help": "off", "stopRequest": "off", "tiktok": "off"},
         "staffDesk": "off",
         "staffAllowlist": [],
     },
     "intake": {"open": True, "maxSubmissionsPerDay": 5},
+    # Honest labels until the facts are in (PLAN.md §8.2, DECISIONS D8a, D24b, D34):
+    # * fbPublicReply gated ("waiting for Meta"): it works only after fact P0-01(g) proves
+    #   delivery to commenters without an app role and the page is subscribed; if (g) fails,
+    #   D24b (a) keeps this label.
+    # * fbPrivateReply, igPrivateReply unavailable: Business Verification is postponed (D8a),
+    #   so nothing is waiting at Meta and private messages are "not available now", not gated.
+    # * igPublicReply unavailable: no approval is pending (D8a, D34 (a)); an admin sets poll
+    #   only after the road 1 test P0-01(w) passes.
+    # * tiktokService off: a manual service run by the team (§8.4), not blocked by any platform,
+    #   so neither gated nor unavailable fits; it stays off until the owner opens it (TikTok is
+    #   hidden in Preview A, §12.3).
     "capabilities": {
-        "fbReplies": "gated",
-        "igReplies": "unavailable",
-        "privateMessages": "unavailable",
-        "tiktok": "unavailable",
+        "fbPublicReply": "gated",
+        "fbPrivateReply": "unavailable",
+        "igPublicReply": "unavailable",
+        "igPrivateReply": "unavailable",
+        "tiktokService": "off",
     },
 }
 
@@ -114,6 +130,12 @@ def _flag(field: str, value: Any) -> bool:
     return value
 
 
+def _service_mode(field: str, value: Any) -> str:
+    if isinstance(value, bool):  # the first shape stored true/false
+        return "on" if value else "off"
+    return _mode(field, value)
+
+
 def _allowlist(field: str, value: Any, id_validator: Callable[[Any], str] | None) -> list[str]:
     if not isinstance(value, list):
         _bad(field, "must be a list of user ids")
@@ -147,7 +169,7 @@ def _apply_rollout(current: dict[str, Any], raw: dict[str, Any], id_validator: C
             for name, flag in value.items():
                 if name not in SERVICE_NAMES:
                     _unknown(f"services.{name}", SERVICE_NAMES)
-                services[name] = _flag(f"services.{name}", flag)
+                services[name] = _service_mode(f"services.{name}", flag)
             current["services"] = services
         else:
             _unknown(field, DEFAULTS["rollout"])
@@ -222,13 +244,19 @@ def normalise_stored(key: str, stored: Any) -> dict[str, Any]:
 # ------------------------------------------------------------------ storage
 
 def _select_row(conn: Any, key: str) -> Any:
+    """The key's row whatever its deleted flag: a soft-deleted row must never block a save."""
     return conn.execute(
         text(
-            "SELECT id, data_json, created_at, last_modified FROM entities "
-            "WHERE type = :type AND id = :id AND deleted = false LIMIT 1"
+            "SELECT id, data_json, deleted, created_at, last_modified FROM entities "
+            "WHERE type = :type AND id = :id LIMIT 1"
         ),
         {"type": STUDIO_SETTINGS_TYPE, "id": setting_id(key)},
     ).mappings().first()
+
+
+def _live_data(row: Any) -> Any:
+    """The stored data of a live row; None for no row or a soft-deleted one (= never saved)."""
+    return json_loads(row["data_json"]) if row and not bool(row["deleted"]) else None
 
 
 def _record(key: str, data: Any) -> dict[str, Any]:
@@ -251,7 +279,7 @@ def read_setting(key: str) -> dict[str, Any]:
     require_known_key(key)
     with db_conn() as conn:
         row = _select_row(conn, key)
-    return _record(key, json_loads(row["data_json"]) if row else None)
+    return _record(key, _live_data(row))
 
 
 def read_all_settings() -> dict[str, dict[str, Any]]:
@@ -266,57 +294,67 @@ def read_all_settings() -> dict[str, dict[str, Any]]:
     return {key: _record(key, found.get(key))["value"] for key in SETTING_KEYS}
 
 
+_SAVED_FIRST = "This setting was saved by someone else just now. Reload it, then save again."
+
+
 def save_setting(
     key: str,
     raw_value: Any,
     expected_version: int,
     actor_id: str,
     iso_now: str,
+    *,
+    audit: Callable[[Any, dict[str, Any], dict[str, Any]], None],
     id_validator: Callable[[Any], str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Validate and save; returns (record before, record after). 409 when someone saved first."""
+    """Validate and save; returns (record before, record after). 409 when someone saved first.
+
+    ``audit(conn, before, after)`` writes the audit entry on the same connection before the
+    commit, so when it fails the save is rolled back too (a switch never changes unrecorded).
+    """
     require_known_key(key)
-    try:
-        with db_conn() as conn:
-            row = _select_row(conn, key)
-            before = _record(key, json_loads(row["data_json"]) if row else None)
-            if int(expected_version) != before["version"]:
-                studio_error(
-                    409,
-                    "VERSION_CONFLICT",
-                    f"This setting changed (now version {before['version']}). Reload it, then save again.",
-                )
-            value = validate_setting(key, raw_value, before["value"], id_validator)
-            version = before["version"] + 1
-            stamp = now_ms()
-            data = {
-                "id": setting_id(key),
-                "recordType": STUDIO_SETTINGS_TYPE,
-                "settingKey": key,
-                "version": version,
-                "value": value,
-                "updatedAt": iso_now,
-                "updatedBy": str(actor_id or ""),
-                "_deleted": False,
-            }
-            if row:
-                baseline = int(row["last_modified"])
-                modified = max(stamp, baseline + 1)
-                data["_created"] = int(row["created_at"])
-                data["_lastModified"] = modified
-                result = conn.execute(
-                    text(
-                        "UPDATE entities SET data_json = :data, last_modified = :modified "
-                        "WHERE type = :type AND id = :id AND deleted = false AND last_modified = :baseline"
-                    ),
-                    {"data": json_dumps(data), "modified": modified, "type": STUDIO_SETTINGS_TYPE,
-                     "id": setting_id(key), "baseline": baseline},
-                )
-                if int(result.rowcount or 0) != 1:
-                    studio_error(409, "VERSION_CONFLICT", "This setting was saved by someone else just now. Reload it, then save again.")
-            else:
-                data["_created"] = stamp
-                data["_lastModified"] = stamp
+    with db_conn() as conn:
+        row = _select_row(conn, key)
+        before = _record(key, _live_data(row))
+        if int(expected_version) != before["version"]:
+            studio_error(
+                409,
+                "VERSION_CONFLICT",
+                f"This setting changed (now version {before['version']}). Reload it, then save again.",
+            )
+        value = validate_setting(key, raw_value, before["value"], id_validator)
+        stamp = now_ms()
+        data = {
+            "id": setting_id(key),
+            "recordType": STUDIO_SETTINGS_TYPE,
+            "settingKey": key,
+            "version": before["version"] + 1,
+            "value": value,
+            "updatedAt": iso_now,
+            "updatedBy": str(actor_id or ""),
+            "_deleted": False,
+        }
+        if row:
+            # A live row is updated; a soft-deleted one is brought back (deleted = false), both
+            # only if nobody touched the row since it was read.
+            baseline = int(row["last_modified"])
+            modified = max(stamp, baseline + 1)
+            data["_created"] = int(row["created_at"])
+            data["_lastModified"] = modified
+            result = conn.execute(
+                text(
+                    "UPDATE entities SET data_json = :data, deleted = false, last_modified = :modified "
+                    "WHERE type = :type AND id = :id AND deleted = :was_deleted AND last_modified = :baseline"
+                ),
+                {"data": json_dumps(data), "modified": modified, "type": STUDIO_SETTINGS_TYPE,
+                 "id": setting_id(key), "was_deleted": bool(row["deleted"]), "baseline": baseline},
+            )
+            if int(result.rowcount or 0) != 1:
+                studio_error(409, "VERSION_CONFLICT", _SAVED_FIRST)
+        else:
+            data["_created"] = stamp
+            data["_lastModified"] = stamp
+            try:
                 # A system row: created_by stays NULL (the acting admin is in updatedBy and the audit log).
                 conn.execute(
                     text(
@@ -325,10 +363,12 @@ def save_setting(
                     ),
                     {"type": STUDIO_SETTINGS_TYPE, "id": setting_id(key), "data": json_dumps(data), "stamp": stamp},
                 )
-    except IntegrityError:
-        # Two first saves at the same moment: the fixed id lets only one insert win.
-        studio_error(409, "VERSION_CONFLICT", "This setting was saved by someone else just now. Reload it, then save again.")
-    return before, _record(key, data)
+            except IntegrityError:
+                # Two first saves at the same moment: the fixed id lets only one insert win.
+                studio_error(409, "VERSION_CONFLICT", _SAVED_FIRST)
+        after = _record(key, data)
+        audit(conn, before, after)
+    return before, after
 
 
 # ------------------------------------------------------- what a user gets
@@ -359,11 +399,23 @@ def staff_desk_layout(rollout: dict[str, Any], user_id: str, is_staff: bool) -> 
     return "classic"
 
 
+def service_access(rollout: dict[str, Any], user_id: str) -> dict[str, bool]:
+    """Each service for this user: on = everyone, pilot = only the customer allowlist
+    (``uiAllowlist``), off = nobody. Neither the env kill switch nor the customer layout is
+    consulted: switching the layout off never hides a service (PLAN.md §12.2(b))."""
+    services = rollout.get("services") or {}
+    allowed = bool(user_id) and user_id in (rollout.get("uiAllowlist") or [])
+    return {
+        name: services.get(name) == "on" or (services.get(name) == "pilot" and allowed)
+        for name in SERVICE_NAMES
+    }
+
+
 def me_view(settings: dict[str, dict[str, Any]], user_id: str, is_admin: bool, is_staff: bool) -> dict[str, Any]:
     rollout = settings["rollout"]
     return {
         "ui": customer_layout(rollout, user_id),
-        "services": {name: bool((rollout.get("services") or {}).get(name)) for name in SERVICE_NAMES},
+        "services": service_access(rollout, user_id),
         "staffDesk": staff_desk_layout(rollout, user_id, is_staff),
         "capabilities": dict(settings["capabilities"]),
         "intake": {"open": bool(settings["intake"].get("open"))},

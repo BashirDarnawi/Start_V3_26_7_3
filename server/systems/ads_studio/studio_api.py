@@ -5,12 +5,14 @@ Routes in this first part:
 * ``GET /api/studio/me`` (any signed-in user): which layout and services this user gets.
 * ``GET /api/studio/admin/settings/{key}`` and ``PUT`` the same (admin only): the switches in
   studio_settings.py. A PUT checks the origin, the admin role, a rate limit and the version,
-  then saves and writes an audit entry with the value before and after.
-* ``GET /api/studio/admin/diagnostics`` (admin only): counts and baselines, no personal data.
+  then saves and writes an audit entry (action ``studio_setting``, which the audit cleanup
+  never deletes) with the value before and after, in one transaction.
+* ``GET /api/studio/admin/diagnostics`` (admin only): counts, baselines and top-up presets,
+  no personal data.
 
 main.py hands helpers over through ``ctx`` (late-binding lambdas): ``user_has_permission``,
-``audit`` and ``validate_entity_id``. Errors are ``{"detail": {"code", "message"}}``
-(studio_errors.py).
+``audit`` (it accepts ``conn=`` to join the caller's transaction) and ``validate_entity_id``.
+Errors are ``{"detail": {"code", "message"}}`` (studio_errors.py).
 """
 
 import math
@@ -106,17 +108,22 @@ def create_studio_router(
         if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
             studio_error(400, "INVALID_REQUEST", "expectedVersion (the version you loaded, 0 for never saved) is required")
         actor_id = str(user.get("id") or "")
-        before, after = save_setting(
+
+        def audit_save(conn: Any, before: dict[str, Any], after: dict[str, Any]) -> None:
+            ctx["audit"](
+                actor_id,
+                "studio_setting",
+                STUDIO_SETTINGS_TYPE,
+                after["id"],
+                f"Saved studio setting '{key}' as version {after['version']}",
+                {"key": key, "version": after["version"], "before": before["value"], "after": after["value"]},
+                conn=conn,
+            )
+
+        _before, after = save_setting(
             key, body.get("value"), expected, actor_id, _iso_now(),
+            audit=audit_save,
             id_validator=lambda value: ctx["validate_entity_id"](value),
-        )
-        ctx["audit"](
-            actor_id,
-            "update",
-            STUDIO_SETTINGS_TYPE,
-            after["id"],
-            f"Saved studio setting '{key}' as version {after['version']}",
-            {"key": key, "version": after["version"], "before": before["value"], "after": after["value"]},
         )
         return public_setting(after)
 

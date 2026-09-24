@@ -2,7 +2,12 @@
 
 Nothing here returns a name, email, phone, id or message text: only counts, medians and shares.
 The baselines describe the classic studio before the pilot, from the timestamps the classic
-workflow already writes on ``adCampaignRequests`` (main.py submit/review routes):
+workflow already writes on ``adCampaignRequests`` (main.py submit/review routes).
+
+Customers archive requests (DELETE -> main._soft_delete_ad_campaign_atomic keeps every
+timestamp and ``reviewHistory``), and an archived request still happened. So the history
+baselines B1, B2, B5 and B6 read ALL rows, archived included; the "now" numbers (``byStatus``,
+``campaigns.total``, holds, B3, B4) read only live rows; ``campaigns.archived`` counts the rest.
 
 * **B1** median hours from submit (``submittedAt``) to the decision (``reviewedAt``). A resubmit
   clears ``reviewedAt`` and overwrites ``submittedAt``, so each request counts its latest cycle.
@@ -15,27 +20,36 @@ workflow already writes on ``adCampaignRequests`` (main.py submit/review routes)
 * **B5** median hours from creating the draft (the row's ``created_at``) to its FIRST submit;
   a request that was already reviewed before its latest submit is left out (its first submit
   time is not stored).
-* **B6** median hours from a customer's account creation (``users.created_at``) to their first
-  approval (earliest ``approvedAt``).
+* **B6** median hours from a customer's account creation (``users.created_at``, read through
+  the platform door server/user_directory.py) to their first approval (earliest ``approvedAt``).
 
 A median or share with no usable rows is ``None`` (null in JSON), never a crash or a fake 0.
 Counts (B3, B4) are real zeros when nothing matches; ``sample`` says how many rows could be judged.
-Only rows that are not deleted are read, and only the few fields above (never the creative images).
+Only the few fields above are read (never the creative images), each row's JSON parsed once
+(db.json_fields_select_sql: on PostgreSQL one jsonb cast per row, not one per field).
+
+**Top-up presets** (P0-05b, D25): the 5 most common confirmed USD wallet top-up amounts with
+their counts, from Albayan's own payment history (wallet_payments.confirmed_top_up_amounts):
+amounts and counts only, no ids, names or users.
 """
 
 import statistics
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import text
 
-from ...db import db_conn, json_field_sql, json_loads_or_raw
+from ...db import db_conn, json_fields_select_sql, json_loads_or_raw
+from ...user_directory import account_created_at
+from ...wallet_payments import confirmed_top_up_amounts
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 
 CAMPAIGN_STATUSES = ("Draft", "Submitted", "Changes Requested", "Approved", "Rejected", "Stopped")
 REVIEW_DECISIONS = ("Approved", "Changes Requested", "Rejected")
 HOLD_AGE_DAYS = 14
 UNSETTLED_GRACE_DAYS = 7
+TOP_UP_PRESETS = 5
+TOP_UP_CURRENCY = "USD"
 _FIELDS = ("status", "submittedAt", "reviewedAt", "approvedAt", "endDate", "budgetMinorUSD", "reviewHistory")
 
 
@@ -91,33 +105,23 @@ def libya_today(now: datetime) -> date:
         return now.astimezone(timezone.utc).date()
 
 
+def campaign_rows_sql(dialect: str | None = None) -> str:
+    """Every request row, archived ones included (the ``deleted`` column says which)."""
+    return json_fields_select_sql(_FIELDS, ("created_at", "created_by", "deleted"), "type = :type", dialect)
+
+
 def load_campaign_rows(conn: Any) -> list[dict[str, Any]]:
     """The fields the baselines need, projected in SQL (no creative images are read)."""
-    # Lower-case aliases: PostgreSQL folds unquoted names, so "f_submittedAt" would come back as "f_submittedat".
-    columns = ", ".join(f"{json_field_sql(field)} AS f_{field.lower()}" for field in _FIELDS)
-    rows = conn.execute(
-        text(f"SELECT created_at, created_by, {columns} FROM entities WHERE type = :type AND deleted = false"),
-        {"type": AD_CAMPAIGN_COLLECTION},
-    ).mappings().all()
+    rows = conn.execute(text(campaign_rows_sql()), {"type": AD_CAMPAIGN_COLLECTION}).mappings().all()
     out = []
     for row in rows:
         item = {field: row.get(f"f_{field.lower()}") for field in _FIELDS}
         item["reviewHistory"] = json_loads_or_raw(item.get("reviewHistory"))
         item["createdAtMs"] = row.get("created_at")
         item["ownerId"] = str(row.get("created_by") or "")
+        item["archived"] = bool(row.get("deleted"))
         out.append(item)
     return out
-
-
-def load_account_created(conn: Any, owner_ids: Iterable[str]) -> dict[str, Any]:
-    """users.created_at (ms) for these owners (read only, through the login platform's table)."""
-    ids = sorted({str(i) for i in owner_ids if i})
-    found: dict[str, Any] = {}
-    query = text("SELECT id, created_at FROM users WHERE id IN :ids").bindparams(bindparam("ids", expanding=True))
-    for start in range(0, len(ids), 500):
-        for row in conn.execute(query, {"ids": ids[start:start + 500]}).mappings().all():
-            found[str(row["id"])] = row["created_at"]
-    return found
 
 
 def _median_hours(values: list[float]) -> dict[str, Any] | None:
@@ -131,11 +135,15 @@ def compute_diagnostics(
     account_created: dict[str, Any],
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Counts by status, holds and B1-B6 from rows shaped like ``load_campaign_rows``."""
+    """Counts by status, holds and B1-B6 from rows shaped like ``load_campaign_rows``.
+
+    A row with ``archived`` true counts only in the history baselines (B1, B2, B5, B6).
+    """
     now = now or datetime.now(timezone.utc)
     today = libya_today(now)
     by_status = {status: 0 for status in CAMPAIGN_STATUSES}
     by_status["other"] = 0
+    live = archived = 0
     holds = 0
     b1: list[float] = []
     decisions = 0
@@ -147,7 +155,12 @@ def compute_diagnostics(
 
     for row in rows:
         status = str(row.get("status") or "Draft")
-        by_status[status if status in by_status else "other"] += 1
+        is_live = not row.get("archived")
+        if is_live:
+            live += 1
+            by_status[status if status in by_status else "other"] += 1
+        else:
+            archived += 1
         submitted = parse_time(row.get("submittedAt"))
         reviewed = parse_time(row.get("reviewedAt"))
         history = row.get("reviewHistory") if isinstance(row.get("reviewHistory"), list) else []
@@ -162,13 +175,13 @@ def compute_diagnostics(
         if status != "Submitted" and submitted and reviewed and reviewed >= submitted:
             b1.append(_hours(reviewed, submitted))
 
-        if status == "Submitted" and _minor(row.get("budgetMinorUSD")) > 0:
+        if is_live and status == "Submitted" and _minor(row.get("budgetMinorUSD")) > 0:
             holds += 1
             if submitted:
                 b3_sample += 1
                 b3_count += now - submitted > timedelta(days=HOLD_AGE_DAYS)
 
-        if status == "Approved":
+        if is_live and status == "Approved":
             end = parse_day(row.get("endDate"))
             if end:
                 b4_sample += 1
@@ -191,7 +204,7 @@ def compute_diagnostics(
             b6.append(_hours(approved, joined))
 
     return {
-        "campaigns": {"total": len(rows), "byStatus": by_status},
+        "campaigns": {"total": live, "archived": archived, "byStatus": by_status},
         "holds": {"count": holds},
         "baselines": {
             "B1": _median_hours(b1),
@@ -210,5 +223,8 @@ def compute_diagnostics(
 def read_diagnostics(now: datetime | None = None) -> dict[str, Any]:
     with db_conn() as conn:
         rows = load_campaign_rows(conn)
-        created = load_account_created(conn, (r["ownerId"] for r in rows if r.get("approvedAt")))
-    return compute_diagnostics(rows, created, now)
+        created = account_created_at(conn, (r["ownerId"] for r in rows if r.get("approvedAt")))
+        top_ups = confirmed_top_up_amounts(conn, TOP_UP_CURRENCY, TOP_UP_PRESETS)
+    report = compute_diagnostics(rows, created, now)
+    report["topUpPresets"] = {"currency": TOP_UP_CURRENCY, **top_ups}
+    return report

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Report-only inventory of the refusal texts in Albayan Ads Studio (plan task P0-08).
+"""Report-only inventory of the refusal texts behind the Albayan Studio screens (plan task P0-08).
 
-Prints every ``HTTPException(... detail=...)`` and every ``studio_error(status, code, message)``
-found in server/systems/ads_studio/*.py, with its file, line and HTTP status. The list is the
-input for the Arabic refusal map (P1-08c) and the v2 error codes (P2-11).
+Prints every ``HTTPException(... detail=...)`` and every ``studio_error(status, code, message)``,
+with its file, line and HTTP status, from:
 
+* server/systems/ads_studio/*.py (/api/ad-studio, /api/social-studio, /api/studio);
+* server/wallet_payments.py and server/subscription_plans.py (/api/wallet, plans);
+* the route functions in server/main.py whose path starts with /api/ad-studio,
+  /api/social-studio or /api/wallet (only the decorated function's own body; helpers it calls
+  are not followed).
+
+The list is the input for the Arabic refusal map (P1-08c) and the v2 error codes (P2-11).
 It never fails a build: it always exits 0, even when a file cannot be read or parsed.
 
 Usage:  python scripts/studio_detail_inventory.py
@@ -15,7 +21,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FOLDER = ROOT / "server" / "systems" / "ads_studio"
+SERVER = ROOT / "server"
+FOLDER = SERVER / "systems" / "ads_studio"
+PLATFORM_FILES = (SERVER / "wallet_payments.py", SERVER / "subscription_plans.py")
+MAIN = SERVER / "main.py"
+MAIN_ROUTE_PREFIXES = ("/api/ad-studio", "/api/social-studio", "/api/wallet")
+ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "api_route"}
 
 
 def _callee(func: ast.AST) -> str:
@@ -58,9 +69,8 @@ def _keyword(call: ast.Call, name: str, position: int) -> ast.AST | None:
     return call.args[position] if len(call.args) > position else None
 
 
-def inventory(path: Path) -> list[tuple[int, str, str]]:
+def refusals(tree: ast.AST) -> list[tuple[int, str, str]]:
     found: list[tuple[int, str, str]] = []
-    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -75,26 +85,62 @@ def inventory(path: Path) -> list[tuple[int, str, str]]:
     return sorted(found)
 
 
+def inventory(path: Path) -> list[tuple[int, str, str]]:
+    return refusals(ast.parse(path.read_text(encoding="utf-8")))
+
+
+def route_path(function: ast.AST) -> str:
+    """The path of an ``@app.post("/api/...")``-style decorator ('' when there is none)."""
+    for decorator in getattr(function, "decorator_list", []):
+        if (
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr in ROUTE_METHODS
+            and decorator.args
+            and isinstance(decorator.args[0], ast.Constant)
+            and isinstance(decorator.args[0].value, str)
+        ):
+            return decorator.args[0].value
+    return ""
+
+
+def main_route_inventory(path: Path) -> list[tuple[int, str, str]]:
+    """Refusals inside main.py route functions whose path starts with a studio prefix."""
+    found: list[tuple[int, str, str]] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and route_path(node).startswith(MAIN_ROUTE_PREFIXES):
+            found.extend(refusals(node))
+    return sorted(found)
+
+
+def _print(label: str, rows: list[tuple[int, str, str]]) -> int:
+    if not rows:
+        return 0
+    print(f"{label} ({len(rows)})")
+    for line, status, detail in rows:
+        print(f"  {line:>5}  {status:>4}  {detail}")
+    return len(rows)
+
+
 def main() -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
     total = 0
-    files = sorted(FOLDER.glob("*.py")) if FOLDER.is_dir() else []
-    for path in files:
+    sources = (sorted(FOLDER.glob("*.py")) if FOLDER.is_dir() else []) + [p for p in PLATFORM_FILES if p.is_file()]
+    jobs = [(path, path.relative_to(ROOT).as_posix(), inventory) for path in sources]
+    if MAIN.is_file():
+        label = f"{MAIN.relative_to(ROOT).as_posix()} routes under {', '.join(MAIN_ROUTE_PREFIXES)}"
+        jobs.append((MAIN, label, main_route_inventory))
+    for path, label, read in jobs:
         try:
-            rows = inventory(path)
+            rows = read(path)
         except Exception as error:  # report-only: never fail
-            print(f"{path.relative_to(ROOT).as_posix()}: could not be read ({type(error).__name__})")
+            print(f"{label}: could not be read ({type(error).__name__})")
             continue
-        if not rows:
-            continue
-        print(f"{path.relative_to(ROOT).as_posix()} ({len(rows)})")
-        for line, status, detail in rows:
-            print(f"  {line:>5}  {status:>4}  {detail}")
-        total += len(rows)
-    print(f"Total: {total} refusal texts in {len(files)} files (report only).")
+        total += _print(label, rows)
+    print(f"Total: {total} refusal texts in {len(jobs)} sources (report only).")
     return 0
 
 
