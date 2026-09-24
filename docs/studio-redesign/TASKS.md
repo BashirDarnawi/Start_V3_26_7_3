@@ -14,6 +14,17 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P0-16 | Done | stage 2 | Ads Studio server modules moved into `server/systems/ads_studio/` (all importers updated, no shims needed) |
 | P0-17 | Done | stage 2 | Boundary guards: `server/test_system_boundaries.py` + `scripts/test-system-boundaries.js` in npm test and CI |
 | P2-00 | Done | stage 2 | Ads Studio screens moved into `src/systems/ads_studio/`; studio.js byte-identical |
+| P0-03 | Done | stage 3 | `studio_types.py`, `/api/studio/me`, router registered (+5 main.py lines) |
+| P0-04 | Part done | stage 3 | `rollout` (layout, staff desk, services off/pilot/on), `intake` (open + daily cap), `capabilities` (the five PLAN channels) + `ALBAYAN_STUDIO_V2` kill switch; version check; audited in the same transaction, history kept permanently. Still to do: `limits`, `settlement`, `hours`, `contact`, `targets`, `thresholds`, `studio-accounts`, `STAFF_DESK_IN_USE` |
+| P0-05a | Done | stage 3 | `GET /api/studio/admin/diagnostics` (admin only, counts only) |
+| P0-05b | Done | stage 3 | Baselines B1–B6 (archived requests included in the history baselines) + top-up preset source (most common confirmed top-up amounts, counts only) |
+| P0-08 | Done | stage 3 | `studio_errors.py`; `scripts/studio_detail_inventory.py` lists studio, wallet and plan refusals (report only) |
+| P0-09a | Done | stage 3 | Discovery, import and link skip or refuse `ALB-S-` campaigns (fail closed when the name is unknown); Manager's ad picker hides them. Rename on link = P0-09b |
+| P0-11a | Done | stage 3 | CI runs the architecture, mobile-config, profitability and system-boundary guards |
+| P0-12 | Done | stage 3 | Privacy page: 365-day audit retention, the exact kept entries (test compares with the server's keep list), Ads Studio data and comment processing |
+| P0-13 | Done | stage 3 | Webhook delivery counter (counts only, after the signature check, flushed once a minute) |
+| P0-14 | Done | stage 3 | `GET /api/meta-ads/token-health` (platform route), reading tied to the key it checked, at most one Meta check per 10 min except the admin refresh; needs `ALBAYAN_META_APP_ID` |
+| D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system |
 
 ## 10. TASKS
 

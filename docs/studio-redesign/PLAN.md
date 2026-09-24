@@ -781,6 +781,8 @@ Every section is backed by a staff route in §7.3. While the desk is open, the b
 - **`giveUpAt`** — comment time + 7 days if a private message is pending, otherwise + 24 h (P3-18b).
 
 **`studioSettings` (new, admin, versioned, append-only like `subscription_plans.py:541-576`).**
+
+> **As built in P0 stage 3 (2026-09-25):** one row per key (`rollout`, `intake`, `capabilities` so far; the other keys arrive with the tasks that use them), saved with a version check (`expectedVersion`). History is kept in the audit log instead of extra rows: every save writes an audit entry with action `studio_setting` and the before/after values **in the same transaction**, and `studio_setting` is in the server's permanent keep list (`_AUDIT_KEEP_ACTIONS`). The rollout record names its lists `uiAllowlist` and `staffAllowlist`. Services are `off|pilot|on` each (`help`, `stopRequest`, `tiktok`; `pilot` = the customer allowlist).
 - `studioRollout`: customer layout mode `off|pilot|on`, `userIds[]`; **`staffDesk`** mode `off|pilot|on`, `staffUserIds[]`; **`services`** mode `off|pilot|on` (follows the customer allowlist during the pilot).
 - **`intake`:** `open|paused`, `pausedMessageAr/En`, **`maxSubmissionsPerDay`** (D29; starts at 5).
 - `studioCapabilities`: `fbPublicReply`, `fbPrivateReply`, `igPublicReply`, `igPrivateReply`, `tiktokService`, each **`on|poll|gated|off|unavailable`** (`poll` only for `igPublicReply`).
@@ -801,7 +803,7 @@ Every section is backed by a staff route in §7.3. While the desk is open, the b
 | `server/studio_errors.py` (new, P0-08) | `studio_error(status, code, message)` for `/api/studio/*` only, plus the code list |
 | `server/studio_types.py` (new) | Type constants, `derived_id()`, the `created_by` rule helper, `studio_ref()` |
 | `server/studio_hours.py` (new, P3-16) | `studio_due_at(start, target, settings)`, `is_working_time()`; pure and tested |
-| `server/meta_token_health.py` (new, P0-14, P3-18a) | `read_token_debug()` (server-side `debug_token` with the app access token, built in memory from `ALBAYAN_META_APP_ID` and the app secret, never stored or logged); `check_token_now()` (cached 10 min); expiry-warning computation; writes `metaHealthState.token` |
+| `server/meta_token_health.py` (new, P0-14, P3-18a) | `read_token_debug()` (server-side `debug_token` with the app access token, built in memory from `ALBAYAN_META_APP_ID` and the app secret, never stored or logged); `check_token_now()` (cached 10 min); expiry-warning computation; writes `metaHealthState.token`. **As built:** platform code (the Meta key belongs to the platform, D36); each reading carries a one-way fingerprint of the key it checked, so a replaced key is shown as "not checked yet", never with the old key's health |
 | `server/studio_ig_poll.py` (new, P1-23, P4-09) | `read_recent_ig_comments(page, since)` (recent media ≤10 from the last 7 days, only media whose `comments_count` changed, top-level comments newer than the cursor and the rule creation); feeds `process_comment(..., source)`; budgeted poll pass |
 | `server/studio_alert_out.py` (new, P3-21) | `notify_staff(kind, ref, count)` → `operations._send_alert` with one kind per urgent item; no personal data |
 | `server/studio_jobs.py` (new, P1-21) | The studio jobs loop: orphan sweep, stale-Submitted alert, overdue checks, daily money scan, storage read, heartbeat; results sync, page-health checks, token check and Instagram polling (Meta parts only if configured, budgeted) |
@@ -870,9 +872,9 @@ Every section is backed by a staff route in §7.3. While the desk is open, the b
 | **`POST /api/studio/admin/pages/{id}/check-comments`** (P1-23) | **admin** | rate key per page (1/min) | `{read, processed, replied}`: reads the Instagram account's recent comments (newer than the cursor and the rule creation) and feeds `process_comment(source='manual_check')`; audited `check_comments` | 403, 404, 409 not Instagram, 429 |
 | `POST /api/studio/admin/fact/subscribe-test` `{pageId}` | admin | once per page per day | Meta response summary; audited `subscribe_smoke_test` (P0-05d) | 403, 409 |
 | **`POST /api/studio/admin/fact/ig-read-test`** `{pageId, replyToCommentId?}` (P0-05e) | admin | once per page per day for the reply part | `{commentsRead, replySent, errorCode}`; audited `ig_read_test` | 403, 404, 409 |
-| **`GET /api/studio/admin/meta-token`** | admin | — | `{isValid, type, expiresInDays, dataAccessExpiresInDays, missingScopes[], pagesCoveredByScope, checkedAt}` — never the token | 403 |
+| **`GET /api/meta-ads/token-health`** (as built; was `/api/studio/admin/meta-token`) | admin; `?refresh=1` same-origin | 30/min; refresh 3/10 min | `{configured, checked, stale, checkedAt, isValid, type, expiresAt, daysLeft, dataAccessDaysLeft, scopes[], missingScopes[], pagesCoveredByScope, lastCheckError, webhookCounts}` — never the token | 403, 429 |
 | **`POST /api/studio/admin/alert-channel/test`** | admin | 1/10 min | `{sent: bool}` (P0-01(u), P3-21) | 403, 429 |
-| `GET/PUT /api/studio/admin/rollout`, `/intake`, `/capabilities`, `/limits`, `/settlement`, `/hours`, `/contact`, `/targets`, `/thresholds`, `/studio-accounts` | admin | `expectedVersion` | record | 403, 409 version; **409 `STAFF_DESK_IN_USE`** when switching `staffDesk` off while open tickets or stop requests exist; 400 `STUDIO_ACCOUNTS_MISMATCH` (settings ≠ env list) |
+| `GET/PUT /api/studio/admin/settings/{key}` (as built; key = `rollout`, `intake`, `capabilities`, later `limits`, `settlement`, `hours`, `contact`, `targets`, `thresholds`, `studio-accounts`) | admin | `expectedVersion` | record | 403, 409 version; **409 `STAFF_DESK_IN_USE`** when switching `staffDesk` off while open tickets or stop requests exist; 400 `STUDIO_ACCOUNTS_MISMATCH` (settings ≠ env list) |
 | `GET /api/studio/admin/diagnostics` | admin | — | counts, B1–B6, pilot metrics, queue-target % (incl. payments, payment/account tickets, overrides), capacity, storage, USD owed vs Studio funds, reconciliation, go/no-go checklist, jobs heartbeat, webhook counters, token state; no personal data | 403 |
 | `POST /api/studio/test/seed-results` | **exists only in the e2e server** | — | seeds an `adCampaignResults` row | Not mounted unless `ALBAYAN_E2E_STUDIO_SEED=true` **and** SQLite **and** `ALBAYAN_DB_PATH` under `.tmp/e2e`. The router refuses to start if the flag is set with PostgreSQL (production refuses SQLite anyway, `main.py:2424`) |
 
@@ -915,7 +917,7 @@ Every section is backed by a staff route in §7.3. While the desk is open, the b
 
 ### 7.5 Customer data isolation and server-side authorization
 - Every customer list filters `created_by = :uid` in SQL. Staff queries filter by type/status and never return customer drafts (`REVIEWER_VISIBLE_STATUSES`, `ad_campaign_actions.py:36`). Another owner's row → **404**.
-- **Reviewer vs admin:** `audience=admin` tickets, payment requests, settle overrides, rollout/diagnostics, the meta-token summary and fact tests are admin-only; reviewers get 404.
+- **Reviewer vs admin:** `audience=admin` tickets, payment requests, settle overrides, rollout/diagnostics, the meta-token summary and fact tests are admin-only; reviewers get 404 (as built for the P0 settings, diagnostics and token routes: 403 `ADMIN_ONLY`, because those route names are public in the app code anyway).
 - **Related-item checks:** `relatedId` and rule `pageRefs` must belong to the owner.
 - **Staff-identity redaction (P1-05)** for non-staff viewers on every read path:
   - campaign `reviewedBy`, `approvedBy`, `rejectedBy`, `stoppedBy`, `publishedBy`, `reviewHistory[].reviewedBy`, `linkedBy` → `"team"`;

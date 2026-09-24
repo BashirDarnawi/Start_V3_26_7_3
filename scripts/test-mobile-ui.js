@@ -1528,6 +1528,16 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const days = (mainPy.match(/AUDIT_LOG_RETENTION_DAYS = read_env_int\("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", (\d+)\)/) || [])[1];
   check('privacy retention matches server default', Boolean(days) && privacy.includes(`${days} days`) && privacy.includes(`${days} يوماً`)
     && !privacy.includes('90 days') && privacy.includes('kept permanently'), `server default ${days}`);
+  // Every audit action the server keeps forever is named on the page, and the page names no kept entry the server deletes.
+  const kept = ((mainPy.match(/_AUDIT_KEEP_ACTIONS = "\(([^)]*)\)"/) || [])[1] || '').split(',').map(a => a.trim().replace(/'/g, '')).filter(Boolean);
+  const keptWording = { close: 'closing or unlocking a month', unlock: 'closing or unlocking a month', cleanup: null, import: 'imports',
+    restore: 'restores', company_coverage: 'company-funded debt coverage', wallet_release: 'returned wallet captures',
+    review: 'advertisement-request review decisions', studio_setting: 'changes to Ads Studio settings' };
+  const unnamed = kept.filter(a => !(a in keptWording) || (keptWording[a] && !privacy.includes(keptWording[a])));
+  const notKept = Object.keys(keptWording).filter(a => keptWording[a] && !kept.includes(a) && privacy.includes(keptWording[a]));
+  check('privacy page names exactly the audit entries kept permanently', kept.length > 0 && !unnamed.length && !notKept.length
+    && privacy.includes('including wallet top-ups, payment confirmations and receipt settlements, follow the retention setting'),
+    `unnamed: ${unnamed.join(', ')}; claimed but deleted: ${notKept.join(', ')}`);
   check('privacy page covers Ads Studio comment processing', privacy.includes('Ads Studio') && privacy.includes('comment text'));
 }
 

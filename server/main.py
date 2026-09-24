@@ -1227,11 +1227,11 @@ def cleanup_old_audit_logs():
             excess = total_count - AUDIT_LOG_MAX_RECORDS
             # Delete oldest excess records
             limit_result = conn.execute(
-                text("""
+                text(f"""
                     DELETE FROM audit_logs
                     WHERE id IN (
                         SELECT id FROM audit_logs
-                        WHERE action NOT IN ('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review')
+                        WHERE action NOT IN {_AUDIT_KEEP_ACTIONS}
                         ORDER BY ts ASC
                         LIMIT :excess
                     )
