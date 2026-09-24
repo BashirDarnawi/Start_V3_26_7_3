@@ -35,12 +35,12 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
 
-from . import meta_ads as _meta
-from .startup_support import read_env_int
-from .db import db_conn, get_engine, json_loads
-from .rate_limiter import check_rate_limit
-from .auth_limits import _client_ip as _shared_client_ip
-from .security import constant_time_equal, new_id
+from ... import meta_ads as _meta
+from ...startup_support import read_env_int
+from ...db import db_conn, get_engine, json_loads
+from ...rate_limiter import check_rate_limit
+from ...auth_limits import _client_ip as _shared_client_ip
+from ...security import constant_time_equal, new_id
 
 SETTINGS_TYPE = "socialStudioSettings"
 PAGES_TYPE = "socialPages"

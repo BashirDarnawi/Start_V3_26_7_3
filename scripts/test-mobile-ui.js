@@ -36,7 +36,7 @@ const adEditHistoryViewer = helpers.slice(
   helpers.indexOf('const _pendingReceiptTransferAttempts')
 );
 const clothes = read('src/15b-clothes.js');
-const adsStudio = read('src/15c-ads-studio.js');
+const adsStudio = read('src/systems/ads_studio/15c-ads-studio.js');
 const metaAds = read('src/15d-meta-ads.js');
 const photoPaste = read('src/15e-photo-paste.js');
 const actionsIo = read('src/16-actions-io.js');
@@ -1243,12 +1243,12 @@ check('admin tools ship lazily with guarded call sites and a bounded retry',
   read('server/main.py').includes('"admin-tools.js"'));
 
 // ---------- Social Studio (posts scheduler + auto-reply rules, studio.js bundle) ----------
-const socialStudio = read('src/15f-social-studio.js');
+const socialStudio = read('src/systems/ads_studio/15f-social-studio.js');
 
 check('social studio ships in the studio bundle and is wired into the Ads Studio tabs',
   Array.isArray(bundleManifestJson.lazy['studio.js']) &&
-  bundleManifestJson.lazy['studio.js'].includes('15c-ads-studio.js') &&
-  bundleManifestJson.lazy['studio.js'].includes('15f-social-studio.js') &&
+  bundleManifestJson.lazy['studio.js'].includes('systems/ads_studio/15c-ads-studio.js') &&
+  bundleManifestJson.lazy['studio.js'].includes('systems/ads_studio/15f-social-studio.js') &&
   adsStudio.includes("{ id: 'posts', icon: 'send', label: 'Posts', labelAr: 'المنشورات' }") &&
   adsStudio.includes("{ id: 'replies', icon: 'message-circle-reply', label: 'Replies', labelAr: 'الردود' }") &&
   adsStudio.includes("else if (_adsStudioActiveTab === 'posts') content = renderSocialStudioPostsTab();") &&
@@ -1488,8 +1488,8 @@ check('reporting: pending-setup ads are unpaid, no default-rate revenue, hero co
   read('src/08-data-audit.js').includes("if (e?.status === 404) { render(); return true; }") &&
   read('src/08-data-audit.js').includes("Number(res?.lastModified) > 0) array[i]._lastModified = Number(res.lastModified);") &&
   read('src/10-live-sync.js').includes("arr.splice(i, 0, ...newOnes.slice(i, i + 5000));") &&
-  read('src/15c-ads-studio.js').includes("_adsStudioEditingBaseline || current._lastModified") &&
-  read('src/15c-ads-studio.js').includes("Math.round(rate * 10000) / 10000) / 100") &&
+  read('src/systems/ads_studio/15c-ads-studio.js').includes("_adsStudioEditingBaseline || current._lastModified") &&
+  read('src/systems/ads_studio/15c-ads-studio.js').includes("Math.round(rate * 10000) / 10000) / 100") &&
   clothes.includes("clothes-shipment-editing-version") &&
   read('src/16-actions-io.js').includes("if (e?.status === 405 && /coverage/i.test(String(e?.message || ''))) throw new Error(String(e.message));") &&
   read('src/01c-native-services.js').includes('androidBiometryStrength: 1') &&

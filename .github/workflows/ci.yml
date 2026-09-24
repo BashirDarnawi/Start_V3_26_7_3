@@ -27,6 +27,7 @@ jobs:
       - run: npm run test:session-regressions
       - run: npm run test:social-native-regressions
       - run: npm run test:import-boundaries
+      - run: npm run test:system-boundaries
       - run: npm run test:clothes-submit-boundaries
       - run: npm run test:sync-persistence-work
       - run: npm run test:render-performance

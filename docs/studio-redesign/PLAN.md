@@ -793,6 +793,8 @@ Every section is backed by a staff route in §7.3. While the desk is open, the b
 - **`alertThresholds`:** storage (e.g. DB size), funds margin, reconciliation tolerance (D32), token-expiry warning days (14/7/2).
 
 ### 7.2 Module boundaries
+
+> **Since D36 (2026-09-24):** Ads Studio lives in `server/systems/ads_studio/` and `src/systems/ads_studio/` (see [docs/SMART_SYSTEMS.md](../SMART_SYSTEMS.md)). Every new Ads Studio module named in this plan (`studio_api.py`, `studio_jobs.py`, `studio_types.py`, `studio_errors.py`, `studio_hours.py`, `studio_ig_poll.py`, `15g-studio-core.js`, `15h-studio-shell.js`, …) is created inside those folders, and paths below that say `server/ad_campaign_actions.py`, `server/social_studio.py`, `src/15c-ads-studio.js` or `src/15f-social-studio.js` now mean their `systems/ads_studio/` location. `meta_token_health.py` and the Meta lanes are platform code.
 | File | Responsibility |
 |---|---|
 | `server/audit_routes.py` (new, P0-02) | `/api/audit*`, moved word for word from `main.py:13231-13358` |

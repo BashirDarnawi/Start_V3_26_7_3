@@ -25,9 +25,9 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from .db import db_conn, json_dumps, now_ms
-from .schemas import AdCampaignPublishStatusRequest, AdCampaignStopRequest
-from .wallet_payments import _campaign_payment_key, refund_stopped_campaign_budget
+from ...db import db_conn, json_dumps, now_ms
+from ...schemas import AdCampaignPublishStatusRequest, AdCampaignStopRequest
+from ...wallet_payments import _campaign_payment_key, refund_stopped_campaign_budget
 
 AD_CAMPAIGN_COLLECTION = "adCampaignRequests"
 _OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}")

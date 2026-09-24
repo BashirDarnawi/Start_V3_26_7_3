@@ -69,7 +69,7 @@ def test_reconciliation_readiness_uses_the_business_day(monkeypatch):
 
 
 def test_campaign_start_check_uses_the_business_day(monkeypatch):
-    from server import ad_campaign_fields
+    from server.systems.ads_studio import ad_campaign_fields
     monkeypatch.setattr(operations, "_business_today", lambda: date(2030, 3, 10))
     src = open(ad_campaign_fields.__file__, encoding="utf-8").read()
     assert "_business_today" in src and "datetime.now(timezone.utc).date()" not in src.split("startDate cannot be in the past")[0][-400:]
@@ -130,7 +130,7 @@ def test_bulk_import_stamps_rows_inside_the_transaction():
 
 # ---------------------------------------------------------------- Social Studio: page ids are durable page by page
 
-import server.social_studio as studio  # noqa: E402
+import server.systems.ads_studio.social_studio as studio  # noqa: E402
 from server.db import json_loads  # noqa: E402
 from server.test_social_studio import (  # noqa: F401, E402  (graph/_fresh are fixtures)
     API as SOCIAL_API,

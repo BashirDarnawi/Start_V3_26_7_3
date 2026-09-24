@@ -68,7 +68,7 @@ from .db import db_conn, get_database_url, get_engine, init_db, json_dumps, json
 from .startup_support import read_env_int
 from . import delivery_workflow
 from .meta_ads import stop_meta_ads_worker
-from .social_studio import stop_social_studio_worker
+from .systems.ads_studio.social_studio import stop_social_studio_worker
 from .rbac import VALID_USER_ROLES, _load_permissions, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
 from .backfills import (
     backfill_covered_settled_receipts,
@@ -77,13 +77,13 @@ from .backfills import (
 )
 from .data_compatibility import DATA_COMPATIBILITY_VERSION
 from .financial_compatibility import project_financial_entity
-from .ad_campaign_actions import (
+from .systems.ads_studio.ad_campaign_actions import (
     apply_boost_campaign_fields,
     create_ad_campaign_actions_router,
     enforce_boost_submission_rules,
     normalize_ad_campaign_destination,
 )
-from .ad_campaign_fields import prepare_ad_campaign_fields, validate_ad_campaign_image_source
+from .systems.ads_studio.ad_campaign_fields import prepare_ad_campaign_fields, validate_ad_campaign_image_source
 from .delivery_ops import create_delivery_ops_router
 from .audit_routes import create_audit_router
 from .receipt_references import (
@@ -187,7 +187,7 @@ from .meta_ads import (
     stamp_import_completion,
 )
 from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
-from .social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
+from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -5029,7 +5029,7 @@ def _soft_delete_ad_campaign_atomic(
             }
 
 
-# Campaign field validation lives in server/ad_campaign_fields.py (moved
+# Campaign field validation lives in server/systems/ads_studio/ad_campaign_fields.py (moved
 # verbatim to keep this file under its line cap). These bindings preserve the
 # historical private names, so every call site in this module is unchanged.
 _AD_CAMPAIGN_FIELDS_CTX = {

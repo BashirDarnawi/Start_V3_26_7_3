@@ -1246,7 +1246,7 @@ class MetaAdsClient:
             elapsed = time.monotonic() - _META_LAST_REMOTE_REQUEST_MONOTONIC
             wait_seconds = _meta_request_interval_seconds() - elapsed
             if server_config and _META_LAST_REMOTE_REQUEST_MONOTONIC and wait_seconds > 0:
-                time.sleep(wait_seconds)
+                time.sleep(min(wait_seconds, _meta_request_interval_seconds()))  # never longer than one interval
             try:
                 with httpx.Client(
                     timeout=float(self.config.request_timeout_seconds),
@@ -5961,7 +5961,7 @@ def create_meta_ads_router(
         if isinstance(payload, dict) and payload.get("object") in ("page", "instagram"):
             # Page/Instagram comment events belong to Social Studio. Imported
             # lazily because social_studio imports this module.
-            from . import social_studio
+            from .systems.ads_studio import social_studio
 
             background_tasks.add_task(social_studio.handle_meta_webhook, payload)
             # A comment says nothing about ad accounts: no discovery read.

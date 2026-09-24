@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 import server.main as main
 import server.meta_ads as meta_ads
-import server.social_studio as social_studio
+import server.systems.ads_studio.social_studio as social_studio
 from server import monitoring, operations, wallet_payments
 from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -459,6 +459,10 @@ def test_worker_respects_the_discovery_interval_when_discovery_fails(meta_env, m
 
     monkeypatch.setattr(meta_ads, "discover_meta_ads", failing_discovery)
     monkeypatch.setattr(meta_ads, "sync_due_meta_ads", lambda *a, **k: sync_calls.append(1))
+    # The funds read (worker, since d7d627e) would call Meta; a stamp left by an earlier test plus the fake
+    # clock below would make it wait for days. Neither belongs to this test.
+    monkeypatch.setattr(meta_ads, "_maybe_refresh_meta_funds", lambda: None)
+    monkeypatch.setattr(meta_ads, "_META_LAST_REMOTE_REQUEST_MONOTONIC", 0.0)
     clock = {"t": 1000.0, "ticks": 0}
     monkeypatch.setattr(meta_ads.time, "monotonic", lambda: clock["t"])
 

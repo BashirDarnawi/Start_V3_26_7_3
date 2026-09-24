@@ -31,6 +31,16 @@ if (!Array.isArray(manifest.files) || manifest.files.length < 2) {
   }
 }
 
+// Lazy (system) screen files get the same per-file limit as startup modules.
+for (const lazyFiles of Object.values(manifest.lazy || {})) {
+  for (const name of lazyFiles) {
+    const file = path.join(ROOT, 'src', path.posix.normalize(String(name)));
+    if (fs.existsSync(file) && fs.statSync(file).size > 475 * 1024) {
+      fail(`src/${name} is ${fs.statSync(file).size.toLocaleString()} bytes; split it before it exceeds 475 KiB.`);
+    }
+  }
+}
+
 const generatedBundle = path.join(ROOT, 'script.js');
 // Raised from 2.35 MiB on 2026-07-30. The bundle had already grown past the old
 // ceiling on its own (analytics/profit, control centre, operations, clothes), so

@@ -4894,7 +4894,7 @@ check('Ads Studio header returns authorized staff to another landing view only',
 });
 
 check('Ads Studio submit and review retries reuse a per-click operation id', () => {
-  const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15c-ads-studio.js'), 'utf8');
+  const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'systems', 'ads_studio', '15c-ads-studio.js'), 'utf8');
   const apiSource = fs.readFileSync(path.join(__dirname, '..', 'src', '09-api-auth.js'), 'utf8');
   assert(studioSource.includes("adsStudioActionAttempt('submit', campaign.id, Number(campaign._lastModified))") && studioSource.includes("adsStudioActionAttempt('review', campaign.id, Number(campaign._lastModified))"), 'workflow clicks do not carry a per-click operation id');
   assert(apiSource.includes('const body = { expectedLastModified, operationId };'), 'submit retry body omits operation id');
@@ -4904,7 +4904,7 @@ check('Ads Studio submit and review retries reuse a per-click operation id', () 
 });
 
 check('Ads Studio never edits a thin campaign after creative hydration fails', () => {
-  const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', '15c-ads-studio.js'), 'utf8');
+  const studioSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'systems', 'ads_studio', '15c-ads-studio.js'), 'utf8');
   assert(studioSource.includes("Your existing images are safe. Check the connection before editing this campaign."), 'creative load failure is not explained to the customer');
   assert(studioSource.includes("!isEntityMediaHydrated('adCampaignRequests', campaign)"), 'thin draft can still open without its stored creatives');
   assert(studioSource.includes('_adsStudioDraft === draftAtSaveStart'), 'slow save can overwrite a replacement or reset draft');

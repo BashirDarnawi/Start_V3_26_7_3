@@ -1,5 +1,5 @@
 """The campaign-field validators were moved out of server/main.py (which sat
-at its enforced line cap) into server/ad_campaign_fields.py, with main.py
+at its enforced line cap) into server/systems/ads_studio/ad_campaign_fields.py, with main.py
 keeping thin bindings under the historical private names. These checks pin
 that wiring so a future edit cannot silently re-create a second copy in
 main.py or break the ctx contract.
@@ -17,7 +17,8 @@ from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).parent.parent))
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
-from server import ad_campaign_fields, main
+from server import main
+from server.systems.ads_studio import ad_campaign_fields
 
 
 def test_main_binds_the_moved_validators_not_copies():

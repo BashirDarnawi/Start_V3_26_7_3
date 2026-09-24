@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 import server.main as main
-import server.social_studio as studio
+import server.systems.ads_studio.social_studio as studio
 from server import operations
 from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id

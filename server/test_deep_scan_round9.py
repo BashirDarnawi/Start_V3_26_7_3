@@ -198,7 +198,8 @@ def test_worker_stops_are_single_shot():
     operations.stop_operations_worker()
     operations.stop_operations_worker()
     assert time.monotonic() - started < 0.5
-    from server import social_studio, meta_ads
+    from server import meta_ads
+    from server.systems.ads_studio import social_studio
     social_studio.stop_social_studio_worker(); social_studio.stop_social_studio_worker()
     meta_ads.stop_meta_ads_worker(); meta_ads.stop_meta_ads_worker()
 
@@ -247,7 +248,7 @@ def test_mixed_edit_from_an_old_build_keeps_a_canceled_job_canceled(actors):
 def test_start_day_itself_counts_as_not_started():
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
-    from server.ad_campaign_actions import _campaign_start_is_in_future
+    from server.systems.ads_studio.ad_campaign_actions import _campaign_start_is_in_future
     today = datetime.now(ZoneInfo("Africa/Tripoli")).date()
     assert _campaign_start_is_in_future({"startDate": today.isoformat()}) is True
     assert _campaign_start_is_in_future({"startDate": (today - timedelta(days=1)).isoformat()}) is False

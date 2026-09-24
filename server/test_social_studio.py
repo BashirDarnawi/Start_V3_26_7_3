@@ -30,7 +30,7 @@ from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 import server.meta_ads as meta_ads
-import server.social_studio as studio
+import server.systems.ads_studio.social_studio as studio
 
 
 client = TestClient(app, headers={"Origin": "http://testserver"})
@@ -1207,6 +1207,7 @@ def test_real_post_helper_sends_form_data_with_page_token_proof(monkeypatch):
     monkeypatch.setattr(meta_ads.httpx, "Client", lambda **kwargs: real_client_class(transport=transport, **kwargs))
     monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
     monkeypatch.setattr(meta_ads, "_meta_request_interval_seconds", lambda: 0.0)
+    monkeypatch.setattr(meta_ads, "_META_LAST_REMOTE_REQUEST_MONOTONIC", 0.0)  # restored after the test
     meta_ads._PAGE_TOKEN_CACHE.clear()
     client_obj = meta_ads.get_meta_ads_client()
     token = client_obj.page_access_token("5100000000030")

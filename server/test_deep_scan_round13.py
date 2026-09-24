@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import text
 
-import server.social_studio as studio
+import server.systems.ads_studio.social_studio as studio
 from server.db import db_conn, init_db, json_loads
 from server.test_clothes_transactions import _create_product, _mutate, _order_data, client as clothes_client  # noqa: F401
 from server.test_clothes_transactions import _ensure_admin as _clothes_ensure_admin, ADMIN_EMAIL as CLOTHES_ADMIN_EMAIL, ADMIN_PASSWORD as CLOTHES_ADMIN_PASSWORD  # noqa: F401

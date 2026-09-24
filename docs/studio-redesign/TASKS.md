@@ -7,9 +7,13 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 
 | Task | Status | Commit / release | Notes |
 |---|---|---|---|
-| P0-02 | Done | stage 1 | Audit routes in `server/audit_routes.py`; main.py 14,199 → 14,074 lines; behaviour proven identical (54-request differential run) |
-| P0-06 | Done | stage 1 | FB private replies on `POST /{page-id}/messages`; one retry with a fresh Page token; Meta code 1200 temporary; Meta error code kept in the reply log |
-| P0-07 | Done | stage 1 | Dead Page token (code 190 / HTTP 401) is forgotten; selective eviction test |
+| P0-02 | Done | 8c082d7 / release-8c082d71ed38-20260924T195027485Z | Audit routes in `server/audit_routes.py`; main.py 14,199 → 14,074 lines; behaviour proven identical (54-request differential run) |
+| P0-06 | Done | 8c082d7 | FB private replies on `POST /{page-id}/messages`; one retry with a fresh Page token; Meta code 1200 temporary; Meta error code kept in the reply log |
+| P0-07 | Done | 8c082d7 | Dead Page token (code 190 / HTTP 401) is forgotten; selective eviction test |
+| P0-15 | Done | stage 2 | `server/systems/`, `src/systems/`, docs/SMART_SYSTEMS.md with the template for new systems |
+| P0-16 | Done | stage 2 | Ads Studio server modules moved into `server/systems/ads_studio/` (all importers updated, no shims needed) |
+| P0-17 | Done | stage 2 | Boundary guards: `server/test_system_boundaries.py` + `scripts/test-system-boundaries.js` in npm test and CI |
+| P2-00 | Done | stage 2 | Ads Studio screens moved into `src/systems/ads_studio/`; studio.js byte-identical |
 
 ## 10. TASKS
 

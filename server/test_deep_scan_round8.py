@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import text
 
 import server.meta_ads as meta_ads
-import server.social_studio as studio
+import server.systems.ads_studio.social_studio as studio
 from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.test_ad_studio_backend import (
     ADMIN_EMAIL,

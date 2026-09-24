@@ -15,7 +15,7 @@ const flush = async () => { for (let i = 0; i < 16; i++) await Promise.resolve()
 
 function fixture() {
   const f = loadBrowserSource();
-  for (const file of ['15c-ads-studio.js', '15f-social-studio.js']) {
+  for (const file of ['systems/ads_studio/15c-ads-studio.js', 'systems/ads_studio/15f-social-studio.js']) {
     f.run(fs.readFileSync(path.join(__dirname, '../src', file), 'utf8'));
   }
   f.state.currentView = 'ads-studio';

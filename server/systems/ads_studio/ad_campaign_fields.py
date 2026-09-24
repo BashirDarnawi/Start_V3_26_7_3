@@ -440,7 +440,7 @@ def prepare_ad_campaign_fields(
         if (end[1] - start[1]).days > 366:
             raise HTTPException(status_code=400, detail="Campaign duration cannot exceed 366 days")
     if strict and start:
-        from .operations import _business_today  # the Libya day, not the UTC day
+        from ...operations import _business_today  # the Libya day, not the UTC day
         if start[1].date() < _business_today():
             raise HTTPException(status_code=400, detail="startDate cannot be in the past")
 

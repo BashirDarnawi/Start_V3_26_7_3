@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 import server.main as main
-from server import auth_limits, social_studio
+from server import auth_limits
+from server.systems.ads_studio import social_studio
 from server.http_security import apply_security_headers
 from server.security import constant_time_equal
 
