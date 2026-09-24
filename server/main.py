@@ -188,6 +188,7 @@ from .meta_ads import (
 )
 from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
 from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
+from .systems.ads_studio.studio_api import create_studio_router
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -14002,6 +14003,10 @@ app.include_router(create_audit_router(  # /api/audit, /cleanup, /stats (server/
     current_user_dependency=current_user, require_same_origin=require_same_origin,
     ctx={"user_has_permission": lambda *a, **k: user_has_permission(*a, **k),
          "audit": lambda *a, **k: audit(*a, **k), "audit_keep_actions": _AUDIT_KEEP_ACTIONS}))
+app.include_router(create_studio_router(  # /api/studio: Albayan Studio v2 (server/systems/ads_studio/studio_api.py)
+    current_user_dependency=current_user, require_same_origin=require_same_origin,
+    ctx={"user_has_permission": lambda *a, **k: user_has_permission(*a, **k), "audit": lambda *a, **k: audit(*a, **k),
+         "validate_entity_id": lambda *a, **k: validate_entity_id(*a, **k)}))
 app.include_router(
     create_delivery_ops_router(
         current_user_dependency=current_user,

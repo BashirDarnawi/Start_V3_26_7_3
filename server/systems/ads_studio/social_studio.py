@@ -41,15 +41,17 @@ from ...db import db_conn, get_engine, json_loads
 from ...rate_limiter import check_rate_limit
 from ...auth_limits import _client_ip as _shared_client_ip
 from ...security import constant_time_equal, new_id
+from .studio_types import STUDIO_ROUTER_ONLY_TYPES
 
 SETTINGS_TYPE = "socialStudioSettings"
 PAGES_TYPE = "socialPages"
 RULES_TYPE = "socialReplyRules"
 POSTS_TYPE = "socialPosts"
 LOG_TYPE = "socialReplyLog"
+# Router-only types: main.py's generic /api/collections refuses every one of them.
 SOCIAL_STUDIO_COLLECTIONS = frozenset(
     {SETTINGS_TYPE, PAGES_TYPE, RULES_TYPE, POSTS_TYPE, LOG_TYPE}
-)
+) | STUDIO_ROUTER_ONLY_TYPES
 
 PLATFORMS = ("fb", "ig")
 POST_EDITABLE_STATUSES = frozenset({"draft", "scheduled", "failed"})
