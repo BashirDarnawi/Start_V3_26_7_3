@@ -27,7 +27,7 @@ NOT_YET_MOVED = {
 # Shared record types behind platform doors (wallet, subscriptions, settings, users, Meta state).
 PLATFORM_TYPES = {
     "walletTransactions", "walletPaymentRequests", "serviceSubscriptions", "appSettings", "users",
-    "metaImportState", "metaProviderState", "metaPartnerState", "metaFundsState",
+    "metaImportState", "metaProviderState", "metaPartnerState", "metaFundsState", "metaHealthState",
 }
 # Platform modules a system may import. Adding a door is a reviewed, one-line change here.
 PLATFORM_DOORS = {

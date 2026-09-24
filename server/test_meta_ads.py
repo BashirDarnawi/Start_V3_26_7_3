@@ -3422,3 +3422,306 @@ def test_messenger_temporary_send_failure_is_retryable(monkeypatch):
     with pytest.raises(meta_ads.MetaAdsError) as caught:
         _real_client(monkeypatch, handler)._post("5100000000001/messages", {"message": "x"}, access_token="T")
     assert caught.value.retryable and caught.value.code == "temporary"
+
+
+# ---------------------------------------------------------------------------
+# P0-09 (owner decision D26): Albayan Studio campaigns run on the same ad
+# accounts and carry the studio code "ALB-S-" in the Meta campaign name.
+# Manager's discovery, manual import, import_meta_ad_draft and link skip them
+# BEFORE any core "ads" row is written.
+# ---------------------------------------------------------------------------
+
+
+def _core_ads_for(meta_ids):
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT data_json FROM entities WHERE type='ads' AND deleted=false")
+        ).mappings().all()
+    found = {}
+    for row in rows:
+        data = json_loads(row["data_json"]) or {}
+        if data.get("metaAdId") in meta_ids:
+            found.setdefault(data["metaAdId"], []).append(data)
+    return found
+
+
+def test_studio_code_is_found_in_any_case():
+    assert meta_ads.is_studio_campaign_name("ALB-S-7KQ2MX9P · Spring offer")
+    assert meta_ads.is_studio_campaign_name("spring alb-s-7kq2mx9p")
+    assert not meta_ads.is_studio_campaign_name("Summer Campaign")
+    assert not meta_ads.is_studio_campaign_name("ALB-7KQ2")
+    assert not meta_ads.is_studio_campaign_name(None)
+
+
+def test_discovery_skips_studio_tagged_campaigns(actors, configured_meta):
+    _clear_auto_import_rows()
+    studio, typed, core = "921000000000001", "921000000000002", "921000000000003"
+    try:
+        meta_ads.discover_meta_ads(force=True)  # baseline pass
+        configured_meta.rows[:0] = [
+            {**_discovery_row(studio, "2026-09-24T08:00:00Z"), "campaignName": "ALB-S-7KQ2MX9P · Spring offer"},
+            {**_discovery_row(typed, "2026-09-24T08:01:00Z"), "campaignName": "spring alb-s-7kq2mx9p"},
+            _discovery_row(core, "2026-09-24T08:02:00Z"),
+        ]
+        result = meta_ads.discover_meta_ads(force=True)
+        assert result["studioSkipped"] == 2
+        assert set(_core_ads_for({studio, typed, core})) == {core}
+        # Remembered as known, so later passes never reconsider (or retry) them.
+        assert {studio, typed} <= set(meta_ads._load_import_state()["knownMetaAdIds"])
+        again = meta_ads.discover_meta_ads(force=True)
+        assert again["imported"] == [] and again["studioSkipped"] == 0
+        assert set(_core_ads_for({studio, typed, core})) == {core}
+    finally:
+        _clear_auto_import_rows()
+
+
+def test_discovery_reads_missing_campaign_names_before_importing(actors, configured_meta):
+    # Meta's slim fallback read carries no campaign names: discovery reads them
+    # first and never imports an ad whose campaign name it could not read.
+    _clear_auto_import_rows()
+    studio, core, waiting = "922000000000001", "922000000000002", "922000000000003"
+    names = {"922000000000091": "ALB-S-7KQ2MX9P · Studio", "922000000000092": "Agency campaign"}
+    lookups = []
+
+    def get_campaign_name(campaign_id):
+        lookups.append(campaign_id)
+        if campaign_id in names:
+            return names[campaign_id]
+        raise meta_ads.MetaAdsError("temporary", "Meta is temporarily unavailable.", retryable=True)
+
+    configured_meta.get_campaign_name = get_campaign_name
+
+    def slim(meta_id, campaign_id):
+        return {**_discovery_row(meta_id, "2026-09-24T09:00:00Z"), "campaignName": "", "campaignId": campaign_id}
+
+    try:
+        meta_ads.discover_meta_ads(force=True)  # baseline pass
+        configured_meta.rows[:0] = [
+            slim(studio, "922000000000091"), slim(core, "922000000000092"), slim(waiting, "922000000000093"),
+        ]
+        result = meta_ads.discover_meta_ads(force=True)
+        assert result["studioSkipped"] == 1
+        imported = _core_ads_for({studio, core, waiting})
+        assert set(imported) == {core}
+        assert imported[core][0]["metaCampaignName"] == "Agency campaign"
+        known = set(meta_ads._load_import_state()["knownMetaAdIds"])
+        assert studio in known and waiting not in known  # the unreadable one is retried later
+
+        names["922000000000093"] = "Late agency campaign"
+        meta_ads.discover_meta_ads(force=True)
+        assert set(_core_ads_for({studio, core, waiting})) == {core, waiting}
+        assert lookups.count("922000000000091") == 1
+    finally:
+        _clear_auto_import_rows()
+
+
+def test_manual_import_route_skips_studio_campaigns(actors, configured_meta):
+    _clear_auto_import_rows()
+    studio, core = "923000000000001", "923000000000002"
+    configured_meta.rows[:0] = [
+        {**_discovery_row(studio, "2026-01-01T00:00:00Z"), "campaignName": "ALB-S-7KQ2MX9P"},
+        _discovery_row(core, "2026-01-01T00:00:00Z"),
+    ]
+    try:
+        response = client.post(
+            "/api/meta-ads/auto-import/run", json={"includeExisting": True}, cookies=actors["admin"]
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["studioSkipped"] == 1
+        assert set(_core_ads_for({studio, core})) == {core}
+    finally:
+        _clear_auto_import_rows()
+
+
+def test_import_meta_ad_draft_refuses_studio_campaigns(actors):
+    row = {
+        "id": "924000000000001", "name": "Studio draft", "effectiveStatus": "ACTIVE",
+        "campaignId": "924000000000009", "campaignName": "Offer ALB-S-7KQ2MX9P",
+        "pageId": "924000000000077", "pageName": "Studio Page", "createdTime": "2026-09-24T10:00:00Z",
+    }
+    pending = meta_ads._pending_meta_snapshot(
+        row, "444444444444444", meta_ads.MetaAdsError("pending_enrichment", "loading", retryable=True), "USD"
+    )
+    with pytest.raises(meta_ads.MetaAdsError) as refused:
+        meta_ads.import_meta_ad_draft(pending)
+    assert refused.value.code == "studio_campaign"
+    assert "Albayan Studio" in refused.value.public_message
+    assert _core_ads_for({"924000000000001"}) == {}
+    with db_conn() as conn:
+        pages = conn.execute(
+            text("SELECT data_json FROM entities WHERE type='pages' AND deleted=false")
+        ).mappings().all()
+    assert not any((json_loads(p["data_json"]) or {}).get("metaPageId") == "924000000000077" for p in pages)
+
+
+def test_manager_link_refuses_albayan_studio_campaigns(actors, configured_meta):
+    ad_id = "meta_test_studio_link"
+    meta_id = "925000000000001"
+    version = _insert_ad(ad_id, actors["admin_id"])
+    url = f"/api/meta-ads/ads/{ad_id}/link"
+    try:
+        configured_meta.snapshots[meta_id] = {**_snapshot(meta_id), "metaCampaignName": "ALB-S-7KQ2MX9P · Studio"}
+        refused = client.post(url, json={"metaAdId": meta_id, "expectedLastModified": version, "operationId": "meta-link-studio-1"}, cookies=actors["admin"])
+        assert refused.status_code == 409, refused.text
+        assert "Albayan Studio" in refused.json()["detail"]
+        data, after = _stored_ad(ad_id)
+        assert not data.get("metaAdId") and after == version
+
+        # An unreadable campaign name is never guessed: the admin tries again later.
+        configured_meta.snapshots[meta_id] = {**_snapshot(meta_id), "metaCampaignName": ""}
+        unknown = client.post(url, json={"metaAdId": meta_id, "expectedLastModified": version, "operationId": "meta-link-studio-2"}, cookies=actors["admin"])
+        assert unknown.status_code == 502, unknown.text
+        assert _stored_ad(ad_id)[1] == version
+
+        with db_conn() as conn:
+            reasons = [
+                (json_loads(row["metadata_json"]) or {}).get("reason")
+                for row in conn.execute(
+                    text("SELECT metadata_json FROM audit_logs WHERE action='meta_link_refused' AND resource_id=:id"),
+                    {"id": ad_id},
+                ).mappings().all()
+            ]
+        assert sorted(reasons) == ["campaign_name_unknown", "studio_campaign"]
+
+        # The same ad in an agency campaign still links normally.
+        configured_meta.snapshots[meta_id] = _snapshot(meta_id)
+        linked = client.post(url, json={"metaAdId": meta_id, "expectedLastModified": version, "operationId": "meta-link-studio-3"}, cookies=actors["admin"])
+        assert linked.status_code == 200, linked.text
+        assert _stored_ad(ad_id)[0]["metaAdId"] == meta_id
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type='ads' AND id=:id"), {"id": ad_id})
+
+
+# ---------------------------------------------------------------------------
+# P0-13: webhook delivery counter. Every signed delivery is counted by object
+# and field BEFORE any filter; only numbers are stored, at most once a minute.
+# ---------------------------------------------------------------------------
+
+_WEBHOOK_SECRET = "secret-app-value-must-never-leak"
+
+
+def _post_signed_webhook(payload):
+    raw = json.dumps(payload).encode("utf-8")
+    signature = "sha256=" + hmac.new(_WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return client.post(
+        "/api/meta-ads/webhook", content=raw,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature},
+    )
+
+
+def _forget_webhook_counts():
+    init_db()
+    with db_conn() as conn:
+        conn.execute(
+            text("DELETE FROM entities WHERE type=:type AND id=:id"),
+            {"type": meta_ads._META_HEALTH_STATE_TYPE, "id": meta_ads._WEBHOOK_COUNTS_ID},
+        )
+
+
+def _stored_webhook_row():
+    with db_conn() as conn:
+        return conn.execute(
+            text("SELECT data_json,created_by FROM entities WHERE type=:type AND id=:id AND deleted=false"),
+            {"type": meta_ads._META_HEALTH_STATE_TYPE, "id": meta_ads._WEBHOOK_COUNTS_ID},
+        ).mappings().first()
+
+
+@pytest.fixture()
+def webhook_counter(configured_meta, monkeypatch):
+    from server.systems.ads_studio import social_studio
+
+    social_calls = []
+    monkeypatch.setattr(social_studio, "handle_meta_webhook", lambda payload: social_calls.append(payload) or 0)
+    monkeypatch.setattr(meta_ads, "discover_meta_ads", lambda *args, **kwargs: {})
+    monkeypatch.setattr(meta_ads, "_WEBHOOK_PENDING", {})
+    monkeypatch.setattr(meta_ads, "_WEBHOOK_LAST_FLUSH", None)
+    _forget_webhook_counts()
+    yield social_calls
+    _forget_webhook_counts()
+
+
+def test_webhook_counter_counts_before_filters(webhook_counter):
+    deliveries = [
+        # Social Studio has no rule for this page (its filters would drop both comments).
+        {"object": "page", "entry": [{"id": "777777777777777", "time": 1, "changes": [
+            {"field": "feed", "value": {"item": "comment", "verb": "add", "comment_id": "1_2"}},
+            {"field": "feed", "value": {"item": "reaction", "verb": "add"}},
+        ], "messaging": [{"sender": {"id": "5"}, "message": {"text": "hi"}}]}]},
+        {"object": "instagram", "entry": [{"id": "178", "time": 1, "changes": [
+            {"field": "comments", "value": {"id": "9", "text": "nice"}},
+            {"field": "Not A Field!", "value": {}},
+        ]}]},
+        # An ad account outside the allowlist is filtered by the route, but still counted.
+        {"object": "ad_account", "entry": [{"id": "999999999999999", "changes": [{"field": "in_process_ad_objects", "value": {}}]}]},
+        {"object": "whatsapp_business_account", "entry": [{"id": "1", "changes": [{"field": "messages", "value": {}}]}]},
+    ]
+    for payload in deliveries:
+        response = _post_signed_webhook(payload)
+        assert response.status_code == 200, response.text
+    assert len(webhook_counter) == 2  # counting never stops the Social Studio hand-off
+    assert meta_ads.flush_webhook_counts(now=meta_ads.time.monotonic() + 3600)
+    stored = json_loads(_stored_webhook_row()["data_json"])
+    assert stored["countsByObjectField"] == {
+        "page.feed": 2, "page.messaging": 1, "instagram.comments": 1, "instagram.other": 1,
+        "ad_account.in_process_ad_objects": 1, "other.messages": 1,
+    }
+    today = meta_ads.datetime.now(meta_ads.timezone.utc).strftime("%Y-%m-%d")
+    assert stored["byDay"][today] == stored["countsByObjectField"]
+    report = meta_ads.webhook_counts_report()
+    assert report["countsByObjectField"]["page.feed"] == 2 and report["notYetStored"] == {}
+    assert report["since"] and report["updatedAt"]
+
+
+def test_webhook_counter_stores_counts_only(webhook_counter):
+    payload = {"object": "page", "entry": [{"id": "777777777777777", "time": 1, "changes": [
+        {"field": "feed", "value": {"item": "comment", "comment_id": "777777777777777_24680",
+                                    "message": "private customer words", "from": {"id": "5551234567", "name": "Customer Name"}}},
+    ], "messaging": [{"sender": {"id": "6661234567"}, "message": {"text": "hello secret text"}}]}]}
+    assert _post_signed_webhook(payload).status_code == 200
+    row = _stored_webhook_row()
+    assert row is not None and row["created_by"] is None
+    raw = row["data_json"]
+    for private in ("777777777777777", "24680", "private customer words", "5551234567", "Customer Name",
+                    "6661234567", "hello secret text"):
+        assert private not in raw, private
+    stored = json_loads(raw)
+    assert set(stored) <= {"recordType", "countsByObjectField", "byDay", "since", "updatedAt",
+                           "id", "_created", "_lastModified", "_deleted"}
+    assert stored["recordType"] == "metaHealthState"
+    assert stored["countsByObjectField"] == {"page.feed": 1, "page.messaging": 1}
+
+
+def test_webhook_counts_flush_at_most_once_per_minute(webhook_counter, monkeypatch):
+    delivery = {"object": "instagram", "entry": [{"id": "178", "changes": [{"field": "comments", "value": {}}]}]}
+    assert meta_ads.count_webhook_delivery(delivery, now=1000.0) is True  # first one: write now
+    assert meta_ads.flush_webhook_counts(reserved=True) is True
+    assert meta_ads.count_webhook_delivery(delivery, now=1030.0) is False  # within the minute
+    assert meta_ads.flush_webhook_counts(now=1059.0) is False  # the worker waits too
+    assert json_loads(_stored_webhook_row()["data_json"])["countsByObjectField"] == {"instagram.comments": 1}
+    assert meta_ads.webhook_counts_report()["notYetStored"] == {"instagram.comments": 1}
+    assert meta_ads.count_webhook_delivery(delivery, now=1061.0) is True
+    assert meta_ads.flush_webhook_counts(reserved=True) is True
+    assert json_loads(_stored_webhook_row()["data_json"])["countsByObjectField"] == {"instagram.comments": 3}
+
+    # A failed write keeps the counts in memory for the next attempt and never raises.
+    def broken_store(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    assert meta_ads.count_webhook_delivery(delivery, now=1200.0) is True
+    monkeypatch.setattr(meta_ads, "save_meta_health_state", broken_store)
+    assert meta_ads.flush_webhook_counts(reserved=True) is False
+    assert meta_ads.webhook_counts_report()["notYetStored"] == {"instagram.comments": 1}
+
+
+def test_webhook_route_writes_counts_once_per_minute(webhook_counter):
+    delivery = {"object": "page", "entry": [{"id": "777777777777777", "changes": [{"field": "feed", "value": {}}]}]}
+    assert _post_signed_webhook(delivery).status_code == 200
+    assert _post_signed_webhook(delivery).status_code == 200
+    stored = json_loads(_stored_webhook_row()["data_json"])
+    assert stored["countsByObjectField"] == {"page.feed": 1}  # only the first delivery wrote
+    assert meta_ads.webhook_counts_report()["notYetStored"] == {"page.feed": 1}
+    # A payload the counter cannot read never breaks it (and is still traced as "other").
+    assert meta_ads.count_webhook_delivery(["not", "a", "dict"]) is False
+    assert meta_ads.count_webhook_delivery({"object": ["odd"], "entry": "x"}) is False
+    assert meta_ads.webhook_counts_report()["notYetStored"] == {"page.feed": 1, "other.other": 1}

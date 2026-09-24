@@ -99,6 +99,28 @@ _META_FUNDS_WORKER_RETRY_S = 60
 _META_FUNDS_WORKER_LAST = 0.0
 _META_FUNDS_STATE_TYPE = "metaFundsState"
 _META_FUNDS_STATE_ID = "accounts"
+# Platform Meta health (P0-13, P0-14): one row per id ("webhookCounts", "token"),
+# created_by NULL. Counts and sanitised token facts only; never a token or a secret.
+_META_HEALTH_STATE_TYPE = "metaHealthState"
+_WEBHOOK_COUNTS_ID = "webhookCounts"
+# Signed webhook deliveries counted in memory by UTC day and "object.field",
+# stored at most once a minute (best effort). No ids, texts or senders.
+_WEBHOOK_COUNT_LOCK = threading.Lock()
+_WEBHOOK_PENDING: dict[str, dict[str, int]] = {}
+_WEBHOOK_LAST_FLUSH: float | None = None
+_WEBHOOK_FLUSH_INTERVAL_S = 60
+_WEBHOOK_OBJECTS = frozenset({"page", "instagram", "ad_account"})
+_WEBHOOK_FIELD_RE = re.compile(r"[a-z][a-z0-9_]{0,59}")
+_WEBHOOK_KEY_RE = re.compile(r"(?:page|instagram|ad_account|other)\.[a-z][a-z0-9_]{0,59}")
+_WEBHOOK_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_WEBHOOK_MAX_KEYS = 64
+_WEBHOOK_DAYS_KEPT = 30
+# Owner decision D26: Albayan Studio campaigns run on the same ad accounts and carry
+# this code in their Meta campaign name. Manager's discovery, import and link skip them.
+STUDIO_CAMPAIGN_CODE = "ALB-S-"
+# Discovery's slim fallback read has no campaign names; at most this many are read
+# per pass, and an ad whose campaign name stays unknown waits for the next pass.
+_STUDIO_NAME_LOOKUPS_PER_PASS = 5
 # Albayan pauses itself at high usage BEFORE Meta refuses anything; that pause
 # still leaves room for a few small reads the owner asked for.
 _META_HEADROOM_MAX_USAGE_PERCENT = 95
@@ -502,6 +524,16 @@ def _clean_time(value: Any) -> str:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def is_studio_campaign_name(value: Any) -> bool:
+    """D26: a Meta campaign whose name carries the studio code belongs to Albayan Studio.
+
+    Case-insensitive (staff may type the code by hand in Ads Manager), so Manager's
+    books never take in a studio campaign because of a lower-case letter.
+    """
+    name = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return STUDIO_CAMPAIGN_CODE.casefold() in name
 
 
 def _clean_https_url(value: Any) -> str:
@@ -1636,6 +1668,11 @@ class MetaAdsClient:
         }
         self._account_cache[account_id] = normalized
         return normalized
+
+    def get_campaign_name(self, campaign_id: Any) -> str:
+        """One small read of a campaign's name (D26 studio-code check after a slim ads read)."""
+        row = self._get(_meta_id(campaign_id, "Meta campaign"), {"fields": "id,name"})
+        return _clean_text(row.get("name"), 240)
 
     def get_account_funds(self, account_id: Any, *, use_headroom: bool = False) -> dict[str, Any]:
         """What Meta reports about the money in one ad account (read-only).
@@ -3161,6 +3198,13 @@ def _imported_ad_dates(snapshot: dict[str, Any]) -> tuple[str, str, int]:
 def import_meta_ad_draft(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Create one neutral Albayan draft, or return its existing linked row."""
     meta_ad_id = _meta_id(snapshot.get("metaAdId"), "Meta ad")
+    if is_studio_campaign_name(snapshot.get("metaCampaignName")):
+        # D26: checked before any row is written; studio ads live only in Albayan Studio.
+        raise MetaAdsError(
+            "studio_campaign",
+            "This Meta ad belongs to Albayan Studio (its campaign name carries the studio code ALB-S-), "
+            "so it is not imported into Albayan Manager.",
+        )
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     with _META_WRITE_LOCK, db_conn() as conn:
         if postgres:
@@ -3527,6 +3571,172 @@ def _save_funds_state(result: dict[str, Any]) -> None:
                 _insert_internal_entity(conn, _META_FUNDS_STATE_TYPE, _META_FUNDS_STATE_ID, clean)
     except Exception:
         return
+
+
+def load_meta_health_state(state_id: str) -> dict[str, Any]:
+    """One metaHealthState row's data ({} when it is missing or unreadable)."""
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT data_json FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"),
+                {"type": _META_HEALTH_STATE_TYPE, "id": state_id},
+            ).mappings().first()
+    except Exception:
+        return {}
+    data = json_loads(row.get("data_json") or "{}") if row else {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_meta_health_state(
+    state_id: str, update: Callable[[dict[str, Any]], dict[str, Any]]
+) -> dict[str, Any]:
+    """Read, change and write one metaHealthState row in one transaction.
+
+    Raises on a database error or when another process wrote the row first
+    (callers that are best effort catch it).
+    """
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
+                "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+            ),
+            {"type": _META_HEALTH_STATE_TYPE, "id": state_id},
+        ).mappings().first()
+        current = json_loads(row.get("data_json") or "{}") if row else {}
+        clean = dict(update(current if isinstance(current, dict) else {}))
+        clean["recordType"] = _META_HEALTH_STATE_TYPE
+        clean["updatedAt"] = _iso_now()
+        if row:
+            _write_entity_data(conn, row, clean)
+        else:
+            _insert_internal_entity(conn, _META_HEALTH_STATE_TYPE, state_id, clean)
+    return clean
+
+
+def _clean_webhook_counts(value: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key, amount in (value.items() if isinstance(value, dict) else []):
+        if len(counts) > _WEBHOOK_MAX_KEYS:
+            break
+        if isinstance(key, str) and _WEBHOOK_KEY_RE.fullmatch(key) and isinstance(amount, int) and not isinstance(amount, bool) and amount > 0:
+            counts[key] = min(amount, 10**15)
+    return counts
+
+
+def _add_webhook_counts(target: dict[str, int], key: str, amount: int) -> None:
+    if key not in target and len(target) >= _WEBHOOK_MAX_KEYS:
+        key = "other.other"  # bounded: a flood of new field names cannot grow the row
+    target[key] = target.get(key, 0) + amount
+
+
+def count_webhook_delivery(payload: Any, *, now: float | None = None) -> bool:
+    """P0-13: count one signed Meta delivery by object and field, BEFORE any filter.
+
+    Only numbers are kept: never ids, texts or senders. Returns True when the caller
+    should store the counts now, which happens at most once a minute. Never raises.
+    """
+    global _WEBHOOK_LAST_FLUSH
+    try:
+        if not isinstance(payload, dict):
+            return False
+        obj = payload.get("object")
+        obj = obj if isinstance(obj, str) and obj in _WEBHOOK_OBJECTS else "other"
+        fields: list[str] = []
+        entries = payload.get("entry") if isinstance(payload.get("entry"), list) else []
+        for entry in entries[:1000]:
+            if not isinstance(entry, dict):
+                continue
+            changes = entry.get("changes") if isinstance(entry.get("changes"), list) else []
+            found = [change.get("field") for change in changes[:1000] if isinstance(change, dict)]
+            messaging = entry.get("messaging") if isinstance(entry.get("messaging"), list) else []
+            found += ["messaging"] * min(len(messaging), 1000)
+            fields.extend(found or ["other"])
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        moment = time.monotonic() if now is None else float(now)
+        with _WEBHOOK_COUNT_LOCK:
+            counts = _WEBHOOK_PENDING.setdefault(day, {})
+            for name in fields or ["other"]:  # an empty delivery still leaves a trace
+                valid = isinstance(name, str) and _WEBHOOK_FIELD_RE.fullmatch(name)
+                _add_webhook_counts(counts, f"{obj}.{name if valid else 'other'}", 1)
+            if _WEBHOOK_LAST_FLUSH is not None and moment - _WEBHOOK_LAST_FLUSH < _WEBHOOK_FLUSH_INTERVAL_S:
+                return False
+            _WEBHOOK_LAST_FLUSH = moment  # this minute's write is reserved for the caller
+            return True
+    except Exception:
+        return False
+
+
+def flush_webhook_counts(*, reserved: bool = False, now: float | None = None) -> bool:
+    """Store the pending webhook counts in metaHealthState (best effort, never raises).
+
+    ``reserved``: count_webhook_delivery already granted this minute's write.
+    Otherwise it writes only when a minute has passed since the last write.
+    Counts that could not be stored go back to memory for the next attempt.
+    """
+    global _WEBHOOK_LAST_FLUSH
+    moment = time.monotonic() if now is None else float(now)
+    with _WEBHOOK_COUNT_LOCK:
+        if not _WEBHOOK_PENDING:
+            return False
+        if not reserved:
+            if _WEBHOOK_LAST_FLUSH is not None and moment - _WEBHOOK_LAST_FLUSH < _WEBHOOK_FLUSH_INTERVAL_S:
+                return False
+            _WEBHOOK_LAST_FLUSH = moment
+        pending = {day: dict(counts) for day, counts in _WEBHOOK_PENDING.items()}
+        _WEBHOOK_PENDING.clear()
+
+    def merge(current: dict[str, Any]) -> dict[str, Any]:
+        totals = _clean_webhook_counts(current.get("countsByObjectField"))
+        stored_days = current.get("byDay") if isinstance(current.get("byDay"), dict) else {}
+        by_day = {
+            day: _clean_webhook_counts(counts)
+            for day, counts in stored_days.items()
+            if isinstance(day, str) and _WEBHOOK_DAY_RE.fullmatch(day)
+        }
+        for day, counts in pending.items():
+            day_counts = by_day.setdefault(day, {})
+            for key, amount in counts.items():
+                _add_webhook_counts(totals, key, amount)
+                _add_webhook_counts(day_counts, key, amount)
+        kept = sorted(by_day)[-_WEBHOOK_DAYS_KEPT:]
+        return {
+            "countsByObjectField": totals,
+            "byDay": {day: by_day[day] for day in kept},
+            "since": _clean_time(current.get("since")) or _iso_now(),
+        }
+
+    try:
+        save_meta_health_state(_WEBHOOK_COUNTS_ID, merge)
+        return True
+    except Exception:
+        with _WEBHOOK_COUNT_LOCK:
+            for day, counts in pending.items():
+                target = _WEBHOOK_PENDING.setdefault(day, {})
+                for key, amount in counts.items():
+                    _add_webhook_counts(target, key, amount)
+            for day in sorted(_WEBHOOK_PENDING)[:-_WEBHOOK_DAYS_KEPT]:
+                _WEBHOOK_PENDING.pop(day, None)
+        return False
+
+
+def webhook_counts_report() -> dict[str, Any]:
+    """The P0-13 counts for the admin token-health view: stored plus not yet stored."""
+    stored = load_meta_health_state(_WEBHOOK_COUNTS_ID)
+    stored_days = stored.get("byDay") if isinstance(stored.get("byDay"), dict) else {}
+    days = sorted(day for day in stored_days if isinstance(day, str) and _WEBHOOK_DAY_RE.fullmatch(day))
+    waiting: dict[str, int] = {}
+    with _WEBHOOK_COUNT_LOCK:
+        for counts in _WEBHOOK_PENDING.values():
+            for key, amount in counts.items():
+                _add_webhook_counts(waiting, key, amount)
+    return {
+        "countsByObjectField": _clean_webhook_counts(stored.get("countsByObjectField")),
+        "byDay": {day: _clean_webhook_counts(stored_days[day]) for day in days[-_WEBHOOK_DAYS_KEPT:]},
+        "since": _clean_time(stored.get("since")),
+        "updatedAt": _clean_time(stored.get("updatedAt")),
+        "notYetStored": waiting,
+    }
 
 
 def get_meta_account_funds(*, refresh: bool = False, interactive: bool = True) -> dict[str, Any] | None:
@@ -4176,11 +4386,49 @@ def discover_meta_ads(
                 currency_by_account[account] = currency
             return currency_by_account[account]
 
+        # D26: an ad whose Meta campaign name carries the studio code belongs to
+        # Albayan Studio and never becomes a Manager "ads" row. The slim fallback
+        # read has no campaign names, so a few are read here; an ad whose campaign
+        # name stays unknown waits for a later pass instead of being imported.
+        campaign_names: dict[str, str] = {}
+        name_lookups_left = _STUDIO_NAME_LOOKUPS_PER_PASS
+        name_getter = getattr(client, "get_campaign_name", None)
+
+        def _discovery_campaign_name(row: dict[str, Any]) -> str | None:
+            nonlocal name_lookups_left
+            name = _clean_text(row.get("campaignName"), 240)
+            campaign_id = _clean_text(row.get("campaignId"), 40)
+            if name or not _META_ID_RE.fullmatch(campaign_id):
+                return name
+            if campaign_id not in campaign_names:
+                if name_lookups_left <= 0 or not callable(name_getter):
+                    return None
+                name_lookups_left -= 1
+                try:
+                    campaign_names[campaign_id] = _clean_text(name_getter(campaign_id), 240)
+                except MetaAdsError as error:
+                    if error.code == "rate_limited":
+                        name_lookups_left = 0
+                    return None
+                except Exception:
+                    return None
+            return campaign_names[campaign_id] or None
+
         imported: list[dict[str, Any]] = []
         failed: set[str] = set()
+        studio_skipped: set[str] = set()
         last_error = ""
         for meta_id in candidate_ids:
             account_id, discovery_row = found[meta_id]
+            campaign_name = _discovery_campaign_name(discovery_row)
+            if campaign_name is None:
+                failed.add(meta_id)  # stays unknown, so a later pass retries it
+                last_error = "Albayan is waiting to read a new ad's Meta campaign name before importing it."
+                continue
+            if is_studio_campaign_name(campaign_name):
+                studio_skipped.add(meta_id)  # remembered as known: never imported
+                continue
+            discovery_row = {**discovery_row, "campaignName": campaign_name}
             # Never perform the expensive per-ad enrichment inside discovery.
             # Import every new ad from the authoritative account edge first;
             # the paced details queue fills in spend, account/page names and
@@ -4230,6 +4478,7 @@ def discover_meta_ads(
             # or broken import. It is displayed once in the connection status.
             "lastError": "" if rate_limited_scan else (last_error or (account_errors[0] if account_errors else "")),
             "lastImportedCount": len(imported),
+            "lastStudioSkippedCount": len(studio_skipped),
             "totalImported": _metric_int(state.get("totalImported")) + len(imported),
             "knownAdCount": len(known),
             "knownMetaAdIds": sorted(known),
@@ -4239,6 +4488,7 @@ def discover_meta_ads(
         _save_import_state(next_state)
         return {
             "imported": imported,
+            "studioSkipped": len(studio_skipped),
             "busy": False,
             "disabled": False,
             "state": _public_import_state(next_state),
@@ -5449,6 +5699,7 @@ def _worker_loop(stop_event: threading.Event | None = None, startup_cutoff: str 
     last_sync_monotonic = 0.0
     while not stop.is_set():
         try:
+            flush_webhook_counts()  # P0-13: counts reach the database even when deliveries stop
             config = load_meta_ads_config()
             if _server_token_matches(config):
                 _refresh_meta_provider_state()
@@ -5958,6 +6209,10 @@ def create_meta_ads_router(
             payload = json.loads(raw_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise HTTPException(status_code=400, detail="Invalid webhook payload")
+        # P0-13: every signed delivery is counted BEFORE any filter below or in
+        # Social Studio; counts only, stored at most once a minute after the reply.
+        if count_webhook_delivery(payload):
+            background_tasks.add_task(flush_webhook_counts, reserved=True)
         if isinstance(payload, dict) and payload.get("object") in ("page", "instagram"):
             # Page/Instagram comment events belong to Social Studio. Imported
             # lazily because social_studio imports this module.
@@ -6060,6 +6315,35 @@ def create_meta_ads_router(
         except MetaAdsError as error:
             raise _partner_error(error)
 
+    @router.get("/token-health")
+    def token_health(
+        request: Request,
+        refresh: bool = Query(default=False),
+        admin: dict[str, Any] = Depends(require_meta_admin),
+    ):
+        """P0-14 + P0-13: the system token's validity, expiry and permissions, and webhook counts.
+
+        A plain read shows the stored reading; ?refresh=1 asks Meta again (same-origin,
+        rate limited, audited). Never returns the token or the app secret.
+        """
+        from . import meta_token_health  # imports this module, so it is loaded on first use
+
+        _rate_limit_or_429(f"meta-token-health:{admin.get('id')}", 30, 60_000)
+        if refresh:
+            require_same_origin(request)
+            _rate_limit_or_429(f"meta-token-health-refresh:{admin.get('id')}", 3, 10 * 60_000)
+            actor = str(admin.get("id") or "") or None
+            try:
+                result = meta_token_health.check_token_now()
+            except MetaAdsError as error:
+                _audit(actor, "meta_token_health_check", "token", "Meta token health check failed",
+                       {"error": error.code, "providerCode": error.provider_code}, resource_type=_META_HEALTH_STATE_TYPE)
+                raise HTTPException(status_code=502, detail=error.public_message)
+            _audit(actor, "meta_token_health_check", "token", "Admin re-read the Meta token health",
+                   {"configured": bool(result.get("configured")), "isValid": result.get("isValid") is True,
+                    "missingScopeCount": len(result.get("missingScopes") or [])}, resource_type=_META_HEALTH_STATE_TYPE)
+        return meta_token_health.token_health_report()
+
     @router.post("/ads/{ad_id}/link")
     def link_ad(
         ad_id: str,
@@ -6072,6 +6356,18 @@ def create_meta_ads_router(
         try:
             provider = configured_client()
             snapshot = provider.get_ad_snapshot(body.metaAdId)
+            campaign_name = snapshot.get("metaCampaignName")
+            if is_studio_campaign_name(campaign_name) or not _clean_text(campaign_name):
+                # D26: a studio campaign never joins Manager's books; an unreadable
+                # campaign name is not guessed (the admin simply tries again).
+                studio = is_studio_campaign_name(campaign_name)
+                _audit(str(admin.get("id") or "") or None, "meta_link_refused", _local_id(ad_id),
+                       "Refused a Manager link to an Albayan Studio campaign" if studio else "Refused a Manager link: Meta campaign name unreadable",
+                       {"metaAdId": body.metaAdId, "reason": "studio_campaign" if studio else "campaign_name_unknown"})
+                raise HTTPException(status_code=409 if studio else 502, detail=(
+                    "This Meta ad belongs to Albayan Studio (its campaign name carries the studio code ALB-S-). "
+                    "It cannot be linked to an Albayan Manager ad." if studio else
+                    "Albayan could not read this ad's Meta campaign name to confirm it is not an Albayan Studio ad. Try again in a minute."))
             activities, activity_cursor = _snapshot_activity_context(provider, snapshot)
             entity, replayed, changes = apply_meta_snapshot(
                 ad_id,
