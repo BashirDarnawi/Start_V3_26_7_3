@@ -1521,6 +1521,16 @@ const closeBraces = (css.match(/\}/g) || []).length;
 check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   `${openBraces} opening vs ${closeBraces} closing braces`);
 
+{
+  // P0-12: the public privacy page must state the server's real audit retention (main.py default).
+  const mainPy = read('server/main.py');
+  const privacy = read('privacy.html');
+  const days = (mainPy.match(/AUDIT_LOG_RETENTION_DAYS = read_env_int\("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", (\d+)\)/) || [])[1];
+  check('privacy retention matches server default', Boolean(days) && privacy.includes(`${days} days`) && privacy.includes(`${days} يوماً`)
+    && !privacy.includes('90 days') && privacy.includes('kept permanently'), `server default ${days}`);
+  check('privacy page covers Ads Studio comment processing', privacy.includes('Ads Studio') && privacy.includes('comment text'));
+}
+
 if (failures.length) {
   console.error(`\n${failures.length} mobile UI regression check(s) failed:`);
   failures.forEach(failure => console.error(`  - ${failure}`));

@@ -22,11 +22,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run test:architecture
+      - run: npm run test:mobile-config
       - run: npm run test:build-safety
       - run: npm run test:review-regressions
       - run: npm run test:session-regressions
       - run: npm run test:social-native-regressions
       - run: npm run test:import-boundaries
+      - run: npm run test:profitability
       - run: npm run test:system-boundaries
       - run: npm run test:clothes-submit-boundaries
       - run: npm run test:sync-persistence-work
