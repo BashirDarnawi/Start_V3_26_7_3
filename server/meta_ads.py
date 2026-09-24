@@ -245,6 +245,16 @@ def _meta_pause_leaves_headroom() -> bool:
         )
 
 
+def _evict_page_token(token: str) -> None:
+    """Forget a cached Page token that Meta just refused (expired, revoked, role lost),
+    so the next call fetches a fresh one instead of reusing it for up to 50 minutes."""
+    if not token:
+        return
+    with _PAGE_TOKEN_LOCK:
+        for page_id in [pid for pid, (cached, _expires) in _PAGE_TOKEN_CACHE.items() if hmac.compare_digest(cached, token)]:
+            _PAGE_TOKEN_CACHE.pop(page_id, None)
+
+
 def _server_token_matches(config: "MetaAdsConfig") -> bool:
     configured = (os.getenv("ALBAYAN_META_ACCESS_TOKEN") or "").strip()
     return bool(configured and hmac.compare_digest(configured, config.access_token))
@@ -1131,7 +1141,7 @@ class MetaAdsClient:
         # photos and page name behind a multi-hour backoff.
         if (
             status >= 500
-            or code in {"1", "2"}
+            or code in {"1", "2", "1200"}  # 1200: Messenger "Temporary send message failure"
             or (isinstance(error, dict) and error.get("is_transient") is True)
         ):
             return MetaAdsError("temporary", "Meta is temporarily unavailable. Albayan will retry.", retryable=True, provider_code=provider_code)
@@ -1272,7 +1282,12 @@ class MetaAdsClient:
             except ValueError:
                 payload = {}
             if not 200 <= response.status_code < 300 or (isinstance(payload, dict) and payload.get("error")):
-                raise self._safe_error(response, payload)
+                error = self._safe_error(response, payload)
+                # Only a dead token (Graph code 190, any subcode, or HTTP 401) is forgotten; a
+                # permission refusal or a limit sent as 403 leaves a working Page token cached.
+                if access_token and (response.status_code == 401 or error.provider_code.split(".")[0] == "190"):
+                    _evict_page_token(str(access_token))
+                raise error
             _observe_meta_response(response, self.config)
             if not isinstance(payload, dict):
                 raise MetaAdsError("invalid_response", "Meta returned an invalid response.")

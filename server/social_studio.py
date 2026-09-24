@@ -1154,43 +1154,67 @@ def _execute_rule_actions(
         failures += 1
         temporary += 1 if error.retryable else 0
     dm_sent = False
+    refreshed = False
+
+    def post(path: str, data: dict[str, Any]) -> None:
+        # A Page token revoked since it was cached: meta_ads forgot it, so fetch a fresh one
+        # and retry this action once. Meta applied nothing on an authorization refusal, so the
+        # retry cannot send twice.
+        nonlocal token, refreshed
+        try:
+            client._post(path, data, access_token=token)
+        except _meta.MetaAdsError as error:
+            if error.code != "authorization" or refreshed:
+                raise
+            refreshed = True
+            fresh = client.page_access_token(str(page.get("metaPageId") or ""))
+            if not fresh or fresh == token:
+                raise
+            token = fresh
+            client._post(path, data, access_token=token)
+
+    def note(kind: str, error: Any) -> str:
+        code = f" ({error.provider_code})" if getattr(error, "provider_code", "") else ""
+        return f"{kind}: {error.public_message}{code}"
+
     if client is not None:
         dm_text = str(rule.get("dmText") or "")
         if _bool(rule.get("dmEnabled")) and dm_text and not _bool(rule.get("pauseDms")):
             try:
-                if platform == "fb":
-                    client._post(f"{comment_id}/private_replies", {"message": dm_text}, access_token=token)
-                else:
-                    client._post(
-                        f"{page.get('igUserId')}/messages",
-                        {
-                            "recipient": json.dumps({"comment_id": str(comment_id)}, separators=(",", ":")),
-                            "message": json.dumps({"text": dm_text}, separators=(",", ":"), ensure_ascii=False),
-                        },
-                        access_token=token,
-                    )
+                # One private reply per comment, within 7 days of the comment, through the
+                # Page's (FB) or the Instagram account's (IG) messages endpoint. The old
+                # /{comment-id}/private_replies edge was removed after Graph API v3.2.
+                # A refusal (already replied, too old) is a permanent request_failed: never retried.
+                sender = page.get("metaPageId") if platform == "fb" else page.get("igUserId")
+                post(
+                    f"{sender}/messages",
+                    {
+                        "recipient": json.dumps({"comment_id": str(comment_id)}, separators=(",", ":")),
+                        "message": json.dumps({"text": dm_text}, separators=(",", ":"), ensure_ascii=False),
+                    },
+                )
                 actions.append("dm")
                 dm_sent = True
             except _meta.MetaAdsError as error:
-                errors.append(f"dm: {error.public_message}")
+                errors.append(note("dm", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
         public_reply = str(rule.get("publicReply") or "")
         if public_reply and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
             try:
                 path = f"{comment_id}/comments" if platform == "fb" else f"{comment_id}/replies"
-                client._post(path, {"message": public_reply}, access_token=token)
+                post(path, {"message": public_reply})
                 actions.append("public")
             except _meta.MetaAdsError as error:
-                errors.append(f"public: {error.public_message}")
+                errors.append(note("public", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
         if platform == "fb" and _bool(rule.get("likeComment")):
             try:
-                client._post(f"{comment_id}/likes", {}, access_token=token)
+                post(f"{comment_id}/likes", {})
                 actions.append("like")
             except _meta.MetaAdsError as error:
-                errors.append(f"like: {error.public_message}")
+                errors.append(note("like", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
     retryable = not actions and failures > 0 and temporary == failures

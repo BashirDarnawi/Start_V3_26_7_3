@@ -3356,3 +3356,69 @@ def test_ensure_import_page_takes_a_per_page_advisory_lock_first_on_postgres(act
     sql, params = recorded[0]
     assert "pg_advisory_xact_lock(hashtext(:k))" in sql
     assert params == {"k": "albayan_meta_page:909900000000001"}
+
+
+def test_page_token_evicted_on_authorization_error(monkeypatch):
+    """P0-07: a Page token Meta refused (expired, revoked, role lost) is not reused for 50 minutes."""
+    tokens = iter(["PAGE-TOKEN-A", "PAGE-TOKEN-B"])
+
+    def handler(request):
+        auth = request.headers.get("Authorization", "")
+        if request.method == "GET" and request.url.path.endswith("/5100000000099"):
+            return httpx.Response(200, json={"id": "5100000000099", "access_token": next(tokens)})
+        if request.method == "POST" and auth == "Bearer PAGE-TOKEN-A":
+            return httpx.Response(401, json={"error": {"code": 190, "error_subcode": 460, "message": "Session invalidated"}})
+        return httpx.Response(200, json={"id": "ok"})
+
+    meta_ads._PAGE_TOKEN_CACHE.clear()
+    try:
+        real = _real_client(monkeypatch, handler)
+        first = real.page_access_token("5100000000099")
+        assert first == "PAGE-TOKEN-A"
+        with pytest.raises(meta_ads.MetaAdsError) as caught:
+            real._post("5100000000099_1/comments", {"message": "hi"}, access_token=first)
+        assert caught.value.code == "authorization"
+        assert "5100000000099" not in meta_ads._PAGE_TOKEN_CACHE
+        assert real.page_access_token("5100000000099") == "PAGE-TOKEN-B"  # fetched again, not reused
+        assert real._post("5100000000099_1/comments", {"message": "hi"}, access_token="PAGE-TOKEN-B") == {"id": "ok"}
+    finally:
+        meta_ads._PAGE_TOKEN_CACHE.clear()
+
+
+def test_page_token_eviction_is_selective(monkeypatch):
+    """Only the refused Page token is forgotten, and only when the token itself is dead."""
+    def handler(request):
+        auth = request.headers.get("Authorization", "")
+        if auth == "Bearer DEAD":
+            return httpx.Response(400, json={"error": {"code": 190, "error_subcode": 463, "message": "expired"}})
+        if auth == "Bearer NO-PERMISSION":
+            return httpx.Response(403, json={"error": {"code": 200, "message": "Permissions error"}})
+        if auth == "Bearer BAD-REQUEST":
+            return httpx.Response(400, json={"error": {"code": 100, "message": "Invalid parameter"}})
+        return httpx.Response(401, json={"error": {"code": 190, "message": "system token expired"}})
+
+    meta_ads._PAGE_TOKEN_CACHE.clear()
+    far = meta_ads.time.monotonic() + 600
+    try:
+        real = _real_client(monkeypatch, handler)
+        meta_ads._PAGE_TOKEN_CACHE.update({"1": ("DEAD", far), "2": ("NO-PERMISSION", far), "3": ("BAD-REQUEST", far), "4": ("OTHER", far)})
+        for token in ("NO-PERMISSION", "BAD-REQUEST"):
+            with pytest.raises(meta_ads.MetaAdsError):
+                real._post("1_1/comments", {"message": "x"}, access_token=token)
+        with pytest.raises(meta_ads.MetaAdsError):
+            real._get("me/accounts")  # the system token failing never touches Page tokens
+        assert set(meta_ads._PAGE_TOKEN_CACHE) == {"1", "2", "3", "4"}
+        with pytest.raises(meta_ads.MetaAdsError):
+            real._post("1_1/comments", {"message": "x"}, access_token="DEAD")
+        assert set(meta_ads._PAGE_TOKEN_CACHE) == {"2", "3", "4"}  # only the dead token's page
+    finally:
+        meta_ads._PAGE_TOKEN_CACHE.clear()
+
+
+def test_messenger_temporary_send_failure_is_retryable(monkeypatch):
+    def handler(request):
+        return httpx.Response(400, json={"error": {"code": 1200, "message": "Temporary send message failure"}})
+
+    with pytest.raises(meta_ads.MetaAdsError) as caught:
+        _real_client(monkeypatch, handler)._post("5100000000001/messages", {"message": "x"}, access_token="T")
+    assert caught.value.retryable and caught.value.code == "temporary"

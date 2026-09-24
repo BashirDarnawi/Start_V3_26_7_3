@@ -468,7 +468,7 @@ def test_webhook_fb_comment_gets_dm_public_reply_and_like(actors, graph):
     )
     _webhook(_fb_comment("5100000000001", "5100000000001_777", "9001", "إيش السِّعر؟"))
     assert graph.paths() == [
-        ("5100000000001_777/private_replies", {"message": "Price is 50 LYD"}),
+        ("5100000000001/messages", {"recipient": '{"comment_id":"5100000000001_777"}', "message": '{"text":"Price is 50 LYD"}'}),
         ("5100000000001_777/comments", {"message": "Check your inbox"}),
         ("5100000000001_777/likes", {}),
     ]
@@ -485,6 +485,46 @@ def test_webhook_fb_comment_gets_dm_public_reply_and_like(actors, graph):
     assert len(_log_rows(actors["a"]["id"])) == 1
 
 
+def test_fb_private_reply_uses_page_messages(actors, graph):
+    """Meta removed /{comment-id}/private_replies after Graph API v3.2; the current path is
+    POST /{page-id}/messages with recipient.comment_id, sent with that Page's token."""
+    _link(actors, "a", "5100000000031")
+    _rule(actors["a"]["cookies"], name="DM", dmEnabled=True, dmText="مرحباً، أرسلنا لك التفاصيل")
+    _webhook(_fb_comment("5100000000031", "5100000000031_5", "9031", "hello"))
+    path, data, token = graph.calls[0]
+    assert path == "5100000000031/messages" and token == "PAGE-TOKEN-5100000000031"
+    assert json.loads(data["recipient"]) == {"comment_id": "5100000000031_5"}
+    assert json.loads(data["message"]) == {"text": "مرحباً، أرسلنا لك التفاصيل"}
+    assert _log_rows(actors["a"]["id"])[0]["actions"][0] == "dm"  # the helper rule also carries a default public reply
+
+
+def test_reply_retries_once_with_a_fresh_page_token(actors, graph, monkeypatch):
+    """A Page token revoked since it was cached: the reply is sent with a fresh token, not lost."""
+    _link(actors, "a", "5100000000032")
+    _rule(actors["a"]["cookies"], name="Thanks", publicReply="Thanks!")
+    tokens = iter(["STALE", "FRESH"])
+    monkeypatch.setattr(meta_ads.MetaAdsClient, "page_access_token", lambda self, page_id: next(tokens))
+    original = graph.post
+
+    def post(path, data, token):
+        if token == "STALE":
+            graph.calls.append((path, dict(data or {}), token))
+            raise meta_ads.MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code="190.460")
+        return original(path, data, token)
+
+    monkeypatch.setattr(graph, "post", post)
+    _webhook(_fb_comment("5100000000032", "5100000000032_1", "9032", "hello"))
+    assert [token for _p, _d, token in graph.calls] == ["STALE", "FRESH"]
+    log = _log_rows(actors["a"]["id"])[0]
+    assert log["actions"] == ["public"] and log["error"] == ""
+
+
+def test_private_replies_endpoint_never_called():
+    source = Path(studio.__file__).read_text(encoding="utf-8")
+    code = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+    assert "private_replies" not in code
+
+
 def test_webhook_skip_public_after_dm(actors, graph):
     _link(actors, "a", "5100000000002")
     _rule(
@@ -492,7 +532,7 @@ def test_webhook_skip_public_after_dm(actors, graph):
         dmEnabled=True, dmText="Private answer", skipPublicAfterDm=True,
     )
     _webhook(_fb_comment("5100000000002", "5100000000002_1", "9003", "hello"))
-    assert graph.paths() == [("5100000000002_1/private_replies", {"message": "Private answer"})]
+    assert graph.paths() == [("5100000000002/messages", {"recipient": '{"comment_id":"5100000000002_1"}', "message": '{"text":"Private answer"}'})]
     assert _log_rows(actors["a"]["id"])[0]["actions"] == ["dm"]
 
 
@@ -573,7 +613,7 @@ def test_webhook_duplicate_delivery_is_handled_once(actors, graph):
 def test_process_comment_records_meta_errors_without_raising(actors, graph):
     _link(actors, "a", "5100000000008")
     _rule(actors["a"]["cookies"], name="All", publicReply="Thanks", dmEnabled=True, dmText="DM")
-    graph.fail["/private_replies"] = meta_ads.MetaAdsError("request_failed", "Meta refused the message.")
+    graph.fail["/messages"] = meta_ads.MetaAdsError("request_failed", "Meta refused the message.")
     _webhook(_fb_comment("5100000000008", "5100000000008_1", "9009", "hello"))
     log = _log_rows(actors["a"]["id"])[0]
     assert log["actions"] == ["public"]
