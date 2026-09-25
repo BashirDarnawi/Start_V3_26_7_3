@@ -34,6 +34,12 @@ of the system token keyed with the app secret, computed in memory. When the toke
 replaced in Jelastic, the old reading no longer matches and is reported as stale
 instead of as the new token's health. The fingerprint stays in the database (and so in full backups);
 it is never in an API response or a log, and the generic collections API refuses metaHealthState.
+
+P3-18a adds the jobs loop's side: ``daily_token_check()`` (the saved reading while it is less than a
+day old, else check_token_now()), ``token_verdict()`` (valid / invalid / unknown: only an answer
+from Meta can say invalid) and ``expiry_warnings()`` (the 14/7/2-day warnings, pure). What the studio
+does with them (the connection state, parked replies, alerts) lives in
+server/systems/ads_studio/studio_alerts_meta.py.
 """
 
 from __future__ import annotations
@@ -370,6 +376,95 @@ def _days_left(iso_value: str, now: float) -> int | None:
     except ValueError:
         return None
     return math.floor((moment - now) / 86400)
+
+
+# ------------------------------------------------------------------ P3-18a: the daily check, its verdict, expiry warnings
+
+DAILY_CHECK_SECONDS = 24 * 60 * 60
+_FAILED_DAILY_RETRY_SECONDS = 60 * 60  # a daily check Meta did not answer is tried again after an hour
+EXPIRY_WARN_DAYS = (14, 7, 2)  # PLAN §7.4 / §7.7; the studio's thresholds setting may change them
+EXPIRY_FIELDS = ("expiresAt", "dataAccessExpiresAt")
+
+
+def _unix_time(iso_value: Any) -> float | None:
+    clean = meta_ads._clean_time(iso_value)
+    return datetime.fromisoformat(clean.replace("Z", "+00:00")).timestamp() if clean else None
+
+
+def _seconds_since(iso_value: Any, now: float) -> float | None:
+    moment = _unix_time(iso_value)
+    return None if moment is None else now - moment
+
+
+def daily_token_check(now: float | None = None) -> dict[str, Any]:
+    """The jobs loop's daily read of the system token (P3-18a); never raises for a Meta failure.
+
+    Returns the saved reading of the CURRENT token while it is less than a day old, or less than an
+    hour after a check Meta did not answer (no Meta call); otherwise check_token_now(), which itself
+    reaches Meta at most once per 10 minutes. After a failure the reading carries lastCheckError
+    (and no checkedAt when this token was never read). Unconfigured: {"configured": False, ...}.
+    """
+    config, _app_id, unconfigured = _configuration()
+    if unconfigured is not None:
+        return unconfigured
+    now = time.time() if now is None else now
+    fingerprint = _token_fingerprint(config)
+    saved = _saved_reading(config, fingerprint)
+    if saved is not None:
+        checked = _seconds_since(saved.get("checkedAt"), now)
+        failed = _seconds_since(saved.get("lastCheckErrorAt"), now)
+        if (checked is not None and 0 <= checked < DAILY_CHECK_SECONDS) or (
+            failed is not None and 0 <= failed < _FAILED_DAILY_RETRY_SECONDS
+        ):
+            return saved
+    try:
+        return check_token_now()
+    except MetaAdsError as error:
+        after = _saved_reading(config, fingerprint)  # check_token_now stored the failure beside the last good reading
+        if after is not None:
+            return after
+        code = f"{error.code}:{error.provider_code}" if error.provider_code else error.code
+        return {"configured": True, "lastCheckError": meta_ads._clean_text(code, 60), "lastCheckErrorAt": meta_ads._iso_now()}
+
+
+def token_verdict(reading: Any) -> str:
+    """'valid', 'invalid' or 'unknown' for a reading of check_token_now() / daily_token_check().
+
+    'invalid' only when Meta ANSWERED that the token does not work: ``is_valid`` false, or a 190
+    error on the token itself (debug_token's data.error). No reading, no app id, or a latest check
+    that failed (lastCheckErrorAt after checkedAt: Meta unreachable) is 'unknown', never 'invalid':
+    a network problem must not look like a dead token (PLAN §7.4).
+    """
+    if not isinstance(reading, dict) or reading.get("configured") is False:
+        return "unknown"
+    checked_at = _unix_time(reading.get("checkedAt"))
+    if checked_at is None:
+        return "unknown"
+    failed_at = _unix_time(reading.get("lastCheckErrorAt"))
+    if failed_at is not None and failed_at > checked_at:
+        return "unknown"
+    if reading.get("isValid") is False or str(reading.get("errorCode") or "").split(".")[0] == "190":
+        return "invalid"
+    return "valid" if reading.get("isValid") is True else "unknown"
+
+
+def expiry_warnings(reading: Any, warn_days: Any = EXPIRY_WARN_DAYS, now: float | None = None) -> list[dict[str, Any]]:
+    """The expiry warning due for each expiry of a reading (P3-18a): ``[{field, expiresAt, daysLeft,
+    thresholdDays}]``, where thresholdDays is the SMALLEST warning day count the days left have
+    reached (14 -> 7 -> 2 by default), so each threshold is one warning. "Never expires" and a
+    reading without a successful check give none. Pure: the caller raises the alerts."""
+    if not isinstance(reading, dict) or not meta_ads._clean_time(reading.get("checkedAt")):
+        return []
+    days = sorted({int(day) for day in (warn_days or ()) if isinstance(day, int) and not isinstance(day, bool) and day > 0})
+    now = time.time() if now is None else now
+    out: list[dict[str, Any]] = []
+    for field in EXPIRY_FIELDS:
+        expires_at = meta_ads._clean_time(reading.get(field))
+        left = _days_left(expires_at, now)
+        reached = [day for day in days if left is not None and left <= day]
+        if reached:
+            out.append({"field": field, "expiresAt": expires_at, "daysLeft": left, "thresholdDays": reached[0]})
+    return out
 
 
 def token_health_report() -> dict[str, Any]:

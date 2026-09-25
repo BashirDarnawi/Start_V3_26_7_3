@@ -3,7 +3,8 @@
 Routes in this first part:
 
 * ``GET /api/studio/me`` (any signed-in user): which layout and services this user gets, plus the
-  public budget limits, service hours ("open now" in Tripoli time) and contact details.
+  public budget limits, service hours ("open now" in Tripoli time) and contact details, and
+  ``metaConnection``, the neutral "Meta connection down" banner flag (P3-18a, studio_alerts_meta.py).
 * ``GET /api/studio/admin/settings/{key}`` and ``PUT`` the same (admin only): the switches in
   studio_settings.py. A PUT checks the origin, the admin role, a rate limit and the version,
   then saves and writes an audit entry (action ``studio_setting``, which the audit cleanup
@@ -24,6 +25,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
+from .studio_alerts_meta import meta_connection_flag
 from .studio_diagnostics import read_diagnostics
 from .studio_errors import studio_error
 from .studio_facts import create_studio_checks_router
@@ -87,7 +89,9 @@ def create_studio_router(
 
     @router.get("/me")
     def studio_me(user: dict[str, Any] = Depends(current_user_dependency)):
-        return me_view(read_all_settings(), str(user.get("id") or ""), is_admin(user), is_staff(user))
+        view = me_view(read_all_settings(), str(user.get("id") or ""), is_admin(user), is_staff(user))
+        view["metaConnection"] = meta_connection_flag()  # P3-18a: neutral banner flag (studio_alerts_meta.py)
+        return view
 
     @router.get("/admin/settings/{key}")
     def get_studio_setting(key: str, user: dict[str, Any] = Depends(current_user_dependency)):

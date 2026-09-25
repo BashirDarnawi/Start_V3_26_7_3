@@ -88,6 +88,13 @@ _WORKER_THREAD: threading.Thread | None = None
 _WORKER_LOCK = threading.Lock()
 WORKER_INTERVAL_SECONDS = 20
 _RETRY_TICK = 0
+# P3-18b: while Albayan's Meta connection is down (studio_alerts_meta.py), a reply Meta refused for
+# authorization is parked instead of lost. A private reply may still go out until 7 days after the
+# comment (Meta's window), a public reply or a like until 24 hours after it (PLAN §7.4).
+PARKED_REASON = "meta_connection_down"
+MISSED_DURING_OUTAGE = "missed_during_outage"
+PRIVATE_REPLY_WINDOW = timedelta(days=7)
+PUBLIC_REPLY_WINDOW = timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1157,82 @@ def _retry_after_iso(attempt: int) -> str:
     return _iso_at(datetime.now(timezone.utc) + timedelta(minutes=minutes))
 
 
+class _ReplyOutcome(tuple):
+    """What _execute_rule_actions returns: (actions, errors, retryable), plus ``auth_codes``, Meta's
+    codes of the authorization refusals among the failures (P3-18b). A plain 3-tuple (a test's
+    stand-in) has none."""
+
+    auth_codes: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, actions: list[str], errors: list[str], retryable: bool, auth_codes: list[str]) -> "_ReplyOutcome":
+        outcome = cls((actions, errors, retryable))
+        outcome.auth_codes = tuple(auth_codes)
+        return outcome
+
+
+def _dm_pending(rule: dict[str, Any], actions: list[str]) -> bool:
+    """The rule still owes this comment a private reply."""
+    return (
+        "dm" not in actions and _bool(rule.get("dmEnabled")) and bool(str(rule.get("dmText") or ""))
+        and not _bool(rule.get("pauseDms"))
+    )
+
+
+def _comment_time(data: dict[str, Any], now: datetime) -> datetime:
+    return _parse_iso(data.get("commentAt")) or _parse_iso(data.get("at")) or now
+
+
+def _missed_patch() -> dict[str, Any]:
+    """A parked reply whose window passed during the outage: finished, visible in the log."""
+    return {
+        "retryAfter": "", "parkedReason": "", "problemCode": MISSED_DURING_OUTAGE,
+        "error": f"{MISSED_DURING_OUTAGE}: the reply window passed while Albayan's Meta connection was down.",
+    }
+
+
+def _parked_patch(outcome: Any, data: dict[str, Any], rule: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    """P3-18b: how a reply Meta refused for authorization keeps waiting, or None (it is not parked).
+
+    Any authorization refusal runs the token check (studio_alerts_meta.after_authorization_failure: at
+    most one Meta call per 10 minutes). The reply is parked only when that check leaves the connection
+    DOWN, nothing was sent, and a refusal is not a per-page one (190.492 page role lost, the permission
+    codes: those stay per-page problems). Parked = ``parkedReason`` meta_connection_down, ``retryAfter``
+    the next check, ``giveUpAt`` the comment's time + 7 days while a private reply is owed, else + 24
+    hours; a reply already past that window is finished as missed_during_outage.
+    """
+    codes = tuple(getattr(outcome, "auth_codes", ()) or ())
+    if not codes:
+        return None
+    from . import studio_alerts_meta  # late: it imports this module
+
+    try:
+        down = studio_alerts_meta.after_authorization_failure()
+    except Exception as error:  # the webhook path never raises: without a verdict nothing is parked
+        print(f"[albayan] Social Studio connection check failed ({type(error).__name__}).")
+        return None
+    actions = list(outcome[0] or [])
+    if not down or actions or all(studio_alerts_meta.is_per_page_auth_code(code) for code in codes):
+        return None
+    window = PRIVATE_REPLY_WINDOW if _dm_pending(rule, actions) else PUBLIC_REPLY_WINDOW
+    give_up = _comment_time(data, now) + window
+    if now >= give_up:
+        return _missed_patch()
+    return {
+        "parkedReason": PARKED_REASON,
+        "retryAfter": _iso_at(min(now + studio_alerts_meta.RECHECK_EVERY, give_up)),
+        "giveUpAt": _iso_at(give_up),
+    }
+
+
+def _rule_for_resend(rule: dict[str, Any], data: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """A parked reply sent after the outage: past 24 hours after the comment only the private reply
+    still goes out (public replies and likes only within 24 hours, PLAN §7.4)."""
+    if data.get("parkedReason") != PARKED_REASON or now < _comment_time(data, now) + PUBLIC_REPLY_WINDOW:
+        return rule
+    return {**rule, "publicReply": "", "likeComment": False}
+
+
 def _execute_rule_actions(
     page: dict[str, Any], rule: dict[str, Any], platform: str, comment_id: str, _actions_holder: list[str] | None = None
 ) -> tuple[list[str], list[str], bool]:
@@ -1157,9 +1240,11 @@ def _execute_rule_actions(
 
     Returns (actions, errors, retryable): retryable when nothing was sent and
     every failure was a temporary Meta condition (pause, outage), so the
-    scheduler may try again instead of the comment being lost."""
+    scheduler may try again instead of the comment being lost. The tuple also
+    carries ``auth_codes`` (_ReplyOutcome) for the parking rule (P3-18b)."""
     actions: list[str] = _actions_holder if _actions_holder is not None else []  # visible to the caller on a crash
     errors: list[str] = []
+    auth_codes: list[str] = []
     failures = 0
     temporary = 0
     client: Any = None
@@ -1172,6 +1257,8 @@ def _execute_rule_actions(
         errors.append(error.public_message)
         failures += 1
         temporary += 1 if error.retryable else 0
+        if error.code == "authorization":
+            auth_codes.append(error.provider_code)
     dm_sent = False
     refreshed = False
 
@@ -1193,6 +1280,8 @@ def _execute_rule_actions(
             client._post(path, data, access_token=token)
 
     def note(kind: str, error: Any) -> str:
+        if getattr(error, "code", "") == "authorization":
+            auth_codes.append(str(getattr(error, "provider_code", "") or ""))
         code = f" ({error.provider_code})" if getattr(error, "provider_code", "") else ""
         return f"{kind}: {error.public_message}{code}"
 
@@ -1237,7 +1326,7 @@ def _execute_rule_actions(
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
     retryable = not actions and failures > 0 and temporary == failures
-    return actions, errors, retryable
+    return _ReplyOutcome.of(actions, errors, retryable, auth_codes)
 
 
 def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
@@ -1247,15 +1336,29 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     never answered ("will resume automatically" was a lie). Meta's private
     reply window is seven days from the COMMENT (``commentAt``; a row from
     before it has only ``at``, the claim time), so older rows are left alone:
-    a comment a manual check read six days late has one day left, not seven."""
+    a comment a manual check read six days late has one day left, not seven.
+
+    Parked replies (P3-18b, ``parkedReason``): while Albayan's Meta connection
+    is down they are left alone (the pass runs one token check, at most one
+    Meta call per 10 minutes, to notice the recovery); after it they are
+    resent like any other, a private reply until 7 days after the comment, a
+    public reply or a like until 24 hours after it. Past ``giveUpAt`` they
+    are finished as missed_during_outage, visible in the reply log."""
+    from . import studio_alerts_meta  # late: it imports this module
+
     ctx = _ctx()
     now_iso = _iso_at(now)
     cutoff = _iso_at(now - timedelta(days=7))
     written = f"COALESCE(NULLIF({_json_field('commentAt')}, ''), {_json_field('at')})"
+    try:
+        down = studio_alerts_meta.recheck_connection()
+    except Exception:
+        down = studio_alerts_meta.connection_down()
+    held = f"AND COALESCE({_json_field('parkedReason')}, '') = '' " if down else ""
     with db_conn() as conn:
         rows = conn.execute(
             text(
-                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
+                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false {held}"
                 f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {_json_field('retryAfter')} <= :now "
                 f"AND {written} >= :cutoff ORDER BY {_json_field('retryAfter')} ASC LIMIT :limit"
             ),
@@ -1267,6 +1370,14 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {written} < :cutoff LIMIT :limit"
             ),
             {"type": LOG_TYPE, "cutoff": cutoff, "limit": max(1, int(limit))},
+        ).mappings().all()
+        gave_up = conn.execute(
+            text(
+                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
+                f"AND {_json_field('parkedReason')} = :parked AND COALESCE({_json_field('retryAfter')}, '') <> '' "
+                f"AND COALESCE({_json_field('giveUpAt')}, '') <> '' AND {_json_field('giveUpAt')} <= :now LIMIT :limit"
+            ),
+            {"type": LOG_TYPE, "parked": PARKED_REASON, "now": now_iso, "limit": max(1, int(limit))},
         ).mappings().all()
     stuck_cutoff = _iso_at(now - timedelta(minutes=15))
     with db_conn() as conn:  # a claim the process never finished (killed mid-reply): hand it to the retry pass
@@ -1287,23 +1398,30 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
             ctx["patch_entity"](LOG_TYPE, str(row["id"]), _release, str(data.get("ownerId") or "system"))
         except Exception:
             pass
-    for row in expired:
+    finished: set[str] = set()
+    for row in [*gave_up, *expired]:
         # Released, so the person no longer counts as answered by a reply that
         # was never sent, and the row is not scanned again.
+        if str(row["id"]) in finished:
+            continue
+        finished.add(str(row["id"]))
         data = json_loads(row.get("data_json") or "{}") or {}
+        parked = isinstance(data, dict) and data.get("parkedReason") == PARKED_REASON
         try:
             ctx["patch_entity"](LOG_TYPE, str(row["id"]),
-                                {"retryAfter": "", "error": "Reply window expired (7 days)."},
+                                _missed_patch() if parked else {"retryAfter": "", "error": "Reply window expired (7 days)."},
                                 str(data.get("ownerId") or "") if isinstance(data, dict) else "")
         except HTTPException:
             pass
     attempted = 0
     for row in rows:
         data = json_loads(row.get("data_json") or "{}") or {}
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or str(row["id"]) in finished:
             continue
         owner_id = str(data.get("ownerId") or "")
         attempts = max(1, int(data.get("attempts") or 1))
+        parked = data.get("parkedReason") == PARKED_REASON
+        give_up = _parse_iso(data.get("giveUpAt")) if parked else None
         page_entity = ctx["get_entity"](PAGES_TYPE, str(data.get("pageId") or "")) if data.get("pageId") else None
         rule_entity = ctx["get_entity"](RULES_TYPE, str(data.get("ruleId") or "")) if data.get("ruleId") else None
         usable = (
@@ -1313,8 +1431,10 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
             and rule_entity and not rule_entity.get("deleted")
             and _bool((rule_entity.get("data") or {}).get("enabled"), True)
         )
-        if not usable:
-            patch: dict[str, Any] = {"retryAfter": "", "error": "Reply retry stopped: the page, rule or access is no longer available."}
+        if give_up is not None and now >= give_up:
+            patch: dict[str, Any] | None = _missed_patch()
+        elif not usable:
+            patch = {"retryAfter": "", "error": "Reply retry stopped: the page, rule or access is no longer available."}
         else:
             settings = _settings_entity(ctx, owner_id)["data"]
             if not _bool(settings.get("masterEnabled"), True):
@@ -1324,13 +1444,24 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
             else:
                 patch = None
         if patch is None:
-            actions, errors, retryable = _execute_rule_actions(
-                page_entity["data"], rule_entity["data"], str(data.get("platform") or ""), str(data.get("commentId") or "")
-            )
-            patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
-            # No attempt cap: the delay is capped at four hours and the pass
-            # itself gives up after seven days (Meta's private-reply window).
-            patch["retryAfter"] = _retry_after_iso(attempts + 1) if retryable else ""
+            rule = _rule_for_resend(rule_entity["data"], data, now)
+            if rule is not rule_entity["data"] and not _dm_pending(rule, []):
+                patch = _missed_patch()  # a parked reply past its public 24 hours with no private reply owed
+            else:
+                outcome = _execute_rule_actions(
+                    page_entity["data"], rule, str(data.get("platform") or ""), str(data.get("commentId") or "")
+                )
+                actions, errors, retryable = outcome
+                patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
+                kept = _parked_patch(outcome, data, rule_entity["data"], now)
+                if kept:
+                    patch.update(kept)  # Albayan's Meta connection went down (again): parked, not lost
+                else:
+                    # No attempt cap: the delay is capped at four hours and the pass
+                    # itself gives up after seven days (Meta's private-reply window).
+                    patch["retryAfter"] = _retry_after_iso(attempts + 1) if retryable else ""
+        if parked and patch.get("retryAfter") == "":
+            patch.setdefault("parkedReason", "")  # finished: no longer waiting for the connection
         try:
             ctx["patch_entity"](LOG_TYPE, str(row["id"]), patch, owner_id)
         except HTTPException:
@@ -1454,7 +1585,8 @@ def process_comment(
             raise
     _sent: list[str] = []
     try:
-        actions, errors, retryable = _execute_rule_actions(page, rule, platform, str(comment_id), _actions_holder=_sent)
+        outcome = _execute_rule_actions(page, rule, platform, str(comment_id), _actions_holder=_sent)
+        actions, errors, retryable = outcome
     except Exception:
         # A non-Meta failure (database hiccup, transport edge case, shutdown):
         # release the claim; retry only when NOTHING was sent (a DM that landed
@@ -1472,7 +1604,13 @@ def process_comment(
     log_data["error"] = "; ".join(errors)[:500]
     log_data["processing"] = False
     patch: dict[str, Any] = {"actions": actions, "error": log_data["error"], "processing": False}
-    if retryable:
+    kept = _parked_patch(outcome, log_data, rule, datetime.now(timezone.utc))
+    if kept:
+        # Albayan's Meta connection is down (P3-18b): parked for the retry pass, or missed when the
+        # comment is already past its reply window.
+        patch.update(kept)
+        patch["attempts"] = 1
+    elif retryable:
         # Nothing was sent and the cause is temporary: keep the claim and let
         # the scheduler try again instead of losing the comment for good.
         patch["retryAfter"] = _retry_after_iso(1)

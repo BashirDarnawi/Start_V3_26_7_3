@@ -202,6 +202,7 @@ def test_me_reflects_safe_defaults(actors, monkeypatch):
         "contact": {"whatsapp": None, "phone": None, "email": None},
         "isAdmin": False,
         "isStaff": False,
+        "metaConnection": {"down": False},  # P3-18a: the neutral banner flag (test_studio_meta_health.py)
     }
     staff = _me(actors["staff"])
     assert staff["isStaff"] is True and staff["isAdmin"] is False and staff["staffDesk"] == "classic"
@@ -1214,7 +1215,7 @@ def test_me_gives_customers_public_fields_only(actors, monkeypatch):
         assert response.status_code == 200, response.text
         me = response.json()
         assert set(me) == {"ui", "services", "staffDesk", "capabilities", "intake", "adLimits", "serviceHours", "contact",
-                           "isAdmin", "isStaff"}
+                           "isAdmin", "isStaff", "metaConnection"}
         # The per-day floor is not secret: the form checks the same limits as the server (P1-08b, P1-15).
         assert me["adLimits"] == {"minTotalMinorUSD": 700, "maxTotalMinorUSD": 150_000, "minPerDayMinorUSD": 250, "maxDays": 45}
         assert me["contact"] == {"whatsapp": "+218912345678", "phone": "+218214444444", "email": "help@albayanhub.com"}

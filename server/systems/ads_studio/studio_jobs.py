@@ -2,10 +2,10 @@
 
 ONE daemon thread per process, started by the /api/studio router's startup event
 (``create_studio_jobs_router``, included by studio_api.create_studio_router: 0 main.py lines),
-whether or not Meta is configured: the money jobs never call Meta or need a Meta token. The one Meta
-job, the results sync (``results``, studio_results_sync.py, P3-03), is claimed only while a Meta
-token is set (ALBAYAN_META_ACCESS_TOKEN, read without loading the Meta client) and runs one budgeted
-pass per tick (at most 5 reads within 10 seconds). The env switch
+whether or not Meta is configured: the money jobs never call Meta or need a Meta token. Two Meta
+jobs run only while a Meta token is set (ALBAYAN_META_ACCESS_TOKEN, read without loading the Meta
+client): the results sync (``results``, studio_results_sync.py, P3-03), one budgeted pass per tick
+(at most 5 reads within 10 seconds), and the Meta watch (token health and funds, P3-18). The env switch
 ``ALBAYAN_STUDIO_JOBS`` (default on; ``off``/``false``/``0``/``no`` = off) stops it, and it never starts
 under pytest (``PYTEST_CURRENT_TEST``): the tests call the job functions directly. Every 30 s a tick
 writes the heartbeat and runs the jobs that are due; a job that fails is logged (error type only),
@@ -44,6 +44,10 @@ remembered in ``studioJobState.lastError`` and runs again at its next turn, and 
   ``integrity_violation`` alert per day holding the findings (counts and request/user ids, for
   admins); ``studioJobState.lastIntegrityResult`` keeps the counts only. A scan that fails is a
   ``check_failed`` finding, never silence.
+* **Meta watch** (every 10 minutes, claimed ONLY while Meta is configured; the one job that calls
+  Meta): studio_alerts_meta.run_meta_watch (P3-18a/c): the daily token check and its 14/7/2-day
+  expiry alerts, the ``meta_connection_down`` state (rechecked while down) and, every 6 hours, the
+  funds and status of the ad accounts that carry studio campaigns.
 
 Records (router-only types: the generic /api/collections API refuses both):
 
@@ -56,7 +60,8 @@ Records (router-only types: the generic /api/collections API refuses both):
 * ``studioJobState``: one row (``sjs_`` + sha256('studio-jobs')[:40]), ``created_by`` NULL:
   lastTickAt, lastSweepAt, lastWaitingCheckAt, lastIntegrityScanDay, lastIntegrityScanAt,
   lastIntegrityResult (counts only), lastError (job, error type, time; never a message),
-  lastResultsSyncAt and resultsParkedUntil (the results sync's parked ad accounts).
+  lastResultsSyncAt and resultsParkedUntil (the results sync's parked ad accounts),
+  lastMetaWatchAt and lastFundsCheckAt (the Meta watch's turns).
 
 ``GET /api/studio/admin/alerts`` (admin only, 30 reads a minute): newest first, ``limit`` 1-50
 (20 by default), ``before`` = the ``nextBefore`` of the previous page; ``jobs`` = jobs_heartbeat().
@@ -90,6 +95,7 @@ from ...wallet_payments import (
 )
 from . import social_studio, studio_integrity
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
+from .studio_alerts_meta import WATCH_EVERY as META_WATCH_EVERY, meta_watch_configured, run_meta_watch
 from .studio_diagnostics import libya_today, parse_time
 from .studio_errors import studio_error
 from .studio_settings import SERVICE_TIMEZONE, WEEKDAYS, read_all_settings
@@ -126,8 +132,30 @@ ALERT_KINDS = (
     "meta_connection_down", "meta_token_expiring", "replies_parked", "instagram_comments_not_arriving",
     "integrity_violation", "jobs_heartbeat_late", "stop_request_overdue", "payment_confirm_overdue",
     "storage_threshold", "studio_core_collision", "review_overdue", "meta_drift",
+    "studio_funds_unreadable",  # P3-18c: Meta does not show an ad account's funds (studio_alerts_meta.py)
 )
 ALERT_LABELS: dict[str, dict[str, str]] = {
+    # P3-18a/c (studio_alerts_meta.py)
+    "meta_connection_down": {
+        "en": "Albayan's Meta connection is down: the token check says it is not valid; comment replies are parked",
+        "ar": "ربط البيان مع ميتا متوقف: فحص الرمز يقول إنه غير صالح؛ الردود على التعليقات محفوظة حتى يعود",
+    },
+    "meta_token_expiring": {
+        "en": "Albayan's Meta token expires soon: refresh it before it stops",
+        "ar": "رمز البيان في ميتا تنتهي صلاحيته قريباً: جدّده قبل أن يتوقف",
+    },
+    "studio_funds_low": {
+        "en": "An ad account with studio ads has less money than those ads still need",
+        "ar": "حساب إعلاني فيه إعلانات الاستوديو رصيده أقل مما تحتاجه هذه الإعلانات",
+    },
+    "studio_account_inactive": {
+        "en": "An ad account with studio ads is not active in Meta",
+        "ar": "حساب إعلاني فيه إعلانات الاستوديو غير نشط في ميتا",
+    },
+    "studio_funds_unreadable": {
+        "en": "Meta does not show the funds of an ad account with studio ads (full control is needed)",
+        "ar": "ميتا لا تعرض رصيد حساب إعلاني فيه إعلانات الاستوديو (يلزم تحكم كامل)",
+    },
     "approval_interrupted": {
         "en": "An approval stopped halfway: the budget was paid but the request still waits for review",
         "ar": "توقفت موافقة في منتصفها: دُفعت الميزانية والطلب ما زال بانتظار المراجعة",
@@ -688,6 +716,9 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         elif _due(state.get("lastSweepAt"), SWEEP_EVERY, now):
             fields["lastSweepAt"] = at
             claimed.append("sweep")
+        if meta_watch_configured() and _due(state.get("lastMetaWatchAt"), META_WATCH_EVERY, now):
+            fields["lastMetaWatchAt"] = at
+            claimed.append("meta_watch")
         if _due(state.get("lastWaitingCheckAt"), WAITING_EVERY, now):
             fields["lastWaitingCheckAt"] = at
             claimed.append("waiting")
@@ -701,6 +732,7 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
     jobs: dict[str, Callable[[], Any]] = {
         "daily": lambda: run_daily_money_check(ctx_provider, now),
         "sweep": lambda: sweep_orphans(ctx_provider(), now),
+        "meta_watch": lambda: run_meta_watch(now),  # P3-18a/c (studio_alerts_meta.py)
         "waiting": lambda: check_waiting_requests(now),
         "results": lambda: _run_results_sync(now),
     }

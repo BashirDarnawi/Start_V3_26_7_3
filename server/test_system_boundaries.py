@@ -35,7 +35,7 @@ PLATFORM_TYPES = {
 PLATFORM_DOORS = {
     "db", "schemas", "wallet_payments", "payment_methods", "subscription_plans", "operations", "meta_ads",
     "startup_support", "rate_limiter", "auth_limits", "security", "rbac", "entity_projection", "http_security",
-    "user_directory", "meta_collisions",
+    "user_directory", "meta_collisions", "meta_token_health",
 }
 # Dictionary access by key is not a use of a record type ("pages" as a JSON key, row.get("ads")).
 KEY_ACCESS = {"get", "pop", "setdefault"}
