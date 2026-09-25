@@ -466,6 +466,9 @@ function renderAdsStudioSubscriptionGate() {
 }
 
 function renderAdsStudioView() {
+  // Studio v2 (P2-02a, 15h-studio-shell.js): only when GET /api/studio/me says so; '' = the classic screens below.
+  const studioV2Html = typeof renderStudioV2View === 'function' ? renderStudioV2View() : '';
+  if (studioV2Html) return studioV2Html;
   const isAr = adsStudioIsAr();
   if (!adsStudioCanUse()) {
     // Expired, but their campaigns may still hold their money: show those

@@ -466,6 +466,9 @@ function renderAdsStudioSubscriptionGate() {
 }
 
 function renderAdsStudioView() {
+  // Studio v2 (P2-02a, 15h-studio-shell.js): only when GET /api/studio/me says so; '' = the classic screens below.
+  const studioV2Html = typeof renderStudioV2View === 'function' ? renderStudioV2View() : '';
+  if (studioV2Html) return studioV2Html;
   const isAr = adsStudioIsAr();
   if (!adsStudioCanUse()) {
     // Expired, but their campaigns may still hold their money: show those
@@ -5645,4 +5648,1138 @@ function renderStudioHealthSection() {
       <div class="space-y-3">${pages.length ? pages.map(renderStudioHealthPage).join('') : `<p class="text-sm text-slate-500">${studioHealthText('No linked pages yet.', 'لا توجد صفحات مربوطة بعد.')}</p>`}</div>
     </div>
   </section>`;
+}
+// ==========================================
+// ALBAYAN STUDIO v2 — CORE (plan task P2-01, studio.js lazy bundle)
+// ==========================================
+// Shared helpers for the v2 screens (the 15h shell and the screens after it). Nothing in this file
+// draws a screen, and nothing runs while the bundle loads: every helper waits to be called.
+// - studioApi(): apiJson with the studio error map attached (error.studio = studioErrorInfo(error)).
+//   ONE lookup for every refusal: the /api/studio codes (studio_errors.py) in STUDIO_ERROR_TEXTS,
+//   the older routes' English prefixes through the classic map (adsStudioRefusalText, 15c, reused,
+//   never copied), 429 by its status (it has no body), and a calm fallback that never shows raw
+//   English to an Arabic reader.
+// - studioMe() / studioLoadMe(): GET /api/studio/me, cleaned, kept per user; a reply younger than
+//   maxAge is reused and a read already on its way is joined (one request at a time).
+// - studioPulseWatch(): a light poller hook for a {changedAt} route: it polls only while the page is
+//   visible and keeps no timer at all while the tab is hidden.
+// - studioStageView(): the server's display stage (derive_display_stage) made safe to show. The
+//   stage keys, looks and flag labels are checked against server/systems/ads_studio/stage_cases.json.
+// - studioUsd() / studioLyd(): money in its own currency (LYD never wears "$").
+// - studioParseAmount() / studioParsePhone(): typed amounts (Arabic digits, ٫ and , decimals,
+//   thousands separators) and phone numbers (E.164; the Libyan 09x / 218 / 00218 forms).
+
+function studioEsc(value) {
+  return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
+}
+
+// A short piece of text left to right inside Arabic (amounts, phone numbers), escaped.
+function studioLtr(text) {
+  return `<bdi dir="ltr">${studioEsc(text)}</bdi>`;
+}
+
+// The {en, ar} pair the server sends, in the reader's language (the other language when one is
+// missing); '' when neither is a usable string. Control characters are dropped; callers escape.
+function studioPickText(labels, max = 300) {
+  if (!labels || typeof labels !== 'object') return '';
+  const pick = value => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max) : '';
+  const first = adsStudioIsAr() ? pick(labels.ar) : pick(labels.en);
+  return first || pick(labels.en) || pick(labels.ar);
+}
+
+// ------------------------------------------------------------------ refusals (P2-01, P2-11)
+
+// Every /api/studio code (studio_errors.py STUDIO_ERROR_CODES; a check keeps the two in step) and the
+// client's own cases (no server code: by HTTP status or a lost connection). [English, Arabic].
+const STUDIO_ERROR_TEXTS = Object.freeze({
+  INVALID_REQUEST: ['Something in this form is not valid. Check it and try again.', 'في هذا النموذج شيء غير صالح. راجعه وأعد المحاولة.'],
+  UNKNOWN_FIELD: ['This screen is out of date. Reload the page and try again.', 'هذه الشاشة قديمة. أعد تحميل الصفحة ثم حاول مرة أخرى.'],
+  INVALID_VALUE: ['One of the values is not allowed. Check it and try again.', 'إحدى القيم غير مسموح بها. راجعها وأعد المحاولة.'],
+  CROSS_SITE: ['Open Albayan directly and try again.', 'افتح البيان مباشرة ثم أعد المحاولة.'],
+  ADMIN_ONLY: ['Only an admin can do this.', 'هذا الإجراء للمدير فقط.'],
+  UNKNOWN_SETTING: ['This setting does not exist. Reload the page.', 'هذا الإعداد غير موجود. أعد تحميل الصفحة.'],
+  VERSION_CONFLICT: ['Someone saved a newer version first. Reload and try again.', 'حفظ شخص آخر نسخة أحدث أولاً. أعد التحميل وحاول مرة أخرى.'],
+  RATE_LIMITED: ['Too many requests. Please wait a minute and try again.', 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.'],
+  UNKNOWN_PAGE: ['This page is no longer linked.', 'هذه الصفحة لم تعد مربوطة.'],
+  NOT_INSTAGRAM: ['This linked page is not an Instagram account.', 'هذه الصفحة المربوطة ليست حساب إنستغرام.'],
+  ALREADY_TESTED_TODAY: ['Already tested today. Try again tomorrow (Tripoli time).', 'تم الاختبار اليوم. أعد المحاولة غداً (بتوقيت طرابلس).'],
+  META_NOT_CONFIGURED: ["Albayan's Meta connection is not set up yet.", 'ربط البيان مع ميتا غير مُعدّ بعد.'],
+  META_PAUSED: ['Meta asked Albayan to wait. Try again in a few minutes.', 'طلبت ميتا من البيان الانتظار. أعد المحاولة بعد بضع دقائق.'],
+  UNKNOWN_CAMPAIGN: ['This request was not found. Refresh the page.', 'لم نجد هذا الطلب. حدّث الصفحة.'],
+  STAFF_ONLY: ['Only the Albayan team can do this.', 'هذا الإجراء لفريق البيان فقط.'],
+  NOT_LINKED: ['This request is not linked to a Meta campaign yet.', 'هذا الطلب غير مربوط بحملة ميتا بعد.'],
+  SESSION_ENDED: ['Your session has ended. Sign in again.', 'انتهت جلستك. سجّل الدخول مرة أخرى.'],
+  FORBIDDEN: ['You do not have access to this.', 'لا تملك صلاحية الوصول إلى هذا.'],
+  NOT_FOUND: ['This item was not found. Refresh the page.', 'لم نجد هذا العنصر. حدّث الصفحة.']
+});
+
+// By kind: a read can simply be tried again; after an action whose answer never arrived, nobody can
+// promise that nothing happened, so the reader is sent to the latest state first.
+const STUDIO_ERROR_KIND_TEXTS = Object.freeze({
+  read: Object.freeze({
+    SERVER: ['Albayan could not load this right now. Try again in a minute.', 'تعذّر على البيان تحميل هذا الآن. أعد المحاولة بعد دقيقة.'],
+    NETWORK: ['No connection to Albayan. Check your internet and try again.', 'لا يوجد اتصال بالبيان. تحقّق من الإنترنت وأعد المحاولة.'],
+    UNKNOWN: ['This could not be loaded. Try again in a moment.', 'تعذّر التحميل. أعد المحاولة بعد لحظات.']
+  }),
+  action: Object.freeze({
+    SERVER: ['We could not confirm whether this went through. Refresh to see the latest state before trying again.', 'لم نتمكن من التأكد من إتمام العملية. حدّث الصفحة لترى آخر حالة قبل المحاولة مرة أخرى.'],
+    NETWORK: ['The connection dropped, so we could not confirm this. Refresh to see the latest state before trying again.', 'انقطع الاتصال، لذلك لم نتأكد من إتمام العملية. حدّث الصفحة لترى آخر حالة قبل المحاولة مرة أخرى.'],
+    // PLAN.md §5.5: an unknown refusal says what matters most — the money did not move.
+    UNKNOWN: ['The action could not be completed. Nothing changed in your balance.', 'تعذّر إتمام العملية. لم يتغير شيء في رصيدك.']
+  })
+});
+
+function studioKnownErrorCode(code) {
+  return Object.prototype.hasOwnProperty.call(STUDIO_ERROR_TEXTS, code);
+}
+
+// Everything a screen needs to explain a failed call: {status, code, retryAfterSeconds, message,
+// text}. `text` is plain text in the reader's language (escape it when drawing); `message` is the
+// server's own words, for logs only. kind: 'read' (a GET) or 'action' (anything that changes data).
+function studioErrorInfo(error, kind = 'action') {
+  const mode = kind === 'read' ? 'read' : 'action';
+  const base = adsStudioErrorInfo(error);  // 15c: {code, message, retryAfterSeconds}; 429 -> RATE_LIMITED
+  const rawStatus = Number(error && error.status);
+  const status = Number.isSafeInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : 0;
+  const serverCode = /^[A-Z][A-Z0-9_]{1,47}$/.test(base.code) ? base.code : '';
+  const message = String(base.message || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 500);
+  const pair = pairOrNull => pairOrNull ? adsStudioText(pairOrNull[0], pairOrNull[1]) : '';
+  let code = serverCode;
+  let text = '';
+  if (status === 429 || code === 'RATE_LIMITED') {
+    code = 'RATE_LIMITED';
+    const wait = adsStudioWaitText(base.retryAfterSeconds);
+    text = wait
+      ? adsStudioText(`Too many requests. Please wait ${wait[0]} and try again.`, `طلبات كثيرة. انتظر ${wait[1]} ثم أعد المحاولة.`)
+      : pair(STUDIO_ERROR_TEXTS.RATE_LIMITED);
+  } else if (code) {
+    // A code this screen does not know yet (a newer server) is never shown raw.
+    text = studioKnownErrorCode(code) ? pair(STUDIO_ERROR_TEXTS[code]) : '';
+  } else if (status === 401) {
+    code = 'SESSION_ENDED';
+  } else if (status === 422) {
+    code = 'INVALID_REQUEST';  // FastAPI's own body check: a list of fields, not words for a person
+  } else if (status >= 400 && status < 500 && message && !/^\s*[[{]/.test(message)) {
+    // The older routes send a plain string with a stable English prefix: the classic map knows them.
+    // Arabic shows only what the map translates; English shows the refusal itself (400/403/409).
+    const mapped = adsStudioRefusalText(message);
+    if (adsStudioIsAr()) text = mapped && mapped !== message ? mapped : '';
+    else if (status === 400 || status === 403 || status === 409) text = mapped;
+  }
+  if (!text && studioKnownErrorCode(code)) text = pair(STUDIO_ERROR_TEXTS[code]);
+  if (!text) {
+    const name = String((error && error.name) || '');
+    const words = String((error && error.message) || '');
+    const offline = !status && (name === 'AbortError' || /failed to fetch|networkerror|network error|load failed|network request failed/i.test(words));
+    let fallback = 'UNKNOWN';
+    if (status >= 500) fallback = 'SERVER';
+    else if (!status && offline) fallback = 'NETWORK';
+    else if (status === 403) { code = code || 'FORBIDDEN'; text = pair(STUDIO_ERROR_TEXTS.FORBIDDEN); }
+    else if (status === 404) { code = code || 'NOT_FOUND'; text = pair(STUDIO_ERROR_TEXTS.NOT_FOUND); }
+    if (!text) {
+      code = code || fallback;
+      text = pair(STUDIO_ERROR_KIND_TEXTS[mode][fallback]);
+    }
+  }
+  return { status, code, retryAfterSeconds: base.retryAfterSeconds || 0, message, text };
+}
+
+// apiJson for the studio screens: the same call, and a failure carries error.studio (above).
+async function studioApi(path, options = {}, timeout = {}) {
+  try {
+    return await apiJson(path, options, timeout);
+  } catch (error) {
+    const method = String((options && options.method) || 'GET').toUpperCase();
+    const failure = error && typeof error === 'object' ? error : new Error(String(error || 'Request failed'));
+    try { failure.studio = studioErrorInfo(failure, method === 'GET' ? 'read' : 'action'); } catch (_) { /* keeps the plain error */ }
+    throw failure;
+  }
+}
+
+// ------------------------------------------------------------------ GET /api/studio/me
+
+const STUDIO_ME_MAX_AGE_MS = 5 * 60 * 1000;  // the switches can change; a reply this old is read again
+const STUDIO_ME_RETRY_MS = 60 * 1000;        // a failed first read is tried again at most once a minute
+const _studioMe = { forUser: '', value: null, loadedAt: 0, failedAt: 0, promise: null, generation: 0, listeners: new Set() };
+
+function studioMeUserId() {
+  return typeof state !== 'undefined' && state && state.currentUser ? String(state.currentUser.id || '') : '';
+}
+
+function studioMeFlag(value) {
+  return value === true;
+}
+
+// The reply, cleaned: only the fields and values the screens understand; anything else reads as
+// the safe side (classic layouts, services off, intake unknown).
+function studioCleanMe(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const services = raw.services && typeof raw.services === 'object' ? raw.services : {};
+  const plain = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return {}; }
+  };
+  const contact = plain(raw.contact);
+  return Object.freeze({
+    ui: raw.ui === 'v2' ? 'v2' : 'classic',
+    staffDesk: raw.staffDesk === 'v2' ? 'v2' : 'classic',
+    isAdmin: studioMeFlag(raw.isAdmin),
+    isStaff: studioMeFlag(raw.isStaff) || studioMeFlag(raw.isAdmin),
+    services: Object.freeze({
+      help: studioMeFlag(services.help),
+      stopRequest: studioMeFlag(services.stopRequest),
+      tiktok: studioMeFlag(services.tiktok)
+    }),
+    intakeOpen: raw.intake && typeof raw.intake.open === 'boolean' ? raw.intake.open : null,
+    adLimits: typeof adsStudioCleanLimits === 'function' ? adsStudioCleanLimits(raw.adLimits) : plain(raw.adLimits),
+    capabilities: plain(raw.capabilities),
+    serviceHours: plain(raw.serviceHours),
+    contact: Object.freeze({
+      whatsapp: studioParsePhone(contact.whatsapp),
+      phone: studioParsePhone(contact.phone),
+      email: typeof contact.email === 'string' && contact.email.length <= 254 && /^[^\s@<>"']+@[^\s@<>"']+$/.test(contact.email) ? contact.email : ''
+    }),
+    metaConnection: plain(raw.metaConnection)
+  });
+}
+
+// The current user's /me reply, or null while unknown (never another user's).
+function studioMe() {
+  const uid = studioMeUserId();
+  return uid && _studioMe.forUser === uid ? _studioMe.value : null;
+}
+
+function studioMeLoading() {
+  const uid = studioMeUserId();
+  return !!(uid && _studioMe.forUser === uid && _studioMe.promise);
+}
+
+function studioResetMe() {
+  _studioMe.generation++;  // a reply still on its way belongs to the old session: dropped
+  _studioMe.forUser = '';
+  _studioMe.value = null;
+  _studioMe.loadedAt = 0;
+  _studioMe.failedAt = 0;
+  _studioMe.promise = null;
+}
+
+// fn() runs after every settled read (a new reply, or a failure that kept the last good one).
+function studioMeSubscribe(fn) {
+  if (typeof fn === 'function') _studioMe.listeners.add(fn);
+  return () => _studioMe.listeners.delete(fn);
+}
+
+function studioMeNotify() {
+  for (const fn of Array.from(_studioMe.listeners)) {
+    try { fn(studioMe()); } catch (_) { /* one screen never breaks another */ }
+  }
+}
+
+// Resolves to the reply (null when unknown). A reply younger than maxAgeMs is reused; a read on its
+// way is joined; a failed read keeps the last good reply. maxAgeMs 0 asks the server again.
+function studioLoadMe(maxAgeMs = STUDIO_ME_MAX_AGE_MS) {
+  const uid = studioMeUserId();
+  if (!uid || typeof isServerModeEnabled !== 'function' || !isServerModeEnabled()) return Promise.resolve(null);
+  if (_studioMe.forUser !== uid) studioResetMe();  // another user's reply is never reused
+  if (_studioMe.promise) return _studioMe.promise;
+  const age = Date.now() - _studioMe.loadedAt;
+  const maxAge = Math.max(0, Number(maxAgeMs) || 0);
+  if (_studioMe.value && age >= 0 && age < maxAge) return Promise.resolve(_studioMe.value);
+  if (!_studioMe.value && _studioMe.failedAt && Date.now() - _studioMe.failedAt < STUDIO_ME_RETRY_MS) return Promise.resolve(null);
+  _studioMe.forUser = uid;
+  const generation = ++_studioMe.generation;
+  const promise = (async () => {
+    let value = null;
+    let aborted = false;
+    try {
+      value = studioCleanMe(await apiJson('/api/studio/me', { method: 'GET' }));
+    } catch (error) {
+      // Leaving a page cancels its reads: that is no failure, the next screen asks again.
+      aborted = !!(error && error.name === 'AbortError');
+    }
+    if (generation !== _studioMe.generation || uid !== studioMeUserId()) return null;
+    _studioMe.promise = null;
+    if (value) {
+      _studioMe.value = value;
+      _studioMe.loadedAt = Date.now();
+      _studioMe.failedAt = 0;
+    } else if (!aborted) {
+      _studioMe.failedAt = Date.now();
+    }
+    studioMeNotify();
+    return _studioMe.value;
+  })();
+  _studioMe.promise = promise;
+  return promise;
+}
+
+// ------------------------------------------------------------------ pulse poller hook
+
+const STUDIO_PULSE_DEFAULT_MS = 30000;
+const STUDIO_PULSE_MIN_MS = 10000;
+const STUDIO_PULSE_MAX_BACKOFF_MS = 5 * 60 * 1000;
+const _studioPulse = { watches: new Map(), listening: false };
+
+function studioPulseVisible() {
+  try { return typeof document === 'undefined' || document.visibilityState !== 'hidden'; } catch (_) { return true; }
+}
+
+// Polls `path` (a GET that answers {changedAt}) every intervalMs while the page is visible and calls
+// onChange(value, reply) when the value moves (never for the first reading). While the tab is hidden
+// there is no timer at all; coming back polls at once if a round was missed. One read at a time;
+// failures back off (429: the server's Retry-After). Signing out or another user stops the watch.
+// Returns stop(). A second watch under the same key replaces the first.
+function studioPulseWatch(key, options = {}) {
+  const name = String(key || '');
+  const path = String(options.path || '');
+  if (!name || !/^\/api\/[A-Za-z0-9/_?=&.-]+$/.test(path) || typeof options.onChange !== 'function') return () => {};
+  studioPulseStop(name);
+  const watch = {
+    key: name,
+    path,
+    field: typeof options.field === 'string' && options.field ? options.field : 'changedAt',
+    intervalMs: Math.max(STUDIO_PULSE_MIN_MS, Number(options.intervalMs) || STUDIO_PULSE_DEFAULT_MS),
+    onChange: options.onChange,
+    uid: studioMeUserId(),
+    timer: null,
+    inFlight: false,
+    last: undefined,
+    lastPollAt: 0,
+    failures: 0,
+    stopped: false
+  };
+  _studioPulse.watches.set(name, watch);
+  studioPulseListen();
+  studioPulseSchedule(watch, 0);
+  return () => studioPulseStop(name);
+}
+
+function studioPulseStop(key) {
+  const watch = _studioPulse.watches.get(String(key || ''));
+  if (!watch) return;
+  watch.stopped = true;
+  if (watch.timer) clearTimeout(watch.timer);
+  watch.timer = null;
+  _studioPulse.watches.delete(watch.key);
+}
+
+function studioPulseSchedule(watch, delayMs) {
+  if (watch.stopped) return;
+  if (watch.timer) { clearTimeout(watch.timer); watch.timer = null; }
+  if (!studioPulseVisible()) return;  // hidden: no timer; the visibility handler starts it again
+  watch.timer = setTimeout(() => { watch.timer = null; studioPulsePoll(watch); }, Math.max(0, Number(delayMs) || 0));
+}
+
+async function studioPulsePoll(watch) {
+  if (watch.stopped || watch.inFlight || !studioPulseVisible()) return;
+  if (!watch.uid || watch.uid !== studioMeUserId()) { studioPulseStop(watch.key); return; }
+  watch.inFlight = true;
+  let delay = watch.intervalMs;
+  try {
+    const reply = await apiJson(watch.path, { method: 'GET' });
+    const raw = reply && typeof reply === 'object' ? reply[watch.field] : undefined;
+    const value = raw === undefined || raw === null ? '' : String(raw).slice(0, 100);
+    const changed = watch.last !== undefined && value !== watch.last;
+    watch.last = value;
+    watch.failures = 0;
+    if (changed && !watch.stopped && watch.uid === studioMeUserId()) {
+      try { watch.onChange(value, reply); } catch (_) { /* a screen's handler never stops the watch */ }
+    }
+  } catch (error) {
+    watch.failures++;
+    const wait = Number(error && error.retryAfter);
+    delay = error && error.status === 429 && wait > 0
+      ? Math.min(wait * 1000, STUDIO_PULSE_MAX_BACKOFF_MS * 2)
+      : Math.min(watch.intervalMs * (2 ** Math.min(watch.failures, 4)), STUDIO_PULSE_MAX_BACKOFF_MS);
+  } finally {
+    watch.inFlight = false;
+    watch.lastPollAt = Date.now();
+  }
+  studioPulseSchedule(watch, delay);
+}
+
+function studioPulseListen() {
+  if (_studioPulse.listening || typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+  _studioPulse.listening = true;
+  document.addEventListener('visibilitychange', studioPulseOnVisibility);
+}
+
+function studioPulseOnVisibility() {
+  const onScreen = studioPulseVisible();
+  for (const watch of Array.from(_studioPulse.watches.values())) {
+    if (!onScreen) {
+      if (watch.timer) clearTimeout(watch.timer);
+      watch.timer = null;
+    } else if (!watch.timer && !watch.inFlight) {
+      studioPulseSchedule(watch, Math.max(0, watch.lastPollAt + watch.intervalMs - Date.now()));
+    }
+  }
+}
+
+// ------------------------------------------------------------------ display stages (PLAN.md §5.4)
+
+// Stage n is STUDIO_STAGE_KEYS[n - 1]; the same list, looks and flag words as the server's tables
+// (stage_cases.json "tables", checked by scripts/test-mobile-ui.js). Colour never stands alone: every
+// stage has its icon (the server's icon name, then the icon this app draws for it).
+const STUDIO_STAGE_KEYS = Object.freeze([
+  'draft', 'waiting_review', 'needs_changes', 'approved_setup', 'meta_reviewing', 'meta_rejected', 'delivery_problem',
+  'running', 'paused', 'ended_settling', 'finished', 'stopped', 'rejected'
+]);
+const STUDIO_STAGE_LOOK = Object.freeze({
+  draft: ['slate', 'pencil', 'pencil'],
+  waiting_review: ['amber', 'clock', 'clock'],
+  needs_changes: ['orange', 'message-warning', 'message-square-warning'],
+  approved_setup: ['blue', 'badge-check', 'badge-check'],
+  meta_reviewing: ['blue', 'shield', 'shield'],
+  meta_rejected: ['red-orange', 'shield-alert', 'shield-alert'],
+  delivery_problem: ['orange', 'alert-triangle', 'triangle-alert'],
+  running: ['green', 'play', 'play'],
+  paused: ['slate-blue', 'pause', 'pause'],
+  ended_settling: ['slate', 'hourglass', 'hourglass'],
+  finished: ['slate', 'flag', 'flag'],
+  stopped: ['rose', 'stop', 'circle-stop'],
+  rejected: ['red', 'x', 'x']
+});
+const STUDIO_STAGE_FLAGS = Object.freeze({
+  runningPastEnd: ['Running past the promised end — the team is on it', 'ما زال يعمل بعد موعد الانتهاء — الفريق يتابعه'],
+  stopRequested: ['Stop requested — we will pause it soon', 'طُلب الإيقاف — سنوقفه قريباً'],
+  stale: ['Meta has not been checked for a while', 'لم نتحقق من ميتا منذ مدة']
+});
+const STUDIO_STAGE_TRACKER = Object.freeze(['not_sent', 'sent', 'approved', 'meta_review', 'running', 'ended', 'finished']);
+const STUDIO_STAGE_ACTIONS = Object.freeze(['edit', 'send', 'delete', 'withdraw', 'ask', 'fix', 'stop_refund', 'ask_to_stop', 'archive', 'read_reasons', 'copy_fix']);
+
+// One request's stage as the server derived it (GET /api/studio/campaigns/summary), ready to draw:
+// the server's words in the reader's language, a look from the list above, and only the actions this
+// app knows. A stage this app does not know yet keeps the server's label with a neutral look. "Meta
+// used" exists only for a linked request in stages 4-10 (never before a link, PLAN.md §5.4).
+// All text is plain: escape it when drawing. null for anything that is not a stage.
+function studioStageView(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const number = Number(raw.stage);
+  const byNumber = Number.isSafeInteger(number) && number >= 1 && number <= STUDIO_STAGE_KEYS.length ? STUDIO_STAGE_KEYS[number - 1] : '';
+  const sentKey = typeof raw.stageKey === 'string' ? raw.stageKey : '';
+  const key = STUDIO_STAGE_KEYS.includes(sentKey) ? sentKey : (sentKey ? '' : byNumber);
+  const stage = key ? STUDIO_STAGE_KEYS.indexOf(key) + 1 : 0;
+  const look = key ? STUDIO_STAGE_LOOK[key] : null;
+  const linked = raw.linked === true;
+  const used = raw.metaUsedMinor;  // null = Meta has not confirmed a spend: never read as $0
+  const flags = Object.keys(STUDIO_STAGE_FLAGS).filter(flag => raw[flag] === true)
+    .map(flag => ({ key: flag, text: adsStudioText(STUDIO_STAGE_FLAGS[flag][0], STUDIO_STAGE_FLAGS[flag][1]) }));
+  const tracker = raw.tracker && typeof raw.tracker === 'object' ? raw.tracker : {};
+  return {
+    stage,
+    key,
+    known: !!key,
+    label: studioPickText(raw.labels, 160) || adsStudioText('Status not available', 'الحالة غير متاحة'),
+    tone: look ? look[0] : 'slate',
+    icon: look ? look[2] : 'circle-help',
+    money: studioPickText(raw.money),
+    nextActor: studioPickText(raw.nextActorLabels, 120),
+    variant: studioPickText(raw.variantLabels, 160),
+    linked,
+    checking: raw.checking === true,
+    checkedAgo: studioPickText(raw.checkedAgo, 80),
+    stale: raw.stale === true,
+    metaUsedMinor: linked && stage >= 4 && stage <= 10 && Number.isSafeInteger(used) && used >= 0 ? used : null,
+    flags,
+    tracker: { step: STUDIO_STAGE_TRACKER.includes(tracker.step) ? tracker.step : '', side: tracker.side === true },
+    actions: Array.isArray(raw.actions) ? raw.actions.filter(action => STUDIO_STAGE_ACTIONS.includes(action)) : [],
+    reasons: Array.isArray(raw.reasons) ? raw.reasons.map(String).filter(reason => /^[a-z_]{1,40}$/.test(reason)).slice(0, 10) : []
+  };
+}
+
+// ------------------------------------------------------------------ money
+
+// "1,234.56" (Latin digits, grouped: money reads the same on every phone) for a whole number of
+// cents; '' for anything else.
+function studioMinorText(minor) {
+  const value = typeof minor === 'string' && /^-?\d{1,16}$/.test(minor.trim()) ? Number(minor.trim()) : minor;
+  if (!Number.isSafeInteger(value)) return '';
+  const abs = Math.abs(value);
+  const whole = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${value < 0 ? '-' : ''}${whole}.${String(abs % 100).padStart(2, '0')}`;
+}
+
+// US dollars (the ad wallet): "$1,234.56", "-$5.00"; "—" when the amount is unknown.
+function studioUsd(minor) {
+  const text = studioMinorText(minor);
+  if (!text) return '—';
+  return text.startsWith('-') ? `-$${text.slice(1)}` : `$${text}`;
+}
+
+// Libyan dinars (plans): "1,234.56 LYD" / "1,234.56 د.ل" — never "$".
+function studioLyd(minor) {
+  const text = studioMinorText(minor);
+  return text ? `${text} ${adsStudioText('LYD', 'د.ل')}` : '—';
+}
+
+// ------------------------------------------------------------------ typed input
+
+const STUDIO_MAX_AMOUNT_MINOR = 1e12;
+
+// A typed amount in minor units (cents), or NaN. Built on the classic parser (adsStudioParseMoneyMinor,
+// 15c: Arabic-Indic digits, ٫ and ، , "1,250" is a thousand, "12,5" is twelve and a half), plus the
+// Arabic thousands sign ٬, a "$" and bidi marks around the number. More than two decimals, a sign or
+// any other character is refused rather than guessed.
+function studioParseAmount(raw) {
+  if (raw === null || raw === undefined || typeof raw === 'object') return NaN;
+  const text = normalizeDigitsAscii(String(raw))
+    .replace(/[\s ‎‏‪-‮⁦-⁩]/g, '')
+    .replace(/٬/g, ',')
+    .replace(/^\$|\$$/g, '');
+  if (!text || text.length > 24) return NaN;
+  const marks = text.replace(/،/g, ',').replace(/٫/g, '.');
+  if (/\.\d{3,}$/.test(marks)) return NaN;
+  if (!marks.includes('.') && /,\d{3,}$/.test(marks) && !/^\d{1,3}(,\d{3})+$/.test(marks)) return NaN;
+  const minor = adsStudioParseMoneyMinor(text);
+  return Number.isSafeInteger(minor) && minor >= 0 && minor <= STUDIO_MAX_AMOUNT_MINOR ? minor : NaN;
+}
+
+// A typed phone number as E.164 ("+218912345678"), or '' when it is not one. Arabic digits, spaces,
+// dots, dashes and brackets are allowed; 00 means +. Libyan numbers may be typed as 091 234 5678,
+// 91 234 5678, 218 91 234 5678 or +218 091… (the local 0 dropped). Any other country needs its +code.
+// The server keeps the same rule (studio_settings._phone: +, then 8-15 digits).
+function studioParsePhone(raw) {
+  if (raw === null || raw === undefined || typeof raw === 'object') return '';
+  let text = normalizeDigitsAscii(String(raw)).trim();
+  if (!text || text.length > 32) return '';
+  text = text.replace(/[\s().\- ‎‏‪-‮⁦-⁩]/g, '');
+  if (text.startsWith('00')) text = `+${text.slice(2)}`;
+  if (!/^\+?\d{6,20}$/.test(text)) return '';
+  let number;
+  if (text.startsWith('+')) number = text;
+  else if (/^218\d{8,10}$/.test(text)) number = `+${text}`;
+  else if (/^0\d{8,9}$/.test(text)) number = `+218${text.slice(1)}`;
+  else if (/^9\d{8}$/.test(text)) number = `+218${text}`;
+  else return '';
+  if (number.startsWith('+2180')) number = `+218${number.slice(5)}`;
+  if (number.startsWith('+218')) return /^\+218[1-9]\d{7,8}$/.test(number) ? number : '';
+  return /^\+[1-9]\d{7,14}$/.test(number) ? number : '';
+}
+// ==========================================
+// ALBAYAN STUDIO v2 — SHELL (plan tasks P2-02a-d; styles P2-08 in assets/ads-workspace.css)
+// ==========================================
+// The v2 frame, drawn only when GET /api/studio/me says so: ui 'v2' for the customer layout,
+// staffDesk 'v2' for the Team desk (staff only). renderAdsStudioView (15c) asks renderStudioV2View()
+// first and draws the classic screens, unchanged, whenever the answer is '' (classic, local mode,
+// /me unknown or failed, or any error here).
+//
+// Addresses stay on ?tab= (one view, no new paths), with &section=, &id= and &step=:
+//   customer: home (the pinned 'dashboard' too), campaigns, replies, wallet, help, inbox, account,
+//             builder (&section=boost|full &step=N, also any tab with section=builder), posts and,
+//             for staff only, review;
+//   Team desk: tab=review&section=requests|launch|settle|tickets|health|more.
+// Back (PLAN.md §5.1): builder step N -> N-1; a detail (&id=) -> its list; any other tab -> Home
+// (the desk: its Requests); Home -> leaves the studio. The browser history mirrors that chain: every
+// studio entry carries history.state.studioV2.chain (the keys from Home to itself). Leaving Home
+// pushes, moving between tabs replaces, going up walks back through history, so the in-app Back
+// button and the browser's Back always agree. A screen opened straight from a link gets its parents
+// put under it. The builder hides the section bar (focus mode).
+// Screens not built yet show "Coming soon in the new studio" inside their own root.
+
+const STUDIO_V2_TABS = Object.freeze([
+  // [tab, icon, English, Arabic, place] place: 'nav' = bottom bar / side rail, 'head' = header button
+  ['home', 'house', 'Home', 'الرئيسية', 'nav'],
+  ['campaigns', 'megaphone', 'My ads', 'إعلاناتي', 'nav'],
+  ['replies', 'messages-square', 'Pages & replies', 'الصفحات والردود', 'nav'],
+  ['wallet', 'wallet', 'Wallet', 'المحفظة', 'nav'],
+  ['help', 'life-buoy', 'Help', 'المساعدة', 'nav'],
+  ['inbox', 'bell', 'Inbox', 'الإشعارات', 'head'],
+  ['account', 'circle-user-round', 'Account', 'حسابي', 'head'],
+  ['builder', 'wand-sparkles', 'New request', 'طلب جديد', ''],
+  ['posts', 'send', 'Scheduled posts', 'المنشورات المجدولة', ''],
+  ['review', 'badge-check', 'Team desk', 'مكتب الفريق', '']
+]);
+
+const STUDIO_V2_STAFF_SECTIONS = Object.freeze([
+  ['requests', 'clipboard-list', 'Requests', 'الطلبات'],
+  ['launch', 'rocket', 'Launch', 'الإطلاق'],
+  ['settle', 'scale', 'Settle', 'التسوية'],
+  ['tickets', 'ticket', 'Tickets', 'التذاكر'],
+  ['health', 'activity', 'Health', 'التنبيهات'],
+  ['more', 'ellipsis', 'More', 'المزيد']
+]);
+
+const STUDIO_V2_BUILDER_STEPS = Object.freeze({
+  full: [['Goal', 'الهدف'], ['Page', 'الصفحة'], ['Content', 'المحتوى'], ['Audience', 'الجمهور'], ['Budget & days', 'الميزانية والمدة'], ['Review', 'المراجعة']],
+  boost: [['Post', 'المنشور'], ['Budget & days', 'الميزانية والمدة'], ['Review', 'المراجعة']]
+});
+
+const STUDIO_V2_CLASSIC_TABS = Object.freeze(['dashboard', 'campaigns', 'builder', 'posts', 'replies', 'review']);
+const STUDIO_V2_ONLY_TABS = Object.freeze(['wallet', 'help', 'inbox', 'account']);
+const STUDIO_V2_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/;
+const STUDIO_V2_SECTION_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const STUDIO_V2_WAIT_MS = 3000;  // at most this long a known v2 user sees "Opening the studio…" instead of classic
+const STUDIO_V2_LAYOUT_KEY = 'albayan.studio.v2.layout.';  // + user id: the layout /me gave last time (this browser only)
+const _studioV2 = { shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false };
+
+// ------------------------------------------------------------------ which layout
+
+// 'staff' (the Team desk), 'customer' (the v2 customer layout) or '' (classic, or /me not known).
+function studioV2Frame() {
+  const me = studioMe();
+  if (!me) return '';
+  if (me.staffDesk === 'v2' && me.isStaff) return 'staff';
+  return me.ui === 'v2' ? 'customer' : '';
+}
+
+function studioV2IsStaff() {
+  const me = studioMe();
+  return !!(me && me.isStaff);
+}
+
+function studioV2Remembered(uid) {
+  try { return String(window.localStorage.getItem(STUDIO_V2_LAYOUT_KEY + uid) || ''); } catch (_) { return ''; }
+}
+
+function studioV2Remember(uid, frame) {
+  try {
+    if (frame === 'customer' || frame === 'staff') window.localStorage.setItem(STUDIO_V2_LAYOUT_KEY + uid, frame);
+    else window.localStorage.removeItem(STUDIO_V2_LAYOUT_KEY + uid);
+  } catch (_) { /* a private window: the classic screens show until /me answers */ }
+}
+
+// While the first /me read is on its way: a user whose last answer was v2 sees a short neutral
+// "Opening the studio…" (never the v2 frame before /me says so); everyone else gets classic at once.
+function studioV2ShouldWait() {
+  const uid = studioMeUserId();
+  if (!uid || !studioMeLoading()) return false;
+  const remembered = studioV2Remembered(uid);
+  if (remembered !== 'customer' && remembered !== 'staff') return false;
+  if (_studioV2.waitFor !== uid) {
+    _studioV2.waitFor = uid;
+    _studioV2.waitUntil = Date.now() + STUDIO_V2_WAIT_MS;
+    if (_studioV2.waitTimer) clearTimeout(_studioV2.waitTimer);
+    _studioV2.waitTimer = setTimeout(() => {
+      _studioV2.waitTimer = null;
+      if (_studioV2.shown === 'wait') studioV2Rerender();
+    }, STUDIO_V2_WAIT_MS + 50);
+  }
+  return Date.now() < _studioV2.waitUntil;
+}
+
+function studioV2Rerender() {
+  try {
+    if (typeof state !== 'undefined' && state.currentView === 'ads-studio' && typeof render === 'function') render();
+  } catch (_) { /* the next render shows the right layout */ }
+}
+
+// A /me answer arrived (or failed): draw again only when the layout on screen is no longer right.
+function studioV2OnMe(me) {
+  const uid = studioMeUserId();
+  if (!uid) return;
+  const frame = studioV2Frame();
+  if (me) studioV2Remember(uid, frame);
+  if (!_studioV2.shown) return;
+  const want = frame || 'classic';
+  if (want !== _studioV2.shown) studioV2Rerender();
+  else if (want === 'classic' && me && !STUDIO_V2_CLASSIC_TABS.includes(String(_adsStudioActiveTab || ''))) studioV2Rerender();
+}
+
+studioMeSubscribe(studioV2OnMe);
+
+// Called first by renderAdsStudioView (15c). '' = draw the classic screens.
+function renderStudioV2View() {
+  try {
+    studioLoadMe();  // reuses a fresh answer, joins a read on its way, re-reads an old one
+    const frame = studioV2Frame();
+    if (frame === 'staff') { _studioV2.shown = 'staff'; return renderStudioV2StaffFrame(); }
+    if (frame === 'customer') { _studioV2.shown = 'customer'; return renderStudioV2CustomerFrame(); }
+    if (!studioMe() && studioV2ShouldWait()) { _studioV2.shown = 'wait'; return renderStudioV2Waiting(); }
+    _studioV2.shown = 'classic';
+    if (studioMe()) studioV2ClassicTabFix();
+    return '';
+  } catch (error) {
+    if (!_studioV2.warned) {
+      _studioV2.warned = true;
+      try { console.warn('[studio v2] showing the classic screens instead:', error); } catch (_) {}
+    }
+    _studioV2.shown = 'classic';
+    return '';
+  }
+}
+
+// The classic layout knows only its own tabs: a v2 address (?tab=wallet …) opens its Overview.
+function studioV2ClassicTabFix() {
+  try {
+    if (STUDIO_V2_CLASSIC_TABS.includes(String(_adsStudioActiveTab || ''))) return;
+    _adsStudioActiveTab = 'dashboard';
+    const tab = new URLSearchParams(window.location.search || '').get('tab');
+    if (tab && !STUDIO_V2_CLASSIC_TABS.includes(tab) && typeof updateUrlParams === 'function') {
+      updateUrlParams({ tab: 'dashboard', section: null, id: null, step: null }, true);
+    }
+  } catch (_) { /* the Overview shows anyway */ }
+}
+
+// ------------------------------------------------------------------ the address and the Back model
+
+function studioV2ReadAddress() {
+  let params;
+  try { params = new URLSearchParams(window.location.search || ''); } catch (_) { params = new URLSearchParams(''); }
+  return { tab: params.get('tab') || '', section: params.get('section') || '', id: params.get('id') || '', step: params.get('step') || '' };
+}
+
+function studioV2BuilderSteps(section) {
+  return STUDIO_V2_BUILDER_STEPS[section === 'boost' ? 'boost' : 'full'];
+}
+
+function studioV2Home(frame) {
+  return frame === 'staff'
+    ? { tab: 'review', section: 'requests', id: '', step: 0 }
+    : { tab: 'home', section: '', id: '', step: 0 };
+}
+
+// Any address -> a route this frame can draw ({tab, section, id, step}); anything unknown is Home.
+function studioV2Route(raw, frame) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const section = STUDIO_V2_SECTION_RE.test(String(src.section || '')) ? String(src.section) : '';
+  const id = STUDIO_V2_ID_RE.test(String(src.id || '')) ? String(src.id) : '';
+  if (frame === 'staff') {
+    const known = STUDIO_V2_STAFF_SECTIONS.some(item => item[0] === section);
+    return { tab: 'review', section: known ? section : 'requests', id, step: 0 };
+  }
+  let tab = String(src.tab || '');
+  if (!tab || tab === 'dashboard') tab = 'home';
+  if (section === 'builder') tab = 'builder';
+  if (!STUDIO_V2_TABS.some(item => item[0] === tab) || (tab === 'review' && !studioV2IsStaff())) tab = 'home';
+  if (tab === 'home') return studioV2Home(frame);
+  if (tab === 'builder') {
+    const kind = section === 'boost' || section === 'full' ? section : '';
+    const count = studioV2BuilderSteps(kind).length;
+    const rawStep = String(src.step === undefined || src.step === null ? '' : src.step);
+    const step = /^\d{1,2}$/.test(rawStep) ? Number(rawStep) : 1;
+    return { tab, section: kind, id: '', step: Math.min(Math.max(step, 1), count) };
+  }
+  return { tab, section, id, step: 0 };
+}
+
+function studioV2Key(route) {
+  return [route.tab, route.section, route.id, route.step || ''].join('|');
+}
+
+// One level up (PLAN.md §5.1), or null on Home.
+function studioV2Parent(route, frame) {
+  if (frame === 'staff') {
+    if (route.id) return { ...route, id: '' };
+    return route.section === 'requests' ? null : studioV2Home('staff');
+  }
+  if (route.tab === 'home') return null;
+  if (route.tab === 'builder' && route.step > 1) return { ...route, step: route.step - 1 };
+  if (route.id) return { ...route, id: '' };
+  return studioV2Home('customer');
+}
+
+// Home first, the route last.
+function studioV2Path(route, frame) {
+  const path = [route];
+  let up = studioV2Parent(route, frame);
+  for (let guard = 0; up && guard < 20; guard++) {
+    path.unshift(up);
+    up = studioV2Parent(up, frame);
+  }
+  return path;
+}
+
+function studioV2Url(route) {
+  const params = new URLSearchParams();
+  params.set('tab', route.tab);
+  if (route.section) params.set('section', route.section);
+  if (route.id) params.set('id', route.id);
+  if (route.step) params.set('step', String(route.step));
+  return `${window.location.pathname || '/'}?${params.toString()}`;
+}
+
+function studioV2HistoryChain() {
+  try {
+    const mark = window.history.state && window.history.state.studioV2;
+    const chain = mark && mark.chain;
+    return Array.isArray(chain) && chain.length > 0 && chain.length <= 24
+      && chain.every(key => typeof key === 'string' && key.length <= 200) ? chain.slice() : null;
+  } catch (_) { return null; }
+}
+
+// The classic tab variable follows the v2 address, so a whole-view re-navigation (which keeps only
+// ?tab=) and the loader's restore land on the same screen.
+function studioV2SyncClassicTab(route) {
+  try { _adsStudioActiveTab = route.tab === 'home' ? 'dashboard' : route.tab; } catch (_) {}
+}
+
+function studioV2WriteEntry(route, chain, replace) {
+  const entry = { view: 'ads-studio', params: { tab: route.tab }, studioV2: { chain: chain.slice() } };
+  const url = studioV2Url(route);
+  if (replace) window.history.replaceState(entry, '', url);
+  else window.history.pushState(entry, '', url);
+  studioV2SyncClassicTab(route);
+}
+
+function studioV2NavigationType() {
+  try {
+    const entry = performance.getEntriesByType('navigation')[0];
+    return entry && entry.type ? String(entry.type) : 'navigate';
+  } catch (_) { return 'navigate'; }
+}
+
+// On every v2 draw: the entry on screen carries its chain. A screen opened straight from a link (or
+// from another page of the app) gets Home and its other parents put under it; after a reload or a
+// return through history the entries under it are the studio's own and only the mark is renewed.
+function studioV2EnsureHistory(route, frame) {
+  try {
+    const current = window.history.state;
+    if (current && current.overlaySentinel) return;  // an open sheet owns the top entry
+    const path = studioV2Path(route, frame);
+    const keys = path.map(studioV2Key);
+    const chain = studioV2HistoryChain();
+    const firstDraw = !_studioV2.docRendered;
+    _studioV2.docRendered = true;
+    if (chain && chain[chain.length - 1] === keys[keys.length - 1]) return;
+    if (path.length === 1 || (firstDraw && studioV2NavigationType() !== 'navigate')) {
+      window.history.replaceState(Object.assign({}, current || {}, { view: 'ads-studio', studioV2: { chain: keys } }), '', window.location.href);
+      return;
+    }
+    path.forEach((step, index) => studioV2WriteEntry(step, keys.slice(0, index + 1), index === 0));
+  } catch (_) { /* the address stays as it is */ }
+}
+
+// The start-up address rewrite keeps only ?tab= (and loses even that when this bundle arrives after
+// it). On the first v2 draw of a page opened moments ago, the address it was opened with comes back
+// (only tab, section, id and step), unless the reader has already moved somewhere else.
+function studioV2RestoreOpeningAddress() {
+  if (_studioV2.docRendered) return;
+  try {
+    if (typeof performance === 'undefined' || !(performance.now() < 15000)) return;
+    const entry = performance.getEntriesByType('navigation')[0];
+    if (!entry || !entry.name) return;
+    const opened = new URL(String(entry.name));
+    if (opened.pathname !== window.location.pathname) return;
+    const now = new URLSearchParams(window.location.search || '');
+    if (['section', 'id', 'step'].some(key => now.get(key))) return;
+    const tab = now.get('tab') || '';
+    const openedTab = opened.searchParams.get('tab') || '';
+    if (!openedTab || !(tab === openedTab || tab === '' || tab === 'dashboard')) return;
+    const params = new URLSearchParams();
+    for (const key of ['tab', 'section', 'id', 'step']) {
+      const value = opened.searchParams.get(key);
+      if (value) params.set(key, value);
+    }
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}?${params.toString()}`);
+  } catch (_) { /* the address stays as it is */ }
+}
+
+function studioV2HistoryGo(delta) {
+  try { window.history.go(delta); } catch (_) {}
+}
+
+// After history.go(): runs once the browser has moved (the router has drawn that entry by then).
+function studioV2AfterPop(fn) {
+  let done = false;
+  let timer = null;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener('popstate', finish);
+    if (timer) clearTimeout(timer);
+    try { fn(); } catch (_) {}
+  };
+  window.addEventListener('popstate', finish);
+  timer = setTimeout(finish, 1500);
+}
+
+function studioV2Show(navigated) {
+  if (navigated && typeof requestViewScrollReset === 'function') requestViewScrollReset();
+  studioV2Rerender();
+}
+
+// Opens a route and keeps the history equal to its chain: the common part stays, what is above it is
+// walked back (going up = the browser's own Back), the rest is added (the first addition replaces the
+// entry being left, so moving between tabs never stacks up).
+function studioV2Go(target) {
+  const frame = studioV2Frame();
+  if (!frame || typeof window === 'undefined' || !window.history) return false;
+  const current = studioV2Route(studioV2ReadAddress(), frame);
+  const path = studioV2Path(studioV2Route(target, frame), frame);
+  const keys = path.map(studioV2Key);
+  let chain = studioV2HistoryChain();
+  if (!chain || chain[chain.length - 1] !== studioV2Key(current)) chain = [studioV2Key(current)];
+  if (chain[chain.length - 1] === keys[keys.length - 1]) { studioV2Show(false); return true; }
+  let same = 0;
+  while (same < keys.length && same < chain.length && keys[same] === chain[same]) same++;
+  const pops = chain.length - same;
+  try {
+    if (same === keys.length) { studioV2HistoryGo(-pops); return true; }
+    if (same === 0) {
+      path.forEach((step, index) => studioV2WriteEntry(step, keys.slice(0, index + 1), index === 0));
+      studioV2Show(true);
+      return true;
+    }
+    const writeRest = replaceFirst => {
+      path.slice(same).forEach((step, index) => studioV2WriteEntry(step, keys.slice(0, same + index + 1), index === 0 && replaceFirst));
+      studioV2Show(true);
+    };
+    if (pops <= 1) writeRest(pops === 1);
+    else {
+      studioV2AfterPop(() => writeRest(true));
+      studioV2HistoryGo(-(pops - 1));
+    }
+    return true;
+  } catch (_) { return false; }
+}
+
+function studioV2Open(tab) {
+  return studioV2Go({ tab: String(tab || '') });
+}
+
+function studioV2OpenSection(section) {
+  return studioV2Go({ tab: 'review', section: String(section || '') });
+}
+
+function studioV2BuilderStep(delta) {
+  if (studioV2Frame() !== 'customer') return false;
+  const route = studioV2Route(studioV2ReadAddress(), 'customer');
+  if (route.tab !== 'builder') return false;
+  return studioV2Go({ tab: 'builder', section: route.section, step: route.step + (Number(delta) || 0) });
+}
+
+function studioV2CloseBuilder() {
+  return studioV2Go(studioV2Home('customer'));
+}
+
+function studioV2CanLeave() {
+  try { if (window.history.length > 1) return true; } catch (_) {}
+  return !IS_STUDIO_SHELL && !!adsStudioBackTarget();
+}
+
+function studioV2Leave() {
+  try {
+    if (window.history.length > 1) { window.history.back(); return true; }
+  } catch (_) {}
+  const target = IS_STUDIO_SHELL ? '' : adsStudioBackTarget();
+  if (target && typeof navigateTo === 'function') { navigateTo(target); return true; }
+  return false;
+}
+
+// The in-app Back button.
+function studioV2Back() {
+  const frame = studioV2Frame();
+  if (!frame) return false;
+  const parent = studioV2Parent(studioV2Route(studioV2ReadAddress(), frame), frame);
+  return parent ? studioV2Go(parent) : studioV2Leave();
+}
+
+// For the app's hardware Back key (P2-09 hook): true when the studio moved up a level itself; false on
+// Home or outside the v2 layout, so the app's own Back runs.
+function studioHandleBack() {
+  if (typeof state === 'undefined' || state.currentView !== 'ads-studio') return false;
+  const frame = studioV2Frame();
+  if (!frame) return false;
+  return studioV2Parent(studioV2Route(studioV2ReadAddress(), frame), frame) ? studioV2Back() : false;
+}
+
+// The pinned tab setter and the address restore keep working in both layouts: in v2 the setter
+// drives the v2 address (same ?tab=, the Back model's history); the restore also keeps the v2-only
+// tabs, so a reload or a link to ?tab=wallet survives the start-up address rewrite (which keeps ?tab=).
+const _studioV2ClassicSetTab = typeof setAdsStudioTab === 'function' ? setAdsStudioTab : null;
+const _studioV2ClassicRestoreTab = typeof restoreAdsStudioTabFromUrl === 'function' ? restoreAdsStudioTabFromUrl : null;
+
+setAdsStudioTab = function setAdsStudioTabForLayout(tabId) {
+  if (studioV2Frame() && typeof state !== 'undefined' && state.currentView === 'ads-studio') {
+    const tab = String(tabId || '');
+    if (tab === 'dashboard' || STUDIO_V2_TABS.some(item => item[0] === tab)) studioV2Go({ tab });
+    return;
+  }
+  if (_studioV2ClassicSetTab) _studioV2ClassicSetTab(tabId);
+};
+
+restoreAdsStudioTabFromUrl = function restoreAdsStudioTabFromUrlForLayout() {
+  if (_studioV2ClassicRestoreTab) _studioV2ClassicRestoreTab();
+  try {
+    const tab = String(new URLSearchParams(window.location.search || '').get('tab') || '');
+    if (tab === 'home') _adsStudioActiveTab = 'dashboard';
+    else if (STUDIO_V2_ONLY_TABS.includes(tab)) _adsStudioActiveTab = tab;
+  } catch (_) {}
+};
+
+// ------------------------------------------------------------------ drawing
+
+function studioV2TabInfo(tab) {
+  return STUDIO_V2_TABS.find(item => item[0] === tab) || STUDIO_V2_TABS[0];
+}
+
+function studioV2StaffSection(section) {
+  return STUDIO_V2_STAFF_SECTIONS.find(item => item[0] === section) || STUDIO_V2_STAFF_SECTIONS[0];
+}
+
+function studioV2Icon(name, className = 'studio-v2-icon') {
+  return `<i data-lucide="${studioEsc(name)}" class="${className}" aria-hidden="true"></i>`;
+}
+
+function studioV2BuilderStepText(route) {
+  const steps = studioV2BuilderSteps(route.section);
+  const step = Math.min(Math.max(1, route.step || 1), steps.length);
+  const name = steps[step - 1];
+  return adsStudioText(`Step ${step} of ${steps.length}: ${name[0]}`, `الخطوة ${step} من ${steps.length}: ${name[1]}`);
+}
+
+function renderStudioV2Header(route, frame) {
+  const staff = frame === 'staff';
+  const focus = !staff && route.tab === 'builder';
+  const parent = studioV2Parent(route, frame);
+  const brand = adsStudioText('Albayan Ads Studio', 'استوديو إعلانات البيان');
+  let title = brand;
+  let kicker = '';
+  if (staff) {
+    const section = studioV2StaffSection(route.section);
+    title = adsStudioText(section[2], section[3]);
+    kicker = adsStudioText('Team desk', 'مكتب الفريق');
+  } else if (route.tab !== 'home') {
+    const info = studioV2TabInfo(route.tab);
+    title = adsStudioText(info[2], info[3]);
+    kicker = brand;
+  }
+  const backLabel = parent ? adsStudioText('Back', 'رجوع') : adsStudioText('Leave the studio', 'الخروج من الاستوديو');
+  const back = parent || studioV2CanLeave()
+    ? `<button type="button" data-testid="studio-back" class="studio-v2-icon-btn" onclick="studioV2Back()" aria-label="${studioEsc(backLabel)}" title="${studioEsc(backLabel)}">${studioV2Icon(adsStudioIsAr() ? 'arrow-right' : 'arrow-left')}</button>`
+    : '';
+  const headButton = tab => {
+    const info = studioV2TabInfo(tab);
+    const label = adsStudioText(info[2], info[3]);
+    return `<button type="button" data-testid="studio-nav-${tab}" class="studio-v2-icon-btn" onclick="studioV2Open('${tab}')" aria-label="${studioEsc(label)}" title="${studioEsc(label)}"${route.tab === tab ? ' aria-current="page"' : ''}>${studioV2Icon(info[1])}</button>`;
+  };
+  let actions = '';
+  if (focus) {
+    const close = adsStudioText('Close', 'إغلاق');
+    actions = `<button type="button" data-testid="studio-close" class="studio-v2-icon-btn" onclick="studioV2CloseBuilder()" aria-label="${studioEsc(close)}" title="${studioEsc(close)}">${studioV2Icon('x')}</button>`;
+  } else if (!staff) {
+    actions = headButton('inbox') + headButton('account');
+  }
+  return `
+      <header class="studio-v2-header">
+        ${back}
+        <div class="studio-v2-heading">
+          ${kicker ? `<p class="studio-v2-kicker">${studioEsc(kicker)}</p>` : ''}
+          <h1 id="studio-v2-title" class="studio-v2-title">${studioEsc(title)}</h1>
+        </div>
+        ${actions ? `<div class="studio-v2-header-actions">${actions}</div>` : ''}
+      </header>`;
+}
+
+function renderStudioV2Soon(title, icon, forStaff = false) {
+  const note = forStaff
+    ? adsStudioText('This part of the Team desk is still being built.', 'ما زلنا نبني هذا القسم من مكتب الفريق.')
+    : adsStudioText('This part is still being built. Your requests, money and pages are safe and unchanged.',
+      'ما زلنا نبني هذا القسم. طلباتك وأموالك وصفحاتك محفوظة ولم يتغير فيها شيء.');
+  return `
+          <div class="studio-v2-soon" data-testid="studio-soon">
+            <span class="studio-v2-soon-icon" aria-hidden="true">${studioV2Icon(icon)}</span>
+            <h2 class="studio-v2-soon-title">${studioEsc(title)}</h2>
+            <p class="studio-v2-soon-text">${studioEsc(adsStudioText('Coming soon in the new studio', 'قريباً في الاستوديو الجديد'))}</p>
+            <p class="studio-v2-soon-note">${studioEsc(note)}</p>
+          </div>`;
+}
+
+// Language, theme and sign-out: reachable in every layout while Account / More are being built.
+function renderStudioV2Basics() {
+  const dark = typeof state !== 'undefined' && state.theme === 'dark';
+  const row = (onclick, icon, label, value, extra = '') => `
+            <button type="button" class="studio-v2-row${extra}" onclick="${onclick}">
+              ${studioV2Icon(icon)}
+              <span class="studio-v2-row-label">${studioEsc(label)}</span>
+              ${value ? `<span class="studio-v2-row-value">${studioEsc(value)}</span>` : ''}
+            </button>`;
+  return `
+          <div class="studio-v2-list" data-testid="studio-basics">
+            ${row('toggleLanguage()', 'languages', adsStudioText('Language', 'اللغة'), adsStudioIsAr() ? 'العربية' : 'English')}
+            ${row('toggleTheme()', dark ? 'moon' : 'sun', adsStudioText('Theme', 'المظهر'), dark ? adsStudioText('Dark', 'داكن') : adsStudioText('Light', 'فاتح'))}
+            ${row('handleLogout()', 'log-out', adsStudioText('Log out', 'تسجيل الخروج'), '', ' is-danger')}
+          </div>`;
+}
+
+function renderStudioV2Builder(route) {
+  const steps = studioV2BuilderSteps(route.section);
+  const items = steps.map((name, index) => {
+    const number = index + 1;
+    const mark = number === route.step ? ' is-current' : (number < route.step ? ' is-done' : '');
+    return `<li class="studio-v2-step${mark}"${number === route.step ? ' aria-current="step"' : ''}><span class="studio-v2-step-dot" aria-hidden="true">${number}</span><span class="studio-v2-step-name">${studioEsc(adsStudioText(name[0], name[1]))}</span></li>`;
+  }).join('');
+  const next = route.step < steps.length
+    ? `<button type="button" data-testid="studio-builder-next" class="studio-v2-action is-primary" onclick="studioV2BuilderStep(1)">${studioEsc(adsStudioText('Next', 'التالي'))}</button>`
+    : '';
+  return `
+          <div class="studio-v2-builder" data-step="${route.step}" data-steps="${steps.length}">
+            <p class="studio-v2-step-text" data-testid="studio-builder-step">${studioEsc(studioV2BuilderStepText(route))}</p>
+            <ol class="studio-v2-steps">${items}</ol>
+            ${renderStudioV2Soon(adsStudioText('New request', 'طلب جديد'), 'wand-sparkles')}
+            ${next ? `<div class="studio-v2-builder-actions">${next}</div>` : ''}
+          </div>`;
+}
+
+function renderStudioV2CustomerScreen(route) {
+  const info = studioV2TabInfo(route.tab);
+  let body;
+  if (route.tab === 'builder') {
+    body = renderStudioV2Builder(route);
+  } else {
+    body = renderStudioV2Soon(adsStudioText(info[2], info[3]), info[1]);
+    // A customer without an active plan still needs the way to activate it (the classic card).
+    if (route.tab === 'home' && !adsStudioCanUse()) body += `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>`;
+    if (route.tab === 'account') body += renderStudioV2Basics();
+  }
+  const attrs = (route.section ? ` data-section="${studioEsc(route.section)}"` : '') + (route.id ? ` data-id="${studioEsc(route.id)}"` : '');
+  return `
+        <section data-testid="studio-screen-${studioEsc(route.tab)}" class="studio-v2-screen" aria-labelledby="studio-v2-title"${attrs}>${body}
+        </section>`;
+}
+
+function renderStudioV2CustomerFrame() {
+  studioV2RestoreOpeningAddress();
+  const route = studioV2Route(studioV2ReadAddress(), 'customer');
+  studioV2EnsureHistory(route, 'customer');
+  studioV2SyncClassicTab(route);
+  const focus = route.tab === 'builder';
+  const items = STUDIO_V2_TABS.filter(item => item[4] === 'nav').map(([tab, icon, en, ar]) => `
+          <button type="button" data-testid="studio-nav-${tab}" class="studio-v2-nav-item" onclick="studioV2Open('${tab}')"${route.tab === tab ? ' aria-current="page"' : ''}>${studioV2Icon(icon, 'studio-v2-nav-icon')}<span>${studioEsc(adsStudioText(en, ar))}</span></button>`).join('');
+  return `
+    <div data-testid="studio-v2-frame" class="studio-v2-frame" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" data-tab="${studioEsc(route.tab)}" data-focus="${focus ? '1' : '0'}">
+      ${renderStudioV2Header(route, 'customer')}
+      <div class="studio-v2-body">
+        <nav data-testid="studio-nav" class="studio-v2-nav" aria-label="${studioEsc(adsStudioText('Studio sections', 'أقسام الاستوديو'))}"${focus ? ' hidden' : ''}>${items}
+        </nav>
+        <div class="studio-v2-main">${renderStudioV2CustomerScreen(route)}
+        </div>
+      </div>
+    </div>`;
+}
+
+// The Team desk frame (P2-02d): its own sections, no wallet or payment items (admin-only items live
+// under More once they are built). Sections are filled in Phase 3.
+function renderStudioV2StaffFrame() {
+  studioV2RestoreOpeningAddress();
+  const route = studioV2Route(studioV2ReadAddress(), 'staff');
+  studioV2EnsureHistory(route, 'staff');
+  studioV2SyncClassicTab(route);
+  const section = studioV2StaffSection(route.section);
+  const items = STUDIO_V2_STAFF_SECTIONS.map(([id, icon, en, ar]) => `
+          <button type="button" data-testid="studio-staffnav-${id}" class="studio-v2-nav-item" onclick="studioV2OpenSection('${id}')"${section[0] === id ? ' aria-current="page"' : ''}>${studioV2Icon(icon, 'studio-v2-nav-icon')}<span>${studioEsc(adsStudioText(en, ar))}</span></button>`).join('');
+  const attrs = route.id ? ` data-id="${studioEsc(route.id)}"` : '';
+  return `
+    <div data-testid="studio-staff-frame" class="studio-v2-frame is-staff" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" data-tab="review" data-section="${section[0]}" data-focus="0">
+      ${renderStudioV2Header(route, 'staff')}
+      <div class="studio-v2-body">
+        <nav data-testid="studio-staffnav" class="studio-v2-nav is-staff" aria-label="${studioEsc(adsStudioText('Team desk sections', 'أقسام مكتب الفريق'))}">${items}
+        </nav>
+        <div class="studio-v2-main">
+          <section data-testid="studio-screen-review" data-section="${section[0]}" class="studio-v2-screen" aria-labelledby="studio-v2-title"${attrs}>
+            <div data-testid="studio-staff-screen-${section[0]}">${renderStudioV2Soon(adsStudioText(section[2], section[3]), section[1], true)}${section[0] === 'more' ? renderStudioV2Basics() : ''}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderStudioV2Waiting() {
+  return `
+    <div data-testid="studio-v2-loading" class="studio-v2-loading" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" role="status">
+      <span class="studio-v2-spinner" aria-hidden="true"></span>
+      <p>${studioEsc(adsStudioText('Opening the studio…', 'جارٍ فتح الاستوديو…'))}</p>
+    </div>`;
 }
