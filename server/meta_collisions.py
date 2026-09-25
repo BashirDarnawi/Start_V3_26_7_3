@@ -6,13 +6,17 @@ changes them only with the owner's written choice:
 
 * ``collision_report(conn)``: read-only. Counts, and one row of flags per colliding core ad: its id,
   why it collides, whether it has receipts / collections / wallet / company-funding records, a
-  Manager payment state or a customer, and its spend numbers. Never names, phones or campaign names.
+  Manager payment state or a customer, its spend numbers and its ``decisionFingerprint`` (a hash of
+  what the owner's choice rests on). Never names, phones or campaign names.
 * ``plan_repair`` (dry run) and ``apply_repair``: the owner's signed choices file says, per row,
-  ``keep_in_manager`` or ``remove_from_manager``. Removal is a soft delete, in ONE transaction, of
-  rows with no money records; a row with money is refused and never deleted. ``keep_in_manager`` is
-  remembered in a server-only metaHealthState row, so the check stops counting that row as open.
+  ``keep_in_manager`` or ``remove_from_manager``; a removal must carry the row's decisionFingerprint
+  and is refused when the row's decision facts changed since the report (Meta's own spend/schedule
+  sync does not count). Removal is a soft delete, in ONE transaction, of rows with no money records;
+  a row with money or in a closed financial month is refused and never deleted. ``keep_in_manager``
+  is remembered in a server-only metaHealthState row, so the check stops counting that row as open.
   Both are audited as ``collision_repair``; the result includes a reversal record.
-* ``reverse_repair``: undoes one apply from its reversal record (all rows or none).
+* ``reverse_repair``: undoes one apply from its reversal record (all rows or none); a row whose
+  financial month was closed since refuses the whole reversal.
 * ``create_meta_collisions_router``: ``GET /api/meta-ads/collisions``, the report for admins.
 
 Platform code (D36): it may read Manager's ``ads`` and money rows and Ads Studio's
@@ -52,6 +56,13 @@ REPORT_READS_PER_MINUTE = 6
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")  # main.SAFE_ENTITY_ID_RE; no LIKE wildcard but "_"
 _REPAIR_ID_RE = re.compile(r"^collision_repair_[0-9a-f]{32}$")
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
+# What the owner's choice rests on. Meta's sync rewrites spend, schedule, status, history and
+# last_modified every few minutes; none of those is here, so a sync alone never voids a choice.
+_DECISION_FIELDS = (
+    "customerId", "amountUSD", "amountLocal", "paymentStatus", "isPaid", "editCount",
+    "metaImportState", "metaCampaignName", "metaCampaignId",
+)
 _UNSET_PAYMENT_STATUS = "pending_setup"  # what Meta's automatic import writes; nobody chose it
 _RECEIPT_ID_FIELDS = (
     "receiptId", "mergedReceiptId", "dueReceiptId", "fundingReceiptId", "linkedDeliveryReceiptId", "linkedReceiptId",
@@ -159,6 +170,17 @@ def _money_flags(data: Mapping[str, Any], references: Iterable[str] = ()) -> dic
             or isinstance(data.get("isPaid"), bool)
         ),
     }
+
+
+def _decision_fingerprint(data: Mapping[str, Any], references: Iterable[str]) -> str:
+    """sha256 of the canonical JSON of the row's decision fields, money flags and money-record kinds."""
+    refs = sorted(set(references))
+    decision = {
+        "fields": {field: data.get(field) for field in _DECISION_FIELDS},
+        "money": _money_flags(data, refs),
+        "references": refs,
+    }
+    return _sha256(json.dumps(decision, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
 
 
 def _reasons(campaign_name: Any, campaign_id: Any, studio: Mapping[str, list[str]]) -> list[str]:
@@ -291,13 +313,15 @@ def _serialize(conn: Any) -> None:
 def _row_facts(ad_id: str, row: Mapping[str, Any], campaign_id: str, studio: Mapping[str, list[str]],
                references: Iterable[str], kept: bool) -> dict[str, Any]:
     data = _data(row)
-    flags = _money_flags(data, references)
+    refs = set(references)
+    flags = _money_flags(data, refs)
     has_money = any(flags.values())
     has_customer = bool(str(data.get("customerId") or "").strip())
     import_state = str(data.get("metaImportState") or "")[:40]
     return {
         "adId": ad_id,
-        "lastModified": int(row["last_modified"] or 0),
+        # Copied into the choices file; apply refuses the row if these facts changed since the report.
+        "decisionFingerprint": _decision_fingerprint(data, refs),
         "reasons": _reasons(data.get("metaCampaignName"), campaign_id, studio),
         "studioRequestIds": sorted(studio.get(campaign_id, [])),
         "kept": kept,
@@ -388,10 +412,14 @@ def parse_choices(document: Any) -> dict[str, Any]:
         seen.add(ad_id)
         if item.get("choice") not in (KEEP, REMOVE):
             raise CollisionRepairError(f"Choice {index}: choice must be {KEEP!r} or {REMOVE!r}.")
-        expected = item.get("lastModified")
-        if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
-            raise CollisionRepairError(f"Choice {index}: lastModified must be the number from the report.")
-        choices.append({"adId": ad_id, "choice": item["choice"], "lastModified": expected})
+        fingerprint = item.get("decisionFingerprint")
+        if fingerprint is None and item["choice"] == REMOVE:
+            raise CollisionRepairError(
+                f"Choice {index}: {REMOVE} needs decisionFingerprint, copied from the report row for {ad_id}."
+            )
+        if fingerprint is not None and not (isinstance(fingerprint, str) and _FINGERPRINT_RE.fullmatch(fingerprint)):
+            raise CollisionRepairError(f"Choice {index}: decisionFingerprint must be the value from the report.")
+        choices.append({"adId": ad_id, "choice": item["choice"], "fingerprint": fingerprint})
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return {"signedBy": signed_by[:120], "signedAt": signed_at[:40], "choices": choices, "sha256": _sha256(canonical)}
 
@@ -415,7 +443,9 @@ def _plan(conn: Any, parsed: Mapping[str, Any], *, lock: bool) -> dict[str, Any]
             refused.append({**refusal, "reason": "already_removed"})
         elif not _reasons(data.get("metaCampaignName"), data.get("metaCampaignId"), studio):
             refused.append({**refusal, "reason": "not_a_collision"})
-        elif choice["lastModified"] is not None and int(row["last_modified"] or 0) != choice["lastModified"]:
+        elif choice["fingerprint"] is not None and (
+            _decision_fingerprint(data, references.get(ad_id, set())) != choice["fingerprint"]
+        ):
             refused.append({**refusal, "reason": "changed_since_report"})
         elif choice["choice"] == KEEP:
             keep.append(ad_id)
@@ -506,7 +536,8 @@ def apply_repair(
 def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> dict[str, Any]:
     """Undo one apply_repair exactly: every removed row comes back unchanged, every keep decision is undone.
 
-    All or nothing: if any row or decision changed after the repair, nothing is changed.
+    All or nothing: if any row or decision changed after the repair, or a removed row's financial month
+    was closed since, nothing is changed. A month being closed or unlocked right now raises 409.
     """
     if not isinstance(reversal, dict) or reversal.get("kind") != REVERSAL_KIND or reversal.get("version") != 1:
         raise CollisionRepairError("This is not a collision repair reversal file.")
@@ -528,10 +559,15 @@ def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> 
         row = rows.get(str(item["adId"]))
         if row is None:
             problems.append(f"{item['adId']} no longer exists")
-        elif not bool(row["deleted"]):
+            continue
+        if not bool(row["deleted"]):
             problems.append(f"{item['adId']} is not removed any more")
         elif int(row["last_modified"] or 0) != item.get("lastModifiedAfter") or _sha256(row["data_json"]) != item.get("dataSha256"):
             problems.append(f"{item['adId']} changed after the repair")
+        # A restored ad is back in Manager's books: the same check and shared period lock as apply_repair,
+        # taken before any write (a month being closed right now raises 409).
+        if financial_period_is_closed(ADS_TYPE, _data(row), conn=conn):
+            problems.append(f"{item['adId']} belongs to a closed financial month")
     state_row, state = _load_decisions(conn, lock=True) if kept else (None, {"kept": {}})
     for item in kept:
         current = state["kept"].get(str(item["adId"]))

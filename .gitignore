@@ -24,6 +24,11 @@ backups/
 server/data/
 *.db
 
+# Studio collision repair files (scripts/studio_collision_repair.py keeps them in ~/albayan-repairs)
+collision-reversal-*.json
+collision-report*.json
+collision-choices*.json
+
 # Generated at runtime by the server
 script.min.js
 

@@ -2,28 +2,38 @@
 """Studio collision repair (Albayan Studio plan task P0-10, owner decision D26). Only with the owner.
 
 Before P0-09, Albayan Manager could import an Albayan Studio campaign as a core ad. The report lists
-those core ads; each one leaves Manager only by the owner's signed choice:
+those core ads; each one leaves Manager only by the owner's signed choice. Keep every file below in
+~/albayan-repairs, outside the repository (an untracked file in the checkout blocks release:image:push):
 
   1. Back up the database and prove the backup restores (docs/RELEASE_AND_SAFETY.md).
-  2. Report (read-only):       python scripts/studio_collision_repair.py --report > report.json
-  3. The owner writes choices.json (below) and signs it with a name and a date.
-  4. Dry run (the default):    python scripts/studio_collision_repair.py --choices choices.json
-  5. Apply (one transaction):  python scripts/studio_collision_repair.py --choices choices.json --apply
+  2. Report (read-only):       python scripts/studio_collision_repair.py --report
+                                   > ~/albayan-repairs/collision-report.json
+  3. The owner writes ~/albayan-repairs/collision-choices.json (below) and signs it with a name and a date.
+  4. Dry run (the default):    python scripts/studio_collision_repair.py
+                                   --choices ~/albayan-repairs/collision-choices.json
+  5. Apply (one transaction):  python scripts/studio_collision_repair.py
+                                   --choices ~/albayan-repairs/collision-choices.json --apply
                                    --confirm-database <database name> [--actor <admin user id>]
-     The reversal file (collision-reversal-<repair id>.json) is written BEFORE the change commits.
+     The reversal file (collision-reversal-<repair id>.json) is written BEFORE the change commits, to
+     --reversal-dir: ~/albayan-repairs by default (created if missing); a folder inside the repository
+     is refused.
   6. Undo, if needed:          python scripts/studio_collision_repair.py --reverse <reversal file>
                                    --confirm-database <database name> [--actor <admin user id>]
 
-Choices file:
+Choices file (decisionFingerprint is copied from the report row; remove_from_manager requires it):
   {"signedBy": "<owner name>", "signedAt": "2026-10-01",
-   "choices": [{"adId": "<id from the report>", "choice": "remove_from_manager", "lastModified": <from the report>},
+   "choices": [{"adId": "<id from the report>", "choice": "remove_from_manager",
+                "decisionFingerprint": "<decisionFingerprint from the report>"},
                {"adId": "<id from the report>", "choice": "keep_in_manager"}]}
 
 A row with receipts, collections, wallet or company-funding records, or a Manager payment state, is
-refused and never deleted; so is a row that changed since the report (lastModified). Removal is a
-soft delete; keep_in_manager is remembered so the check stops counting the row. Everything is
-audited as 'collision_repair'. The database is the one the server uses (DATABASE_URL or the
-ALBAYAN_DB_* settings) and must be set explicitly. The output has ids, flags and counts only.
+refused and never deleted; so is a row in a closed financial month, and a row whose decision facts
+changed since the report (customer, amounts, payment state, edits, import state, campaign or money
+records; Meta's own spend and schedule sync does not count). Removal is a soft delete; keep_in_manager
+is remembered so the check stops counting the row. An undo is refused as a whole when a restored
+row's financial month was closed since. Everything is audited as 'collision_repair'. The database is
+the one the server uses (DATABASE_URL or the ALBAYAN_DB_* settings) and must be set explicitly. The
+output has ids, flags and counts only.
 """
 
 import argparse
@@ -38,6 +48,12 @@ sys.path.insert(0, str(ROOT))
 
 TARGET_SETTINGS = ("DATABASE_URL", "ALBAYAN_DATABASE_URL", "ALBAYAN_DB_HOST", "ALBAYAN_DB_PATH")
 ACTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
+DEFAULT_REVERSAL_DIR = Path.home() / "albayan-repairs"
+
+
+def _inside_repository(path: Path) -> bool:
+    resolved = path.resolve()
+    return resolved == ROOT or ROOT in resolved.parents
 
 
 def _target() -> tuple[str, str]:
@@ -75,12 +91,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="change the data (with --choices)")
     parser.add_argument("--confirm-database", default="", help="the database name; required to change data")
     parser.add_argument("--actor", default=None, help="the admin user id recorded in the audit log")
-    parser.add_argument("--reversal-dir", type=Path, default=Path.cwd(), help="where the reversal file is written")
+    parser.add_argument("--reversal-dir", type=Path, default=DEFAULT_REVERSAL_DIR,
+                        help="where the reversal file is written, outside the repository (default %(default)s)")
     args = parser.parse_args(argv)
     if args.apply and args.choices is None:
         parser.error("--apply goes with --choices")
     if args.actor is not None and not ACTOR_RE.fullmatch(args.actor):
         parser.error("--actor must be a user id")
+    reversal_dir = args.reversal_dir.expanduser()
+    if args.apply and _inside_repository(reversal_dir):
+        # An untracked reversal file in the checkout blocks release:image:push and could be committed.
+        parser.error(f"--reversal-dir must be outside the repository ({ROOT}); nothing was done")
 
     if not any(os.getenv(name) for name in TARGET_SETTINGS):
         print("Set DATABASE_URL (or the ALBAYAN_DB_* settings) to the database to use; nothing was done.", file=sys.stderr)
@@ -100,19 +121,20 @@ def main(argv: list[str] | None = None) -> int:
             with db_conn() as conn:
                 result = meta_collisions.collision_report(conn)
         elif args.choices is not None and not args.apply:
-            document = _read_json(args.choices)
+            document = _read_json(args.choices.expanduser())
             with db_conn() as conn:
                 result = meta_collisions.plan_repair(conn, document)
         elif args.choices is not None:
-            document = _read_json(args.choices)
+            document = _read_json(args.choices.expanduser())
+            reversal_dir.mkdir(parents=True, exist_ok=True)
             with db_conn() as conn:
                 result, reversal = meta_collisions.apply_repair(conn, document, actor_id=args.actor, database=name)
                 if reversal is not None:
-                    path = args.reversal_dir / f"collision-reversal-{reversal['repairId']}.json"
+                    path = reversal_dir / f"collision-reversal-{reversal['repairId']}.json"
                     _write_new(path, reversal)  # a failed write rolls the whole change back
                     result["reversalFile"] = str(path)
         else:
-            reversal = _read_json(args.reverse)
+            reversal = _read_json(args.reverse.expanduser())
             with db_conn() as conn:
                 result = meta_collisions.reverse_repair(conn, reversal, actor_id=args.actor)
     except (meta_collisions.CollisionRepairError, ValueError, OSError) as error:
