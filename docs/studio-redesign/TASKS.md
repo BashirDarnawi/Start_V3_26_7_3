@@ -63,6 +63,11 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P2-02a-d | Done | stage 10 | `15h-studio-shell.js`: v2 frame behind `/me` (`ui==='v2'` only), bottom nav + side rail + header, `?tab/section/id/step` + Back model, builder focus mode, Team desk frame; staff with a classic desk keep the classic review queue |
 | P2-08 | Part done | stage 10 | v2 frame styles in `assets/ads-workspace.css` (320–820 px, light/dark, RTL); screen styles follow with each screen |
 | P2-13 | Done | stage 10 | E2E harness: `ALBAYAN_STUDIO_V2=pilot`, guarded seed route (SQLite + flag only), dedicated pilot users; classic specs unchanged |
+| P2-03 | Done | stage 11 | v2 Home: money strip = wallet summary, Needs you, Getting started, trackers, goal actions, intake-paused banner |
+| P2-04 | Done | stage 11 | v2 My ads: filters, detail with stage tracker, money chain and results, sheets (withdraw, stop, archive; ask-to-stop until P3-10) |
+| P2-05a-e | Done (phone MAN check open) | stage 11 | v2 wizard: quick boost (post picker / no post / link), full request (goal, page, content, audience, budget & days), saved as you go, Fix deep links |
+| P2-06 | Done | stage 11 | v2 Wallet: four numbers, per-ad chains, LYD plan card, Add money flow with confirm |
+| P2-07 | Done | stage 11 | v2 Account + `GET/PUT /api/studio/profile` (WhatsApp only with consent, strict Libyan numbers, owner-only, not in audit) |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
