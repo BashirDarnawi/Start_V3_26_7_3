@@ -892,11 +892,10 @@ test('an admin wallet top-up funds a subscriber plan purchase and the ledger bal
   expect(subscription.serviceId).toBe('clothes_system');
   expect(String(subscription.status).toLowerCase()).toBe('active');
   expect(new Date(subscription.expiresAt).getTime()).toBeGreaterThan(Date.now());
-  // Balances from the admin session's view of the same ledger.
-  const balances = await page.evaluate(async id => {
+  // Balances from the admin session's view of the same ledger. Poll like the member view above: one live-sync
+  // tick can still be behind the purchase when the machine is busy (seen once: 5000 instead of 2000).
+  await expect.poll(() => page.evaluate(async id => {
     if (typeof serverLiveSyncTick === 'function') await serverLiveSyncTick().catch(() => {});
-    return { lyd: WALLET.getBalanceMinor(id, 'LYD'), usd: WALLET.getBalanceMinor(id, 'USD') };
-  }, member.id);
-  expect(balances.lyd).toBe(2000);
-  expect(balances.usd).toBe(2500);
+    return `${WALLET.getBalanceMinor(id, 'LYD')}/${WALLET.getBalanceMinor(id, 'USD')}`;
+  }, member.id), { timeout: 20000 }).toBe('2000/2500');
 });
