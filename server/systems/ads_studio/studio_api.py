@@ -2,7 +2,8 @@
 
 Routes in this first part:
 
-* ``GET /api/studio/me`` (any signed-in user): which layout and services this user gets.
+* ``GET /api/studio/me`` (any signed-in user): which layout and services this user gets, plus the
+  public budget limits, service hours ("open now" in Tripoli time) and contact details.
 * ``GET /api/studio/admin/settings/{key}`` and ``PUT`` the same (admin only): the switches in
   studio_settings.py. A PUT checks the origin, the admin role, a rate limit and the version,
   then saves and writes an audit entry (action ``studio_setting``, which the audit cleanup

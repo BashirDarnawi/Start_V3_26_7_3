@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -180,8 +180,10 @@ def test_me_requires_login():
     assert client.get("/api/studio/me", cookies={"albayan_session": "not-a-session"}).status_code == 401
 
 
-def test_me_reflects_safe_defaults(actors):
+def test_me_reflects_safe_defaults(actors, monkeypatch):
+    monkeypatch.setattr(studio_settings, "utc_now", lambda: datetime(2026, 9, 24, 8, 30, tzinfo=timezone.utc))  # Thu 10:30 Tripoli
     customer = _me(actors["customer"])
+    workday = {"open": "09:00", "close": "17:00"}
     assert customer == {
         "ui": "classic",
         "services": {"help": False, "stopRequest": False, "tiktok": False},
@@ -190,6 +192,13 @@ def test_me_reflects_safe_defaults(actors):
         "capabilities": {"fbPublicReply": "gated", "fbPrivateReply": "unavailable", "igPublicReply": "unavailable",
                          "igPrivateReply": "unavailable", "tiktokService": "off"},
         "intake": {"open": True},
+        "adLimits": {"minTotalMinorUSD": 500, "maxTotalMinorUSD": 200_000, "maxDays": 90},  # D4 + D5: $5 - $2,000
+        "serviceHours": {  # D11 default: Sun-Thu 09:00-17:00 Tripoli
+            "timezone": "Africa/Tripoli", "openNow": True,
+            "week": {"sun": workday, "mon": workday, "tue": workday, "wed": workday, "thu": workday, "fri": None, "sat": None},
+            "holidays": [], "ramadan": None, "onDutyUntil": None,
+        },
+        "contact": {"whatsapp": None, "phone": None, "email": None},
         "isAdmin": False,
         "isStaff": False,
     }
@@ -380,8 +389,9 @@ def test_settings_request_shape_and_unknown_key(actors):
     _error(client.put(url, json={"expectedVersion": -1, "value": {}}, cookies=admin["cookies"]), 400, "INVALID_REQUEST")
     _error(client.put(url, json={"expectedVersion": 0, "value": {}, "force": True}, cookies=admin["cookies"]), 400, "UNKNOWN_FIELD")
     _error(client.put(url, json=[1, 2], cookies=admin["cookies"]), 400, "INVALID_REQUEST")
-    _error(_put(admin, "limits", {"x": 1}), 404, "UNKNOWN_SETTING")
-    _error(client.get("/api/studio/admin/settings/limits", cookies=admin["cookies"]), 404, "UNKNOWN_SETTING")
+    # D26 = the same ad accounts: PLAN.md's studio-accounts setting is not built.
+    _error(_put(admin, "studio-accounts", {"x": 1}), 404, "UNKNOWN_SETTING")
+    _error(client.get("/api/studio/admin/settings/studio-accounts", cookies=admin["cookies"]), 404, "UNKNOWN_SETTING")
     good = _put(admin, "capabilities", {"igPublicReply": "poll", "fbPublicReply": "on"})
     assert good.status_code == 200 and good.json()["value"]["igPublicReply"] == "poll"
     assert _me(actors["customer"])["capabilities"]["fbPublicReply"] == "on"
@@ -812,3 +822,410 @@ def test_missing_data_gives_null_baselines_not_a_crash():
     assert report["baselines"]["B1"] is None and report["baselines"]["B5"] is None and report["baselines"]["B6"] is None
     assert report["baselines"]["B2"] == {"value": 0.0, "unit": "percent", "sample": 1}
     json.dumps(report)  # always serialisable
+
+
+# ------------------------------------ P0-04: limits, settlement, hours, contact, targets, thresholds
+
+NEW_KEYS = ("limits", "settlement", "hours", "contact", "targets", "thresholds")
+WORKDAY = {"open": "09:00", "close": "17:00"}
+DEFAULT_WEEK = {"sun": WORKDAY, "mon": WORKDAY, "tue": WORKDAY, "wed": WORKDAY, "thu": WORKDAY, "fri": None, "sat": None}
+
+
+def _utc(*parts) -> datetime:
+    return datetime(*parts, tzinfo=timezone.utc)
+
+
+THURSDAY_1030_TRIPOLI = _utc(2026, 9, 24, 8, 30)  # Tripoli is UTC+2 all year
+
+# key -> (value sent, value stored and read back)
+ROUND_TRIPS = {
+    "limits": (
+        {"minTotalMinorUSD": 1_000, "maxTotalMinorUSD": 150_000, "minPerDayMinorUSD": 200, "maxDays": 30,
+         "p1CutoverAt": "2026-10-01T10:00:00+02:00"},
+        {"minTotalMinorUSD": 1_000, "maxTotalMinorUSD": 150_000, "minPerDayMinorUSD": 200, "maxDays": 30,
+         "p1CutoverAt": "2026-10-01T08:00:00.000Z"},  # kept in UTC
+    ),
+    "settlement": (
+        {"spendDelayHours": 72, "neverDeliveredImmediate": False, "driftWatchDays": 30},
+        {"spendDelayHours": 72, "neverDeliveredImmediate": False, "driftWatchDays": 30},
+    ),
+    "hours": (
+        {"timezone": "Africa/Tripoli", "week": {"sat": {"open": "10:00", "close": "14:00"}, "thu": None},
+         "holidays": [{"date": "2026-12-24", "labelEn": " Independence Day ", "labelAr": "عيد الاستقلال"}, {"date": "2026-10-10"}],
+         "ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "10:00", "close": "15:00"},
+         "onDutyUntil": "23:00"},
+        {"timezone": "Africa/Tripoli",
+         "week": {**DEFAULT_WEEK, "sat": {"open": "10:00", "close": "14:00"}, "thu": None},  # a partial week merges
+         "holidays": [{"date": "2026-10-10", "labelEn": "", "labelAr": ""},  # sorted by date, labels optional
+                      {"date": "2026-12-24", "labelEn": "Independence Day", "labelAr": "عيد الاستقلال"}],
+         "ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "10:00", "close": "15:00"},
+         "onDutyUntil": "23:00"},
+    ),
+    "contact": (
+        {"whatsapp": "+218 91 234 5678", "phone": "٠٠٢١٨٢١٤٤٤٤٤٤٤", "email": " help@albayanhub.com ",
+         "urgentWhatsapp": "+218-92-000-1111"},
+        {"whatsapp": "+218912345678", "phone": "+218214444444", "email": "help@albayanhub.com",
+         "urgentWhatsapp": "+218920001111"},  # Arabic digits, spaces and dashes; 00 becomes +
+    ),
+    "targets": (
+        {"reviewBusinessDays": 2, "ticketFirstResponseMinutes": 180, "stopRequestMinutes": 60,
+         "paymentConfirmMinutes": 300, "settlementBusinessDays": 3, "tiktokBusinessDays": 2},
+        {"reviewBusinessDays": 2, "ticketFirstResponseMinutes": 180, "stopRequestMinutes": 60,
+         "paymentConfirmMinutes": 300, "settlementBusinessDays": 3, "tiktokBusinessDays": 2},
+    ),
+    "thresholds": (
+        {"goConsecutiveWeeks": 3, "reconcileToleranceMinorUSD": 1_000, "reconcileToleranceBasisPoints": 50,
+         "queueOnTargetPercent": 95, "resultsFreshPercent": 80, "resultsFreshHours": 12, "webhookReplyP95Seconds": 60,
+         "pollReplyP95Seconds": 900, "replyFailureMaxPercent": 3, "restoreProofMaxDays": 5, "tokenMinDaysLeft": 21,
+         "strandedCaptureMaxMinutes": 30, "replyOutageMaxHours": 4, "heartbeatLateMaxMinutes": 10,
+         "tokenExpiryWarnDays": [3, 21, 7, 7]},
+        {"goConsecutiveWeeks": 3, "reconcileToleranceMinorUSD": 1_000, "reconcileToleranceBasisPoints": 50,
+         "queueOnTargetPercent": 95, "resultsFreshPercent": 80, "resultsFreshHours": 12, "webhookReplyP95Seconds": 60,
+         "pollReplyP95Seconds": 900, "replyFailureMaxPercent": 3, "restoreProofMaxDays": 5, "tokenMinDaysLeft": 21,
+         "strandedCaptureMaxMinutes": 30, "replyOutageMaxHours": 4, "heartbeatLateMaxMinutes": 10,
+         "tokenExpiryWarnDays": [21, 7, 3]},  # repeats dropped, largest first
+    ),
+}
+
+
+def _get_setting(user: dict, key: str) -> dict:
+    response = client.get(f"/api/studio/admin/settings/{key}", cookies=user["cookies"])
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _store(values: dict, version: int = 3) -> None:
+    """Rows written by hand (an old release or a manual edit), bypassing every save rule."""
+    stamp = now_ms()
+    _replace_settings_rows([{
+        "type": STUDIO_SETTINGS_TYPE, "id": derived_id("sts", key),
+        "data_json": json_dumps({"settingKey": key, "version": version, "value": value}),
+        "deleted": False, "created_at": stamp, "created_by": None, "last_modified": stamp,
+    } for key, value in values.items()])
+
+
+def test_new_settings_start_from_the_decided_defaults(actors):
+    admin = actors["admin"]
+    records = {key: _get_setting(admin, key) for key in NEW_KEYS}
+    assert all(record["version"] == 0 and record["updatedAt"] is None for record in records.values())
+    assert records["limits"]["value"] == {  # D4 + D5 (owner): $5 - $2,000; $1 per-day floor until P0-01(f)
+        "minTotalMinorUSD": 500, "maxTotalMinorUSD": 200_000, "minPerDayMinorUSD": 100, "maxDays": 90, "p1CutoverAt": None}
+    assert records["settlement"]["value"] == {"spendDelayHours": 48, "neverDeliveredImmediate": True, "driftWatchDays": 28}  # D28
+    assert records["hours"]["value"] == {  # D11 [ASSUMPTION until the owner confirms]
+        "timezone": "Africa/Tripoli", "week": DEFAULT_WEEK, "holidays": [], "ramadan": None, "onDutyUntil": None}
+    assert records["contact"]["value"] == {"whatsapp": None, "phone": None, "email": None, "urgentWhatsapp": None}
+    assert records["targets"]["value"] == {  # D11: 1 business day, 4 h, 2 h, 4 h, 2 business days, 1 business day
+        "reviewBusinessDays": 1, "ticketFirstResponseMinutes": 240, "stopRequestMinutes": 120,
+        "paymentConfirmMinutes": 240, "settlementBusinessDays": 2, "tiktokBusinessDays": 1}
+    thresholds = records["thresholds"]["value"]  # D32 / PLAN.md §12.8
+    assert thresholds["reconcileToleranceMinorUSD"] == 500 and thresholds["reconcileToleranceBasisPoints"] == 100
+    assert thresholds["queueOnTargetPercent"] == 90 and thresholds["goConsecutiveWeeks"] == 2
+    assert (thresholds["resultsFreshPercent"], thresholds["resultsFreshHours"]) == (90, 6)
+    assert (thresholds["webhookReplyP95Seconds"], thresholds["pollReplyP95Seconds"], thresholds["replyFailureMaxPercent"]) == (120, 600, 5)
+    assert (thresholds["strandedCaptureMaxMinutes"], thresholds["replyOutageMaxHours"], thresholds["heartbeatLateMaxMinutes"]) == (60, 6, 15)
+    assert thresholds["tokenExpiryWarnDays"] == [14, 7, 2] and thresholds["tokenMinDaysLeft"] == 14
+    assert set(studio_settings.SETTING_KEYS) == {"rollout", "intake", "capabilities", *NEW_KEYS}  # no studio-accounts (D26)
+
+
+@pytest.mark.parametrize("key", NEW_KEYS)
+def test_every_new_setting_round_trips(actors, key):
+    admin = actors["admin"]
+    sent, expected = ROUND_TRIPS[key]
+    started = now_ms()
+    saved = _put(admin, key, sent)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["version"] == 1 and saved.json()["value"] == expected
+    assert _get_setting(admin, key)["value"] == expected  # read back through today's rules unchanged
+    assert studio_settings.read_all_settings()[key] == expected
+    again = _put(admin, key, expected, expected_version=1)  # the stored shape is accepted as it is
+    assert again.status_code == 200 and again.json()["version"] == 2 and again.json()["value"] == expected
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT metadata_json FROM audit_logs WHERE action='studio_setting' AND resource_id=:r AND ts >= :t ORDER BY ts"),
+            {"r": derived_id("sts", key), "t": started},
+        ).mappings().all()
+    audits = [json_loads(r["metadata_json"]) for r in rows]
+    assert [a["version"] for a in audits] == [1, 2] and audits[0]["after"] == expected
+    assert audits[0]["before"] == studio_settings.DEFAULTS[key] and audits[0]["key"] == key
+
+
+def test_partial_saves_keep_the_other_fields(actors):
+    admin = actors["admin"]
+    assert _put(admin, "limits", {"p1CutoverAt": "2026-10-01T08:00:00Z"}).json()["value"] == {
+        "minTotalMinorUSD": 500, "maxTotalMinorUSD": 200_000, "minPerDayMinorUSD": 100, "maxDays": 90,
+        "p1CutoverAt": "2026-10-01T08:00:00.000Z"}
+    cleared = _put(admin, "limits", {"p1CutoverAt": None, "maxDays": 45}, expected_version=1)
+    assert cleared.json()["value"]["p1CutoverAt"] is None and cleared.json()["value"]["maxDays"] == 45
+    assert _put(admin, "contact", {"whatsapp": "+218912345678", "email": "help@albayanhub.com"}).status_code == 200
+    emptied = _put(admin, "contact", {"whatsapp": ""}, expected_version=1)  # "" or null = not shown
+    assert emptied.json()["value"] == {"whatsapp": None, "phone": None, "email": "help@albayanhub.com", "urgentWhatsapp": None}
+    week = _put(admin, "hours", {"week": {"fri": {"open": "10:00", "close": "12:00"}}}).json()["value"]["week"]
+    assert week == {**DEFAULT_WEEK, "fri": {"open": "10:00", "close": "12:00"}}
+
+
+_SIXTY_ONE_DAYS = [{"date": (date(2027, 1, 1) + timedelta(days=i)).isoformat()} for i in range(61)]
+
+
+@pytest.mark.parametrize("key,value,code", [
+    # limits: whole US cents, $1 minimum totals, the $1,000,000 request ceiling, 1-90 days, a time with its zone
+    ("limits", {"minTotalMinorUSD": 99}, "INVALID_VALUE"),
+    ("limits", {"maxTotalMinorUSD": 100_000_001}, "INVALID_VALUE"),
+    ("limits", {"minTotalMinorUSD": "500"}, "INVALID_VALUE"),
+    ("limits", {"minTotalMinorUSD": 500.0}, "INVALID_VALUE"),
+    ("limits", {"minPerDayMinorUSD": 0}, "INVALID_VALUE"),
+    ("limits", {"maxDays": 0}, "INVALID_VALUE"),
+    ("limits", {"maxDays": 91}, "INVALID_VALUE"),
+    ("limits", {"maxDays": True}, "INVALID_VALUE"),
+    ("limits", {"p1CutoverAt": "2026-10-01"}, "INVALID_VALUE"),
+    ("limits", {"p1CutoverAt": "2026-10-01T08:00:00"}, "INVALID_VALUE"),  # no zone
+    ("limits", {"p1CutoverAt": "2026-13-01T08:00:00Z"}, "INVALID_VALUE"),
+    ("limits", {"p1CutoverAt": "2019-12-31T08:00:00Z"}, "INVALID_VALUE"),
+    ("limits", {"p1CutoverAt": 1_790_000_000_000}, "INVALID_VALUE"),
+    ("limits", {"minTotalMinorUSD": 300_000}, "INVALID_VALUE"),  # above the (default) maximum
+    ("limits", {"maxTotalMinorUSD": 400}, "INVALID_VALUE"),      # below the (default) minimum
+    ("limits", {"minPerDayMinorUSD": 600}, "INVALID_VALUE"),     # a floor above the minimum total
+    ("limits", {"minTotal": 500}, "UNKNOWN_FIELD"),
+    ("limits", [500, 200_000], "INVALID_REQUEST"),
+    # settlement: 0-168 hours, 1-90 days, and the watch must outlast the wait
+    ("settlement", {"spendDelayHours": -1}, "INVALID_VALUE"),
+    ("settlement", {"spendDelayHours": 169}, "INVALID_VALUE"),
+    ("settlement", {"neverDeliveredImmediate": "yes"}, "INVALID_VALUE"),
+    ("settlement", {"driftWatchDays": 91}, "INVALID_VALUE"),
+    ("settlement", {"driftWatchDays": 1}, "INVALID_VALUE"),  # 24 h < the 48 h wait
+    ("settlement", {"waitHours": 48}, "UNKNOWN_FIELD"),
+    # hours
+    ("hours", {"timezone": "Europe/London"}, "INVALID_VALUE"),
+    ("hours", {"timezone": "UTC"}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "9:00", "close": "17:00"}}}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "17:00", "close": "09:00"}}}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "09:00", "close": "09:00"}}}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "09:00", "close": "24:00"}}}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "09:00"}}}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "٠٩:٠٠", "close": "12:00"}}}, "INVALID_VALUE"),
+    ("hours", {"week": {"fri": {"open": "09:00", "close": "12:00", "note": "x"}}}, "UNKNOWN_FIELD"),
+    ("hours", {"week": {"friday": None}}, "UNKNOWN_FIELD"),
+    ("hours", {"week": "sun-thu"}, "INVALID_VALUE"),
+    ("hours", {"week": {day: None for day in ("sun", "mon", "tue", "wed", "thu", "fri", "sat")}}, "INVALID_VALUE"),
+    ("hours", {"holidays": ["2026-12-24"]}, "INVALID_VALUE"),
+    ("hours", {"holidays": {"date": "2026-12-24"}}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "24/12/2026"}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2026-02-30"}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "٢٠٢٦-١٢-٢٤"}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2101-01-01"}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2026-12-24"}, {"date": "2026-12-24", "labelEn": "again"}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2026-12-24", "labelEn": "<b>Holiday</b>"}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2026-12-24", "labelAr": "ع" * 61}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2026-12-24", "labelAr": 5}]}, "INVALID_VALUE"),
+    ("hours", {"holidays": [{"date": "2026-12-24", "name": "x"}]}, "UNKNOWN_FIELD"),
+    ("hours", {"holidays": _SIXTY_ONE_DAYS}, "INVALID_VALUE"),
+    ("hours", {"ramadan": {"from": "2027-03-09", "to": "2027-02-08", "open": "10:00", "close": "15:00"}}, "INVALID_VALUE"),
+    ("hours", {"ramadan": {"from": "2027-02-01", "to": "2027-03-09", "open": "10:00", "close": "15:00"}}, "INVALID_VALUE"),
+    ("hours", {"ramadan": {"from": "2027-02-08", "to": "2027-03-09"}}, "INVALID_VALUE"),
+    ("hours", {"ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "15:00", "close": "10:00"}}, "INVALID_VALUE"),
+    ("hours", {"ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "10:00", "close": "15:00", "days": []}}, "UNKNOWN_FIELD"),
+    ("hours", {"ramadan": "2027-02-08"}, "INVALID_VALUE"),
+    ("hours", {"onDutyUntil": "11pm"}, "INVALID_VALUE"),
+    ("hours", {"openNow": True}, "UNKNOWN_FIELD"),  # computed by the server, never stored
+    # contact: international numbers and a plain e-mail address only
+    ("contact", {"whatsapp": "0912345678"}, "INVALID_VALUE"),  # no country code
+    ("contact", {"whatsapp": "+218 91 abc"}, "INVALID_VALUE"),
+    ("contact", {"whatsapp": "<a href='https://x'>+218912345678</a>"}, "INVALID_VALUE"),
+    ("contact", {"phone": "+0218912345678"}, "INVALID_VALUE"),
+    ("contact", {"phone": "+2189"}, "INVALID_VALUE"),
+    ("contact", {"phone": 218912345678}, "INVALID_VALUE"),
+    ("contact", {"email": "not-an-email"}, "INVALID_VALUE"),
+    ("contact", {"email": "<script>@albayanhub.com"}, "INVALID_VALUE"),
+    ("contact", {"email": "help@albayanhub"}, "INVALID_VALUE"),
+    ("contact", {"urgentWhatsapp": "call Ali"}, "INVALID_VALUE"),
+    ("contact", {"facebook": "albayan"}, "UNKNOWN_FIELD"),
+    # targets: ranges, and a stop request never slower than an ordinary ticket
+    ("targets", {"reviewBusinessDays": 0}, "INVALID_VALUE"),
+    ("targets", {"reviewBusinessDays": 11}, "INVALID_VALUE"),
+    ("targets", {"ticketFirstResponseMinutes": 10}, "INVALID_VALUE"),
+    ("targets", {"stopRequestMinutes": 481}, "INVALID_VALUE"),
+    ("targets", {"paymentConfirmMinutes": 2401}, "INVALID_VALUE"),
+    ("targets", {"stopRequestMinutes": 300}, "INVALID_VALUE"),         # above the 240-minute ticket target
+    ("targets", {"ticketFirstResponseMinutes": 60}, "INVALID_VALUE"),  # below the 120-minute stop target
+    ("targets", {"reviewHours": 8}, "UNKNOWN_FIELD"),
+    # thresholds
+    ("thresholds", {"queueOnTargetPercent": 101}, "INVALID_VALUE"),
+    ("thresholds", {"queueOnTargetPercent": 49}, "INVALID_VALUE"),
+    ("thresholds", {"reconcileToleranceBasisPoints": 1001}, "INVALID_VALUE"),
+    ("thresholds", {"reconcileToleranceMinorUSD": -1}, "INVALID_VALUE"),
+    ("thresholds", {"goConsecutiveWeeks": 1.5}, "INVALID_VALUE"),
+    ("thresholds", {"tokenExpiryWarnDays": []}, "INVALID_VALUE"),
+    ("thresholds", {"tokenExpiryWarnDays": [30, 14, 7, 3, 2, 1]}, "INVALID_VALUE"),
+    ("thresholds", {"tokenExpiryWarnDays": [0]}, "INVALID_VALUE"),
+    ("thresholds", {"tokenExpiryWarnDays": "14,7,2"}, "INVALID_VALUE"),
+    ("thresholds", {"integrityViolationsMax": 1}, "UNKNOWN_FIELD"),  # zero-tolerance rows are fixed rules
+])
+def test_new_settings_refuse_invalid_values_with_codes(actors, key, value, code):
+    _error(_put(actors["admin"], key, value), 400, code)
+    assert _settings_rows() == []
+
+
+def test_limits_rules_hold_across_partial_saves(actors):
+    admin = actors["admin"]
+    both = _put(admin, "limits", {"minTotalMinorUSD": 300_000, "maxTotalMinorUSD": 400_000})  # one save may move both
+    assert both.status_code == 200, both.text
+    detail = _error(_put(admin, "limits", {"maxTotalMinorUSD": 250_000}, expected_version=1), 400, "INVALID_VALUE")
+    assert "maxTotalMinorUSD" in detail["message"]  # checked against the stored minimum
+    _error(_put(admin, "limits", {"minPerDayMinorUSD": 300_001}, expected_version=1), 400, "INVALID_VALUE")
+    assert _put(admin, "limits", {"minPerDayMinorUSD": 300_000}, expected_version=1).json()["version"] == 2  # equal is fine
+    assert _put(admin, "limits", {"minTotalMinorUSD": 400_000}, expected_version=2).json()["version"] == 3  # min == max is fine
+    _error(_put(admin, "limits", {"minTotalMinorUSD": 299_999}, expected_version=3), 400, "INVALID_VALUE")  # below the floor
+    assert _get_setting(admin, "limits")["version"] == 3  # refused saves never used a version
+    assert _me(actors["customer"])["adLimits"] == {"minTotalMinorUSD": 400_000, "maxTotalMinorUSD": 400_000, "maxDays": 90}
+
+
+def test_settlement_and_target_rules_between_fields(actors):
+    admin = actors["admin"]
+    assert _put(admin, "settlement", {"spendDelayHours": 168, "driftWatchDays": 7}).status_code == 200  # 7 x 24 = 168
+    _error(_put(admin, "settlement", {"driftWatchDays": 6}, expected_version=1), 400, "INVALID_VALUE")
+    zero = _put(admin, "settlement", {"spendDelayHours": 0, "driftWatchDays": 1}, expected_version=1)
+    assert zero.status_code == 200 and zero.json()["value"]["spendDelayHours"] == 0
+    assert _put(admin, "targets", {"stopRequestMinutes": 240}).status_code == 200  # equal to the ticket target
+    _error(_put(admin, "targets", {"ticketFirstResponseMinutes": 239}, expected_version=1), 400, "INVALID_VALUE")
+    both = _put(admin, "targets", {"ticketFirstResponseMinutes": 60, "stopRequestMinutes": 30}, expected_version=1)
+    assert both.status_code == 200 and both.json()["version"] == 2
+
+
+def test_stored_new_settings_are_renormalised_on_read(actors, monkeypatch):
+    """A hand-edited row is read through today's rules: bad fields, entries and items fall back one by
+    one, the rules between fields still hold, and /me never breaks or shows what failed."""
+    monkeypatch.setattr(studio_settings, "utc_now", lambda: THURSDAY_1030_TRIPOLI)
+    _store({
+        "limits": {"minTotalMinorUSD": 300_000, "maxTotalMinorUSD": 400_000, "minPerDayMinorUSD": 10**12,
+                   "maxDays": "30", "junk": 1},
+        "hours": {"timezone": "Europe/London",
+                  "week": {"sun": {"open": "18:00", "close": "08:00"}, "fri": {"open": "10:00", "close": "13:00"}, "xyz": {}},
+                  "holidays": [{"date": "2026-12-24", "labelEn": "Independence Day"}, {"date": "bad"}, {"date": "2026-12-24"},
+                               "2026-10-10", {"date": "2026-10-07", "labelAr": "<script>"}],
+                  "ramadan": {"from": "2027-02-08", "to": "2027-01-01", "open": "10:00", "close": "15:00"},
+                  "onDutyUntil": "25:00"},
+        "contact": {"whatsapp": "<b>call us</b>", "phone": "+218 21 444 4444", "email": "help@albayanhub.com",
+                    "urgentWhatsapp": 5},
+        "targets": {"stopRequestMinutes": 400, "ticketFirstResponseMinutes": 300},
+        "thresholds": {"tokenExpiryWarnDays": [30, "x", 3, 30], "queueOnTargetPercent": 150},
+        "settlement": "not an object",
+    })
+    admin = actors["admin"]
+    limits = _get_setting(admin, "limits")
+    # min 300,000 is kept once max 400,000 is read (the second pass); the rest fall back to the defaults.
+    assert limits["version"] == 3 and limits["value"] == {
+        "minTotalMinorUSD": 300_000, "maxTotalMinorUSD": 400_000, "minPerDayMinorUSD": 100, "maxDays": 90, "p1CutoverAt": None}
+    assert _get_setting(admin, "hours")["value"] == {
+        "timezone": "Africa/Tripoli", "week": {**DEFAULT_WEEK, "fri": {"open": "10:00", "close": "13:00"}},
+        "holidays": [{"date": "2026-12-24", "labelEn": "Independence Day", "labelAr": ""}],
+        "ramadan": None, "onDutyUntil": None}
+    assert _get_setting(admin, "contact")["value"] == {
+        "whatsapp": None, "phone": "+218214444444", "email": "help@albayanhub.com", "urgentWhatsapp": None}
+    targets = _get_setting(admin, "targets")["value"]  # a stop target above the ticket target is never read back
+    assert targets["ticketFirstResponseMinutes"] == 300 and targets["stopRequestMinutes"] == 120
+    thresholds = _get_setting(admin, "thresholds")["value"]
+    assert thresholds["tokenExpiryWarnDays"] == [30, 3] and thresholds["queueOnTargetPercent"] == 90
+    assert _get_setting(admin, "settlement")["value"] == studio_settings.DEFAULTS["settlement"]
+    response = client.get("/api/studio/me", cookies=actors["customer"]["cookies"])
+    assert response.status_code == 200, response.text
+    me = response.json()
+    assert me["contact"] == {"whatsapp": None, "phone": "+218214444444", "email": "help@albayanhub.com"}
+    assert me["adLimits"] == {"minTotalMinorUSD": 300_000, "maxTotalMinorUSD": 400_000, "maxDays": 90}
+    assert me["serviceHours"]["openNow"] is True and "<" not in response.text
+    # The next save starts from the clean value, so nothing refused is ever written back.
+    saved = _put(admin, "hours", {"onDutyUntil": "22:00"}, expected_version=3)
+    assert saved.status_code == 200 and saved.json()["value"]["timezone"] == "Africa/Tripoli"
+    stored = json_loads(next(r for r in _settings_rows() if r["id"] == derived_id("sts", "hours"))["data_json"])
+    assert stored["value"]["holidays"] == [{"date": "2026-12-24", "labelEn": "Independence Day", "labelAr": ""}]
+
+
+def test_me_gives_customers_public_fields_only(actors, monkeypatch):
+    monkeypatch.setattr(studio_settings, "utc_now", lambda: THURSDAY_1030_TRIPOLI)
+    admin = actors["admin"]
+    urgent = "+218920001111"
+    for key, value in {
+        "contact": {"whatsapp": "+218912345678", "phone": "+218214444444", "email": "help@albayanhub.com", "urgentWhatsapp": urgent},
+        "limits": {"minTotalMinorUSD": 700, "maxTotalMinorUSD": 150_000, "minPerDayMinorUSD": 250, "maxDays": 45,
+                   "p1CutoverAt": "2026-10-01T08:00:00Z"},
+        "hours": {"holidays": [{"date": "2026-09-01", "labelEn": "Past day"},
+                               {"date": "2026-12-24", "labelEn": "Independence Day", "labelAr": "عيد الاستقلال"}],
+                  "ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "10:00", "close": "15:00"},
+                  "onDutyUntil": "23:00"},
+        "settlement": {"spendDelayHours": 71},
+        "targets": {"paymentConfirmMinutes": 333},
+        "thresholds": {"tokenMinDaysLeft": 17},
+    }.items():
+        assert _put(admin, key, value).status_code == 200, key
+    for who in ("customer", "staff", "admin"):
+        response = client.get("/api/studio/me", cookies=actors[who]["cookies"])
+        assert response.status_code == 200, response.text
+        me = response.json()
+        assert set(me) == {"ui", "services", "staffDesk", "capabilities", "intake", "adLimits", "serviceHours", "contact",
+                           "isAdmin", "isStaff"}
+        assert me["adLimits"] == {"minTotalMinorUSD": 700, "maxTotalMinorUSD": 150_000, "maxDays": 45}
+        assert me["contact"] == {"whatsapp": "+218912345678", "phone": "+218214444444", "email": "help@albayanhub.com"}
+        assert me["serviceHours"] == {
+            "timezone": "Africa/Tripoli", "openNow": True, "week": DEFAULT_WEEK,
+            "holidays": [{"date": "2026-12-24", "labelEn": "Independence Day", "labelAr": "عيد الاستقلال"}],  # past days left out
+            "ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "10:00", "close": "15:00"},
+            "onDutyUntil": "23:00",
+        }
+        # The urgent line (only for the after-hours stop answer) and staff-only settings never reach /me
+        # (the exact comparisons above already pin every value that does).
+        for private in (urgent, "urgentWhatsapp", "p1CutoverAt", "2026-10-01", "minPerDayMinorUSD", "spendDelayHours",
+                        "tokenMinDaysLeft", "paymentConfirmMinutes", "settlement", "targets", "thresholds"):
+            assert private not in response.text, (who, private)
+    # Without an urgent line to call, no on-duty time is promised.
+    assert _put(admin, "contact", {"urgentWhatsapp": None}, expected_version=1).status_code == 200
+    assert _me(actors["customer"])["serviceHours"]["onDutyUntil"] is None
+
+
+def test_open_now_uses_tripoli_time_weekends_holidays_and_ramadan():
+    hours = studio_settings.validate_setting("hours", {
+        "holidays": [{"date": "2026-10-04", "labelEn": "Test holiday", "labelAr": "عطلة تجريبية"}],
+        "ramadan": {"from": "2027-02-08", "to": "2027-03-09", "open": "10:00", "close": "15:00"},
+    })
+    cases = [
+        (_utc(2026, 9, 24, 8, 30), True),    # Thursday 10:30 in Tripoli
+        (_utc(2026, 9, 24, 6, 59), False),   # Thursday 08:59: not open yet
+        (_utc(2026, 9, 24, 7, 0), True),     # 09:00 Tripoli opens (07:00 read as UTC would still be closed)
+        (_utc(2026, 9, 24, 14, 59), True),   # 16:59
+        (_utc(2026, 9, 24, 15, 0), False),   # 17:00 closes (15:00 read as UTC would still be open)
+        (_utc(2026, 9, 25, 8, 30), False),   # Friday: weekend
+        (_utc(2026, 9, 26, 8, 30), False),   # Saturday: weekend
+        (_utc(2026, 9, 27, 7, 30), True),    # Sunday 09:30: the week starts
+        (_utc(2026, 10, 4, 8, 30), False),   # Sunday, but a holiday
+        (_utc(2026, 10, 5, 7, 30), True),    # Monday after the holiday
+        (_utc(2027, 2, 10, 12, 0), True),    # Ramadan Wednesday 14:00 (10:00-15:00)
+        (_utc(2027, 2, 10, 13, 30), False),  # Ramadan 15:30: ordinary hours would say open
+        (_utc(2027, 2, 10, 7, 30), False),   # Ramadan 09:30: ordinary hours would say open
+        (_utc(2027, 2, 12, 12, 0), False),   # a Ramadan Friday stays closed
+        (_utc(2027, 3, 10, 13, 30), True),   # the day after Ramadan: ordinary hours again (15:30)
+        (datetime(2026, 9, 24, 8, 30), True),  # a time without a zone is read as UTC
+    ]
+    for moment, expected in cases:
+        assert studio_settings.service_open_at(hours, moment) is expected, moment
+    # The day changes at Tripoli midnight (22:00 UTC), not at UTC midnight.
+    all_day = studio_settings.validate_setting("hours", {
+        "week": {"sun": {"open": "00:00", "close": "23:59"}, "mon": {"open": "00:00", "close": "23:59"}},
+        "holidays": [{"date": "2026-10-05", "labelEn": "Monday holiday", "labelAr": "عطلة الاثنين"}],
+    })
+    assert studio_settings.service_open_at(all_day, _utc(2026, 10, 4, 21, 30)) is True    # Sunday 23:30 Tripoli
+    assert studio_settings.service_open_at(all_day, _utc(2026, 10, 4, 22, 30)) is False   # Monday 00:30 = the holiday
+    assert studio_settings.service_open_at(all_day, _utc(2026, 10, 5, 21, 30)) is False   # Monday 23:30: still the holiday
+    assert studio_settings.service_open_at(all_day, _utc(2026, 10, 5, 22, 30)) is False   # Tuesday 00:30: ordinary 09:00 opening
+
+
+def test_me_open_now_follows_a_fixed_tripoli_clock(actors, monkeypatch):
+    holiday = {"date": "2026-10-04", "labelEn": "Test holiday", "labelAr": "عطلة تجريبية"}
+    assert _put(actors["admin"], "hours", {"holidays": [holiday]}).status_code == 200
+    for moment, open_now, holidays in [
+        (THURSDAY_1030_TRIPOLI, True, [holiday]),
+        (_utc(2026, 9, 24, 16, 0), False, [holiday]),   # Thursday 18:00 Tripoli: after hours
+        (_utc(2026, 9, 25, 8, 30), False, [holiday]),   # Friday (weekend)
+        (_utc(2026, 9, 26, 8, 30), False, [holiday]),   # Saturday (weekend)
+        (_utc(2026, 10, 4, 8, 30), False, [holiday]),   # the holiday itself (still listed today)
+        (_utc(2026, 10, 5, 7, 30), True, []),           # Monday 09:30: open, the holiday is past
+    ]:
+        monkeypatch.setattr(studio_settings, "utc_now", lambda moment=moment: moment)
+        hours = _me(actors["customer"])["serviceHours"]
+        assert hours["openNow"] is open_now and hours["holidays"] == holidays, moment
