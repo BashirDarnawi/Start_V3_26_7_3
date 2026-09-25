@@ -11,8 +11,9 @@ Routes under the studio router's /api/studio prefix:
   (15g-studio-core.js): Arabic digits, spaces, dots, dashes and brackets are allowed, 00 means +,
   and the Libyan forms 091…, 91… and 218… become +218…. The shared table phone_cases.json keeps
   the two readers equal (server/test_studio_profile.py and scripts/test-mobile-ui.js). A null or
-  empty number removes the number and its consent time. Saving what is already stored changes
-  nothing and writes no audit entry, so the PUT can be repeated safely.
+  empty number removes the number and its consent time, whatever the row holds (a stored value
+  that today's rule no longer reads is removed too). Saving what is already stored changes nothing
+  and writes no audit entry, so the PUT can be repeated safely.
 
 **Only the owner.** Neither route takes a user id (``userId`` or ``ownerId`` in the body is an
 unknown field), so an admin or a reviewer reads and writes only their own profile here; the team
@@ -26,10 +27,9 @@ One row per owner: type ``studioProfiles``, id ``stp_`` + sha256(owner)[:40]
 (studio_types.derived_id, the id the scrub looks for), ``created_by`` = the owner. Fields that
 other features keep on the same row (``activitySeenAt``, P3-05) are left as they are.
 
-Refusals use the existing studio codes (studio_errors.py): ``INVALID_VALUE`` for a number that is not
-a phone number and for a number sent without consent (PLAN.md §7.3 names them PHONE_INVALID and
-CONSENT_REQUIRED; PHONE_REFUSAL_CODE and CONSENT_REFUSAL_CODE below switch to them once the screens'
-error map carries their words).
+Refusals are studio codes (studio_errors.py, PLAN.md §7.3): ``PHONE_INVALID`` for a number that is
+not a phone number and ``CONSENT_REQUIRED`` for a number sent without consent (the screens' error map,
+15g STUDIO_ERROR_TEXTS, carries their words).
 """
 
 import math
@@ -50,8 +50,8 @@ BODY_FIELDS = ("whatsappNumber", "whatsappConsent")
 PROFILE_READS_PER_MINUTE = 60
 PROFILE_WRITES_PER_MINUTE = 20
 AUDIT_ACTION = "studio_profile"
-PHONE_REFUSAL_CODE = "INVALID_VALUE"
-CONSENT_REFUSAL_CODE = "INVALID_VALUE"
+PHONE_REFUSAL_CODE = "PHONE_INVALID"
+CONSENT_REFUSAL_CODE = "CONSENT_REQUIRED"
 
 # ------------------------------------------------------------------ the phone rule (= studioParsePhone)
 
@@ -195,7 +195,10 @@ def save_profile(
 
     ``audit(conn, row_id, change)`` writes the audit entry on the same connection before the commit
     (change: "set", "changed" or "removed"), so a failed audit rolls the save back too. Nothing is
-    written, and nothing audited, when the number is already the stored one.
+    written, and nothing audited, when the row already holds exactly that: the same number, or (for
+    a removal) no number and no consent time at all. The check reads the stored fields themselves,
+    not the owner's view: a stored value that today's rule no longer reads (the view shows "no
+    number") is still removed.
     """
     uid = str(owner_id or "")
     row_id = profile_id(uid)
@@ -204,9 +207,14 @@ def save_profile(
         row = _select_row(conn, row_id)
         data = _live_data(row)
         before = profile_view(data)
-        if number == before["whatsappNumber"]:
+        stored = data.get("whatsappNumber")
+        has_number = stored not in (None, "")
+        if number is None:
+            if not has_number and data.get("whatsappConsentAt") in (None, ""):
+                return before
+        elif number == stored:
             return before
-        change = "removed" if number is None else ("changed" if before["whatsappNumber"] else "set")
+        change = "removed" if number is None else ("changed" if has_number else "set")
         stamp = now_ms()
         new = dict(data)
         new.update({"id": row_id, "recordType": STUDIO_PROFILES_TYPE, "ownerId": uid, "updatedAt": stamp_iso, "_deleted": False})

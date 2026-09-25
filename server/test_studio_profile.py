@@ -28,6 +28,7 @@ from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from server.systems.ads_studio import OWNED_TYPES
 from server.systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS
+from server.systems.ads_studio.studio_errors import STUDIO_ERROR_CODES
 from server.systems.ads_studio.studio_privacy import scrub_studio_personal_data_conn
 from server.systems.ads_studio.studio_profile import (
     AUDIT_ACTION,
@@ -130,6 +131,16 @@ def test_profile_phone_rule_matches_the_screens():
     wrong = [(raw, want, normalize_phone(raw)) for raw, want in PHONE_CASES if normalize_phone(raw) != want]
     assert wrong == []
     assert normalize_phone(912345678) == "" and normalize_phone(["0912345678"]) == ""  # text only
+
+
+def test_profile_refusals_use_their_own_codes():
+    """PLAN.md §7.3: PHONE_INVALID and CONSENT_REQUIRED are catalogued studio codes (400), and the
+    screens' error map (15g STUDIO_ERROR_TEXTS) carries their words (scripts/test-mobile-ui.js)."""
+    assert (PHONE_REFUSAL_CODE, CONSENT_REFUSAL_CODE) == ("PHONE_INVALID", "CONSENT_REQUIRED")
+    assert STUDIO_ERROR_CODES["PHONE_INVALID"] == 400 and STUDIO_ERROR_CODES["CONSENT_REQUIRED"] == 400
+    user = _customer("codes")
+    assert _error(_put(user, {"whatsappNumber": "12345", "whatsappConsent": True}), 400, "PHONE_INVALID")["message"]
+    assert _error(_put(user, {"whatsappNumber": "0912345678", "whatsappConsent": False}), 400, "CONSENT_REQUIRED")["message"]
 
 
 # ------------------------------------------------------------------ consent
@@ -296,3 +307,34 @@ def test_profile_reads_a_hand_edited_number_as_none():
         ), {"type": STUDIO_PROFILES_TYPE, "id": row_id, "stamp": stamp, "owner": user["id"],
             "data": json_dumps({"id": row_id, "whatsappNumber": "call me <b>maybe</b>", "whatsappConsentAt": "x"})})
     assert _get(user).json() == {"whatsappNumber": None, "whatsappConsentAt": None, "updatedAt": None}
+
+    # The owner is told "no number", so a removal must really remove what the row still holds.
+    removed = _put(user, {"whatsappNumber": None})
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["whatsappNumber"] is None and removed.json()["updatedAt"]
+    data = _row(user["id"])["data"]
+    assert "whatsappNumber" not in data and "whatsappConsentAt" not in data and "maybe" not in json.dumps(data)
+    assert [json.loads(entry["metadata_json"])["whatsapp"] for entry in _audits(row_id)] == ["removed"]
+    assert _put(user, {"whatsappNumber": ""}).status_code == 200  # nothing left: no second write
+    assert len(_audits(row_id)) == 1
+
+
+def test_profile_remove_clears_a_number_saved_before_a_stricter_rule():
+    """A number stored under an older, looser rule (a Libyan mobile with a digit missing) reads as none
+    and is removed on request, consent time included."""
+    user = _customer("older-rule")
+    row_id = profile_id(user["id"])
+    stamp = now_ms()
+    with db_conn() as conn:
+        conn.execute(text(
+            "INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified) "
+            "VALUES (:type, :id, :data, false, :stamp, :owner, :stamp)"
+        ), {"type": STUDIO_PROFILES_TYPE, "id": row_id, "stamp": stamp, "owner": user["id"],
+            "data": json_dumps({"id": row_id, "whatsappNumber": "+21891234567", "whatsappConsentAt": "2026-01-01T00:00:00Z"})})
+    assert normalize_phone("+21891234567") == "" and _get(user).json()["whatsappNumber"] is None
+    assert _put(user, {"whatsappNumber": None, "whatsappConsent": False}).status_code == 200
+    data = _row(user["id"])["data"]
+    assert "whatsappNumber" not in data and "whatsappConsentAt" not in data
+    # Setting a number over it is a change, not a first save.
+    assert _put(user, {"whatsappNumber": "0912345678", "whatsappConsent": True}).json()["whatsappNumber"] == "+218912345678"
+    assert [json.loads(entry["metadata_json"])["whatsapp"] for entry in _audits(row_id)] == ["removed", "set"]

@@ -44,6 +44,8 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "TICKET_OPEN_LIMIT": 409,    # help: too many tickets still open; resolve one first
     "TICKET_MESSAGE_LIMIT": 409,  # help: the ticket holds the most messages it may; open a new one
     "TICKET_CLOSED": 409,        # help: resolved more than 7 days ago; it can no longer be reopened
+    "PHONE_INVALID": 400,        # profile: the WhatsApp number is not a phone number (the shared phone rule)
+    "CONSENT_REQUIRED": 400,     # profile: a WhatsApp number is kept only with the owner's consent
 }
 
 

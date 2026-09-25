@@ -23,7 +23,9 @@
 // in-app Back button and the browser's Back always agree. A screen opened straight from a link (or
 // after a reload this tab has no proof of) gets its parents put under it. The builder hides the
 // section bar (focus mode).
-// Screens not built yet show "Coming soon in the new studio" inside their own root.
+// Screens: a screen file registers the body of its tab with studioV2RegisterScreen(tab, draw) (15j
+// Home, 15k My ads, 15l the builder, 15m Wallet and Account). The shell keeps the screen root; a tab
+// with no screen, or a draw that fails, shows "Coming soon in the new studio" inside that root.
 
 const STUDIO_V2_TABS = Object.freeze([
   // [tab, icon, English, Arabic, place] place: 'nav' = bottom bar / side rail, 'head' = header button
@@ -68,6 +70,8 @@ const _studioV2 = {
   shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false,
   layout: null, repin: false, session: -1, fromApp: false, popping: false
 };
+const _studioV2Screens = new Map();  // tab -> draw(route): the body of that tab's screen root (studioV2RegisterScreen)
+const _studioV2ScreenWarned = new Set();
 
 // ------------------------------------------------------------------ which layout
 
@@ -703,12 +707,39 @@ function renderStudioV2Builder(route) {
           </div>`;
 }
 
+// ------------------------------------------------------------------ the screens of the tabs
+
+// A screen file registers the body of one tab (a tab of STUDIO_V2_TABS, 'builder' included) once, at
+// load. The shell draws the root around it; true when the tab is known.
+function studioV2RegisterScreen(tab, draw) {
+  const name = String(tab || '');
+  if (typeof draw !== 'function' || !STUDIO_V2_TABS.some(item => item[0] === name)) return false;
+  _studioV2Screens.set(name, draw);
+  return true;
+}
+
+// The registered body of this route's tab, or null (no screen, or its draw failed: the placeholder).
+function studioV2ScreenBody(route) {
+  const draw = _studioV2Screens.get(String(route && route.tab || ''));
+  if (!draw) return null;
+  try {
+    const body = draw(route);
+    if (typeof body === 'string') return body;
+  } catch (error) {
+    if (!_studioV2ScreenWarned.has(route.tab)) {
+      _studioV2ScreenWarned.add(route.tab);
+      try { console.warn(`[studio v2] the ${route.tab} screen could not be drawn; showing the placeholder:`, error); } catch (_) {}
+    }
+  }
+  return null;
+}
+
 function renderStudioV2CustomerScreen(route) {
   const info = studioV2TabInfo(route.tab);
-  let body;
-  if (route.tab === 'builder') {
+  let body = studioV2ScreenBody(route);  // the registered screen first; the placeholders below otherwise
+  if (body === null && route.tab === 'builder') {
     body = renderStudioV2Builder(route);
-  } else {
+  } else if (body === null) {
     body = renderStudioV2Soon(adsStudioText(info[2], info[3]), info[1]);
     // A customer without an active plan still needs the way to activate it (the classic card).
     if (route.tab === 'home' && !adsStudioCanUse()) body += `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>`;

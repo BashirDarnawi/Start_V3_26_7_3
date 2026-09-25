@@ -10,53 +10,15 @@
 // - "Getting started" until the first request is sent (plan, page, money, first request);
 // - "Your ads now": tracker rows for the requests in progress (stage, who acts next, checked X ago);
 // - quick actions written as goals, and the calm banner while new requests are paused.
-// It also holds what Home shares with My ads (15k):
-// - studioPlugScreen(): how a screen plugs into the shell (below);
+// The screen registers its body with the shell (studioV2RegisterScreen, 15h). It also holds what the
+// other v2 screens share:
 // - studioData*: the server summaries (campaigns, wallet, linked pages), read when a screen shows them,
-//   again after a minute or after the synced rows change, never more than one read at a time;
+//   again after a minute or after the synced rows change, never more than one read at a time. It is
+//   the ONE copy of the wallet summary: Home, My ads, the builder (15l) and Wallet (15m) all read it,
+//   and studioDataRefresh() after every money action renews it for all of them;
 // - the customer's own requests, their display stage (the server's; a plain fallback while unknown)
 //   and the stage chip.
 // Every server string is escaped; money is studioUsd / studioLyd (LYD never wears "$").
-
-// ------------------------------------------------------------------ plugging into the shell
-
-// The shell (15h) draws every customer tab as <section data-testid="studio-screen-<tab>"> with a
-// "Coming soon" body. A screen registered here draws its own body inside that same root; any other
-// tab, or a screen that fails, keeps the shell's. The shell's function is wrapped once, the way 15h
-// itself wraps setAdsStudioTab.
-const _studioPlugScreens = new Map();  // tab -> function(route): the screen's body (HTML)
-const _studioPlug = { shell: null, warned: false };
-
-function studioPlugScreen(tab, drawBody) {
-  const name = String(tab || '');
-  if (/^[a-z]{2,20}$/.test(name) && typeof drawBody === 'function') _studioPlugScreens.set(name, drawBody);
-}
-
-// The shell's screen root (same test id, labels and data attributes) around a body.
-function studioPlugRoot(route, body) {
-  const attrs = (route.section ? ` data-section="${studioEsc(route.section)}"` : '') + (route.id ? ` data-id="${studioEsc(route.id)}"` : '');
-  return `
-        <section data-testid="studio-screen-${studioEsc(route.tab)}" class="studio-v2-screen" aria-labelledby="studio-v2-title"${attrs}>${body}
-        </section>`;
-}
-
-if (typeof renderStudioV2CustomerScreen === 'function') {
-  _studioPlug.shell = renderStudioV2CustomerScreen;
-  renderStudioV2CustomerScreen = function renderStudioV2CustomerScreenPlugged(route) {
-    const draw = route && typeof route === 'object' ? _studioPlugScreens.get(String(route.tab || '')) : null;
-    if (draw) {
-      try {
-        return studioPlugRoot(route, draw(route));
-      } catch (error) {
-        if (!_studioPlug.warned) {
-          _studioPlug.warned = true;
-          try { console.warn('[studio v2] this screen could not be drawn; showing the placeholder:', error); } catch (_) {}
-        }
-      }
-    }
-    return _studioPlug.shell(route);
-  };
-}
 
 // ------------------------------------------------------------------ server summaries
 
@@ -69,7 +31,7 @@ const STUDIO_DATA_TTL_MS = 60 * 1000;           // a summary this old is read ag
 const STUDIO_DATA_PAGES_TTL_MS = 5 * 60 * 1000;
 const STUDIO_DATA_CHANGE_MS = 4 * 1000;         // after the synced rows change: at most this often
 const STUDIO_DATA_RETRY_MS = 30 * 1000;         // a failed read waits this long (a Retry button asks at once)
-const _studioData = { forUser: '', generation: 0, slots: Object.create(null), redrawTimer: null, recheckTimer: null };
+const _studioData = { forUser: '', generation: 0, slots: Object.create(null), redrawTimer: null, recheckTimer: null, painters: new Map() };
 
 function studioDataReset(uid = '') {
   _studioData.generation++;  // replies still on their way belong to the old session: dropped
@@ -130,12 +92,26 @@ function studioDataClean(kind, raw) {
   return out;
 }
 
+// A screen that shows a summary while the customer types (the builder) updates its lines in place:
+// a whole redraw would close the phone's keyboard. paint() runs instead of the redraw on that tab.
+function studioDataPaintInPlace(tab, paint) {
+  if (typeof paint === 'function') _studioData.painters.set(String(tab || ''), paint);
+}
+
 // One redraw after a burst of answers (only while the v2 customer layout is on screen).
 function studioDataRedraw() {
   if (_studioData.redrawTimer) return;
   _studioData.redrawTimer = setTimeout(() => {
     _studioData.redrawTimer = null;
-    if (typeof studioV2Frame === 'function' && studioV2Frame() === 'customer' && typeof studioV2Rerender === 'function') studioV2Rerender();
+    if (typeof studioV2Frame !== 'function' || studioV2Frame() !== 'customer') return;
+    let tab = '';
+    try { tab = studioV2Route(studioV2ReadAddress(), 'customer').tab; } catch (_) {}
+    const paint = _studioData.painters.get(tab);
+    if (paint) {
+      try { paint(); } catch (_) { /* the next draw shows the numbers */ }
+    } else if (typeof studioV2Rerender === 'function') {
+      studioV2Rerender();
+    }
   }, 30);
 }
 
@@ -147,10 +123,11 @@ function studioDataRecheckLater(delayMs) {
   }, Math.max(50, Number(delayMs) || 0));
 }
 
-// Starts a read of one summary when it is due (see the constants above); force reads now (a read on
-// its way is followed by one more, so an answer never predates the action that asked). Returns the
+// Starts a read of one summary when it is due (see the constants above; maxAgeMs shortens the age a
+// screen accepts); force reads now (a read on its way is followed by one more, so an answer never
+// predates the action that asked). An answer counts from the moment its read started. Returns the
 // read's promise, or null when nothing was started.
-function studioDataWant(kind, force = false) {
+function studioDataWant(kind, force = false, maxAgeMs = 0) {
   const path = STUDIO_DATA_READS[kind];
   const uid = studioMeUserId();
   if (!path || !uid || typeof isServerModeEnabled !== 'function' || !isServerModeEnabled()) return null;
@@ -163,7 +140,7 @@ function studioDataWant(kind, force = false) {
   const mark = kind === 'pages' ? '' : studioDataMark(kind);
   if (!force) {
     if (slot.failedAt && now - slot.failedAt < STUDIO_DATA_RETRY_MS) return null;
-    const ttl = kind === 'pages' ? STUDIO_DATA_PAGES_TTL_MS : STUDIO_DATA_TTL_MS;
+    const ttl = Math.min(kind === 'pages' ? STUDIO_DATA_PAGES_TTL_MS : STUDIO_DATA_TTL_MS, Number(maxAgeMs) > 0 ? Number(maxAgeMs) : Infinity);
     const age = now - slot.loadedAt;
     const due = slot.value === null || age >= ttl || age < 0 || (mark !== slot.mark && age >= STUDIO_DATA_CHANGE_MS);
     if (!due) {
@@ -174,6 +151,7 @@ function studioDataWant(kind, force = false) {
   const generation = _studioData.generation;
   slot.mark = mark;
   slot.again = false;
+  const signal = studioReadSignal();
   const promise = studioApi(path, { method: 'GET' }).then(raw => {
     if (generation !== _studioData.generation) return;
     const value = studioDataClean(kind, raw);
@@ -183,12 +161,12 @@ function studioDataWant(kind, force = false) {
       return;
     }
     slot.value = value;
-    slot.loadedAt = Date.now();
+    slot.loadedAt = now;  // when the read started: a slow answer is not fresher than what it saw
     slot.failedAt = 0;
     slot.error = null;
   }, error => {
     if (generation !== _studioData.generation) return;
-    if (error && error.name === 'AbortError') return;  // leaving a page cancels its reads: not a failure
+    if (studioReadCancelled(error, signal)) return;  // leaving a page cancels its reads (a timeout is a failure)
     slot.failedAt = Date.now();
     slot.error = (error && error.studio) || studioErrorInfo(error, 'read');
   }).finally(() => {
@@ -210,14 +188,21 @@ function studioDataValue(kind) {
   return _studioData.slots[kind].value;
 }
 
-// {loading, error} of one summary: error is the {code, text} to show when there is no value at all.
+// {loading, error, failure, loadedAt} of one summary: error is the {code, text} to show when there is
+// no value at all; failure is the last read's, also while an older value is kept.
 function studioDataState(kind) {
   const uid = studioMeUserId();
   const slot = uid && _studioData.forUser === uid ? _studioData.slots[kind] : null;
-  return { loading: !!(slot && slot.promise), error: slot && slot.value === null ? slot.error : null };
+  return {
+    loading: !!(slot && slot.promise),
+    error: slot && slot.value === null ? slot.error : null,
+    failure: slot ? slot.error : null,
+    loadedAt: slot ? slot.loadedAt : 0
+  };
 }
 
-// After an action that moves money or a stage: both summaries now.
+// After an action that moves money or a stage: both summaries now, for every screen that shows them
+// (Home, My ads, the builder's wallet lines and Wallet read this one copy).
 function studioDataRefresh() {
   studioDataWant('campaigns', true);
   studioDataWant('wallet', true);
@@ -312,18 +297,26 @@ const STUDIO_HOME_GOALS = Object.freeze([
   ['comments', 'messages-square', 'Answer comments', 'ردّ على التعليقات', 'Replies on your posts, set up once', 'ردود على منشوراتك تضبطها مرة واحدة'],
   ['help', 'life-buoy', 'Get help', 'اطلب المساعدة', 'Talk to the Albayan team', 'تحدّث مع فريق البيان']
 ]);
-const STUDIO_HOME_AD_GOALS = Object.freeze({ messages: 'full', promote: 'boost', grow: 'boost' });
+// goal -> [the builder's kind, its start options] (studioBuilderStart, 15l).
+const STUDIO_HOME_AD_GOALS = Object.freeze({
+  messages: Object.freeze(['full', Object.freeze({ goal: 'messages' })]),
+  promote: Object.freeze(['boost', Object.freeze({ boostType: 'boost_post' })]),
+  grow: Object.freeze(['boost', Object.freeze({ boostType: 'boost_page' })])
+});
 
 function studioHomeCanAsk() {
   return adsStudioCanUse() && adsStudioCanCreate();
 }
 
-// A goal: the ad goals open the request builder (drafts save even while sending is paused).
+// A goal: the ad goals start a new request in the builder, already on that goal (drafts save even
+// while sending is paused).
 function studioHomeGoal(key) {
   const goal = String(key || '');
   if (Object.prototype.hasOwnProperty.call(STUDIO_HOME_AD_GOALS, goal)) {
     if (!studioHomeCanAsk()) return false;
-    return studioV2Go({ tab: 'builder', section: STUDIO_HOME_AD_GOALS[goal] });
+    const [kind, options] = STUDIO_HOME_AD_GOALS[goal];
+    if (typeof studioBuilderStart === 'function') return studioBuilderStart(kind, { ...options });
+    return studioV2Go({ tab: 'builder', section: kind });
   }
   if (goal === 'comments') return studioV2Open('replies');
   if (goal === 'help') return studioV2Open('help');
@@ -333,6 +326,33 @@ function studioHomeGoal(key) {
 function studioHomeOpenRequest(id) {
   const wanted = String(id || '');
   return Security.isValidRecordId(wanted) ? studioV2Go({ tab: 'campaigns', id: wanted }) : false;
+}
+
+// Continue a draft, or fix a request the team sent back, in the builder (15l): a draft opens where
+// it was, a sent-back request at the field its reason names. The request's own page otherwise.
+function studioHomeEdit(id, button = null) {
+  const request = studioDataRequest(id);
+  if (!request) return false;
+  const status = String(request.status || 'Draft');
+  if (status === 'Changes Requested' && typeof studioBuilderFix === 'function') return studioBuilderFix(request.id, request.reviewReasonCode, button);
+  if (status === 'Draft' && typeof studioBuilderEdit === 'function') return studioBuilderEdit(request.id, { button });
+  return studioHomeOpenRequest(request.id);
+}
+
+// "Fix: photo" (the builder's words for the field the reason names), or a plain "Fix it".
+function studioHomeFixLabel(request) {
+  if (typeof studioBuilderFixLabel === 'function') {
+    try { return studioBuilderFixLabel(request.reviewReasonCode, request.boostType ? 'boost' : 'full', request); } catch (_) {}
+  }
+  return adsStudioText('Fix it', 'عدّله');
+}
+
+// The plan ENDED only for someone who had one: an ad_maker subscription of this user that is no
+// longer active. A customer who never had a plan activates it from Getting started and the gate.
+function studioHomePlanEnded() {
+  const uid = studioMeUserId();
+  const rows = typeof state !== 'undefined' && Array.isArray(state.serviceSubscriptions) ? state.serviceSubscriptions : [];
+  return !!uid && rows.some(row => row && !row._deleted && String(row.userId || '') === uid && String(row.serviceId || '') === 'ad_maker');
 }
 
 function renderStudioHomeHead(id, title, link) {
@@ -402,7 +422,7 @@ function studioHomeNeeds(requests, wallet) {
   const items = [];
   const usd = wallet && wallet.usd && typeof wallet.usd === 'object' ? wallet.usd : null;
   const available = usd ? studioDataMinor(usd.availableMinor) : null;
-  if (!adsStudioCanUse() && adsStudioCanCreate()) {
+  if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded()) {
     items.push({
       key: 'plan', icon: 'badge-alert', tone: 'orange',
       title: adsStudioText('Your plan has ended', 'انتهى اشتراكك'),
@@ -418,7 +438,7 @@ function studioHomeNeeds(requests, wallet) {
       title: reason ? adsStudioText(`Needs your changes: ${reason}`, `يحتاج تعديلك: ${reason}`) : adsStudioText('Needs your changes', 'يحتاج تعديلك'),
       text: `${studioDataName(request)}${note ? ` — ${note.length > 140 ? `${note.slice(0, 139)}…` : note}` : ''}`,
       textAuto: true,  // the customer's and the reviewer's own words: their direction, not the page's
-      button: adsStudioText('Fix it', 'عدّله'), onclick: `studioHomeOpenRequest('${request.id}')`
+      button: studioHomeFixLabel(request), onclick: `studioHomeEdit('${request.id}', this)`
     });
   }
   const drafts = requests.filter(row => String(row.status || 'Draft') === 'Draft');
@@ -431,7 +451,7 @@ function studioHomeNeeds(requests, wallet) {
       text: covered
         ? adsStudioText('Your available money covers it — send it when you are ready.', 'رصيدك المتاح يكفيه — أرسله عندما تكون جاهزاً.')
         : adsStudioText('Finish it and send it to our team when you are ready.', 'أكمله وأرسله إلى فريقنا عندما تكون جاهزاً.'),
-      button: adsStudioText('Open', 'افتح'), onclick: `studioHomeOpenRequest('${request.id}')`
+      button: adsStudioText('Continue', 'أكمله'), onclick: `studioHomeEdit('${request.id}', this)`
     });
   }
   if (drafts.length > STUDIO_HOME_MAX_DRAFTS) {
@@ -609,4 +629,4 @@ function renderStudioHomeBody() {
         </div>`;
 }
 
-studioPlugScreen('home', renderStudioHomeBody);
+studioV2RegisterScreen('home', renderStudioHomeBody);

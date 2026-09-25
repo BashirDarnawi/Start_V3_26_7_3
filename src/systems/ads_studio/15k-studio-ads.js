@@ -1,7 +1,8 @@
 // ==========================================
 // ALBAYAN STUDIO v2 — MY ADS (plan task P2-04; styles in assets/ads-workspace.css, "Studio v2 Home and My ads")
 // ==========================================
-// The customer's requests in the v2 layout (?tab=campaigns), drawn through the Home file's plug (15j):
+// The customer's requests in the v2 layout (?tab=campaigns), registered with the shell (15h) and
+// reading the summaries Home keeps (15j):
 // - the list: every own request with its stage chip, filters All / Active / Waiting / Finished
 //   (&section=active|waiting|finished, so a filter survives Back and a reload);
 // - the detail (&id=): stage tracker, who acts next and the last Meta check, the reason and note of a
@@ -11,7 +12,8 @@
 // - in-page sheets, never a native dialog: Withdraw (a request waiting for review), Stop (the stop
 //   route's own rule: approved, not started, not linked: a full refund), Archive (a finished request;
 //   a draft is deleted), and "Ask to stop" / "Ask about this": coming soon in the app, meanwhile the
-//   public contact from /me (P3-10 and P3-08 replace them).
+//   public contact from /me (P3-10 and P3-08 replace them);
+// - Continue editing / "Fix: <field>" open the request builder (15l) on that request.
 // Every action is single-flight; withdraw and stop send one operationId per (action, version)
 // through the classic helpers (adsStudioActionAttempt), so a retry after a lost answer replays it.
 // A sheet is a .mobile-dialog-overlay on <body>: the phone's Back closes it first (01b overlay model),
@@ -39,6 +41,9 @@ const STUDIO_ADS_BUCKETS = Object.freeze({
   beingReturned: ['Being returned', 'في طريقه إليك'],
   spent: ['Spent', 'صُرف']
 });
+// Archive / Delete draft: only a request that is done with (the server's deletable statuses minus
+// the ones still in progress); an Approved one only once its money is settled (stage 11, Finished).
+const STUDIO_ADS_ARCHIVE_STATUSES = Object.freeze(['Draft', 'Rejected', 'Stopped']);
 const _studioAdsRuns = new Map();  // `${kind}:${id}` -> the action in flight (single flight)
 const _studioAdsSheet = { kind: '', id: '', el: null, opener: null };
 
@@ -68,13 +73,20 @@ function studioAdsBackToList() {
   return studioV2Go({ tab: 'campaigns', section: studioAdsCurrentSection() });
 }
 
-// Opens a draft (or a request sent back) in the request builder. Until the v2 builder (P2-05) has
-// its own opener this is the classic loader, which puts ?tab=builder in the address itself.
-function studioAdsEdit(id) {
+// Opens a draft in the request builder where it was, or a request sent back at the field its
+// reason names (studioHomeEdit: studioBuilderEdit / studioBuilderFix, 15l).
+function studioAdsEdit(id, button = null) {
   const request = studioDataRequest(id);
   if (!request || !['Draft', 'Changes Requested'].includes(String(request.status || 'Draft'))) return false;
-  if (typeof startAdsStudioCampaign === 'function') startAdsStudioCampaign(request.id);
-  return true;
+  return studioHomeEdit(request.id, button);
+}
+
+// Archive / Delete draft is offered by the request's own status too, not the server's stage alone: a
+// stage read before a send can still say Draft for a request that is now waiting for review.
+function studioAdsCanArchive(request) {
+  const status = String((request && request.status) || 'Draft');
+  if (STUDIO_ADS_ARCHIVE_STATUSES.includes(status)) return true;
+  return status === 'Approved' && !!String((request && request.settleBasis) || '').trim();
 }
 
 // ------------------------------------------------------------------ the list
@@ -271,14 +283,14 @@ function studioAdsActions(request, stage) {
   if (status === 'Submitted' && own && (offered.has('withdraw') || !stage.fromServer) && canActOnRecord('adCampaignRequests', 'submit', creator)) out.push('withdraw');
   if (status === 'Approved' && offered.has('stop_refund') && canActOnRecord('adCampaignRequests', 'stop', creator)) out.push('stop');
   if (status === 'Approved' && offered.has('ask_to_stop')) out.push('ask_stop');
-  if ((offered.has('archive') || offered.has('delete')) && canActOnRecord('adCampaignRequests', 'delete', creator)) out.push('archive');
+  if ((offered.has('archive') || offered.has('delete')) && studioAdsCanArchive(request) && canActOnRecord('adCampaignRequests', 'delete', creator)) out.push('archive');
   if (offered.has('ask')) out.push('ask');
   return out;
 }
 
 function studioAdsActionLabel(action, request, stage) {
   switch (action) {
-    case 'edit': return String(request.status || '') === 'Changes Requested' ? adsStudioText('Fix it', 'عدّله') : adsStudioText('Continue editing', 'أكمل التعديل');
+    case 'edit': return String(request.status || '') === 'Changes Requested' ? studioHomeFixLabel(request) : adsStudioText('Continue editing', 'أكمل التعديل');
     case 'withdraw': return adsStudioText('Withdraw', 'اسحب الطلب');
     case 'stop': return adsStudioText('Stop and get a full refund', 'أوقفه واسترد المبلغ كاملاً');
     case 'ask_stop': return adsStudioText('Ask to stop', 'اطلب الإيقاف');
@@ -302,7 +314,7 @@ function renderStudioAdsActions(request, stage) {
   if (!actions.length) return '';
   const buttons = actions.map(action => {
     const [icon, look, handler] = STUDIO_ADS_ACTION_LOOK[action];
-    const call = handler === 'studioAdsEdit' ? `studioAdsEdit('${request.id}')` : `studioAdsSheet('${action}', '${request.id}', this)`;
+    const call = handler === 'studioAdsEdit' ? `studioAdsEdit('${request.id}', this)` : `studioAdsSheet('${action}', '${request.id}', this)`;
     const busy = _studioAdsRuns.has(`${action}:${request.id}`);
     return `<button type="button" class="studio-v2-action${look}" data-testid="studio-ad-action-${action}" onclick="${call}"${busy ? ' disabled aria-busy="true"' : ''}>${studioV2Icon(action === 'archive' && stage.stage === 1 ? 'trash-2' : icon)}<span>${studioEsc(studioAdsActionLabel(action, request, stage))}</span></button>`;
   }).join('');
@@ -367,7 +379,7 @@ function renderStudioAdsBody(route) {
   return route && route.id ? renderStudioAdsDetail(route) : renderStudioAdsList(route);
 }
 
-studioPlugScreen('campaigns', renderStudioAdsBody);
+studioV2RegisterScreen('campaigns', renderStudioAdsBody);
 
 // ------------------------------------------------------------------ sheets
 
@@ -578,7 +590,8 @@ function studioAdsGoneText() {
   return { ok: false, text: adsStudioText('This request changed meanwhile. Check its new state.', 'تغيّر هذا الطلب في الأثناء. راجع حالته الجديدة.') };
 }
 
-// After money moved: the wallet rows, both summaries and the screen.
+// After money moved: the wallet rows, both summaries (the one copy Home, the builder and Wallet read)
+// and the screen.
 function studioAdsAfterMoney() {
   if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
   if (typeof serverLiveSyncTick === 'function') {
@@ -636,13 +649,29 @@ async function studioAdsStopOnce(id) {
   return { ok: true };
 }
 
+// The server removes the request first; only then does it leave this device's list (a refusal
+// leaves everything as it was, and is explained in the sheet through the studio error map).
 async function studioAdsArchiveOnce(id) {
   const request = studioDataRequest(id);
   if (!request) return { ok: true, leave: true };  // already gone
+  if (!studioAdsCanArchive(request)) return studioAdsGoneText();
+  if (!isServerModeEnabled()) {
+    return { ok: false, text: adsStudioText('This needs the connection to Albayan.', 'هذا الإجراء يحتاج الاتصال بالبيان.') };
+  }
   const draft = String(request.status || 'Draft') === 'Draft';
-  const done = await deleteRecord(state.adCampaignRequests, request.id);
-  if (!done) {
-    return { ok: false, text: adsStudioText('This request could not be removed. Nothing changed.', 'تعذّرت إزالة هذا الطلب. لم يتغير شيء.') };
+  let reply = null;
+  try {
+    reply = await apiDeleteEntity('adCampaignRequests', request.id);
+  } catch (error) {
+    if (!(error && error.status === 404)) throw error;  // 404: already gone on the server
+  }
+  const row = (Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : []).find(item => item && item.id === request.id);
+  if (row) {
+    const version = Number(reply && reply.lastModified);
+    row._deleted = true;
+    row._lastModified = version > 0 ? version : (typeof getMonotonicTime === 'function' ? getMonotonicTime() : Date.now());
+    if (typeof markCollectionDirty === 'function') markCollectionDirty('adCampaignRequests');
+    if (typeof saveState === 'function') saveState();
   }
   if (typeof clearTransientEntityMediaCache === 'function') clearTransientEntityMediaCache('adCampaignRequests');
   studioAdsAfterMoney();

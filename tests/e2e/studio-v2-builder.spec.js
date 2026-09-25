@@ -394,10 +394,13 @@ test.describe('Albayan Studio v2 request builder (pilot)', () => {
     await expect(page.getByTestId('studio-builder-pending')).toContainText(reference);
     await setLanguage(page, 'en');
 
-    // Add money leaves for the Wallet tab; the draft is kept.
+    // Add money opens Wallet's own Add money on "my ads" with the missing $20.00 filled in; the draft is kept.
     await page.getByTestId('studio-builder-add-money').click();
     await expect.poll(() => tabParam(page)).toBe('wallet');
+    await expect.poll(() => new URL(page.url()).searchParams.get('id')).toBe('add-money');
     await expect(page.getByTestId('studio-screen-wallet')).toBeVisible();
+    await expect(page.getByTestId('studio-wallet-add-step')).toHaveText('Step 2 of 4: Amount');
+    await expect(page.locator('#studio-wallet-amount')).toHaveValue('20.00');
     const id = await openDraftId(page);
     await expect.poll(async () => (await readRequest(api, id)).data.status).toBe('Draft');
     expect(errors).toEqual([]);

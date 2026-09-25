@@ -4,8 +4,10 @@
 // Two customer screens of the v2 frame (15h), drawn inside the frame's own screen roots
 // (data-testid="studio-screen-wallet" / "studio-screen-account"):
 //
-// Wallet (?tab=wallet) — every amount is the server's own (GET /api/studio/wallet/summary, P1-07);
-// nothing here adds or converts money except the "≈ dinars" estimate before a payment request:
+// Wallet (?tab=wallet) — every amount is the server's own (GET /api/studio/wallet/summary, P1-07, read
+// through Home's one copy of it, studioData in 15j: a money action anywhere in the studio renews it
+// for this screen too); nothing here adds or converts money except the "≈ dinars" estimate before a
+// payment request:
 //   - the four numbers (Available, Reserved, In your ads, Spent) with one line each on what they
 //     mean, "On its way back" only when it is not zero, and "Meta used $Y so far" only for ads
 //     linked to Meta (the server sends null before a link, PLAN.md §5.4);
@@ -18,23 +20,23 @@
 //   - Add money (?tab=wallet&id=add-money; Back returns to the wallet): purpose first (my ads in
 //     dollars, or my plan in dinars), amount ($10/$25/$50/$100 or typed, Arabic digits too),
 //     method, a confirm screen, then the PAY- code and how to pay. One idempotency key per
-//     (user, currency, amount, method) until the request exists, so a retry after a lost answer
-//     replays the same request instead of adding a second one.
+//     (user, currency, amount, method) until the server answers with the request (kept across
+//     reopening Add money), so a retry after a lost answer replays the same request instead of
+//     adding a second one. Other screens open it with studioWalletOpenAdd(purpose, amountMinor):
+//     the request builder's "Add money" (15l) asks for the missing dollars.
 // Account (?tab=account) — name (read only), language, theme, the optional WhatsApp number with
 // consent (GET/PUT /api/studio/profile, P2-07, the same phone rule as the server), privacy and
 // sign out (the app's own handleLogout).
 //
-// The screens plug into the shell the way the shell plugs into 15c: renderStudioV2CustomerScreen
-// is kept and answered first for these two tabs; any error here falls back to the shell's own
-// screen. Every server text is escaped; every action is single-flight.
+// Both screens are registered with the shell (studioV2RegisterScreen, 15h): any error here falls back
+// to the shell's own placeholder. Every server text is escaped; every action is single-flight.
 
 const STUDIO_WALLET_USD_PRESETS = Object.freeze([1000, 2500, 5000, 10000]);  // $10 / $25 / $50 / $100
 const STUDIO_WALLET_MIN_MINOR = 100;          // 1.00 of either currency (wallet_payments.WALLET_PAYMENT_CURRENCIES)
 const STUDIO_WALLET_MAX_MINOR = 100000000;    // 1,000,000.00: a typing guard far below the server's own ceiling
 const STUDIO_WALLET_MAX_OPEN = 5;             // wallet_payments.MAX_OPEN_PAYMENT_REQUESTS
 const STUDIO_WALLET_FRESH_MS = 30000;         // an open wallet asks the server again after this long
-const STUDIO_WALLET_RETRY_MS = 15000;         // a failed read is not repeated by itself sooner
-const STUDIO_WALLET_ADD_ID = 'add-money';     // ?tab=wallet&id=add-money
+const STUDIO_WALLET_ADD_ID = 'add-money';     // ?tab=wallet&id=add-money (the builder's "Add money" too)
 const STUDIO_WALLET_STEPS = 4;                // purpose, amount, method, confirm (then the result)
 const STUDIO_WALLET_HISTORY_MAX = 5;
 const STUDIO_WALLET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/;
@@ -59,10 +61,12 @@ const STUDIO_WALLET_REFUSALS = Object.freeze([
 
 const _studioWallet = {
   forUser: '', generation: 0,
-  summary: null, summaryAt: 0, failedAt: 0, error: '', loading: null,
+  clean: { raw: null, value: null },       // the wallet summary (15j's copy) as these screens use it
   requests: null,                          // the owner's payment requests (ids, methods, dinar amounts, receipts)
+  requestsAt: 0, listLoading: null, listAgain: false,
   methods: null, rate: 0, methodsFailed: false, methodsLoading: null,
   add: null,                               // the Add money flow (studioWalletNewFlow)
+  idem: { fingerprint: '', key: '' },      // the create's idempotency key, until the server answers with the request
   busy: new Set(),                         // single-flight: 'create', 'cancel:<id>', 'receipt:<id>'
   plansAsked: false,
   whereOpen: false                         // "Where is every dollar?" stays open across redraws
@@ -171,7 +175,10 @@ function studioWalletScope() {
   const uid = studioWalletUserId();
   if (_studioWallet.forUser !== uid) {
     _studioWallet.generation++;
-    Object.assign(_studioWallet, { forUser: uid, summary: null, summaryAt: 0, failedAt: 0, error: '', loading: null, requests: null, add: null, whereOpen: false });
+    Object.assign(_studioWallet, {
+      forUser: uid, clean: { raw: null, value: null }, requests: null, requestsAt: 0, listLoading: null, listAgain: false,
+      add: null, idem: { fingerprint: '', key: '' }, whereOpen: false
+    });
     _studioWallet.busy.clear();
   }
   return uid;
@@ -270,43 +277,70 @@ function studioWalletLoadMethods(retry = false) {
   return _studioWallet.methodsLoading;
 }
 
-// The summary and the payment requests. A fresh answer is reused, a read on its way is joined,
+// The wallet summary, cleaned (null while unknown): Home's one copy (studioData, 15j).
+function studioWalletSummary() {
+  const raw = typeof studioDataValue === 'function' ? studioDataValue('wallet') : null;
+  if (!raw) return null;
+  if (_studioWallet.clean.raw !== raw) _studioWallet.clean = { raw, value: studioWalletCleanSummary(raw) };
+  return _studioWallet.clean.value;
+}
+
+// {loading, error}: the last summary read's refusal in the reader's words ('' after a good answer).
+function studioWalletSummaryState() {
+  const known = typeof studioDataState === 'function' ? studioDataState('wallet') : { loading: false, failure: null };
+  const failure = known.failure;
+  return {
+    loading: !!known.loading,
+    error: failure ? (failure.text || adsStudioText('The wallet could not be read. Try again in a minute.', 'تعذّرت قراءة المحفظة. أعد المحاولة بعد دقيقة.')) : ''
+  };
+}
+
+// The owner's payment requests, read with the summary (and at most every half minute by itself; a
+// failed read keeps the last list). force: now (a read on its way is followed by one more). Returns
+// the read's promise, or null when nothing new was asked.
+function studioWalletLoadRequests(force = false) {
+  if (_studioWallet.listLoading) {
+    if (!force) return null;
+    _studioWallet.listAgain = true;
+    return _studioWallet.listLoading;
+  }
+  if (!force && Date.now() - _studioWallet.requestsAt < STUDIO_WALLET_FRESH_MS) return null;
+  const generation = _studioWallet.generation;
+  _studioWallet.requestsAt = Date.now();
+  _studioWallet.listAgain = false;
+  const promise = studioApi('/api/wallet/payment-requests', { method: 'GET' }).then(reply => {
+    if (generation !== _studioWallet.generation) return;
+    const rows = reply && Array.isArray(reply.requests) ? reply.requests : [];
+    _studioWallet.requests = rows.map(studioWalletRequestRow).filter(row => row && row.reference);
+  }, () => { /* the last list stays on screen */ }).then(() => {
+    if (generation !== _studioWallet.generation) return null;
+    _studioWallet.listLoading = null;
+    if (!_studioWallet.listAgain) return null;
+    _studioWallet.listAgain = false;
+    const again = studioWalletLoadRequests(true);
+    return again ? again.then(() => studioWalletRedraw()) : null;
+  });
+  _studioWallet.listLoading = promise;
+  return promise;
+}
+
+// The summary (15j's copy) and the payment requests. A fresh answer is reused, a read on its way is
+// joined (a forced one is followed by one more, so an answer never predates the action that asked),
 // a failure keeps the last good numbers on screen. force: ask the server now.
 function studioWalletLoad(force = false) {
   const uid = studioWalletScope();
   if (!uid || typeof isServerModeEnabled !== 'function' || !isServerModeEnabled()) return Promise.resolve(null);
-  if (_studioWallet.loading) return _studioWallet.loading;
-  const now = Date.now();
-  if (!force) {
-    if (_studioWallet.summary && now - _studioWallet.summaryAt < STUDIO_WALLET_FRESH_MS) return Promise.resolve(_studioWallet.summary);
-    if (_studioWallet.failedAt && now - _studioWallet.failedAt < STUDIO_WALLET_RETRY_MS) return Promise.resolve(_studioWallet.summary);
-  }
+  const joined = studioWalletSummaryState().loading;
+  const summaryRead = typeof studioDataWant === 'function' ? studioDataWant('wallet', force, STUDIO_WALLET_FRESH_MS) : null;
+  const started = !!summaryRead && (force || !joined);
+  const listRead = studioWalletLoadRequests(force || started);
+  if (!started && !listRead) return Promise.resolve(summaryRead).then(() => studioWalletSummary());
   if (!_studioWallet.methods) studioWalletLoadMethods(force);
   const generation = _studioWallet.generation;
-  const promise = (async () => {
-    const [summary, mine] = await Promise.allSettled([
-      studioApi('/api/studio/wallet/summary', { method: 'GET' }),
-      studioApi('/api/wallet/payment-requests', { method: 'GET' })
-    ]);
-    if (generation !== _studioWallet.generation) return null;
-    _studioWallet.loading = null;
-    const clean = summary.status === 'fulfilled' ? studioWalletCleanSummary(summary.value) : null;
-    if (clean) {
-      Object.assign(_studioWallet, { summary: clean, summaryAt: Date.now(), failedAt: 0, error: '' });
-    } else if (!(summary.reason && summary.reason.name === 'AbortError')) {
-      _studioWallet.failedAt = Date.now();
-      _studioWallet.error = summary.status === 'rejected' ? studioWalletErrorText(summary.reason, 'read')
-        : adsStudioText('The wallet could not be read. Try again in a minute.', 'تعذّرت قراءة المحفظة. أعد المحاولة بعد دقيقة.');
-    }
-    if (mine.status === 'fulfilled') {
-      const rows = mine.value && Array.isArray(mine.value.requests) ? mine.value.requests : [];
-      _studioWallet.requests = rows.map(studioWalletRequestRow).filter(row => row && row.reference);
-    }
-    studioWalletRedraw();
-    return _studioWallet.summary;
-  })();
-  _studioWallet.loading = promise;
-  return promise;
+  return Promise.allSettled([summaryRead, listRead]).then(() => {
+    if (generation === _studioWallet.generation) studioWalletRedraw();
+    return studioWalletSummary();
+  });
 }
 
 function studioWalletRefresh() {
@@ -330,29 +364,10 @@ function studioWalletRequestById(id) {
   return (_studioWallet.requests || []).find(row => row.id === id) || null;
 }
 
-// ------------------------------------------------------------------ plugging into the shell
+// ------------------------------------------------------------------ the two screens in the shell
 
-const _studioWalletShellScreen = typeof renderStudioV2CustomerScreen === 'function' ? renderStudioV2CustomerScreen : null;
-let _studioWalletWarned = false;
-
-renderStudioV2CustomerScreen = function renderStudioV2CustomerScreenWithWallet(route) {
-  const tab = route && route.tab;
-  if (tab === 'wallet' || tab === 'account') {
-    try {
-      const body = tab === 'wallet' ? renderStudioWalletScreen(route) : renderStudioAccountScreen();
-      const attrs = (route.section ? ` data-section="${studioEsc(route.section)}"` : '') + (route.id ? ` data-id="${studioEsc(route.id)}"` : '');
-      return `
-        <section data-testid="studio-screen-${tab}" class="studio-v2-screen" aria-labelledby="studio-v2-title"${attrs}>${body}
-        </section>`;
-    } catch (error) {
-      if (!_studioWalletWarned) {
-        _studioWalletWarned = true;
-        try { console.warn('[studio v2] the wallet screens failed; showing the frame placeholder:', error); } catch (_) {}
-      }
-    }
-  }
-  return _studioWalletShellScreen ? _studioWalletShellScreen(route) : '';
-};
+studioV2RegisterScreen('wallet', route => renderStudioWalletScreen(route));
+studioV2RegisterScreen('account', () => renderStudioAccountScreen());
 
 // ------------------------------------------------------------------ the wallet screen
 
@@ -360,12 +375,13 @@ function renderStudioWalletScreen(route) {
   studioWalletScope();
   if (route && route.id === STUDIO_WALLET_ADD_ID) return renderStudioWalletAdd();
   studioWalletLoad();
-  const summary = _studioWallet.summary;
+  const summary = studioWalletSummary();
+  const known = studioWalletSummaryState();
   if (!summary) {
-    return _studioWallet.error && !_studioWallet.loading
+    return known.error && !known.loading
       ? `
           <div class="studio-v2-wallet" data-testid="studio-wallet">
-            ${renderStudioWalletProblem(_studioWallet.error)}
+            ${renderStudioWalletProblem(known.error)}
           </div>`
       : `
           <div class="studio-v2-wallet" data-testid="studio-wallet" aria-busy="true">
@@ -374,7 +390,7 @@ function renderStudioWalletScreen(route) {
   }
   return `
           <div class="studio-v2-wallet" data-testid="studio-wallet">
-            ${_studioWallet.error ? renderStudioWalletProblem(_studioWallet.error, true) : ''}
+            ${known.error ? renderStudioWalletProblem(known.error, true) : ''}
             ${renderStudioWalletNumbers(summary.usd)}
             ${renderStudioWalletActions(summary)}
             ${renderStudioWalletPending(summary)}
@@ -467,7 +483,7 @@ function studioWalletPendingRows(summary) {
 function renderStudioWalletActions(summary) {
   const open = studioWalletPendingRows(summary).length;
   const full = open >= STUDIO_WALLET_MAX_OPEN;
-  const loading = !!_studioWallet.loading;
+  const loading = studioWalletSummaryState().loading || !!_studioWallet.listLoading;
   return `
             <div class="studio-v2-wallet-actions">
               <button type="button" class="studio-v2-action is-primary" data-testid="studio-wallet-add" onclick="studioWalletOpenAdd()"${full ? ' disabled aria-describedby="studio-wallet-full"' : ''}>${studioWalletIcon('plus')}<span>${studioEsc(adsStudioText('Add money', 'أضف مالاً'))}</span></button>
@@ -787,8 +803,9 @@ async function studioWalletAttachReceipt(requestId, input) {
 
 function studioWalletNewFlow(purpose = '', amountMinor = 0) {
   const known = purpose === 'ads' || purpose === 'plan' ? purpose : '';
-  const amount = known && Number.isSafeInteger(amountMinor) && amountMinor > 0 ? studioMinorText(amountMinor).replace(/,/g, '') : '';
-  return { step: known ? 2 : 1, purpose: known, amountText: amount, method: '', error: '', created: null, key: '', keyFor: '' };
+  const wanted = known && Number.isSafeInteger(amountMinor) && amountMinor > 0 ? Math.max(amountMinor, STUDIO_WALLET_MIN_MINOR) : 0;
+  const amount = wanted && wanted <= STUDIO_WALLET_MAX_MINOR ? studioMinorText(wanted).replace(/,/g, '') : '';
+  return { step: known ? 2 : 1, purpose: known, amountText: amount, method: '', error: '', created: null };
 }
 
 // Opens Add money. purpose 'ads' (dollars) or 'plan' (dinars) skips the first question; amountMinor
@@ -915,24 +932,24 @@ async function studioWalletCreate() {
     return;
   }
   if (currency === 'USD' && !(_studioWallet.rate > 0)) return;  // the confirm screen explains why
-  // One key per (user, currency, amount, method) until the request exists: a retry after a lost
-  // answer replays the same request on the server instead of making a second one.
+  // One key per (user, currency, amount, method) until the server answers with the request: a retry
+  // after a lost answer, even from a reopened Add money, replays the same request on the server
+  // instead of making a second one (the classic charge screen keeps its key the same way, 12c).
   const fingerprint = `${uid}|${currency}|${parsed.minor}|${method.id}`;
-  if (flow.keyFor !== fingerprint || !flow.key) {
-    flow.key = Security.generateSecureId('studiopay');
-    flow.keyFor = fingerprint;
+  if (_studioWallet.idem.fingerprint !== fingerprint || !_studioWallet.idem.key) {
+    _studioWallet.idem = { fingerprint, key: Security.generateSecureId('studiopay') };
   }
+  const key = _studioWallet.idem.key;
   const generation = _studioWallet.generation;
   _studioWallet.busy.add('create');
   flow.error = '';
   studioWalletRedraw();
   try {
-    const created = studioWalletRequestRow(await apiWalletPaymentRequestCreate(parsed.minor, method.id, flow.key, currency));
+    const created = studioWalletRequestRow(await apiWalletPaymentRequestCreate(parsed.minor, method.id, key, currency));
     if (generation !== _studioWallet.generation) return;
     if (!created || !created.reference) throw new Error('The payment request answer had no reference');
     flow.created = created;
-    flow.key = '';
-    flow.keyFor = '';
+    if (_studioWallet.idem.key === key) _studioWallet.idem = { fingerprint: '', key: '' };
     _studioWallet.requests = [created].concat((_studioWallet.requests || []).filter(row => row.id !== created.id));
     studioWalletLoad(true);
   } catch (error) {
@@ -1215,6 +1232,7 @@ function studioAccountLoad(force = false) {
   if (_studioAccount.loading) return _studioAccount.loading;
   if (!force && (_studioAccount.profile || _studioAccount.error)) return Promise.resolve(_studioAccount.profile);
   const generation = _studioAccount.generation;
+  const signal = studioReadSignal();
   const promise = (async () => {
     try {
       const profile = studioAccountCleanProfile(await studioApi('/api/studio/profile', { method: 'GET' }));
@@ -1222,7 +1240,8 @@ function studioAccountLoad(force = false) {
       Object.assign(_studioAccount, { profile, error: '' });
     } catch (error) {
       if (generation !== _studioAccount.generation) return null;
-      if (!(error && error.name === 'AbortError')) _studioAccount.error = studioWalletErrorText(error, 'read');
+      // Leaving the page cancels the read (asked again on the next draw); a timeout is a failure.
+      if (!studioReadCancelled(error, signal)) _studioAccount.error = studioWalletErrorText(error, 'read');
     }
     _studioAccount.loading = null;
     studioWalletRedraw();
@@ -1361,13 +1380,6 @@ function studioAccountDraftConsent(input) {
   try { const problem = document.getElementById('studio-account-whatsapp-error'); if (problem) problem.textContent = ''; } catch (_) {}
 }
 
-function studioAccountErrorText(error) {
-  const code = error && error.studio ? error.studio.code : '';
-  if (code === 'PHONE_INVALID') return adsStudioText('This is not a phone number we can use. Check it and try again.', 'هذا ليس رقماً صالحاً. راجعه وأعد المحاولة.');
-  if (code === 'CONSENT_REQUIRED') return adsStudioText('Tick the box to allow us to contact you on WhatsApp.', 'ضع علامة في المربع لتسمح لنا بالتواصل معك على واتساب.');
-  return studioWalletErrorText(error);
-}
-
 async function studioAccountPut(number) {
   const account = _studioAccount;
   if (account.saving) return false;
@@ -1389,7 +1401,7 @@ async function studioAccountPut(number) {
       number ? saved.whatsappNumber : adsStudioText('The team can no longer message you there.', 'لن يراسلك الفريق عليه بعد الآن.'));
   } catch (error) {
     if (generation !== account.generation) return false;
-    account.formError = studioAccountErrorText(error);
+    account.formError = studioWalletErrorText(error);  // PHONE_INVALID / CONSENT_REQUIRED: the studio error map (15g)
     if (!account.editing) studioWalletNotify(false, adsStudioText('Could not save', 'تعذّر الحفظ'), account.formError);
   } finally {
     if (generation === account.generation) {
@@ -1405,7 +1417,7 @@ function studioAccountSave() {
   if (account.saving) return;
   const number = studioParsePhone(account.draftNumber);
   if (!number) account.formError = adsStudioText('Type a WhatsApp number such as 091 234 5678 or +218 91 234 5678.', 'اكتب رقم واتساب مثل 091 234 5678، أو الرقم الدولي كاملاً مع رمز الدولة.');
-  else if (!account.draftConsent) account.formError = adsStudioText('Tick the box to allow us to contact you on WhatsApp.', 'ضع علامة في المربع لتسمح لنا بالتواصل معك على واتساب.');
+  else if (!account.draftConsent) account.formError = adsStudioText(STUDIO_ERROR_TEXTS.CONSENT_REQUIRED[0], STUDIO_ERROR_TEXTS.CONSENT_REQUIRED[1]);
   if (account.formError) { studioWalletRedraw(); return; }
   studioAccountPut(number);
 }

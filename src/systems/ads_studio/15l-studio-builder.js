@@ -7,9 +7,9 @@
 //   review & send;
 // - a full request in six (section=full, or no section): goal -> page -> content -> audience ->
 //   budget & days -> review & send.
-// The shell owns the frame, the address (&step=N), focus mode and the Back model. This file draws
-// the screen through the shell's builder hook (renderStudioV2Builder, wrapped at load the way 15h
-// wraps the classic tab setter) and moves between steps with studioV2Go / studioV2BuilderStep.
+// The shell owns the frame, the address (&step=N), focus mode and the Back model. This file registers
+// the builder screen with the shell (studioV2RegisterScreen('builder'); the shell's placeholder stays
+// the fallback if a draw fails) and moves between steps with studioV2Go / studioV2BuilderStep.
 //
 // The draft is the classic draft object (_adsStudioDraft: one object per request, never replaced
 // while it is open), so the existing photo path works unchanged: the file input
@@ -26,8 +26,9 @@
 // Sending: POST /api/ad-studio/campaigns/{id}/submit with an operationId per (action, version)
 // (adsStudioActionAttempt, 15c); a 409 whose request is already Submitted counts as sent. Refusals
 // are explained through 15g's error map (studioErrorInfo). Money is what the server says: the
-// wallet line reads GET /api/studio/wallet/summary; the "reserved" amount is the total the submit
-// stamped on the request (totalBudgetMinorUSD).
+// wallet line reads GET /api/studio/wallet/summary through Home's one copy of it (studioData, 15j),
+// painted in place; the "reserved" amount is the total the submit stamped on the request
+// (totalBudgetMinorUSD). "Add money" opens Wallet's Add money for the missing dollars (15m).
 //
 // Entry points for the other v2 screens (Home quick actions, My ads, Needs you):
 //   studioBuilderStart('boost' | 'full', {goal, boostType})  a new request
@@ -36,6 +37,7 @@
 //   studioBuilderFixLabel(reasonCode)                         that button's words ("Fix: photo")
 
 const STUDIO_BUILDER_SAVE_DELAY_MS = 1200;
+const STUDIO_BUILDER_PRESETS = Object.freeze([2000, 3500, 6000, 10000, 15000]);  // suggested totals ($20 … $150)
 const STUDIO_BUILDER_RETRY_MS = Object.freeze([4000, 10000, 30000]);
 const STUDIO_BUILDER_WALLET_MAX_AGE_MS = 30000;
 const STUDIO_BUILDER_ENTRY_MS = 5000;           // a start/edit/fix call owns the next draw for this long
@@ -111,10 +113,8 @@ const _studioBuilder = {
   submit: null,       // the send in flight
   options: { state: '', goals: null, locations: null, failedAt: 0 },
   pages: { state: '', list: [], error: '', failedAt: 0, pageId: '', posts: Object.create(null) },
-  wallet: { state: '', value: null, at: 0, failedAt: 0, error: '', promise: null },
   focusTimer: null,
-  listening: false,
-  warned: false
+  listening: false
 };
 
 // ------------------------------------------------------------------ small helpers
@@ -154,7 +154,6 @@ function studioBuilderSync() {
   _studioBuilder.submit = null;
   _studioBuilder.options = { state: '', goals: null, locations: null, failedAt: 0 };
   _studioBuilder.pages = { state: '', list: [], error: '', failedAt: 0, pageId: '', posts: Object.create(null) };
-  _studioBuilder.wallet = { state: '', value: null, at: 0, failedAt: 0, error: '', promise: null };
 }
 
 function studioBuilderCurrent(generation) {
@@ -182,8 +181,9 @@ function studioBuilderIcons(node) {
 }
 
 // The app cancels a page's reads when it moves (the post-sign-in view restore too): not a failure.
-function studioBuilderAborted(error) {
-  return !!(error && error.name === 'AbortError');
+// A read cut off by its timeout is one (15g studioReadCancelled): the step offers Try again.
+function studioBuilderAborted(error, signal) {
+  return studioReadCancelled(error, signal);
 }
 
 function studioBuilderMemoryKey() {
@@ -259,7 +259,8 @@ async function studioBuilderLoadOptions(force = false) {
   options.state = 'loading';
   let reply = null;
   let aborted = false;
-  try { reply = await studioApi('/api/studio/ad-options', { method: 'GET' }); } catch (e) { aborted = studioBuilderAborted(e); }
+  const signal = studioReadSignal();
+  try { reply = await studioApi('/api/studio/ad-options', { method: 'GET' }); } catch (e) { aborted = studioBuilderAborted(e, signal); }
   if (!studioBuilderCurrent(generation)) return;
   if (aborted) { options.state = ''; return; }
   const clean = reply ? studioBuilderCleanOptions(reply) : null;
@@ -302,7 +303,8 @@ async function studioBuilderLoadPages(force = false) {
   let list = null;
   let error = '';
   let aborted = false;
-  try { list = studioBuilderCleanPages(await studioApi('/api/studio/pages', { method: 'GET' })); } catch (e) { error = (e && e.studio && e.studio.text) || ''; aborted = studioBuilderAborted(e); }
+  const signal = studioReadSignal();
+  try { list = studioBuilderCleanPages(await studioApi('/api/studio/pages', { method: 'GET' })); } catch (e) { error = (e && e.studio && e.studio.text) || ''; aborted = studioBuilderAborted(e, signal); }
   if (!studioBuilderCurrent(generation)) return;
   if (aborted) { pages.state = ''; studioBuilderRedraw(); return; }
   if (list) {
@@ -331,11 +333,12 @@ async function studioBuilderLoadPosts(pageId, force = false) {
   pages.posts[id] = { state: 'loading', posts: current ? current.posts : [], platforms: current ? current.platforms : {}, checkedAt: current ? current.checkedAt : '', error: '', at: Date.now() };
   let result = null;
   let error = '';
+  const signal = studioReadSignal();
   try {
     result = adsStudioNormalizeRecentPosts(await studioApi(`/api/studio/pages/${encodeURIComponent(id)}/recent-posts${force ? '?refresh=1' : ''}`, { method: 'GET' }));
   } catch (e) {
     error = (e && e.studio && e.studio.text) || '';
-    if (studioBuilderAborted(e)) {
+    if (studioBuilderAborted(e, signal)) {
       if (studioBuilderCurrent(generation)) { delete pages.posts[id]; studioBuilderRedraw(); }
       return;
     }
@@ -360,41 +363,18 @@ function studioBuilderCleanWallet(reply) {
   return { availableMinor: whole(usd.availableMinor), reservedMinor: whole(usd.reservedMinor), pending };
 }
 
-// GET /api/studio/wallet/summary: the numbers exactly as the server counts them (read again after
-// half a minute, and after a send). The wallet lines are updated in place (the keyboard stays).
+// GET /api/studio/wallet/summary through Home's one copy (studioData, 15j): read again after half a
+// minute, after a send and after every money action anywhere in the studio (studioDataRefresh). An
+// answer paints the wallet lines in place (studioDataPaintInPlace below: the keyboard stays open).
 function studioBuilderLoadWallet(force = false) {
-  const wallet = _studioBuilder.wallet;
-  if (wallet.promise) return wallet.promise;
-  if (!force && wallet.state === 'done' && Date.now() - wallet.at < STUDIO_BUILDER_WALLET_MAX_AGE_MS) return Promise.resolve(wallet.value);
-  if (!force && wallet.state === 'failed' && Date.now() - wallet.failedAt < 30000) return Promise.resolve(null);
-  const generation = _studioBuilder.generation;
-  if (wallet.state !== 'done') wallet.state = 'loading';
-  const promise = (async () => {
-    let value = null;
-    let error = '';
-    let aborted = false;
-    try { value = studioBuilderCleanWallet(await studioApi('/api/studio/wallet/summary', { method: 'GET' })); } catch (e) { error = (e && e.studio && e.studio.text) || ''; aborted = studioBuilderAborted(e); }
-    if (!studioBuilderCurrent(generation)) return null;
-    wallet.promise = null;
-    if (aborted) {
-      if (wallet.state === 'loading') wallet.state = '';
-      studioBuilderPaintWallet();
-      return wallet.value;
-    }
-    if (value) {
-      wallet.value = value;
-      wallet.state = 'done';
-      wallet.at = Date.now();
-    } else if (wallet.state !== 'done') {
-      wallet.state = 'failed';
-      wallet.error = error;
-      wallet.failedAt = Date.now();
-    }
-    studioBuilderPaintWallet();
-    return wallet.value;
-  })();
-  wallet.promise = promise;
-  return promise;
+  return (typeof studioDataWant === 'function' ? studioDataWant('wallet', force, STUDIO_BUILDER_WALLET_MAX_AGE_MS) : null) || Promise.resolve(null);
+}
+
+// The wallet lines' numbers: {value: {availableMinor, reservedMinor, pending} or null, failed}.
+function studioBuilderWallet() {
+  const raw = typeof studioDataValue === 'function' ? studioDataValue('wallet') : null;
+  const known = typeof studioDataState === 'function' ? studioDataState('wallet') : { error: null };
+  return { value: raw ? studioBuilderCleanWallet(raw) : null, failed: !raw && !!known.error };
 }
 
 // ------------------------------------------------------------------ the draft
@@ -514,6 +494,7 @@ function studioBuilderOpenSession(kind, draft, extra = {}) {
     statusText: '',
     savedAt: extra.created ? Date.now() : 0,
     conflict: null,
+    quota: false,       // the last create was refused by the server's limit of open requests
     shown: Object.create(null),
     highlight: extra.field ? { field: extra.field } : null,
     typed: Object.create(null),
@@ -535,9 +516,20 @@ function studioBuilderOpenSession(kind, draft, extra = {}) {
       if (guess) studioBuilderApplyGoal(draft, guess);
     }
   }
+  if (kind === 'boost') studioBuilderBoostPlatforms(draft);
   _studioBuilder.session = session;
   if (extra.created) studioBuilderRemember(session);
   return session;
+}
+
+// A quick boost has no platform choice of its own: an empty list (a full request whose two boxes were
+// unticked, or a stored boost without platforms) becomes the page's own platforms, or both.
+function studioBuilderBoostPlatforms(draft) {
+  const list = (Array.isArray(draft.platforms) ? draft.platforms : []).filter(p => p === 'facebook' || p === 'instagram');
+  if (list.length) return;
+  const page = _studioBuilder.pages.list.find(item => item.id === String(draft.connectedAssetId || ''));
+  const own = page ? [page.fb ? 'facebook' : '', page.ig ? 'instagram' : ''].filter(Boolean) : [];
+  draft.platforms = own.length ? own : ['facebook', 'instagram'];
 }
 
 function studioBuilderSetStart(session, day) {
@@ -557,6 +549,7 @@ function studioBuilderConvert(session, kind) {
     d.objective = 'engagement';
     d.goalDetail = STUDIO_BUILDER_BOOST_GOALS[d.boostType];
     if (!session.ctaTouched) d.callToAction = ADS_STUDIO_BOOST_DEFAULTS[d.boostType][0];
+    studioBuilderBoostPlatforms(d);
   } else {
     if (String(d.destination || '') && String(d.destination) === String(d.sourcePostRef || '')) d.destination = '';
     d.boostType = '';
@@ -755,7 +748,13 @@ function studioBuilderSaveNow(session) {
     session.dirty = false;
     session.again = false;
     const { payload, changes } = studioBuilderChanges(session);
-    if (session.created && !Object.keys(changes).length) return true;
+    if (session.created && !Object.keys(changes).length) {
+      // Nothing left to send (a refused change was undone, too): the draft is as the server has it.
+      session.retries = 0;
+      session.quota = false;
+      if (session.status !== 'saved') studioBuilderSetStatus(session, 'saved');
+      return true;
+    }
     studioBuilderSetStatus(session, 'saving');
     try {
       let entity;
@@ -798,8 +797,10 @@ function studioBuilderSaved(session, entity, sent) {
     _adsStudioEditingId = session.id;
     _adsStudioEditingBaseline = session.baseline;
   }
+  session.quota = false;
   try { upsertAdsStudioEntity(entity); } catch (_) { /* the list catches up on its next read */ }
-  studioBuilderRemember(session);
+  // A late answer for a draft the customer has already left never points the reload memory back at it.
+  if (session === _studioBuilder.session) studioBuilderRemember(session);
   studioBuilderSetStatus(session, 'saved');
 }
 
@@ -819,9 +820,17 @@ async function studioBuilderSaveFailed(session, error, generation) {
       studioBuilderSetStatus(session, 'saved');
       return;
     }
+    if (!session.created && !data) {
+      // The request was never made (the server's limit of open requests, most often): not a version
+      // conflict. The reason is shown, and the next change tries again once a slot is free.
+      session.quota = STUDIO_OPEN_REQUESTS_RE.test(info.message);
+      studioBuilderSetStatus(session, 'error', info.text);
+      studioBuilderRedraw();
+      return;
+    }
     if (data && !['Draft', 'Changes Requested'].includes(String(data.status || 'Draft'))) {
       session.campaignStatus = String(data.status || '');
-      studioBuilderForget();
+      if (session === _studioBuilder.session) studioBuilderForget();
       studioBuilderSetStatus(session, 'locked');
       studioBuilderRedraw();
       return;
@@ -1218,10 +1227,12 @@ function studioBuilderSetBudgetType(type) {
   studioBuilderChanged('budget');
 }
 
-function studioBuilderPreset(index) {
+// A chip carries its own amount: tapping "$20.00" sets $20.00 even when the typed days changed the
+// suggestions meanwhile (an amount now under the per-day floor shows the budget's own hint).
+function studioBuilderPreset(minor) {
   const session = studioBuilderSession();
-  const preset = session ? studioBuilderPresets(session)[Number(index)] : undefined;
-  if (!session || !preset) return;
+  const preset = Number(minor);
+  if (!session || !STUDIO_BUILDER_PRESETS.includes(preset)) return;
   session.draft.budgetMinorUSD = preset;
   session.typed.budget = (preset / 100).toFixed(2).replace(/\.00$/, '');
   studioBuilderChanged('budget');
@@ -1327,11 +1338,12 @@ async function studioBuilderLoadCampaign(id) {
     return { error: studioBuilderT('This request can no longer be changed.', 'لم يعد بالإمكان تعديل هذا الطلب.') };
   }
   for (let attempt = 0; attempt < 2; attempt++) {
+    const signal = studioReadSignal();
     try {
       campaign = await ensureEntityMediaLoaded('adCampaignRequests', campaign.id) || campaign;
       break;
     } catch (error) {
-      if (!studioBuilderAborted(error) || attempt) { campaign = null; break; }  // cancelled by the app moving: once more
+      if (!studioBuilderAborted(error, signal) || attempt) { campaign = null; break; }  // cancelled by the app moving: once more
     }
   }
   const photosMissing = campaign && campaign._mediaOmitted === true && getEntityPhotoCountHint('adCampaignRequests', campaign) > 0
@@ -1457,9 +1469,12 @@ function studioBuilderNext() {
   return studioV2BuilderStep(1);
 }
 
+// Wallet's Add money (15m, ?tab=wallet&id=add-money), already on "my ads" with the missing amount.
 function studioBuilderAddMoney() {
+  const short = studioBuilderShortMinor(_studioBuilder.session);
   studioBuilderFlush();
-  return studioV2Go({ tab: 'wallet', section: 'add' });
+  if (typeof studioWalletOpenAdd === 'function') return studioWalletOpenAdd('ads', short);
+  return studioV2Go({ tab: 'wallet', id: 'add-money' });
 }
 
 function studioBuilderOpenPages() {
@@ -1511,11 +1526,16 @@ function studioBuilderKeepMine() {
 
 // ------------------------------------------------------------------ sending
 
-function studioBuilderWalletShort(session) {
-  const wallet = _studioBuilder.wallet;
-  if (wallet.state !== 'done' || !wallet.value || wallet.value.availableMinor === null) return false;
+// The dollars missing for this request (0 when the wallet covers it or is not known yet).
+function studioBuilderShortMinor(session) {
+  const wallet = studioBuilderWallet();
+  if (!session || !wallet.value || wallet.value.availableMinor === null) return 0;
   const total = studioBuilderTotalMinor(session.draft);
-  return total > 0 && wallet.value.availableMinor < total;
+  return total > 0 && wallet.value.availableMinor < total ? total - Math.max(0, wallet.value.availableMinor) : 0;
+}
+
+function studioBuilderWalletShort(session) {
+  return studioBuilderShortMinor(session) > 0;
 }
 
 function studioBuilderIntakePaused() {
@@ -1541,6 +1561,13 @@ async function studioBuilderSettle(session) {
   for (let round = 0; round < 4; round++) {
     if (session.timer) { clearTimeout(session.timer); session.timer = null; }
     if (session.inFlight) { await session.inFlight; continue; }
+    if (session.status === 'error' && session.created && !Object.keys(studioBuilderChanges(session).changes).length) {
+      // The refused change was undone: nothing is left to save.
+      session.dirty = false;
+      session.retries = 0;
+      session.quota = false;
+      studioBuilderSetStatus(session, 'saved');
+    }
     if (session.dirty && session.touched && !['conflict', 'locked', 'error'].includes(session.status)) { await studioBuilderSaveNow(session); continue; }
     break;
   }
@@ -1613,7 +1640,9 @@ async function studioBuilderSendOnce() {
     _adsStudioConfirmationChecked = false;
   }
   studioBuilderForget();
-  studioBuilderLoadWallet(true);
+  // The money is reserved now and the request is waiting: both summaries, for every screen.
+  if (typeof studioDataRefresh === 'function') studioDataRefresh();
+  else studioBuilderLoadWallet(true);
   studioBuilderRedraw();
   try { if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (_) {}
   return true;
@@ -1839,8 +1868,13 @@ function studioBuilderPresets(session) {
   const limits = studioBuilderLimits();
   const days = Number(session.draft.durationDays);
   const floor = Number.isSafeInteger(days) && days > 0 ? limits.minPerDayMinorUSD * days : limits.minPerDayMinorUSD;
-  return [2000, 3500, 6000, 10000, 15000]
+  return STUDIO_BUILDER_PRESETS
     .filter(minor => minor >= limits.minTotalMinorUSD && minor <= limits.maxTotalMinorUSD && minor >= floor).slice(0, 4);
+}
+
+function studioBuilderPresetChips(session) {
+  const d = session.draft;
+  return studioBuilderPresets(session).map((minor, index) => studioBuilderChip(studioUsd(minor), Number(d.budgetMinorUSD) === minor, `studioBuilderPreset(${minor})`, `studio-builder-preset-${index}`)).join('');
 }
 
 function studioBuilderTotalText(session) {
@@ -1863,9 +1897,9 @@ function studioBuilderLimitsText() {
 }
 
 function studioBuilderWalletHtml(session) {
-  const wallet = _studioBuilder.wallet;
   studioBuilderLoadWallet();
-  if (wallet.state === 'failed' && !wallet.value) {
+  const wallet = studioBuilderWallet();
+  if (wallet.failed) {
     return `<p class="studio-b-wallet-line">${studioEsc(studioBuilderT('We could not read your wallet right now. It is checked again when you send.', 'تعذّرت قراءة محفظتك الآن. نتحقق منها مرة أخرى عند الإرسال.'))}</p>`;
   }
   if (!wallet.value) return `<p class="studio-b-wallet-line">${studioEsc(studioBuilderT('Checking your wallet…', 'نتحقق من محفظتك…'))}</p>`;
@@ -1888,12 +1922,19 @@ function studioBuilderWalletHtml(session) {
   return html;
 }
 
-// The budget lines update in place while the customer types (the keyboard stays open).
+// The budget lines update in place while the customer types (the keyboard stays open), the
+// suggested totals too (typed days move the per-day floor).
 function studioBuilderPaintBudget() {
   const session = _studioBuilder.session;
   if (!session) return;
   const total = studioBuilderEl('studio-b-total');
   if (total) total.textContent = studioBuilderTotalText(session);
+  const presets = studioBuilderEl('studio-b-presets');
+  if (presets) {
+    const chips = session.draft.budgetType === 'daily' ? '' : studioBuilderPresetChips(session);
+    presets.innerHTML = chips;
+    presets.hidden = !chips;
+  }
   studioBuilderPaintWallet();
 }
 
@@ -1919,7 +1960,7 @@ function studioBuilderBudgetStep(session) {
   const typedDays = session.typed.days !== undefined ? session.typed.days : (Number.isSafeInteger(days) && days > 0 ? String(days) : '');
   const types = [['lifetime', 'Total for the whole ad', 'مبلغ إجمالي للإعلان كله'], ['daily', 'An amount per day', 'مبلغ لكل يوم']]
     .map(([id, en, ar]) => studioBuilderChip(studioBuilderT(en, ar), d.budgetType === id, `studioBuilderSetBudgetType('${id}')`, `studio-builder-budget-${id}`)).join('');
-  const presets = daily ? '' : studioBuilderPresets(session).map((minor, index) => studioBuilderChip(studioUsd(minor), Number(d.budgetMinorUSD) === minor, `studioBuilderPreset(${index})`, `studio-builder-preset-${index}`)).join('');
+  const presets = daily ? '' : studioBuilderPresetChips(session);
   const dayChips = [3, 7, 14, 30].filter(n => n <= limits.maxDays)
     .map(n => studioBuilderChip(adsStudioDaysText(n), days === n, `studioBuilderSetDays(${n})`, `studio-builder-days-${n}`)).join('');
   const amount = `
@@ -1927,7 +1968,7 @@ function studioBuilderBudgetStep(session) {
               <span class="studio-b-money-sign" aria-hidden="true">$</span>
               ${studioBuilderInputHtml('studio-b-budget', 'budget', typedBudget, { inputmode: 'decimal', maxlength: 20, dir: 'ltr' })}
             </div>
-            ${presets ? `<div class="studio-b-chips" role="group" aria-label="${studioEsc(studioBuilderT('Suggested totals', 'مبالغ مقترحة'))}">${presets}</div>` : ''}`;
+            ${daily ? '' : `<div class="studio-b-chips" id="studio-b-presets" role="group" aria-label="${studioEsc(studioBuilderT('Suggested totals', 'مبالغ مقترحة'))}"${presets ? '' : ' hidden'}>${presets}</div>`}`;
   let start = '';
   if (session.kind === 'full') {
     const modes = [['asap', 'As soon as approved (recommended)', 'فور الموافقة (مُستحسن)'], ['date', 'On a date I choose', 'في تاريخ أختاره']]
@@ -2132,6 +2173,9 @@ function studioBuilderBanners(session) {
   const out = [];
   if (session.status === 'locked') {
     out.push(`<div class="studio-b-banner is-warn" data-testid="studio-builder-locked" role="status">${studioV2Icon('lock')}<span>${studioEsc(studioBuilderT('This request was already sent or decided, so it can no longer be changed here.', 'أُرسل هذا الطلب أو اتُّخذ فيه قرار، فلم يعد بالإمكان تعديله هنا.'))}</span>
+            <button type="button" class="studio-b-link is-strong" onclick="studioBuilderOpenMyAds()">${studioEsc(studioBuilderT('Open My ads', 'افتح إعلاناتي'))}</button></div>`);
+  } else if (session.status === 'error' && session.quota) {
+    out.push(`<div class="studio-b-banner is-warn" data-testid="studio-builder-quota" role="alert">${studioV2Icon('triangle-alert')}<span>${studioEsc(session.statusText)}</span>
             <button type="button" class="studio-b-link is-strong" onclick="studioBuilderOpenMyAds()">${studioEsc(studioBuilderT('Open My ads', 'افتح إعلاناتي'))}</button></div>`);
   } else if (session.status === 'conflict') {
     out.push(`<div class="studio-b-banner is-warn" data-testid="studio-builder-conflict" role="alert">${studioV2Icon('triangle-alert')}<span>${studioEsc(studioBuilderT('This draft was changed on another device. Nothing was overwritten.', 'تغيّرت هذه المسودة على جهاز آخر. لم يُستبدل شيء.'))}</span>
@@ -2343,20 +2387,10 @@ function studioBuilderRender(address) {
 
 // ------------------------------------------------------------------ hooks into the shell and the photo path
 
-// The shell draws the builder through renderStudioV2Builder(route); this screen takes that hook (the
-// shell's placeholder stays the fallback if anything here fails).
-const _studioBuilderShellScreen = typeof renderStudioV2Builder === 'function' ? renderStudioV2Builder : null;
-renderStudioV2Builder = function renderStudioV2BuilderScreen(route) {
-  try {
-    return studioBuilderRender(route);
-  } catch (error) {
-    if (!_studioBuilder.warned) {
-      _studioBuilder.warned = true;
-      try { console.warn('[studio v2] the request builder could not be drawn:', error); } catch (_) {}
-    }
-    return _studioBuilderShellScreen ? _studioBuilderShellScreen(route) : '';
-  }
-};
+// The builder is the shell's 'builder' screen (the shell's placeholder stays the fallback if a draw
+// fails); a wallet answer while it is on screen repaints its wallet lines in place.
+studioV2RegisterScreen('builder', route => studioBuilderRender(route));
+if (typeof studioDataPaintInPlace === 'function') studioDataPaintInPlace('builder', () => studioBuilderPaintWallet());
 
 // Photos added by the file input, a paste or the camera all go through uploadAdsStudioCreativeFiles
 // (15c); afterwards the builder redraws its photos and saves. The classic screens are unchanged.

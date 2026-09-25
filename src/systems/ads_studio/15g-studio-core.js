@@ -6,8 +6,10 @@
 // - studioApi(): apiJson with the studio error map attached (error.studio = studioErrorInfo(error)).
 //   ONE lookup for every refusal: the /api/studio codes (studio_errors.py) in STUDIO_ERROR_TEXTS,
 //   the older routes' English prefixes through the classic map (adsStudioRefusalText, 15c, reused,
-//   never copied), 429 by its status (it has no body), and a calm fallback that never shows raw
-//   English to an Arabic reader.
+//   never copied; STUDIO_ERROR_PATTERNS holds the few it lacks), 429 by its status (it has no
+//   body), and a calm fallback that never shows raw English to an Arabic reader.
+// - studioReadSignal() / studioReadCancelled(): a read the app cancelled by moving on is no
+//   failure; a read cut off by its timeout is one.
 // - studioMe() / studioLoadMe(): GET /api/studio/me, cleaned, kept per user; a reply younger than
 //   maxAge is reused and a read already on its way is joined (one request at a time).
 // - studioPulseWatch(): a light poller hook for a {changedAt} route: it polls only while the page is
@@ -68,6 +70,8 @@ const STUDIO_ERROR_TEXTS = Object.freeze({
   STAFF_DESK_IN_USE: ['The team desk still has open tickets or stop requests. Answer or close them first.', 'ما زالت في مكتب الفريق تذاكر مفتوحة أو طلبات إيقاف. أجب عنها أو أغلقها أولاً.'],
   UNKNOWN_CUSTOMER: ['This customer was not found. Refresh the page.', 'لم نجد هذا العميل. حدّث الصفحة.'],
   NO_CONSENT: ['This customer has not shared a WhatsApp number with consent. Use a ticket instead.', 'لم يشارك هذا العميل رقم واتساب بموافقته. استخدم التذكرة بدلاً من ذلك.'],
+  PHONE_INVALID: ['This is not a phone number we can use. Check it and try again.', 'هذا ليس رقماً صالحاً. راجعه وأعد المحاولة.'],
+  CONSENT_REQUIRED: ['Tick the box to allow us to contact you on WhatsApp.', 'ضع علامة في المربع لتسمح لنا بالتواصل معك على واتساب.'],
   SESSION_ENDED: ['Your session has ended. Sign in again.', 'انتهت جلستك. سجّل الدخول مرة أخرى.'],
   FORBIDDEN: ['You do not have access to this.', 'لا تملك صلاحية الوصول إلى هذا.'],
   NOT_FOUND: ['This item was not found. Refresh the page.', 'لم نجد هذا العنصر. حدّث الصفحة.']
@@ -89,8 +93,26 @@ const STUDIO_ERROR_KIND_TEXTS = Object.freeze({
   })
 });
 
+// Refusals of the older routes (a plain English sentence) that the classic map (15c) does not carry:
+// [pattern, English, Arabic]. The builder also tells the open-request limit apart by its pattern.
+const STUDIO_OPEN_REQUESTS_RE = /at most \d+ open campaign requests/i;  // main.py: MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER
+const STUDIO_ERROR_PATTERNS = Object.freeze([
+  [STUDIO_OPEN_REQUESTS_RE,
+    'You have too many open requests. Delete an old draft or wait for one to finish, then try again.',
+    'لديك طلبات مفتوحة كثيرة. احذف مسودة قديمة أو انتظر حتى ينتهي أحد طلباتك، ثم أعد المحاولة.'],
+  [/cannot be deleted while under review/i,
+    'Our team is reviewing this request, so it cannot be removed now. Withdraw it first.',
+    'يراجع فريقنا هذا الطلب، لذلك لا يمكن حذفه الآن. اسحبه أولاً.']
+]);
+
 function studioKnownErrorCode(code) {
   return Object.prototype.hasOwnProperty.call(STUDIO_ERROR_TEXTS, code);
+}
+
+function studioErrorPattern(message) {
+  const text = String(message || '');
+  const hit = STUDIO_ERROR_PATTERNS.find(([pattern]) => pattern.test(text));
+  return hit ? [hit[1], hit[2]] : null;
 }
 
 // Everything a screen needs to explain a failed call: {status, code, retryAfterSeconds, message,
@@ -122,8 +144,10 @@ function studioErrorInfo(error, kind = 'action') {
   } else if (status >= 400 && status < 500 && message && !/^\s*[[{]/.test(message)) {
     // The older routes send a plain string with a stable English prefix: the classic map knows them.
     // Arabic shows only what the map translates; English shows the refusal itself (400/403/409).
-    const mapped = adsStudioRefusalText(message);
-    if (adsStudioIsAr()) text = mapped && mapped !== message ? mapped : '';
+    const own = studioErrorPattern(message);
+    const mapped = own ? '' : adsStudioRefusalText(message);
+    if (own) text = pair(own);
+    else if (adsStudioIsAr()) text = mapped && mapped !== message ? mapped : '';
     else if (status === 400 || status === 403 || status === 409) text = mapped;
   }
   if (!text && studioKnownErrorCode(code)) text = pair(STUDIO_ERROR_TEXTS[code]);
@@ -142,6 +166,18 @@ function studioErrorInfo(error, kind = 'action') {
     }
   }
   return { status, code, retryAfterSeconds: base.retryAfterSeconds || 0, message, text };
+}
+
+// apiFetch (09-api-auth.js) ends a read with an AbortError in two cases: the app moved to another
+// screen (cancelPendingRequests aborts the navigation signal; no failure, the next screen asks again)
+// or the read ran past its timeout (a failure like any other: its screen offers Try again). Take
+// studioReadSignal() just before a read and ask studioReadCancelled(error, signal) when it fails.
+function studioReadSignal() {
+  try { return typeof getNavigationSignal === 'function' ? getNavigationSignal() : null; } catch (_) { return null; }
+}
+
+function studioReadCancelled(error, signal) {
+  return !!(error && error.name === 'AbortError' && signal && signal.aborted === true);
 }
 
 // apiJson for the studio screens: the same call, and a failure carries error.studio (above).

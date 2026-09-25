@@ -207,8 +207,9 @@ test.describe('Albayan Studio v2 (pilot)', () => {
     expect(errors).toEqual([]);
   });
 
-  // The request builder arrives with P2-05: until then only the URL model (&step=) can be named.
-  test.fixme('back model: builder step 3 goes back to step 2 (P2-05)', async ({ page, playwright, baseURL }, testInfo) => {
+  // The request builder (P2-05) keeps the Back model: an address straight to step 3 gets steps 1 and 2
+  // (and Home) put under it, so the in-app Back and the phone's Back walk the steps down.
+  test('back model: builder step 3 goes back to step 2 (P2-05)', async ({ page, playwright, baseURL }, testInfo) => {
     fullMatrixOnly(testInfo);
     const { pilot } = await studioUsers(playwright, baseURL, testInfo);
     const errors = collectPageErrors(page);

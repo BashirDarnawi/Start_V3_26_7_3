@@ -2927,7 +2927,29 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       return caught.code === 'NOT_LINKED' && caught.text === clientTexts.NOT_LINKED[0];
     })(),
     coreSrc.includes('adsStudioRefusalText(message)') && coreSrc.includes('adsStudioErrorInfo(error)')
-      && !['Insufficient wallet balance', 'Only Submitted campaigns can be withdrawn', 'Conflict: record has changed'].some(prefix => coreSrc.includes(prefix) || shellSrc.includes(prefix))
+      && !['Insufficient wallet balance', 'Only Submitted campaigns can be withdrawn', 'Conflict: record has changed'].some(prefix => coreSrc.includes(prefix) || shellSrc.includes(prefix)),
+    // PLAN.md §7.3: the profile's own refusals, in the words the Account screen shows.
+    serverCodes.includes('PHONE_INVALID') && serverCodes.includes('CONSENT_REQUIRED')
+      && JSON.stringify(clientTexts.PHONE_INVALID) === JSON.stringify(['This is not a phone number we can use. Check it and try again.', 'هذا ليس رقماً صالحاً. راجعه وأعد المحاولة.'])
+      && JSON.stringify(clientTexts.CONSENT_REQUIRED) === JSON.stringify(['Tick the box to allow us to contact you on WhatsApp.', 'ضع علامة في المربع لتسمح لنا بالتواصل معك على واتساب.'])
+      && info({ status: 400, message: 'x', payload: { detail: { code: 'PHONE_INVALID', message: 'm' } } }, 'action', 'ar').text === clientTexts.PHONE_INVALID[1],
+    // The older-route refusals the classic map does not carry: their own words, never raw English in Arabic.
+    (() => {
+      const limit = 'Ads Studio allows at most 50 open campaign requests per customer. Finish or delete an old request first.';
+      const review = 'Submitted campaigns cannot be deleted while under review';
+      const limitEn = info({ status: 409, message: limit, payload: { detail: limit } });
+      const limitAr = info({ status: 409, message: limit, payload: { detail: limit } }, 'action', 'ar');
+      const reviewEn = info({ status: 409, message: review, payload: { detail: review } });
+      const reviewAr = info({ status: 409, message: review, payload: { detail: review } }, 'action', 'ar');
+      return limitEn.text === 'You have too many open requests. Delete an old draft or wait for one to finish, then try again.' && limitEn.message === limit
+        && /[؀-ۿ]/.test(limitAr.text) && !latin.test(limitAr.text) && limitAr.text !== info({ status: 409, message: 'nobody knows this' }, 'action', 'ar').text
+        && reviewEn.text.includes('cannot be removed now') && /[؀-ۿ]/.test(reviewAr.text) && !latin.test(reviewAr.text);
+    })(),
+    // A read cut off by its timeout is a failure; only the app moving on (the navigation signal) cancels one.
+    run("studioReadCancelled(Object.assign(new Error('aborted'), { name: 'AbortError' }), { aborted: true })") === true
+      && run("studioReadCancelled(Object.assign(new Error('aborted'), { name: 'AbortError' }), { aborted: false })") === false
+      && run("studioReadCancelled(Object.assign(new Error('aborted'), { name: 'AbortError' }), null)") === false
+      && run("studioReadCancelled(new Error('Failed to fetch'), { aborted: true })") === false
   ];
   check('Studio v2 error map: every studio_errors.py code in EN/AR, classic prefixes reused, 429 by status, Arabic never falls back to raw English', !loadError && errorCases.every(Boolean),
     loadError || `cases ${failed(errorCases)}`);
@@ -3032,6 +3054,34 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 frame: bottom nav + header (bell, account), one active tab, bilingual placeholders in every screen root, builder focus mode, RTL', !loadError && shellCases.every(Boolean),
     loadError || `cases ${failed(shellCases)}`);
+
+  // The screen registry: a screen file registers the body of its tab; the shell keeps the root, and the
+  // placeholder when a draw fails. Only the shell's own tabs (the builder included) take a screen.
+  const registryCases = [
+    run(`studioV2RegisterScreen('help', route => '<p data-testid="x-help">' + studioEsc(route.section || 'none') + '</p>')`) === true,
+    run("studioV2RegisterScreen('nope', () => '')") === false && run("studioV2RegisterScreen('wallet', 'not a function')") === false,
+    run(`studioV2RegisterScreen('builder', route => '<p data-testid="x-builder">' + route.section + ' ' + route.step + '</p>')`) === true
+  ];
+  openAt('/studio?tab=help&section=faq');
+  const registered = html();
+  run("studioV2RegisterScreen('help', () => { throw new Error('broken screen'); });");
+  openAt('/studio?tab=help');
+  const brokenScreen = html();
+  openAt('/studio?tab=builder&section=boost&step=2');
+  const builderScreen = html();
+  run("_studioV2Screens.delete('help'); _studioV2Screens.delete('builder');");
+  openAt('/studio?tab=builder&section=boost&step=2');
+  const builderPlaceholder = html();
+  registryCases.push(
+    /<section data-testid="studio-screen-help" class="studio-v2-screen" aria-labelledby="studio-v2-title" data-section="faq"><p data-testid="x-help">faq<\/p>/.test(registered)
+      && !registered.includes('Coming soon'),
+    brokenScreen.includes('data-testid="studio-screen-help"') && brokenScreen.includes('Coming soon in the new studio') && !brokenScreen.includes('x-help'),
+    builderScreen.includes('<p data-testid="x-builder">boost 2</p>') && /data-testid="studio-nav"[^>]* hidden>/.test(builderScreen) && !builderScreen.includes('Coming soon'),
+    builderPlaceholder.includes('Step 2 of 3: Budget &amp; days') && builderPlaceholder.includes('Coming soon in the new studio'),
+    !/renderStudioV2CustomerScreen\s*=|renderStudioV2Builder\s*=/.test(shellSrc)
+  );
+  check('Studio v2 screen registry: a registered body draws inside the shell\'s own root (the builder too); a failing draw or an unknown tab keeps the placeholder',
+    !loadError && registryCases.every(Boolean), loadError || `cases ${failed(registryCases)}`);
 
   // Back model through the history (PLAN.md §5.1).
   openAt('/studio?tab=home');
@@ -3453,7 +3503,15 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       function apiStopAdCampaignRequest(id, expectedLastModified, operationId, reason) {
         return apiJson('/api/ad-studio/campaigns/' + encodeURIComponent(id) + '/stop', { method: 'POST', body: { expectedLastModified, operationId, reason: reason || null } });
       }
-      function deleteRecord(list, id) { __deleted.push(id); const row = list.find(item => item.id === id); if (row) row._deleted = true; return Promise.resolve(true); }
+      // The platform's delete (09-api-auth.js), reduced to its call; the classic deleteRecord must not be used.
+      function apiDeleteEntity(collection, id) { __deleted.push(id); return apiJson('/api/collections/' + collection + '/' + id, { method: 'DELETE', body: {} }); }
+      function deleteRecord() { __notes.push({ title: 'classic deleteRecord', message: 'used', type: 'error' }); return Promise.resolve(true); }
+      // The request builder's entry points (15l), recorded: Home and My ads only call them.
+      var __builder = [];
+      function studioBuilderStart(kind, options) { __builder.push(['start', kind, options || null]); return true; }
+      function studioBuilderEdit(id, options) { __builder.push(['edit', id, !!(options && options.button)]); return Promise.resolve(true); }
+      function studioBuilderFix(id, code, button) { __builder.push(['fix', id, code, !!button]); return Promise.resolve(true); }
+      function studioBuilderFixLabel(code, kind) { return (code === 'creative_quality' ? 'Fix: photo' : 'Fix: details') + (kind === 'boost' ? ' (boost)' : ''); }
       window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
     `, box);
     vm.runInContext(adsStudio, box);
@@ -3559,21 +3617,53 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio v2 Home: plugged into the shell root; strip = wallet summary (Being returned only when non-zero, Meta used only when given); Needs you, trackers, goals, paused banner, EN/AR, escaped',
     !loadError && homeCases.every(Boolean), loadError || `cases ${failed(homeCases)}`);
 
+  // Home opens the request builder itself: each goal starts its own kind of request, a draft continues
+  // where it was, a request sent back opens at the field its reason names ("Fix: photo").
+  run('__builder.length = 0;');
+  const goalsStarted = ['messages', 'promote', 'grow', 'comments'].map(key => run(`studioHomeGoal('${key}')`));
+  const afterGoals = win.location.search;
+  const starts = json('__builder') || [];
+  run("__builder.length = 0; studioHomeEdit('r_fix', {}); studioHomeEdit('r_draft', {}); studioHomeEdit('r_wait');");
+  const edits = json('__builder') || [];
+  const wiringCases = [
+    JSON.stringify(starts) === JSON.stringify([['start', 'full', { goal: 'messages' }], ['start', 'boost', { boostType: 'boost_post' }], ['start', 'boost', { boostType: 'boost_page' }]])
+      && goalsStarted.slice(0, 3).every(out => out === true) && afterGoals === '?tab=replies',
+    JSON.stringify(edits) === JSON.stringify([['fix', 'r_fix', 'creative_quality', true], ['edit', 'r_draft', true]]) && win.location.search === '?tab=campaigns&id=r_wait',
+    /data-testid="studio-need-fix-r_fix"[\s\S]*?onclick="studioHomeEdit\('r_fix', this\)">Fix: photo<\/button>/.test(home)
+      && /data-testid="studio-need-draft-r_draft"[\s\S]*?onclick="studioHomeEdit\('r_draft', this\)">Continue<\/button>/.test(home)
+  ];
+  check('Studio v2 Home opens the builder: goals start full / boost post / boost page, a draft continues (studioBuilderEdit), a sent-back request opens at its field (studioBuilderFix)',
+    !loadError && wiringCases.every(Boolean), loadError || `cases ${failed(wiringCases)}`);
+
   // Getting started: a new customer (nothing sent yet) sees the four steps; the page step waits for its read.
   const fresh = open('/studio?tab=home', { rows: [requests()[0]], summaryReply: { r_draft: stageRow(1) }, walletReply: wallet({ addedMinor: 0, availableMinor: 0, reservedMinor: 0, inAdsMinor: 0, spentMinor: 0, metaUsedInAdsMinor: null }),
     extra: () => reply('/api/studio/pages', { pages: [] }) });
   const lapsedStart = (() => { who.plan = false; const page = open('/studio?tab=home', { rows: [] }); who.plan = true; return page; })();
+  // A customer whose ad_maker plan ran out (a row of theirs that is no longer active) is.
+  const lapsedPlan = (() => {
+    who.plan = false;
+    box.state.serviceSubscriptions = [{ id: 'sub_old', userId: 'u1', serviceId: 'ad_maker', status: 'active', expiresAt: '2026-01-01T00:00:00Z' },
+      { id: 'sub_other', userId: 'u2', serviceId: 'ad_maker', status: 'active', expiresAt: '2026-01-01T00:00:00Z' }];
+    const page = open('/studio?tab=home', { rows: [] });
+    box.state.serviceSubscriptions = [{ id: 'sub_someone', userId: 'u2', serviceId: 'ad_maker', status: 'canceled', expiresAt: '2026-01-01T00:00:00Z' }];
+    const other = open('/studio?tab=home', { rows: [] });
+    delete box.state.serviceSubscriptions;
+    who.plan = true;
+    return { page, other };
+  })();
   const failedRead = open('/studio?tab=home', { walletReply: undefined, extra: () => { run("__replies['/api/studio/wallet/summary'] = []"); replyError('/api/studio/wallet/summary', { status: 503, message: 'down' }); } });
   const startCases = [
     ['plan', 'page', 'money', 'first'].every(key => fresh.includes(`data-testid="studio-start-${key}"`)),
     between(fresh, 'studio-start-plan').includes('Done') && between(fresh, 'studio-start-page').includes("studioV2Open('replies')") && between(fresh, 'studio-start-money').includes("studioV2Open('wallet')")
       && between(fresh, 'studio-start-page').includes('aria-current="step"'),
-    lapsedStart.includes('data-testid="studio-need-plan"') && lapsedStart.includes('Activate Ads Studio') && /data-testid="studio-goal-messages"[^>]* disabled/.test(lapsedStart)
-      && between(lapsedStart, 'studio-start-plan').includes("showSubscriptionModal('ad_maker', 'ad_maker')"),
+    !lapsedStart.includes('data-testid="studio-need-plan"') && !lapsedStart.includes('Your plan has ended') && lapsedStart.includes('Activate Ads Studio')
+      && /data-testid="studio-goal-messages"[^>]* disabled/.test(lapsedStart) && between(lapsedStart, 'studio-start-plan').includes("showSubscriptionModal('ad_maker', 'ad_maker')"),
+    between(lapsedPlan.page, 'studio-need-plan').includes('Your plan has ended') && between(lapsedPlan.page, 'studio-need-plan').includes("showSubscriptionModal('ad_maker', 'ad_maker')")
+      && !lapsedPlan.other.includes('data-testid="studio-need-plan"'),
     ((block) => block.includes('data-testid="studio-home-retry"') && block.includes('Albayan could not load this right now'))(failedRead.slice(failedRead.indexOf('data-testid="studio-home-money"'), failedRead.indexOf('data-testid="studio-home-needs"'))),
     !home.includes('Coming soon') && open('/studio?tab=wallet').includes('Coming soon in the new studio'),
-    // A plugged screen that throws keeps the shell's own root and placeholder.
-    (() => { run("studioPlugScreen('help', () => { throw new Error('broken screen'); })"); const page = open('/studio?tab=help'); run("_studioPlugScreens.delete('help')");
+    // A registered screen that throws keeps the shell's own root and placeholder.
+    (() => { run("studioV2RegisterScreen('help', () => { throw new Error('broken screen'); })"); const page = open('/studio?tab=help'); run("_studioV2Screens.delete('help')");
       return page.includes('data-testid="studio-screen-help"') && page.includes('Coming soon in the new studio'); })()
   ];
   check('Studio v2 Home: Getting started (plan, page, money, first request) until the first send; lapsed plan; a failed wallet read offers Retry; other tabs keep the shell placeholder',
@@ -3606,9 +3696,14 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     actionsOf(dLive) === 'ask_stop,ask' && between(dLive, 'studio-ad-meta-used').includes('Meta used $3.00 so far') && dLive.includes('Meta used $3.00 of $50.00')
       && dLive.includes('12,000') && dLive.includes('Leads') && dLive.includes('data-step="running"'),
     actionsOf(dDone) === 'archive' && between(dDone, 'studio-ad-chain').includes('Unused budget returned from: Done ad') && dDone.includes('<bdi dir="ltr">$20.00</bdi>') && dDone.includes('is-side'),
-    actionsOf(dFix) === 'edit,ask' && between(dFix, 'studio-ad-reason').includes('Photo or video quality') && between(dFix, 'studio-ad-reason').includes('Use a brighter &lt;photo&gt;') && dFix.includes('Fix it'),
-    actionsOf(dDraft) === 'edit,archive' && dDraft.includes('Delete draft') && dDraft.includes('Not sent yet'),
-    dMissing.includes('data-testid="studio-ad-missing"') && !dMissing.includes('Someone else')
+    actionsOf(dFix) === 'edit,ask' && between(dFix, 'studio-ad-reason').includes('Photo or video quality') && between(dFix, 'studio-ad-reason').includes('Use a brighter &lt;photo&gt;')
+      && /data-testid="studio-ad-action-edit" onclick="studioAdsEdit\('r_fix', this\)">.*?<span>Fix: photo<\/span>/.test(dFix),
+    actionsOf(dDraft) === 'edit,archive' && dDraft.includes('Delete draft') && dDraft.includes('Not sent yet') && dDraft.includes(`onclick="studioAdsEdit('r_draft', this)"`),
+    dMissing.includes('data-testid="studio-ad-missing"') && !dMissing.includes('Someone else'),
+    (() => {
+      run("__builder.length = 0; studioAdsEdit('r_fix', {}); studioAdsEdit('r_draft'); studioAdsEdit('r_wait');");
+      return JSON.stringify(json('__builder')) === JSON.stringify([['fix', 'r_fix', 'creative_quality', true], ['edit', 'r_draft', false]]);
+    })()
   ];
   check('Studio v2 My ads: own requests only, filters Active / Waiting / Finished in the address, detail actions from the server stage, money chain and results as the server gives them',
     !loadError && adsCases.every(Boolean), loadError || `cases ${failed(adsCases)}`);
@@ -3635,7 +3730,24 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   replyError('/api/ad-studio/campaigns/r_new/stop', { status: 500, message: 'Internal Server Error' });
   run("var __s2 = null; studioAdsRun('stop', 'r_new').then(out => { __s2 = out; });");
   const stopBodies = json("__calls.filter(c => c.path === '/api/ad-studio/campaigns/r_new/stop').map(c => c.body)") || [];
+  reply('/api/collections/adCampaignRequests/r_done', { id: 'r_done', lastModified: 30 });
   run("var __a = null; studioAdsRun('archive', 'r_done').then(out => { __a = out; });");
+  const archived = json("(() => { const row = state.adCampaignRequests.find(r => r.id === 'r_done'); return { deleted: row._deleted === true, version: row._lastModified }; })()") || {};
+  // A refusal leaves the request where it was and is explained in the sheet (never the classic toast).
+  const underReview = 'Submitted campaigns cannot be deleted while under review';
+  replyError('/api/collections/adCampaignRequests/r_draft', { status: 409, message: underReview, payload: { detail: underReview } });
+  const notesBefore = json('__notes.length');
+  run("var __ar = null; studioAdsRun('archive', 'r_draft').then(out => { __ar = out; });");
+  const refusedArchive = { out: json('__ar') || {}, notes: (json('__notes') || []).slice(notesBefore), row: json("state.adCampaignRequests.find(r => r.id === 'r_draft')") || {} };
+  // Archive / Delete draft follows the request's own status too: a stage read before a send may still
+  // offer "delete" for a request that is waiting for review now.
+  const staleDraftStage = "Object.assign(studioDataStage(studioDataRequest('r_draft')), { fromServer: true })";
+  const archiveOffers = [
+    json(`studioAdsActions(Object.assign({}, studioDataRequest('r_wait'), { status: 'Submitted' }), ${staleDraftStage})`),
+    json(`studioAdsActions(Object.assign({}, studioDataRequest('r_new'), { settleBasis: 'meta_final' }), studioStageView({ stage: 11, stageKey: 'finished', actions: ['archive'] }))`),
+    json(`studioAdsActions(studioDataRequest('r_new'), studioStageView({ stage: 11, stageKey: 'finished', actions: ['archive'] }))`)
+  ];
+  run("var __ag = null; studioAdsRun('archive', 'r_live').then(out => { __ag = out; });");
   const sheetCases = [
     withdrawSheet.includes('studio-sheet-withdraw') && withdrawSheet.includes('Your reservation of $30.00 ends now') && withdrawSheet.includes('data-testid="studio-sheet-confirm"')
       && withdrawSheet.includes('role="dialog"') && withdrawSheet.includes('mobile-dialog-overlay'),
@@ -3647,7 +3759,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     run('__wSame') === true && withdrawOut.ok === true && afterWithdraw.status === 'Draft' && afterWithdraw.rereads >= 1 && json("__notes.some(n => n.type === 'success' && n.message.includes('$30.00'))") === true,
     json('__s1') && json('__s1').ok === false && json('__s1').text === refusal && json('__s2') && json('__s2').ok === false
       && stopBodies.length === 2 && stopBodies[0].operationId === stopBodies[1].operationId && stopBodies[0].expectedLastModified === 15,
-    json('__a') && json('__a').ok === true && json('__a').leave === true && JSON.stringify(json('__deleted')) === '["r_done"]',
+    json('__a') && json('__a').ok === true && json('__a').leave === true && archived.deleted === true && archived.version === 30,
+    refusedArchive.out.ok === false && refusedArchive.out.text === 'Our team is reviewing this request, so it cannot be removed now. Withdraw it first.'
+      && refusedArchive.notes.length === 0 && refusedArchive.row._deleted !== true && refusedArchive.row.status === 'Draft',
+    JSON.stringify(json('__deleted')) === '["r_done","r_draft"]' && json('__ag') && json('__ag').ok === false,
+    Array.isArray(archiveOffers[0]) && !archiveOffers[0].includes('archive') && archiveOffers[1].includes('archive') && !archiveOffers[2].includes('archive'),
     json("_studioAdsRuns.size") === 0
   ];
   check('Studio v2 My ads sheets: withdraw / stop / archive / ask to stop (coming soon + public contact); single flight; one operationId per (action, version); refusals shown as the server says',
@@ -3663,8 +3779,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && lazy.indexOf('systems/ads_studio/15k-studio-ads.js') === lazy.indexOf('systems/ads_studio/15j-studio-home.js') + 1,
     [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(homeSrc) && bundle.includes(adsSrc)) && !read('script.js').includes('renderStudioHomeBody'),
     !v2Files.some(src => /\b(?:confirm|prompt|alert)\(/.test(src)) && !/access_token|app_?secret|page_?token|Bearer /i.test(homeSrc + adsSrc) && !/setInterval\(/.test(homeSrc + adsSrc),
-    homeSrc.includes("studioPlugScreen('home', renderStudioHomeBody)") && adsSrc.includes("studioPlugScreen('campaigns', renderStudioAdsBody)")
-      && homeSrc.includes('renderStudioV2CustomerScreen = function renderStudioV2CustomerScreenPlugged(route)'),
+    homeSrc.includes("studioV2RegisterScreen('home', renderStudioHomeBody)") && adsSrc.includes("studioV2RegisterScreen('campaigns', renderStudioAdsBody)")
+      && ![homeSrc, adsSrc].some(src => /renderStudioV2CustomerScreen\s*=|studioPlugScreen/.test(src)),
     homeCss.length > 1000 && read('www/assets/ads-workspace.css') === workspaceCss
       && ['html.dark :is(.studio-v2-frame, .studio-ads-sheet)', '.studio-ads-sheet { position: fixed;', '@media (max-width: 900px)', 'overflow-wrap: anywhere', 'min-height: 44px'].every(rule => homeCss.includes(rule))
       && !/background(-color)?:\s*#|[^-]color:\s*#/.test(homeCss)
@@ -3681,6 +3797,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const builderSrc = read('src/systems/ads_studio/15l-studio-builder.js');
   const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
   const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
   const mainPy = read('server/main.py');
   const fieldsPy = read('server/systems/ads_studio/ad_campaign_fields.py');
   const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
@@ -3726,7 +3843,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       sanitizeInput: (value, options = {}) => String(value ?? '').replace(/[<>]/g, '').trim().slice(0, options.maxLength || 100000),
       sanitizeObject: value => JSON.parse(JSON.stringify(value)),
-      generateSecureId: prefix => `${prefix}_${++seq}_abcdef123456`
+      generateSecureId: prefix => `${prefix}_${++seq}_abcdef123456`,
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim())
     },
     window: win, history: hist, URLSearchParams, URL, Intl,
     isServerModeEnabled: () => true,
@@ -3749,6 +3867,12 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       var __html = '';
       var __notes = [];
       var __patchReply = null;
+      var __createReply = null;
+      var __openAdd = null;
+      var __nav = { aborted: false };  // the app's navigation signal (09-api-auth.js getNavigationSignal)
+      function getNavigationSignal() { return __nav; }
+      // Wallet's Add money (15m), recorded.
+      function studioWalletOpenAdd(purpose, amountMinor) { __openAdd = [purpose, amountMinor]; return true; }
       var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
       var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, getElementById: () => null };
       function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
@@ -3766,6 +3890,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       function __entity(data) { return { id: data.id, data: JSON.parse(JSON.stringify(data)), lastModified: data._lastModified }; }
       function apiCreateEntity(collection, record) {
         __calls.push({ path: 'create:' + collection, method: 'POST', body: JSON.parse(JSON.stringify(record)) });
+        if (__createReply) { const reply = __createReply; __createReply = null; return Promise.reject(Object.assign(new Error(reply.error.message || 'refused'), reply.error)); }
         return Promise.resolve(__entity({ ...record, status: 'Draft', createdBy: 'b-user', _lastModified: 1000 }));
       }
       function apiPatchEntity(collection, id, updates, expected) {
@@ -3792,6 +3917,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     vm.runInContext(adsStudio, box);
     vm.runInContext(coreSrc, box);
     vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);  // Home's data layer: the one copy of the wallet summary
     vm.runInContext(builderSrc, box);
     vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
   } catch (error) { loadError = String(error && error.message || error); }
@@ -3880,17 +4006,46 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   run("studioBuilderInput('days', { value: '91' });");
   const maxDays = json('studioBuilderStepProblems(_studioBuilder.session, "budget")') || {};
   run("studioBuilderInput('days', { value: '5' }); studioBuilderInput('budget', { value: '10' });");
-  run('studioBuilderLoadWallet(true);');
+  run(`__replies['/api/studio/wallet/summary'] = [{ value: { usd: { availableMinor: 1000, reservedMinor: 0 }, pendingPayments: [{ reference: 'PAY-LYD', amountMinor: 900, currency: 'LYD' }, { reference: 'PAY-AB12CD34', amountMinor: 2500, currency: 'USD' }] } }];
+    studioBuilderLoadWallet(true);`);
   const walletHtml = String(run('studioBuilderWalletHtml(_studioBuilder.session)'));
+  run("_adsStudioDraft.budgetType = 'lifetime'; studioBuilderInput('budget', { value: '50' }); __openAdd = null; studioBuilderAddMoney();");
+  const addMoney = json('__openAdd');
+  run("_adsStudioDraft.budgetType = 'daily'; studioBuilderInput('budget', { value: '10' });");
   const budgetCases = [
     floor.includes('$1.00 a day'), minTotal.includes('at least $5.00') && minTotal.includes('$0.50 × 3 days = $1.50'), String(maxDays.days || '').includes('90'),
     walletHtml.includes('You have <bdi dir="ltr">$10.00</bdi> available') && walletHtml.includes('Short by <bdi dir="ltr">$40.00</bdi>')
       && walletHtml.includes('PAY-AB12CD34') && walletHtml.includes('$25.00') && !walletHtml.includes('PAY-LYD')
       && walletHtml.includes('onclick="studioBuilderAddMoney()"'),
-    run('studioBuilderWalletShort(_studioBuilder.session)') === true && run('studioBuilderSendBlocked(_studioBuilder.session)') === true
+    run('studioBuilderWalletShort(_studioBuilder.session)') === true && run('studioBuilderSendBlocked(_studioBuilder.session)') === true,
+    // "Add money" opens Wallet's Add money on "my ads" with the missing $40.00 ($50.00 - $10.00 available).
+    JSON.stringify(addMoney) === '["ads",4000]' && !/section: 'add'/.test(builderSrc)
   ];
   check('Studio v2 builder: total limits, the per-day floor and max days from /me; the wallet line and a pending USD payment from the wallet summary',
     !loadError && budgetCases.every(Boolean), loadError || `cases ${failed(budgetCases)}`);
+
+  // The suggested totals carry their own amount: typed days that move the per-day floor never turn a
+  // tap on "$20.00" into another amount, and the chips follow the typed days in place.
+  run("studioBuilderStart('full'); studioBuilderSetDays(7);");
+  openAt('/studio?tab=builder&section=full&step=5');
+  const budgetPage = html();
+  run("var __els = { 'studio-b-presets': { innerHTML: '', hidden: false } }; document.getElementById = id => __els[id] || null;");
+  run("studioBuilderInput('days', { value: '30' });");
+  const repainted = json("__els['studio-b-presets']") || {};
+  run('studioBuilderPreset(2000);');
+  const tapped = json('_adsStudioDraft.budgetMinorUSD');
+  run('studioBuilderPreset(0); studioBuilderPreset(1234);');
+  const keptBudget = json('_adsStudioDraft.budgetMinorUSD');
+  const floorHint = String(run('studioBuilderBudgetProblem(_studioBuilder.session)'));
+  run('document.getElementById = () => null; __timers.clear(); __calls.length = 0;');
+  const presetCases = [
+    budgetPage.includes('id="studio-b-presets"') && ['2000', '3500', '6000', '10000'].every(minor => budgetPage.includes(`onclick="studioBuilderPreset(${minor})"`))
+      && /onclick="studioBuilderPreset\(2000\)"[^>]*><span>\$20\.00<\/span>/.test(budgetPage),
+    repainted.innerHTML.includes('studioBuilderPreset(3500)') && repainted.innerHTML.includes('studioBuilderPreset(15000)') && !repainted.innerHTML.includes('studioBuilderPreset(2000)') && repainted.hidden === false,
+    tapped === 2000 && keptBudget === 2000 && floorHint.includes('Meta needs at least $1.00 a day')
+  ];
+  check('Studio v2 builder: a suggested total sets the amount on its chip, whatever the typed days did meanwhile; the chips follow the days in place',
+    !loadError && presetCases.every(Boolean), loadError || `cases ${failed(presetCases)}`);
 
   // Saving as you go: one create with a fixed id, then PATCH with only the changed fields and the
   // version; a conflict never overwrites.
@@ -3923,9 +4078,68 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio v2 builder saves as you go: one create (fixed id), then PATCH of the changed fields with expectedLastModified; a conflict never overwrites',
     !loadError && saveCases.every(Boolean), loadError || `cases ${failed(saveCases)}`);
 
+  // The server's limit of open requests is said as that, never as "changed on another device"; the
+  // next change tries the create again once the customer has freed a slot.
+  const keptSession = 'var __keptSession = _studioBuilder.session; var __keptDraft = _adsStudioDraft;';
+  run(keptSession);
+  const openLimit = 'Ads Studio allows at most 50 open campaign requests per customer. Finish or delete an old request first.';
+  run("studioBuilderStart('full'); __timers.clear();");
+  const limitId = String(run('_studioBuilder.session.id'));
+  run(`__createReply = { error: { status: 409, message: ${JSON.stringify(openLimit)}, payload: { detail: ${JSON.stringify(openLimit)} } } };
+    __replies['/api/collections/adCampaignRequests/' + encodeURIComponent(${JSON.stringify(limitId)})] = [{ error: { status: 404, message: 'Not Found', payload: { detail: 'Not Found' } } }];
+    studioBuilderInput('notes', { value: 'First try' }); __runTimers();`);
+  const limited = json('{ status: _studioBuilder.session.status, text: _studioBuilder.session.statusText, quota: _studioBuilder.session.quota, conflict: _studioBuilder.session.conflict, created: _studioBuilder.session.created }') || {};
+  openAt('/studio?tab=builder&section=full&step=6');
+  const limitHtml = html();
+  run("studioBuilderInput('notes', { value: 'Second try' }); __runTimers();");
+  const retried = json(`{ status: _studioBuilder.session.status, created: _studioBuilder.session.created, quota: _studioBuilder.session.quota,
+    creates: __calls.filter(call => call.path === 'create:adCampaignRequests' && call.body.id === ${JSON.stringify(limitId)}).length }`) || {};
+  // A late answer for the draft the customer just left never points the reload memory back at it.
+  const tabStore = new Map();
+  win.sessionStorage = { getItem: k => (tabStore.has(k) ? tabStore.get(k) : null), setItem: (k, v) => tabStore.set(k, String(v)), removeItem: k => tabStore.delete(k) };
+  run("studioBuilderStart('full'); studioBuilderInput('notes', { value: 'Left behind' });");
+  const leftId = String(run('_studioBuilder.session.id'));
+  run("studioBuilderStart('full');");  // the left draft's save is sent on the way out; its answer lands after the new one opened
+  const memoryAfter = json('studioBuilderMemory()');
+  const leftSaved = json(`__calls.some(call => call.path === 'create:adCampaignRequests' && call.body.id === ${JSON.stringify(leftId)})`);
+  delete win.sessionStorage;
+  // A quick boost has no platform choice: an empty list (both boxes unticked in the full request, or
+  // a stored boost) becomes the page's platforms or both, so Send never meets "at least one platform".
+  run("studioBuilderStart('full'); studioBuilderTogglePlatform('facebook'); studioBuilderTogglePlatform('instagram');");
+  const unticked = json('_adsStudioDraft.platforms');
+  run("studioBuilderSwitchKind('boost');");
+  const boosted = json('{ draft: _adsStudioDraft.platforms, sent: studioBuilderPayload(_adsStudioDraft).platforms }') || {};
+  run("studioBuilderOpenSession('boost', Object.assign(newAdsStudioDraft(), { id: 'stored_boost_1', boostType: 'boost_post', platforms: [] }), { created: true, baseline: 5 });");
+  const storedBoost = json('_adsStudioDraft.platforms');
+  run('__timers.clear(); _studioBuilder.session = __keptSession; _adsStudioDraft = __keptDraft;');
+  const limitCases = [
+    limited.status === 'error' && limited.quota === true && limited.conflict === null && limited.created === false
+      && limited.text === 'You have too many open requests. Delete an old draft or wait for one to finish, then try again.',
+    limitHtml.includes('data-testid="studio-builder-quota"') && !limitHtml.includes('studio-builder-conflict') && limitHtml.includes('onclick="studioBuilderOpenMyAds()"')
+      && limitHtml.includes('Not saved: You have too many open requests.'),
+    retried.status === 'saved' && retried.created === true && retried.quota === false && retried.creates === 2,
+    memoryAfter === null && leftSaved === true,
+    JSON.stringify(unticked) === '[]' && Array.isArray(boosted.draft) && boosted.draft.length > 0 && JSON.stringify(boosted.sent) === JSON.stringify(boosted.draft)
+      && JSON.stringify(storedBoost) === '["facebook","instagram"]'
+  ];
+  check('Studio v2 builder: the 50-open-requests limit is shown as that (a way to My ads, the next change retries); a late save never repoints the reload memory; a quick boost always has platforms',
+    !loadError && limitCases.every(Boolean), loadError || `cases ${failed(limitCases)}`);
+
   // Sending: single flight, an operationId per (action, version), the reserved total from the server.
-  run("_studioBuilder.session.status = 'saved'; _studioBuilder.session.conflict = null; _studioBuilder.session.rights = true; _studioBuilder.wallet.value = { availableMinor: 900000, reservedMinor: 0, pending: [] };");
+  run(`_studioBuilder.session.status = 'saved'; _studioBuilder.session.conflict = null; _studioBuilder.session.rights = true;
+    Object.assign(studioDataSlot('wallet'), { value: { usd: { availableMinor: 900000, reservedMinor: 0 }, pendingPayments: [] }, loadedAt: Date.now(), promise: null });`);
   run("studioBuilderInput('budget', { value: '50' }); __runTimers();");
+  // A change the server refuses (413) and that is then undone leaves nothing unsaved: the status is
+  // "saved" again, and Send goes through even while the undo's own save is still waiting.
+  const storageFull = 'Ads Studio storage quota reached. Remove images, or archive a finished campaign (ask us to close a running one first).';
+  const notesNow = String(run('_adsStudioDraft.notes'));
+  run(`__patchReply = { error: { status: 413, message: ${JSON.stringify(storageFull)} } }; studioBuilderInput('notes', { value: 'A note the server refuses' }); __runTimers();`);
+  const refusedOnce = String(run('_studioBuilder.session.status'));
+  run(`studioBuilderInput('notes', { value: ${JSON.stringify(notesNow)} }); __runTimers();`);
+  const undoneSaved = String(run('_studioBuilder.session.status'));
+  run(`__patchReply = { error: { status: 413, message: ${JSON.stringify(storageFull)} } }; studioBuilderInput('notes', { value: 'Refused again' }); __runTimers();`);
+  const refusedTwice = String(run('_studioBuilder.session.status'));
+  run(`studioBuilderInput('notes', { value: ${JSON.stringify(notesNow)} });`);  // its save waits; Send settles it
   run("__replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', intake: { open: true }, adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }];");
   run('var __s1 = studioBuilderSend(null); var __s2 = studioBuilderSend(null); var __same = __s1 === __s2;');
   run('__runTimers();');
@@ -3935,7 +4149,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const sendCases = [
     sent.same === true && Array.isArray(sent.submits) && sent.submits.length === 1 && /^campaign-submit_/.test(sent.submits[0].operationId),
     sent.sent && sent.sent.totalMinor === 5000 && sent.session === false,
-    sentHtml.includes('data-testid="studio-builder-sent"') && sentHtml.includes('Sent. <bdi dir="ltr">$50.00</bdi> is reserved, not charged.')
+    sentHtml.includes('data-testid="studio-builder-sent"') && sentHtml.includes('Sent. <bdi dir="ltr">$50.00</bdi> is reserved, not charged.'),
+    refusedOnce === 'error' && undoneSaved === 'saved' && refusedTwice === 'error',
+    // Both summaries are read again after a send (Home, My ads and Wallet show the reserve at once).
+    json("__calls.some(call => call.path === '/api/studio/campaigns/summary')") === true
   ];
   check('Studio v2 builder sends once (single flight, operationId per action and version) and shows the reserved total the server stamped',
     !loadError && sendCases.every(Boolean), loadError || `cases ${failed(sendCases)}`);
@@ -3995,7 +4212,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const builderCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio v2 request builder'));
   const hookCases = [
     paused,
-    run('uploadAdsStudioCreativeFiles.name') === 'uploadAdsStudioCreativeFilesForBuilder' && run('renderStudioV2Builder.name') === 'renderStudioV2BuilderScreen',
+    run('uploadAdsStudioCreativeFiles.name') === 'uploadAdsStudioCreativeFilesForBuilder' && run("_studioV2Screens.has('builder') && _studioData.painters.has('builder')") === true
+      && !/renderStudioV2Builder\s*=|renderStudioV2CustomerScreen\s*=/.test(builderSrc) && builderSrc.includes("studioV2RegisterScreen('builder', route => studioBuilderRender(route));"),
     photo.photos === 1 && photo.created === true,
     repaired.kind && repaired.search === '?tab=builder&section=boost&step=1',
     builderCss.length > 1000 && read('www/assets/ads-workspace.css') === workspaceCss
@@ -4005,6 +4223,29 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 builder: intake paused turns Send off; the classic photo path (paste, file input, limits) stays; an address that lost its kind is put right; styles ship',
     !loadError && hookCases.every(Boolean), loadError || `cases ${failed(hookCases)}`);
+
+  // One wallet copy: a money action anywhere in the studio (studioDataRefresh: a withdraw in My ads, a
+  // payment in Wallet) renews the builder's wallet lines at once, not after its own half minute.
+  run("studioDataReset('b-user'); studioBuilderStart('boost'); studioBuilderInput('budget', { value: '50' });");
+  run(`__replies['/api/studio/wallet/summary'] = [{ value: { usd: { availableMinor: 1000, reservedMinor: 0 }, pendingPayments: [] } },
+    { value: { usd: { availableMinor: 99900, reservedMinor: 0 }, pendingPayments: [] } }]; studioBuilderLoadWallet();`);
+  const shortBefore = run('studioBuilderWalletShort(_studioBuilder.session)');
+  run('studioDataRefresh();');
+  const shortAfter = run('studioBuilderWalletShort(_studioBuilder.session)');
+  const summaryReads = json("__calls.filter(call => call.path === '/api/studio/wallet/summary').length");
+  // A read cut off by its timeout is a failure the step explains (Try again); only the app moving on
+  // cancels one, and then the next draw simply asks again.
+  run("_studioBuilder.pages.state = ''; __replies['/api/studio/pages'] = [{ error: { name: 'AbortError', message: 'signal is aborted without reason' } }]; studioBuilderLoadPages();");
+  const pagesTimedOut = String(run('_studioBuilder.pages.state'));
+  run("__nav.aborted = true; _studioBuilder.pages.state = ''; __replies['/api/studio/pages'] = [{ error: { name: 'AbortError', message: 'The operation was aborted' } }]; studioBuilderLoadPages();");
+  const pagesCancelled = String(run('_studioBuilder.pages.state'));
+  run('__nav.aborted = false;');
+  const copyCases = [
+    shortBefore === true && shortAfter === false && summaryReads >= 2 && !/_studioBuilder\.wallet\b/.test(builderSrc),
+    pagesTimedOut === 'failed' && pagesCancelled !== 'failed'  // cancelled: '' and, on the redraw it causes, asked again
+  ];
+  check('Studio v2 builder: its wallet lines read Home\'s one copy of the summary (renewed by every money action); a timed-out read fails with Try again, a cancelled one is asked again',
+    !loadError && copyCases.every(Boolean), loadError || `cases ${failed(copyCases)}`);
 }
 
 {
@@ -4016,6 +4257,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const walletSrc = read('src/systems/ads_studio/15m-studio-wallet.js');
   const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
   const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
   const phoneTable = JSON.parse(read('server/systems/ads_studio/phone_cases.json')).cases;
   const win = {
     location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
@@ -4046,7 +4288,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     state: { language: 'en', theme: 'light', currentUser: { id: 'wallet-user', name: 'Sara <script>x</script>', email: 'sara@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [] },
     Security: {
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
-      generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++idSeq).padStart(12, '0')}`
+      generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++idSeq).padStart(12, '0')}`,
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim())
     },
     window: win, history: hist, URLSearchParams, URL,
     isServerModeEnabled: () => true,
@@ -4070,6 +4313,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       var __notes = [];
       var __sheet = null;
       var __plan = null;
+      var __held = [];                 // answers held back until the test lets them arrive (__held.shift()())
+      var __nav = { aborted: false };  // the app's navigation signal (09-api-auth.js getNavigationSignal)
+      function getNavigationSignal() { return __nav; }
       var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
       var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, getElementById: () => null, querySelectorAll: () => [] };
       function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
@@ -4080,6 +4326,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
         const next = (__replies[method + ' ' + path] || []).shift();
         if (!next) return new Promise(() => {});
         if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        if (next.hold) return new Promise(resolve => { __held.push(() => resolve(JSON.parse(JSON.stringify(next.value)))); });
         return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
       }
       // The platform's wallet helpers (09-api-auth.js), reduced to their calls.
@@ -4097,6 +4344,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     vm.runInContext(adsStudio, box);
     vm.runInContext(coreSrc, box);
     vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);  // Home's data layer: the one copy of the wallet summary
     vm.runInContext(walletSrc, box);
     vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
     // The sheet needs a real page (e2e covers it); here its options are kept and confirmed by hand.
@@ -4176,7 +4424,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && !bundleManifestJson.files.some(file => /15m-studio/.test(file))
       && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(walletSrc))
       && fs.statSync(path.join(ROOT, 'studio.js')).size < 1024 * 1024
-      && walletSrc.includes('const _studioWalletShellScreen = typeof renderStudioV2CustomerScreen === \'function\' ? renderStudioV2CustomerScreen : null;'),
+      && run("_studioV2Screens.has('wallet') && _studioV2Screens.has('account')") === true && !/renderStudioV2CustomerScreen\s*=/.test(walletSrc),
     loadError || `studio.js ${fs.statSync(path.join(ROOT, 'studio.js')).size} bytes`);
 
   // The phone rule: the screens and the server read every typed number the same way.
@@ -4423,9 +4671,98 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio v2 Account: name read only (escaped), language, theme, sign out; a WhatsApp number is sent only as E.164 with the consent box ticked; removal asks first',
     !loadError && accountCases.every(Boolean), loadError || `cases ${failed(accountCases)}`);
 
+  // ONE copy of the wallet summary (Home's, 15j): a money action anywhere in the studio (a withdraw in
+  // My ads calls studioDataRefresh) shows on Wallet at once, not after Wallet's own half minute, and
+  // Wallet's own actions renew what Home and My ads show.
+  const withoutUsdPending = { ...summary(), pendingPayments: summary().pendingPayments.slice(1) };
+  run("studioDataReset('wallet-user'); _studioWallet.requestsAt = 0;");
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  openAt('/studio?tab=wallet');
+  const oneCopyBefore = amountOf(html(), 'studio-wallet-available-amount');
+  const readsBeforeRefresh = calls('GET', SUMMARY).length;
+  reply('GET', SUMMARY, summary({ usd: { reservedMinor: 0, availableMinor: 7500 } }));
+  run('studioDataRefresh();');  // what 15k's studioAdsAfterMoney does after "$10.00 is available again"
+  run('render();');  // Wallet's next draw (15j redraws once the answer is in)
+  const oneCopyAfter = amountOf(html(), 'studio-wallet-available-amount');
+  const readsAfterRefresh = calls('GET', SUMMARY).length - readsBeforeRefresh;
+  // A forced read after Cancel never joins a read that started before the cancel (that older answer
+  // can still list the request as waiting): one more read follows it.
+  run('_studioData.slots.wallet.loadedAt -= 31000;');  // the wallet has been open for a while
+  const readsBeforeCancel = calls('GET', SUMMARY).length;
+  run(`__replies['GET ${SUMMARY}'] = [{ hold: true, value: ${JSON.stringify(summary())} }, { value: ${JSON.stringify(withoutUsdPending)} }];
+    __replies['GET ${MINE}'] = [{ value: ${JSON.stringify(requests)} }, { value: ${JSON.stringify(requests)} }];`);
+  reply('POST', '/api/wallet/payment-requests/wpr_1/cancel', { id: 'wpr_1', data: { status: 'canceled' } });
+  run("studioWalletCancel('wpr_1');");
+  const readsWhileHeld = calls('GET', SUMMARY).length - readsBeforeCancel;
+  run('__held.shift()(); render();');
+  const readsAfterCancel = calls('GET', SUMMARY).length - readsBeforeCancel;
+  const pendingAfterCancel = json('studioWalletSummary().pending.map(item => item.reference)') || [];
+  const homePendingAfterCancel = json("studioDataValue('wallet').pendingPayments.map(item => item.reference)") || [];
+  const cancelledScreen = html();
+  const oneCopyCases = [
+    oneCopyBefore === '$65.00' && oneCopyAfter === '$75.00' && readsAfterRefresh === 1,
+    readsWhileHeld === 1 && readsAfterCancel === 2 && JSON.stringify(pendingAfterCancel) === '["PAY-LYDBBBB2"]'
+      && JSON.stringify(homePendingAfterCancel) === '["PAY-LYDBBBB2"]' && !cancelledScreen.includes('data-reference="PAY-USDAAAA1"'),
+    json('_studioData.slots.wallet.loadedAt') <= Date.now() && !/_studioWallet\.summary\b|studioApi\('\/api\/studio\/wallet\/summary'/.test(walletSrc)
+  ];
+  check('Studio v2 wallet reads Home\'s one copy of the summary: a money action elsewhere shows at once; a forced read after Cancel never joins an older read',
+    !loadError && oneCopyCases.every(Boolean), loadError || `cases ${failed(oneCopyCases)}`);
+
+  // Add money keeps its idempotency key until the server answers with the request: after a lost answer,
+  // Add money opened again for the same amount and method replays the same request (no second PAY- code).
+  run("studioWalletOpenAdd('ads', 2500); studioWalletPickMethod('adfali');");
+  replyError('POST', MINE, { name: 'TypeError', message: 'Failed to fetch' });
+  run('studioWalletCreate();');
+  const lostKey = ((calls('POST', MINE).slice(-1)[0] || {}).body || {}).idempotencyKey;
+  run("studioWalletFinishAdd(); studioWalletOpenAdd(); studioWalletPickPurpose('ads'); studioWalletPickAmount(2500); studioWalletFlowStep(1); studioWalletPickMethod('adfali');");
+  reply('POST', MINE, { id: 'wpr_replayed', data: { reference: 'PAY-REPLAYGG7', status: 'pending', currency: 'USD', amountMinor: 2500, amountMinorLYD: 17250, method: 'adfali' } });
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  run('studioWalletCreate();');
+  const replayKey = ((calls('POST', MINE).slice(-1)[0] || {}).body || {}).idempotencyKey;
+  const keyCases = [
+    /^studiopay_\d+_\d{12}$/.test(String(lostKey)) && replayKey === lostKey && run('_studioWallet.idem.key') === '' && html().includes('PAY-REPLAYGG7'),
+    // The builder's "short by $0.50" still opens a valid amount (the smallest one, $1.00).
+    run("studioWalletOpenAdd('ads', 50); _studioWallet.add.amountText") === '1.00' && run("studioWalletOpenAdd('ads', 4000); _studioWallet.add.step + ':' + _studioWallet.add.amountText") === '2:40.00'
+  ];
+  run('studioWalletFinishAdd();');
+  check('Studio v2 Add money: the idempotency key survives reopening Add money until the server answers, so a lost answer is replayed; an amount from another screen is at least $1.00',
+    !loadError && keyCases.every(Boolean), loadError || `cases ${failed(keyCases)}`);
+
+  // A read cut off by its timeout shows the problem with Try again (never "Reading…" for ever, nor a new
+  // read every 15 s); only the app moving on (the navigation signal) cancels a read quietly.
+  run("studioDataReset('wallet-user'); _studioWallet.requestsAt = 0;");
+  replyError('GET', SUMMARY, { name: 'AbortError', message: 'signal is aborted without reason' });
+  reply('GET', MINE, requests);
+  openAt('/studio?tab=wallet');
+  const walletTimedOut = html();
+  const readsAfterTimeout = calls('GET', SUMMARY).length;
+  run('render(); render();');
+  const readsAfterRedraws = calls('GET', SUMMARY).length;
+  run("studioDataReset('wallet-user'); _studioWallet.requestsAt = 0; __nav.aborted = true;");
+  replyError('GET', SUMMARY, { name: 'AbortError', message: 'The operation was aborted' });
+  reply('GET', MINE, requests);
+  openAt('/studio?tab=wallet');
+  const walletCancelled = html();
+  run('__nav.aborted = false;');
+  run("_studioAccount.profile = null; _studioAccount.error = ''; _studioAccount.loading = null;");
+  replyError('GET', '/api/studio/profile', { name: 'AbortError', message: 'signal is aborted without reason' });
+  openAt('/studio?tab=account');
+  const profileTimedOut = html();
+  const timeoutCases = [
+    walletTimedOut.includes('data-testid="studio-wallet-problem"') && walletTimedOut.includes('data-testid="studio-wallet-retry"')
+      && walletTimedOut.includes('No connection to Albayan') && !walletTimedOut.includes('Reading your wallet'),
+    readsAfterRedraws === readsAfterTimeout,
+    walletCancelled.includes('Reading your wallet') && !walletCancelled.includes('studio-wallet-problem'),
+    profileTimedOut.includes('data-testid="studio-account-retry"') && !profileTimedOut.includes('Reading your profile')
+  ];
+  check('Studio v2 wallet/account: a timed-out read shows the problem and Try again; a read the app cancelled is simply asked again',
+    !loadError && timeoutCases.every(Boolean), loadError || `cases ${failed(timeoutCases)}`);
+
   // Another signed-in user starts empty; a failing screen falls back to the frame's own placeholder.
   box.state.currentUser = { id: 'other-user', name: 'Other' };
-  const otherWallet = run('studioWalletScope(); _studioWallet.summary === null && _studioWallet.requests === null && _studioWallet.add === null');
+  const otherWallet = run("studioWalletScope(); studioWalletSummary() === null && _studioWallet.requests === null && _studioWallet.add === null && _studioWallet.idem.key === ''");
   const otherAccount = run('studioAccountScope(); _studioAccount.profile === null');
   box.state.currentUser = { id: 'wallet-user', name: 'Sara' };
   run("var __realWallet = renderStudioWalletScreen; renderStudioWalletScreen = function () { throw new Error('boom'); };");

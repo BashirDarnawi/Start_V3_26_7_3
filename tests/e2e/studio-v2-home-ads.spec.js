@@ -208,9 +208,17 @@ test.describe('Albayan Studio v2 Home and My ads (pilot)', () => {
     await page.getByTestId('studio-back').click();
     await expectCustomerTab(page, 'home');
 
-    // A goal opens the request builder.
+    // A goal starts a new request in the builder, already on that goal.
     await page.getByTestId('studio-goal-messages').click();
     await expect.poll(() => tabParam(page)).toBe('builder');
+    await expect(page.getByTestId('studio-builder')).toHaveAttribute('data-kind', 'full');
+    await expect(page.getByTestId('studio-builder-goal-messages')).toHaveAttribute('aria-pressed', 'true');
+    await page.getByTestId('studio-close').click();
+    await expectCustomerTab(page, 'home');
+    // "Not sent yet" continues that very draft in the builder.
+    await page.getByTestId(`studio-need-draft-${seed.ids.draft}`).getByRole('button').click();
+    await expect.poll(() => tabParam(page)).toBe('builder');
+    await expect.poll(() => page.evaluate(() => String((_studioBuilder.session && _studioBuilder.session.id) || ''))).toBe(seed.ids.draft);
     await page.getByTestId('studio-close').click();
     await expectCustomerTab(page, 'home');
 
@@ -310,7 +318,9 @@ test.describe('Albayan Studio v2 Home and My ads (pilot)', () => {
     await page.goto(`/studio?tab=campaigns&id=${seed.ids.approved}`);
     await expect(page.getByTestId('studio-ad-detail')).toBeVisible({ timeout: BOOT_TIMEOUT });
     await expect(page.getByTestId('studio-ad-detail')).toHaveAttribute('data-stage', '4');
-    expect(await actionIds(page)).toEqual(['stop', 'ask_stop', 'ask']);
+    // Right after a page load the plain status (Approved = stage 4, no actions) shows until the
+    // server's stage arrives with its actions a moment later: wait for those.
+    await expect.poll(() => actionIds(page)).toEqual(['stop', 'ask_stop', 'ask']);
     expect(await page.getByTestId('studio-ad-detail').innerText(), 'no "Meta used" before a Meta link').not.toMatch(/Meta used/);
 
     await page.getByTestId('studio-ad-action-ask_stop').click();
