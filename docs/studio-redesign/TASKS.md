@@ -68,6 +68,13 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P2-05a-e | Done (phone MAN check open) | stage 11 | v2 wizard: quick boost (post picker / no post / link), full request (goal, page, content, audience, budget & days), saved as you go, Fix deep links |
 | P2-06 | Done | stage 11 | v2 Wallet: four numbers, per-ad chains, LYD plan card, Add money flow with confirm |
 | P2-07 | Done | stage 11 | v2 Account + `GET/PUT /api/studio/profile` (WhatsApp only with consent, strict Libyan numbers, owner-only, not in audit) |
+| P3-05 | Done (server) | stage 12 | Activity feed + inbox (`GET /api/studio/activity`, seen marker); events at review, link/live, stop, ticket answered |
+| P3-07 + P3-13 | Done (server) | stage 12 | Help tickets (`/api/studio/tickets`, `/api/studio/staff/tickets`): numbers unique under 50 parallel opens (PostgreSQL), caps, 7-day reopen, reviewer 404 on payment/account tickets. `services.help` is off until the owner switches it on |
+| P3-10 + P3-11 | Done (server) | stage 12 | Stop request opens an urgent ticket on the same transaction, auto-resolves when the ad stops, overdue alert; staff contact link only with consent, audited |
+| P3-12 | Done | stage 12 | Anonymisation also scrubs ticket subjects and message texts |
+| P3-16 | Done | stage 12 | `studio_hours.py`: due times from the week hours, holidays and Ramadan (Africa/Tripoli); used for ticket and stop-request due times |
+| P3-17 | Done (server) | stage 12 | Staff pulse (`GET /api/studio/staff/pulse`): counts only; admins also see payments waiting |
+| P3-20 | Done | stage 12 | Services and the Team desk stay independent of the customer layout; `STAFF_DESK_IN_USE` refuses switching the desk off while tickets or stop requests are open |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
