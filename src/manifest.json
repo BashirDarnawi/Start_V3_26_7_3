@@ -36,7 +36,8 @@
       "systems/ads_studio/15g-studio-core.js",
       "systems/ads_studio/15h-studio-shell.js",
       "systems/ads_studio/15j-studio-home.js",
-      "systems/ads_studio/15k-studio-ads.js"
+      "systems/ads_studio/15k-studio-ads.js",
+      "systems/ads_studio/15l-studio-builder.js"
     ],
     "clothes.js": [
       "15b-clothes.js"

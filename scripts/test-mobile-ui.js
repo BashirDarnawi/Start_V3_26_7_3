@@ -3674,6 +3674,340 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P2-05a-e (Studio v2 request builder, 15l): the real files (15c, 15g, 15h, 15l) run in a sandbox with
+  // a fake history, fake timers and scripted server calls, next to static checks against the server's
+  // field lists, goals and review reasons, the built bundles and the CSS.
+  const vm = require('vm');
+  const builderSrc = read('src/systems/ads_studio/15l-studio-builder.js');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const mainPy = read('server/main.py');
+  const fieldsPy = read('server/systems/ads_studio/ad_campaign_fields.py');
+  const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
+  const lazyStudio = bundleManifestJson.lazy['studio.js'];
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+
+  check('Studio v2 builder (15l) ships after the shell in both studio.js copies, under 1 MiB, no native dialogs or token words',
+    lazyStudio.indexOf('systems/ads_studio/15l-studio-builder.js') > lazyStudio.indexOf('systems/ads_studio/15h-studio-shell.js')
+      && !bundleManifestJson.files.some(file => /15l-studio/.test(file))
+      && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(builderSrc) && bundle.indexOf(shellSrc) < bundle.indexOf(builderSrc))
+      && fs.statSync(path.join(ROOT, 'studio.js')).size < 1024 * 1024
+      && !/\b(?:confirm|prompt|alert)\(/.test(builderSrc) && !/access_token|app_?secret|page_?token|Bearer /i.test(builderSrc)
+      && !/localStorage/.test(builderSrc) && builderSrc.includes('window.sessionStorage.getItem('));
+
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} }
+  };
+  const hist = {
+    entries: [], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) {
+      const next = this.index + delta;
+      if (!delta || next < 0 || next >= this.entries.length) return;
+      this.index = next; this.show();
+      for (const fn of [...win.listeners.popstate]) fn({ state: this.state });
+    },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let seq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'b-user' }, currentView: 'ads-studio', adCampaignRequests: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      sanitizeInput: (value, options = {}) => String(value ?? '').replace(/[<>]/g, '').trim().slice(0, options.maxLength || 100000),
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      generateSecureId: prefix => `${prefix}_${++seq}_abcdef123456`
+    },
+    window: win, history: hist, URLSearchParams, URL, Intl,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => false,
+    currentUserHasPermission: (collection, action) => action !== 'review',
+    hasSubscription: id => id === 'ad_maker',
+    updateUrlParams: () => {},
+    requestViewScrollReset: () => {},
+    IS_STUDIO_SHELL: true
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var __patchReply = null;
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, getElementById: () => null };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function __runTimers() { const due = Array.from(__timers.entries()); __timers.clear(); due.forEach(([, t]) => t.fn()); }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function showNotification(title, text) { __notes.push(String(title) + ': ' + String(text)); }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function __entity(data) { return { id: data.id, data: JSON.parse(JSON.stringify(data)), lastModified: data._lastModified }; }
+      function apiCreateEntity(collection, record) {
+        __calls.push({ path: 'create:' + collection, method: 'POST', body: JSON.parse(JSON.stringify(record)) });
+        return Promise.resolve(__entity({ ...record, status: 'Draft', createdBy: 'b-user', _lastModified: 1000 }));
+      }
+      function apiPatchEntity(collection, id, updates, expected) {
+        __calls.push({ path: 'patch:' + id, method: 'PATCH', body: JSON.parse(JSON.stringify(updates)), expected });
+        if (__patchReply) { const reply = __patchReply; __patchReply = null; return reply.error ? Promise.reject(Object.assign(new Error('refused'), reply.error)) : Promise.resolve(reply.value); }
+        const row = state.adCampaignRequests.find(item => item.id === id) || {};
+        return Promise.resolve(__entity({ ...row, ...updates, _lastModified: Number(expected) + 1 }));
+      }
+      function apiSubmitAdCampaignRequest(id, expected, operationId) {
+        __calls.push({ path: 'submit:' + id, method: 'POST', expected, operationId });
+        return Promise.resolve(__entity({ ...(state.adCampaignRequests.find(item => item.id === id) || {}), status: 'Submitted', totalBudgetMinorUSD: 5000, _lastModified: Number(expected) + 1 }));
+      }
+      function ensureEntityMediaLoaded(collection, id) { return Promise.resolve(state.adCampaignRequests.find(item => item.id === id) || null); }
+      function isEntityMediaHydrated() { return true; }
+      function getEntityPhotoCountHint() { return 0; }
+      function getVisibleRecords(list) { return list.filter(item => item && !item._deleted); }
+      function saveState() {}
+      function markCollectionDirty() {}
+      function clearCollectionCorruption() {}
+      function compressImageToDataUrl() { return Promise.resolve('data:image/png;base64,AAAA'); }
+      function isSafeReceiptPhotoSource(value) { return /^data:image\\//.test(String(value)); }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(builderSrc, box);
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const search = () => win.location.search;
+  const openAt = url => { hist.reset(url); run('_studioV2.docRendered = false; render();'); };
+  run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', isStaff: false, intake: { open: true },
+    adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }]; studioLoadMe();`);
+  run(`__replies['/api/studio/ad-options'] = [{ value: { goals: [{ key: 'messages', objective: 'messages', labelEn: 'Messages', labelAr: 'رسائل' }, { key: 'sales', objective: 'sales', labelEn: 'Sales', labelAr: 'مبيعات' }],
+    locations: [{ key: 'libya', labelEn: 'All of Libya', labelAr: 'كل ليبيا' }, { key: 'tripoli', labelEn: 'Tripoli', labelAr: 'طرابلس' }, { key: 'benghazi', labelEn: 'Benghazi', labelAr: 'بنغازي' }] } }];
+    __replies['/api/studio/pages'] = [{ value: { pages: [{ id: 'spg_1', name: '<img src=x onerror=alert(1)>Shop', hasFacebook: true, hasInstagram: true, healthy: false }] } }];
+    __replies['/api/studio/wallet/summary'] = [{ value: { usd: { availableMinor: 1000, reservedMinor: 0 }, pendingPayments: [{ reference: 'PAY-LYD', amountMinor: 900, currency: 'LYD' }, { reference: 'PAY-AB12CD34', amountMinor: 2500, currency: 'USD' }] } }];`);
+
+  // Drawing: every step of both kinds, from the shell's own route; ids on every input; safe handlers.
+  const handlerRe = /^(?:onclick|oninput|onchange)="(?:studioBuilder[A-Za-z]+\((?:\d+|'[a-z_]+'|this|\d+, this|'[A-Za-z]+', this)?\)|studioV2(?:Back|CloseBuilder)\(\)|studioV2Open\('[a-z]+'\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/;
+  const pages = [];
+  // An address never converts an open draft (only studioBuilderSwitchKind does): each kind starts its own.
+  for (const [section, count] of [['full', 6], ['boost', 3]]) {
+    run(`studioBuilderStart('${section}');`);
+    for (let step = 1; step <= count; step++) {
+      openAt(`/studio?tab=builder&section=${section}&step=${step}`);
+      pages.push({ section, step, html: html() });
+    }
+  }
+  const stepCases = pages.map(({ section, step, html: page }) => {
+    const names = section === 'full' ? ['Goal', 'Page', 'Content', 'Audience', 'Budget & days', 'Review'] : ['Post', 'Budget & days', 'Review'];
+    const last = step === names.length;
+    const controls = page.match(/<(?:input|textarea|select)\b[^>]*>/g) || [];
+    const handlers = page.match(/\bon(?:click|input|change)="[^"]*"/g) || [];
+    return page.includes('data-testid="studio-builder"') && page.includes(`data-kind="${section}"`) && page.includes(`data-step="${step}"`)
+      && page.includes(`Step ${step} of ${names.length}: ${names[step - 1].replace('&', '&amp;')}`)
+      && page.includes(last ? 'data-testid="studio-builder-send"' : 'data-testid="studio-builder-next"')
+      && page.includes('data-testid="studio-builder-save"') && !page.includes('Coming soon in the new studio')
+      && controls.every(tag => /\bid="[a-z][a-z0-9-]*"/.test(tag))
+      && handlers.length > 0 && handlers.every(attr => handlerRe.test(attr))
+      && !/<img src=x/.test(page);
+  });
+  const promote = pages.find(item => item.section === 'boost' && item.step === 1).html;
+  const content = pages.find(item => item.section === 'full' && item.step === 3).html;
+  const pageStep = pages.find(item => item.section === 'full' && item.step === 2).html;
+  run("studioBuilderStart('full'); _studioBuilder.pages.state = ''; __replies['/api/studio/pages'] = [{ value: { pages: [{ id: 'spg_1', name: '<img src=x onerror=alert(1)>Shop', hasFacebook: true, hasInstagram: true, healthy: false }] } }];");
+  openAt('/studio?tab=builder&section=full&step=2');
+  const pagesDrawn = html();
+  stepCases.push(
+    promote.includes('data-testid="studio-builder-kind-post"') && promote.includes('data-testid="studio-builder-to-full"'),
+    content.includes('id="ads-studio-image-input"') && content.includes('data-photo-paste-target="ads-studio"') && content.includes('onchange="studioBuilderPhotosChosen(this)"'),
+    pagesDrawn.includes('&lt;img src=x onerror=alert(1)&gt;Shop') && !pagesDrawn.includes('<img src=x') && pagesDrawn.includes('needs attention'),
+    pageStep.includes('data-testid="studio-builder-platform-facebook"')
+  );
+  run("studioBuilderStart('boost');");
+  box.state.language = 'ar';
+  openAt('/studio?tab=builder&section=boost&step=2');
+  const arabic = html();
+  box.state.language = 'en';
+  stepCases.push(/dir="rtl"/.test(arabic) && arabic.includes('الخطوة 2 من 3') && arabic.includes('الإجمالي بالدولار الأمريكي') && !/\bLYD\b|د\.ل/.test(arabic));
+  check('Studio v2 builder draws every step of the quick boost and the full request (ids on inputs, safe handlers, escaped server words, Arabic RTL)',
+    !loadError && stepCases.every(Boolean), loadError || `cases ${failed(stepCases)}`);
+
+  // Typed input: Arabic-Indic digits, 09x phones, days; what is sent is only what the server takes.
+  const allowed = new Set(((mainPy.match(/AD_CAMPAIGN_ALLOWED_FIELDS = frozenset\(\s*\{([\s\S]*?)\}\s*\)/) || [])[1] || '').match(/"([A-Za-z]+)"/g).map(item => item.slice(1, -1)));
+  run("studioBuilderStart('full');");
+  run("studioBuilderInput('budget', { value: '٥٠' }); studioBuilderInput('days', { value: '١٤' }); studioBuilderInput('destination', { value: '٠٩١ ٢٣٤ ٥٦٧٨' });");
+  const typed = json('{ budget: _adsStudioDraft.budgetMinorUSD, days: _adsStudioDraft.durationDays, total: studioBuilderTotalText(_studioBuilder.session), payload: studioBuilderPayload(_adsStudioDraft) }') || {};
+  run("studioBuilderInput('destination', { value: 'www.no-scheme' }); studioBuilderInput('days', { value: '0' }); studioBuilderInput('budget', { value: '1.234' });");
+  const halfTyped = json('studioBuilderPayload(_adsStudioDraft)') || {};
+  const goalsPy = Object.fromEntries([...fieldsPy.matchAll(/"([a-z_]+)": \("([a-z_]+)", "[a-z_]+"\)/g)].map(m => [m[1], m[2]]));
+  const clientGoals = json('STUDIO_BUILDER_GOALS.map(goal => [goal[0], goal[1]])') || [];
+  const typedCases = [
+    typed.budget === 5000 && typed.days === 14 && String(typed.total).includes('$50.00') && String(typed.total).includes('14 days'),
+    typed.payload && typed.payload.destination === '+218912345678' && typed.payload.durationDays === 14 && typed.payload.budgetMinorUSD === 5000,
+    typed.payload && Object.keys(typed.payload).every(field => allowed.has(field)) && typed.payload.goalDetail === 'messages' && typed.payload.objective === 'messages',
+    !('destination' in halfTyped) && !('durationDays' in halfTyped) && !('budgetMinorUSD' in halfTyped) && halfTyped.name,
+    clientGoals.length === Object.keys(goalsPy).length && clientGoals.every(([key, objective]) => goalsPy[key] === objective),
+    run("studioBuilderDestination('https://wa.me/218912345678')") === 'https://wa.me/218912345678' && run("studioBuilderDestination('+44 20 7946 0958')") === '+442079460958'
+  ];
+  check('Studio v2 builder: Arabic digits in money, days and phones (09x -> +2189x); half-typed values are never sent; goals equal the server\'s',
+    !loadError && typedCases.every(Boolean), loadError || `cases ${failed(typedCases)}`);
+
+  // Budget rules = server rules (limits from /me), and the wallet line from the wallet summary.
+  run("_adsStudioDraft.budgetType = 'daily'; studioBuilderInput('budget', { value: '0.9' }); studioBuilderInput('days', { value: '7' });");
+  const floor = String(run('studioBuilderBudgetProblem(_studioBuilder.session)'));
+  run("studioBuilderInput('budget', { value: '0.5' }); studioBuilderInput('days', { value: '3' });");
+  const minTotal = String(run('studioBuilderBudgetProblem(_studioBuilder.session)'));
+  run("studioBuilderInput('days', { value: '91' });");
+  const maxDays = json('studioBuilderStepProblems(_studioBuilder.session, "budget")') || {};
+  run("studioBuilderInput('days', { value: '5' }); studioBuilderInput('budget', { value: '10' });");
+  run('studioBuilderLoadWallet(true);');
+  const walletHtml = String(run('studioBuilderWalletHtml(_studioBuilder.session)'));
+  const budgetCases = [
+    floor.includes('$1.00 a day'), minTotal.includes('at least $5.00') && minTotal.includes('$0.50 × 3 days = $1.50'), String(maxDays.days || '').includes('90'),
+    walletHtml.includes('You have <bdi dir="ltr">$10.00</bdi> available') && walletHtml.includes('Short by <bdi dir="ltr">$40.00</bdi>')
+      && walletHtml.includes('PAY-AB12CD34') && walletHtml.includes('$25.00') && !walletHtml.includes('PAY-LYD')
+      && walletHtml.includes('onclick="studioBuilderAddMoney()"'),
+    run('studioBuilderWalletShort(_studioBuilder.session)') === true && run('studioBuilderSendBlocked(_studioBuilder.session)') === true
+  ];
+  check('Studio v2 builder: total limits, the per-day floor and max days from /me; the wallet line and a pending USD payment from the wallet summary',
+    !loadError && budgetCases.every(Boolean), loadError || `cases ${failed(budgetCases)}`);
+
+  // Saving as you go: one create with a fixed id, then PATCH with only the changed fields and the
+  // version; a conflict never overwrites.
+  run('__timers.clear();');
+  // Starting another request first sends what the open one still had waiting (its own create).
+  run("studioBuilderStart('boost');");
+  const flushedOld = json('__calls.filter(call => call.path === "create:adCampaignRequests").map(call => call.body.boostType)') || [];
+  run("__calls.length = 0; studioBuilderInput('postLink', { value: 'https://www.facebook.com/shop/posts/1' }); studioBuilderInput('pageName', { value: 'Shop' });");
+  const beforeTimer = json('__calls.filter(call => call.method !== "GET").length');
+  run('__runTimers();');
+  const create = json('__calls.find(call => call.path === "create:adCampaignRequests")') || {};
+  run('state.adCampaignRequests = [JSON.parse(JSON.stringify(_studioBuilder.session.draft))]; state.adCampaignRequests[0]._lastModified = 1000;');
+  run("studioBuilderInput('notes', { value: 'Morning only' }); __runTimers();");
+  const patch = json('__calls.find(call => call.path.startsWith("patch:"))') || {};
+  run("__replies['/api/collections/adCampaignRequests/' + encodeURIComponent(_studioBuilder.session.id)] = [{ value: { id: _studioBuilder.session.id, lastModified: 3000, data: { id: _studioBuilder.session.id, status: 'Draft', createdBy: 'b-user', _lastModified: 3000 } } }];");
+  run("__patchReply = { error: { status: 409, message: 'Conflict: record has changed' } }; studioBuilderInput('notes', { value: 'Evenings' }); __runTimers();");
+  const conflict = json('{ status: _studioBuilder.session.status, version: _studioBuilder.session.conflict && _studioBuilder.session.conflict.version }') || {};
+  run("studioBuilderInput('notes', { value: 'Evenings too' }); __runTimers();");
+  const patchesAfterConflict = json('__calls.filter(call => call.path.startsWith("patch:")).length');
+  run('studioBuilderKeepMine(); __runTimers();');
+  const kept = json('__calls.filter(call => call.path.startsWith("patch:")).slice(-1)[0]') || {};
+  const saveCases = [
+    beforeTimer === 0 && JSON.stringify(flushedOld) === '[""]',
+    create.body && /^campaign_/.test(create.body.id) && create.body.boostType === 'boost_post' && create.body.sourcePostRef === 'https://www.facebook.com/shop/posts/1'
+      && Object.keys(create.body).every(field => field === 'id' || allowed.has(field)),
+    patch.expected === 1000 && JSON.stringify(Object.keys(patch.body || {})) === '["notes"]' && patch.body.notes === 'Morning only',
+    conflict.status === 'conflict' && conflict.version === 3000 && patchesAfterConflict === 2,
+    kept.expected === 3000 && kept.body && kept.body.notes === 'Evenings too' && kept.body.sourcePostRef === 'https://www.facebook.com/shop/posts/1'
+  ];
+  check('Studio v2 builder saves as you go: one create (fixed id), then PATCH of the changed fields with expectedLastModified; a conflict never overwrites',
+    !loadError && saveCases.every(Boolean), loadError || `cases ${failed(saveCases)}`);
+
+  // Sending: single flight, an operationId per (action, version), the reserved total from the server.
+  run("_studioBuilder.session.status = 'saved'; _studioBuilder.session.conflict = null; _studioBuilder.session.rights = true; _studioBuilder.wallet.value = { availableMinor: 900000, reservedMinor: 0, pending: [] };");
+  run("studioBuilderInput('budget', { value: '50' }); __runTimers();");
+  run("__replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', intake: { open: true }, adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }];");
+  run('var __s1 = studioBuilderSend(null); var __s2 = studioBuilderSend(null); var __same = __s1 === __s2;');
+  run('__runTimers();');
+  const sent = json('{ same: __same, submits: __calls.filter(call => call.path.startsWith("submit:")), sent: _studioBuilder.sent, session: !!_studioBuilder.session }') || {};
+  openAt('/studio?tab=builder&section=boost&step=3');
+  const sentHtml = html();
+  const sendCases = [
+    sent.same === true && Array.isArray(sent.submits) && sent.submits.length === 1 && /^campaign-submit_/.test(sent.submits[0].operationId),
+    sent.sent && sent.sent.totalMinor === 5000 && sent.session === false,
+    sentHtml.includes('data-testid="studio-builder-sent"') && sentHtml.includes('Sent. <bdi dir="ltr">$50.00</bdi> is reserved, not charged.')
+  ];
+  check('Studio v2 builder sends once (single flight, operationId per action and version) and shows the reserved total the server stamped',
+    !loadError && sendCases.every(Boolean), loadError || `cases ${failed(sendCases)}`);
+
+  // P2-05e: every review reason (the server's P1-12 list) opens a step and a field, in both kinds.
+  const reasonsPy = [...(actionsPy.match(/REVIEW_REASON_LABELS[^=]*= \{([\s\S]*?)\n\}/) || [])[1].matchAll(/"([a-z_]+)": \{/g)].map(m => m[1]);
+  const places = json(`${JSON.stringify(reasonsPy)}.map(code => {
+    const field = STUDIO_BUILDER_FIX[code];
+    return [code, field, studioBuilderFieldStep('full', field, {}).step, studioBuilderFieldStep('boost', field, { boostType: 'boost_page' }).step,
+      studioBuilderFieldStep('boost', field, { boostType: 'boost_post' }).field, studioBuilderFixLabel(code)];
+  })`) || [];
+  box.state.language = 'ar';
+  const arLabel = run("studioBuilderFixLabel('creative_quality')");
+  box.state.language = 'en';
+  const byCode = Object.fromEntries(places.map(item => [item[0], item.slice(1)]));
+  const fixCases = [
+    reasonsPy.length === 7 && places.every(item => item[1] && item[2] >= 1 && item[3] >= 1),
+    JSON.stringify(byCode.creative_quality) === JSON.stringify(['photos', 3, 1, 'post', 'Fix: photo']) && arLabel === 'أصلح: الصورة',
+    byCode.budget_dates[1] === 5 && byCode.budget_dates[2] === 2 && byCode.targeting[1] === 4 && byCode.targeting[2] === 2
+      && byCode.page_access[1] === 2 && byCode.other[1] === 6 && byCode.other[2] === 3 && byCode.text_policy[1] === 3
+  ];
+  // The Fix entry: a sent-back request opens at its step with the field outlined and the team's words.
+  run(`state.adCampaignRequests = [{ id: 'req_fix_1', status: 'Changes Requested', createdBy: 'b-user', _lastModified: 7, name: 'Fix me', goalDetail: 'messages', objective: 'messages',
+    platforms: ['facebook'], pageName: 'Shop', primaryText: 'Hi', destination: '+218912345678', creativeImages: ['data:image/png;base64,AAAA'], locationKeys: ['libya'],
+    budgetMinorUSD: 2000, budgetType: 'lifetime', durationDays: 7, startDate: '2020-01-01', endDate: '2020-01-07', reviewReasonCode: 'creative_quality', reviewNote: '<b>Too dark</b>' }];
+    __replies['/api/collections/adCampaignRequests/req_fix_1?include_media=false'] = [{ error: { status: 0, name: 'TypeError', message: 'Failed to fetch' } }];`);
+  run("studioBuilderFix('req_fix_1', 'creative_quality');");
+  const fixHtml = html();
+  fixCases.push(
+    search() === '?tab=builder&section=full&step=3' && /data-field="photos" data-fix="1"/.test(fixHtml.replace(/class="[^"]*" /g, ''))
+      && fixHtml.includes('data-testid="studio-builder-fix-banner"') && fixHtml.includes('&lt;b&gt;Too dark&lt;/b&gt;') && fixHtml.includes('Photo or video quality'),
+    json('_adsStudioDraft.startDate') === run('_adsStudioDateOffset(0)')
+  );
+  check('Studio v2 builder "Fix: <field>": every review reason maps to a step and a field in both kinds; the sent-back request opens there, outlined',
+    !loadError && fixCases.every(Boolean), loadError || `cases ${failed(fixCases)}`);
+
+  // Intake paused (P1-22): the draft still saves, Send is off and says why.
+  run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', intake: { open: false },
+    adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }]; studioLoadMe();`);
+  run("studioBuilderStart('boost');");
+  openAt('/studio?tab=builder&section=boost&step=3');
+  const pausedHtml = html();
+  const paused = pausedHtml.includes('data-testid="studio-builder-paused"') && /data-testid="studio-builder-send"[^>]*\sdisabled>/.test(pausedHtml)
+    && pausedHtml.includes('Sending is paused for now');
+  run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', intake: { open: true },
+    adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }]; studioLoadMe();`);
+
+  // The photo path stays the classic one, wrapped only to redraw and save; the address keeps its kind.
+  run("studioBuilderStart('boost'); studioBuilderSetBoostKind('boost_page'); __calls.length = 0;");
+  run("uploadAdsStudioCreativeFiles([{ type: 'image/png', size: 10 }]);");
+  run('__runTimers();');
+  const photo = json('{ photos: _adsStudioDraft.creativeImages.length, created: __calls.some(call => call.path === "create:adCampaignRequests" && call.body.creativeImages.length === 1) }') || {};
+  hist.reset('/studio?tab=builder&step=2');
+  run('render(); __runTimers();');
+  const repaired = { search: search(), kind: /data-kind="boost"/.test(html()) };
+  const workspaceCss = read('assets/ads-workspace.css');
+  const builderCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio v2 request builder'));
+  const hookCases = [
+    paused,
+    run('uploadAdsStudioCreativeFiles.name') === 'uploadAdsStudioCreativeFilesForBuilder' && run('renderStudioV2Builder.name') === 'renderStudioV2BuilderScreen',
+    photo.photos === 1 && photo.created === true,
+    repaired.kind && repaired.search === '?tab=builder&section=boost&step=1',
+    builderCss.length > 1000 && read('www/assets/ads-workspace.css') === workspaceCss
+      && ['html.dark .studio-b {', 'body.keyboard-open .studio-b-save { display: none; }', '.studio-b-chip { display: inline-flex;', 'min-height: 44px', '.studio-b .is-fix', 'prefers-reduced-motion']
+        .every(rule => builderCss.includes(rule))
+      && !/background(-color)?:\s*#|[^-]color:\s*#(?!be123c|fda4af)/.test(builderCss)
+  ];
+  check('Studio v2 builder: intake paused turns Send off; the classic photo path (paste, file input, limits) stays; an address that lost its kind is put right; styles ship',
+    !loadError && hookCases.every(Boolean), loadError || `cases ${failed(hookCases)}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');
