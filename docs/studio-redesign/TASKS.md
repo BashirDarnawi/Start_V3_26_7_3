@@ -35,6 +35,15 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P1-08a + P1-08b | Done | stage 5 | Classic screen: LYD rows in LYD, budget summary counts Submitted/Approved only, dead Connections button replaced by text, form limits = server limits from `/me`, Arabic digits |
 | P1-17 | Done | stage 2–3 | The row-limit cleanup reads the same keep list (`_AUDIT_KEEP_ACTIONS`) |
 | P1-20 | Done | stage 5 | `adCampaignResults` type, pure `derive_display_stage()` (13 stages), shared fixture `stage_cases.json` (54 cases), `GET /api/studio/campaigns/summary` |
+| P1-06 (changed, D4+D5) | Done | stage 6 | Daily OR lifetime; `totalBudgetMinorUSD` = lifetime amount or daily × days; hold at submit and charge at approval = the total; refunds use what was really charged |
+| P1-08c | Done | stage 6 | Arabic entries for every new refusal (T1–T14 + Meta busy); a check keeps client and server texts in step |
+| P1-11 | Done | stage 6 | `durationDays` (1..maxDays); a late approval keeps the number of days |
+| P1-12 | Done | stage 6 | Review reasons (budget_dates, creative_quality, text_policy, targeting, page_access, payment, other) required for send-back/reject, shown to the customer |
+| P1-13 (changed, D19) | Done | stage 6 | Post picker from the customer's linked page (Facebook posts + Instagram media), or a new ad without a post, or a pasted link as fallback |
+| P1-14 | Done | stage 6 | Goal detail ↔ objective rules, Libya location chips (34 keys), result type map |
+| P1-15 | Done | stage 6 | Total limits, per-day floor and max days from the `limits` setting, for new rows only |
+| P1-18 | Part done | stage 6 | (a) legacy rows keep their old rules (`legacyRules`, `schemaVersion` 2 for new sends). (b) not needed (daily kept, D4+D5). (c) staff send back waiting daily rows (D33) — manual, owner/staff |
+| P1-22 | Done | stage 6 | Intake pause switch + Tripoli-day cap (default effectively off until the owner decides D29; plan start value 5) |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
