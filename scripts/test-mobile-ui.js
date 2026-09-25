@@ -2809,8 +2809,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const chainOf = entry => (entry && entry.state && entry.state.studioV2 && entry.state.studioV2.chain) || null;
   const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
 
+  // Core, then shell, then only v2 screen files (15j and later plug into the shell).
+  const v2Lazy = bundleManifestJson.lazy['studio.js'].slice(bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15g-studio-core.js'));
   check('Studio v2 files ship last in the lazy studio bundle (core before shell) and renderAdsStudioView delegates first',
-    JSON.stringify(bundleManifestJson.lazy['studio.js'].slice(-2)) === JSON.stringify(['systems/ads_studio/15g-studio-core.js', 'systems/ads_studio/15h-studio-shell.js'])
+    JSON.stringify(v2Lazy.slice(0, 2)) === JSON.stringify(['systems/ads_studio/15g-studio-core.js', 'systems/ads_studio/15h-studio-shell.js'])
+      && v2Lazy.every(file => /^systems\/ads_studio\/15[g-z]-studio-[a-z-]+\.js$/.test(file))
       && bundleManifestJson.lazy['studio.js'][0] === 'systems/ads_studio/15c-ads-studio.js' && !bundleManifestJson.files.some(file => /15[gh]-studio/.test(file))
       && adsStudio.includes("function renderAdsStudioView() {\n  // Studio v2 (P2-02a, 15h-studio-shell.js): only when GET /api/studio/me says so; '' = the classic screens below.\n  const studioV2Html = typeof renderStudioV2View === 'function' ? renderStudioV2View() : '';\n  if (studioV2Html) return studioV2Html;\n  const isAr = adsStudioIsAr();"),
     loadError);
@@ -3356,6 +3359,318 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
         '.studio-v2-nav { position: fixed;', 'html.dark .studio-v2-row.is-danger', '.studio-v2-nav-item[aria-current="page"]', 'overflow-wrap: anywhere'].every(rule => v2Css.includes(rule))
       && !/background(-color)?:\s*#|[^-]color:\s*#(?!be123c|fda4af)/.test(v2Css),
     `studio.js ${studioBytes} bytes`);
+}
+
+{
+  // P2-03 + P2-04 (Studio v2 Home 15j + My ads 15k): the real files run after 15c, 15g and 15h in a
+  // sandbox (fake history and timers, a scripted apiJson, the platform helpers they call stubbed), with
+  // /me, the campaigns summary and the wallet summary answered like the server. Promises settle before
+  // each run() returns (microtaskMode 'afterEvaluate'); __runTimers() lets a finished read redraw.
+  const vm = require('vm');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
+  const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
+  const fixture = JSON.parse(read('server/systems/ads_studio/stage_cases.json'));
+  const who = { plan: true };
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+  };
+  const hist = {
+    entries: [], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) {
+      const next = this.index + delta;
+      if (!delta || next < 0 || next >= this.entries.length) return;
+      this.index = next; this.show();
+      for (const fn of [...win.listeners.popstate]) fn({ state: this.state });
+    },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let secureSeq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'u1' }, currentView: 'ads-studio', adCampaignRequests: [], walletTransactions: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+      generateSecureId: prefix => `${prefix}-${++secureSeq}`,
+      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => false,
+    currentUserHasPermission: (collection, action) => action !== 'review' && action !== 'view',
+    hasSubscription: id => who.plan && id === 'ad_maker',
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+    updateUrlParams: () => {}, requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 1000 }
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var __deleted = [];
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function __runTimers() { for (let round = 0; round < 5 && __timers.size; round++) { const due = Array.from(__timers.entries()); __timers.clear(); due.forEach(([, t]) => t.fn()); } }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function showNotification(title, message, type) { __notes.push({ title, message, type }); }
+      function getServerSessionIdentity() { return 'session'; }
+      function serverSessionIdentityChanged() { return false; }
+      function makeSessionChangedError() { return new Error('session changed'); }
+      function requestValidatedServerEntity(collection, context, loader) { return loader(); }
+      function withRetry(fn) { return fn(); }
+      function clearCollectionCorruption() {}
+      function markCollectionDirty() {}
+      function saveState() {}
+      function apiStopAdCampaignRequest(id, expectedLastModified, operationId, reason) {
+        return apiJson('/api/ad-studio/campaigns/' + encodeURIComponent(id) + '/stop', { method: 'POST', body: { expectedLastModified, operationId, reason: reason || null } });
+      }
+      function deleteRecord(list, id) { __deleted.push(id); const row = list.find(item => item.id === id); if (row) row._deleted = true; return Promise.resolve(true); }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);
+    vm.runInContext(adsSrc, box);
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
+  const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
+  const minutesAgo = n => new Date(Date.now() - n * 60000).toISOString();
+  const stageRow = (n, extra = {}) => {
+    const entry = fixture.tables.stages[String(n)];
+    return {
+      stage: n, stageKey: entry.key, labels: { en: entry.en, ar: entry.ar }, money: fixture.tables.money[entry.money],
+      nextActorLabels: fixture.tables.nextActors[entry.nextActor], tracker: { step: entry.tracker, side: entry.side },
+      actions: entry.actions.slice(), linked: false, metaUsedMinor: null, ...extra
+    };
+  };
+  const requests = () => [
+    { id: 'r_draft', createdBy: 'u1', status: 'Draft', name: 'Spring <b>sale</b>', budgetMinorUSD: 2000, budgetType: 'lifetime', durationDays: 5, _created: 1, _lastModified: 11 },
+    { id: 'r_wait', createdBy: 'u1', status: 'Submitted', name: 'Waiting ad', budgetMinorUSD: 3000, totalBudgetMinorUSD: 3000, budgetType: 'lifetime', durationDays: 7, submittedAt: '2026-09-20T10:00:00Z', _created: 2, _lastModified: 12 },
+    { id: 'r_fix', createdBy: 'u1', status: 'Changes Requested', name: 'Fix me', reviewReasonCode: 'creative_quality', reviewNote: 'Use a brighter <photo>', submittedAt: '2026-09-19T10:00:00Z', _created: 3, _lastModified: 13 },
+    { id: 'r_live', createdBy: 'u1', status: 'Approved', name: 'Live ad', metaCampaignId: '120200001', paidMinorUSD: 5000, submittedAt: '2026-09-18T10:00:00Z', _created: 4, _lastModified: 14 },
+    { id: 'r_new', createdBy: 'u1', status: 'Approved', name: 'New ad', paidMinorUSD: 5000, startDate: '2099-01-10', endDate: '2099-01-16', durationDays: 7, studioRef: 'ALB-S-AB12CD34', submittedAt: '2026-09-21T10:00:00Z', _created: 5, _lastModified: 15 },
+    { id: 'r_done', createdBy: 'u1', status: 'Stopped', closeReason: 'customer_stop', name: 'Done ad', submittedAt: '2026-09-10T10:00:00Z', _created: 6, _lastModified: 16 },
+    { id: 'r_other', createdBy: 'u2', status: 'Draft', name: 'Someone else', _created: 7, _lastModified: 17 }
+  ];
+  const summary = {
+    r_draft: stageRow(1), r_wait: stageRow(2), r_fix: stageRow(3),
+    r_live: stageRow(8, { linked: true, metaUsedMinor: 300, checkedAt: minutesAgo(5), checkedAgo: { en: 'checked 5 minutes ago', ar: 'فُحص قبل 5 دقائق' } }),
+    r_new: stageRow(4), r_done: stageRow(12)
+  };
+  const wallet = (usd = {}) => ({
+    usd: { addedMinor: 20000, adjustmentsMinor: 0, reservedMinor: 3000, inAdsMinor: 10000, metaUsedInAdsMinor: 300, metaCheckedAt: minutesAgo(5), beingReturnedMinor: 0, spentMinor: 2000, availableMinor: 5000, ...usd },
+    reserved: [{ campaignId: 'r_wait', name: 'Waiting ad', budgetMinor: 3000, dailyMinor: null, days: null }],
+    inAds: [{ campaignId: 'r_live', inAdsMinor: 5000, metaUsedMinor: 300 }, { campaignId: 'r_new', inAdsMinor: 5000, metaUsedMinor: null }],
+    chains: [
+      { campaignId: 'r_live', bucket: 'inAds', state: 'in_ads', paidMinor: 5000, returnedMinor: 0, netMinor: 5000, metaUsedMinor: 300, checkedAt: minutesAgo(5),
+        steps: [{ kind: 'payment', amountMinor: 5000, labels: { en: 'Ad budget paid: Live ad', ar: 'دفع ميزانية إعلان: Live ad' } }] },
+      { campaignId: 'r_done', bucket: 'spent', state: 'spent', paidMinor: 4000, returnedMinor: 2000, netMinor: 2000, metaUsedMinor: null, checkedAt: null,
+        steps: [{ kind: 'payment', amountMinor: 4000, labels: { en: 'Ad budget paid: Done ad', ar: 'دفع ميزانية إعلان: Done ad' } },
+          { kind: 'return', amountMinor: 2000, labels: { en: 'Unused budget returned from: Done ad', ar: 'استرجاع ما لم تصرفه ميتا من: Done ad' } }] }
+    ],
+    lyd: { balanceMinor: 0 },
+    pendingPayments: [{ reference: 'PAY-AB12CD34', amountMinor: 5000, currency: 'LYD', createdAt: '2026-09-24T10:00:00Z', dueAt: null }]
+  });
+  const me = (extra = {}) => ({ ui: 'v2', staffDesk: 'classic', isStaff: false, isAdmin: false, intake: { open: true }, services: {}, ...extra });
+  // A fresh session: /me, both summaries and the synced rows, then the screen at `url` drawn twice
+  // (the first draw asks, the answers redraw).
+  const open = (url, { meReply = me(), walletReply = wallet(), rows = requests(), summaryReply = summary, language = 'en', extra = () => {} } = {}) => {
+    box.state.language = language;
+    box.state.adCampaignRequests = rows;
+    run("studioResetMe(); studioDataReset(''); __timers.clear(); __calls.length = 0; __notes.length = 0; __replies = Object.create(null);");
+    reply('/api/studio/me', meReply);
+    reply('/api/studio/campaigns/summary', summaryReply);
+    reply('/api/studio/wallet/summary', walletReply);
+    extra();
+    run('studioLoadMe();');
+    hist.reset(url);
+    run('_studioV2.docRendered = false; render();');
+    run('__runTimers();');  // the answers arrived after the first draw: their redraw
+    run('__runTimers();');
+    return html();
+  };
+  const between = (page, testId) => {
+    const at = page.indexOf(`data-testid="${testId}"`);
+    if (at < 0) return '';
+    const end = page.indexOf('data-testid="studio-', at + 20);
+    return page.slice(at, end < 0 ? undefined : end);
+  };
+
+  // Home: the plug, the strip (exactly the wallet summary), Needs you, trackers, goals, no Getting started.
+  const home = open('/studio?tab=home');
+  const homeAr = open('/studio?tab=home', { language: 'ar' });
+  const returning = open('/studio?tab=home', { walletReply: wallet({ beingReturnedMinor: 700, metaUsedInAdsMinor: null, metaCheckedAt: null }) });
+  const paused = open('/studio?tab=home', { meReply: me({ intake: { open: false } }) });
+  const homeCases = [
+    home.includes('data-testid="studio-screen-home"') && home.includes('data-testid="studio-home"') && !home.includes('Coming soon in the new studio'),
+    [['available', 5000, '$50.00'], ['reserved', 3000, '$30.00'], ['in-ads', 10000, '$100.00'], ['spent', 2000, '$20.00']]
+      .every(([key, minor, text]) => home.includes(`data-testid="studio-money-${key}" data-minor="${minor}"`) && between(home, `studio-money-${key}`).includes(`<bdi dir="ltr">${text}</bdi>`)),
+    !home.includes('studio-money-returning') && returning.includes('data-testid="studio-money-returning" data-minor="700"') && between(returning, 'studio-money-returning').includes('$7.00'),
+    between(home, 'studio-money-meta-used').includes('Meta used $3.00 so far · checked 5 minutes ago') && !returning.includes('studio-money-meta-used') && !/Meta used/.test(returning),
+    between(home, 'studio-need-fix-r_fix').includes('Needs your changes: Photo or video quality') && between(home, 'studio-need-fix-r_fix').includes('Use a brighter &lt;photo&gt;'),
+    between(home, 'studio-need-draft-r_draft').includes('Not sent yet: Spring &lt;b&gt;sale&lt;/b&gt;') && between(home, 'studio-need-draft-r_draft').includes('Your available money covers it'),
+    between(home, 'studio-need-pay-PAY-AB12CD34').includes('PAY-AB12CD34 · 50.00 LYD') && between(homeAr, 'studio-need-pay-PAY-AB12CD34').includes('50.00 د.ل')
+      && !between(home, 'studio-need-pay-PAY-AB12CD34').includes('$') && !between(homeAr, 'studio-need-pay-PAY-AB12CD34').includes('$'),
+    !home.includes('<b>sale') && !home.includes('r_other') && !home.includes('Someone else'),
+    ['r_new', 'r_live', 'r_wait'].every(id => home.includes(`data-testid="studio-tracker-${id}"`)) && !home.includes('studio-tracker-r_draft') && !home.includes('studio-tracker-r_done')
+      && between(home, 'studio-tracker-r_wait').includes('Waiting for Albayan review') && between(home, 'studio-tracker-r_wait').includes('Next: Albayan team')
+      && between(home, 'studio-tracker-r_live').includes('checked 5 minutes ago'),
+    ['messages', 'promote', 'grow', 'comments', 'help'].every(key => home.includes(`data-testid="studio-goal-${key}"`)) && !home.includes('studio-home-start') && !home.includes('studio-intake-paused'),
+    paused.includes('data-testid="studio-intake-paused"') && paused.includes('New ad requests will open again soon — your drafts are saved.') && paused.includes('saved as a draft until we open again'),
+    homeAr.includes('dir="rtl"') && homeAr.includes('متاح') && homeAr.includes('محجوز') && homeAr.includes('في إعلاناتك') && homeAr.includes('صُرف') && homeAr.includes('<bdi dir="ltr">$50.00</bdi>')
+      && homeAr.includes('يحتاج تعديلك: جودة الصورة أو الفيديو') && homeAr.includes('استخدمت ميتا $3.00 حتى الآن'),
+    json("__calls.filter(c => c.path === '/api/studio/wallet/summary').length") === 1 && json("__calls.filter(c => c.path === '/api/studio/campaigns/summary').length") === 1
+  ];
+  check('Studio v2 Home: plugged into the shell root; strip = wallet summary (Being returned only when non-zero, Meta used only when given); Needs you, trackers, goals, paused banner, EN/AR, escaped',
+    !loadError && homeCases.every(Boolean), loadError || `cases ${failed(homeCases)}`);
+
+  // Getting started: a new customer (nothing sent yet) sees the four steps; the page step waits for its read.
+  const fresh = open('/studio?tab=home', { rows: [requests()[0]], summaryReply: { r_draft: stageRow(1) }, walletReply: wallet({ addedMinor: 0, availableMinor: 0, reservedMinor: 0, inAdsMinor: 0, spentMinor: 0, metaUsedInAdsMinor: null }),
+    extra: () => reply('/api/studio/pages', { pages: [] }) });
+  const lapsedStart = (() => { who.plan = false; const page = open('/studio?tab=home', { rows: [] }); who.plan = true; return page; })();
+  const failedRead = open('/studio?tab=home', { walletReply: undefined, extra: () => { run("__replies['/api/studio/wallet/summary'] = []"); replyError('/api/studio/wallet/summary', { status: 503, message: 'down' }); } });
+  const startCases = [
+    ['plan', 'page', 'money', 'first'].every(key => fresh.includes(`data-testid="studio-start-${key}"`)),
+    between(fresh, 'studio-start-plan').includes('Done') && between(fresh, 'studio-start-page').includes("studioV2Open('replies')") && between(fresh, 'studio-start-money').includes("studioV2Open('wallet')")
+      && between(fresh, 'studio-start-page').includes('aria-current="step"'),
+    lapsedStart.includes('data-testid="studio-need-plan"') && lapsedStart.includes('Activate Ads Studio') && /data-testid="studio-goal-messages"[^>]* disabled/.test(lapsedStart)
+      && between(lapsedStart, 'studio-start-plan').includes("showSubscriptionModal('ad_maker', 'ad_maker')"),
+    ((block) => block.includes('data-testid="studio-home-retry"') && block.includes('Albayan could not load this right now'))(failedRead.slice(failedRead.indexOf('data-testid="studio-home-money"'), failedRead.indexOf('data-testid="studio-home-needs"'))),
+    !home.includes('Coming soon') && open('/studio?tab=wallet').includes('Coming soon in the new studio'),
+    // A plugged screen that throws keeps the shell's own root and placeholder.
+    (() => { run("studioPlugScreen('help', () => { throw new Error('broken screen'); })"); const page = open('/studio?tab=help'); run("_studioPlugScreens.delete('help')");
+      return page.includes('data-testid="studio-screen-help"') && page.includes('Coming soon in the new studio'); })()
+  ];
+  check('Studio v2 Home: Getting started (plan, page, money, first request) until the first send; lapsed plan; a failed wallet read offers Retry; other tabs keep the shell placeholder',
+    !loadError && startCases.every(Boolean), loadError || `cases ${failed(startCases)}`);
+
+  // My ads: list + filters (in the address), detail per stage, money chain, results, reasons.
+  const list = open('/studio?tab=campaigns');
+  const active = open('/studio?tab=campaigns&section=active');
+  const count = (page, key) => (page.match(new RegExp(`data-testid="studio-ads-filter-${key}"[^>]*>.*?studio-ads-count">(\\d+)<`)) || [])[1];
+  const detail = id => open(`/studio?tab=campaigns&id=${id}`, { extra: () => reply(`/api/studio/campaigns/${id}/results`, {
+    campaignId: id, linked: true, stage: { labels: { en: 'Running', ar: 'يعمل الآن' } },
+    results: { metaUsedMinor: 300, paidMinor: 5000, impressions: 12000, reach: 8000, resultType: 'lead', resultCount: 40, checkedAt: minutesAgo(5), checkedAgo: { en: 'checked 5 minutes ago', ar: 'فُحص قبل 5 دقائق' }, stale: false }
+  }) });
+  const actionsOf = page => [...page.matchAll(/data-testid="studio-ad-action-([a-z_]+)"/g)].map(m => m[1]).join(',');
+  const dWait = detail('r_wait');
+  const dNew = detail('r_new');
+  const dLive = detail('r_live');
+  const dDone = detail('r_done');
+  const dFix = detail('r_fix');
+  const dDraft = detail('r_draft');
+  const dMissing = detail('r_other');
+  const adsCases = [
+    list.includes('data-testid="studio-screen-campaigns"') && list.includes('data-testid="studio-ads-list"') && !list.includes('Coming soon'),
+    count(list, 'all') === '6' && count(list, 'active') === '2' && count(list, 'waiting') === '3' && count(list, 'finished') === '1' && !list.includes('studio-ad-r_other'),
+    /data-testid="studio-ads-filter-active"[^>]*aria-pressed="true"/.test(active) && active.includes('studio-ad-r_live') && active.includes('studio-ad-r_new') && !active.includes('studio-ad-r_wait')
+      && active.includes('data-section="active"'),
+    list.includes('Spring &lt;b&gt;sale&lt;/b&gt;') && !list.includes('<b>sale'),
+    actionsOf(dWait) === 'withdraw,ask' && between(dWait, 'studio-ad-reserved').includes('$30.00') && dWait.includes('data-step="sent"'),
+    actionsOf(dNew) === 'stop,ask_stop,ask' && !/Meta used/.test(dNew),
+    actionsOf(dLive) === 'ask_stop,ask' && between(dLive, 'studio-ad-meta-used').includes('Meta used $3.00 so far') && dLive.includes('Meta used $3.00 of $50.00')
+      && dLive.includes('12,000') && dLive.includes('Leads') && dLive.includes('data-step="running"'),
+    actionsOf(dDone) === 'archive' && between(dDone, 'studio-ad-chain').includes('Unused budget returned from: Done ad') && dDone.includes('<bdi dir="ltr">$20.00</bdi>') && dDone.includes('is-side'),
+    actionsOf(dFix) === 'edit,ask' && between(dFix, 'studio-ad-reason').includes('Photo or video quality') && between(dFix, 'studio-ad-reason').includes('Use a brighter &lt;photo&gt;') && dFix.includes('Fix it'),
+    actionsOf(dDraft) === 'edit,archive' && dDraft.includes('Delete draft') && dDraft.includes('Not sent yet'),
+    dMissing.includes('data-testid="studio-ad-missing"') && !dMissing.includes('Someone else')
+  ];
+  check('Studio v2 My ads: own requests only, filters Active / Waiting / Finished in the address, detail actions from the server stage, money chain and results as the server gives them',
+    !loadError && adsCases.every(Boolean), loadError || `cases ${failed(adsCases)}`);
+
+  // Sheets (in-page, never native) and the actions: single flight, one operationId per (action, version).
+  open('/studio?tab=campaigns&id=r_new');
+  const sheet = (kind, id, contact) => {
+    if (contact) run(`_studioMe.value = Object.freeze(Object.assign({}, _studioMe.value, { contact: ${JSON.stringify(contact)}, serviceHours: { openNow: false } }));`);
+    return String(run(`renderStudioAdsSheet(${JSON.stringify(kind)}, studioDataRequest(${JSON.stringify(id)}), studioDataStage(studioDataRequest(${JSON.stringify(id)})))`));
+  };
+  const withdrawSheet = sheet('withdraw', 'r_wait');
+  const stopSheet = sheet('stop', 'r_new');
+  const askNoContact = sheet('ask_stop', 'r_new');
+  const askSheet = sheet('ask_stop', 'r_new', { whatsapp: '+218912345678', phone: '+218912345678', email: 'help@albayan.example' });
+  run("__calls.length = 0; __notes.length = 0; __replies['/api/ad-studio/campaigns/r_wait/withdraw'] = [{ value: { id: 'r_wait', lastModified: 20, data: { id: 'r_wait', createdBy: 'u1', status: 'Draft', name: 'Waiting ad', _lastModified: 20 } } }];"
+    + " var __w1 = studioAdsRun('withdraw', 'r_wait'); var __w2 = studioAdsRun('withdraw', 'r_wait'); var __wSame = __w1 === __w2; var __wOut = null; __w1.then(out => { __wOut = out; });");
+  const withdrawCalls = json("__calls.filter(c => c.path === '/api/ad-studio/campaigns/r_wait/withdraw')") || [];
+  const withdrawOut = json('__wOut') || {};
+  const afterWithdraw = { status: run("state.adCampaignRequests.find(r => r.id === 'r_wait').status"), rereads: json("__calls.filter(c => c.path === '/api/studio/wallet/summary').length") };
+  const refusal = 'This ad has already started — ask us to stop it and refund the unspent part';
+  replyError('/api/ad-studio/campaigns/r_new/stop', { status: 409, message: refusal, payload: { detail: refusal } });
+  reply('/api/collections/adCampaignRequests/r_new', { id: 'r_new', lastModified: 15, data: requests()[4] });
+  run("var __s1 = null; studioAdsRun('stop', 'r_new').then(out => { __s1 = out; });");
+  replyError('/api/ad-studio/campaigns/r_new/stop', { status: 500, message: 'Internal Server Error' });
+  run("var __s2 = null; studioAdsRun('stop', 'r_new').then(out => { __s2 = out; });");
+  const stopBodies = json("__calls.filter(c => c.path === '/api/ad-studio/campaigns/r_new/stop').map(c => c.body)") || [];
+  run("var __a = null; studioAdsRun('archive', 'r_done').then(out => { __a = out; });");
+  const sheetCases = [
+    withdrawSheet.includes('studio-sheet-withdraw') && withdrawSheet.includes('Your reservation of $30.00 ends now') && withdrawSheet.includes('data-testid="studio-sheet-confirm"')
+      && withdrawSheet.includes('role="dialog"') && withdrawSheet.includes('mobile-dialog-overlay'),
+    stopSheet.includes('The full $50.00 you paid comes back') && stopSheet.includes('studio-ads-danger'),
+    askNoContact.includes('Coming soon') && askNoContact.includes('contact details are not published yet') && !askNoContact.includes('studio-sheet-confirm'),
+    askSheet.includes('href="https://wa.me/218912345678?text=') && askSheet.includes('ALB-S-AB12CD34') && askSheet.includes('href="tel:+218912345678"')
+      && askSheet.includes('href="mailto:help@albayan.example?subject=') && askSheet.includes('rel="noopener noreferrer"') && askSheet.includes('outside working hours'),
+    withdrawCalls.length === 1 && withdrawCalls[0].method === 'POST' && withdrawCalls[0].body.expectedLastModified === 12 && /^campaign-withdraw-\d+$/.test(withdrawCalls[0].body.operationId),
+    run('__wSame') === true && withdrawOut.ok === true && afterWithdraw.status === 'Draft' && afterWithdraw.rereads >= 1 && json("__notes.some(n => n.type === 'success' && n.message.includes('$30.00'))") === true,
+    json('__s1') && json('__s1').ok === false && json('__s1').text === refusal && json('__s2') && json('__s2').ok === false
+      && stopBodies.length === 2 && stopBodies[0].operationId === stopBodies[1].operationId && stopBodies[0].expectedLastModified === 15,
+    json('__a') && json('__a').ok === true && json('__a').leave === true && JSON.stringify(json('__deleted')) === '["r_done"]',
+    json("_studioAdsRuns.size") === 0
+  ];
+  check('Studio v2 My ads sheets: withdraw / stop / archive / ask to stop (coming soon + public contact); single flight; one operationId per (action, version); refusals shown as the server says',
+    !loadError && sheetCases.every(Boolean), loadError || `cases ${failed(sheetCases)}`);
+
+  // Static: bundles, manifest order, no native dialogs or token words, the styles.
+  const workspaceCss = read('assets/ads-workspace.css');
+  const homeCss = workspaceCss.slice(workspaceCss.indexOf('/* Studio v2 Home and My ads'));
+  const lazy = bundleManifestJson.lazy['studio.js'];
+  const v2Files = [coreSrc, shellSrc, homeSrc, adsSrc];
+  const staticCases = [
+    lazy.indexOf('systems/ads_studio/15j-studio-home.js') === lazy.indexOf('systems/ads_studio/15h-studio-shell.js') + 1
+      && lazy.indexOf('systems/ads_studio/15k-studio-ads.js') === lazy.indexOf('systems/ads_studio/15j-studio-home.js') + 1,
+    [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(homeSrc) && bundle.includes(adsSrc)) && !read('script.js').includes('renderStudioHomeBody'),
+    !v2Files.some(src => /\b(?:confirm|prompt|alert)\(/.test(src)) && !/access_token|app_?secret|page_?token|Bearer /i.test(homeSrc + adsSrc) && !/setInterval\(/.test(homeSrc + adsSrc),
+    homeSrc.includes("studioPlugScreen('home', renderStudioHomeBody)") && adsSrc.includes("studioPlugScreen('campaigns', renderStudioAdsBody)")
+      && homeSrc.includes('renderStudioV2CustomerScreen = function renderStudioV2CustomerScreenPlugged(route)'),
+    homeCss.length > 1000 && read('www/assets/ads-workspace.css') === workspaceCss
+      && ['html.dark :is(.studio-v2-frame, .studio-ads-sheet)', '.studio-ads-sheet { position: fixed;', '@media (max-width: 900px)', 'overflow-wrap: anywhere', 'min-height: 44px'].every(rule => homeCss.includes(rule))
+      && !/background(-color)?:\s*#|[^-]color:\s*#/.test(homeCss)
+  ];
+  check('Studio v2 Home + My ads ship after the shell in both studio.js copies (not in script.js), no native dialogs, token words or timers loops, styles with tokens and dark mode',
+    staticCases.every(Boolean), `cases ${failed(staticCases)}`);
 }
 
 {
