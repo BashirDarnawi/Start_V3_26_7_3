@@ -12,6 +12,12 @@ private names as thin bindings, so every existing call site is unchanged.
 
 This is a request/approval record only. It deliberately contains no Meta
 access token, live campaign ID, internal ad, receipt, or wallet mutation.
+
+Albayan Studio v2 fields (plan tasks P1-14 and P1-13 as changed by D19): ``goalDetail`` (sets or
+must match the objective), ``locationKeys`` (Libya chips) and the picked post
+(``sourcePostId`` + ``sourcePostPlatform``) are validated here. At submit, whether the picked
+post belongs to the customer's linked page and whether a boost has a post or its own photo and
+text is checked by studio_posts.enforce_source_post_rules.
 """
 
 from __future__ import annotations
@@ -30,7 +36,6 @@ from .ad_campaign_actions import (
     REFUSE_DURATION,
     REFUSE_MAX_DAYS,
     apply_boost_campaign_fields,
-    enforce_boost_submission_rules,
     normalize_ad_campaign_destination,
 )
 
@@ -63,6 +68,197 @@ AD_CAMPAIGN_CALL_TO_ACTION_ALIASES = {
     "get_quote": "Get Quote",
     "call_now": "Call Now",
 }
+AD_CAMPAIGN_OBJECTIVES = frozenset(
+    {"awareness", "traffic", "engagement", "leads", "app_promotion", "sales", "messages"}
+)
+
+# --- Goal, Libya locations and the post to boost (plan tasks P1-14, P1-13 as changed by D19) ---
+# Customer fields of the studio v2 wizard. main.py's AD_CAMPAIGN_ALLOWED_FIELDS (ctx) is joined
+# with these here, so main.py does not grow; PATCH accepts them and still refuses unknown fields.
+AD_CAMPAIGN_STUDIO_FIELDS = frozenset({"goalDetail", "locationKeys", "sourcePostId", "sourcePostPlatform"})
+# goalDetail -> (the one objective it runs under, the main result Meta reports for it). The key
+# names never change once released (stored on requests); labels live with the screens.
+AD_CAMPAIGN_GOAL_DETAILS: dict[str, tuple[str, str]] = {
+    "messages": ("messages", "messaging_conversations_started"),
+    "page_likes": ("engagement", "page_likes"),
+    "post_engagement": ("engagement", "post_engagement"),
+    "video_views": ("engagement", "video_views"),
+    "website_visits": ("traffic", "link_clicks"),
+    "leads": ("leads", "leads"),
+    "sales": ("sales", "purchases"),
+}
+# The main result of a request that has no goalDetail (older requests, the classic screens).
+AD_CAMPAIGN_OBJECTIVE_RESULT_TYPES: dict[str, str] = {
+    "awareness": "reach",
+    "traffic": "link_clicks",
+    "engagement": "post_engagement",
+    "leads": "leads",
+    "app_promotion": "app_installs",
+    "sales": "purchases",
+    "messages": "messaging_conversations_started",
+}
+MAX_AD_CAMPAIGN_LOCATION_KEYS = 25
+LIBYA_ALL_LOCATION_KEY = "libya"
+# Libya location chips: key -> (English label, Arabic label). Keys never change once released.
+LIBYA_LOCATIONS: dict[str, tuple[str, str]] = {
+    "libya": ("All of Libya", "كل ليبيا"),
+    "tripoli": ("Tripoli", "طرابلس"),
+    "benghazi": ("Benghazi", "بنغازي"),
+    "misrata": ("Misrata", "مصراتة"),
+    "zawiya": ("Zawiya", "الزاوية"),
+    "zliten": ("Zliten", "زليتن"),
+    "khoms": ("Khoms", "الخمس"),
+    "tajoura": ("Tajoura", "تاجوراء"),
+    "janzour": ("Janzour", "جنزور"),
+    "sabratha": ("Sabratha", "صبراتة"),
+    "surman": ("Surman", "صرمان"),
+    "zuwara": ("Zuwara", "زوارة"),
+    "gharyan": ("Gharyan", "غريان"),
+    "tarhuna": ("Tarhuna", "ترهونة"),
+    "msallata": ("Msallata", "مسلاتة"),
+    "bani_walid": ("Bani Walid", "بني وليد"),
+    "zintan": ("Zintan", "الزنتان"),
+    "yafran": ("Yafran", "يفرن"),
+    "nalut": ("Nalut", "نالوت"),
+    "ghadames": ("Ghadames", "غدامس"),
+    "sirte": ("Sirte", "سرت"),
+    "hun": ("Hun", "هون"),
+    "ajdabiya": ("Ajdabiya", "أجدابيا"),
+    "brega": ("Brega", "البريقة"),
+    "marj": ("Marj", "المرج"),
+    "bayda": ("Bayda", "البيضاء"),
+    "shahhat": ("Shahhat", "شحات"),
+    "derna": ("Derna", "درنة"),
+    "tobruk": ("Tobruk", "طبرق"),
+    "sabha": ("Sabha", "سبها"),
+    "ubari": ("Ubari", "أوباري"),
+    "murzuq": ("Murzuq", "مرزق"),
+    "ghat": ("Ghat", "غات"),
+    "kufra": ("Kufra", "الكفرة"),
+}
+# Other spellings a screen may send; they are stored as the key above.
+_LIBYA_LOCATION_ALIASES = {
+    "all_libya": "libya", "all": "libya", "misurata": "misrata", "misratah": "misrata",
+    "zawia": "zawiya", "az_zawiyah": "zawiya", "al_zawiya": "zawiya", "zawiyah": "zawiya",
+    "al_khums": "khoms", "khums": "khoms", "alkhums": "khoms", "tajura": "tajoura", "tajurah": "tajoura",
+    "janzur": "janzour", "sabratah": "sabratha", "sabrata": "sabratha", "zuwarah": "zuwara",
+    "zuara": "zuwara", "gharian": "gharyan", "tarhunah": "tarhuna", "misallata": "msallata",
+    "baniwalid": "bani_walid", "yefren": "yafran", "ghadamis": "ghadames", "sirt": "sirte",
+    "ajdabia": "ajdabiya", "marsa_brega": "brega", "al_marj": "marj", "al_bayda": "bayda",
+    "albayda": "bayda", "beida": "bayda", "shahat": "shahhat", "darnah": "derna", "tobruq": "tobruk",
+    "sebha": "sabha", "awbari": "ubari", "murzuk": "murzuq", "kufrah": "kufra", "al_kufrah": "kufra",
+}
+_LOCATION_KEY_SEPARATORS_RE = re.compile(r"[\s\-.'’]+")
+SOURCE_POST_PLATFORMS = frozenset({"fb", "ig"})
+# Fields a boost of an existing post does not need at submit (the post brings its own).
+POST_BOOST_NOT_REQUIRED = frozenset({"objective", "primaryText", "destination", "callToAction"})
+_SOURCE_POST_ID_RES = {"fb": re.compile(r"[0-9]{1,40}_[0-9]{1,40}"), "ig": re.compile(r"[0-9]{1,40}")}
+# Shared refusal prefixes (the Arabic map of the screens matches these exact texts).
+GOAL_OBJECTIVE_MISMATCH = "The goal detail does not match the objective"
+UNKNOWN_LOCATION = "Unknown location"
+
+
+def _location_lookup() -> dict[str, str]:
+    table = {key: key for key in LIBYA_LOCATIONS}
+    table.update(_LIBYA_LOCATION_ALIASES)
+    for key, (label_en, label_ar) in LIBYA_LOCATIONS.items():
+        table.setdefault(_LOCATION_KEY_SEPARATORS_RE.sub("_", label_en.strip().lower()), key)
+        table.setdefault(label_ar, key)
+    return table
+
+
+_LIBYA_LOCATION_LOOKUP = _location_lookup()
+
+
+def libya_location_key(value: str) -> str:
+    """The stored key of one location chip ('' when it is not a known Libya location)."""
+    raw = " ".join(str(value or "").split())
+    if raw in _LIBYA_LOCATION_LOOKUP:
+        return _LIBYA_LOCATION_LOOKUP[raw]
+    return _LIBYA_LOCATION_LOOKUP.get(_LOCATION_KEY_SEPARATORS_RE.sub("_", raw.lower()).strip("_"), "")
+
+
+def ad_campaign_result_type(goal_detail: Any, objective: Any = "") -> str:
+    """The main result Meta reports for a request: from its goalDetail, else its objective."""
+    goal = AD_CAMPAIGN_GOAL_DETAILS.get(str(goal_detail or ""))
+    if goal:
+        return goal[1]
+    return AD_CAMPAIGN_OBJECTIVE_RESULT_TYPES.get(str(objective or ""), "")
+
+
+def is_source_post_id(value: str, platform: str = "") -> bool:
+    """A Facebook post id (<page id>_<post id>) or an Instagram media id; either when no platform."""
+    patterns = [_SOURCE_POST_ID_RES[platform]] if platform in _SOURCE_POST_ID_RES else list(_SOURCE_POST_ID_RES.values())
+    return any(pattern.fullmatch(value) for pattern in patterns)
+
+
+def apply_goal_location_source_fields(
+    data: dict[str, Any], clean: dict[str, Any], string_fn: Callable[..., str]
+) -> None:
+    """goalDetail, locationKeys, sourcePostId and sourcePostPlatform (P1-14, P1-13/D19).
+
+    Runs after ``objective``. A goalDetail sets the objective when none is given and must match
+    it when one is (T9). Location keys are Libya chips (aliases and the chip labels are stored
+    as their key; anything else is T10). The post id is checked for its shape here; whether it
+    belongs to the customer's linked page is checked at submit (studio_posts.py, T13).
+    """
+    if "goalDetail" in data:
+        goal = string_fn(data.get("goalDetail"), "goalDetail", 40).lower().replace(" ", "_")
+        if goal and goal not in AD_CAMPAIGN_GOAL_DETAILS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"goalDetail must be one of: {', '.join(AD_CAMPAIGN_GOAL_DETAILS)}",
+            )
+        clean["goalDetail"] = goal
+    goal = str(clean.get("goalDetail") or "")
+    if goal:
+        expected = AD_CAMPAIGN_GOAL_DETAILS[goal][0]
+        if not clean.get("objective"):
+            clean["objective"] = expected
+        elif clean["objective"] != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{GOAL_OBJECTIVE_MISMATCH}: {goal} runs under the {expected} objective",
+            )
+
+    if "locationKeys" in data:
+        raw_keys = data.get("locationKeys")
+        if raw_keys is None:
+            raw_keys = []
+        if not isinstance(raw_keys, list) or len(raw_keys) > MAX_AD_CAMPAIGN_LOCATION_KEYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"locationKeys must be a list of at most {MAX_AD_CAMPAIGN_LOCATION_KEYS} items",
+            )
+        keys: list[str] = []
+        for raw in raw_keys:
+            if not isinstance(raw, str):
+                raise HTTPException(status_code=400, detail="locationKeys must contain only text")
+            key = libya_location_key(string_fn(raw, "locationKeys", 80))
+            if not key:
+                raise HTTPException(status_code=400, detail=f"{UNKNOWN_LOCATION}: {string_fn(raw, 'locationKeys', 40)}")
+            if key not in keys:
+                keys.append(key)
+        if LIBYA_ALL_LOCATION_KEY in keys and len(keys) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail="locationKeys cannot combine all of Libya with a city",
+            )
+        clean["locationKeys"] = keys
+
+    if "sourcePostPlatform" in data:
+        platform = string_fn(data.get("sourcePostPlatform"), "sourcePostPlatform", 10).lower()
+        if platform and platform not in SOURCE_POST_PLATFORMS:
+            raise HTTPException(status_code=400, detail="sourcePostPlatform must be fb or ig")
+        clean["sourcePostPlatform"] = platform
+    if "sourcePostId" in data:
+        post_id = string_fn(data.get("sourcePostId"), "sourcePostId", 100)
+        if post_id and not is_source_post_id(post_id, str(clean.get("sourcePostPlatform") or "")):
+            raise HTTPException(
+                status_code=400,
+                detail="sourcePostId must be a Facebook post id (pageid_postid) or an Instagram media id that matches sourcePostPlatform",
+            )
+        clean["sourcePostId"] = post_id
 
 
 # ctx keys (all provided by main.py):
@@ -295,7 +491,7 @@ def prepare_ad_campaign_fields(
     This is a request/approval record only. It deliberately contains no Meta
     access token, live campaign ID, internal ad, receipt, or wallet mutation.
     """
-    allowed_fields: frozenset[str] = ctx["allowed_fields"]
+    allowed_fields: frozenset[str] = ctx["allowed_fields"] | AD_CAMPAIGN_STUDIO_FIELDS
     sanitize_str: Callable[..., str] = ctx["sanitize_str"]
     sanitize_json: Callable[..., Any] = ctx["sanitize_json"]
     validate_entity_id: Callable[[Any], str] = ctx["validate_entity_id"]
@@ -365,13 +561,11 @@ def prepare_ad_campaign_fields(
 
     if "objective" in data:
         objective = _string(data.get("objective"), "objective", 40).lower().replace(" ", "_")
-        valid_objectives = {
-            "awareness", "traffic", "engagement", "leads", "app_promotion",
-            "sales", "messages",
-        }
-        if objective and objective not in valid_objectives:
+        if objective and objective not in AD_CAMPAIGN_OBJECTIVES:
             raise HTTPException(status_code=400, detail="Unsupported campaign objective")
         clean["objective"] = objective
+
+    apply_goal_location_source_fields(data, clean, _string)
 
     if "platforms" in data:
         platforms = _string_list(
@@ -522,28 +716,35 @@ def prepare_ad_campaign_fields(
         clean["creativeImages"] = clean_images
 
     if strict:
+        # P1-13 as changed by D19, before the other checks: the post to boost (T13: it must be from
+        # the customer's linked page) and T11 (a boost with neither a post nor their own photo and
+        # text). Boosting an existing post needs no objective, text, button, link or photo of its own.
+        from .studio_posts import enforce_source_post_rules  # late import: studio_posts imports this module
+
+        boosts_a_post = enforce_source_post_rules(clean, raw_data)
         required_text = (
             "name", "objective", "primaryText", "destination",
             "callToAction", "budgetType",
         )
         for field in required_text:
+            if boosts_a_post and field in POST_BOOST_NOT_REQUIRED:
+                continue
             if not str(clean.get(field) or "").strip():
                 raise HTTPException(status_code=400, detail=f"{field} is required before submission")
         if not clean.get("platforms"):
             raise HTTPException(status_code=400, detail="At least one platform is required before submission")
         if not (str(clean.get("pageName") or "").strip() or str(clean.get("connectedAssetId") or "").strip()):
             raise HTTPException(status_code=400, detail="pageName or connectedAssetId is required before submission")
-        if not clean.get("locations"):
+        if not (clean.get("locations") or clean.get("locationKeys")):
             raise HTTPException(status_code=400, detail="At least one location is required before submission")
         if not start or not end:
             raise HTTPException(status_code=400, detail="startDate and endDate are required before submission")
         if int(clean.get("budgetMinorUSD") or 0) <= 0:
             raise HTTPException(status_code=400, detail="A positive budgetMinorUSD is required before submission")
-        if not clean.get("creativeImages"):
+        if not clean.get("creativeImages") and not boosts_a_post:
             raise HTTPException(
                 status_code=400,
                 detail="At least one campaign image is required before submission",
             )
-        enforce_boost_submission_rules(clean)
 
     return clean

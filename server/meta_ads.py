@@ -4044,6 +4044,92 @@ def studio_funds_flags() -> dict[str, Any]:
             "accounts": accounts[:_META_FUNDS_MAX_ACCOUNTS]}
 
 
+# ---------------------------------------------------------------------------
+# Recent posts of a linked page (Albayan Studio post picker; owner decision D19, P1-13)
+# ---------------------------------------------------------------------------
+# Platform reads for the studio's "pick a post of your page" list. Each is ONE paced GET with the
+# page's own token (plus the page-token read when it is not in memory) on the shared request lane,
+# so it waits its turn behind every other Meta call and is refused while Albayan's Meta pause runs
+# (MetaAdsError "rate_limited", retryable, no provider code). When the per-lane request state
+# (PLAN P3-00) arrives these move to the page lane. Rows hold public page content only: an id,
+# a bounded text, and public HTTPS image and post links; never a token, a commenter or a count.
+PAGE_RECENT_POSTS_MAX = 25
+_PAGE_POST_ID_RE = re.compile(r"[0-9]{1,40}_[0-9]{1,40}")
+_RECENT_POST_TEXT_MAX = 500
+
+
+def _recent_post_limit(limit: Any) -> int:
+    try:
+        return min(max(int(limit), 1), PAGE_RECENT_POSTS_MAX)
+    except (TypeError, ValueError, OverflowError):
+        return 10
+
+
+def _recent_post_row(post_id: str, text_value: Any, image_url: Any, permalink: Any, created: Any) -> dict[str, str]:
+    return {
+        "id": post_id,
+        "text": _clean_text(" ".join(str(text_value or "").split()), _RECENT_POST_TEXT_MAX),
+        "imageUrl": _clean_https_url(image_url),
+        "permalink": _clean_https_url(permalink),
+        "createdAt": _clean_time(created),
+    }
+
+
+def read_page_recent_posts(page_id: Any, *, limit: Any = 10) -> list[dict[str, str]]:
+    """The newest published posts of a Facebook page, read with the page's own token.
+
+    Rows ``{id, text, imageUrl, permalink, createdAt}``, newest first as Meta sends them. ``id`` is
+    Meta's ``<page id>_<post id>``; a row whose id does not start with this page's id is left out.
+    Raises MetaAdsError (``not_configured`` without Albayan's Meta token; ``rate_limited`` while the
+    pause runs or when Meta limits; ``authorization`` when the token cannot manage the page).
+    """
+    clean_page = _meta_id(page_id, "Meta page")
+    count = _recent_post_limit(limit)
+    client = get_meta_ads_client()
+    token = client.page_access_token(clean_page)
+    payload = client._request(
+        "GET", f"{clean_page}/posts",
+        params={"fields": "id,message,created_time,permalink_url,full_picture", "limit": count},
+        access_token=token,
+    )
+    rows: list[dict[str, str]] = []
+    for item in payload.get("data") if isinstance(payload.get("data"), list) else []:
+        post_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+        if not _PAGE_POST_ID_RE.fullmatch(post_id) or post_id.split("_", 1)[0] != clean_page:
+            continue
+        rows.append(_recent_post_row(post_id, item.get("message"), item.get("full_picture"),
+                                     item.get("permalink_url"), item.get("created_time")))
+    return rows[:count]
+
+
+def read_instagram_recent_media(page_id: Any, ig_user_id: Any, *, limit: Any = 10) -> list[dict[str, str]]:
+    """The newest media of the Instagram professional account linked to a Facebook page.
+
+    Read with that page's token (the account is reached through its page). Rows as in
+    read_page_recent_posts; ``id`` is the media id and ``imageUrl`` the photo, or the cover of a
+    video. Raises MetaAdsError like read_page_recent_posts.
+    """
+    clean_page = _meta_id(page_id, "Meta page")
+    clean_ig = _meta_id(ig_user_id, "Instagram account")
+    count = _recent_post_limit(limit)
+    client = get_meta_ads_client()
+    token = client.page_access_token(clean_page)
+    payload = client._request(
+        "GET", f"{clean_ig}/media",
+        params={"fields": "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp", "limit": count},
+        access_token=token,
+    )
+    rows: list[dict[str, str]] = []
+    for item in payload.get("data") if isinstance(payload.get("data"), list) else []:
+        media_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+        if not _META_ID_RE.fullmatch(media_id):
+            continue
+        is_video = str(item.get("media_type") or "").upper() == "VIDEO"
+        image = item.get("thumbnail_url") if is_video else item.get("media_url")
+        rows.append(_recent_post_row(media_id, item.get("caption"), image, item.get("permalink"), item.get("timestamp")))
+    return rows[:count]
+
+
 def _percentiles(values: list[float]) -> dict[str, Any] | None:
     """Nearest-rank p50/p90/p95 and the maximum (None without values)."""
     if not values:
