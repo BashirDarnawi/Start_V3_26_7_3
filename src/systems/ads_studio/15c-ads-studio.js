@@ -53,6 +53,7 @@ function resetAdsStudioSessionState() {
   _adsStudioStopPromises.clear();
   for (const id of Object.keys(_adsStudioReviewNotes)) delete _adsStudioReviewNotes[id];
   if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
+  resetAdsStudioLimits();
 }
 
 // Wallet + Meta Connection live INSIDE the Overview (owner decision): no tabs.
@@ -261,6 +262,28 @@ function adsStudioMoney(minor) {
   return `$${(value / 100).toFixed(2)}`;
 }
 
+// An amount in its own currency (P1-08a): LYD money (subscription plans) never wears "$".
+// A row without a currency is USD, as on the server.
+function adsStudioMoneyIn(minor, currency) {
+  if (String(currency || 'USD').trim().toUpperCase() !== 'LYD') return adsStudioMoney(minor);
+  const value = Math.max(0, Math.trunc(Number(minor) || 0));
+  return `${(value / 100).toFixed(2)} ${adsStudioText('LYD', 'د.ل')}`;
+}
+
+// A typed money amount in minor units, or NaN when it is not a number (P1-08b). Arabic-Indic
+// digits go through normalizeDigitsAscii first, so '٥٠' is 5000 ($50.00), never 0. The Arabic
+// decimal sign ٫ is a point and the Arabic comma ، a comma; commas follow the money-box rule
+// (sanitizeMoneyInput): "1,250" is a thousand, "12,5" is twelve and a half.
+function adsStudioParseMoneyMinor(raw) {
+  let text = normalizeDigitsAscii(String(raw ?? '')).replace(/،/g, ',').replace(/٫/g, '.').replace(/\s+/g, '');
+  if (text.includes(',')) {
+    const grouped = /^\d{1,3}(,\d{3})+(\.\d*)?$/.test(text);
+    text = (text.includes('.') || grouped) ? text.split(',').join('') : text.replace(',', '.');
+  }
+  if (!/^(\d+(\.\d*)?|\.\d+)$/.test(text)) return NaN;
+  return Math.round(parseFloat(text) * 100);
+}
+
 // "$25.00 (≈ 130 LYD)" companion — an estimate for planning, never a charge.
 function adsStudioMoneyWithLyd(minor) {
   const usd = adsStudioMoney(minor);
@@ -372,6 +395,8 @@ function renderAdsStudioView() {
     return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}${shellWallet}</div>`;
   }
 
+  // The budget limits arrive long before the budget step (once per session, P1-08b).
+  if (adsStudioCanCreate()) refreshAdsStudioLimits();
   let content = '';
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
@@ -394,10 +419,13 @@ function renderAdsStudioDashboard() {
   const draftCount = campaigns.filter(item => ['Draft', 'Changes Requested'].includes(String(item.status || 'Draft'))).length;
   const reviewCount = campaigns.filter(item => item.status === 'Submitted').length;
   const approvedCount = campaigns.filter(item => item.status === 'Approved').length;
-  const lifetimeBudget = campaigns
+  // Only requests that hold money (Submitted) or were paid (Approved) are budgets; drafts,
+  // rejected and stopped requests hold nothing, so they never count here (P1-08a).
+  const budgeted = campaigns.filter(item => ['Submitted', 'Approved'].includes(String(item.status || 'Draft')));
+  const lifetimeBudget = budgeted
     .filter(item => String(item.budgetType || 'lifetime') !== 'daily')
     .reduce((sum, item) => sum + Math.max(0, Number(item.budgetMinorUSD) || 0), 0);
-  const dailyBudget = campaigns
+  const dailyBudget = budgeted
     .filter(item => String(item.budgetType || '') === 'daily')
     .reduce((sum, item) => sum + Math.max(0, Number(item.budgetMinorUSD) || 0), 0);
   const isAr = adsStudioIsAr();
@@ -448,7 +476,7 @@ function renderAdsStudioDashboard() {
         </div>
         <div class="glass-panel rounded-2xl p-5 sm:p-6">
           <h3 class="font-black text-lg text-slate-900 dark:text-white">${isAr ? 'ملخص الميزانيات' : 'Budget summary'}</h3>
-          <p class="text-sm text-slate-500 mt-1">${isAr ? 'ميزانيات الحملات المطلوبة، وليست مصروفاً فعلياً' : 'Requested campaign budgets, not actual spend'}</p>
+          <p class="text-sm text-slate-500 mt-1">${isAr ? 'ميزانيات الحملات قيد المراجعة أو المعتمدة، وليست مصروفاً فعلياً' : 'Budgets of campaigns under review or approved, not actual spend'}</p>
           <div class="mt-6 grid gap-3 sm:grid-cols-2">
             <div class="rounded-2xl bg-blue-50 dark:bg-blue-900/20 p-5"><div class="text-sm font-bold text-blue-700 dark:text-blue-300">${isAr ? 'إجمالي ميزانيات المدة' : 'Lifetime requested'}</div><div class="mt-1 text-2xl font-black text-blue-900 dark:text-blue-100">${adsStudioMoney(lifetimeBudget)}</div></div>
             <div class="rounded-2xl bg-cyan-50 dark:bg-cyan-900/20 p-5"><div class="text-sm font-bold text-cyan-700 dark:text-cyan-300">${isAr ? 'إجمالي الميزانيات اليومية' : 'Daily requested'}</div><div class="mt-1 text-2xl font-black text-cyan-900 dark:text-cyan-100">${adsStudioMoney(dailyBudget)}<span class="ms-1 text-sm font-bold">${isAr ? 'يومياً' : '/ day'}</span></div></div>
@@ -953,8 +981,10 @@ function adsStudioSetDraftField(field, value) {
   if (!_adsStudioDraft) _adsStudioDraft = newAdsStudioDraft();
   const allowed = new Set(['name', 'objective', 'pageName', 'primaryText', 'headline', 'description', 'callToAction', 'destination', 'ageMin', 'ageMax', 'startDate', 'endDate', 'budgetType', 'budgetMinorUSD', 'notes', 'boostType', 'sourcePostRef', 'extendsCampaignId']);
   if (!allowed.has(field)) return;
-  if (field === 'budgetMinorUSD') _adsStudioDraft[field] = Math.max(0, Math.round((Number(value) || 0) * 100));
-  else if (field === 'ageMin' || field === 'ageMax') _adsStudioDraft[field] = Math.max(0, Math.trunc(Number(value) || 0));
+  if (field === 'budgetMinorUSD') {
+    const minor = adsStudioParseMoneyMinor(value);  // '٥٠' typed on an Arabic keyboard is $50.00
+    _adsStudioDraft[field] = Number.isFinite(minor) ? Math.max(0, minor) : 0;
+  } else if (field === 'ageMin' || field === 'ageMax') _adsStudioDraft[field] = Math.max(0, Math.trunc(Number(value) || 0));
   else _adsStudioDraft[field] = String(value ?? '').slice(0, 4000);
 }
 
@@ -1240,12 +1270,134 @@ function renderAdsStudioAudienceStep() {
   </div>`;
 }
 
+// ---- Budget limits (P1-08b; owner decisions D4 + D5) ----
+// The form checks the limits the server enforces, read from GET /api/studio/me (adLimits). Until
+// /me answers, or when it fails, the plan defaults stand in (the server's DEFAULTS in
+// studio_settings.py: $5 - $2,000 in total, $1 per day, 90 days). A limit /me leaves out, or
+// sends malformed, keeps its default. "Total" is what one request costs: the lifetime amount,
+// or the daily amount x days.
+const ADS_STUDIO_DEFAULT_LIMITS = Object.freeze({ minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 });
+let _adsStudioLimits = null;
+let _adsStudioLimitsFor = '';
+let _adsStudioLimitsState = '';  // '' | 'loading' | 'done' | 'failed'
+let _adsStudioLimitsFailedAt = 0;
+let _adsStudioLimitsGeneration = 0;
+
+function resetAdsStudioLimits() {
+  _adsStudioLimitsGeneration++;  // a reply still in flight belongs to the old session: dropped
+  _adsStudioLimits = null;
+  _adsStudioLimitsFor = '';
+  _adsStudioLimitsState = '';
+  _adsStudioLimitsFailedAt = 0;
+}
+
+function adsStudioCleanLimits(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const out = { ...ADS_STUDIO_DEFAULT_LIMITS };
+  for (const key of Object.keys(out)) {
+    if (Number.isSafeInteger(src[key]) && src[key] > 0) out[key] = src[key];
+  }
+  // The server keeps minimum <= maximum and floor <= minimum; a set that breaks it is not trusted.
+  if (out.minTotalMinorUSD > out.maxTotalMinorUSD) return { ...ADS_STUDIO_DEFAULT_LIMITS };
+  out.minPerDayMinorUSD = Math.min(out.minPerDayMinorUSD, out.minTotalMinorUSD);
+  return out;
+}
+
+function adsStudioLimits() {
+  const uid = String(state.currentUser?.id || '');
+  return _adsStudioLimits && uid && _adsStudioLimitsFor === uid ? _adsStudioLimits : ADS_STUDIO_DEFAULT_LIMITS;
+}
+
+// Once per session; a failed read is retried at most once a minute (the defaults hold meanwhile).
+async function refreshAdsStudioLimits() {
+  try {
+    const uid = String(state.currentUser?.id || '');
+    if (!uid || !isServerModeEnabled()) return;
+    if (_adsStudioLimitsFor === uid && _adsStudioLimitsState !== '' && (_adsStudioLimitsState !== 'failed' || Date.now() - _adsStudioLimitsFailedAt < 60000)) return;
+    const generation = ++_adsStudioLimitsGeneration;
+    _adsStudioLimitsFor = uid;
+    _adsStudioLimitsState = 'loading';
+    let limits = null;
+    try {
+      const me = await apiJson('/api/studio/me', { method: 'GET' });
+      if (me && me.adLimits && typeof me.adLimits === 'object') limits = adsStudioCleanLimits(me.adLimits);
+    } catch (_) { /* the plan defaults stay */ }
+    if (generation !== _adsStudioLimitsGeneration || uid !== String(state.currentUser?.id || '')) return;
+    _adsStudioLimits = limits;
+    _adsStudioLimitsState = limits ? 'done' : 'failed';
+    if (!limits) _adsStudioLimitsFailedAt = Date.now();
+    // Update the hint in place: a full render could take the keyboard away mid-typing.
+    const hint = typeof document !== 'undefined' ? document.getElementById('ads-studio-budget-limits') : null;
+    if (hint) hint.textContent = adsStudioBudgetLimitsText(_adsStudioDraft?.budgetType);
+  } catch (_) { /* never breaks the screen */ }
+}
+
+function adsStudioDaysText(days) {
+  const n = Math.max(0, Math.trunc(Number(days) || 0));
+  if (!adsStudioIsAr()) return n === 1 ? '1 day' : `${n} days`;
+  if (n === 1) return 'يوم واحد';
+  if (n === 2) return 'يومان';
+  return n >= 3 && n <= 10 ? `${n} أيام` : `${n} يوماً`;
+}
+
+// Days the request runs, both ends included (the server's end = start + durationDays - 1).
+function adsStudioCampaignDays(draft) {
+  const start = Date.parse(`${String(draft?.startDate || '')}T00:00:00Z`);
+  const end = Date.parse(`${String(draft?.endDate || '')}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  return Math.round((end - start) / 86400000) + 1;
+}
+
+function adsStudioBudgetLimitsText(budgetType) {
+  const limits = adsStudioLimits();
+  const range = adsStudioText(
+    `${adsStudioMoney(limits.minTotalMinorUSD)} – ${adsStudioMoney(limits.maxTotalMinorUSD)}`,
+    `من ${adsStudioMoney(limits.minTotalMinorUSD)} إلى ${adsStudioMoney(limits.maxTotalMinorUSD)}`
+  );
+  const tail = adsStudioText(
+    ` · at least ${adsStudioMoney(limits.minPerDayMinorUSD)} per day · up to ${adsStudioDaysText(limits.maxDays)}`,
+    ` · لا يقل عن ${adsStudioMoney(limits.minPerDayMinorUSD)} يومياً · حتى ${adsStudioDaysText(limits.maxDays)}`
+  );
+  return String(budgetType || '') === 'daily'
+    ? adsStudioText(`Daily budget × days must total ${range}`, `الميزانية اليومية × عدد الأيام يجب أن يكون مجموعها ${range}`) + tail
+    : adsStudioText(`Total for the whole campaign: ${range}`, `إجمالي الحملة كلها: ${range}`) + tail;
+}
+
+// '' when the request fits the limits, else the first problem in the customer's language.
+function adsStudioBudgetLimitProblem(draft) {
+  const limits = adsStudioLimits();
+  const budget = Math.max(0, Math.trunc(Number(draft?.budgetMinorUSD) || 0));
+  const days = adsStudioCampaignDays(draft);
+  if (!budget || !days) return '';
+  if (days > limits.maxDays) {
+    return adsStudioText(`A campaign can run for at most ${adsStudioDaysText(limits.maxDays)}. Pick an earlier end date.`, `لا تتجاوز مدة الحملة ${adsStudioDaysText(limits.maxDays)}. اختر تاريخ انتهاء أقرب.`);
+  }
+  const daily = String(draft?.budgetType || '') === 'daily';
+  const total = daily ? budget * days : budget;
+  const sum = daily ? ` (${adsStudioMoney(budget)} × ${adsStudioDaysText(days)} = ${adsStudioMoney(total)})` : '';
+  if (total < limits.minTotalMinorUSD) {
+    return adsStudioText(`The total budget must be at least ${adsStudioMoney(limits.minTotalMinorUSD)}${sum}.`, `يجب ألا يقل إجمالي الميزانية عن ${adsStudioMoney(limits.minTotalMinorUSD)}${sum}.`);
+  }
+  if (total > limits.maxTotalMinorUSD) {
+    return adsStudioText(`The total budget cannot be more than ${adsStudioMoney(limits.maxTotalMinorUSD)}${sum}.`, `لا يمكن أن يزيد إجمالي الميزانية على ${adsStudioMoney(limits.maxTotalMinorUSD)}${sum}.`);
+  }
+  if (total < limits.minPerDayMinorUSD * days) {
+    return daily
+      ? adsStudioText(`The daily budget must be at least ${adsStudioMoney(limits.minPerDayMinorUSD)}.`, `يجب ألا تقل الميزانية اليومية عن ${adsStudioMoney(limits.minPerDayMinorUSD)}.`)
+      : adsStudioText(
+        `The budget per day must be at least ${adsStudioMoney(limits.minPerDayMinorUSD)} (${adsStudioMoney(total)} for ${adsStudioDaysText(days)}). Raise the budget or shorten the campaign.`,
+        `يجب ألا تقل الميزانية لكل يوم عن ${adsStudioMoney(limits.minPerDayMinorUSD)} (${adsStudioMoney(total)} لمدة ${adsStudioDaysText(days)}). ارفع الميزانية أو قصّر مدة الحملة.`
+      );
+  }
+  return '';
+}
+
 function renderAdsStudioBudgetStep() {
   const d = _adsStudioDraft;
   const isAr = adsStudioIsAr();
   return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'الميزانية والمدة' : 'Budget and schedule'}</h3><p class="text-sm text-slate-500">${isAr ? 'هذه ميزانية مقترحة للمراجعة وليست عملية دفع.' : 'This is a requested planning budget, not a payment.'}</p></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'نوع الميزانية' : 'Budget type'}</label><div class="grid grid-cols-2 gap-3"><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'lifetime' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="lifetime" ${d.budgetType === 'lifetime' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="calendar-range" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'إجمالي الحملة' : 'Lifetime'}</span></label><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'daily' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="daily" ${d.budgetType === 'daily' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="sun" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'يومي' : 'Daily'}</span></label></div></div>
-    <div><label class="block text-sm font-bold mb-2">${d.budgetType === 'daily' ? (isAr ? 'الميزانية اليومية بالدولار *' : 'Daily budget in USD *') : (isAr ? 'إجمالي الميزانية بالدولار *' : 'Total budget in USD *')}</label><div class="relative"><span class="absolute ${isAr ? 'right-4' : 'left-4'} top-1/2 -translate-y-1/2 font-black text-blue-600">$</span><input type="number" min="1" max="1000000" step="0.01" value="${(Math.max(0, Number(d.budgetMinorUSD) || 0) / 100).toFixed(2)}" id="ads-studio-field-budgetMinorUSD" oninput="adsStudioSetDraftField(\'budgetMinorUSD\', this.value)" class="glass-input min-h-14 w-full rounded-xl ${isAr ? 'pr-9 pl-4' : 'pl-9 pr-4'} text-xl font-black" /></div>${(typeof _adsStudioUsdToLydRate === 'function' && _adsStudioUsdToLydRate() > 1) ? `<p class="mt-2 text-xs font-bold text-blue-700 dark:text-blue-300">${Security.escapeHtml(adsStudioMoneyWithLyd(d.budgetMinorUSD))} — ${isAr ? 'تقديري' : 'estimate'}</p>` : ''}</div>
+    <div><label class="block text-sm font-bold mb-2">${d.budgetType === 'daily' ? (isAr ? 'الميزانية اليومية بالدولار *' : 'Daily budget in USD *') : (isAr ? 'إجمالي الميزانية بالدولار *' : 'Total budget in USD *')}</label><div class="relative"><span class="absolute ${isAr ? 'right-4' : 'left-4'} top-1/2 -translate-y-1/2 font-black text-blue-600">$</span><input type="text" inputmode="decimal" autocomplete="off" value="${(Math.max(0, Number(d.budgetMinorUSD) || 0) / 100).toFixed(2)}" id="ads-studio-field-budgetMinorUSD" oninput="sanitizeMoneyInput(this); adsStudioSetDraftField(\'budgetMinorUSD\', this.value)" class="glass-input min-h-14 w-full rounded-xl ${isAr ? 'pr-9 pl-4' : 'pl-9 pr-4'} text-xl font-black" /></div><p id="ads-studio-budget-limits" class="mt-2 text-xs text-slate-500">${Security.escapeHtml(adsStudioBudgetLimitsText(d.budgetType))}</p>${(typeof _adsStudioUsdToLydRate === 'function' && _adsStudioUsdToLydRate() > 1) ? `<p class="mt-2 text-xs font-bold text-blue-700 dark:text-blue-300">${Security.escapeHtml(adsStudioMoneyWithLyd(d.budgetMinorUSD))} — ${isAr ? 'تقديري' : 'estimate'}</p>` : ''}</div>
     <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ البدء *' : 'Start date *'}</label><input type="date" value="${Security.escapeHtml(d.startDate || '')}" onchange="adsStudioSetDraftField('startDate',this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ الانتهاء *' : 'End date *'}</label><input type="date" value="${Security.escapeHtml(d.endDate || '')}" onchange="adsStudioSetDraftField('endDate',this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظات لفريق المراجعة' : 'Notes for the review team'}</label><textarea rows="3" maxlength="1000" id="ads-studio-field-notes" oninput="adsStudioSetDraftField(\'notes\', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'وقت مفضل، عرض خاص، تفاصيل إضافية...' : 'Preferred time, special offer, extra context...'}">${Security.escapeHtml(d.notes || '')}</textarea></div>
     <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 p-4 text-sm text-emerald-800 dark:text-emerald-200 flex items-start gap-3"><i data-lucide="shield-check" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نرفع الميزانية أو نطلق الإعلان دون تأكيد وموافقة. عند إضافة الربط المباشر، سيتم إنشاء إعلانات ميتا في وضع الإيقاف المؤقت أولاً.' : 'We will not increase the budget or launch without confirmation. Future Meta publishing will create campaigns paused first.'}</span></div>
@@ -1297,8 +1449,13 @@ function adsStudioValidateStep(step, draft = _adsStudioDraft) {
     if (!Number.isInteger(min) || !Number.isInteger(max) || min < 18 || max > 65 || min > max) errors.push(adsStudioText('Age range must be between 18 and 65.', 'يجب أن يكون العمر بين 18 و65.'));
   }
   if (step >= 4) {
-    if (!(Number(d.budgetMinorUSD) > 0)) errors.push(adsStudioText('Budget must be greater than zero.', 'يجب أن تكون الميزانية أكبر من صفر.'));
-    if (!String(d.startDate || '') || !String(d.endDate || '') || String(d.startDate) < _adsStudioDateOffset(0) || String(d.endDate) < String(d.startDate)) errors.push(adsStudioText('Choose a start date from today onward and a valid end date.', 'اختر تاريخ بداية من اليوم فصاعداً وتاريخ نهاية صحيحاً.'));
+    const budgetSet = Number(d.budgetMinorUSD) > 0;
+    if (!budgetSet) errors.push(adsStudioText('Budget must be greater than zero.', 'يجب أن تكون الميزانية أكبر من صفر.'));
+    const datesBad = !String(d.startDate || '') || !String(d.endDate || '') || String(d.startDate) < _adsStudioDateOffset(0) || String(d.endDate) < String(d.startDate);
+    if (datesBad) errors.push(adsStudioText('Choose a start date from today onward and a valid end date.', 'اختر تاريخ بداية من اليوم فصاعداً وتاريخ نهاية صحيحاً.'));
+    // The server's limits (GET /api/studio/me adLimits): total, per-day floor and days (P1-08b).
+    const limitProblem = budgetSet && !datesBad ? adsStudioBudgetLimitProblem(d) : '';
+    if (limitProblem) errors.push(limitProblem);
   }
   if (String(d.boostType || '') === 'boost_post' && !adsStudioIsValidBoostRef(d.sourcePostRef)) {
     errors.unshift(adsStudioText('Paste the Facebook or Instagram link of the post you want to boost.', 'الصق رابط المنشور من فيسبوك أو إنستغرام.'));
@@ -1691,7 +1848,7 @@ function _adsStudioUsdToLydRate() {
 function adsStudioUpdateLydPreview() {
   const el = document.getElementById('ads-studio-lyd-preview');
   if (!el) return;
-  const usd = parseFloat(document.getElementById('ads-studio-charge-amount')?.value || '0');
+  const usd = adsStudioParseMoneyMinor(document.getElementById('ads-studio-charge-amount')?.value || '') / 100;  // '٥٠' is 50
   const rate = _adsStudioUsdToLydRate();
   const lydMode = String(document.getElementById('ads-studio-charge-currency')?.value || 'USD') === 'LYD';
   el.textContent = (!lydMode && Number.isFinite(usd) && usd > 0 && rate > 0)
@@ -1757,8 +1914,8 @@ async function adsStudioCreateWalletCharge() {
   const input = document.getElementById('ads-studio-charge-amount');
   const method = String(document.querySelector('input[name="ads-studio-charge-method"]:checked')?.value || '');
   const currency = String(document.getElementById('ads-studio-charge-currency')?.value || 'USD') === 'LYD' ? 'LYD' : 'USD';
-  const amountUSD = parseFloat(input?.value || '0');
-  const amountMinor = Math.round((Number.isFinite(amountUSD) ? amountUSD : 0) * 100);
+  const parsedMinor = adsStudioParseMoneyMinor(input?.value || '');  // Arabic-Indic digits count (P1-08b)
+  const amountMinor = Number.isFinite(parsedMinor) ? parsedMinor : 0;
   if (amountMinor < 100) {
     showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), currency === 'LYD' ? adsStudioText('Minimum charge is 1.00 LYD', 'أقل مبلغ للشحن هو دينار واحد') : adsStudioText('Minimum charge is $1.00', 'أقل مبلغ للشحن هو 1 دولار'), 'error');
     return;
@@ -1896,12 +2053,14 @@ function _adsStudioWalletRequestRow(entity, adminView) {
   const statusColor = isPending ? 'text-amber-600' : (String(d.status) === 'confirmed' ? 'text-emerald-600' : 'text-slate-400');
   const entry = _adsStudioPayMethod(d.method);
   const hasPhoto = Number(d._photoCount || 0) > 0 || !!d.receiptPhotoAt;
-  const lyd = d.amountMinorLYD ? ` • ≈ ${(d.amountMinorLYD / 100).toFixed(2)} LYD` : '';
+  // An LYD request (plan money) IS the cash: shown in LYD, never "$", and with no "≈" line (P1-08a).
+  const currency = String(d.currency || 'USD').trim().toUpperCase() === 'LYD' ? 'LYD' : 'USD';
+  const lyd = currency === 'USD' && d.amountMinorLYD ? ` • ≈ ${(d.amountMinorLYD / 100).toFixed(2)} LYD` : '';
   return `
     <div class="studio-wallet-request flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40">
       <div class="min-w-0">
         <div class="font-mono font-bold text-slate-800 dark:text-white">${Security.escapeHtml(String(d.reference || ''))} ${hasPhoto ? '<i data-lucide="paperclip" class="inline w-3.5 h-3.5 text-emerald-600"></i>' : ''}</div>
-        <div class="text-xs text-slate-500">${adsStudioMoney(parseInt(d.amountMinor, 10) || 0)}${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}</div>
+        <div class="text-xs text-slate-500">${adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)}${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}</div>
       </div>
       <div class="studio-wallet-request-actions flex flex-wrap items-center gap-2">
         <span class="text-xs font-bold ${statusColor}">${Security.escapeHtml(String(d.status || ''))}</span>
@@ -1947,7 +2106,7 @@ function renderAdsStudioWallet() {
             <select id="ads-studio-charge-currency" onchange="adsStudioUpdateLydPreview()" class="ml-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200"><option value="USD">${adsStudioText('USD (campaigns)', 'دولار (الحملات)')}</option><option value="LYD">${adsStudioText('LYD (subscription plans)', 'دينار (باقات الاشتراك)')}</option></select>
           </label>
           <div class="studio-wallet-charge-preview flex flex-wrap items-center gap-3">
-            <input id="ads-studio-charge-amount" type="number" min="1" step="0.01" placeholder="50.00" oninput="adsStudioUpdateLydPreview()"
+            <input id="ads-studio-charge-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="50.00" oninput="sanitizeMoneyInput(this); adsStudioUpdateLydPreview()"
               class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
             <span id="ads-studio-lyd-preview" class="text-sm font-bold text-blue-700 dark:text-blue-300"></span>
           </div>
@@ -2015,5 +2174,5 @@ function renderAdsStudioConnections() {
     ['pause-circle', isAr ? 'إنشاء الحملات الجديدة متوقفة مؤقتاً' : 'Create every new Meta campaign paused'],
     ['activity', isAr ? 'مزامنة الحالة والأخطاء والنتائج' : 'Status, issue and performance synchronization']
   ];
-  return `<section class="grid gap-6 lg:grid-cols-[1.1fr_1fr]"><div class="glass-panel rounded-3xl p-5 sm:p-7"><div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white mb-5"><i data-lucide="facebook" class="w-7 h-7"></i></div><span class="inline-flex rounded-full bg-emerald-100 dark:bg-emerald-900/30 px-3 py-1 text-xs font-bold text-emerald-800 dark:text-emerald-200">${isAr ? 'تتبع Meta للقراءة فقط متاح' : 'Read-only Meta tracking available'}</span><h2 class="mt-4 text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'اربط الإعلان الحقيقي وتابع تغيّراته' : 'Link the real ad and track its changes'}</h2><p class="mt-3 text-slate-500 dark:text-slate-400">${isAr ? 'من صفحة الإعلانات يمكنك ربط إعلان Albayan بإعلان Meta ومزامنة الحالة والميزانية والمصروف والنتائج. تبقى الوصل والأموال والصور داخل Albayan دون تغيير. النشر المباشر سيبقى مغلقاً حتى اكتمال موافقات ميتا.' : 'From the Ads page you can link an Albayan ad to a real Meta ad and sync status, budget, spend and results. Albayan receipts, money and photos stay unchanged. Direct publishing remains locked until Meta approvals are complete.'}</p><button type="button" onclick="navigateTo('ads')" class="mt-5 inline-flex min-h-12 items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 font-black text-white hover:bg-blue-700"><i data-lucide="link" class="h-5 w-5"></i>${isAr ? 'فتح الإعلانات والربط' : 'Open Ads and link'}</button><div class="mt-5 rounded-2xl bg-red-50 dark:bg-red-900/20 p-4 text-sm text-red-800 dark:text-red-200 flex items-start gap-3"><i data-lucide="shield-alert" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نطلب كلمة مرور فيسبوك ولن نخزن رمز ميتا داخل تطبيق الهاتف أو بيانات الحملة.' : 'We will never ask for a Facebook password or store a Meta token in the mobile app or campaign records.'}</span></div></div><div class="glass-panel rounded-3xl p-5 sm:p-7"><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'خطة النشر المباشر لاحقاً' : 'Future direct-publishing checklist'}</h3><div class="mt-5 space-y-3">${checklist.map(([icon,label], index) => `<div class="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3"><span class="w-9 h-9 rounded-xl ${index < 2 ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-200' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'} flex items-center justify-center"><i data-lucide="${icon}" class="w-4 h-4"></i></span><span class="flex-1 text-sm font-bold text-slate-700 dark:text-slate-200">${label}</span><i data-lucide="${index < 2 ? 'clock-3' : 'circle-dashed'}" class="w-4 h-4 text-slate-400"></i></div>`).join('')}</div></div></section>`;
+  return `<section class="grid gap-6 lg:grid-cols-[1.1fr_1fr]"><div class="glass-panel rounded-3xl p-5 sm:p-7"><div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white mb-5"><i data-lucide="facebook" class="w-7 h-7"></i></div><span class="inline-flex rounded-full bg-emerald-100 dark:bg-emerald-900/30 px-3 py-1 text-xs font-bold text-emerald-800 dark:text-emerald-200">${isAr ? 'تتبع Meta للقراءة فقط متاح' : 'Read-only Meta tracking available'}</span><h2 class="mt-4 text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'نربط الإعلان الحقيقي ونتابع تغيّراته' : 'We link the real ad and track its changes'}</h2><p class="mt-3 text-slate-500 dark:text-slate-400">${isAr ? 'الربط يقوم به فريق البيان وليس من هذه الشاشة: بعد الموافقة ينشئ الفريق حملتك في ميتا ويربطها بطلبك. تبقى الوصل والأموال والصور داخل Albayan دون تغيير. النشر المباشر سيبقى مغلقاً حتى اكتمال موافقات ميتا.' : 'Linking is done by the Albayan team, not from this screen: after approval, the team creates your campaign in Meta and links it to your request. Albayan receipts, money and photos stay unchanged. Direct publishing remains locked until Meta approvals are complete.'}</p><div class="mt-5 rounded-2xl bg-blue-50 dark:bg-blue-900/20 p-4 text-sm text-blue-900 dark:text-blue-100 flex items-start gap-3"><i data-lucide="info" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لا يلزمك ربط أي شيء من جهتك. تابع كل حملة من بطاقتها في «حملاتي».' : 'There is nothing for you to connect. Follow each campaign on its card in My Campaigns.'}</span></div><div class="mt-5 rounded-2xl bg-red-50 dark:bg-red-900/20 p-4 text-sm text-red-800 dark:text-red-200 flex items-start gap-3"><i data-lucide="shield-alert" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نطلب كلمة مرور فيسبوك ولن نخزن رمز ميتا داخل تطبيق الهاتف أو بيانات الحملة.' : 'We will never ask for a Facebook password or store a Meta token in the mobile app or campaign records.'}</span></div></div><div class="glass-panel rounded-3xl p-5 sm:p-7"><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'خطة النشر المباشر لاحقاً' : 'Future direct-publishing checklist'}</h3><div class="mt-5 space-y-3">${checklist.map(([icon,label], index) => `<div class="flex items-center gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3"><span class="w-9 h-9 rounded-xl ${index < 2 ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-200' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'} flex items-center justify-center"><i data-lucide="${icon}" class="w-4 h-4"></i></span><span class="flex-1 text-sm font-bold text-slate-700 dark:text-slate-200">${label}</span><i data-lucide="${index < 2 ? 'clock-3' : 'circle-dashed'}" class="w-4 h-4 text-slate-400"></i></div>`).join('')}</div></div></section>`;
 }

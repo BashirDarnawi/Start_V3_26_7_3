@@ -5032,12 +5032,20 @@ check('Ads Studio renders daily and lifetime requested budgets as separate total
   loginAs(customer);
   S.language = 'en';
   S.adCampaignRequests = [
-    { id: 'campaign-lifetime-budget', name: 'Lifetime campaign', status: 'Draft', createdBy: customer.id, budgetType: 'lifetime', budgetMinorUSD: 10000 },
-    { id: 'campaign-daily-budget', name: 'Daily campaign', status: 'Draft', createdBy: customer.id, budgetType: 'daily', budgetMinorUSD: 1000 }
+    { id: 'campaign-lifetime-budget', name: 'Lifetime campaign', status: 'Submitted', createdBy: customer.id, budgetType: 'lifetime', budgetMinorUSD: 10000 },
+    { id: 'campaign-daily-budget', name: 'Daily campaign', status: 'Approved', createdBy: customer.id, budgetType: 'daily', budgetMinorUSD: 1000 },
+    // P1-08a: drafts, rejected and stopped requests hold no money, so they are not budgets.
+    { id: 'campaign-draft-budget', name: 'Draft campaign', status: 'Draft', createdBy: customer.id, budgetType: 'lifetime', budgetMinorUSD: 70000 },
+    { id: 'campaign-rejected-budget', name: 'Rejected campaign', status: 'Rejected', createdBy: customer.id, budgetType: 'daily', budgetMinorUSD: 4000 },
+    { id: 'campaign-stopped-budget', name: 'Stopped campaign', status: 'Stopped', createdBy: customer.id, budgetType: 'lifetime', budgetMinorUSD: 5000 }
   ];
   const html = visible(sandbox.renderAdsStudioDashboard());
-  assert(/Lifetime requested[\s\S]*?\$100\.00[\s\S]*?Daily requested[\s\S]*?\$10\.00[\s\S]*?\/ day/.test(html), 'dashboard did not label and render the two budget units separately');
+  const summaryStart = html.indexOf('Budget summary');
+  const summary = html.slice(summaryStart, html.indexOf('Wallet</h3>', summaryStart));
+  assert(summaryStart >= 0 && summary.includes('Daily requested'), 'dashboard lost its budget summary');
+  assert(/Lifetime requested[\s\S]*?\$100\.00[\s\S]*?Daily requested[\s\S]*?\$10\.00[\s\S]*?\/ day/.test(summary), 'dashboard did not label and render the two budget units separately');
   assert(!html.includes('$110.00'), 'dashboard added a daily rate to a lifetime total');
+  assert(!/\$(850|800|150)\.00|\$50\.00[\s\S]*?\/ day/.test(summary), 'budget summary counted a draft, rejected or stopped request');
 });
 
 check('Ads Studio view and records are ownership scoped for customer accounts', () => {

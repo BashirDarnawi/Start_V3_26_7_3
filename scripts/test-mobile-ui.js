@@ -1522,6 +1522,122 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   `${openBraces} opening vs ${closeBraces} closing braces`);
 
 {
+  // P1-08a / P1-08b (classic Ads Studio fixes): the real studio helpers run in a sandbox, next to
+  // static checks of the source and of both built copies of studio.js.
+  const vm = require('vm');
+  const studioBox = vm.createContext({
+    state: { language: 'en', currentUser: { id: 'studio-check-user' } },
+    Security: { escapeHtml: value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') },
+    isSafeReceiptPhotoSource: () => true,
+    getEntityPhotoCountHint: () => 0
+  });
+  let studioLoadError = '';
+  try {
+    vm.runInContext((forms.match(/function normalizeDigitsAscii\(value\) \{[\s\S]*?\n\}/) || [''])[0], studioBox);
+    vm.runInContext(adsStudio, studioBox);
+  } catch (error) { studioLoadError = String(error && error.message || error); }
+  const inStudio = code => { try { return vm.runInContext(code, studioBox); } catch (error) { return `THREW ${error && error.message}`; } };
+  const inLanguage = (language, code) => { studioBox.state.language = language; const out = inStudio(code); studioBox.state.language = 'en'; return out; };
+  const studioFn = name => { const at = adsStudio.indexOf(`function ${name}(`); return at < 0 ? '' : adsStudio.slice(at, adsStudio.indexOf('\n}\n', at)); };
+
+  // P1-08a: a wallet charge row is shown in its own currency; a row without a currency is USD.
+  const chargeRow = data => `_adsStudioWalletRequestRow(${JSON.stringify({ id: 'row-check', data })}, false)`;
+  const lydRow = { reference: 'PAY-LYDCHECK', amountMinor: 5000, amountMinorLYD: 5000, currency: 'LYD', method: 'bank_transfer', status: 'pending' };
+  const usdRow = { reference: 'PAY-USDCHECK', amountMinor: 2000, amountMinorLYD: 13000, method: 'bank_transfer', status: 'pending' };
+  const lydEn = String(inLanguage('en', chargeRow(lydRow)));
+  const lydAr = String(inLanguage('ar', chargeRow(lydRow)));
+  const usdEn = String(inLanguage('en', chargeRow(usdRow)));
+  check('LYD rows use LYD', !studioLoadError && !lydEn.includes('$') && lydEn.includes('50.00 LYD') && !lydEn.includes('≈')
+    && !lydAr.includes('$') && lydAr.includes('50.00 د.ل') && usdEn.includes('$20.00') && usdEn.includes('≈ 130.00 LYD')
+    && studioFn('_adsStudioWalletRequestRow').includes('adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)'),
+  studioLoadError || `LYD row: ${lydEn.replace(/\s+/g, ' ').slice(0, 300)}`);
+
+  // P1-08a: /studio has no 'ads' view, so the Connections card explains instead of a dead button.
+  const studioSources = fs.readdirSync(path.join(ROOT, 'src/systems/ads_studio')).filter(file => file.endsWith('.js'))
+    .map(file => read(`src/systems/ads_studio/${file}`)).concat([read('studio.js'), read('www/studio.js')]);
+  const connectionsEn = String(inLanguage('en', 'renderAdsStudioConnections()'));
+  const connectionsAr = String(inLanguage('ar', 'renderAdsStudioConnections()'));
+  check("no navigateTo('ads') in studio", !studioLoadError && !studioSources.some(source => /navigateTo\(\s*['"`]ads['"`]\s*\)/.test(source))
+    && adsStudio.includes('${renderAdsStudioConnections()}') && !connectionsEn.includes('<button') && !connectionsAr.includes('<button')
+    && connectionsEn.includes('There is nothing for you to connect') && connectionsAr.includes('لا يلزمك ربط أي شيء من جهتك'),
+  studioLoadError || 'a studio file or built bundle still calls navigateTo(\'ads\'), or the Connections card lost its text');
+
+  const dashboard = studioFn('renderAdsStudioDashboard');
+  check('studio budget summary counts only Submitted and Approved requests',
+    dashboard.includes("const budgeted = campaigns.filter(item => ['Submitted', 'Approved'].includes(String(item.status || 'Draft')));")
+    && (dashboard.match(/const (lifetimeBudget|dailyBudget) = budgeted\n/g) || []).length === 2);
+
+  // P1-08b: the classic form enforces the server's limits: adLimits from GET /api/studio/me, the
+  // server defaults (studio_settings.py) as the fallback, compared field by field.
+  const settingsPy = read('server/systems/ads_studio/studio_settings.py');
+  const pyNumber = expr => {
+    const value = String(expr || '').trim();
+    if (/^\d[\d_]*$/.test(value)) return Number(value.replace(/_/g, ''));
+    const constant = settingsPy.match(new RegExp(`^${value} = (\\d[\\d_]*)`, 'm'));
+    return constant ? Number(constant[1].replace(/_/g, '')) : NaN;
+  };
+  const publicLimits = ((settingsPy.match(/PUBLIC_LIMIT_FIELDS = \(([^)]*)\)/) || [])[1] || '').split(',').map(f => f.trim().replace(/"/g, '')).filter(Boolean);
+  const defaultsPy = settingsPy.slice(settingsPy.indexOf('DEFAULTS: dict'));
+  const limitsPy = (defaultsPy.match(/"limits": \{([\s\S]*?)\}/) || [])[1] || '';
+  const serverDefaults = Object.fromEntries(publicLimits.map(f => [f, pyNumber((limitsPy.match(new RegExp(`"${f}": ([A-Za-z_\\d]+)`)) || [])[1])]));
+  const clientDefaults = JSON.parse(String(inStudio('JSON.stringify(ADS_STUDIO_DEFAULT_LIMITS)')).replace(/^THREW.*/, '{}'));
+  const limitProblem = (startDate, endDate, budgetMinorUSD, budgetType = 'lifetime') =>
+    String(inStudio(`adsStudioBudgetLimitProblem(${JSON.stringify({ startDate, endDate, budgetMinorUSD, budgetType })})`));
+  const lim = clientDefaults;
+  const defaultCases = [
+    limitProblem('2030-01-01', '2030-01-05', lim.minTotalMinorUSD - 1) !== '',
+    limitProblem('2030-01-01', '2030-01-05', lim.minTotalMinorUSD) === '',
+    limitProblem('2030-01-01', '2030-03-31', lim.maxTotalMinorUSD) === '',  // 90 days, both ends included
+    limitProblem('2030-01-01', '2030-03-31', lim.maxTotalMinorUSD + 1) !== '',
+    limitProblem('2030-01-01', '2030-04-01', lim.maxTotalMinorUSD) !== '',  // 91 days
+    limitProblem('2030-01-01', '2030-01-10', lim.minPerDayMinorUSD * 10 - 1) !== '',  // lifetime under the per-day floor
+    limitProblem('2030-01-01', '2030-01-05', lim.minPerDayMinorUSD, 'daily') === '',
+    limitProblem('2030-01-01', '2030-01-10', lim.minPerDayMinorUSD - 1, 'daily') !== '',
+    limitProblem('2030-01-01', '2030-03-31', 3000, 'daily') !== ''  // $30 x 90 days is over $2,000
+  ];
+  // Limits from /me win (minPerDayMinorUSD is optional there and keeps its default); a reset drops them.
+  inStudio("_adsStudioLimits = adsStudioCleanLimits({ minTotalMinorUSD: 2000, maxTotalMinorUSD: 5000, maxDays: 10 }); _adsStudioLimitsFor = 'studio-check-user';");
+  const fromMe = JSON.parse(String(inStudio('JSON.stringify(adsStudioLimits())')).replace(/^THREW.*/, '{}'));
+  const fullDraft = budgetMinorUSD => JSON.stringify({
+    name: 'Limit check', objective: 'messages', platforms: ['facebook'], pageName: 'Page', primaryText: 'Copy',
+    destination: '+218900000000', creativeImages: ['data:image/png;base64,AAAA'], locations: ['Libya'], ageMin: 18, ageMax: 65,
+    startDate: '2099-01-01', endDate: '2099-01-05', budgetMinorUSD, budgetType: 'lifetime'
+  });
+  const meCases = [
+    fromMe.minTotalMinorUSD === 2000 && fromMe.maxTotalMinorUSD === 5000 && fromMe.maxDays === 10 && fromMe.minPerDayMinorUSD === lim.minPerDayMinorUSD,
+    limitProblem('2030-01-01', '2030-01-05', 1999) !== '' && limitProblem('2030-01-01', '2030-01-05', 2000) === '',
+    limitProblem('2030-01-01', '2030-01-11', 2000) !== '',  // 11 days > maxDays 10
+    String(inStudio(`adsStudioValidateStep(4, ${fullDraft(1999)}).join('|')`)).includes('The total budget must be at least $20.00'),
+    String(inStudio(`adsStudioValidateStep(4, ${fullDraft(2000)}).length`)) === '0'
+  ];
+  inStudio('resetAdsStudioLimits()');
+  const afterReset = JSON.parse(String(inStudio('JSON.stringify(adsStudioLimits())')).replace(/^THREW.*/, '{}'));
+  check('classic budget limits = server limits (adLimits from /api/studio/me, plan defaults as fallback)', !studioLoadError
+    && publicLimits.length === 4 && JSON.stringify(Object.keys(clientDefaults).sort()) === JSON.stringify(publicLimits.slice().sort())
+    && publicLimits.every(f => Number.isSafeInteger(serverDefaults[f]) && serverDefaults[f] === clientDefaults[f])
+    && settingsPy.includes('"adLimits": {field: settings["limits"][field] for field in PUBLIC_LIMIT_FIELDS}')
+    && studioFn('refreshAdsStudioLimits').includes("apiJson('/api/studio/me', { method: 'GET' })") && studioFn('refreshAdsStudioLimits').includes('me.adLimits')
+    && adsStudio.includes('id="ads-studio-budget-limits"') && studioFn('resetAdsStudioSessionState').includes('resetAdsStudioLimits();')
+    && defaultCases.every(Boolean) && meCases.every(Boolean) && JSON.stringify(afterReset) === JSON.stringify(clientDefaults),
+  studioLoadError || `server ${JSON.stringify(serverDefaults)} vs client ${JSON.stringify(clientDefaults)}; default cases ${defaultCases}; /me cases ${meCases}`);
+
+  // P1-08b: Arabic-Indic digits typed as money go through normalizeDigitsAscii ('٥٠' is $50.00, never 0).
+  const parsed = raw => inStudio(`adsStudioParseMoneyMinor(${JSON.stringify(raw)})`);
+  inStudio("beginAdsStudioCampaign(); adsStudioSetDraftField('budgetMinorUSD', '٥٠');");
+  const typedBudget = inStudio('adsStudioMoney(_adsStudioDraft.budgetMinorUSD)');
+  const budgetInput = (adsStudio.match(/<input[^>]*id="ads-studio-field-budgetMinorUSD"[^>]*>/) || [''])[0];
+  const chargeInput = (adsStudio.match(/<input id="ads-studio-charge-amount"[^>]*>/) || [''])[0];
+  const moneyBox = tag => tag.includes('type="text"') && tag.includes('inputmode="decimal"') && tag.includes('sanitizeMoneyInput(this)') && !tag.includes('type="number"');
+  check("Arabic-Indic budget digits: '٥٠' -> $50.00", !studioLoadError && typedBudget === '$50.00'
+    && parsed('٥٠') === 5000 && parsed('١٢٫٥') === 1250 && parsed('۷۵') === 7500 && parsed('1,250') === 125000 && parsed('12،5') === 1250
+    && Number.isNaN(parsed('abc')) && studioFn('adsStudioParseMoneyMinor').includes('normalizeDigitsAscii(')
+    && moneyBox(budgetInput) && moneyBox(chargeInput)
+    && studioFn('adsStudioUpdateLydPreview').includes('adsStudioParseMoneyMinor(') && studioFn('adsStudioCreateWalletCharge').includes('adsStudioParseMoneyMinor(')
+    && !/parseFloat\(/.test(studioFn('adsStudioUpdateLydPreview') + studioFn('adsStudioCreateWalletCharge') + studioFn('adsStudioSetDraftField')),
+  studioLoadError || `typed '٥٠' became ${typedBudget}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');
