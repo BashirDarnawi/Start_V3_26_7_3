@@ -846,7 +846,7 @@ def _append_message(
         old = _data(existing)
         if bool(existing["deleted"]) or old.get("text") != body or old.get("author") != author:
             studio_error(409, "IDEMPOTENCY_MISMATCH", "This operationId was already used for a different message")
-        return data, {**old, "id": new_id}, False
+        return {**old, "id": new_id}, False
     if author == "customer" and data.get("status") == "resolved":
         if not _can_reopen(data, now):
             studio_error(409, "TICKET_CLOSED", f"This ticket was resolved more than {REOPEN_DAYS} days ago. Open a new ticket.")
@@ -867,19 +867,15 @@ def _append_message(
                "authorUserId": str(author_id or "") or None, "text": body, "createdAt": at, "operationId": operation_id}
     if not _insert(conn, SUPPORT_TICKET_MESSAGES_TYPE, new_id, message, row["created_by"], now_ms()):
         studio_error(409, "IDEMPOTENCY_MISMATCH", "This operationId was already used for a different message")
-    _update(conn, SUPPORT_TICKETS_TYPE, row, data)
     if author == "team":
         from .studio_activity import record_activity  # late, as ad_campaign_actions does (no import cycle either way)
 
-        # One inbox item per answer (the message's operationId is its key); a scrubbed owner gets none.
+        # One inbox item per team answer (the message's operationId is its key; a replay returned above); a
+        # scrubbed owner gets none. TikTok status notes by the team (status route) reach the inbox the same way.
         record_activity(conn, owner_id=row["created_by"] or data.get("ownerId"), kind="ticket_answered",
                         related_type="ticket", related_id=row_id, key=operation_id, at=now,
                         params={"number": data.get("number")})
-    if audit is not None:
-        audit(conn, "ticket_message", row_id, f"Ticket {data.get('number')}: {author} message", {
-            "number": data.get("number"), "from": author, "statusBefore": was, "status": data["status"],
-        })
-    return data, message, True
+    return {**message, "id": new_id}, True
 
 
 def change_status_conn(
