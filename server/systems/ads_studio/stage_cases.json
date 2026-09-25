@@ -1,0 +1,1808 @@
+{
+  "about": "Albayan Studio display stages (PLAN.md §5.4, task P1-20). Shared by the server (server/systems/ads_studio/studio_results.py, tested in server/test_studio_results.py) and the client fallback (P2-01). 'tables' must equal studio_results.stage_tables(); every case's 'expect' lists the fields derive_display_stage(request, results, now) must return.",
+  "tables": {
+    "staleCheckHours": 6,
+    "stages": {
+      "1": {
+        "key": "draft",
+        "en": "Draft — not sent",
+        "ar": "مسودة — لم تُرسل",
+        "tone": "slate",
+        "icon": "pencil",
+        "money": "nothing_reserved",
+        "nextActor": "you",
+        "tracker": "not_sent",
+        "side": false,
+        "actions": [
+          "edit",
+          "send",
+          "delete"
+        ]
+      },
+      "2": {
+        "key": "waiting_review",
+        "en": "Waiting for Albayan review",
+        "ar": "بانتظار مراجعة فريق البيان",
+        "tone": "amber",
+        "icon": "clock",
+        "money": "reserved",
+        "nextActor": "albayan",
+        "tracker": "sent",
+        "side": false,
+        "actions": [
+          "withdraw",
+          "ask"
+        ]
+      },
+      "3": {
+        "key": "needs_changes",
+        "en": "Needs your changes",
+        "ar": "يحتاج تعديلك",
+        "tone": "orange",
+        "icon": "message-warning",
+        "money": "reserve_released",
+        "nextActor": "you",
+        "tracker": "sent",
+        "side": true,
+        "actions": [
+          "fix",
+          "ask"
+        ]
+      },
+      "4": {
+        "key": "approved_setup",
+        "en": "Approved — being set up in Meta",
+        "ar": "مقبول — نجهّزه في ميتا",
+        "tone": "blue",
+        "icon": "badge-check",
+        "money": "paid",
+        "nextActor": "albayan",
+        "tracker": "approved",
+        "side": false,
+        "actions": [
+          "stop_refund",
+          "ask_to_stop",
+          "ask"
+        ]
+      },
+      "5": {
+        "key": "meta_reviewing",
+        "en": "Meta is reviewing",
+        "ar": "ميتا تراجع الإعلان",
+        "tone": "blue",
+        "icon": "shield",
+        "money": "paid",
+        "nextActor": "meta",
+        "tracker": "meta_review",
+        "side": false,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ]
+      },
+      "6": {
+        "key": "meta_rejected",
+        "en": "Meta rejected the ad — the team is fixing it",
+        "ar": "ميتا رفضت الإعلان — الفريق يعالجه",
+        "tone": "red-orange",
+        "icon": "shield-alert",
+        "money": "paid_meta_rejected",
+        "nextActor": "albayan",
+        "tracker": "meta_review",
+        "side": true,
+        "actions": [
+          "ask",
+          "ask_to_stop"
+        ]
+      },
+      "7": {
+        "key": "delivery_problem",
+        "en": "Delivery problem — the team is fixing it",
+        "ar": "مشكلة في التشغيل — الفريق يعالجها",
+        "tone": "orange",
+        "icon": "alert-triangle",
+        "money": "paid",
+        "nextActor": "albayan",
+        "tracker": "running",
+        "side": true,
+        "actions": [
+          "ask",
+          "ask_to_stop"
+        ]
+      },
+      "8": {
+        "key": "running",
+        "en": "Running",
+        "ar": "يعمل الآن",
+        "tone": "green",
+        "icon": "play",
+        "money": "paid_running",
+        "nextActor": "none",
+        "tracker": "running",
+        "side": false,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ]
+      },
+      "9": {
+        "key": "paused",
+        "en": "Paused",
+        "ar": "متوقف مؤقتاً",
+        "tone": "slate-blue",
+        "icon": "pause",
+        "money": "paid",
+        "nextActor": "albayan",
+        "tracker": "running",
+        "side": true,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ]
+      },
+      "10": {
+        "key": "ended_settling",
+        "en": "Ended — final amount being calculated",
+        "ar": "انتهى — نحسب المبلغ النهائي",
+        "tone": "slate",
+        "icon": "hourglass",
+        "money": "paid_settling",
+        "nextActor": "albayan",
+        "tracker": "ended",
+        "side": false,
+        "actions": [
+          "ask"
+        ]
+      },
+      "11": {
+        "key": "finished",
+        "en": "Finished",
+        "ar": "انتهى",
+        "tone": "slate",
+        "icon": "flag",
+        "money": "final",
+        "nextActor": "none",
+        "tracker": "finished",
+        "side": false,
+        "actions": [
+          "archive"
+        ]
+      },
+      "12": {
+        "key": "stopped",
+        "en": "Stopped",
+        "ar": "أُوقف",
+        "tone": "rose",
+        "icon": "stop",
+        "money": "returned",
+        "nextActor": "none",
+        "tracker": "finished",
+        "side": true,
+        "actions": [
+          "archive"
+        ]
+      },
+      "13": {
+        "key": "rejected",
+        "en": "Rejected by Albayan",
+        "ar": "مرفوض من فريق البيان",
+        "tone": "red",
+        "icon": "x",
+        "money": "reserve_released",
+        "nextActor": "none",
+        "tracker": "sent",
+        "side": true,
+        "actions": [
+          "read_reasons",
+          "copy_fix",
+          "delete"
+        ]
+      }
+    },
+    "money": {
+      "nothing_reserved": {
+        "en": "Nothing reserved",
+        "ar": "لا يوجد مبلغ محجوز"
+      },
+      "reserved": {
+        "en": "Reserved — still yours",
+        "ar": "محجوز — ما زال لك"
+      },
+      "reserve_released": {
+        "en": "The reserved amount is back in your balance",
+        "ar": "عاد المبلغ المحجوز إلى رصيدك"
+      },
+      "paid": {
+        "en": "Paid — counted in \"In your ads\"",
+        "ar": "مدفوع — ضمن «في إعلاناتك»"
+      },
+      "paid_meta_rejected": {
+        "en": "Paid — usually nothing was used; if it cannot be fixed in time, the full amount comes back",
+        "ar": "مدفوع — عادةً لم يُصرف شيء، وإن تعذّر إصلاحه في الوقت المحدد نعيد المبلغ كاملاً"
+      },
+      "paid_running": {
+        "en": "Paid — Meta reports what it used so far",
+        "ar": "مدفوع — تعرض ميتا ما استخدمته حتى الآن"
+      },
+      "paid_settling": {
+        "en": "Unused money comes back after Meta's final numbers, usually within 2–3 days",
+        "ar": "نحسب المبلغ النهائي بعد أن تثبت أرقام ميتا — عادةً خلال يومين إلى ثلاثة"
+      },
+      "full_return": {
+        "en": "Meta never showed your ad — we return the full amount within one working day",
+        "ar": "لم تعرض ميتا إعلانك — نعيد المبلغ كاملاً خلال يوم عمل"
+      },
+      "final": {
+        "en": "Final — what Meta used is spent, the rest came back",
+        "ar": "نهائي — صُرف ما استخدمته ميتا وعاد الباقي"
+      },
+      "returned": {
+        "en": "The unused amount came back to your wallet",
+        "ar": "عاد المبلغ غير المصروف إلى محفظتك"
+      }
+    },
+    "nextActors": {
+      "you": {
+        "en": "You",
+        "ar": "أنت"
+      },
+      "albayan": {
+        "en": "Albayan team",
+        "ar": "فريق البيان"
+      },
+      "meta": {
+        "en": "Meta (about 24 hours)",
+        "ar": "ميتا (نحو 24 ساعة)"
+      },
+      "none": {
+        "en": "Nothing needed now",
+        "ar": "لا شيء مطلوب الآن"
+      }
+    },
+    "variants": {
+      "checking": {
+        "en": "Checking Meta…",
+        "ar": "نتحقق من ميتا…"
+      },
+      "never_delivered": {
+        "en": "Meta never showed this ad",
+        "ar": "لم تعرض ميتا هذا الإعلان"
+      },
+      "never_linked": {
+        "en": "This ad was never created in Meta",
+        "ar": "لم يُنشأ هذا الإعلان في ميتا"
+      }
+    },
+    "flags": {
+      "runningPastEnd": {
+        "en": "Running past the promised end — the team is on it",
+        "ar": "ما زال يعمل بعد موعد الانتهاء — الفريق يتابعه"
+      },
+      "stopRequested": {
+        "en": "Stop requested — we will pause it soon",
+        "ar": "طُلب الإيقاف — سنوقفه قريباً"
+      },
+      "stale": {
+        "en": "Meta has not been checked for a while",
+        "ar": "لم نتحقق من ميتا منذ مدة"
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "draft",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Draft",
+        "startDate": "2026-10-20",
+        "endDate": "2026-10-30"
+      },
+      "results": null,
+      "expect": {
+        "stage": 1,
+        "stageKey": "draft",
+        "nextActor": "you",
+        "moneyKey": "nothing_reserved",
+        "actions": [
+          "edit",
+          "send",
+          "delete"
+        ],
+        "linked": false,
+        "metaUsedMinor": null,
+        "checkedAt": null,
+        "tracker": {
+          "step": "not_sent",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "no_status_is_draft",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {},
+      "results": null,
+      "expect": {
+        "stage": 1,
+        "stageKey": "draft",
+        "nextActor": "you",
+        "moneyKey": "nothing_reserved"
+      }
+    },
+    {
+      "name": "withdrawn_is_draft",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Draft",
+        "submittedAt": "2026-10-14T08:00:00Z",
+        "withdrawnAt": "2026-10-14T09:00:00Z"
+      },
+      "results": null,
+      "expect": {
+        "stage": 1,
+        "stageKey": "draft",
+        "nextActor": "you",
+        "moneyKey": "nothing_reserved"
+      }
+    },
+    {
+      "name": "submitted",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Submitted",
+        "submittedAt": "2026-10-14T08:00:00Z",
+        "budgetMinorUSD": 3000
+      },
+      "results": null,
+      "expect": {
+        "stage": 2,
+        "stageKey": "waiting_review",
+        "nextActor": "albayan",
+        "moneyKey": "reserved",
+        "actions": [
+          "withdraw",
+          "ask"
+        ],
+        "tracker": {
+          "step": "sent",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "status_first_submitted_ignores_results",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Submitted",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 2,
+        "stageKey": "waiting_review",
+        "nextActor": "albayan",
+        "moneyKey": "reserved",
+        "metaUsedMinor": null,
+        "checkedAt": null
+      }
+    },
+    {
+      "name": "changes_requested",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Changes Requested",
+        "changeReasons": [
+          "photo",
+          "budget_dates"
+        ]
+      },
+      "results": null,
+      "expect": {
+        "stage": 3,
+        "stageKey": "needs_changes",
+        "nextActor": "you",
+        "moneyKey": "reserve_released",
+        "reasons": [
+          "photo",
+          "budget_dates"
+        ],
+        "actions": [
+          "fix",
+          "ask"
+        ],
+        "tracker": {
+          "step": "sent",
+          "side": true
+        }
+      }
+    },
+    {
+      "name": "rejected",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Rejected",
+        "changeReasons": [
+          "policy"
+        ]
+      },
+      "results": null,
+      "expect": {
+        "stage": 13,
+        "stageKey": "rejected",
+        "nextActor": "none",
+        "moneyKey": "reserve_released",
+        "reasons": [
+          "policy"
+        ],
+        "actions": [
+          "read_reasons",
+          "copy_fix",
+          "delete"
+        ]
+      }
+    },
+    {
+      "name": "approved_unlinked_not_started",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-16",
+        "endDate": "2026-10-25"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "linked": false,
+        "checking": false,
+        "variant": "",
+        "metaUsedMinor": null,
+        "checkedAt": null,
+        "actions": [
+          "stop_refund",
+          "ask_to_stop",
+          "ask"
+        ],
+        "tracker": {
+          "step": "approved",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "approved_unlinked_starts_today",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-15",
+        "endDate": "2026-10-25"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "actions": [
+          "stop_refund",
+          "ask_to_stop",
+          "ask"
+        ]
+      },
+      "note": "the start day itself still allows the customer's own full-refund stop"
+    },
+    {
+      "name": "approved_unlinked_started",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "metaUsedMinor": null,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ]
+      }
+    },
+    {
+      "name": "approved_marked_live_by_hand",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-16",
+        "endDate": "2026-10-25",
+        "publishStatus": "live"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "linked": false,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ]
+      }
+    },
+    {
+      "name": "approved_unlinked_after_end",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-01",
+        "endDate": "2026-10-14"
+      },
+      "results": null,
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "full_return",
+        "variant": "never_linked",
+        "metaUsedMinor": null,
+        "checkedAt": null,
+        "actions": [
+          "ask"
+        ]
+      }
+    },
+    {
+      "name": "approved_unlinked_on_end_day",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-01",
+        "endDate": "2026-10-15"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "variant": ""
+      }
+    },
+    {
+      "name": "approved_marked_live_after_end",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-01",
+        "endDate": "2026-10-14",
+        "publishStatus": "live"
+      },
+      "results": null,
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling",
+        "variant": ""
+      },
+      "note": "a legacy ad staff marked live by hand did run: no full-return promise"
+    },
+    {
+      "name": "libya_day_boundary",
+      "now": "2026-10-14T22:30:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-01",
+        "endDate": "2026-10-14"
+      },
+      "results": null,
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "full_return",
+        "variant": "never_linked"
+      },
+      "note": "00:30 on 15 October in Tripoli: the 14th has passed there although it is still the 14th in UTC"
+    },
+    {
+      "name": "linked_no_results_checking",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "linked": true,
+        "checking": true,
+        "variant": "checking",
+        "metaUsedMinor": null,
+        "checkedAt": null,
+        "stale": false,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ]
+      }
+    },
+    {
+      "name": "linked_results_never_read",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "never",
+        "lastSyncedAt": null,
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {},
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "checking": true,
+        "variant": "checking",
+        "metaUsedMinor": null
+      }
+    },
+    {
+      "name": "linked_results_of_another_meta_campaign",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000999",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "checking": true,
+        "metaUsedMinor": null,
+        "checkedAt": null
+      }
+    },
+    {
+      "name": "running",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 300,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "linked": true,
+        "checking": false,
+        "metaUsedMinor": 300,
+        "checkedAt": "2026-10-15T09:30:00Z",
+        "stale": false,
+        "runningPastEnd": false,
+        "stopRequested": false,
+        "actions": [
+          "ask_to_stop",
+          "ask"
+        ],
+        "tracker": {
+          "step": "running",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "running_from_delivering_flag",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {},
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 120,
+        "currency": "USD",
+        "anyAdDelivering": true
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "metaUsedMinor": 120
+      }
+    },
+    {
+      "name": "running_wins_over_review_and_end",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-12",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1,
+          "PENDING_REVIEW": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "runningPastEnd": true
+      }
+    },
+    {
+      "name": "meta_reviewing",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PENDING_REVIEW": 2
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 5,
+        "stageKey": "meta_reviewing",
+        "nextActor": "meta",
+        "moneyKey": "paid",
+        "runningPastEnd": false,
+        "tracker": {
+          "step": "meta_review",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "meta_reviewing_in_process_preapproved",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "IN_PROCESS": 1,
+          "PREAPPROVED": 1,
+          "DISAPPROVED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 5,
+        "stageKey": "meta_reviewing",
+        "nextActor": "meta",
+        "moneyKey": "paid"
+      }
+    },
+    {
+      "name": "meta_reviewing_past_end",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PENDING_REVIEW": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD",
+        "adsetEndTime": "2026-10-14T22:00:00Z"
+      },
+      "expect": {
+        "stage": 5,
+        "stageKey": "meta_reviewing",
+        "nextActor": "meta",
+        "moneyKey": "paid",
+        "runningPastEnd": true
+      }
+    },
+    {
+      "name": "ended_adset_end_time",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 2700,
+        "currency": "USD",
+        "adsetEndTime": "2026-10-15T08:00:00Z"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling",
+        "variant": "",
+        "metaUsedMinor": 2700,
+        "tracker": {
+          "step": "ended",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "ended_campaign_deleted",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "DELETED",
+        "adStatusCounts": {},
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling"
+      }
+    },
+    {
+      "name": "ended_campaign_stop_time",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "CAMPAIGN_PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD",
+        "campaignStopTime": "2026-10-15T00:00:00Z"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling"
+      }
+    },
+    {
+      "name": "ended_request_end_date",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-14",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling"
+      }
+    },
+    {
+      "name": "ended_by_stop_request",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001",
+        "stopRequestedAt": "2026-10-15T07:00:00Z"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "PAUSED",
+        "adStatusCounts": {
+          "CAMPAIGN_PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling",
+        "stopRequested": false,
+        "stopRequestedAt": "2026-10-15T07:00:00Z"
+      },
+      "note": "a stop request is an end signal, so a paused ad with one is Ended, not Paused"
+    },
+    {
+      "name": "ended_never_delivered",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-14",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD",
+        "neverDelivered": true,
+        "lifetimeImpressions": 0
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "full_return",
+        "variant": "never_delivered",
+        "metaUsedMinor": 0
+      }
+    },
+    {
+      "name": "ended_wins_over_meta_rejected",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-14",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "DISAPPROVED": 2
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "nextActor": "albayan",
+        "moneyKey": "paid_settling"
+      }
+    },
+    {
+      "name": "meta_rejected",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "DISAPPROVED": 2
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 6,
+        "stageKey": "meta_rejected",
+        "nextActor": "albayan",
+        "moneyKey": "paid_meta_rejected",
+        "tracker": {
+          "step": "meta_review",
+          "side": true
+        },
+        "actions": [
+          "ask",
+          "ask_to_stop"
+        ]
+      }
+    },
+    {
+      "name": "delivery_problem_with_issues",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "WITH_ISSUES": 1,
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 7,
+        "stageKey": "delivery_problem",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "tracker": {
+          "step": "running",
+          "side": true
+        }
+      }
+    },
+    {
+      "name": "delivery_problem_billing",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PENDING_BILLING_INFO": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 7,
+        "stageKey": "delivery_problem",
+        "nextActor": "albayan",
+        "moneyKey": "paid"
+      },
+      "note": "the customer never sees 'billing' (Albayan's own account needs funds)"
+    },
+    {
+      "name": "delivery_problem_campaign_with_issues",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "WITH_ISSUES",
+        "adStatusCounts": {},
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 7,
+        "stageKey": "delivery_problem",
+        "nextActor": "albayan",
+        "moneyKey": "paid"
+      }
+    },
+    {
+      "name": "paused_campaign",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "PAUSED",
+        "adStatusCounts": {
+          "CAMPAIGN_PAUSED": 2
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 9,
+        "stageKey": "paused",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "tracker": {
+          "step": "running",
+          "side": true
+        }
+      }
+    },
+    {
+      "name": "paused_all_ads",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PAUSED": 1,
+          "ADSET_PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 9,
+        "stageKey": "paused",
+        "nextActor": "albayan",
+        "moneyKey": "paid"
+      }
+    },
+    {
+      "name": "linked_checked_no_ads_yet",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {},
+        "insightsState": "never",
+        "spendConfirmedAt": null,
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "checking": false,
+        "variant": "",
+        "metaUsedMinor": null,
+        "checkedAt": "2026-10-15T09:30:00Z"
+      }
+    },
+    {
+      "name": "mixed_disapproved_and_paused",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "DISAPPROVED": 1,
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "checking": false
+      },
+      "note": "no rule of PLAN.md §5.4 matches: the team is still setting it up"
+    },
+    {
+      "name": "stale_check",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T03:59:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "stale": true,
+        "checkedAt": "2026-10-15T03:59:00Z"
+      }
+    },
+    {
+      "name": "six_hours_is_not_stale",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T04:00:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "stale": false
+      }
+    },
+    {
+      "name": "stop_requested_overlay_running",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001",
+        "stopRequestedAt": "2026-10-15T09:00:00Z"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "stopRequested": true,
+        "stopRequestedAt": "2026-10-15T09:00:00Z",
+        "runningPastEnd": false,
+        "actions": [
+          "ask"
+        ]
+      },
+      "note": "the stop chip shows instead of 'running past the promised end' (dates only)"
+    },
+    {
+      "name": "stop_requested_overlay_unlinked",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "stopRequestedAt": "2026-10-15T09:00:00Z"
+      },
+      "results": null,
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "stopRequested": true,
+        "actions": [
+          "ask"
+        ]
+      }
+    },
+    {
+      "name": "currency_mismatch_hides_meta_used",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 500,
+        "currency": "EUR"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "metaUsedMinor": null
+      }
+    },
+    {
+      "name": "spend_not_confirmed_hides_meta_used",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": null,
+        "spendMinorUSD": 500,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "nextActor": "none",
+        "moneyKey": "paid_running",
+        "metaUsedMinor": null
+      }
+    },
+    {
+      "name": "stopped_completed",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "closeReason": "completed",
+        "spendMinorUSD": 300
+      },
+      "results": null,
+      "expect": {
+        "stage": 11,
+        "stageKey": "finished",
+        "nextActor": "none",
+        "moneyKey": "final",
+        "actions": [
+          "archive"
+        ],
+        "tracker": {
+          "step": "finished",
+          "side": false
+        }
+      }
+    },
+    {
+      "name": "stopped_by_customer",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "closeReason": "customer_stop"
+      },
+      "results": null,
+      "expect": {
+        "stage": 12,
+        "stageKey": "stopped",
+        "nextActor": "none",
+        "moneyKey": "returned",
+        "actions": [
+          "archive"
+        ],
+        "tracker": {
+          "step": "finished",
+          "side": true
+        }
+      }
+    },
+    {
+      "name": "stopped_by_staff",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "closeReason": "staff_stop",
+        "spendMinorUSD": 900
+      },
+      "results": null,
+      "expect": {
+        "stage": 12,
+        "stageKey": "stopped",
+        "nextActor": "none",
+        "moneyKey": "returned"
+      }
+    },
+    {
+      "name": "stopped_legacy_after_end_is_finished",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "spendMinorUSD": 2700,
+        "endDate": "2026-10-10",
+        "stoppedAt": "2026-10-12T10:00:00Z"
+      },
+      "results": null,
+      "expect": {
+        "stage": 11,
+        "stageKey": "finished",
+        "nextActor": "none",
+        "moneyKey": "final"
+      }
+    },
+    {
+      "name": "stopped_legacy_before_end_is_stopped",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "spendMinorUSD": 1000,
+        "endDate": "2026-10-20",
+        "stoppedAt": "2026-10-12T10:00:00Z"
+      },
+      "results": null,
+      "expect": {
+        "stage": 12,
+        "stageKey": "stopped",
+        "nextActor": "none",
+        "moneyKey": "returned"
+      }
+    },
+    {
+      "name": "stopped_legacy_no_spend_is_stopped",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "spendMinorUSD": 0,
+        "endDate": "2026-10-10",
+        "stoppedAt": "2026-10-12T10:00:00Z"
+      },
+      "results": null,
+      "expect": {
+        "stage": 12,
+        "stageKey": "stopped",
+        "nextActor": "none",
+        "moneyKey": "returned"
+      }
+    },
+    {
+      "name": "stopped_ignores_results",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Stopped",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001",
+        "closeReason": "completed"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 300,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 11,
+        "stageKey": "finished",
+        "nextActor": "none",
+        "moneyKey": "final",
+        "metaUsedMinor": null,
+        "checkedAt": null
+      }
+    },
+    {
+      "name": "approved_but_settled",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001",
+        "settleBasis": "final_read"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 11,
+        "stageKey": "finished",
+        "nextActor": "none",
+        "moneyKey": "final"
+      }
+    },
+    {
+      "name": "bad_results_values_read_safely",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "yesterday",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": "lots",
+          "BOGUS": 3
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 4,
+        "stageKey": "approved_setup",
+        "nextActor": "albayan",
+        "moneyKey": "paid",
+        "checking": true,
+        "metaUsedMinor": null
+      },
+      "note": "an unreadable check time means never checked"
+    }
+  ]
+}

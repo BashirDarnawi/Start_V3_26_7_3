@@ -15,5 +15,6 @@ OWNED_TYPES = frozenset(
         "socialPosts",
         "socialReplyLog",
         "studioSettings",  # /api/studio switches (studio_settings.py)
+        "adCampaignResults",  # Meta's view of a linked request (studio_results.py)
     }
 )

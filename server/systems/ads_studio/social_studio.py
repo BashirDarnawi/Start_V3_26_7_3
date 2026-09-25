@@ -52,7 +52,7 @@ LOG_TYPE = "socialReplyLog"
 # Router-only types: main.py's generic /api/collections refuses every one of them.
 SOCIAL_STUDIO_COLLECTIONS = frozenset(
     {SETTINGS_TYPE, PAGES_TYPE, RULES_TYPE, POSTS_TYPE, LOG_TYPE}
-) | STUDIO_ROUTER_ONLY_TYPES
+) | STUDIO_ROUTER_ONLY_TYPES | {"adCampaignResults"}  # + studio_results.RESULTS_TYPE (P1-20)
 
 PLATFORMS = ("fb", "ig")
 POST_EDITABLE_STATUSES = frozenset({"draft", "scheduled", "failed"})

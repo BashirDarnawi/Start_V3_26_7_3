@@ -150,6 +150,89 @@ def confirmed_top_up_amounts(conn: Any, currency: str = "USD", limit: int = 5) -
     return {"amounts": [{"amountMinor": amount, "count": count} for amount, count in ranked], "sample": sum(counts.values())}
 
 
+def ledger_amount_minor(data: dict[str, Any]) -> int:
+    """One ledger row's positive amount in minor units, read exactly as the balance reads it
+    (main._wallet_amount_minor): ``amountMinor``, else ``amount`` x 100 rounded; 0 when unusable."""
+    try:
+        amount = int(data.get("amountMinor"))
+    except (TypeError, ValueError, OverflowError):
+        try:
+            amount = round(float(data.get("amount")) * 100)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return amount if amount > 0 else 0
+
+
+# The fields a money summary may read from a ledger row: never the memo or who wrote the row.
+LEDGER_SUMMARY_FIELDS = (
+    "type", "currency", "fromUserId", "toUserId", "idempotencyKey", "referenceType", "referenceId", "createdAt",
+    "status",
+)
+
+
+def wallet_ledger_rows(conn: Any, user_id: str) -> list[dict[str, Any]]:
+    """Read only: every ledger row (any currency) that moves money to or from ``user_id``.
+
+    The same rows main._wallet_balance_minor sums (live rows naming the user as sender or
+    receiver), so a summary built from them agrees with every debit check. Each row is a plain
+    dict: ``id``, ``amountMinor`` (ledger_amount_minor), ``currency`` upper-cased and the
+    LEDGER_SUMMARY_FIELDS as text; nothing else (no memo, no staff stamps).
+    """
+    uid = str(user_id or "")
+    if not uid:
+        return []
+    rows = conn.execute(
+        text(
+            "SELECT id, data_json FROM entities WHERE type = 'walletTransactions' AND deleted = false "
+            f"AND ({json_field_sql('toUserId')} = :uid OR {json_field_sql('fromUserId')} = :uid)"
+        ),
+        {"uid": uid},
+    ).mappings().all()
+    out = []
+    for row in rows:
+        data = json_loads(row.get("data_json") or "{}") or {}
+        if uid not in (str(data.get("toUserId") or ""), str(data.get("fromUserId") or "")):
+            continue
+        item = {field: str(data.get(field) or "") for field in LEDGER_SUMMARY_FIELDS}
+        item["currency"] = item["currency"].upper()
+        item["id"] = str(row.get("id") or "")
+        item["amountMinor"] = ledger_amount_minor(data)
+        out.append(item)
+    return out
+
+
+def pending_payment_requests(conn: Any, user_id: str) -> list[dict[str, Any]]:
+    """Read only: the user's PENDING charge requests as ``{reference, amountMinor, currency,
+    createdAt}`` (a request without a currency is USD, as in the confirm path). Only these
+    fields are read: never the receipt photo, never a staff field."""
+    uid = str(user_id or "")
+    if not uid:
+        return []
+    rows = conn.execute(
+        text(json_fields_select_sql(
+            ("status", "userId", "reference", "amountMinor", "currency", "createdAt"), ("id",),
+            "type = :type AND deleted = false AND created_by = :uid",
+        )),
+        {"type": WALLET_PAYMENT_COLLECTION, "uid": uid},
+    ).mappings().all()
+    out = []
+    for row in rows:
+        if str(row.get("f_status") or "") != "pending" or str(row.get("f_userid") or "") != uid:
+            continue
+        try:
+            amount = max(int(float(row.get("f_amountminor") or 0)), 0)
+        except (TypeError, ValueError, OverflowError):
+            amount = 0
+        out.append({
+            "reference": str(row.get("f_reference") or ""),
+            "amountMinor": amount,
+            "currency": str(row.get("f_currency") or "USD").strip().upper(),
+            "createdAt": str(row.get("f_createdat") or ""),
+        })
+    out.sort(key=lambda item: item["createdAt"], reverse=True)
+    return out
+
+
 def _campaign_payment_key(campaign: dict[str, Any]) -> str:
     """One payment per SUBMISSION CYCLE: budgets are frozen while Submitted
     (edits are only allowed in Draft/Changes Requested), so scoping the key
