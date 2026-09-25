@@ -75,6 +75,7 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P3-16 | Done | stage 12 | `studio_hours.py`: due times from the week hours, holidays and Ramadan (Africa/Tripoli); used for ticket and stop-request due times |
 | P3-17 | Done (server) | stage 12 | Staff pulse (`GET /api/studio/staff/pulse`): counts only; admins also see payments waiting |
 | P3-20 | Done | stage 12 | Services and the Team desk stay independent of the customer layout; `STAFF_DESK_IN_USE` refuses switching the desk off while tickets or stop requests are open |
+| P3-05 (client) + P3-08 + P3-09 + P3-10 (client) | Done | stage 12 | Help in both layouts (tickets list/new/thread, Ask about this, contact + hours), v2 Inbox with the bell badge and Mark all seen, classic staff tickets section, stop-request sheet on Approved cards in both layouts (after-hours urgent line) |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
