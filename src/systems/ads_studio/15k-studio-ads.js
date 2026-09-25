@@ -475,12 +475,16 @@ function renderStudioAdsSheet(kind, request, stage) {
 }
 
 // Opens one sheet (another open one is replaced). The request must still offer that action.
+// "Ask about this" and "Ask to stop" go to the help desk (15n) once its services are on for this
+// user; the "coming soon" sheets below stay for everyone else.
 function studioAdsSheet(kind, id, opener = null) {
   if (typeof document === 'undefined' || !document.body) return false;
   const request = studioDataRequest(id);
   if (!request) return false;
   const stage = studioDataStage(request);
   if (!studioAdsActions(request, stage).includes(kind) || kind === 'edit') return false;
+  if (kind === 'ask' && typeof studioHelpAskAbout === 'function' && studioHelpAskAbout('campaign', request.id)) return true;
+  if (kind === 'ask_stop' && typeof studioStopSheetOpen === 'function' && studioStopSheetOpen(request.id, opener)) return true;
   const holder = document.createElement('div');
   holder.innerHTML = renderStudioAdsSheet(kind, request, stage).trim();
   const el = holder.firstElementChild;

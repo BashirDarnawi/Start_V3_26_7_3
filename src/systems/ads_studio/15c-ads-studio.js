@@ -179,6 +179,11 @@ function openAdsStudioCustomerAccount() {
 
 function adsStudioTabsForUser() {
   const tabs = ADS_STUDIO_TABS.slice();
+  // Help (P3-08, 15n-studio-help.js): tickets and our working hours, in the classic layout too, once
+  // /me says the Help service is on for this user (the layout switch never hides a service, P3-20).
+  if (typeof studioHelpClassicTab === 'function' && studioHelpClassicTab()) {
+    tabs.push({ id: 'help', icon: 'life-buoy', label: 'Help', labelAr: 'المساعدة' });
+  }
   if (adsStudioCanReview()) {
     tabs.push({ id: 'review', icon: 'badge-check', label: 'Review Queue', labelAr: 'طلبات المراجعة' });
   }
@@ -500,9 +505,10 @@ function renderAdsStudioView() {
   let content = '';
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
-  else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue() + renderAdsStudioLaunchQueue() + (isCurrentUserAdmin() && typeof renderStudioHealthSection === 'function' ? renderStudioHealthSection() : '');
+  else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue() + renderAdsStudioLaunchQueue() + (typeof renderStudioStaffTicketsClassic === 'function' ? renderStudioStaffTicketsClassic() : '') + (isCurrentUserAdmin() && typeof renderStudioHealthSection === 'function' ? renderStudioHealthSection() : '');
   else if (_adsStudioActiveTab === 'posts') content = renderSocialStudioPostsTab();
   else if (_adsStudioActiveTab === 'replies') content = renderSocialStudioRepliesTab();
+  else if (_adsStudioActiveTab === 'help' && typeof renderStudioHelpClassic === 'function') content = renderStudioHelpClassic();
   else content = renderAdsStudioDashboard();
 
   return `
@@ -630,7 +636,14 @@ function renderAdsStudioCampaignCard(campaign) {
   const mayStop = canActOnRecord('adCampaignRequests', 'stop', campaign.createdBy);
   const staffHere = adsStudioCanReview() && String(campaign.createdBy || '') !== String(state.currentUser?.id || '');  // own campaigns follow the customer rule (server)
   const canStop = statusValue === 'Approved' && (staffHere || (mayStop && ownerCanInstantStop));
-  const showAskStop = statusValue === 'Approved' && !staffHere && mayStop && !ownerCanInstantStop;
+  // Ask to stop (P3-10, 15n-studio-help.js): the real stop-request sheet on an Approved request of
+  // the owner once the service is on; the old "message us" toast stays only while it is off. An ad
+  // whose stop was already asked for shows the marker instead (the ticket, when Help is on).
+  const stopRequestedAt = String(campaign.stopRequestedAt || '').trim() || (typeof studioStopRequestedAt === 'function' ? studioStopRequestedAt(campaign.id) : '');
+  const askStopSheet = statusValue === 'Approved' && !staffHere && mayStop && !stopRequestedAt && typeof studioStopSheetAvailable === 'function' && studioStopSheetAvailable();
+  const showAskStop = statusValue === 'Approved' && !staffHere && mayStop && !ownerCanInstantStop && !askStopSheet && !stopRequestedAt;
+  const stopTicketId = /^tkt_[0-9a-f]{40}$/.test(String(campaign.stopRequestTicketId || '')) ? String(campaign.stopRequestTicketId) : '';
+  const askAboutThis = String(campaign.createdBy || '') === String(state.currentUser?.id || '') && typeof studioHelpAskButton === 'function' ? studioHelpAskButton('campaign', campaign.id) : '';
   // Withdraw (P1-03): only the owner takes a waiting request back to Draft (the server answers 404 to anyone else).
   const canWithdraw = statusValue === 'Submitted' && String(campaign.createdBy || '') === String(state.currentUser?.id || '')
     && canActOnRecord('adCampaignRequests', 'submit', campaign.createdBy);
@@ -680,7 +693,10 @@ function renderAdsStudioCampaignCard(campaign) {
           ${canSubmit ? `<button type="button" data-ads-studio-submit="1" onclick="submitAdsStudioCampaign('${safeId}', this)"${_adsStudioIntakeOpen === false ? ` disabled title="${Security.escapeHtml(adsStudioIntakePausedText())}"` : ''} class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-3 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'إرسال' : 'Submit'}</button>` : ''}
           ${canWithdraw ? `<button type="button" data-ads-studio-withdraw="1" onclick="openAdsStudioWithdraw('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-amber-50 dark:bg-amber-900/20 px-3 text-sm font-bold text-amber-800 dark:text-amber-200 disabled:opacity-60"><i data-lucide="undo-2" class="w-4 h-4"></i>${isAr ? 'سحب الطلب' : 'Withdraw'}</button>` : ''}
           ${canStop ? `<button type="button" onclick="stopAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/30 px-3 text-sm font-bold text-rose-700 dark:text-rose-200 disabled:opacity-60"><i data-lucide="circle-stop" class="w-4 h-4"></i>${isLaunched ? (isAr ? 'إغلاق الحملة' : 'Close campaign') : (isAr ? 'إيقاف واسترداد' : 'Stop & refund')}</button>` : ''}
+          ${askStopSheet ? `<button type="button" data-ads-studio-ask-stop="1" onclick="studioStopSheetOpen('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="hand" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask to stop'}</button>` : ''}
+          ${stopRequestedAt && statusValue === 'Approved' ? `<span data-ads-studio-stop-requested="1" class="inline-flex items-center gap-1 rounded-full bg-amber-100 dark:bg-amber-900/30 px-2.5 py-1 text-[11px] font-bold text-amber-800 dark:text-amber-200"><i data-lucide="hand" class="w-3.5 h-3.5"></i>${isAr ? 'طُلب الإيقاف — سنوقفه قريباً' : 'Stop requested — we will pause it soon'}</span>${stopTicketId && typeof studioHelpClassicTab === 'function' && studioHelpClassicTab() ? `<button type="button" data-ads-studio-stop-ticket="1" onclick="studioHelpOpen('${stopTicketId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="ticket" class="w-4 h-4"></i>${isAr ? 'افتح التذكرة' : 'Open the ticket'}</button>` : ''}` : ''}
           ${showAskStop ? `<button type="button" onclick="showNotification('${isAr ? 'الإعلان بدأ بالفعل' : 'This ad already started'}', '${isAr ? 'راسلنا لنوقفه ونعيد الجزء غير المصروف إلى محفظتك.' : 'Message us — we stop it and refund the unspent part to your wallet.'}', 'info')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="circle-help" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask us to stop it'}</button>` : ''}
+          ${askAboutThis}
           ${canLink ? `<button type="button" data-ads-studio-link="1" onclick="openAdsStudioLinkSheet('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 px-3 text-sm font-bold text-emerald-700 dark:text-emerald-300 disabled:opacity-60"><i data-lucide="link-2" class="w-4 h-4"></i>${isAr ? 'ربط حملة ميتا' : 'Link Meta campaign'}</button>` : ''}
           ${canUnlink ? `<button type="button" data-ads-studio-unlink="1" onclick="openAdsStudioUnlinkSheet('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-rose-700 dark:text-rose-300 disabled:opacity-60"><i data-lucide="unlink" class="w-4 h-4"></i>${isAr ? 'إلغاء ربط حملة ميتا' : 'Unlink Meta campaign'}</button>` : ''}
           ${canDuplicate && ['Approved', 'Stopped'].includes(statusValue) ? `<button type="button" onclick="duplicateAdsStudioCampaign('${safeId}', this, true)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-900/20 px-3 text-sm font-bold text-indigo-700 dark:text-indigo-300 disabled:opacity-60"><i data-lucide="calendar-plus" class="w-4 h-4"></i>${isAr ? 'تمديد' : 'Extend'}</button>` : ''}
@@ -1061,6 +1077,7 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['This request is not linked to a Meta campaign', 'هذا الطلب غير مرتبط بحملة ميتا'],
   // Ask to stop (P3-10, studio_stop.py REFUSE_STOP_REQUEST_OFF); "Only Approved campaigns can be stopped" is above.
   ['Stop requests are not open yet', 'طلب إيقاف الإعلان غير متاح بعد. تواصل مع فريق البيان.'],
+  ['note must be text', 'يجب أن تكون الملاحظة نصاً'],
 ];
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {
@@ -3796,6 +3813,7 @@ function _adsStudioWalletRequestRow(entity, adminView) {
         ${isPending && adminView ? `<button onclick="adsStudioDecideWalletCharge('${rid}', 'confirm')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-100 hover:bg-emerald-200 text-emerald-700">${adsStudioText('Confirm received', 'تأكيد الاستلام')}</button>` : ''}
         ${isPending && adminView && entry && entry.requiresReceiptPhoto && !hasPhoto ? `<button onclick="adsStudioDecideWalletCharge('${rid}', 'confirm', true)" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-100 hover:bg-amber-200 text-amber-700" title="${adsStudioText('Bank verified the transfer without a photo', 'تحقق المصرف من الحوالة دون صورة')}">${adsStudioText('Confirm w/o receipt', 'تأكيد بدون إيصال')}</button>` : ''}
         ${isPending ? `<button onclick="adsStudioDecideWalletCharge('${rid}', 'cancel')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300">${adsStudioText('Cancel', 'إلغاء')}</button>` : ''}
+        ${!adminView && typeof studioHelpAskButton === 'function' && /^PAY-[A-Z0-9]{4,16}$/.test(String(d.reference || '')) ? studioHelpAskButton('payment', String(d.reference), true) : ''}
       </div>
     </div>`;
 }

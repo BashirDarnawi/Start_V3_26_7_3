@@ -4860,6 +4860,380 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P3-05, P3-08, P3-09, P3-10 (Studio help desk, inbox, stop request and the staff tickets, 15n): the real
+  // 15c, 15g, 15h, 15j, 15k and 15n run in a sandbox (fake history and timers, a scripted apiJson keyed by
+  // path) with /me answered like the server, in the v2 layout and in classic. Promises settle before each
+  // run() returns (microtaskMode 'afterEvaluate'). Static checks cover the bundle, the styles and the texts.
+  const vm = require('vm');
+  const helpSrc = read('src/systems/ads_studio/15n-studio-help.js');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
+  const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
+  const who = { staff: false };
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+  };
+  const hist = {
+    entries: [], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) {
+      const next = this.index + delta;
+      if (!delta || next < 0 || next >= this.entries.length) return;
+      this.index = next; this.show();
+      for (const fn of [...win.listeners.popstate]) fn({ state: this.state });
+    },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let secureSeq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'u1', name: 'Sara', email: 'sara@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [], walletTransactions: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+      generateSecureId: prefix => `${prefix}-${++secureSeq}`,
+      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => false,
+    currentUserHasPermission: (collection, action) => (who.staff ? true : action !== 'review' && action !== 'view'),
+    hasSubscription: id => id === 'ad_maker',
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+    getEntityPhotoCountHint: () => 0,
+    updateUrlParams: () => {}, requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 1000 }
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function __runTimers() { for (let round = 0; round < 5 && __timers.size; round++) { const due = Array.from(__timers.entries()); __timers.clear(); due.forEach(([, t]) => t.fn()); } }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function showNotification(title, message, type) { __notes.push({ title, message, type }); }
+      function getServerSessionIdentity() { return 'session'; }
+      function serverSessionIdentityChanged() { return false; }
+      function makeSessionChangedError() { return new Error('session changed'); }
+      function requestValidatedServerEntity(collection, context, loader) { return loader(); }
+      function withRetry(fn) { return fn(); }
+      function markCollectionDirty() {}
+      function saveState() {}
+      function studioBuilderStart() { return true; }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);
+    vm.runInContext(adsSrc, box);
+    vm.runInContext(helpSrc, box);
+    // The classic page needs the platform's wallet and more; here the classic tab's own screens are drawn by name.
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
+  const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
+  const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && c.path === path);
+  const openAt = url => { hist.reset(url); run('_studioV2.docRendered = false; render();'); };
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const arabicOnly = value => /[؀-ۿ]/.test(value) && !/[A-Za-z]{3}/.test(value.replace(/PAY|LYD|USD|T-|ALB-S/g, ''));
+  const meReply = value => run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: ${JSON.stringify(value)} }]; studioLoadMe();`);
+  const soon = minutes => new Date(Date.now() + minutes * 60000).toISOString();
+  const ago = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+  const T1 = 'tkt_' + '1'.repeat(40);
+  const T2 = 'tkt_' + '2'.repeat(40);
+  const T3 = 'tkt_' + '3'.repeat(40);
+  const ticket = (id, number, status, extra = {}) => ({
+    id, number, subject: 'Why is my ad <b>late</b>?', category: 'ad', status, audience: 'staff', priority: 'normal', kind: 'question',
+    relatedType: 'campaign', relatedId: 'r_new', createdAt: ago(120), updatedAt: ago(30), dueAt: status === 'open' ? soon(180) : null,
+    lastMessageAt: ago(30), resolvedAt: null, reopenUntil: null, ...extra
+  });
+  const requests = () => [
+    { id: 'r_new', createdBy: 'u1', status: 'Approved', name: 'New ad', paidMinorUSD: 5000, startDate: '2099-01-10', endDate: '2099-01-16', durationDays: 7, studioRef: 'ALB-S-AB12CD34', objective: 'messages', platforms: ['facebook'], submittedAt: ago(500), _created: 5, _lastModified: 15 },
+    { id: 'r_other', createdBy: 'someone-else', status: 'Approved', name: 'Not mine', paidMinorUSD: 100, _created: 6, _lastModified: 16 }
+  ];
+  const meV2 = { ui: 'v2', staffDesk: 'classic', isStaff: false, isAdmin: false, services: { help: true, stopRequest: true, tiktok: false },
+    serviceHours: { timezone: 'Africa/Tripoli', openNow: false, week: { sun: { open: '09:00', close: '17:00' }, mon: { open: '09:00', close: '17:00' }, tue: { open: '09:00', close: '17:00' }, wed: { open: '09:00', close: '17:00' }, thu: { open: '09:00', close: '17:00' }, fri: null, sat: null }, holidays: [{ date: '2099-03-01', labelEn: 'Spring day', labelAr: 'يوم الربيع' }], ramadan: null, onDutyUntil: '23:00' },
+    contact: { whatsapp: '+218912345678', phone: '+218213333333', email: 'help@albayan.example' } };
+  const allHtml = [];
+
+  // Bundle, manifest and the shell registry.
+  check('Studio help desk (15n) ships last in the lazy studio bundle after 15m, in both built copies under 1 MiB, and registers the Help and Inbox screens with the shell',
+    !loadError && bundleManifestJson.lazy['studio.js'].slice(-1)[0] === 'systems/ads_studio/15n-studio-help.js'
+      && bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15n-studio-help.js') === bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15m-studio-wallet.js') + 1
+      && !bundleManifestJson.files.some(file => /15n-studio/.test(file))
+      && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(helpSrc)) && !read('script.js').includes('renderStudioHelpBody')
+      && fs.statSync(path.join(ROOT, 'studio.js')).size < 1024 * 1024
+      && run("_studioV2Screens.has('help') && _studioV2Screens.has('inbox')") === true
+      && helpSrc.includes("studioV2RegisterScreen('help', renderStudioHelpBody)") && helpSrc.includes("studioV2RegisterScreen('inbox', renderStudioInboxBody)"),
+    loadError || `studio.js ${fs.statSync(path.join(ROOT, 'studio.js')).size} bytes`);
+
+  // The v2 Help tab: the list in its two groups, the due time, the hours card and the contact links.
+  box.state.adCampaignRequests = requests();
+  meReply(meV2);
+  reply('/api/studio/tickets?status=active', { tickets: [ticket(T1, 'T-000001', 'open'), ticket(T2, 'T-000002', 'answered')], nextCursor: null });
+  reply('/api/studio/activity', { items: [], unreadCount: 0, nextCursor: null, seenAt: null });  // the bell's badge reads the feed on every screen
+  openAt('/studio?tab=help');
+  const helpList = html();
+  allHtml.push(helpList);
+  const helpListAr = inLanguage('ar', 'render(); __html');
+  const listCases = [
+    helpList.includes('data-testid="studio-screen-help"') && helpList.includes('data-testid="studio-help-new"') && !helpList.includes('studio-help-off'),
+    helpList.includes('data-testid="studio-help-list-team"') && helpList.includes('T-000001') && helpList.includes('We reply by') && helpList.includes('Waiting for our team'),
+    helpList.includes('data-testid="studio-help-list-you"') && helpList.includes('T-000002') && helpList.includes('Waiting for you'),
+    helpList.includes('Why is my ad &lt;b&gt;late&lt;/b&gt;?') && !helpList.includes('<b>late</b>'),
+    helpList.includes('data-testid="studio-help-hours"') && helpList.includes('09:00–17:00') && helpList.includes('Closed now') && helpList.includes('2099-03-01 (Spring day)'),
+    helpList.includes('href="https://wa.me/218912345678"') && helpList.includes('href="tel:+218213333333"') && helpList.includes('href="mailto:help@albayan.example"'),
+    helpListAr.includes('تذاكري') && helpListAr.includes('بانتظار فريقنا') && helpListAr.includes('نرد قبل') && helpListAr.includes('يوم الربيع'),
+    calls('GET', '/api/studio/tickets?status=active').length === 1,
+    calls('GET', '/api/studio/activity').length === 1 && helpList.includes('data-testid="studio-nav-inbox"') && !helpList.includes('studio-inbox-badge')  // nothing unread: no badge
+  ];
+  check('Studio v2 Help: tickets grouped "waiting for you" / "waiting for our team" with due times, hours and contact from /me, Arabic words',
+    !loadError && listCases.every(Boolean), loadError || `cases ${failed(listCases)}`);
+
+  // "Ask about this" pre-fills New ticket; a lost answer replays the same operationId; success opens the thread.
+  run("studioHelpAskAbout('campaign', 'r_new');");
+  const form = html();
+  allHtml.push(form);
+  run("studioHelpDraftSet('message', 'It has not started yet.');");
+  replyError('/api/studio/tickets', { name: 'TypeError', message: 'Failed to fetch' });
+  run('studioHelpSend();');
+  const formAfterLoss = html();
+  const newTicket = { ticket: ticket(T3, 'T-000003', 'open', { subject: 'About my ad: New ad' }), message: { id: 'tkm_' + '3'.repeat(40), from: 'customer', text: 'It has not started yet.', createdAt: ago(0) } };
+  reply('/api/studio/tickets', newTicket);
+  run('studioHelpSend();');
+  const thread = html();
+  allHtml.push(thread);
+  const posts = calls('POST', '/api/studio/tickets');
+  const formCases = [
+    win.location.search.includes('tab=help') && win.location.search.includes('id=new') === false || form.includes('data-testid="studio-help-form"'),
+    form.includes('data-testid="studio-help-category-ad" aria-pressed="true"') && form.includes('value="About my ad: New ad"')
+      && form.includes('value="campaign:r_new" selected') && form.includes('My ad: New ad (ALB-S-AB12CD34)') && !form.includes('Not mine'),
+    formAfterLoss.includes('data-testid="studio-help-error"') && formAfterLoss.includes('The connection dropped'),
+    posts.length === 2 && posts[0].body.operationId === posts[1].body.operationId
+      && JSON.stringify(posts[1].body) === JSON.stringify({ subject: 'About my ad: New ad', category: 'ad', message: 'It has not started yet.', operationId: posts[0].body.operationId, relatedType: 'campaign', relatedId: 'r_new' }),
+    win.location.search === `?tab=help&id=${T3}` && thread.includes('data-testid="studio-ticket-thread"') && thread.includes('T-000003')
+      && thread.includes('It has not started yet.') && thread.includes('data-from="customer"') && thread.includes('data-testid="studio-ticket-resolve"'),
+    (json('__notes') || []).some(note => note.title === 'Ticket sent' && /T-000003/.test(note.message)),
+    json('_studioHelp.draft') === null
+  ];
+  check('Studio v2 Help: "Ask about this" pre-fills the request, a lost answer replays the same operationId, the sent ticket opens as its thread',
+    !loadError && formCases.every(Boolean), loadError || `cases ${failed(formCases)}`);
+
+  // The thread: the team's answer is "Albayan team" (never a name), a reply reopens, resolve and reopen carry operationIds.
+  reply(`/api/studio/tickets/${T3}`, { ticket: ticket(T3, 'T-000003', 'answered'), messages: [newTicket.message, { id: 'tkm_' + '4'.repeat(40), from: 'team', text: 'Starting <today>', createdAt: ago(5) }] });
+  run(`studioHelpRefreshThread('${T3}');`);
+  const answered = html();
+  allHtml.push(answered);
+  run(`studioHelpReplySet('${T3}', 'Thanks!');`);
+  reply(`/api/studio/tickets/${T3}/messages`, { ticket: ticket(T3, 'T-000003', 'open'), message: { id: 'tkm_' + '5'.repeat(40), from: 'customer', text: 'Thanks!', createdAt: ago(0) } });
+  run(`studioHelpReplySend('${T3}');`);
+  const replied = html();
+  reply(`/api/studio/tickets/${T3}/resolve`, { ticket: ticket(T3, 'T-000003', 'resolved', { resolvedAt: ago(0), reopenUntil: soon(7 * 24 * 60) }) });
+  run(`studioHelpStatus('${T3}', 'resolve');`);
+  const resolved = html();
+  reply(`/api/studio/tickets/${T3}/reopen`, { ticket: ticket(T3, 'T-000003', 'open') });
+  run(`studioHelpStatus('${T3}', 'reopen');`);
+  const reopened = html();
+  const replyPost = calls('POST', `/api/studio/tickets/${T3}/messages`)[0];
+  const threadCases = [
+    answered.includes('data-from="team"') && answered.includes('Albayan team') && answered.includes('Starting &lt;today&gt;') && answered.includes('Waiting for you') && !/sara|reviewer|authorId/i.test(answered),
+    replyPost && replyPost.body.text === 'Thanks!' && /^reply-\d+$/.test(replyPost.body.operationId) && replied.includes('Thanks!') && replied.includes('Waiting for our team'),
+    resolved.includes('data-status="resolved"') && resolved.includes('data-testid="studio-ticket-reopen"') && !resolved.includes('data-testid="studio-ticket-resolve"')
+      && /^resolve-\d+$/.test((calls('POST', `/api/studio/tickets/${T3}/resolve`)[0] || { body: {} }).body.operationId),
+    reopened.includes('data-status="open"') && reopened.includes('data-testid="studio-ticket-resolve"') && calls('POST', `/api/studio/tickets/${T3}/reopen`).length === 1,
+    (json('__notes') || []).some(note => note.title === 'Ticket resolved') && (json('__notes') || []).some(note => note.title === 'Ticket reopened')
+  ];
+  check('Studio v2 Help thread: the team is always "Albayan team", a reply reopens the ticket, resolve and reopen post operationIds',
+    !loadError && threadCases.every(Boolean), loadError || `cases ${failed(threadCases)}`);
+
+  // Inbox: opening it reads the feed afresh (the bell's read above is minutes young), the feed in the
+  // reader's language, unread items, the bell badge inside the header's bell, "Mark all seen".
+  reply('/api/studio/activity', { items: [
+    { id: 'act_1', kind: 'ticket_answered', title: { en: 'The team answered your ticket', ar: 'ردّ الفريق على تذكرتك' }, body: { en: 'Ticket T-000003: open it.', ar: 'التذكرة T-000003: افتحها.' }, relatedType: 'ticket', relatedId: T3, createdAt: ago(5), unread: true },
+    { id: 'act_2', kind: 'request_approved', title: { en: 'Your ad was approved', ar: 'تمت الموافقة على إعلانك' }, body: { en: '$50.00 was paid.', ar: 'دُفع $50.00.' }, relatedType: 'campaign', relatedId: 'r_new', createdAt: ago(60), unread: false }
+  ], unreadCount: 1, nextCursor: null, seenAt: ago(30) });
+  openAt('/studio?tab=inbox');
+  const inbox = html();
+  allHtml.push(inbox);
+  const badgeBefore = run("studioInboxBadge('inbox')");
+  const inboxAr = inLanguage('ar', 'render(); __html');
+  reply('/api/studio/activity/seen', { activitySeenAt: ago(5), unreadCount: 0 });
+  run('studioInboxMarkSeen();');
+  const seen = html();
+  const seenPost = calls('POST', '/api/studio/activity/seen')[0];
+  run("studioInboxOpen('act_1');");
+  const inboxCases = [
+    inbox.includes('data-testid="studio-screen-inbox"') && inbox.includes('data-testid="studio-inbox-item-act_1" data-kind="ticket_answered" data-unread="1"')
+      && inbox.includes('The team answered your ticket') && inbox.includes('data-testid="studio-inbox-unread" data-count="1"') && inbox.includes('1 new'),
+    String(badgeBefore).includes('data-testid="studio-inbox-badge"') && String(badgeBefore).includes('>1<')
+      && /data-testid="studio-nav-inbox"[^>]*>(?:(?!<\/button>)[\s\S])*data-testid="studio-inbox-badge"/.test(inbox)  // the badge sits inside the bell
+      && calls('GET', '/api/studio/activity').length === 2 && json('_studioInbox.loading') === null,
+    inboxAr.includes('ردّ الفريق على تذكرتك') && inboxAr.includes('الإشعارات'),
+    seenPost && seenPost.body.upTo === json('_studioInbox.items')[0].createdAt && seen.includes('data-count="0"') && seen.includes('data-unread="0"') && run("studioInboxBadge('inbox')") === '' && !seen.includes('studio-inbox-badge'),
+    win.location.search === `?tab=help&id=${T3}`,
+    shellSrc.includes("const badge = tab === 'inbox' && typeof studioInboxBadge === 'function' ? String(studioInboxBadge(route.tab) || '') : '';")
+  ];
+  check('Studio v2 Inbox: the feed with unread items in the reader\'s language, the bell badge, "Mark all seen" posts the newest time, an item opens its ticket',
+    !loadError && inboxCases.every(Boolean), loadError || `cases ${failed(inboxCases)}`);
+
+  // Ask to stop: the sheet's words, one operationId per ad until the server answers, the after-hours line.
+  const askSheet = run("renderStudioStopSheet(studioDataRequest('r_new'), { note: '', sending: false, error: '', result: null })");
+  replyError('/api/ad-studio/campaigns/r_new/stop-request', { name: 'TypeError', message: 'Failed to fetch' });
+  run("_studioStop.__lost = studioStopSendOnce('r_new', 'Please stop <it>').catch(e => e.message);");
+  const stopAnswer = { ticket: { id: T1, number: 'T-000009', subject: 'Stop request', category: 'ad', status: 'open', audience: 'staff', relatedType: 'campaign', relatedId: 'r_new', createdAt: ago(0), updatedAt: ago(0), dueAt: soon(120), lastMessageAt: ago(0), urgent: true },
+    stopRequestedAt: ago(0), afterHours: true, urgentContact: { whatsapp: '+218 91 999 8888', phone: '+218211111111' } };
+  reply('/api/ad-studio/campaigns/r_new/stop-request', stopAnswer);
+  run("_studioStop.__sent = null; studioStopSendOnce('r_new', 'Please stop <it>').then(r => { _studioStop.__sent = r; });");
+  const sent = json('_studioStop.__sent');
+  const stopPosts = calls('POST', '/api/ad-studio/campaigns/r_new/stop-request');
+  const sentSheet = run("renderStudioStopSheet(studioDataRequest('r_new'), { note: '', sending: false, error: '', result: _studioStop.__sent })");
+  const sentSheetAr = inLanguage('ar', "renderStudioStopSheet(studioDataRequest('r_new'), { note: '', sending: false, error: '', result: _studioStop.__sent })");
+  const inHours = run("renderStudioStopSheet(studioDataRequest('r_new'), { note: '', sending: false, error: '', result: Object.assign({}, _studioStop.__sent, { afterHours: false }) })");
+  const stopCases = [
+    String(askSheet).includes('data-testid="studio-sheet-ask-stop"') && String(askSheet).includes('data-state="ask"') && String(askSheet).includes('Ask us to stop this ad')
+      && String(askSheet).includes('ALB-S-AB12CD34') && String(askSheet).includes('data-testid="studio-stop-note"') && String(askSheet).includes('Send the stop request') && String(askSheet).includes('outside working hours'),
+    stopPosts.length === 2 && stopPosts[0].body.operationId === stopPosts[1].body.operationId && stopPosts[1].body.note === 'Please stop <it>' && /^stopask-\d+$/.test(stopPosts[1].body.operationId),
+    sent && sent.ticket.number === 'T-000009' && sent.afterHours === true && sent.urgentContact.whatsapp === '+218919998888' && run("studioStopRequestedAt('r_new')") === stopAnswer.stopRequestedAt,
+    String(sentSheet).includes('data-state="sent"') && String(sentSheet).includes('Ticket T-000009') && String(sentSheet).includes('We pause it in Meta by')
+      && String(sentSheet).includes('data-testid="studio-stop-after-hours"') && String(sentSheet).includes('href="https://wa.me/218919998888?text=') && String(sentSheet).includes('href="tel:+218211111111"')
+      && String(sentSheet).includes('until 23:00') && String(sentSheet).includes(`studioStopOpenTicket('${T1}')`),
+    String(sentSheetAr).includes('أُرسل طلب الإيقاف') && String(sentSheetAr).includes('راسل فريق المناوبة على واتساب'),
+    !String(inHours).includes('studio-stop-after-hours') && String(inHours).includes('Ticket T-000009'),
+    calls('GET', '/api/studio/campaigns/summary').length >= 1,
+    !/\b(?:confirm|prompt|alert)\(/.test(helpSrc) && !/access_token|app_?secret|page_?token|Bearer /i.test(helpSrc) && !/setInterval\(/.test(helpSrc)
+  ];
+  check('Studio Ask to stop (P3-10): the sheet explains, one operationId per ad is replayed after a lost answer, the answer shows the ticket number, the due time and the after-hours urgent line',
+    !loadError && stopCases.every(Boolean), loadError || `cases ${failed(stopCases)}`);
+
+  // Classic: the help tab exists only while the service is on, the tab fix keeps it, the classic card offers the sheet and "Ask about this".
+  const meClassic = Object.assign({}, meV2, { ui: 'classic' });
+  meReply(meClassic);
+  run('_studioStop.requested.clear();');  // the stop asked above belongs to that flow, not to this card
+  const classicTabs = json('adsStudioTabsForUser().map(tab => tab.id)');
+  run("_adsStudioActiveTab = 'help'; studioV2ClassicTabFix();");
+  const keptHelp = run('_adsStudioActiveTab');
+  const classicHelp = run("_studioHelp.classic = { view: 'list', id: '', filter: 'active' }; renderStudioHelpClassic()");
+  const card = run("renderAdsStudioCampaignCard(studioDataRequest('r_new'))");
+  const cardRequested = run("renderAdsStudioCampaignCard(Object.assign({}, studioDataRequest('r_new'), { stopRequestedAt: '2026-09-25T10:00:00Z', stopRequestTicketId: '" + T1 + "' }))");
+  run("_adsStudioActiveTab = 'help'; studioHelpGo('new');");
+  const classicNew = run("_studioHelp.classic.view + ':' + _adsStudioActiveTab");
+  const classicForm = run('renderStudioHelpClassic()');
+  meReply(Object.assign({}, meClassic, { services: { help: false, stopRequest: false, tiktok: false } }));
+  const offTabs = json('adsStudioTabsForUser().map(tab => tab.id)');
+  const offButton = run("studioHelpAskButton('campaign', 'r_new')");
+  const cardOff = run("renderAdsStudioCampaignCard(studioDataRequest('r_new'))");
+  run("_adsStudioActiveTab = 'help'; studioV2ClassicTabFix();");
+  const droppedHelp = run('_adsStudioActiveTab');
+  const classicCases = [
+    JSON.stringify(classicTabs) === JSON.stringify(['dashboard', 'campaigns', 'builder', 'posts', 'replies', 'help']) && keptHelp === 'help',
+    String(classicHelp).includes('class="studio-help studio-help-classic"') && String(classicHelp).includes('My tickets') && String(classicHelp).includes('dir="ltr"'),
+    String(card).includes('data-ads-studio-ask-stop="1"') && String(card).includes("studioStopSheetOpen('r_new', this)") && String(card).includes('data-testid="studio-ask-campaign-r_new"')
+      && !String(card).includes('data-ads-studio-stop-requested'),
+    String(cardRequested).includes('data-ads-studio-stop-requested="1"') && String(cardRequested).includes('Stop requested') && String(cardRequested).includes(`studioHelpOpen('${T1}')`) && !String(cardRequested).includes('data-ads-studio-ask-stop'),
+    classicNew === 'new:help' && String(classicForm).includes('data-testid="studio-help-form"'),
+    JSON.stringify(offTabs) === JSON.stringify(['dashboard', 'campaigns', 'builder', 'posts', 'replies']) && offButton === '' && !String(cardOff).includes('data-ads-studio-ask-stop') && String(cardOff).includes('Ask us to stop it') === false,
+    droppedHelp === 'dashboard',
+    // No function of another file is wrapped by 15n: the shell and My ads call its hooks behind typeof guards.
+    !/^\s*(?:studioV2\w+|studioAds\w+|setAdsStudioTab|restoreAdsStudioTabFromUrl)\s*=\s*function/m.test(helpSrc)
+      && shellSrc.includes('function studioV2ClassicTabKnown(tab) {') && shellSrc.includes("return name === 'help' && typeof studioHelpClassicTab === 'function' && studioHelpClassicTab() === true;")
+      && shellSrc.includes('if (studioV2ClassicTabKnown(_adsStudioActiveTab)) return;') && shellSrc.includes('if (tab && !studioV2ClassicTabKnown(tab) && typeof updateUrlParams === ')
+      && adsSrc.includes("if (kind === 'ask' && typeof studioHelpAskAbout === 'function' && studioHelpAskAbout('campaign', request.id)) return true;")
+      && adsSrc.includes("if (kind === 'ask_stop' && typeof studioStopSheetOpen === 'function' && studioStopSheetOpen(request.id, opener)) return true;"),
+    adsStudio.includes("tabs.push({ id: 'help', icon: 'life-buoy', label: 'Help', labelAr: 'المساعدة' });")
+      && adsStudio.includes("else if (_adsStudioActiveTab === 'help' && typeof renderStudioHelpClassic === 'function') content = renderStudioHelpClassic();")
+      && adsStudio.includes("(typeof renderStudioStaffTicketsClassic === 'function' ? renderStudioStaffTicketsClassic() : '')")
+      && adsStudio.includes("['note must be text', 'يجب أن تكون الملاحظة نصاً']")
+  ];
+  check('Studio classic layout: a Help tab and the stop-request sheet only while the services are on, the tab fix keeps ?tab=help, the card shows "Stop requested" with its ticket',
+    !loadError && classicCases.every(Boolean), loadError || `cases ${failed(classicCases)}`);
+
+  // Staff tickets (classic review tab): stop requests first, the thread, a reply, a status change, the consented contact link; never a person's id on screen.
+  who.staff = true;
+  meReply(Object.assign({}, meClassic, { isStaff: true }));
+  const urgentTicket = ticket(T1, 'T-000009', 'open', { subject: 'Stop request', priority: 'urgent', kind: 'stop_request', ownerId: 'cust-77', overdue: true, messageCount: 1 });
+  reply('/api/studio/staff/tickets?status=active', { tickets: [urgentTicket, ticket(T2, 'T-000002', 'open', { ownerId: 'cust-77', messageCount: 2 })], nextCursor: null });
+  run('_studioStaff.forUser = ""; renderStudioStaffTicketsClassic();');
+  const staffList = run('renderStudioStaffTicketsClassic()');
+  reply(`/api/studio/staff/tickets/${T1}`, { ticket: urgentTicket, messages: [{ id: 'tkm_' + '9'.repeat(40), from: 'customer', text: 'Please stop it', createdAt: ago(9), authorId: 'cust-77' }] });
+  run(`studioStaffOpen('${T1}');`);
+  const staffThread = run('renderStudioStaffTicketsClassic()');
+  run(`studioStaffReplySet('${T1}', 'Paused in Meta.');`);
+  reply(`/api/studio/staff/tickets/${T1}/messages`, { ticket: Object.assign({}, urgentTicket, { status: 'answered', dueAt: null, overdue: false }), message: { id: 'tkm_' + '8'.repeat(40), from: 'team', text: 'Paused in Meta.', createdAt: ago(0), authorId: 'u1' } });
+  run(`studioStaffReplySend('${T1}');`);
+  const staffAnswered = run('renderStudioStaffTicketsClassic()');
+  reply(`/api/studio/staff/tickets/${T1}/status`, { ticket: Object.assign({}, urgentTicket, { status: 'resolved', dueAt: null, overdue: false, resolvedAt: ago(0) }) });
+  run(`studioStaffStatus('${T1}', 'resolved');`);
+  const staffResolved = run('renderStudioStaffTicketsClassic()');
+  reply(`/api/studio/staff/customers/cust-77/contact?relatedType=ticket&relatedId=${T1}`, { customerId: 'cust-77', whatsapp: '+218911234567', whatsappUrl: 'https://wa.me/218911234567?text=%D9%85%D8%B1%D8%AD%D8%A8%D8%A7', consentAt: ago(1000) });
+  run(`studioStaffContact('${T1}');`);
+  const staffContact = run('renderStudioStaffTicketsClassic()');
+  const staffReply = calls('POST', `/api/studio/staff/tickets/${T1}/messages`)[0];
+  const staffStatus = calls('POST', `/api/studio/staff/tickets/${T1}/status`)[0];
+  const staffCases = [
+    String(staffList).includes('data-testid="studio-staff-tickets"') && String(staffList).includes('data-testid="studio-staff-urgent-count"') && String(staffList).indexOf('T-000009') < String(staffList).indexOf('T-000002')
+      && String(staffList).includes('Urgent: stop request') && String(staffList).includes('Overdue since') && String(staffList).includes('data-testid="studio-staff-filter-active" aria-pressed="true"'),
+    String(staffThread).includes('data-testid="studio-staff-thread"') && String(staffThread).includes('Please stop it') && String(staffThread).includes('data-testid="studio-staff-reply-send"') && !String(staffThread).includes('cust-77') && !String(staffThread).includes('authorId'),
+    staffReply && staffReply.body.text === 'Paused in Meta.' && /^answer-\d+$/.test(staffReply.body.operationId) && String(staffAnswered).includes('data-status="answered"') && String(staffAnswered).includes('Answered') && String(staffAnswered).includes('Paused in Meta.'),
+    staffStatus && staffStatus.body.status === 'resolved' && /^status-\d+$/.test(staffStatus.body.operationId) && String(staffResolved).includes('data-testid="studio-staff-status-open"') && !String(staffResolved).includes('data-testid="studio-staff-status-resolved"'),
+    String(staffContact).includes('data-testid="studio-staff-whatsapp-link"') && String(staffContact).includes('href="https://wa.me/218911234567?text=') && !String(staffContact).includes('cust-77'),
+    !helpSrc.includes('category=') && !helpSrc.includes('audience=')  // no way to ask for admin-only tickets: the server's audience rule decides alone
+  ];
+  check('Studio staff tickets (P3-09, P3-11): stop requests pinned and overdue, the thread, a reply marks it answered, status changes, the consented WhatsApp link; never a customer id on screen',
+    !loadError && staffCases.every(Boolean), loadError || `cases ${failed(staffCases)}`);
+  who.staff = false;
+
+  // Texts, handlers and styles.
+  const textPairs = [...helpSrc.matchAll(/adsStudioText\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
+  const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
+  const safeHandler = /^\son(?:click|input|change|submit)="(event\.preventDefault\(\); studioHelp(Send|ReplySend\('tkt_[0-9a-f]{40}'\))\(?\)?;?|studioHelp(Open|Filter|Retry|More|RetryThread|RefreshThread|New|CancelNew|Send|Status|DraftCategory|DraftSet|DraftRelated|ReplyInput|Go|AskAbout)\((?:'[A-Za-z0-9_.:-]+'(?:, (?:'[A-Za-z0-9_.:-]+'|this|this\.value))?|this\.value)?\)|studioInbox(Open|More|Retry|MarkSeen)\((?:'[A-Za-z0-9_.:-]+')?\)|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|setAdsStudioTab\('[a-z]+'\)|studioAdsSheet\('[a-z_]+', '[A-Za-z0-9_.:-]+', this\)|studioAdsEdit\('[A-Za-z0-9_.:-]+', this\)|studioAdsOpen\('[A-Za-z0-9_.:-]+'\)|studioAdsFilter\('[a-z]*'\)|studioAds(BackToList|CloseSheet|ConfirmSheet)\(\)|studioHomeGoal\('[a-z]+'\)|studioHome(OpenRequest|Edit)\('[A-Za-z0-9_.:-]+'(?:, this)?\)|studioDataRetry\(\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
+  const workspaceCss = read('assets/ads-workspace.css');
+  const helpCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio help desk'));
+  const staticCases = [
+    textPairs.length >= 120 && textPairs.every(ar => /[؀-ۿ]/.test(ar)),
+    onclicks.length > 30 && onclicks.every(attr => safeHandler.test(attr)),
+    helpCss.length > 2000 && read('www/assets/ads-workspace.css') === workspaceCss
+      && ['html.dark :is(.studio-help, .studio-stop-sheet)', '.studio-help-chip { display: inline-flex;', 'min-height: 44px', 'overflow-wrap: anywhere', '.studio-inbox-badge { position: absolute;', '@media (max-width: 900px)'].every(rule => helpCss.includes(rule))
+      && !/background(-color)?:\s*#|[^-]color:\s*#/.test(helpCss),
+    arabicOnly(String(inLanguage('ar', "studioHelpWhen('2026-09-27T08:30:00Z')"))) && run("studioHelpWhen('2026-09-27T08:30:00Z')") === 'Sun 27 Sep, 10:30' && run("studioHelpWhen('nope')") === ''
+  ];
+  check('Studio help desk: every text pair has Arabic, only known handlers reach the page, the styles use the tokens with dark tones, times read in Tripoli time',
+    !loadError && staticCases.every(Boolean), loadError || `cases ${failed(staticCases)} pairs ${textPairs.length} handlers ${onclicks.filter(attr => !safeHandler.test(attr)).slice(0, 3).join(' | ')}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');

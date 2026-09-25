@@ -24,8 +24,10 @@
 // after a reload this tab has no proof of) gets its parents put under it. The builder hides the
 // section bar (focus mode).
 // Screens: a screen file registers the body of its tab with studioV2RegisterScreen(tab, draw) (15j
-// Home, 15k My ads, 15l the builder, 15m Wallet and Account). The shell keeps the screen root; a tab
-// with no screen, or a draw that fails, shows "Coming soon in the new studio" inside that root.
+// Home, 15k My ads, 15l the builder, 15m Wallet and Account, 15n Help and Inbox). The shell keeps the
+// screen root; a tab with no screen, or a draw that fails, shows "Coming soon in the new studio"
+// inside that root. Two guarded hooks reach 15n: the bell's badge (studioInboxBadge) and the classic
+// 'help' tab (studioHelpClassicTab, through studioV2ClassicTabKnown).
 
 const STUDIO_V2_TABS = Object.freeze([
   // [tab, icon, English, Arabic, place] place: 'nav' = bottom bar / side rail, 'head' = header button
@@ -206,7 +208,15 @@ function studioV2OnMe(me) {
   if (!_studioV2.shown) return;
   const want = studioV2Wanted();
   if (want !== _studioV2.shown) studioV2Rerender();
-  else if (want === 'classic' && studioV2Layout() && !STUDIO_V2_CLASSIC_TABS.includes(String(_adsStudioActiveTab || ''))) studioV2Rerender();
+  else if (want === 'classic' && studioV2Layout() && !studioV2ClassicTabKnown(_adsStudioActiveTab)) studioV2Rerender();
+}
+
+// A tab the classic layout can draw: its pinned tabs, plus the service tabs a later screen file
+// adds to it (15n: 'help' while /me says the Help service is on for this user, P3-08).
+function studioV2ClassicTabKnown(tab) {
+  const name = String(tab || '');
+  if (STUDIO_V2_CLASSIC_TABS.includes(name)) return true;
+  return name === 'help' && typeof studioHelpClassicTab === 'function' && studioHelpClassicTab() === true;
 }
 
 studioMeSubscribe(studioV2OnMe);
@@ -244,13 +254,14 @@ function renderStudioV2View() {
   }
 }
 
-// The classic layout knows only its own tabs: a v2 address (?tab=wallet …) opens its Overview.
+// The classic layout knows only its own tabs (studioV2ClassicTabKnown): a v2 address (?tab=wallet …)
+// opens its Overview.
 function studioV2ClassicTabFix() {
   try {
-    if (STUDIO_V2_CLASSIC_TABS.includes(String(_adsStudioActiveTab || ''))) return;
+    if (studioV2ClassicTabKnown(_adsStudioActiveTab)) return;
     _adsStudioActiveTab = 'dashboard';
     const tab = new URLSearchParams(window.location.search || '').get('tab');
-    if (tab && !STUDIO_V2_CLASSIC_TABS.includes(tab) && typeof updateUrlParams === 'function') {
+    if (tab && !studioV2ClassicTabKnown(tab) && typeof updateUrlParams === 'function') {
       updateUrlParams({ tab: 'dashboard', section: null, id: null, step: null }, true);
     }
   } catch (_) { /* the Overview shows anyway */ }
@@ -636,7 +647,9 @@ function renderStudioV2Header(route, frame) {
   const headButton = tab => {
     const info = studioV2TabInfo(tab);
     const label = adsStudioText(info[2], info[3]);
-    return `<button type="button" data-testid="studio-nav-${tab}" class="studio-v2-icon-btn" onclick="studioV2Open('${tab}')" aria-label="${studioEsc(label)}" title="${studioEsc(label)}"${route.tab === tab ? ' aria-current="page"' : ''}>${studioV2Icon(info[1])}</button>`;
+    // The bell's unread badge (P3-05, 15n studioInboxBadge): '' while nothing is unread or the Inbox screen is not loaded.
+    const badge = tab === 'inbox' && typeof studioInboxBadge === 'function' ? String(studioInboxBadge(route.tab) || '') : '';
+    return `<button type="button" data-testid="studio-nav-${tab}" class="studio-v2-icon-btn" onclick="studioV2Open('${tab}')" aria-label="${studioEsc(label)}" title="${studioEsc(label)}"${route.tab === tab ? ' aria-current="page"' : ''}>${studioV2Icon(info[1])}${badge}</button>`;
   };
   let actions = '';
   if (focus) {

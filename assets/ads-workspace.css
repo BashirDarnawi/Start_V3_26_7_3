@@ -560,3 +560,104 @@ html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {
   .studio-v2-wallet-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .studio-v2-wallet-choices { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+/* Albayan Studio help desk (P3-05, P3-08, P3-09, P3-10; src/systems/ads_studio/15n-studio-help.js).
+   Tickets, the New ticket form, the thread, our working hours, the inbox, the stop-request sheet and
+   the staff tickets section, drawn in BOTH layouts (the classic tab too), so the tones are declared on
+   .studio-help itself (light and dark) and every surface uses the --ui-* tokens. A status never
+   stands alone: each chip has its icon and words. Every control is at least 44px; long subjects,
+   numbers and messages wrap; nothing may widen the page. */
+.studio-help, .studio-stop-sheet {
+  --studio-help-slate-fg: #475569; --studio-help-slate-bg: #f1f5f9;
+  --studio-help-amber-fg: #92400e; --studio-help-amber-bg: #fef3c7;
+  --studio-help-blue-fg: #1d4ed8; --studio-help-blue-bg: #dbeafe;
+  --studio-help-green-fg: #166534; --studio-help-green-bg: #dcfce7;
+  --studio-help-rose-fg: #be123c; --studio-help-rose-bg: #ffe4e6;
+}
+html.dark :is(.studio-help, .studio-stop-sheet) {
+  --studio-help-slate-fg: #cbd5e1; --studio-help-slate-bg: #1e293b;
+  --studio-help-amber-fg: #fcd34d; --studio-help-amber-bg: #422006;
+  --studio-help-blue-fg: #93c5fd; --studio-help-blue-bg: #172554;
+  --studio-help-green-fg: #86efac; --studio-help-green-bg: #052e16;
+  --studio-help-rose-fg: #fda4af; --studio-help-rose-bg: #4c0519;
+}
+.studio-help { display: flex; flex-direction: column; gap: 14px; min-width: 0; max-width: 100%; color: var(--ui-ink); }
+.studio-help :is(p, h2, h3, dl, dd, dt, ul, ol) { margin: 0; }
+.studio-help :is(ul, ol) { padding: 0; list-style: none; }
+.studio-help-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 16px; background: var(--ui-surface); border: 1px solid var(--ui-line); border-radius: var(--ui-radius); box-shadow: var(--ui-shadow); overflow-wrap: anywhere; }
+.studio-help-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; min-width: 0; }
+.studio-help-h2 { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 17px; font-weight: 800; line-height: 1.4; color: var(--ui-ink); }
+.studio-help-h3 { font-size: 14px; font-weight: 800; line-height: 1.5; color: var(--ui-muted); }
+.studio-help-note, .studio-help-empty { font-size: 13px; line-height: 1.7; color: var(--ui-muted); overflow-wrap: anywhere; }
+.studio-help ul.studio-help-guide { display: flex; flex-direction: column; gap: 6px; padding-inline-start: 18px; font-size: 13px; line-height: 1.7; color: var(--ui-ink); list-style: disc; }
+.studio-help-chips { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.studio-help-chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 44px; min-height: 44px; max-width: 100%; padding: 8px 14px; border: 1px solid var(--ui-line); border-radius: 999px; background: var(--ui-surface); color: var(--ui-ink); font: inherit; font-size: 14px; font-weight: 700; line-height: 1.3; text-align: center; overflow-wrap: anywhere; }
+.studio-help-chip > span { min-width: 0; }
+.studio-help-chip[aria-pressed="true"] { border-color: var(--ui-accent); background: var(--ui-accent-soft); color: var(--ui-accent); }
+.studio-help-chip[disabled] { opacity: 0.55; }
+.studio-help-chip-icon, .studio-help-status-icon, .studio-help-ask-icon { width: 16px; height: 16px; flex-shrink: 0; }
+.studio-help-list { display: flex; flex-direction: column; gap: 10px; }
+.studio-help-row { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: 100%; min-width: 0; min-height: 44px; padding: 12px 14px; border: 1px solid var(--ui-line); border-radius: 16px; background: var(--ui-surface-soft); color: var(--ui-ink); text-align: start; font: inherit; cursor: pointer; }
+.studio-help-row.is-overdue { border-color: var(--studio-help-rose-fg); }
+.studio-help-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; max-width: 100%; }
+.studio-help-number { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; font-weight: 800; letter-spacing: 0.04em; color: var(--ui-ink); }
+.studio-help-subject { display: block; max-width: 100%; font-size: 15px; font-weight: 750; line-height: 1.5; overflow-wrap: anywhere; }
+.studio-help-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; max-width: 100%; font-size: 12px; line-height: 1.5; color: var(--ui-muted); overflow-wrap: anywhere; }
+.studio-help-status { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 10px; border-radius: 999px; background: var(--studio-help-slate-bg); color: var(--studio-help-slate-fg); font-size: 12px; font-weight: 750; line-height: 1.5; overflow-wrap: anywhere; }
+.studio-help-status[data-tone="amber"] { background: var(--studio-help-amber-bg); color: var(--studio-help-amber-fg); }
+.studio-help-status[data-tone="blue"] { background: var(--studio-help-blue-bg); color: var(--studio-help-blue-fg); }
+.studio-help-status[data-tone="green"] { background: var(--studio-help-green-bg); color: var(--studio-help-green-fg); }
+.studio-help-status[data-tone="rose"] { background: var(--studio-help-rose-bg); color: var(--studio-help-rose-fg); }
+.studio-help-problem { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border-radius: 14px; background: var(--ui-surface-soft); font-size: 14px; color: var(--ui-ink); }
+.studio-help-problem > span { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.studio-help-msgs { display: flex; flex-direction: column; gap: 10px; }
+.studio-help-msg { display: flex; flex-direction: column; gap: 4px; max-width: 92%; min-width: 0; padding: 10px 14px; border-radius: 16px; background: var(--ui-surface-soft); }
+.studio-help-msg.is-customer { align-self: flex-end; background: var(--ui-accent-soft); }
+.studio-help-msg.is-team { align-self: flex-start; }
+.studio-help-msg-from { font-size: 12px; font-weight: 800; color: var(--ui-muted); }
+.studio-help-msg.is-team .studio-help-msg-from { color: var(--ui-accent); }
+.studio-help-msg-text { font-size: 14px; line-height: 1.7; white-space: pre-wrap; color: var(--ui-ink); overflow-wrap: anywhere; }
+.studio-help-msg-time { font-size: 11px; color: var(--ui-muted); }
+.studio-help-form, .studio-help-reply, .studio-help-thread { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.studio-help-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.studio-help-label { font-size: 14px; font-weight: 750; line-height: 1.5; color: var(--ui-ink); }
+.studio-help-input { display: block; width: 100%; max-width: 100%; min-width: 0; min-height: 48px; padding: 10px 14px; border: 1px solid var(--ui-line); border-radius: 14px; background: var(--ui-surface); color: var(--ui-ink); font: inherit; font-size: 16px; line-height: 1.5; }
+textarea.studio-help-input { resize: vertical; }
+.studio-help-input:focus-visible { outline: 3px solid var(--ui-accent); outline-offset: 1px; }
+.studio-help-field.is-invalid .studio-help-input { border-color: var(--studio-help-rose-fg); }
+.studio-help-error { font-size: 13px; font-weight: 700; line-height: 1.6; color: var(--studio-help-rose-fg); overflow-wrap: anywhere; }
+.studio-help-actions { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+.studio-help-actions > .studio-v2-action { flex: 1 1 auto; }
+.studio-help .studio-v2-action, .studio-stop-sheet .studio-v2-action { gap: 8px; cursor: pointer; text-decoration: none; }
+.studio-help .studio-v2-action[disabled] { opacity: 0.55; cursor: not-allowed; }
+.studio-help-small { min-height: 44px; padding: 8px 14px; font-size: 14px; }
+.studio-help-link { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; min-width: 44px; min-height: 44px; max-width: 100%; padding: 8px 10px; border: 0; border-radius: 12px; background: transparent; color: var(--ui-accent); font: inherit; font-size: 14px; font-weight: 700; line-height: 1.4; text-align: start; cursor: pointer; overflow-wrap: anywhere; }
+.studio-help-link > span { min-width: 0; }
+.studio-help-ask { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; max-width: 100%; padding: 8px 12px; border: 1px solid var(--ui-line); border-radius: 12px; background: var(--ui-surface); color: var(--ui-accent); font: inherit; font-size: 14px; font-weight: 700; line-height: 1.3; cursor: pointer; overflow-wrap: anywhere; }
+.studio-help-ask.is-compact { padding: 6px 10px; font-size: 12px; }
+.studio-help-hours { display: flex; flex-direction: column; gap: 4px; }
+.studio-help-hours-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 6px 0; border-top: 1px solid var(--ui-line); font-size: 14px; color: var(--ui-ink); }
+.studio-help-hours-row:first-child { border-top: 0; }
+.studio-help-hours-row > dd { font-weight: 750; font-variant-numeric: tabular-nums; }
+.studio-help-hours-row.is-closed > dd { font-weight: 600; color: var(--ui-muted); }
+.studio-help-contact { display: flex; flex-wrap: wrap; gap: 8px; }
+.studio-inbox-item { flex-direction: row; align-items: flex-start; gap: 12px; }
+.studio-inbox-item.is-unread { border-color: var(--ui-accent); background: var(--ui-surface); }
+.studio-inbox-item[disabled] { cursor: default; }
+.studio-inbox-icon { display: grid; flex-shrink: 0; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--ui-accent-soft); color: var(--ui-accent); }
+.studio-inbox-text { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-width: 0; }
+.studio-inbox-dot { display: inline-block; width: 8px; height: 8px; margin-inline-end: 6px; border-radius: 50%; background: var(--ui-accent); vertical-align: middle; }
+.studio-inbox-badge { position: absolute; top: 4px; inset-inline-end: 4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--studio-help-rose-fg); color: var(--ui-surface); font-size: 11px; font-weight: 800; line-height: 18px; text-align: center; }
+.studio-v2-icon-btn { position: relative; }
+.studio-stop-sheet .studio-ads-sheet-panel { gap: 10px; }
+.studio-stop-number { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 18px; font-weight: 800; letter-spacing: 0.04em; color: var(--ui-ink); }
+.studio-stop-urgent { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 14px; background: var(--studio-help-amber-bg); color: var(--studio-help-amber-fg); }
+.studio-stop-urgent .studio-ads-sheet-text, .studio-stop-urgent .studio-ads-sheet-note { color: inherit; }
+.studio-help-classic { margin-top: 4px; }
+.studio-staff-tickets { margin-top: 24px; }
+@media (max-width: 900px) {
+  .studio-v2-frame .studio-help { padding-bottom: calc(80px + var(--app-safe-bottom, 0px)); }
+}
+@media (max-width: 359px) {
+  .studio-help-card { padding: 14px 12px; }
+  .studio-help-msg { max-width: 100%; }
+}
