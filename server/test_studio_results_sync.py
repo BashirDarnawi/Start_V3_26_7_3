@@ -217,7 +217,7 @@ def meta(monkeypatch, people):
     monkeypatch.setenv("ALBAYAN_META_BACKGROUND_SYNC", "false")
     monkeypatch.setattr(meta_ads.MetaAdsClient, "_request",
                         lambda self, method, path, **kwargs: fake.request(method, path, **kwargs))
-    monkeypatch.setattr(meta_ads, "studio_meta_pause_seconds", lambda: 0)
+    monkeypatch.setattr(meta_ads, "meta_lane_pause_seconds", lambda lane="admin", subject="": 0)
     monkeypatch.setattr(sync, "due_candidates", _mine)
     for who in people.values():
         for bucket in ("campaign-results", "results-check"):
@@ -480,9 +480,9 @@ def test_per_account_parking(meta, people, seeded):
 def test_meta_pause_and_missing_configuration_skip_the_pass(meta, people, seeded, monkeypatch):
     first, _meta_first = _linked(seeded, people, meta)
     second, _meta_second = _linked(seeded, people, meta)
-    monkeypatch.setattr(meta_ads, "studio_meta_pause_seconds", lambda: 120)
+    monkeypatch.setattr(meta_ads, "meta_lane_pause_seconds", lambda lane="admin", subject="": 120)
     assert sync.run_results_sync(T0, settings=SETTINGS)["skipped"] == "meta_paused" and meta.calls == []
-    monkeypatch.setattr(meta_ads, "studio_meta_pause_seconds", lambda: 0)
+    monkeypatch.setattr(meta_ads, "meta_lane_pause_seconds", lambda lane="admin", subject="": 0)
     # Albayan's own pause starting mid-pass: nothing reached Meta, the pass stops, the row waits.
     meta.fail[_meta_first] = meta_ads.MetaAdsError(
         "rate_limited", "Meta synchronization is paused safely and will resume automatically.", retryable=True)
@@ -978,10 +978,10 @@ def test_check_now_cached(meta, people, seeded, monkeypatch):
 def test_check_now_while_meta_is_paused_or_busy(meta, people, seeded, monkeypatch):
     monkeypatch.setattr(studio_results, "utc_now", lambda: T0)
     campaign_id, _meta_id_ = _linked(seeded, people, meta)
-    monkeypatch.setattr(meta_ads, "studio_meta_pause_seconds", lambda: 300)
+    monkeypatch.setattr(meta_ads, "meta_lane_pause_seconds", lambda lane="admin", subject="": 300)
     paused = _refresh(campaign_id, people["reviewer"]).json()
     assert paused["cached"] is True and paused["checkError"]["code"] == "META_PAUSED" and meta.calls == []
-    monkeypatch.setattr(meta_ads, "studio_meta_pause_seconds", lambda: 0)
+    monkeypatch.setattr(meta_ads, "meta_lane_pause_seconds", lambda lane="admin", subject="": 0)
     with db_conn() as conn:
         write_results_row(conn, campaign_id, people["owner"]["id"], {"syncClaimedUntil": _iso(T0 + timedelta(minutes=1))})
     busy = _refresh(campaign_id, people["reviewer"]).json()

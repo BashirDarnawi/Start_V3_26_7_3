@@ -9,7 +9,8 @@ on the allowlist and the campaign is claimed by THIS request.
 * **Where it runs.** One job of the studio jobs loop (studio_jobs.py, ``results``), claimed in the
   tick's heartbeat write like the other jobs, and only while a Meta token is configured. A pass
   (``run_results_sync``) makes at most 5 Meta reads, starts none after 10 seconds, and starts none
-  at all while Albayan's Meta pause runs (meta_ads.studio_meta_pause_seconds). The staff "Check
+  at all while the studio_results lane is paused app-wide (meta_ads.meta_lane_pause_seconds('studio_results'); an
+  ad-account park refuses only that account's reads). The staff "Check
   Meta now" button (``check_now``) syncs one request the same way.
 * **One worker per request.** A sync first CLAIMS the row: ``syncClaimedUntil`` = now + 2 minutes,
   written with a version check (a first row: an insert only). Only the claim's winner reads Meta,
@@ -294,7 +295,7 @@ def _error_plan(error: Any, now: datetime) -> dict[str, Any]:
     """What a failed read means for the row and the pass (see the module docstring, "Errors")."""
     code = str(getattr(error, "code", "") or "meta_error")
     if _meta.is_meta_pause_refusal(error):  # Albayan's own pause: nothing reached Meta, the pass stops
-        wait = max(_meta.studio_meta_pause_seconds(), 60)
+        wait = max(_meta.meta_lane_pause_seconds("studio_results"), 60)
         return {"state": "throttled", "next": now + timedelta(seconds=wait), "park": False, "stop": True, "called": False}
     if code == "not_configured":
         return {"state": "error", "next": now + RETRY_AFTER_ERROR, "park": False, "stop": True, "called": False}
@@ -536,7 +537,7 @@ def run_results_sync(
     report: dict[str, Any] = {"reads": 0, "synced": [], "errors": [], "parked": [], "skipped": ""}
     if not _meta_configured():
         return {**report, "skipped": "not_configured"}
-    if _meta.studio_meta_pause_seconds():
+    if _meta.meta_lane_pause_seconds("studio_results"):
         return {**report, "skipped": "meta_paused"}
     settings = settings or read_all_settings()
     parks = active_parks(now)
@@ -591,7 +592,7 @@ def check_now(campaign_id: str, now: datetime | None = None) -> dict[str, Any]:
         return {"outcome": "cached", "cached": True, "nextAllowedAt": wait, "checkError": None}
     if not _meta_configured():
         return {"outcome": "cached", "cached": True, "nextAllowedAt": None, "checkError": _check_error("META_NOT_CONFIGURED")}
-    if _meta.studio_meta_pause_seconds():
+    if _meta.meta_lane_pause_seconds("studio_results"):
         return {"outcome": "cached", "cached": True, "nextAllowedAt": None, "checkError": _check_error("META_PAUSED")}
     result = sync_campaign(campaign_id, now, manual=True)
     later = _iso(now + MANUAL_CHECK_EVERY)
