@@ -208,12 +208,24 @@ def _enabled(value: Any) -> bool:
     return True if value is None else str(value).strip().lower() in _TRUE_TEXT
 
 
+PAGE_LINK_FIELDS = ("platform", "metaPageId", "igUserId", "ownerId", "linkedAt")  # the page projection of both readers
+
+
+def linked_second(row: Any) -> int:
+    """The second the page was linked, the floor below which no comment is ever answered: the later
+    of the row's creation and its data ``linkedAt`` (``f_linkedat``). Linking the same Meta page to
+    the same owner again revives the OLD row (P4-01: same id, an old created_at) with a fresh
+    ``linkedAt``, so comments written while the page was unlinked, which the owner answered by
+    hand, stay unanswered; a row from before ``linkedAt`` has only its creation."""
+    created = int(row.get("created_at") or 0) // 1000
+    return max(created, comment_second(row.get("f_linkedat")) or 0)
+
+
 def load_instagram_page(page_id: str) -> dict[str, Any]:
     """The linked (not unlinked) studio page with this row id, which must be an Instagram account."""
     if not _ROW_ID_RE.fullmatch(str(page_id or "")):
         studio_error(404, "UNKNOWN_PAGE", "No linked page has this id")
-    sql = json_fields_select_sql(("platform", "metaPageId", "igUserId", "ownerId"), ("id", "created_at"),
-                                 "type = :type AND deleted = false AND id = :id")
+    sql = json_fields_select_sql(PAGE_LINK_FIELDS, ("id", "created_at"), "type = :type AND deleted = false AND id = :id")
     with db_conn() as conn:
         row = conn.execute(text(sql), {"type": PAGES_TYPE, "id": page_id}).mappings().first()
     meta_page_id = re.sub(r"\D", "", str((row or {}).get("f_metapageid") or ""))
@@ -223,7 +235,7 @@ def load_instagram_page(page_id: str) -> dict[str, Any]:
     if str(row.get("f_platform") or "") != "ig" or not ig_user_id:
         studio_error(409, "NOT_INSTAGRAM", "This linked page is not an Instagram account")
     return {"id": str(row.get("id") or ""), "metaPageId": meta_page_id, "igUserId": ig_user_id,
-            "ownerId": str(row.get("f_ownerid") or ""), "linkedSecond": int(row.get("created_at") or 0) // 1000}
+            "ownerId": str(row.get("f_ownerid") or ""), "linkedSecond": linked_second(row)}
 
 
 def rule_floor_second(conn: Any, owner_id: str) -> int | None:

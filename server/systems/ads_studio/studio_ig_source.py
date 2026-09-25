@@ -143,9 +143,9 @@ def _owner_active(owner_id: str) -> bool:
 
 def linked_instagram_accounts(conn: Any) -> list[dict[str, Any]]:
     """Every linked Instagram account, by row id: ``{id, metaPageId, igUserId, ownerId, linkedSecond}``
-    (the shape studio_ig_poll.load_instagram_page gives). One query; the JSON is parsed once per row."""
-    sql = json_fields_select_sql(("platform", "metaPageId", "igUserId", "ownerId"), ("id", "created_at"),
-                                 "type = :type AND deleted = false")
+    (the shape studio_ig_poll.load_instagram_page gives; ``linkedSecond`` is the reader's
+    linked_second: the relink time of a revived row, P4-01). One query; the JSON is parsed once per row."""
+    sql = json_fields_select_sql(_reader.PAGE_LINK_FIELDS, ("id", "created_at"), "type = :type AND deleted = false")
     out: list[dict[str, Any]] = []
     for row in conn.execute(text(sql), {"type": PAGES_TYPE}).mappings().all():
         if str(row.get("f_platform") or "") != "ig":
@@ -156,7 +156,7 @@ def linked_instagram_accounts(conn: Any) -> list[dict[str, Any]]:
         if not (meta_page_id and ig_user_id and owner_id):
             continue
         out.append({"id": str(row.get("id") or ""), "metaPageId": meta_page_id, "igUserId": ig_user_id,
-                    "ownerId": owner_id, "linkedSecond": int(row.get("created_at") or 0) // 1000})
+                    "ownerId": owner_id, "linkedSecond": _reader.linked_second(row)})
     return sorted(out, key=lambda page: page["id"])
 
 

@@ -1444,6 +1444,29 @@ def test_page_refs_unlink_shows_page_removed_and_relink_keeps_the_rule_firing(ac
     assert rule["id"] == shown["id"]
 
 
+def test_rule_with_a_removed_page_stays_editable(actors):
+    """An edit that leaves pageRefs alone is not held to the live-page check: the owner (or an admin
+    on their behalf) can switch a rule off or change its text after staff unlinked its page, and the
+    removed page stays on the rule. Naming pageRefs is still held to the owner's live pages."""
+    a, admin = actors["a"]["cookies"], actors["admin"]["cookies"]
+    page = _link(actors, "a", "5100000000061", name="Shop")
+    other = _link(actors, "a", "5100000000067", name="Other shop")
+    rule = _rule(a, name="Shop rule", publicReply="Thanks", pageRefs=[page["id"]])
+    assert client.post(f"{API}/pages/{page['id']}/unlink", cookies=admin).status_code == 200
+    off = client.patch(f"{API}/rules/{rule['id']}", json={"enabled": False}, cookies=a)
+    assert off.status_code == 200, off.text
+    assert off.json()["enabled"] is False and off.json()["pageRemoved"] is True and off.json()["pageRefs"] == [page["id"]]
+    worded = client.patch(f"{API}/rules/{rule['id']}", json={"publicReply": "Thanks a lot"}, cookies=a)
+    assert worded.status_code == 200 and worded.json()["publicReply"] == "Thanks a lot" and worded.json()["pageRemoved"] is True
+    assert client.patch(f"{API}/rules/{rule['id']}", json={"name": "Renamed by the team"}, cookies=admin).status_code == 200
+    assert client.patch(f"{API}/rules/{rule['id']}", json={"pageRefs": [page["id"]]}, cookies=a).status_code == 400
+    replaced = client.patch(f"{API}/rules/{rule['id']}", json={"pageRefs": [other["id"]]}, cookies=a)
+    assert replaced.status_code == 200 and replaced.json()["pageRefs"] == [other["id"]] and replaced.json()["pageRemoved"] is False
+    # A live page is still held to the rule's platform when the platform is switched.
+    moved = client.patch(f"{API}/rules/{rule['id']}", json={"platform": "ig"}, cookies=a)
+    assert moved.status_code == 400 and "not on this rule's platform" in moved.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # P4-02: the reply log, its counters and the latency fields
 # ---------------------------------------------------------------------------
@@ -1541,6 +1564,58 @@ def test_reply_actions_saved_as_they_succeed(actors, graph):
     graph.post = real_post
     studio._retry_pending_replies(datetime.now(timezone.utc) + timedelta(hours=1))
     assert [p for p, _d in graph.paths() if p.endswith("/messages")] == ["5100000000065/messages"]  # never resent
+
+
+def test_retry_pass_never_resends_what_an_earlier_attempt_sent(actors, graph):
+    """A retry killed after the DM: the next pass sends only what is missing (one private message
+    per person, ever), adds it after the saved actions, keeps the row's first sentAt, and the row
+    is claimed before the send and released after the crash like the webhook path."""
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000066")
+    _rule(a, name="All", publicReply="Thanks", dmEnabled=True, dmText="DM", likeComment=True)
+    real_post = graph.post
+    busy = meta_ads.MetaAdsError("temporary", "Meta is temporarily unavailable.", retryable=True, provider_code="2")
+
+    def meta_down(path, data, token):
+        graph.calls.append((path, dict(data or {}), token))
+        raise busy
+
+    graph.post = meta_down
+    _webhook(_fb_comment("5100000000066", "5100000000066_1", "9068", "hi"))
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == [] and row["retryAfter"] and row["attempts"] == 1  # every action hit a temporary problem: retried later
+    seen = []
+
+    def dies_after_the_dm(path, data, token):
+        current = _log_rows(actors["a"]["id"])[0]
+        seen.append((path.rsplit("/", 1)[-1], list(current["actions"]), current["processing"], current["retryAfter"]))
+        if path.endswith("/comments"):
+            raise RuntimeError("the process died here")
+        return real_post(path, data, token)
+
+    graph.post = dies_after_the_dm
+    later = datetime.now(timezone.utc) + timedelta(hours=1)
+    with pytest.raises(RuntimeError):
+        studio._retry_pending_replies(later)
+    assert seen == [("messages", [], True, ""), ("comments", ["dm"], True, "")]  # claimed before the send; the DM saved as it landed
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == ["dm"] and row["processing"] is False and row["error"] == "interrupted"
+    assert row["retryAfter"] and row["attempts"] == 2 and row["sentAt"]  # released and re-armed: the rest may still go out
+    first_answer = row["sentAt"]
+    graph.post = real_post
+    studio._retry_pending_replies(later + timedelta(hours=2))
+    assert [p for p, _d in graph.paths() if p.endswith("/messages")] == ["5100000000066/messages"] * 2  # the failed try and the one that landed: never a third
+    assert [p for p, _d in graph.paths()][-2:] == ["5100000000066_1/comments", "5100000000066_1/likes"]
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == ["dm", "public", "like"] and row["retryAfter"] == "" and row["error"] == "" and row["processing"] is False
+    assert row["sentAt"] == first_answer  # the latency still measures the person's first answer
+    # A row killed after its last action: finished without a Meta call, the actions intact.
+    log_id = studio._log_id(actors["a"]["id"], "fb", "5100000000066_1")
+    studio._ctx()["patch_entity"](studio.LOG_TYPE, log_id, {"retryAfter": studio._iso_at(later)}, actors["a"]["id"])
+    calls = len(graph.calls)
+    studio._retry_pending_replies(later + timedelta(hours=3))
+    row = _log_rows(actors["a"]["id"])[0]
+    assert len(graph.calls) == calls and row["retryAfter"] == "" and row["actions"] == ["dm", "public", "like"]
 
 
 # ---------------------------------------------------------------------------

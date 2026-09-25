@@ -410,6 +410,22 @@ def test_poll_only_accounts_that_can_answer_and_only_with_the_poll_capability(ac
     assert summary["longestIntervalSeconds"] == 300 and summary["lastPass"]["polled"] == 1
 
 
+def test_linked_second_is_the_relink_time_of_a_revived_row(actors):
+    """The poll's floor of a revived row (P4-01) is its fresh linkedAt, not the old created_at; a row
+    without linkedAt (from before it) keeps its creation."""
+    owner = actors["owner"]["id"]
+    relinked = (T0 - timedelta(hours=1)).replace(microsecond=0)
+    _insert("socialPages", "spg_src_a", {
+        "ownerId": owner, "metaPageId": PAGE_A, "platform": "ig", "igUserId": IG_A, "name": "Shop", "healthy": True,
+        "linkedAt": _iso(relinked),
+    }, owner=owner, created_at=now_ms() - 30 * 86_400_000)
+    _page(actors, "spg_src_b", IG_B, PAGE_B, "owner2", linked_ago=timedelta(days=3))
+    with db_conn() as conn:
+        floors = {page["id"]: page["linkedSecond"] for page in source.linked_instagram_accounts(conn)}
+    assert floors["spg_src_a"] == int(relinked.timestamp()) == studio_ig_poll.load_instagram_page("spg_src_a")["linkedSecond"]
+    assert abs(floors["spg_src_b"] - (now_ms() // 1000 - 3 * 86_400)) <= 2
+
+
 def test_poll_respects_page_parks_and_pauses(actors, graph, monkeypatch):
     ig = Instagram(graph)
     ig.add_account(IG_A, PAGE_A, [MEDIA_A1])

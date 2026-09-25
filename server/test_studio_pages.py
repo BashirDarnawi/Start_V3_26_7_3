@@ -24,6 +24,7 @@ import server.systems.ads_studio.social_studio as studio
 from server.db import db_conn, init_db, json_field_sql, json_loads
 from server.systems.ads_studio import studio_alerts_meta, studio_jobs
 from server.systems.ads_studio.studio_privacy import scrub_studio_personal_data_conn
+from server.systems.ads_studio.studio_settings import DEFAULTS
 from server.test_social_studio import (  # noqa: F401  (_fresh is a fixture)
     ALL_ON,
     API,
@@ -464,6 +465,125 @@ def test_page_health_pass_runs_from_the_worker_tick(monkeypatch):
     monkeypatch.setattr(studio, "_RETRY_TICK", studio.PAGE_HEALTH_PASS_EVERY_TICKS + 1)
     studio.run_scheduler_tick()
     assert len(calls) == 2
+
+
+def test_page_check_clears_a_standing_reason_only_after_a_read_proved_it_wrong(actors, meta):
+    """With the default capabilities (fbPublicReply gated) a check makes no Meta call: a standing
+    reason then stays, and the daily pass neither clears it nor raises a fresh alert the next day.
+    A page-token read that answers clears a token/role/permission reason; only the subscription
+    read as subscribed (or backfilled) clears webhook_not_subscribed."""
+    a = actors["a"]["cookies"]
+    _arm(dict(DEFAULTS["capabilities"]))  # the realistic first save: fbPublicReply gated, the rest unavailable
+    page = _link(actors, "a", FB_PAGE)
+    assert meta.calls == []  # gated: nothing to subscribe on link
+    studio._set_page_health(page["id"], "attention", "page_role_lost")
+    assert len(_alerts("page_health_drop")) == 1
+    result = studio.check_page_health(_entity(page["id"]))
+    assert meta.calls == [] and result["reason"] == "page_role_lost" and result["health"]["state"] == "attention"
+    data = _entity(page["id"])["data"]
+    assert data["healthReason"] == "page_role_lost" and data["lastHealthCheckAt"]  # stamped: the daily budget is unchanged
+    tomorrow = datetime.now(UTC) + timedelta(hours=25)
+    passed = studio.run_page_health_pass(now=tomorrow)
+    assert (passed["checked"], passed["attention"]) == (1, 1) and meta.calls == []
+    assert _entity(page["id"])["data"]["healthReason"] == "page_role_lost" and len(_alerts("page_health_drop")) == 1
+    assert _listed(a, page["id"])["health"]["fix"]["en"] == "Give Albayan access to the page again in Meta Business Suite"
+    # An Instagram account read by polling: no media read either, the reason stays.
+    _arm({**ALL_ON, "igPublicReply": "poll"})
+    meta.routes[("POST", f"{IG_PAGE_FB}/subscribed_apps")] = {"success": True}
+    ig = _link(actors, "a", IG_PAGE_FB, platform="ig", ig_user_id=IG_USER)
+    studio._set_page_health(ig["id"], "attention", "permission_missing")
+    reads = len(meta.calls)
+    assert studio.check_page_health(_entity(ig["id"]))["reason"] == "permission_missing" and len(meta.calls) == reads
+    # A standing webhook_not_subscribed survives a backfill Meta refused temporarily (nothing was proved)...
+    _arm(ALL_ON)
+    studio._set_page_health(page["id"], "attention", "webhook_not_subscribed")
+    meta.routes[("GET", f"{FB_PAGE}/subscribed_apps")] = _subscribed(app_id="999")
+    meta.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = meta_ads.MetaAdsError("temporary", "Meta is busy.", retryable=True, provider_code="2")
+    result = studio.check_page_health(_entity(page["id"]))
+    assert result["webhook"] == "not_subscribed" and result["reason"] == "webhook_not_subscribed"
+    # ... and goes once the backfill is confirmed; a token reason goes once the page token answered.
+    meta.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = {"success": True}
+    result = studio.check_page_health(_entity(page["id"]))
+    assert result["webhook"] == "subscribed" and result["reason"] == "" and result["health"]["state"] == "ok"
+    studio._set_page_health(page["id"], "attention", "token_revoked")
+    meta.routes[("GET", f"{FB_PAGE}/subscribed_apps")] = _subscribed()
+    assert studio.check_page_health(_entity(page["id"]))["reason"] == "" and _entity(page["id"])["data"]["healthState"] == "ok"
+
+
+def test_190_460_from_albayans_own_token_is_the_global_outage_not_the_pages(actors, meta, monkeypatch):
+    """Meta's subcode 460 names the session behind a token, and every page is reached through ONE
+    system token: unless the token check says that token is fine (ok_fresh), the refusal is Albayan's
+    own outage (P3-18a state, P3-18b parked reply), the page is not marked and no owner is told to
+    reshare the page."""
+    a = actors["a"]["cookies"]
+    _arm(ALL_ON)
+    meta.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = {"success": True}
+    page = _link(actors, "a", FB_PAGE)
+    _rule(a, name="All", publicReply="Thanks")
+    checks = []
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", lambda *args, **kwargs: checks.append(args) or "down")
+    dead = meta_ads.MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code="190.460")
+    meta.routes[("POST", f"{FB_PAGE}_1/comments")] = dead
+    _webhook(_fb_comment(FB_PAGE, f"{FB_PAGE}_1", "9001", "hello"))
+    assert checks  # the token check decided (P3-18a)
+    listed = _listed(a, page["id"])
+    assert listed["healthy"] is True and listed["health"]["state"] == "ok" and _alerts("page_health_drop") == []
+    [log] = _log_rows(actors["a"]["id"])
+    assert log["parkedReason"] == studio.PARKED_REASON and log["retryAfter"]  # parked for the recovery, not lost
+    # The check: the same refusal on the subscription read goes to the token check; the page keeps its state.
+    meta.routes[("GET", f"{FB_PAGE}/subscribed_apps")] = dead
+    result = studio.check_page_health(_entity(page["id"]))
+    assert result["reason"] == "" and result["errorCode"] == "authorization" and result["providerCode"] == "190.460"
+    assert _entity(page["id"])["data"]["healthState"] == "ok" and _alerts("page_health_drop") == []
+    # No verdict about the refusal yet (pending): still not the page's.
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", lambda *args, **kwargs: "pending")
+    meta.routes[("POST", f"{FB_PAGE}_2/comments")] = dead
+    _webhook(_fb_comment(FB_PAGE, f"{FB_PAGE}_2", "9002", "hello"))
+    assert _listed(a, page["id"])["health"]["state"] == "ok" and _alerts("page_health_drop") == []
+    # Albayan's token checked fine after the refusal: then it IS this page's token (the owner's fix step).
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", lambda *args, **kwargs: "ok_fresh")
+    meta.routes[("POST", f"{FB_PAGE}_3/comments")] = dead
+    _webhook(_fb_comment(FB_PAGE, f"{FB_PAGE}_3", "9003", "hello"))
+    assert _listed(a, page["id"])["health"]["reason"] == "token_revoked" and len(_alerts("page_health_drop")) == 1
+    # A page linked during the outage (its subscribe refused the same way) is not marked either.
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", lambda *args, **kwargs: "down")
+    meta.routes[("POST", f"{FB_PAGE_2}/subscribed_apps")] = dead
+    page2 = _link(actors, "a", FB_PAGE_2)
+    assert page2["healthy"] is True and page2["health"]["state"] == "ok" and len(_alerts("page_health_drop")) == 1
+
+
+def test_ig_heuristic_trusts_a_comment_that_arrived_right_after_the_snapshot(actors, meta):
+    """A stamp written 5 minutes before the snapshot, one comment delivered 3 minutes after it (inside
+    the 10-minute stamp throttle) and a quiet day: the comment did arrive, so nothing is marked and
+    no owner is told to make the account public. Real silence is still found."""
+    a = actors["a"]["cookies"]
+    _arm(ALL_ON)
+    meta.routes[("POST", f"{IG_PAGE_FB}/subscribed_apps")] = {"success": True}
+    meta.routes[("GET", f"{IG_PAGE_FB}/subscribed_apps")] = _subscribed()
+    ig = _link(actors, "a", IG_PAGE_FB, platform="ig", ig_user_id=IG_USER)
+    counts = {"n": 3}
+    meta.routes[("GET", f"{IG_USER}/media")] = lambda body: {"data": [{"id": "17950000000011", "comments_count": counts["n"]}]}
+    t0 = datetime.now(UTC)
+    studio._ctx()["patch_entity"](studio.PAGES_TYPE, ig["id"], {"igLastCommentEventAt": studio._iso_at(t0 - timedelta(minutes=5))}, actors["a"]["id"])
+    assert studio.check_page_health(_entity(ig["id"]), now=t0)["reason"] == ""
+    assert _entity(ig["id"])["data"]["igCommentCounts"] == {"total": 3, "at": studio._iso_at(t0)}
+    _webhook(_ig_comment("17900000000021"))  # the one comment of a quiet day, right after the snapshot
+    stamped = studio._parse_iso(_entity(ig["id"])["data"]["igLastCommentEventAt"])
+    assert stamped >= t0  # rewritten although the last stamp is younger than 10 minutes: it predates the snapshot
+    counts["n"] = 4
+    late = studio.check_page_health(_entity(ig["id"]), now=t0 + timedelta(hours=25))
+    assert late["reason"] == "" and late["health"]["state"] == "ok" and _alerts("instagram_comments_not_arriving") == []
+    assert _listed(a, ig["id"])["healthy"] is True
+    # Real silence: a stamp from well before the snapshot and nothing since still marks the page.
+    studio._ctx()["patch_entity"](studio.PAGES_TYPE, ig["id"], {"igLastCommentEventAt": studio._iso_at(t0 + timedelta(hours=24, minutes=30))}, actors["a"]["id"])
+    counts["n"] = 6
+    assert studio.check_page_health(_entity(ig["id"]), now=t0 + timedelta(hours=50))["reason"] == "instagram_comments_not_arriving"
+    assert len(_alerts("instagram_comments_not_arriving")) == 1
+    # A stamp throttled just before the snapshot never counts as silence on its own.
+    studio._set_page_health(ig["id"], "ok")
+    studio._ctx()["patch_entity"](studio.PAGES_TYPE, ig["id"], {"igLastCommentEventAt": studio._iso_at(t0 + timedelta(hours=50) - timedelta(minutes=5))}, actors["a"]["id"])
+    counts["n"] = 7
+    assert studio.check_page_health(_entity(ig["id"]), now=t0 + timedelta(hours=75))["reason"] == ""
 
 
 # ---------------------------------------------------------------------------

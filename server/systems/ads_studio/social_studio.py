@@ -26,7 +26,7 @@ Albayan Studio redesign (PLAN.md stage P4; DECISIONS D9, D24b, D34):
   owner), paged, with counters by action and outcome and the ``receivedAt`` / ``sentAt`` /
   ``source`` latency; ``reply_latency_by_source()`` gives diagnostics the p95 per source. Each
   reply action is saved to its log row the moment Meta accepts it (``_reply_row``), so a server
-  killed mid-reply never replays the whole rule.
+  killed mid-reply never replays the whole rule: the retry pass sends only what is missing.
 * **P4-03 page health.** ``_set_page_health()`` is the one writer of ``healthState`` /
   ``healthReason`` / ``healthy``; ``health`` in the page list carries the bilingual label and fix
   step; ``check_page_health()`` reads the webhook subscription (subscribing on link and as a
@@ -244,8 +244,9 @@ LOG_OUTCOME_LABELS: dict[str, dict[str, str]] = {
 }
 _CURSOR_RE = re.compile(r"^(\d{1,15}):([A-Za-z0-9][A-Za-z0-9._:-]{0,79})$")
 # The reply-log row the actions sent inside a _reply_row() block are saved to as each one succeeds
-# (P4-02): a server killed mid-reply leaves the exact list behind, so nothing is ever replayed.
-_REPLY_ROW: ContextVar[tuple[str, str] | None] = ContextVar("albayan_social_reply_row", default=None)
+# (P4-02): a server killed mid-reply leaves the exact list behind, so nothing is ever replayed. The
+# tuple: (log id, owner, the actions already on the row before this attempt, the row's first sentAt).
+_REPLY_ROW: ContextVar[tuple[str, str, tuple[str, ...], str] | None] = ContextVar("albayan_social_reply_row", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +903,7 @@ def rule_active_since_ms(rule: dict[str, Any]) -> int:
     return max(created, ms(rule.get("activeSince"))) if created else 0
 
 
-def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any]) -> dict[str, Any]:
+def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any], *, stored_refs: list[str] | None = None) -> dict[str, Any]:
     name = _text_field(ctx, raw.get("name"), "Rule name", 80, required=True)
     platform = str(raw.get("platform") or "fb").strip().lower()
     if platform not in PLATFORMS:
@@ -933,9 +934,20 @@ def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any]) -> dict
     if not public_reply and not (dm_enabled and dm_text):
         raise HTTPException(status_code=400, detail="A rule needs a public reply or a private message")
     # P4-01: the pages the rule answers on, by socialPages row id; each must be a live page of this
-    # owner on the rule's platform. Empty = every page (rules from before pageRefs).
+    # owner on the rule's platform. Empty = every page (rules from before pageRefs). An edit that
+    # leaves ``pageRefs`` alone (``stored_refs``) keeps the saved list as it is: a ref whose page was
+    # unlinked stays (the rule shows "page removed" and revives with the page, P4-01) and only the
+    # live pages are held to the rule's platform, so the owner can still switch the rule off or
+    # change its text.
     page_refs: list[str] = []
-    for ref in _string_list(raw.get("pageRefs"), "pageRefs", max_items=MAX_POST_PAGES, max_chars=80):
+    if stored_refs is not None:
+        for ref in stored_refs:
+            page = ctx["get_entity"](PAGES_TYPE, ref) if _SAFE_ID_RE.fullmatch(ref) else None
+            live = page and not page.get("deleted") and str(page["data"].get("ownerId") or "") == owner_id
+            if live and str(page["data"].get("platform") or "") != platform:
+                raise HTTPException(status_code=400, detail=f"Page {ref} is not on this rule's platform")
+            page_refs.append(ref)
+    for ref in _string_list(raw.get("pageRefs") if stored_refs is None else None, "pageRefs", max_items=MAX_POST_PAGES, max_chars=80):
         page = ctx["get_entity"](PAGES_TYPE, ctx["validate_entity_id"](ref))
         if not page or page.get("deleted") or str(page["data"].get("ownerId") or "") != owner_id:
             raise HTTPException(status_code=400, detail=f"Page {ref} is not linked to this account")
@@ -1342,8 +1354,11 @@ def run_scheduler_tick(*, now: datetime | None = None, limit: int = 20) -> int:
             _retry_pending_replies(current)
         except Exception:
             print("[albayan] Social Studio reply retry pass failed; it will retry.")
-    # P4-03: the daily page check, a few pages at a time, about every 20 minutes (a no-op until the
-    # capability gates are armed). The studio jobs loop may take this turn over (run_page_health_pass).
+    # P4-03: the daily page check stays on this worker, budgeted and paced: PAGE_HEALTH_PASS_LIMIT
+    # pages per pass (oldest check first, each page once a day) and one pass every
+    # PAGE_HEALTH_PASS_EVERY_TICKS ticks (about 20 minutes), so at most ~360 page checks a day in
+    # total whatever the number of pages; a no-op until the capability gates are armed. Moving it
+    # into studio_jobs.run_tick as a claimed job (one process wins) is a studio_jobs change.
     if _RETRY_TICK % PAGE_HEALTH_PASS_EVERY_TICKS == 2:
         try:
             run_page_health_pass(current)
@@ -1503,13 +1518,21 @@ class _ReplyOutcome(tuple):
 
 
 @contextmanager
-def _reply_row(log_id: str, owner_id: str):
-    """P4-02: the reply-log row the actions sent inside this block are saved to as each succeeds."""
-    marker = _REPLY_ROW.set((str(log_id or ""), str(owner_id or "")))
+def _reply_row(log_id: str, owner_id: str, saved: list[str] | None = None, sent_at: str = ""):
+    """P4-02: the reply-log row the actions sent inside this block are saved to as each succeeds.
+    A retry names the actions already on the row (``saved``) and its first ``sentAt``: what lands
+    now is added after them, and the time of the person's first answer is kept."""
+    marker = _REPLY_ROW.set((str(log_id or ""), str(owner_id or ""), tuple(saved or ()), str(sent_at or "")))
     try:
         yield
     finally:
         _REPLY_ROW.reset(marker)
+
+
+def _merge_actions(saved: Any, actions: list[str]) -> list[str]:
+    """The row's saved actions (in their order) followed by the new ones not among them."""
+    kept = [str(a) for a in saved if str(a) in _REPLY_ACTIONS] if isinstance(saved, (list, tuple)) else []
+    return [*kept, *[a for a in actions if a not in kept]]
 
 
 def _save_sent_actions(actions: list[str], sent_at: str) -> None:
@@ -1520,17 +1543,20 @@ def _save_sent_actions(actions: list[str], sent_at: str) -> None:
     if not row or not row[0]:
         return
     try:
-        _ctx()["patch_entity"](LOG_TYPE, row[0], {"actions": list(actions), "sentAt": sent_at}, row[1] or "system")
+        _ctx()["patch_entity"](LOG_TYPE, row[0], {"actions": _merge_actions(row[2], actions), "sentAt": row[3] or sent_at},
+                               row[1] or "system")
     except Exception:
         pass
 
 
 def page_problem_reason(error: Any) -> str:
     """P4-03: the page health reason a Meta refusal stands for, or '' (a global problem, P3-18a, or
-    an ordinary failure): 190.460 (the token was revoked, e.g. a password change) -> token_revoked;
-    190.492 (the page role was lost) or no page token at all -> page_role_lost; the permission
-    family (3, 10, 200-299) -> permission_missing; one of Meta's PAGE-scoped limits (32, 80001,
-    80002, 80006; PLAN §8.1) -> throttled (an app-wide limit is not the page's problem)."""
+    an ordinary failure): 190.460 (the session behind the token was invalidated, e.g. a password
+    change) -> token_revoked, which is the PAGE's only when Albayan's own token passes the check
+    (token_revoked_is_the_pages: every writer asks before marking); 190.492 (the page role was
+    lost) or no page token at all -> page_role_lost; the permission family (3, 10, 200-299) ->
+    permission_missing; one of Meta's PAGE-scoped limits (32, 80001, 80002, 80006; PLAN §8.1) ->
+    throttled (an app-wide limit is not the page's problem)."""
     code = str(getattr(error, "code", "") or "")
     provider = str(getattr(error, "provider_code", "") or "").strip()
     major, _dot, sub = provider.partition(".")
@@ -1545,6 +1571,22 @@ def page_problem_reason(error: Any) -> str:
     if code == "rate_limited" and major in PAGE_THROTTLE_CODES:
         return "throttled"
     return ""
+
+
+def token_revoked_is_the_pages(failed_at: datetime | None = None) -> bool:
+    """Whether a 190.460 refused at ``failed_at`` (default now) is this page's problem. Meta's subcode
+    460 names the session behind a token: Albayan reaches every page through ONE system token, so
+    the refusal is Albayan's own outage unless the token check (studio_alerts_meta.
+    after_authorization_failure, at most one Meta call per 10 minutes) says that token is fine and
+    was checked after the refusal (``ok_fresh``). Down, or no verdict yet: P3-18a holds the global
+    state and the admin alert, the page keeps its state and no owner is told to reshare the page."""
+    from . import studio_alerts_meta  # late: it imports this module
+
+    try:
+        return studio_alerts_meta.after_authorization_failure(failed_at or datetime.now(timezone.utc)) == "ok_fresh"
+    except Exception as error:
+        print(f"[albayan] Social Studio connection check failed ({type(error).__name__}).")
+        return False
 
 
 def _dm_pending(rule: dict[str, Any], actions: list[str]) -> bool:
@@ -1588,6 +1630,7 @@ def _without_actions(rule: dict[str, Any], skip: set[str]) -> dict[str, Any]:
 
 def _parked_patch(
     outcome: Any, data: dict[str, Any], rule: dict[str, Any], now: datetime, verdict: str | None = None,
+    sent: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """P3-18b: how a reply Meta refused for authorization keeps waiting, or None (it is not parked).
 
@@ -1601,6 +1644,8 @@ def _parked_patch(
     already past that window is finished as missed_during_outage. A pending one also keeps
     ``authCheckPendingSince`` (the refusal's time): the retry pass checks again before resending. An
     action whose send timed out may have landed: it goes into ``skipActions`` and is never resent.
+    ``sent``: the actions already on the row from an earlier attempt (a retry): a private reply that
+    went out then is not owed any more, so it does not buy the 7-day window.
     """
     codes = tuple(getattr(outcome, "auth_codes", ()) or ())
     if not codes:
@@ -1620,7 +1665,7 @@ def _parked_patch(
     ):
         return None
     skip = _skip_actions(data.get("skipActions")) | set(getattr(outcome, "timed_out", ()) or ())
-    window = PRIVATE_REPLY_WINDOW if _dm_pending(_without_actions(rule, skip), actions) else PUBLIC_REPLY_WINDOW
+    window = PRIVATE_REPLY_WINDOW if _dm_pending(_without_actions(rule, skip | set(sent or ())), actions) else PUBLIC_REPLY_WINDOW
     give_up = _comment_time(data, now) + window
     if now >= give_up:
         return _missed_patch()
@@ -1635,12 +1680,13 @@ def _parked_patch(
     return patch
 
 
-def _rule_for_resend(rule: dict[str, Any], data: dict[str, Any], now: datetime) -> dict[str, Any]:
-    """The rule a retried reply is sent with: never an action in ``skipActions`` (its send timed out
-    and may have landed), and for a parked reply sent after the outage, past 24 hours after the
-    comment only the private reply still goes out (public replies and likes only within 24 hours,
-    PLAN §7.4). The rule itself when nothing changes."""
-    skip = _skip_actions(data.get("skipActions"))
+def _rule_for_resend(rule: dict[str, Any], data: dict[str, Any], now: datetime, sent: set[str] | None = None) -> dict[str, Any]:
+    """The rule a retried reply is sent with: never an action already on the row (``sent``: Meta
+    accepted it in an earlier attempt, P4-02) or in ``skipActions`` (its send timed out and may
+    have landed), and for a parked reply sent after the outage, past 24 hours after the comment
+    only the private reply still goes out (public replies and likes only within 24 hours, PLAN
+    §7.4). The rule itself when nothing changes."""
+    skip = _skip_actions(data.get("skipActions")) | set(sent or ())
     if data.get("parkedReason") == PARKED_REASON and now >= _comment_time(data, now) + PUBLIC_REPLY_WINDOW:
         skip |= {"public", "like"}
     return _without_actions(rule, skip)
@@ -1788,7 +1834,8 @@ def _execute_rule_actions(
                 errors.append(note("like", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
-    _page_health_after_meta(page, page_reasons[0] if page_reasons else "", succeeded=bool(actions))
+    _page_health_after_meta(page, page_reasons[0] if page_reasons else "", succeeded=bool(actions),
+                            failed_at=auth_failed[0] if auth_failed else None)
     retryable = not actions and failures > 0 and temporary == failures
     return _ReplyOutcome.of(actions, errors, retryable, auth_codes, auth_failed[0] if auth_failed else None, timed_out,
                             skipped, sent_at)
@@ -1813,7 +1860,14 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     again first: down, it waits like the others; valid (checked after the
     refusal), it is resent once and a new refusal finishes it; still no verdict,
     it is resent and a new refusal parks it again until ``giveUpAt``. An action
-    in ``skipActions`` (its send timed out and may have landed) is never resent."""
+    in ``skipActions`` (its send timed out and may have landed) is never resent,
+    nor is one already on the row (P4-02: Meta accepted it in an earlier attempt;
+    a retry sends only what is missing, adds it after the saved actions and keeps
+    the row's first ``sentAt``). Like the webhook path, a row is claimed before
+    the send (``processing`` true, ``retryAfter`` empty, checked against the
+    row's version so two passes never send the same reply) and released when
+    the send crashes; unlike there the retry is re-armed even when part of the
+    rule went out, because the saved actions are never resent."""
     from . import studio_alerts_meta  # late: it imports this module
 
     ctx = _ctx()
@@ -1828,7 +1882,7 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     with db_conn() as conn:
         rows = conn.execute(
             text(
-                f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false {held}"
+                f"SELECT id, data_json, last_modified FROM entities WHERE type=:type AND deleted=false {held}"
                 f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {_json_field('retryAfter')} <= :now "
                 f"AND {written} >= :cutoff ORDER BY {_json_field('retryAfter')} ASC LIMIT :limit"
             ),
@@ -1926,27 +1980,47 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 patch = {"retryAfter": _iso_at(min(later, give_up) if give_up else later), "authCheckPendingSince": ""}
             # ok_fresh (the token is fine) or still no verdict (no app id, Meta unreachable): the reply
             # itself tries again below. A refused send applied nothing on Meta, so it cannot double up.
+        saved = _merge_actions(data.get("actions"), [])  # P4-02: what an earlier attempt already sent, in row order
         if patch is None:
-            rule = _rule_for_resend(rule_entity["data"], data, now)
+            rule = _rule_for_resend(rule_entity["data"], data, now, sent=set(saved))
             if rule is not rule_entity["data"] and not _reply_left(rule, str(data.get("platform") or "")):
-                # A parked reply past its public 24 hours with no private reply owed (or nothing left
-                # that did not time out before).
+                # A parked reply past its public 24 hours with no private reply owed, or nothing left
+                # that was not sent or did not time out before (a retry killed after its last action).
                 patch = _missed_patch() if parked else {"retryAfter": ""}
             else:
-                with _reply_row(str(row["id"]), owner_id):  # P4-02: each action lands on the row as it succeeds
-                    outcome = _execute_rule_actions(
-                        {**page_entity["data"], "id": str(page_entity["id"])}, rule,
-                        str(data.get("platform") or ""), str(data.get("commentId") or ""),
-                    )
+                try:  # the claim: another pass (or process) that took the row first keeps it
+                    ctx["patch_entity"](LOG_TYPE, str(row["id"]), {"processing": True, "retryAfter": ""}, owner_id,
+                                        expected_last_modified=int(row.get("last_modified") or 0))
+                except HTTPException:
+                    continue
+                try:
+                    with _reply_row(str(row["id"]), owner_id, saved, str(data.get("sentAt") or "")):  # P4-02: each action lands on the row as it succeeds
+                        outcome = _execute_rule_actions(
+                            {**page_entity["data"], "id": str(page_entity["id"])}, rule,
+                            str(data.get("platform") or ""), str(data.get("commentId") or ""),
+                        )
+                except Exception:
+                    # A non-Meta failure (database hiccup, transport edge case, shutdown): release the
+                    # claim and try again later. What Meta accepted is on the row (per-action save) and
+                    # is never resent, so the rest of the rule may still go out.
+                    try:
+                        ctx["patch_entity"](LOG_TYPE, str(row["id"]), {"processing": False, "error": "interrupted",
+                                                                      "retryAfter": _retry_after_iso(attempts + 1), "attempts": attempts + 1}, owner_id)
+                    except Exception:
+                        pass
+                    raise
                 actions, errors, retryable = outcome
-                patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
+                patch = {"actions": _merge_actions(saved, actions), "error": "; ".join(errors)[:500], "attempts": attempts + 1,
+                         "processing": False}
                 patch.update(_outcome_patch(outcome))
+                if data.get("sentAt"):
+                    patch.pop("sentAt", None)  # the person's first answer came in an earlier attempt (P4-02 latency)
                 if pending_since is not None:
                     patch["authCheckPendingSince"] = ""
                 # A new refusal is judged by the check just made: ok_fresh (the token was fine after
                 # the first refusal) finishes it, so a page-level refusal cannot loop; pending parks
                 # it again until giveUpAt.
-                kept = _parked_patch(outcome, data, rule_entity["data"], now, verdict)
+                kept = _parked_patch(outcome, data, rule_entity["data"], now, verdict, sent=set(saved))
                 if kept:
                     patch.update(kept)  # Albayan's Meta connection went down (again): parked, not lost
                 else:
@@ -2261,12 +2335,16 @@ def _set_page_health(
     return saved.get("data") or {**data, **patch}
 
 
-def _page_health_after_meta(page: dict[str, Any], reason: str, *, succeeded: bool) -> None:
+def _page_health_after_meta(page: dict[str, Any], reason: str, *, succeeded: bool, failed_at: datetime | None = None) -> None:
     """After a reply or a publish on ``page``: a per-page refusal marks the page with its reason; a
     success clears a reason a reply can clear (never the staff-set or heuristic ones). A page dict
-    without its row ``id`` (a bare stand-in) is left alone."""
+    without its row ``id`` (a bare stand-in) is left alone. ``token_revoked`` (190.460, refused at
+    ``failed_at``) marks the page only when Albayan's own token passes the check
+    (token_revoked_is_the_pages); otherwise it is the global outage P3-18a handles."""
     page_id = str(page.get("id") or "")
     if not page_id:
+        return
+    if reason == "token_revoked" and not token_revoked_is_the_pages(failed_at):
         return
     try:
         if reason:
@@ -2281,7 +2359,8 @@ def _page_health_after_meta(page: dict[str, Any], reason: str, *, succeeded: boo
 
 def _note_comment_seen(page_entity: dict[str, Any], source: str) -> None:
     """A comment reached Albayan on this page (webhook, poll or check): an Instagram account stamps
-    ``igLastCommentEventAt`` (at most every 10 minutes; the heuristic's proof) and sheds the
+    ``igLastCommentEventAt`` (at most every 10 minutes, and always when the stamp predates the
+    check's comment-count snapshot: that is exactly the proof the heuristic needs) and sheds the
     "comments not arriving" and staff-set "private" reasons; a Facebook feed webhook sheds
     ``webhook_not_subscribed`` (the delivery proves the subscription). Best effort."""
     data = page_entity.get("data") or {}
@@ -2294,7 +2373,9 @@ def _note_comment_seen(page_entity: dict[str, Any], source: str) -> None:
         if platform == "ig":
             now = datetime.now(timezone.utc)
             last = _parse_iso(data.get("igLastCommentEventAt"))
-            if last is None or now - last >= IG_EVENT_STAMP_EVERY:
+            snapshot = data.get("igCommentCounts") if isinstance(data.get("igCommentCounts"), dict) else {}
+            snapshot_at = _parse_iso(snapshot.get("at"))
+            if last is None or now - last >= IG_EVENT_STAMP_EVERY or (snapshot_at is not None and last < snapshot_at):
                 _ctx()["patch_entity"](PAGES_TYPE, page_id, {"igLastCommentEventAt": _iso_at(now)}, str(data.get("ownerId") or "") or "system")
             if state == "attention" and reason in IG_EVENT_CLEARED_REASONS:
                 _set_page_health(page_id, "ok")
@@ -2333,7 +2414,10 @@ def _subscribe_page(page_id: str, data: dict[str, Any], *, now: datetime | None 
         except HTTPException:
             pass
     elif not answer.get("retryable"):
-        _set_page_health(page_id, "attention", answer.get("pageReason") or "webhook_not_subscribed", now=now)
+        reason = str(answer.get("pageReason") or "")
+        if reason == "token_revoked" and not token_revoked_is_the_pages(now):
+            return answer  # Albayan's own token (P3-18a decided): not the page's problem
+        _set_page_health(page_id, "attention", reason or "webhook_not_subscribed", now=now)
     return answer
 
 
@@ -2349,7 +2433,11 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
       The sum of ``comments_count`` over recent media is kept with its time; when a later sum, at
       least 24 hours after, is higher and no comment event reached Albayan in between, the page is
       marked ``instagram_comments_not_arriving`` (an event clears it, _note_comment_seen);
-    * a page whose reasons all cleared goes back to ``ok``; ``lastHealthCheckAt`` is stamped always.
+    * a standing reason goes back to ``ok`` only when a read of this check proved it wrong: a token,
+      role or permission reason (and an unknown one from before P4-03) by a page-token read that
+      answered, ``webhook_not_subscribed`` by the subscription read as subscribed; a check that made
+      no Meta call, failed, or hit Albayan's own token (190.460 with the token check not ``ok_fresh``,
+      or any other global 190) changes nothing; ``lastHealthCheckAt`` is stamped always.
 
     Returns ``{pageId, checked, webhook, igCommentTotal, reason, health, errorCode, providerCode}``.
     """
@@ -2368,25 +2456,40 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
         return out
     found: list[str] = []
     global_refusal = False
+    verified_token = False  # a Meta read with the page's token answered: the token and role are fine
+    webhook_ok = False  # the subscription was read (or backfilled) as subscribed
+
+    def page_reason(reason: str) -> None:
+        # 190.460 from Albayan's own token is the global outage (P3-18a), never this page's mark.
+        nonlocal global_refusal
+        if reason == "token_revoked" and not token_revoked_is_the_pages(moment):
+            global_refusal = True
+        elif reason:
+            found.append(reason)
+
     if webhook_wanted(platform, gates):
         answer = _meta.read_page_webhook_subscription(str(data.get("metaPageId") or ""))
         out["webhook"] = answer["state"]
+        if answer["state"] in ("subscribed", "not_subscribed"):
+            verified_token = True
+            webhook_ok = answer["state"] == "subscribed"
         if answer["state"] == "not_subscribed":
             backfill = _meta.subscribe_page_webhook(str(data.get("metaPageId") or ""))
             if backfill.get("ok"):
                 out["webhook"] = "subscribed"
+                webhook_ok = True
                 try:
                     _ctx()["patch_entity"](PAGES_TYPE, page_id, {"webhookSubscribedAt": _iso_at(moment)}, str(data.get("ownerId") or "") or "system")
                 except HTTPException:
                     pass
             elif backfill.get("pageReason"):
-                found.append(backfill["pageReason"])
+                page_reason(backfill["pageReason"])
             elif not backfill.get("retryable"):
                 found.append("webhook_not_subscribed")
         elif answer["state"] == "error":
             out["errorCode"], out["providerCode"] = answer["errorCode"], answer["providerCode"]
             if answer.get("pageReason"):
-                found.append(answer["pageReason"])
+                page_reason(answer["pageReason"])
             elif answer["errorCode"] == "authorization":
                 global_refusal = True
     if platform == "ig" and str(gates.get("igPublicReply") if gates else "") == "on" and not found and not global_refusal:
@@ -2398,18 +2501,21 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
             out["errorCode"], out["providerCode"] = out["errorCode"] or error.code, out["providerCode"] or error.provider_code
             reason = page_problem_reason(error)
             if reason:
-                found.append(reason)
+                page_reason(reason)
             elif error.code == "authorization":
                 global_refusal = True
         out["igCommentTotal"] = total
         if total is not None:
+            verified_token = True
             snapshot = data.get("igCommentCounts") if isinstance(data.get("igCommentCounts"), dict) else {}
             earlier_total = snapshot.get("total")
             earlier_at = _parse_iso(snapshot.get("at"))
             last_event = _parse_iso(data.get("igLastCommentEventAt"))
+            # A stamp is rewritten at most every IG_EVENT_STAMP_EVERY, so one written just before the
+            # snapshot may stand for a comment that came just after it: that is not silence.
             if (
                 isinstance(earlier_total, int) and earlier_at is not None and moment - earlier_at >= IG_EVENT_SILENCE
-                and total > earlier_total and (last_event is None or last_event < earlier_at)
+                and total > earlier_total and (last_event is None or last_event < earlier_at - IG_EVENT_STAMP_EVERY)
             ):
                 found.append("instagram_comments_not_arriving")
             # The snapshot moves on only after a full silence window, so a check every few hours
@@ -2426,12 +2532,18 @@ def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = Non
         except Exception as error:
             print(f"[albayan] Social Studio connection check failed ({type(error).__name__}).")
     state, current = page_health_state(data)
+    # A standing reason is cleared only by a read that proved it wrong in this check: a check that
+    # made no Meta call (the channel's public replies are not "on"), failed, or was refused for
+    # Albayan's own token proves nothing, and the page keeps its mark (lastHealthCheckAt is stamped
+    # all the same, so the daily budget is unchanged).
     if found:
         reason = found[0]
-    elif state == "attention" and current in REPLY_CLEARED_REASONS | {"webhook_not_subscribed"} and not global_refusal and not out["errorCode"]:
-        reason = ""  # what the check watches is fine again
+    elif state == "attention" and (current in REPLY_CLEARED_REASONS or not current) and verified_token and not global_refusal and not out["errorCode"]:
+        reason = ""  # the page token answered: the token, role and permissions are fine again
+    elif state == "attention" and current == "webhook_not_subscribed" and webhook_ok:
+        reason = ""  # the subscription is there again
     else:
-        reason = current  # a staff-set or heuristic reason stays until its own clearing
+        reason = current  # a staff-set or heuristic reason stays until its own clearing; so does an unverified one
     saved = _set_page_health(page_id, "attention" if reason else "ok", reason, now=moment, touch=True)
     out.update({"checked": True, "reason": reason, "health": page_health_view(saved or data)})
     return out
@@ -2769,7 +2881,10 @@ def create_social_studio_router(
         entity = _load_owned(ctx, RULES_TYPE, rule_id, scope)
         owner_id = str(entity["data"].get("ownerId") or "")
         merged = {**entity["data"], **(body or {})}
-        clean = {**_clean_rule(ctx, owner_id, merged), "updatedAt": _iso_now()}
+        # P4-01: only a body that names pageRefs is held to the live-page check; otherwise the saved
+        # list stays (a removed page keeps its "page removed" label and the rule stays editable).
+        stored = None if "pageRefs" in (body or {}) else [str(r) for r in (entity["data"].get("pageRefs") or []) if str(r)]
+        clean = {**_clean_rule(ctx, owner_id, merged, stored_refs=stored), "updatedAt": _iso_now()}
         old = entity["data"]
         if (clean["enabled"] and not _bool(old.get("enabled"), True)) or _match_fields_changed(old, clean):
             clean["activeSince"] = now_ms()  # switched on or pointed elsewhere: older comments are not its

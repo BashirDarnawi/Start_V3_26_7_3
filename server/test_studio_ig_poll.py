@@ -406,6 +406,24 @@ def test_comments_written_before_the_account_was_linked_are_skipped(actors, grap
     assert [path for path, _body, _token in graph.posts()] == ["18310000000000002/replies"]
 
 
+def test_comments_written_while_the_account_was_unlinked_are_skipped_after_a_relink(actors, graph):
+    """Linking the same account to the same owner again revives the OLD row (P4-01: an old created_at)
+    with a fresh linkedAt: the floor is the relink, so a comment the owner answered by hand while
+    Albayan was not managing the account is never auto-replied."""
+    owner = actors["customer"]["id"]
+    relinked = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    _insert("socialPages", "spg_ig_1", {
+        "ownerId": owner, "metaPageId": IG_PAGE_FB, "platform": "ig", "igUserId": IG_USER, "name": "Shop", "healthy": True,
+        "linkedAt": relinked.isoformat().replace("+00:00", "Z"),
+    }, owner=owner, created_at=now_ms() - 30 * 86_400_000)
+    assert studio_ig_poll.load_instagram_page("spg_ig_1")["linkedSecond"] == int(relinked.timestamp())
+    _rule(actors, "srule_all", created_ago=timedelta(days=2))
+    Account(graph, {MEDIA_1: [_comment("18320000000000001", timedelta(hours=2), "while it was unlinked"),
+                              _comment("18320000000000002", timedelta(minutes=10), "after the relink")]})
+    _check(actors, read=2, new=1, replied=1, skipped=1)
+    assert [path for path, _body, _token in graph.posts()] == ["18320000000000002/replies"]
+
+
 def test_no_enabled_instagram_rule_answers_nothing_and_moves_the_cursor(actors, graph):
     _ig_page(actors)
     _rule(actors, "srule_off", created_ago=timedelta(hours=2), enabled=False)
