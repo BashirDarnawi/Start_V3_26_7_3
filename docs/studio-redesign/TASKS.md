@@ -55,6 +55,10 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P1-09 | Done | stage 8 | `studioRef` + `studioName` at approval (unique); `meta_review`; `metaAdAccountId`; one request per Meta campaign; bilingual publish labels; staff Unlink (restores removed copies, renames back) |
 | P1-23 | Done | stage 8 | Admin "Check recent comments now" per Instagram page: only comments newer than the cursor and the rule's active time; never answered twice |
 | P3-02 | Done | stage 8 | Link validation: allowlisted account, campaign in that account, not linked elsewhere, name code, `meta_budget_above_paid` warning |
+| P3-00a/b/c | Done | stage 9 | Meta call lanes (admin, studio_results, page) with their own lock, pacing and back-off; page throttles park one page, ad-account throttles one account, app-wide limits pause all; state persisted and shown in diagnostics |
+| P3-01 + P3-03 | Done | stage 9 | Results read only for a linked request on an allowed account; sync in the jobs loop (≤5 reads / 10 s per pass, per-account parking), final read 48 h after delivery ends, daily drift reads, `meta_drift` alert |
+| P3-04a/b/c | Done | stage 9 | Meta-fed stages (in review, rejected, delivery problem, running, paused, ended — also by end time), results route + classic results card, staff "Check Meta now" (10-min cache) |
+| P3-18a/b/c | Done | stage 9 | Daily token check + 14/7/2-day expiry alerts; `meta_connection_down` only after a failed check; parked replies resent after recovery (7 d / 24 h windows, never a timed-out send twice); ad-account funds/status alerts |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
