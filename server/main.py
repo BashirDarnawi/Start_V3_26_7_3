@@ -189,7 +189,7 @@ from .meta_ads import (
 from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
 from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from .systems.ads_studio.studio_api import create_studio_router
-from .systems.ads_studio.studio_privacy import redact_staff_identity, scrub_studio_personal_data_conn  # P1-05, P1-16
+from .systems.ads_studio.studio_privacy import redact_staff_identity, register_redacted_type, scrub_studio_personal_data_conn  # P1-05, P1-16
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -238,6 +238,7 @@ from .auth_security import upgrade_password_hash_after_login
 from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
 from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, stop_operations_worker
+register_redacted_type("exchangeRateHistory", ("userId",))  # P1-05: every account reads the Manager's rates; data.userId = who set one
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
 # for an unknown email as for a known one. Without it, the known-email path runs
 # full-work-factor PBKDF2 while the unknown path returns instantly, and the timing
@@ -3833,7 +3834,7 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
     pages = _bootstrap_fetch_scoped("pages", user)
     # Exchange-rate history is non-sensitive reference data every client needs to
     # render historical money conversions; keep it readable to all authenticated
-    # users (unchanged behavior).
+    # users (unchanged behavior). Who set each rate reaches staff only (P1-05).
     exh = _page_all("exchangeRateHistory", include_deleted=True)
     logs = []  # audit logs are available via /api/audit
 
@@ -3843,7 +3844,7 @@ def bootstrap(user: dict[str, Any] = Depends(current_user)):
         receipts=[_project_entity_contacts_for_user(e, user)["data"] for e in receipts],
         customers=[_project_entity_contacts_for_user(e, user)["data"] for e in customers],
         pages=[e["data"] for e in pages],
-        exchangeRateHistory=[e["data"] for e in exh],
+        exchangeRateHistory=[_project_entity_contacts_for_user(e, user)["data"] for e in exh],
         logs=logs,
     )
 
@@ -4085,11 +4086,11 @@ def _wallet_available_after_holds(conn: Any, user_id: str, currency: str) -> int
 
     Every wallet DEBIT must use this number, or money already promised to a
     submitted campaign could leave through a transfer or subscription and
-    make the later approval capture fail."""
-    balance = _wallet_balance_minor(conn, user_id, currency)
-    if str(currency or "").upper() == "USD":
-        balance -= wallet_campaign_holds_minor(conn, user_id)
-    return balance
+    make the later approval capture fail. Holds are read BEFORE the balance (two READ COMMITTED
+    reads): no hold can grow while the caller holds the owner's row, so a sibling approval committing
+    between them (capture, then Approved) only lowers this; balance first could see neither (over-reserve)."""
+    holds = wallet_campaign_holds_minor(conn, user_id) if str(currency or "").upper() == "USD" else 0
+    return _wallet_balance_minor(conn, user_id, currency) - holds
 
 
 def _lock_and_validate_wallet_users(conn: Any, user_ids: list[str], *, postgres: bool) -> None:
@@ -10146,7 +10147,7 @@ def create_wallet_transfer(
     if created:
         audit(str(user.get("id")), "create", "walletTransactions", saved["id"], "Created wallet transfer",
               {k: (saved.get("data") or {}).get(k) for k in ("amountMinor", "currency", "fromUserId", "toUserId", "memo")})
-    return EntityResponse(**saved)
+    return EntityResponse(**_project_entity_media_for_user(saved, user))  # P1-05: staff stamps reach staff only
 
 
 @app.post("/api/wallet/top-ups", response_model=EntityResponse)
@@ -10206,7 +10207,7 @@ def purchase_subscription(
             f"Purchased subscription {body.serviceId}",
             {"paymentTxId": payment.get("id") if payment else None},
         )
-    return EntityResponse(**saved)
+    return EntityResponse(**_project_entity_media_for_user(saved, user))  # P1-05: a replay may return a period staff bought
 
 
 def _owns_personal_record(collection: str, data: dict[str, Any] | None, uid: str) -> bool:
@@ -11223,7 +11224,7 @@ def create_collection_item(
             )
         if created:
             audit(str(user.get("id")), "create", collection, saved["id"], f"Created wallet {tx_type}", {})
-        return EntityResponse(**saved)
+        return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
     if collection == "serviceSubscriptions":
         data = sanitize_json(body.data or {}) or {}
@@ -11243,7 +11244,7 @@ def create_collection_item(
                 f"Purchased subscription {data.get('serviceId') or ''}",
                 {"paymentTxId": payment.get("id") if payment else None},
             )
-        return EntityResponse(**saved)
+        return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
     if not user_has_permission(user, module, _action_for_collection(collection, "add")):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -11971,7 +11972,7 @@ def update_collection_item(
             raise HTTPException(status_code=403, detail="Only subscription cancellation is allowed")
         saved = _subscription_cancel_atomic(user, entity_id, body.expectedLastModified)
         audit(_uid, "update", collection, entity_id, f"Canceled subscription {entity_id}", {})
-        return EntityResponse(**saved)
+        return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))  # P1-05: not the buyer's staff id
 
     creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
     delivery_grant_patch = False

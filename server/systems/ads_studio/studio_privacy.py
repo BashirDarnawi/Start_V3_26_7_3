@@ -4,8 +4,10 @@
 user)`` is the one redaction step on every customer read path:
 
 * main.py's entity projection (``_project_entity_contacts_for_user``): every /api/collections list,
-  get and write response, and the /api/ad-studio campaign actions (they project through it);
-* the /api/wallet/payment-requests routes (wallet_payments.py, through the same projection in ctx);
+  get and write response, the /api/bootstrap lists, the wallet transfer and plan purchase answers,
+  and the /api/ad-studio campaign actions (they project through it);
+* the /api/wallet/payment-requests routes and the /api/subscriptions/purchase-plan answer
+  (wallet_payments.py, subscription_plans.py, through the same projection in ctx);
 * the /api/studio summaries (studio_wallet.py wallet summary, studio_results.py campaigns summary).
 
 Staff see every stamp: admins, and every account that may browse the user directory (the platform
@@ -25,6 +27,10 @@ staff name there anyway. For anyone else the response is a copy in which:
 An entity (a dict with ``type`` and ``data``) is redacted only when its type is one a customer
 reads with staff stamps (REDACTED_TYPES), so Manager records keep fields such as
 ``deliveryFeePaidBy``; any other value (a summary) is redacted as a whole. Nothing stored changes.
+A type this system does not own joins REDACTED_TYPES through ``register_redacted_type``, called by
+the type's owner (D36: a system never names another system's record type). main.py registers the
+Manager's exchangeRateHistory, which every signed-in account reads; its ``data.userId`` (who
+changed the rate) is an actor stamp there, checked like ``reviewedBy``.
 
 **Anonymisation scrub (P1-16).** ``scrub_studio_personal_data_conn(conn, user_id)`` runs inside
 main.py's privacy-anonymisation transaction, after its own scrub of the account row and the
@@ -55,10 +61,11 @@ TEAM_LABELS = {"en": "Albayan team", "ar": "فريق البيان"}
 # The record types a customer reads that carry staff stamps: their ad requests (reviews, approvals,
 # links, stops), their wallet ledger rows (credits, captures and returns written by staff), their
 # charge requests (confirmed or cancelled by an admin) and their plan periods (an admin may buy one
-# for them). The last three are platform types: this only shapes what a viewer sees of them.
-REDACTED_TYPES = frozenset(
-    {"adCampaignRequests", "walletTransactions", "walletPaymentRequests", "serviceSubscriptions"}
-)
+# for them). The last three are platform types: this only shapes what a viewer sees of them. Other
+# owners add their types with register_redacted_type (main.py: exchangeRateHistory).
+REDACTED_TYPES: set[str] = {"adCampaignRequests", "walletTransactions", "walletPaymentRequests", "serviceSubscriptions"}
+# Per registered type: fields that name who did something without a stamp's name (e.g. userId).
+_TYPE_ACTOR_KEYS: dict[str, frozenset[str]] = {}
 
 _ACTOR_SUFFIXES = ("By", "ById", "ByUserId")
 _ACTOR_KEYS = frozenset({"creatorId", "actorId", "authorUserId", "reviewerId", "staffId", "staffUserId"})
@@ -66,6 +73,17 @@ _NAME_SUFFIX = "ByName"
 _NOT_A_PERSON = frozenset({"system", TEAM_ID})
 
 # ------------------------------------------------------------------ P1-05 redaction
+
+
+def register_redacted_type(entity_type: str, actor_keys: tuple[str, ...] = ()) -> None:
+    """Redact ``entity_type`` for customers too (called once, at import, by the type's owner).
+
+    ``actor_keys``: that type's fields naming the person who did something although the name is
+    not a stamp name (exchangeRateHistory's ``userId``); they are redacted like ``reviewedBy``.
+    """
+    REDACTED_TYPES.add(str(entity_type))
+    if actor_keys:
+        _TYPE_ACTOR_KEYS[str(entity_type)] = frozenset(str(key) for key in actor_keys)
 
 
 @lru_cache(maxsize=256)
@@ -87,8 +105,8 @@ def is_staff_viewer(user: dict[str, Any] | None) -> bool:
     return can_browse_user_directory(user)
 
 
-def _is_actor_key(key: str) -> bool:
-    return key in _ACTOR_KEYS or key.endswith(_ACTOR_SUFFIXES)
+def _is_actor_key(key: str, extra: frozenset[str] = frozenset()) -> bool:
+    return key in _ACTOR_KEYS or key in extra or key.endswith(_ACTOR_SUFFIXES)
 
 
 def _names_someone_else(value: Any, viewer_id: str) -> bool:
@@ -101,10 +119,11 @@ def _names_someone_else(value: Any, viewer_id: str) -> bool:
     return bool(raw) and raw != viewer_id and raw.lower() not in _NOT_A_PERSON
 
 
-def _redact(value: Any, viewer_id: str) -> tuple[Any, bool]:
-    """(the customer-safe copy, whether anything changed); an unchanged value is returned as is."""
+def _redact(value: Any, viewer_id: str, extra: frozenset[str] = frozenset()) -> tuple[Any, bool]:
+    """(the customer-safe copy, whether anything changed); an unchanged value is returned as is.
+    ``extra``: the entity type's own actor keys (register_redacted_type)."""
     if isinstance(value, list):
-        items = [_redact(item, viewer_id) for item in value]
+        items = [_redact(item, viewer_id, extra) for item in value]
         if any(changed for _item, changed in items):
             return [item for item, _changed in items], True
         return value, False
@@ -120,13 +139,13 @@ def _redact(value: Any, viewer_id: str) -> tuple[Any, bool]:
                 out[key] = child
             else:
                 changed = True  # a staff member's name is left out
-        elif _is_actor_key(name):
+        elif _is_actor_key(name, extra):
             if _names_someone_else(child, viewer_id):
                 out[key], changed = TEAM_ID, True
             else:
                 out[key] = child
         else:
-            out[key], child_changed = _redact(child, viewer_id)
+            out[key], child_changed = _redact(child, viewer_id, extra)
             changed = changed or child_changed
     return (out, True) if changed else (value, False)
 
@@ -139,12 +158,14 @@ def redact_staff_identity(value: Any, user: dict[str, Any] | None) -> Any:
     ``value`` itself; a customer gets a redacted copy, or ``value`` itself when it holds no staff
     stamp.
     """
+    extra: frozenset[str] = frozenset()
     if isinstance(value, dict) and "type" in value and isinstance(value.get("data"), dict):
         if value.get("type") not in REDACTED_TYPES:
             return value
+        extra = _TYPE_ACTOR_KEYS.get(str(value.get("type")), frozenset())
     if str((user or {}).get("role") or "").lower() == "admin":
         return value
-    redacted, changed = _redact(value, str((user or {}).get("id") or ""))
+    redacted, changed = _redact(value, str((user or {}).get("id") or ""), extra)
     if not changed or is_staff_viewer(user):
         return value
     return redacted

@@ -1,8 +1,9 @@
 """Albayan Studio privacy (plan tasks P1-05 and P1-16; PLAN.md §7.5).
 
 * P1-05: a customer never receives a staff id or a staff name on any read path (the generic
-  collections API, the ad-studio actions, the payment-request routes and the studio summaries);
-  staff and admins still do.
+  collections API, the ad-studio actions, the payment-request routes, the studio summaries, and
+  the exchange-rate history in the collections API and /api/bootstrap) nor in a write answer on
+  their own rows (a plan cancel, a purchase replay, a ledger write); staff and admins still do.
 * P1-16: privacy anonymisation removes the studio's personal data (the optional WhatsApp number,
   the reply-log commenter data) and never touches the ledger.
 
@@ -117,8 +118,9 @@ def _no_rate_limits(monkeypatch):
 def _customer(staff, label: str) -> dict:
     """A studio customer whose plan period an admin bought (so it carries the admin's stamp)."""
     user = _insert_user(f"{label}-{_uid('c')}", "Employee", CUSTOMER_PERMISSIONS, f"Privacy Customer {label} {TAG}")
+    user["planKey"] = _uid("sub-key")  # the customer reads it on their own row (idempotencyKey)
     bought = client.post("/api/subscriptions/purchase", json={
-        "serviceId": "ad_maker", "idempotencyKey": _uid("sub-key"), "userId": user["id"],
+        "serviceId": "ad_maker", "idempotencyKey": user["planKey"], "userId": user["id"],
     }, cookies=staff["admin"]["cookies"])
     assert bought.status_code == 200, bought.text
     return user
@@ -261,7 +263,25 @@ def test_redaction_rule_keeps_own_stamps_and_hides_staff_ones():
     # Other record types keep their fields ("deliveryFeePaidBy" is a Manager setting, not a person).
     ad = {"id": "ad_1", "type": "ads", "createdBy": "user_admin", "data": {"deliveryFeePaidBy": "customer"}}
     assert redact_staff_identity(ad, customer) is ad
-    assert REDACTED_TYPES == {CAMPAIGNS, "walletTransactions", "walletPaymentRequests", "serviceSubscriptions"}
+    # main.py (the Manager, D36) registers its exchangeRateHistory: every account reads it, and its
+    # data.userId (who set the rate) is a stamp there. userId stays a plain field of other types.
+    assert REDACTED_TYPES == {CAMPAIGNS, "walletTransactions", "walletPaymentRequests", "serviceSubscriptions",
+                              "exchangeRateHistory"}
+    rate = {"id": "rate_1", "type": "exchangeRateHistory", "createdBy": "user_admin", "data": {
+        "id": "rate_1", "rate": 5.2, "date": "2027-01-01T00:00:00Z", "userId": "user_admin",
+        "createdBy": "user_admin", "createdByName": "Admin Person"}}
+    rate_snapshot = json.dumps(rate, sort_keys=True)
+    seen_rate = redact_staff_identity(rate, customer)
+    assert json.dumps(rate, sort_keys=True) == rate_snapshot
+    assert seen_rate["createdBy"] == TEAM_ID and seen_rate["data"] == {
+        "id": "rate_1", "rate": 5.2, "date": "2027-01-01T00:00:00Z", "userId": TEAM_ID, "createdBy": TEAM_ID}
+    assert redact_staff_identity(rate, reviewer) is rate
+    system_rate = {"id": "rate_2", "type": "exchangeRateHistory", "createdBy": "system",
+                   "data": {"rate": 5.3, "userId": "system", "createdBy": "system"}}
+    assert redact_staff_identity(system_rate, customer) is system_rate
+    charge_row = {"id": "pr_1", "type": "walletPaymentRequests", "createdBy": "user_customer",
+                  "data": {"userId": "user_other", "amountMinor": 100}}
+    assert redact_staff_identity(charge_row, customer) is charge_row
     # A summary (not an entity) is redacted whole, so a field added later cannot leak.
     summary = {"cmp_1": {"stage": 11, "settledBy": "user_admin", "steps": [{"confirmedBy": "user_admin"}]}}
     assert redact_staff_identity(summary, customer) == {"cmp_1": {"stage": 11, "settledBy": TEAM_ID, "steps": [{"confirmedBy": TEAM_ID}]}}
@@ -285,7 +305,7 @@ def test_staff_means_the_user_directory_rule():
 
 # ------------------------------------------------------------------ P1-05: every customer read path
 
-def test_customer_never_sees_staff_ids(staff):
+def test_customer_never_sees_staff_ids(staff, monkeypatch):
     admin, reviewer = staff["admin"], staff["reviewer"]
     user = _customer(staff, "reads")
     staff_marks = [admin["id"], reviewer["id"], admin["name"], reviewer["name"]]
@@ -330,7 +350,31 @@ def test_customer_never_sees_staff_ids(staff):
         ), {"admin": admin["id"], "uid": f"%{user['id']}%"}).scalar()
     assert cpay_id and subscription_id
 
+    # Write answers on the customer's own rows. A plan period the admin bought, which the customer
+    # cancels; the purchase key the customer reads on their own row, replayed through every purchase
+    # door (a replay answers with the row the admin wrote); and the two ledger write doors, made to
+    # replay the admin's credit (no real customer transfer carries a staff stamp).
+    second_period = client.post("/api/subscriptions/purchase", json={
+        "serviceId": "clothes_system", "idempotencyKey": _uid("sub-key"), "userId": user["id"],
+    }, cookies=admin["cookies"])
+    assert second_period.status_code == 200 and second_period.json()["createdBy"] == admin["id"], second_period.text
+    replay = {"serviceId": "ad_maker", "idempotencyKey": user["planKey"]}
+    stored_credit = main_module.get_entity("walletTransactions", credit.json()["id"])
+    monkeypatch.setattr(main_module, "_wallet_transfer_atomic", lambda *a, **k: (stored_credit, False))
+    transfer = {"toUserId": admin["id"], "amountMinor": 100, "currency": "USD", "idempotencyKey": _uid("transfer-key")}
+
     answers = {
+        "plan cancel": client.patch(f"/api/collections/serviceSubscriptions/{second_period.json()['id']}", json={
+            "data": {"status": "canceled"}, "expectedLastModified": second_period.json()["lastModified"],
+        }, cookies=user["cookies"]),
+        "plan replay": client.post("/api/subscriptions/purchase", json=replay, cookies=user["cookies"]),
+        "plan replay (collections)": client.post("/api/collections/serviceSubscriptions", json={"data": replay},
+                                                 cookies=user["cookies"]),
+        "plan replay (plans)": client.post("/api/subscriptions/purchase-plan", json={
+            "planId": "svc:ad_maker", "idempotencyKey": user["planKey"]}, cookies=user["cookies"]),
+        "transfer answer": client.post("/api/wallet/transfers", json=transfer, cookies=user["cookies"]),
+        "ledger write answer": client.post("/api/collections/walletTransactions", json={
+            "data": {**transfer, "type": "transfer", "fromUserId": user["id"]}}, cookies=user["cookies"]),
         "resubmit answer": resubmitted,
         "campaign list": _get(user, f"/api/collections/{CAMPAIGNS}"),
         "campaign delta": _get(user, f"/api/collections/{CAMPAIGNS}?updated_since=0"),
@@ -375,6 +419,18 @@ def test_customer_never_sees_staff_ids(staff):
     assert by_id[admin_cancelled]["canceledBy"] == TEAM_ID and by_id[self_cancelled]["canceledBy"] == user["id"]
     assert answers["plan period"].json()["createdBy"] == TEAM_ID
     assert answers["wallet summary"].json()["usd"]["spentMinor"] == 200  # the numbers are untouched
+    cancelled = answers["plan cancel"].json()
+    assert cancelled["data"]["status"] == "canceled" and cancelled["data"]["canceledBy"] == user["id"]  # their own cancel
+    assert cancelled["createdBy"] == cancelled["data"]["createdBy"] == TEAM_ID and "createdByName" not in cancelled["data"]
+    for label in ("plan replay", "plan replay (collections)"):
+        replayed = answers[label].json()
+        assert replayed["id"] == subscription_id and replayed["createdBy"] == replayed["data"]["createdBy"] == TEAM_ID, label
+    plan_rows = answers["plan replay (plans)"].json()["subscriptions"]
+    assert [(row["id"], row["createdBy"]) for row in plan_rows] == [(subscription_id, TEAM_ID)]
+    for label in ("transfer answer", "ledger write answer"):
+        row = answers[label].json()
+        assert row["id"] == credit.json()["id"] and row["createdBy"] == row["data"]["createdBy"] == TEAM_ID, label
+        assert "createdByName" not in row["data"] and row["data"]["amountMinor"] == 5_000, label
 
     # Staff and admins still see who did what.
     staff_view = _get(reviewer, f"/api/collections/{CAMPAIGNS}/{campaign_a}").json()["data"]
@@ -384,6 +440,9 @@ def test_customer_never_sees_staff_ids(staff):
     assert admin_charge["confirmedBy"] == admin_charge["receiptOverriddenBy"] == admin["id"]
     admin_credit = _get(admin, f"/api/collections/walletTransactions/{credit.json()['id']}").json()
     assert admin_credit["createdBy"] == admin["id"] and admin_credit["data"]["createdByName"] == admin["name"]
+    admin_replay = client.post("/api/subscriptions/purchase", json={**replay, "userId": user["id"]}, cookies=admin["cookies"])
+    assert admin_replay.status_code == 200 and admin_replay.json()["id"] == subscription_id, admin_replay.text
+    assert admin_replay.json()["createdBy"] == admin["id"] and admin_replay.json()["data"]["createdByName"] == admin["name"]
     # Nothing stored changed.
     with db_conn() as conn:
         stored = json_loads(conn.execute(text("SELECT data_json FROM entities WHERE type = :t AND id = :id"),
@@ -457,6 +516,54 @@ def test_studio_summaries_pass_through_the_redaction(staff, monkeypatch):
     assert "usd" in wallet
     reviewer_view = _get(staff["reviewer"], "/api/studio/wallet/summary").json()
     assert reviewer_view["extra"]["settledBy"] == staff["admin"]["id"]
+
+
+def _bootstrap_rates(user: dict) -> tuple:
+    reset_rate_limit(f"bootstrap:{user['id']}")
+    response = client.get("/api/bootstrap", cookies=user["cookies"])
+    assert response.status_code == 200, response.text
+    return response, {row.get("id"): row for row in response.json()["exchangeRateHistory"]}
+
+
+def test_rate_history_hides_who_set_each_rate(staff):
+    """Every signed-in account reads the exchange-rate history (GET /api/collections and
+    /api/bootstrap); who set a rate (createdBy, createdByName, data.userId) reaches staff only."""
+    admin, reviewer = staff["admin"], staff["reviewer"]
+    user = _customer(staff, "rates")
+    rate_id = _uid("rate")
+    # Dated long ago, so it is never the current rate another test reads; removed at the end.
+    made = client.post("/api/collections/exchangeRateHistory", json={"id": rate_id, "data": {
+        "id": rate_id, "rate": 5.25, "date": "2001-01-01T00:00:00.000Z", "userId": admin["id"]}}, cookies=admin["cookies"])
+    assert made.status_code == 200, made.text
+    try:
+        assert made.json()["data"]["userId"] == made.json()["createdBy"] == admin["id"]  # the admin's own answer
+        booted_answer, booted = _bootstrap_rates(user)
+        answers = {
+            "rate list": _get(user, "/api/collections/exchangeRateHistory"),
+            "rate delta": _get(user, "/api/collections/exchangeRateHistory?updated_since=0"),
+            "rate": _get(user, f"/api/collections/exchangeRateHistory/{rate_id}"),
+            "bootstrap": booted_answer,
+        }
+        for label, response in answers.items():
+            for mark in (admin["id"], admin["name"]):
+                assert mark not in response.text, f"{label} shows staff identity {mark!r}"
+        seen = answers["rate"].json()
+        assert seen["createdBy"] == seen["data"]["createdBy"] == seen["data"]["userId"] == TEAM_ID
+        assert "createdByName" not in seen["data"] and (seen["data"]["rate"], seen["data"]["date"]) == (5.25, "2001-01-01T00:00:00.000Z")
+        assert rate_id in {row["id"] for row in answers["rate list"].json()}
+        assert booted[rate_id]["userId"] == booted[rate_id]["createdBy"] == TEAM_ID and "createdByName" not in booted[rate_id]
+        assert booted[rate_id]["rate"] == 5.25
+
+        # Staff and admins still see who set it, on both paths.
+        for person in (reviewer, admin):
+            row = _get(person, f"/api/collections/exchangeRateHistory/{rate_id}").json()
+            assert row["createdBy"] == row["data"]["userId"] == admin["id"], person["role"]
+            assert row["data"]["createdByName"] == admin["name"], person["role"]
+            _, staff_booted = _bootstrap_rates(person)
+            assert staff_booted[rate_id]["userId"] == staff_booted[rate_id]["createdBy"] == admin["id"], person["role"]
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type = 'exchangeRateHistory' AND id = :id"), {"id": rate_id})
 
 
 # ------------------------------------------------------------------ P1-16: anonymisation

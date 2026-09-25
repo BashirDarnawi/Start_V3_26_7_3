@@ -2712,6 +2712,51 @@ class TestStudioSubmitSerialised:
         _assert_wallet_identity(cookies, user["id"])
         assert len(_audit_rows(next(cid for cid, status, _ in results if status == 200), "submit")) == 1
 
+    def test_money_gate_reads_holds_before_balance(self, actors):
+        """The gate (main._wallet_available_after_holds) reads the holds FIRST, then the balance.
+        They are two READ COMMITTED reads and no hold can grow while submit holds the owner's row,
+        so a sibling approval committing between them (capture, then Approved) only lowers
+        Available; balance first could see neither and over-reserve (PostgreSQL scenario
+        campaign_submit_vs_sibling_approval in test_postgres_financial_review.py)."""
+        import server.main as main_module
+        from sqlalchemy import event
+
+        from server.db import get_engine
+
+        user, cookies = _fresh_funded_customer(actors, "gateorder", 4000)
+        _sent_campaign(cookies, "gate_order_held", "Gate order held")  # holds $25 of $40
+        created = _create_campaign(cookies, _complete_campaign("Gate order next"), "gate_order_next")
+        assert created.status_code == 200, created.text
+        reads: list[str] = []
+
+        def spy(conn, cursor, statement, parameters, context, executemany):
+            if "type = 'adCampaignRequests' AND deleted = false AND created_by = " in statement:
+                reads.append("holds")  # wallet_payments.wallet_campaign_holds_minor
+            elif "type = 'walletTransactions' AND deleted = false AND UPPER(COALESCE(" in statement:
+                reads.append("balance")
+
+        engine = get_engine()
+        event.listen(engine, "before_cursor_execute", spy)
+        try:
+            with db_conn() as conn:
+                usd = main_module._wallet_available_after_holds(conn, user["id"], "USD")
+                usd_reads = reads[:]
+                del reads[:]
+                lyd = main_module._wallet_available_after_holds(conn, user["id"], "LYD")
+                lyd_reads = reads[:]
+                del reads[:]
+            sent = _submit_campaign(cookies, "gate_order_next", created.json()["lastModified"], "gate-order-next-send")
+        finally:
+            event.remove(engine, "before_cursor_execute", spy)
+        assert usd_reads == ["holds", "balance"] and usd == 1500, (usd_reads, usd)
+        assert lyd_reads == ["balance"], lyd_reads  # no campaign holds in other currencies
+        with db_conn() as conn:
+            assert lyd == main_module._wallet_balance_minor(conn, user["id"], "LYD")
+        # The submit's own gate, in the same order: $25 asked, $15 available -> refused.
+        assert reads == ["holds", "balance"], reads
+        assert sent.status_code == 409 and sent.json()["detail"].startswith("Insufficient wallet balance"), sent.text
+        _assert_wallet_identity(cookies, user["id"])
+
 
 class TestStudioWithdraw:
     """P1-03: the owner takes a Submitted request back to Draft in one locked transaction."""

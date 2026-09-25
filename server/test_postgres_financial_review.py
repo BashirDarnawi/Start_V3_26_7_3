@@ -33,7 +33,7 @@ SCENARIOS = ("refund", "company_budget", "debt_growth", "concurrent_funding",
              "coverage_lifecycle", "coverage_lock_order", "coverage_overlaps", "period_lock_protocol",
              "legacy_compatibility", "legacy_backfills",
              "campaign_submit_serialisation", "campaign_withdraw_vs_approve", "campaign_approval_self_release",
-             "studio_privacy_scrub")
+             "campaign_submit_vs_sibling_approval", "studio_privacy_scrub")
 
 
 def _guarded_url(raw: str) -> URL:
@@ -529,6 +529,8 @@ def _run_scenario(scenario: str) -> None:
                 _campaign_withdraw_vs_approve(t)
             elif scenario == "campaign_approval_self_release":
                 _campaign_approval_self_release(t)
+            elif scenario == "campaign_submit_vs_sibling_approval":
+                _campaign_submit_vs_sibling_approval(t)
             elif scenario == "studio_privacy_scrub":  # P1-16: anonymisation vs a reply-log write, both orders
                 from server import test_studio_privacy as privacy
                 privacy.postgres_scrub_race()
@@ -708,6 +710,94 @@ def _campaign_submit_serialisation(t) -> None:
         assert wallet_campaign_holds_minor(conn, user["id"]) == 2500
     usd = _assert_studio_wallet_identity(user["id"])
     assert (usd["availableMinor"], usd["reservedMinor"]) == (1500, 2500), usd
+
+
+def _campaign_submit_vs_sibling_approval(t) -> None:
+    """P1-02: a submit racing a FULL approval (capture, then the Approved write) of a sibling
+    request of the same owner. $40 in the wallet, the sibling holds $25, the new request asks
+    $25: Available is $15 before and after the approval, so the submit is refused in every order.
+
+    (a) The submit stops between its two money reads while the sibling's approval commits in
+        full (the approval takes neither the owner's row nor the new request's row, so it never
+        waits for the submit). The gate read the holds first (the sibling still Submitted), then
+        the balance (the capture taken): refused. Balance first read $40, then no hold, and
+        reserved $25 of $15.
+    (b) Free races started by one Barrier.
+    After each: the sibling is Approved with one capture, the new request stays a Draft, the
+    wallet identity holds, Available is $15 and nothing is reserved.
+    """
+    from server.db import get_engine
+
+    ad, studio = _studio_actors()
+    engine = get_engine()
+
+    def gate_read(statement: str) -> str:
+        if "type = 'adCampaignRequests' AND deleted = false AND created_by = " in statement:
+            return "holds"  # wallet_payments.wallet_campaign_holds_minor
+        if "type = 'walletTransactions' AND deleted = false AND UPPER(COALESCE(" in statement:
+            return "balance"  # main._wallet_balance_minor
+        return ""
+
+    def setup(tag):
+        ad._reset_reviewer_limits(studio)
+        user, cookies = ad._fresh_funded_customer(studio, f"pgsibling{tag}", 4000)
+        sibling, draft = f"pg_sibling_held_{tag}", f"pg_sibling_next_{tag}"
+        sibling_lm = _studio_sent(ad, cookies, sibling)
+        created = ad._create_campaign(cookies, ad._complete_campaign(f"PG sibling next {tag}"), draft)
+        assert created.status_code == 200, created.text
+        return user, cookies, sibling, sibling_lm, draft, created.json()["lastModified"]
+
+    def approve(sibling, last_modified, barrier=None):
+        return _studio_post(t.app, f"/api/ad-studio/campaigns/{sibling}/review",
+                            {"expectedLastModified": last_modified, "decision": "Approved", "note": "",
+                             "operationId": f"{sibling}-approve"}, studio["reviewer"], barrier)
+
+    def submit(cookies, draft, last_modified, barrier=None):
+        return _studio_post(t.app, f"/api/ad-studio/campaigns/{draft}/submit",
+                            {"expectedLastModified": last_modified, "operationId": f"{draft}-send"}, cookies, barrier)
+
+    def assert_refused(user, sibling, draft, approval, submission):
+        assert approval[0] == 200 and approval[1]["data"]["status"] == "Approved", (approval, submission)
+        assert submission[0] == 409, (approval, submission)
+        assert str(submission[1]["detail"]).startswith("Insufficient wallet balance"), submission
+        assert (_studio_request(sibling)["status"], _studio_request(draft)["status"]) == ("Approved", "Draft")
+        assert _studio_money(sibling)["campaign_payment"] == [2500] and _studio_money(draft)["campaign_payment"] == []
+        usd = _assert_studio_wallet_identity(user["id"])
+        assert (usd["availableMinor"], usd["reservedMinor"], usd["inAdsMinor"]) == (1500, 0, 2500), usd
+
+    # (a) The approval commits in full between the submit's two money reads.
+    user, cookies, sibling, sibling_lm, draft, draft_lm = setup("a")
+    holder, reads, between, approved = [], [], Event(), Event()
+
+    def submit_pauses(conn, cursor, statement, parameters, context, executemany):
+        if _row_lock(statement, parameters, _OWNER_ROW_LOCK, user["id"]) and not holder:
+            holder.append(conn)  # the submit's transaction
+        elif holder and conn is holder[0] and gate_read(statement):
+            reads.append(gate_read(statement))
+            if not between.is_set():
+                between.set()
+                assert approved.wait(30), "The sibling's approval never finished"
+
+    with _with_hooks(engine, after=submit_pauses), ThreadPoolExecutor(max_workers=1) as pool:
+        submitting = pool.submit(submit, cookies, draft, draft_lm)
+        try:
+            assert between.wait(30), "The submit never reached its money check"
+            approval = approve(sibling, sibling_lm)
+        finally:
+            approved.set()
+        submission = submitting.result(timeout=40)
+    assert reads == ["holds", "balance"], reads
+    assert_refused(user, sibling, draft, approval, submission)
+
+    # (b) Free races: the approval always wins, the submit is always refused.
+    for n in range(3):
+        user, cookies, sibling, sibling_lm, draft, draft_lm = setup(f"free{n}")
+        barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            approving = pool.submit(approve, sibling, sibling_lm, barrier)
+            submitting = pool.submit(submit, cookies, draft, draft_lm, barrier)
+            approval, submission = approving.result(timeout=40), submitting.result(timeout=40)
+        assert_refused(user, sibling, draft, approval, submission)
 
 
 def _campaign_withdraw_vs_approve(t) -> None:

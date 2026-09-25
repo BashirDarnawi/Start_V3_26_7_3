@@ -501,7 +501,8 @@ def create_subscription_plans_router(
                     "targetUserId": str(((rows[0] or {}).get("data") or {}).get("userId") or body.userId or user.get("id") or ""),
                 },
             )
-        return {"subscriptions": rows, "payment": payment}
+        project = ctx["project_entity_media_for_user"]  # P1-05: a replay of a plan staff bought shows no staff id
+        return {"subscriptions": [project(row, user) for row in rows], "payment": project(payment, user) if payment else None}
 
     @router.get("/admin/subscription-plans")
     def get_admin_subscription_plans(
