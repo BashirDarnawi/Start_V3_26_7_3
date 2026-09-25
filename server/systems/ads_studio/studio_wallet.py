@@ -46,6 +46,8 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Request
 
+from sqlalchemy import text
+
 from ...db import db_conn
 from ...wallet_payments import (
     _campaign_payment_key,
@@ -257,6 +259,10 @@ def compute_wallet_summary(
 def wallet_summary(conn: Any, owner_id: str, now: datetime) -> dict[str, Any]:
     """Read everything on one connection, then compute (see compute_wallet_summary)."""
     uid = str(owner_id or "")
+    if conn.dialect.name == "postgresql":
+        # The five reads below must describe one instant: an approval or stop committing between
+        # two READ COMMITTED snapshots would give wrong numbers that still satisfy the identity.
+        conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
     ledger = wallet_ledger_rows(conn, uid)
     requests = load_owner_requests(conn, uid, include_archived=True)
     results = load_owner_results(conn, uid, (request["id"] for request in requests))

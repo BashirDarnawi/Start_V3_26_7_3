@@ -29,6 +29,12 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P0-12 | Done | stage 3 | Privacy page: 365-day audit retention, the exact kept entries (test compares with the server's keep list), Ads Studio data and comment processing |
 | P0-13 | Done | stage 3 | Webhook delivery counter (counts only, after the signature check, flushed once a minute) |
 | P0-14 | Done | stage 3 | `GET /api/meta-ads/token-health` (platform route), reading tied to the key it checked, at most one Meta check per 10 min except the admin refresh; needs `ALBAYAN_META_APP_ID` |
+| P1-01 + P1-10 | Done | stage 5 | Submit and review moved word for word into `ad_campaign_actions.py` (62-request before/after comparison identical); main.py 14,082 → 13,749 lines |
+| P1-04 | Done | stage 5 | `closeReason` (customer_stop / staff_stop / completed — completed is staff-only); lifecycle and staff-test audit actions kept forever (privacy page names them) |
+| P1-07 | Done | stage 5 | `GET /api/studio/wallet/summary`: Available, Reserved, In your ads (Meta used), Spent, Being returned, per-ad money chains; LYD separate; one PostgreSQL snapshot; property test of the identity |
+| P1-08a + P1-08b | Done | stage 5 | Classic screen: LYD rows in LYD, budget summary counts Submitted/Approved only, dead Connections button replaced by text, form limits = server limits from `/me`, Arabic digits |
+| P1-17 | Done | stage 2–3 | The row-limit cleanup reads the same keep list (`_AUDIT_KEEP_ACTIONS`) |
+| P1-20 | Done | stage 5 | `adCampaignResults` type, pure `derive_display_stage()` (13 stages), shared fixture `stage_cases.json` (54 cases), `GET /api/studio/campaigns/summary` |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 

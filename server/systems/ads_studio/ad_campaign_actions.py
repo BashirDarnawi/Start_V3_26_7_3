@@ -11,6 +11,9 @@ Submit and review were moved here word for word from main.py (P1-01, P1-10):
 same status codes, texts, audit rows, ledger rows, operation-id replay and
 version checks. Main's helpers reach them through late-bound ``ctx`` lambdas,
 so a monkeypatched main helper (tests, fault injection) still takes effect.
+Exception: ``db_conn`` and the wallet ledger functions are imported directly;
+fault-inject them on this module (server.systems.ads_studio.ad_campaign_actions),
+never on main, or the patch silently misses submit and review.
 
 The stop endpoint runs ONE locked transaction: the refund ledger row and the
 ``Stopped`` status write commit or roll back together, so there is no orphan

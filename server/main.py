@@ -1199,6 +1199,7 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
 AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 365)   # the UI promises "keeps last 1 year"
 AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 500000)
 # Money-history actions are never auto-deleted (closing a month, unlocking it, imports, restores, company money, Ads Studio lifecycle and staff tests; P1-04).
+# 'stop' is kept for every record type on purpose: agency ad stops reconcile spend too (privacy.html: 'stopping advertisements').
 _AUDIT_KEEP_ACTIONS = "('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review','studio_setting','collision_repair','stop','withdraw','publish_status','stop_request','settle_override','contact_link','subscribe_smoke_test','ig_read_test','check_comments')"
 
 
