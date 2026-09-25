@@ -134,11 +134,17 @@ test('Classic view: the v2 header link keeps this tab on the classic studio unti
   await expect.poll(() => tab(page)).toBe('home');  // wallet is no classic tab: the Overview
   await expect(page.getByTestId('studio-new-studio')).toHaveText('New studio');
   expect(await page.evaluate(() => sessionStorage.getItem('albayan.studio.v2.classic'))).toBe(await page.evaluate(() => state.currentUser.id));
-  await page.reload();  // this tab keeps the choice, with no "Opening the studio…" wait
+  // A reload keeps the choice, with no "Opening the studio…" wait. /me is slow here, so the classic studio is drawn
+  // before it answers: the answer itself must bring "New studio" to the classic header (no other draw does).
+  const slowMe = async route => { await new Promise(resolve => setTimeout(resolve, 2500)); await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(meReply()) }); };
+  await page.route('**/api/studio/me', slowMe);
+  await page.reload();
   await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
-  await expect(page.getByTestId('studio-new-studio')).toBeVisible();
   await expect(page.getByTestId('studio-v2-frame')).toHaveCount(0);
   await expect(page.getByTestId('studio-v2-loading')).toHaveCount(0);
+  expect(await page.evaluate(() => typeof studioMe === 'function' && !!studioMe()), 'the classic studio is on screen before /me answered').toBe(false);
+  await expect(page.getByTestId('studio-new-studio')).toBeVisible({ timeout: 10_000 });
+  await page.unroute('**/api/studio/me', slowMe);
   const other = await context.newPage();  // another tab of the same browser: the new studio
   await answerMe(other);
   await other.goto('/studio?tab=home');

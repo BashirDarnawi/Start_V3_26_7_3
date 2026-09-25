@@ -21,8 +21,10 @@ const {
 // routes builds a quick boost in the wizard (a new ad without a post: own text, a photo, a daily
 // budget of 7 x $10.00), sends it, watches Home reserve the $70.00, withdraws it from My ads and
 // sees the money come back; then (a second test) sends again, a reviewer approves on the Team desk,
-// the customer sees "In your ads $70.00", and a staff stop before the start date returns the whole
-// payment. At every step the Home strip is compared with GET /api/studio/wallet/summary.
+// the customer sees "In your ads $70.00", and a staff stop of the never-linked ad (the real route)
+// returns the whole payment; then (a third test) the customer stops the approved ad before its start
+// date from the app (Stop -> the sheet -> confirm) and gets the whole $70.00 back. At every step the
+// Home strip is compared with GET /api/studio/wallet/summary.
 //
 // Each test seeds its OWN pilot customer and reviewer (helpers/studio-v2.js); the customer layout
 // stays a pilot (never "on" for everyone). The full journeys run on mobile-chromium at 390 px, in
@@ -43,12 +45,14 @@ const WORDS = {
     home: 'Home', available: 'Available', reserved: 'Reserved', inAds: 'In your ads',
     waiting: 'Waiting for Albayan review', draft: 'Draft — not sent', approved: 'Approved — being set up in Meta', stopped: 'Stopped',
     reservedRow: 'Reserved — still yours', returnedInFull: 'Came back to you in full', withdrawTitle: 'Withdraw this request?',
+    stopTitle: 'Stop this ad before it starts?', stopConfirm: 'Stop and refund',
     perDay: '10', page: 'E2E Bakery', text: 'Fresh bread every morning — order before 9.'
   },
   ar: {
     home: 'الرئيسية', available: 'متاح', reserved: 'محجوز', inAds: 'في إعلاناتك',
     waiting: 'بانتظار مراجعة فريق البيان', draft: 'مسودة — لم تُرسل', approved: 'مقبول — نجهّزه في ميتا', stopped: 'أُوقف',
     reservedRow: 'محجوز — ما زال لك', returnedInFull: 'عاد إليك كاملاً', withdrawTitle: 'سحب هذا الطلب؟',
+    stopTitle: 'إيقاف هذا الإعلان قبل أن يبدأ؟', stopConfirm: 'أوقفه واسترد المبلغ',
     perDay: '١٠', page: 'مخبز البيان التجريبي', text: 'خبز طازج كل صباح — اطلب قبل التاسعة.'
   }
 };
@@ -234,8 +238,12 @@ async function expectSentOnServer(api, id, words) {
   expect(fourNumbers(await jsonOrThrow(await api.get('/api/studio/wallet/summary'), 'The summary after the send'))).toEqual([TOP_UP_MINOR - TOTAL_MINOR, TOTAL_MINOR, 0, 0]);
 }
 
-// The Home button of the "Sent" screen (the bottom nav is hidden in the wizard).
+// The Home button of the "Sent" screen (the bottom nav is hidden in the wizard). The send asks for both
+// summaries again at once; leaving the wizard while they are still on their way would cancel them (the
+// app aborts a screen's reads on a navigation) and Home would show the numbers from before the send
+// until its next read. The journey lets them land first, like a person who watches the money line settle.
 async function homeFromSent(page, taps, words) {
+  await page.waitForFunction(() => !studioDataState('wallet').loading && !studioDataState('campaigns').loading, null, { timeout: BOOT_TIMEOUT });
   await page.getByTestId('studio-builder-sent').getByRole('button', { name: words.home, exact: true }).click();
   await expectCustomerTab(page, 'home');
   taps.home();
@@ -372,7 +380,7 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
     });
   }
 
-  test('send -> a reviewer approves on the Team desk -> the customer sees "In your ads $70" -> a staff stop before the start date returns it all; the strip equals the wallet summary at every step', async ({ page, browser, contextOptions, playwright, baseURL }, testInfo) => {
+  test('send -> a reviewer approves on the Team desk -> the customer sees "In your ads $70" -> a staff stop of the never-linked ad (the real route) returns it all; the strip equals the wallet summary at every step', async ({ page, browser, contextOptions, playwright, baseURL }, testInfo) => {
     fullMatrixOnly(testInfo);
     const words = WORDS.en;
     const seed = await seedMoneyCustomer(playwright, baseURL, testInfo, 'staff');
@@ -420,8 +428,9 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
       await expect(page.getByTestId('studio-ad-meta-used')).toHaveCount(0);
       await expect.poll(() => actionIds(page)).toEqual(['stop', 'ask_stop', 'ask']);
 
-      // Staff stop before the start date (the real route, the reviewer's own session): the ad was
-      // never linked to Meta, so the server returns the whole payment on its own.
+      // A staff stop (the real route, the reviewer's own session) of an ad that was never linked to
+      // Meta: the server returns the whole payment on its own (settleBasis never_linked). This is the
+      // never-linked STAFF rule; the customer's own stop before the start date is the next test.
       reviewerApi = await openUserApi(playwright, baseURL, seed.reviewer);
       const current = await readRequest(reviewerApi, id);
       const stopped = await jsonOrThrow(await reviewerApi.post(`/api/ad-studio/campaigns/${encodeURIComponent(id)}/stop`, {
@@ -462,6 +471,75 @@ test.describe('Albayan Studio v2 money journey (pilot)', () => {
       expect(errors).toEqual([]);
     } finally {
       if (reviewerApi) await reviewerApi.dispose();
+      await seed.customerApi.dispose();
+    }
+  });
+
+  test('send -> a reviewer approves -> the customer stops the ad before its start date from the app (Stop -> sheet -> confirm) -> Stopped, the whole $70 back; the strip equals the wallet summary', async ({ page, browser, contextOptions, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    const words = WORDS.en;
+    const seed = await seedMoneyCustomer(playwright, baseURL, testInfo, 'own');
+    const errors = collectPageErrors(page);
+    let nativeDialogs = 0;
+    page.on('dialog', dialog => { nativeDialogs += 1; dialog.dismiss().catch(() => {}); });
+    const taps = tapCounter();
+    try {
+      await page.setViewportSize(PHONE);
+      await openHome(page, seed.customer, 'en');
+      await expectStripEqualsServer(page, [TOP_UP_MINOR, 0, 0, 0], 'Home after the confirmed top-up');
+
+      // Send, then the reviewer approves on the desk: $70.00 paid, nothing reserved.
+      const id = await sendOwnTextBoost(page, { language: 'en', taps, words });
+      await expectSentOnServer(seed.customerApi, id, words);
+      await homeFromSent(page, taps, words);
+      await expectStripEqualsServer(page, [TOP_UP_MINOR - TOTAL_MINOR, TOTAL_MINOR, 0, 0], 'Home after the send');
+      const staffErrors = await approveOnDesk(browser, contextOptions, baseURL, seed.reviewer, id);
+      expect(staffErrors, 'the Team desk logged no errors').toEqual([]);
+      const approved = await readRequest(seed.customerApi, id);
+      expect(approved.data.status).toBe('Approved');
+      expect(approved.data.startDate, 'the quick boost starts on its send day, so the customer may still stop it').toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(fourNumbers(await jsonOrThrow(await seed.customerApi.get('/api/studio/wallet/summary'), 'The summary after the approval'))).toEqual([TOP_UP_MINOR - TOTAL_MINOR, 0, TOTAL_MINOR, 0]);
+
+      // The customer reopens the app: the approved ad (one tap), then Stop (two taps) opens the sheet
+      // that names the whole payment; confirming it is the customer's own stop through the real route.
+      await reopenHome(page, 'en');
+      await expect(page.getByTestId('studio-money-in-ads')).toHaveAttribute('data-minor', String(TOTAL_MINOR), { timeout: BOOT_TIMEOUT });
+      await expectStripEqualsServer(page, [TOP_UP_MINOR - TOTAL_MINOR, 0, TOTAL_MINOR, 0], 'Home after the approval');
+      taps.home();
+      await taps.tap(page.getByTestId(`studio-tracker-${id}`), 'the approved request');
+      const detail = page.getByTestId('studio-ad-detail');
+      await expect(detail).toHaveAttribute('data-stage', '4');
+      await expect.poll(() => actionIds(page)).toEqual(['stop', 'ask_stop', 'ask']);
+      await taps.tap(page.getByTestId('studio-ad-action-stop'), 'the Stop sheet');
+      const sheet = page.getByTestId('studio-sheet-stop');
+      await expect(sheet).toBeVisible();
+      await expect(sheet).toContainText(words.stopTitle);
+      await expect(sheet).toContainText(usd(TOTAL_MINOR));
+      await expect(sheet.getByTestId('studio-sheet-confirm')).toHaveText(words.stopConfirm);
+      await page.getByTestId('studio-sheet-confirm').click();
+      await expect(sheet).toHaveCount(0);
+
+      // Stopped: the request on screen and on the server, the whole $70.00 back, nothing held.
+      await expect(detail).toHaveAttribute('data-stage', '12');
+      await expect(detail.locator('.studio-stage-chip')).toHaveText(words.stopped);
+      await expect(page.getByTestId('studio-ad-chain')).toContainText(words.returnedInFull);
+      await expect(page.getByTestId('studio-ad-chain')).toContainText(usd(TOTAL_MINOR));
+      await expect(page.getByTestId('studio-ad-reserved')).toHaveCount(0);
+      await expect.poll(() => actionIds(page)).toEqual(['archive']);
+      const stopped = await readRequest(seed.customerApi, id);
+      expect(stopped.data).toMatchObject({ status: 'Stopped', closeReason: 'customer_stop', refundMinorUSD: TOTAL_MINOR, spendMinorUSD: 0 });
+      expect(fourNumbers(await jsonOrThrow(await seed.customerApi.get('/api/studio/wallet/summary'), 'The summary after the customer stop'))).toEqual([TOP_UP_MINOR, 0, 0, 0]);
+      await expectNoPageOverflow(page, 'stopped request (own stop)');
+
+      // Home: exactly the server's numbers, the whole top-up available again; a stopped ad is not "an ad now".
+      await page.getByTestId('studio-nav-home').click();
+      await expectCustomerTab(page, 'home');
+      await expectStripEqualsServer(page, [TOP_UP_MINOR, 0, 0, 0], 'Home after the customer stop');
+      await expect(page.getByTestId('studio-money-in-ads').locator('.studio-home-money-value')).toHaveText(usd(0));
+      await expect(page.getByTestId(`studio-tracker-${id}`)).toHaveCount(0);
+      expect(nativeDialogs, 'no native confirm/prompt/alert').toBe(0);
+      expect(errors).toEqual([]);
+    } finally {
       await seed.customerApi.dispose();
     }
   });

@@ -35,7 +35,7 @@ const _studioHealth = {
   tokenError: '',
   pages: [],
   diag: null,       // the last /diagnostics answer (jobs, metaLanes)
-  diagAt: 0,        // when it was asked for (a failed read waits like a good one)
+  diagAt: 0,        // when it was last READ (a failed read keeps it, so the next 60 s reload asks again; Refresh from Meta clears it)
   diagError: '',
   refreshing: false,
   refreshNote: null,
@@ -214,8 +214,9 @@ async function studioHealthEnsureLoaded(force = false) {
     _studioHealth.tokenError = token.status === 'fulfilled' ? '' : studioHealthErrorText(token.reason);
     if (pages.status === 'fulfilled') _studioHealth.pages = Array.isArray(pages.value?.pages) ? pages.value.pages : [];
     if (wantDiag) {
-      _studioHealth.diagAt = Date.now();
-      if (diag.status === 'fulfilled') { _studioHealth.diag = diag.value && typeof diag.value === 'object' ? diag.value : null; _studioHealth.diagError = ''; }
+      // Only a read that answered starts the 10 minutes; a failed one keeps the old stamp, so the
+      // 60 s reload asks again (the facts loaded, so this is no request loop: one try a minute).
+      if (diag.status === 'fulfilled') { _studioHealth.diagAt = Date.now(); _studioHealth.diag = diag.value && typeof diag.value === 'object' ? diag.value : null; _studioHealth.diagError = ''; }
       else _studioHealth.diagError = studioHealthErrorText(diag.reason);
     }
   } finally {
@@ -261,7 +262,14 @@ async function studioHealthRefreshFacts() {
     if (!studioHealthContextIsCurrent(context)) return;
     _studioHealth.refreshNote = { tone: 'rose', text: studioHealthErrorText(error) };
   } finally {
-    if (studioHealthGenerationIsCurrent(context)) { _studioHealth.refreshing = false; studioHealthRerender(); }
+    if (studioHealthGenerationIsCurrent(context)) {
+      _studioHealth.refreshing = false;
+      // The admin asked for fresh readings: the load that follows this draw asks for the heartbeat
+      // and the lanes too, however fresh (or failed) the last /diagnostics read was.
+      _studioHealth.diagAt = 0;
+      _studioHealth.loadedAt = 0;
+      studioHealthRerender();
+    }
   }
 }
 
@@ -464,14 +472,22 @@ function studioHealthGoFix(key) {
 }
 
 // One item's line: "What to do (runbook §x): <the steps> <the link>". id names the item in tests.
+// runbook '' = the item has no runbook page of its own (the line says only "What to do").
 function studioHealthFix(id, key, runbook, en, ar) {
   const fix = STUDIO_HEALTH_FIXES[key];
   const label = studioHealthText(fix[2], fix[3]);
   const linked = key === 'pages' || studioHealthDeskOpen();
+  // The pointer in words (no desk here): the desk section, and More only for the items under it.
+  const pointer = [studioHealthText('Team desk', 'مكتب الفريق')]
+    .concat(fix[0] === 'more' ? [studioHealthText('More', 'المزيد')] : [], [label])
+    .join(adsStudioIsAr() ? ' ← ' : ' → ');
   const where = linked
     ? `<button type="button" data-testid="studio-health-fix-link-${id}" onclick="studioHealthGoFix('${key}')" class="touch-target min-h-11 inline-flex items-center gap-1 rounded-xl border border-blue-200 dark:border-blue-800 px-3 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 align-middle"><i data-lucide="${key === 'pages' ? 'arrow-down' : 'arrow-right'}" class="w-3.5 h-3.5" aria-hidden="true"></i>${label}</button>`
-    : `<span class="font-bold text-slate-800 dark:text-slate-100">${studioHealthText(`Team desk → More → ${fix[2]}`, `مكتب الفريق ← المزيد ← ${fix[3]}`)}</span>`;
-  return `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${studioHealthText(`What to do (runbook ${runbook})`, `ماذا تفعل (دليل التشغيل ${runbook})`)}:</strong> ${studioHealthText(en, ar)} ${where}</p>`;
+    : `<span class="font-bold text-slate-800 dark:text-slate-100">${pointer}</span>`;
+  const heading = runbook
+    ? studioHealthText(`What to do (runbook ${runbook})`, `ماذا تفعل (دليل التشغيل ${runbook})`)
+    : studioHealthText('What to do', 'ماذا تفعل');
+  return `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${heading}:</strong> ${studioHealthText(en, ar)} ${where}</p>`;
 }
 
 // ---------- rendering ----------
@@ -581,14 +597,25 @@ function studioHealthLaneValue(lane) {
     : studioHealthText(`usage ${usage}`, `الاستخدام ${usage}`);
 }
 
+// When the last /diagnostics read was, and when the next comes: after 10 minutes; within a minute
+// when the last read failed (the 60 s reload asks again), and at once through Refresh from Meta.
+function studioHealthDiagNote() {
+  const read = _studioHealth.diagAt ? `${studioHealthText('Read', 'قُرئ')} ${studioHealthAge((Date.now() - _studioHealth.diagAt) / 1000)}` : '';
+  if (_studioHealth.diagError) {
+    return `<p class="text-[11px] text-amber-700 dark:text-amber-300" data-diag="failed">${read ? `${read} · ` : ''}${studioHealthText('The last read failed', 'فشلت آخر قراءة')}: ${studioHealthEsc(_studioHealth.diagError)} · ${studioHealthText('read again within a minute; Refresh from Meta asks now', 'تُعاد القراءة خلال دقيقة؛ وتحديث من ميتا يطلبها الآن')}</p>`;
+  }
+  return read ? `<p class="text-[11px] text-slate-500" data-diag="read">${read} · ${studioHealthText('read again after 10 min', 'يُقرأ مجدداً بعد 10 دقائق')}</p>` : '';
+}
+
 // The studio jobs heartbeat (runbook 3.6) and the Meta lanes (3.4), from the last /diagnostics read.
 function renderStudioHealthJobsAndLanes() {
   const report = _studioHealth.diag;
-  const readNote = _studioHealth.diagAt ? `<p class="text-[11px] text-slate-500">${studioHealthText('Read', 'قُرئ')} ${studioHealthAge((Date.now() - _studioHealth.diagAt) / 1000)} · ${studioHealthText('read again after 10 min', 'يُقرأ مجدداً بعد 10 دقائق')}</p>` : '';
+  const readNote = studioHealthDiagNote();
   const jobs = report && report.jobs && typeof report.jobs === 'object' ? report.jobs : null;
   const lanesReport = report && report.metaLanes && typeof report.metaLanes === 'object' ? report.metaLanes : null;
+  const none = () => `<p>${studioHealthEsc(_studioHealth.diagError ? studioHealthText('No reading yet.', 'لا قراءة بعد.') : studioHealthText('Loading…', 'جارٍ التحميل…'))}</p>`;
   let jobsBody;
-  if (!report) jobsBody = `<p>${studioHealthEsc(_studioHealth.diagError || studioHealthText('Loading…', 'جارٍ التحميل…'))}</p>`;
+  if (!report) jobsBody = none();
   else if (!jobs) jobsBody = `<p>${studioHealthText('No heartbeat in the report.', 'لا نبض في التقرير.')}</p>`;
   else {
     const late = jobs.enabled === false || jobs.late === true;
@@ -604,7 +631,7 @@ function renderStudioHealthJobsAndLanes() {
     'Late: restart the app container in Libyan Spider (redeploy only if the restart fails); "switched off" means ALBAYAN_STUDIO_JOBS is set to off in Jelastic. Follow it in',
     'متأخر: أعد تشغيل حاوية التطبيق في Libyan Spider (أعد النشر فقط إن فشلت إعادة التشغيل)؛ «متوقفة» تعني أن ALBAYAN_STUDIO_JOBS مضبوط على off في Jelastic. تابعه في');
   let lanesBody;
-  if (!report) lanesBody = `<p>${studioHealthEsc(_studioHealth.diagError || studioHealthText('Loading…', 'جارٍ التحميل…'))}</p>`;
+  if (!report) lanesBody = none();
   else if (!lanesReport) lanesBody = `<p>${studioHealthText('No lane state in the report.', 'لا حالة مسارات في التقرير.')}</p>`;
   else {
     const app = lanesReport.appWide && typeof lanesReport.appWide === 'object' ? lanesReport.appWide : {};
@@ -652,9 +679,9 @@ function renderStudioHealthFacts() {
       studioHealthLine(studioHealthText('Now', 'الآن'), studioHealthEsc(c.total || 0))
       + studioHealthCounts(c.byStatus, studioHealthStatusLabel)
       + studioHealthLine(studioHealthText('Archived', 'مؤرشفة'), studioHealthEsc(c.archived || 0))
-      + studioHealthFix('daily-requests', 'requests', '§7.1',
-        'A daily budget holds its whole total (days × amount) from the send; review the waiting ones by their due time in',
-        'الميزانية اليومية تحجز مجموعها كاملاً (الأيام × المبلغ) منذ الإرسال؛ راجع الطلبات المنتظرة حسب موعدها في')),
+      + studioHealthFix('daily-requests', 'requests', '1',
+        'A daily budget holds its whole total (days × amount) from the send; the daily check reviews the waiting ones by their due time in',
+        'الميزانية اليومية تحجز مجموعها كاملاً (الأيام × المبلغ) منذ الإرسال؛ الفحص اليومي يراجع الطلبات المنتظرة حسب موعدها في')),
     studioHealthCard('list-checks', studioHealthText('Ad-account allowlist', 'قائمة الحسابات الإعلانية المسموحة'),
       studioHealthLine(studioHealthText('Configured', 'مُعدّة'), studioHealthYesNo(f.d?.allowlistConfigured === true))
       + studioHealthFix('allowlist', 'diagnostics', '0.3',
@@ -663,7 +690,7 @@ function renderStudioHealthFacts() {
     studioHealthCard('wallet', studioHealthText('Meta minimum daily budget', 'الحد الأدنى اليومي لميزانية ميتا'),
       `<p class="text-[11px] text-slate-500">${budget.checked ? studioHealthAge(budget.ageSeconds) : studioHealthText('Not read yet: press Refresh from Meta.', 'لم تُقرأ بعد: اضغط تحديث من ميتا.')}${budget.stale && budget.checked ? ` · ${studioHealthText('older than 24 h', 'أقدم من 24 ساعة')}` : ''}</p>`
       + (budget.accounts || []).filter(a => a && typeof a === 'object').map(studioHealthBudgetRow).join('')
-      + studioHealthFix('min-budget', 'limits', '§7.1',
+      + studioHealthFix('min-budget', 'limits', '',  // no runbook page of its own: the Budget limits form is the fix
         'Keep the per-day floor of the budget limits at or above every account\'s minimum, in',
         'أبقِ حد اليوم الأدنى في حدود الميزانية عند الحد الأدنى لكل حساب أو فوقه، في')),
     studioHealthCard('webhook', studioHealthText('Page webhook subscription', 'اشتراك الصفحات في الويب هوك'),

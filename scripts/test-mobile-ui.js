@@ -6938,6 +6938,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       var __dom = new Map();
       var __desk = [];
       var __scrolled = [];
+      var __held = [];  // answers held back until the test lets them arrive (__held.shift()()): a slow /me
       var _lastRenderedView = null;
       var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
       var document = { visibilityState: 'visible', title: 'Albayan Studio', addEventListener() {}, removeEventListener() {}, getElementById(id) { return __dom.get(id) || null; }, querySelectorAll: () => [] };
@@ -6951,8 +6952,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
         __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
         const next = (__replies[path] || []).shift();
         if (!next) return new Promise(() => {});
-        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
-        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+        const settle = (resolve, reject) => (next.error ? reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error)) : resolve(JSON.parse(JSON.stringify(next.value))));
+        if (next.hold) return new Promise((resolve, reject) => { __held.push(() => settle(resolve, reject)); });
+        return new Promise(settle);
       }
       function showNotification(title, message, type) { __notes.push({ title, message, type }); }
       function getServerSessionIdentity() { return 'session'; }
@@ -6983,7 +6985,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
   const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
   const html = () => String(run('__html'));
-  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const failedCases = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
   const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
   const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
   const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && (!path || c.path === path));
@@ -7012,6 +7014,21 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   run('studioV2ChooseClassic(false)');
   const backPage = html();
   const backState = { key: win.sessionStorage.getItem(classicKey), frame: run('studioV2Frame()'), switchGone: run('renderStudioV2ClassicSwitch()') };
+  // a reload of this tab with the choice while /me is still on its way: classic at once, without "New studio" (nothing
+  // says v2 yet); the answer draws the classic header again by itself, so the button appears with no other draw
+  run(`studioResetMe(); __replies['/api/studio/me'] = [{ hold: true, value: ${JSON.stringify(customerMe)} }]; studioLoadMe();`);
+  win.sessionStorage.setItem(classicKey, 'u1');
+  openAt('/studio?tab=campaigns');
+  const pending = { page: html(), shown: run('_studioV2.shown'), loading: run('studioMeLoading()'), wanted: run('studioV2Wanted()') };
+  run("__html = 'not drawn again'; __calls.length = 0; __held.shift()();");  // /me answers
+  const answered = { page: html(), shown: run('_studioV2.shown'), meCalls: calls('GET', '/api/studio/me').length, tab: run('_adsStudioActiveTab') };
+  // the same reload with a /me that fails: classic stays as it is, nothing is drawn or asked again (no loop)
+  run("studioResetMe(); __replies['/api/studio/me'] = [{ hold: true, error: { status: 503, message: 'down' } }]; studioLoadMe();");
+  openAt('/studio?tab=campaigns');
+  const failPending = { page: html(), shown: run('_studioV2.shown') };
+  run("__html = 'not drawn again'; __calls.length = 0; __held.shift()();");  // /me fails
+  const failed = { page: html(), shown: run('_studioV2.shown'), meCalls: calls('GET', '/api/studio/me').length, switchOff: String(run('renderStudioV2ClassicSwitch()')), held: run('__held.length') };
+  win.sessionStorage.removeItem(classicKey);
   // staff: the same link in the Team desk header
   who.staff = true; who.admin = true;
   meReply(staffMe);
@@ -7057,6 +7074,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && classicSwitchAr.includes('>الاستوديو الجديد<') && writesWhileSwitching === 0,
     afterMe.startsWith('<classic>') && afterReload.page.startsWith('<classic>') && afterReload.shown === 'classic',
     backPage.includes('data-testid="studio-v2-frame"') && backPage.includes('data-testid="studio-screen-campaigns"') && backState.key === null && backState.frame === 'customer' && backState.switchGone === '',
+    pending.page.startsWith('<classic>') && !pending.page.includes('studio-new-studio') && !pending.page.includes('studio-v2-loading') && pending.shown === 'classic-pending' && pending.loading === true && pending.wanted === 'classic-pending',
+    answered.page.startsWith('<classic>') && answered.page.includes('data-testid="studio-new-studio"') && answered.page.includes('>New studio<') && answered.shown === 'classic' && answered.meCalls === 0 && answered.tab === 'campaigns',
+    failPending.page.startsWith('<classic>') && !failPending.page.includes('studio-new-studio') && failPending.shown === 'classic-pending'
+      && failed.page === 'not drawn again' && failed.shown === 'classic-pending' && failed.meCalls === 0 && failed.switchOff === '' && failed.held === 0,
     staffPage.includes('data-testid="studio-staff-frame"') && staffPage.includes('data-testid="studio-classic-view"') && staffClassic.page.startsWith('<classic>') && staffClassic.tab === 'review'
       && staffClassic.switchOn.includes('data-testid="studio-new-studio"') && staffBack.includes('data-testid="studio-staff-frame"'),
     classicMeSwitch === '' && classicMePage.startsWith('<classic>') && !classicMePage.includes('studio-new-studio'),
@@ -7066,10 +7087,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     shellSrc.includes("const STUDIO_V2_CLASSIC_KEY = 'albayan.studio.v2.classic';") && chooseFn.includes('try {') && chooseFn.includes('window.sessionStorage.setItem(STUDIO_V2_CLASSIC_KEY, uid)')
       && !/apiJson|fetch\(|studioApi/.test(chooseFn) && shellSrc.includes('if (studioV2ClassicChosen()) return \'\';'),
     workspaceCss.includes('.studio-v2-header-link {') && /\.studio-v2-header-link \{[^}]*min-height: 44px/.test(workspaceCss) && workspaceCss.includes('.studio-v2-heading-meta {'),
-    ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-classic-view"') && built.includes('function renderStudioV2ClassicSwitch()'); })
+    ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-classic-view"') && built.includes('function renderStudioV2ClassicSwitch()') && built.includes("'classic-pending'"); })
   ];
-  check('Classic view (P6-06): a "Classic view / العرض القديم" link in the v2 header of both frames keeps this tab classic (sessionStorage, memory when storage is blocked; the wallet address lands on the Overview) until "New studio / الاستوديو الجديد" in the classic header, drawn only while /me says v2; a /me re-read and a reload keep the choice, another user does not inherit it, nothing is written to the server',
-    !loadError && classicCases.every(Boolean), loadError || `cases ${failed(classicCases)} state ${JSON.stringify(classicState)} back ${JSON.stringify(backState)}`);
+  check('Classic view (P6-06): a "Classic view / العرض القديم" link in the v2 header of both frames keeps this tab classic (sessionStorage, memory when storage is blocked; the wallet address lands on the Overview) until "New studio / الاستوديو الجديد" in the classic header, drawn only while /me says v2; a /me re-read and a reload keep the choice, another user does not inherit it, nothing is written to the server; a reload drawn before /me answers gets "New studio" from the answer itself (classic-pending), and a failed answer draws nothing again',
+    !loadError && classicCases.every(Boolean), loadError || `cases ${failedCases(classicCases)} state ${JSON.stringify(classicState)} back ${JSON.stringify(backState)} pending ${JSON.stringify({ shown: pending.shown, wanted: pending.wanted, answered: answered.shown, failed: failed.shown })}`);
 
   // ---- P5-07: the customer terms from Account, Help (v2 and classic) and the login help line
   meReply(customerMe);
@@ -7098,7 +7119,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-account-terms"') && built.includes('data-testid="studio-login-terms"') && built.includes('data-testid="studio-help-terms-link"'); })
   ];
   check('Customer terms (P5-07): /privacy#terms is linked from the v2 Account screen (between Privacy and Sign out), from the Help contact card in the v2 screen and the classic help tab, and from the login help line (drawn by 15r: no startup bytes), in English and Arabic; the privacy page carries the anchor',
-    !loadError && termsCases.every(Boolean), loadError || `cases ${failed(termsCases)}`);
+    !loadError && termsCases.every(Boolean), loadError || `cases ${failedCases(termsCases)}`);
 
   // ---- P3-25: Test alert channel
   who.staff = true; who.admin = true;
@@ -7158,7 +7179,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     ['studio-staff.js', 'www/studio-staff.js'].every(file => read(file).includes('data-testid="studio-health-alert-test"'))
   ];
   check('Test alert channel (P3-25): an admin button in the Studio health screen POSTs the existing route once (single flight) and says {sent, configured} in words (sent; not set up: ALBAYAN_ALERT_WEBHOOK_URL; set up but refused), a 429 shows the wait in minutes, ADMIN_ONLY in words, a reviewer never presses; EN and AR',
-    !loadError && alertCases.every(Boolean), loadError || `cases ${failed(alertCases)} sent ${JSON.stringify(alertSent)} wait ${JSON.stringify(alertWait)}`);
+    !loadError && alertCases.every(Boolean), loadError || `cases ${failedCases(alertCases)} sent ${JSON.stringify(alertSent)} wait ${JSON.stringify(alertWait)}`);
 
   // ---- P5-05: a "What to do" line under every item, linked into the desk (a pointer in words in classic)
   const fixIds = ['token', 'webhooks', 'heartbeat', 'lanes', 'private-replies', 'public-replies', 'daily-requests', 'allowlist', 'min-budget', 'pages', 'funds', 'spend-drift'];
@@ -7182,21 +7203,48 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   healthReplies();
   run('__calls.length = 0; _studioHealth.loadedAt = 0; renderStudioHealthSection();');  // the 60 s reload: no diagnostics read within 10 min
   const diagReadsReload = calls('GET', '/api/studio/admin/diagnostics').length;
+  const DIAG = '/api/studio/admin/diagnostics';
+  const fineDiag = { jobs: { enabled: true, late: false, ageSeconds: 20, lastTickAt: new Date().toISOString() }, metaLanes: { appWide: { paused: false }, lanes: {} } };
   healthReplies();
-  reply('/api/studio/admin/diagnostics', { jobs: { enabled: true, late: false, ageSeconds: 20, lastTickAt: new Date().toISOString() }, metaLanes: { appWide: { paused: false }, lanes: {} } });
+  reply(DIAG, fineDiag);
   run('__calls.length = 0; _studioHealth.loadedAt = 0; _studioHealth.diagAt = Date.now() - 11 * 60000; renderStudioHealthSection();');
-  const diagReadsLater = calls('GET', '/api/studio/admin/diagnostics').length;
+  const diagReadsLater = calls('GET', DIAG).length;
   const healthFine = String(run('renderStudioHealthSection()'));
+  // a /diagnostics read that fails keeps the last good stamp (11 min old here), so the next 60 s reload asks again;
+  // the card says so, with the old reading still shown
+  healthReplies();
+  replyError(DIAG, { status: 503, message: 'down' });
+  run('__calls.length = 0; _studioHealth.loadedAt = 0; _studioHealth.diagAt = Date.now() - 11 * 60000; renderStudioHealthSection();');
+  const diagFail = { reads: calls('GET', DIAG).length, stampAge: Number(run('Date.now() - _studioHealth.diagAt')), page: String(run('renderStudioHealthSection()')), pageAr: String(inLanguage('ar', 'renderStudioHealthSection()')) };
+  healthReplies();
+  reply(DIAG, fineDiag);
+  run('__calls.length = 0; _studioHealth.loadedAt = 0; renderStudioHealthSection();');  // the 60 s reload after the failure
+  const diagRetry = { reads: calls('GET', DIAG).length, page: String(run('renderStudioHealthSection()')) };
+  // Refresh from Meta asks for the diagnostics again on the load it triggers, however fresh the last read was
+  reply('/api/studio/admin/facts?refresh=1', { windowDays: 30, facts: {}, meta: { refreshed: true } });
+  healthReplies();
+  reply(DIAG, fineDiag);
+  run('__calls.length = 0; studioHealthRefreshFacts();');
+  run('renderStudioHealthSection();');
+  const diagRefresh = { reads: calls('GET', DIAG).length, factsReads: calls('GET', '/api/studio/admin/facts?refresh=1').length, leftover: json(`__replies[${JSON.stringify(DIAG)}]`) };
   // classic (the desk off, or this tab on the classic view): the same lines point in words; the pages scroll keeps its button
   run('studioV2ChooseClassic(true)');
   const healthClassic = String(run('renderStudioHealthSection()'));
+  const healthClassicAr = String(inLanguage('ar', 'renderStudioHealthSection()'));
   run('studioV2ChooseClassic(false)');
   const classicLines = fixIds.map(id => fixLine(healthClassic, id));
   const adminPageIds = [...adminSrc.matchAll(/^\s+\['([a-z-]+)', '[a-z-]+', '/gm)].map(m => m[1]);
   const deskSections = (deskSrc.match(/const STUDIO_DESK_SECTIONS = Object\.freeze\(\[([^\]]*)\]\)/) || ['', ''])[1];
+  // The pointer in words names the desk section, and More only for the items under More.
+  const pointerOf = line => { const fix = fixTargets[(line.match(/data-fix="([a-z]+)"/) || [])[1]] || ['', '', '']; return fix[0] === 'more' ? `Team desk → More → ${fix[2]}</span>` : `Team desk → ${fix[2]}</span>`; };
   const fixCases = [
-    linkedEn.every(line => line && line.includes('data-linked="1"') && line.includes('<strong>What to do (runbook ') && /data-testid="studio-health-fix-link-[a-z-]+" onclick="studioHealthGoFix\('[a-z]+'\)"/.test(line)),
-    linkedAr.every(line => line && line.includes('<strong>ماذا تفعل (دليل التشغيل ') && arabicLine(line)),
+    linkedEn.every(line => line && line.includes('data-linked="1"') && line.includes('<strong>What to do') && /data-testid="studio-health-fix-link-[a-z-]+" onclick="studioHealthGoFix\('[a-z]+'\)"/.test(line)),
+    linkedAr.every(line => line && line.includes('<strong>ماذا تفعل') && arabicLine(line)),
+    // the runbook page named is a real one: the daily check (§1) for the waiting daily-budget requests; the minimum
+    // budget has no page of its own (the Budget limits form is the fix), so its line names none; nothing names a PLAN section
+    fixLine(healthEn, 'daily-requests').includes('<strong>What to do (runbook 1):</strong>') && fixLine(healthAr, 'daily-requests').includes('<strong>ماذا تفعل (دليل التشغيل 1):</strong>')
+      && fixLine(healthEn, 'min-budget').includes('<strong>What to do:</strong>') && fixLine(healthAr, 'min-budget').includes('<strong>ماذا تفعل:</strong>')
+      && !healthEn.includes('§') && !healthAr.includes('§') && !healthEn.includes('runbook )'),
     fixLine(healthEn, 'token').includes("studioHealthGoFix('diagnostics')") && fixLine(healthEn, 'webhooks').includes("studioHealthGoFix('pages')") && fixLine(healthEn, 'heartbeat').includes("studioHealthGoFix('diagnostics')")
       && fixLine(healthEn, 'lanes').includes("studioHealthGoFix('intake')") && fixLine(healthEn, 'funds').includes("studioHealthGoFix('alerts')") && fixLine(healthEn, 'pages').includes("studioHealthGoFix('pages')")
       && fixLine(healthEn, 'private-replies').includes("studioHealthGoFix('capabilities')") && fixLine(healthEn, 'min-budget').includes("studioHealthGoFix('limits')") && fixLine(healthEn, 'spend-drift').includes("studioHealthGoFix('settlement')")
@@ -7208,16 +7256,25 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     goDiag === true && goAlerts === true && goIntake === true && goRequests === true && JSON.stringify(deskMoves) === JSON.stringify([['more', 'diagnostics'], ['more', 'alerts'], ['more', 'settings-intake'], ['requests', '']])
       && goPages === true && goUnknown === false && Array.isArray(scrolled) && scrolled.length === 1 && scrolled[0].block === 'start',
     diagReadsFirst === 1 && diagReadsReload === 0 && diagReadsLater === 1 && healthSrc.includes('const STUDIO_HEALTH_DIAG_MAX_AGE_MS = 10 * 60000;')
-      && healthFine.includes('data-testid="studio-health-heartbeat" data-late="0"') && healthFine.includes('>fine<') && healthFine.includes('data-testid="studio-health-lanes" data-paused="0"') && healthFine.includes('>running<'),
-    classicLines.every((line, i) => line && (fixIds[i] === 'webhooks' || fixIds[i] === 'pages' ? line.includes('data-linked="1"') && line.includes("studioHealthGoFix('pages')") : line.includes('data-linked="0"') && !line.includes('studioHealthGoFix') && line.includes('Team desk → More → ')))
+      && healthFine.includes('data-testid="studio-health-heartbeat" data-late="0"') && healthFine.includes('>fine<') && healthFine.includes('data-testid="studio-health-lanes" data-paused="0"') && healthFine.includes('>running<')
+      && healthFine.includes('data-diag="read"') && healthFine.includes('read again after 10 min') && !healthFine.includes('data-diag="failed"'),
+    // the failed read: asked once, the stamp not renewed (still 11 min old), the last good heartbeat kept, the card names the retry
+    diagFail.reads === 1 && diagFail.stampAge >= 11 * 60000 - 1000 && diagFail.page.includes('data-diag="failed"') && diagFail.page.includes('Read 11 min ago · The last read failed: The check did not finish. Try again. · read again within a minute; Refresh from Meta asks now')
+      && diagFail.page.includes('data-testid="studio-health-heartbeat" data-late="0"') && diagFail.pageAr.includes('قُرئ قبل 11 دقيقة · فشلت آخر قراءة: ') && diagFail.pageAr.includes(' · تُعاد القراءة خلال دقيقة؛ وتحديث من ميتا يطلبها الآن</p>'),
+    diagRetry.reads === 1 && diagRetry.page.includes('data-diag="read"') && !diagRetry.page.includes('data-diag="failed"') && diagRetry.page.includes('Read 1 min ago · read again after 10 min'),
+    diagRefresh.factsReads === 1 && diagRefresh.reads === 1 && (!diagRefresh.leftover || diagRefresh.leftover.length === 0),
+    classicLines.every((line, i) => line && (fixIds[i] === 'webhooks' || fixIds[i] === 'pages' ? line.includes('data-linked="1"') && line.includes("studioHealthGoFix('pages')") : line.includes('data-linked="0"') && !line.includes('studioHealthGoFix') && line.includes(pointerOf(line))))
+      && fixLine(healthClassic, 'daily-requests').includes('>Team desk → Requests</span>') && !fixLine(healthClassic, 'daily-requests').includes('More')
+      && fixLine(healthClassicAr, 'daily-requests').includes('>مكتب الفريق ← الطلبات</span>') && !fixLine(healthClassicAr, 'daily-requests').includes('المزيد')
+      && fixLine(healthClassic, 'min-budget').includes('>Team desk → More → Budget limits</span>') && fixLine(healthClassicAr, 'min-budget').includes('>مكتب الفريق ← المزيد ← حدود الميزانية</span>')
       && !healthClassic.includes('studio-health-fix-link-token'),
     Object.entries(fixTargets).every(([key, [section, id]]) => key === 'pages' ? section === '' && id === 'studio-health-pages' : (section === 'more' ? adminPageIds.includes(id) : id === '' && deskSections.includes(`'${section}'`))),
     // the runbook is not served (the API docs exist only in debug mode), which is why the lines link the desk and name the runbook page
     read('server/main.py').includes('docs_url="/docs" if DEBUG_MODE else None') && !/StaticFiles\([^)]*docs/.test(read('server/main.py')),
     ['studio-staff.js', 'www/studio-staff.js'].every(file => { const built = read(file); return built.includes('function studioHealthFix(id, key, runbook, en, ar)') && fixIds.every(id => built.includes(`studioHealthFix('${id}', '`)); })
   ];
-  check('Health "What to do" (P5-05): every item (token, webhook counters, jobs heartbeat, Meta lanes, replies, daily requests, allowlist, minimum budget, page subscription, funds, spend drift, page tests) names its runbook page and links the desk section or settings form that fixes it (a real id of More, or the Requests queue; the pages link scrolls); the heartbeat and lanes come from /diagnostics at most every 10 min; in classic the lines point in words; EN and AR',
-    !loadError && fixCases.every(Boolean), loadError || `cases ${failed(fixCases)} moves ${JSON.stringify(deskMoves)} diag ${diagReadsFirst}/${diagReadsReload}/${diagReadsLater} missing ${fixIds.filter((id, i) => !linkedEn[i]).join(',')}`);
+  check('Health "What to do" (P5-05): every item (token, webhook counters, jobs heartbeat, Meta lanes, replies, daily requests, allowlist, minimum budget, page subscription, funds, spend drift, page tests) names a real runbook page (or none) and links the desk section or settings form that fixes it (a real id of More, or the Requests queue; the pages link scrolls); the heartbeat and lanes come from /diagnostics at most every 10 min, a failed read is asked again on the next 60 s reload and by Refresh from Meta (the card says so); in classic the lines point in words at the section (More only for its items); EN and AR',
+    !loadError && fixCases.every(Boolean), loadError || `cases ${failedCases(fixCases)} moves ${JSON.stringify(deskMoves)} diag ${diagReadsFirst}/${diagReadsReload}/${diagReadsLater} fail ${JSON.stringify({ reads: diagFail.reads, stampAge: diagFail.stampAge, retry: diagRetry.reads, refresh: diagRefresh })} missing ${fixIds.filter((id, i) => !linkedEn[i]).join(',')}`);
   who.staff = false; who.admin = false;
 }
 

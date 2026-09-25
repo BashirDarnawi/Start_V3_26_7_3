@@ -36,7 +36,8 @@
 // renderStudioV2ClassicSwitch, guarded). The choice lives in sessionStorage (this tab, gone with it)
 // and in this page's memory; it never reaches the server, and it means nothing once /me stops saying
 // v2 for this user. studioV2Frame() is the effective frame ('' while classic is chosen);
-// studioV2FrameOf(studioV2Layout()) stays what /me says.
+// studioV2FrameOf(studioV2Layout()) stays what /me says. A reload with the choice draws classic before
+// /me answers ('classic-pending'); the answer draws the classic header again, so it gets "New studio".
 
 const STUDIO_V2_TABS = Object.freeze([
   // [tab, icon, English, Arabic, place] place: 'nav' = bottom bar / side rail, 'head' = header button
@@ -76,8 +77,10 @@ const STUDIO_V2_WAIT_MS = 3000;  // at most this long a known v2 user sees "Open
 const STUDIO_V2_LAYOUT_KEY = 'albayan.studio.v2.layout.';  // + user id: the layout /me gave last time (this browser only)
 const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (this tab): the chain and address of the last v2 draw
 const STUDIO_V2_CLASSIC_KEY = 'albayan.studio.v2.classic';  // sessionStorage (this tab): the user id that chose the classic view (P6-06)
-// shown: what the last draw was ('staff', 'customer', 'desk-classic', 'wait', 'classic'). layout: the
-// pinned layout (studioV2Layout). repin: entered the studio while /me was being read again. session:
+// shown: what the last draw was ('staff', 'customer', 'desk-classic', 'wait', 'classic', or
+// 'classic-pending': the classic view chosen for this tab was drawn while /me was still unknown, so
+// the /me answer draws it again for the "New studio" button). layout: the pinned layout
+// (studioV2Layout). repin: entered the studio while /me was being read again. session:
 // the /me session the visit notes belong to. fromApp: this visit came from another screen of this app
 // in this document (so Home's Back is the browser's Back). popping: a Back/Forward move is running.
 // opening: the address of the first v2 draw of this page ({tab, section, id, step}); reapplied: it was
@@ -257,10 +260,13 @@ function studioV2Rerender() {
 }
 
 // What renderStudioV2View draws for the pinned layout and the address (the 'wait' state aside).
+// 'classic-pending': the classic view is chosen for this tab and /me is not known yet, so the classic
+// header has no "New studio" to offer until the answer comes (then it is 'classic': drawn again).
 function studioV2Wanted() {
   const frame = studioV2Frame();
   if (frame === 'customer' && studioV2DeskClassicTab(studioV2Route(studioV2ReadAddress(), 'customer'))) return 'desk-classic';
-  return frame || 'classic';
+  if (frame) return frame;
+  return studioV2ClassicChosen() && !studioV2Layout() ? 'classic-pending' : 'classic';
 }
 
 // A /me answer arrived (or failed): draw again only when the layout on screen is no longer right.
@@ -309,8 +315,11 @@ function renderStudioV2View() {
       return renderStudioV2CustomerFrame(route);
     }
     if (!studioMe() && studioV2ShouldWait()) { _studioV2.shown = 'wait'; return renderStudioV2Waiting(); }
-    _studioV2.shown = 'classic';
-    if (studioV2Layout()) studioV2ClassicTabFix();
+    const layout = studioV2Layout();
+    // The classic view chosen while /me is still on its way: the answer draws again (studioV2OnMe), so
+    // the classic header gets its "New studio" without any other draw; a failed answer changes nothing.
+    _studioV2.shown = !layout && studioV2ClassicChosen() ? 'classic-pending' : 'classic';
+    if (layout) studioV2ClassicTabFix();
     return '';
   } catch (error) {
     if (!_studioV2.warned) {
