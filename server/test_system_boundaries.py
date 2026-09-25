@@ -7,12 +7,18 @@ another system's record type: not as a value (call argument, including ctx["get_
 calls, SQL bound parameter, assignment, comparison, collection element) and not inside SQL text.
 Its SQL may read and write only the ``entities`` table: users, sessions, audit_logs and every
 other platform table are reached through a platform door (e.g. user_directory, ctx["audit"]).
+Nor may its SQL reach a platform record type (PLATFORM_TYPES, e.g. walletPaymentRequests): neither
+named in the SQL text nor bound as a value, as a literal or through a door's constant
+(wallet_payments.WALLET_PAYMENT_COLLECTION). Those rows are read by a door FUNCTION
+(wallet_payments.payment_request_belongs_to, wallet_ledger_rows, ...); the constant may still be
+compared with or handed to a ctx helper.
 """
 
 import ast
 import importlib
 import re
 from pathlib import Path
+from typing import Any
 
 SERVER = Path(__file__).resolve().parent
 SYSTEMS = SERVER / "systems"
@@ -171,12 +177,61 @@ def _sql_table_problems(tree: ast.AST, docstrings: set[int]) -> list[str]:
     return problems
 
 
+def _door_constant_value(module: str, name: str) -> Any:
+    """The value of a name imported from a platform door (None when it is not a plain constant)."""
+    try:
+        value = getattr(importlib.import_module(module), name, None)
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _platform_type_problems(tree: ast.AST, package: str, docstrings: set[int]) -> list[str]:
+    """SQL text or a SQL bound value naming a platform record type (PLATFORM_TYPES), as a literal or
+    through a door's constant: those rows are read by a door function, never by the system's SQL."""
+    platform_names: dict[str, str] = {}  # a local name -> the platform type it holds
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            base = _resolve(node.module, node.level, package)
+            parts = base.split(".")
+            if len(parts) == 2 and parts[0] == "server" and parts[1] in PLATFORM_DOORS:
+                for alias in node.names:
+                    value = _door_constant_value(base, alias.name)
+                    if value in PLATFORM_TYPES:
+                        platform_names[alias.asname or alias.name] = value
+    for node in ast.walk(tree):  # one hop of aliasing: WALLET = WALLET_PAYMENT_COLLECTION
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id in platform_names:
+            platform_names.update({t.id: platform_names[node.value.id] for t in node.targets if isinstance(t, ast.Name)})
+    dict_keys = {id(k) for node in ast.walk(tree) if isinstance(node, ast.Dict) for k in node.keys if k is not None}
+    problems = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _callee(node.func) in SQL_CALLS):
+            continue
+        for arg in [*node.args, *(k.value for k in node.keywords)]:
+            for inner in ast.walk(arg):
+                if isinstance(inner, ast.Name) and inner.id in platform_names:
+                    problems.append(f"line {inner.lineno}: SQL binds the platform record type {platform_names[inner.id]!r} "
+                                    "through a door's constant (read those rows with a door function)")
+                elif isinstance(inner, ast.Constant) and isinstance(inner.value, str) and id(inner) not in dict_keys:
+                    if inner.value in PLATFORM_TYPES:
+                        problems.append(f"line {inner.lineno}: SQL binds the platform record type {inner.value!r} "
+                                        "(read those rows with a door function)")
+                    elif any(f"'{t}'" in inner.value or f'"{t}"' in inner.value for t in PLATFORM_TYPES):
+                        problems.append(f"line {inner.lineno}: SQL names a platform record type (read those rows with a door function)")
+    for node in ast.walk(tree):  # SQL kept in a string first (a name ending in SQL/QUERY, or holding a SQL keyword)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings and SQL_KEYWORD.search(node.value):
+            if any(f"'{t}'" in node.value or f'"{t}"' in node.value for t in PLATFORM_TYPES):
+                problems.append(f"line {node.lineno}: SQL names a platform record type (read those rows with a door function)")
+    return problems
+
+
 def boundary_violations(source: str, package: str, system: str, foreign: set[str], other_systems: set[str]) -> list[str]:
     """Pure checker (also used by the self-test below)."""
     problems: list[str] = []
     tree = ast.parse(source)
     skip = _docstrings(tree)
     problems.extend(_sql_table_problems(tree, set(skip)))
+    problems.extend(_platform_type_problems(tree, package, set(skip)))
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             skip.update(id(k) for k in node.keys if isinstance(k, ast.Constant))
@@ -287,16 +342,31 @@ def test_the_guard_catches_violations():
         "q = 'select id, role from users'\nconn.execute(text(q))\n"
         "conn.execute(text('DELETE FROM entities USING audit_logs WHERE entities.id = audit_logs.resource_id'))\n"
         "conn.execute(text('TRUNCATE audit_logs'))\n"
+        # A platform record type reached by the system's own SQL (D36: only a door function reads those rows).
+        "conn.execute(text('SELECT id FROM entities WHERE type = :t'), {'t': 'walletPaymentRequests'})\n"
+        "conn.execute(text(\"SELECT id FROM entities WHERE type = 'walletTransactions' AND deleted = false\"))\n"
+        "from ...wallet_payments import WALLET_PAYMENT_COLLECTION\n"
+        "conn.execute(text(where_sql), {'type': WALLET_PAYMENT_COLLECTION, 'uid': uid})\n"
+        "PLAN_SQL = \"SELECT id FROM entities WHERE type = 'serviceSubscriptions'\"\n"
     )
     foreign = set().union(*NOT_YET_MOVED.values())
     found = boundary_violations(bad, "server.systems.ads_studio", "ads_studio", foreign, {"clothes"})
-    assert len(found) == 18, "\n".join(found)
+    assert len(found) == 22, "\n".join(found)
     assert any("'users' table" in p for p in found) and any("'audit_logs' table" in p for p in found)
+    assert sum("platform record type" in p for p in found) == 4, "\n".join(found)
+    assert any("'walletPaymentRequests' through a door's constant" in p for p in found)
     clean = (
         '"""Mentions ads and pages in prose."""\n'
         "from ...db import db_conn\nfrom ... import meta_ads\nfrom .social_studio import x\n"
         "LOG_TYPE = 'socialReplyLog'\n"
         "payload = {'pages': [], 'ads': 1}\nrow.get('pages')\nrow['ads']\n"
+        # A platform type through its door: the door function reads the rows; the constant is compared with
+        # or handed to a ctx helper, never bound into the system's own SQL.
+        "from ...wallet_payments import WALLET_PAYMENT_COLLECTION, payment_request_belongs_to\n"
+        "owned = payment_request_belongs_to(conn, uid, key)\n"
+        "if row['referenceType'] != WALLET_PAYMENT_COLLECTION:\n    pass\n"
+        "REDACTED_TYPES = {'adCampaignRequests', 'walletTransactions'}\n"
+        "ctx['find_entity_by_idempotency'](conn, 'walletTransactions', key)\n"
         'def f():\n    """Never runs SELECT id FROM users itself."""\n'
         "conn.execute(text('SELECT id FROM entities WHERE type = :t LIMIT 1 FOR UPDATE SKIP LOCKED'))\n"
         "rows = conn.execute(text(f'SELECT {cols} FROM entities WHERE {where} OFFSET 0'))\n"

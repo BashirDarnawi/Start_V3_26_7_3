@@ -708,21 +708,30 @@ def read_all_settings() -> dict[str, dict[str, Any]]:
 _SAVED_FIRST = "This setting was saved by someone else just now. Reload it, then save again."
 
 
+def desk_hidden(rollout: dict[str, Any]) -> bool:
+    """True when the rollout shows the v2 team desk to nobody: ``staffDesk`` off, or ``pilot`` with an
+    empty ``staffAllowlist`` (staff_desk_layout answers classic for every staff member then)."""
+    mode = str(rollout.get("staffDesk") or "off")
+    return mode == "off" or (mode == "pilot" and not (rollout.get("staffAllowlist") or []))
+
+
 def refuse_desk_off_while_in_use(conn: Any, before: dict[str, Any], after: dict[str, Any]) -> None:
-    """P3-20: the team desk (``staffDesk``) cannot go off while it still holds work that only it shows:
-    open tickets or stop requests (studio_stop.staff_desk_in_use) -> 409 STAFF_DESK_IN_USE. Counted on
-    the save's own transaction; any other rollout change (the customer layout included) is never held."""
-    if str(before.get("staffDesk") or "off") == "off" or str(after.get("staffDesk") or "off") != "off":
+    """P3-20: the team desk (``staffDesk``) cannot be hidden (off, or pilot with nobody on the staff
+    allowlist: desk_hidden) while it still holds work that only it shows: unresolved tickets or open
+    stop requests, counted by studio_stop.staff_desk_in_use exactly as the desk and the pulse count
+    them -> 409 STAFF_DESK_IN_USE. Counted on the save's own transaction; any other rollout change
+    (the customer layout included) is never held."""
+    if desk_hidden(before) or not desk_hidden(after):
         return
     from .studio_stop import staff_desk_in_use  # late: studio_stop imports this module
 
     in_use = staff_desk_in_use(conn)
-    if in_use["openTickets"] or in_use["stopRequests"]:
+    if in_use["tickets"] or in_use["stopRequests"]:
         studio_error(
             409,
             "STAFF_DESK_IN_USE",
-            f"The team desk still has {in_use['openTickets']} open ticket(s) and {in_use['stopRequests']} stop "
-            "request(s). Answer or close them before switching the desk off.",
+            f"The team desk still has {in_use['tickets']} unresolved ticket(s) and {in_use['stopRequests']} open stop "
+            "request(s). Resolve them before switching the desk off.",
         )
 
 

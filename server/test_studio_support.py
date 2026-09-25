@@ -44,6 +44,7 @@ from server.systems.ads_studio.studio_types import (
     SUPPORT_TICKETS_TYPE,
     STUDIO_ROUTER_ONLY_TYPES,
 )
+from server.wallet_payments import PAYMENT_REFERENCE_RE, payment_request_belongs_to
 
 TAG = secrets.token_hex(4)
 PASSWORD = "StudioSupportPassword123!"
@@ -393,7 +394,9 @@ def test_related_items_must_be_the_customers_own():
     with db_conn() as conn:
         conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": CAMPAIGNS, "id": archived})
     my_charge = _insert_entity("walletPaymentRequests", user["id"], {"userId": user["id"], "reference": "PAY-ABCD2345", "status": "pending"})
+    my_paid = _insert_entity("walletPaymentRequests", user["id"], {"userId": user["id"], "reference": "PAY-CNFM2345", "status": "confirmed"})
     their_charge = _insert_entity("walletPaymentRequests", other["id"], {"userId": other["id"], "reference": "PAY-WXYZ6789", "status": "pending"})
+    forged = _insert_entity("walletPaymentRequests", user["id"], {"userId": other["id"], "reference": "PAY-FORG2345", "status": "pending"})
     my_page = _insert_entity("socialPages", user["id"], {"ownerId": user["id"], "platform": "fb", "metaPageId": "111222333", "name": "My page"})
     their_page = _insert_entity("socialPages", other["id"], {"ownerId": other["id"], "platform": "fb", "metaPageId": "444555666", "name": "Theirs"})
 
@@ -401,14 +404,25 @@ def test_related_items_must_be_the_customers_own():
     assert (ok["relatedType"], ok["relatedId"]) == ("campaign", mine)
     assert _opened(user, category="payment", relatedType="payment", relatedId=my_charge)["relatedId"] == my_charge
     assert _opened(user, category="payment", relatedType="payment", relatedId="PAY-ABCD2345")["relatedId"] == "PAY-ABCD2345"
+    # J2 "Ask about this payment": a confirmed charge request is still the customer's own (by id or reference).
+    assert _opened(user, category="payment", relatedType="payment", relatedId=my_paid)["relatedId"] == my_paid
+    assert _opened(user, category="payment", relatedType="payment", relatedId="PAY-CNFM2345")["relatedId"] == "PAY-CNFM2345"
     assert _opened(user, category="page", relatedType="page", relatedId=my_page)["relatedId"] == my_page
     for related_type, related_id, code in (
         ("campaign", theirs, "UNKNOWN_CAMPAIGN"), ("campaign", archived, "UNKNOWN_CAMPAIGN"), ("campaign", "cmp_missing", "UNKNOWN_CAMPAIGN"),
         ("payment", their_charge, "UNKNOWN_PAYMENT"), ("payment", "PAY-WXYZ6789", "UNKNOWN_PAYMENT"), ("payment", "PAY-NOPE2345", "UNKNOWN_PAYMENT"),
+        ("payment", forged, "UNKNOWN_PAYMENT"), ("payment", "PAY-FORG2345", "UNKNOWN_PAYMENT"),
         ("page", their_page, "UNKNOWN_PAGE"),
     ):
         _error(_open(user, relatedType=related_type, relatedId=related_id), 404, code)
-    assert len(_get(user, "/tickets").json()["tickets"]) == 4
+    assert len(_get(user, "/tickets").json()["tickets"]) == 6
+    # The platform door itself (D36): the help desk never reads the payment rows; it asks wallet_payments.
+    assert "WALLET_PAYMENT_COLLECTION" not in Path(studio_support.__file__).read_text(encoding="utf-8")
+    with db_conn() as conn:
+        assert payment_request_belongs_to(conn, user["id"], my_paid) and payment_request_belongs_to(conn, user["id"], "PAY-CNFM2345")
+        assert not payment_request_belongs_to(conn, user["id"], their_charge) and not payment_request_belongs_to(conn, user["id"], forged)
+        assert not payment_request_belongs_to(conn, "", my_charge) and not payment_request_belongs_to(conn, user["id"], "")
+    assert PAYMENT_REFERENCE_RE.fullmatch("PAY-ABCD2345") and not PAYMENT_REFERENCE_RE.fullmatch("pay-abcd2345")
 
 
 # ------------------------------------------------------------------ caps, switch, rate limit
@@ -524,6 +538,65 @@ def test_a_message_within_seven_days_reopens(staff, monkeypatch):
     _freeze(monkeypatch, datetime.now(timezone.utc) + timedelta(days=6))
     written = _say(user, ticket, "It broke again")
     assert written.status_code == 200 and written.json()["ticket"]["status"] == "open"
+
+
+def test_reopen_counts_against_the_open_ticket_cap(staff):
+    """A customer's reopen (by /reopen or by a message on a resolved ticket) is held by the same cap as a
+    new ticket: 20 unresolved tickets stay 20. The team's reopen is never held."""
+    user = _customer("reopen-cap")
+    tickets = [_opened(user, subject=f"Cap {n}") for n in range(studio_support.MAX_OPEN_TICKETS)]
+    resolved = tickets[:2]
+    for ticket in resolved:
+        assert _post(user, f"/tickets/{ticket['id']}/resolve", {"operationId": _op()}).json()["ticket"]["status"] == "resolved"
+    fresh = [_opened(user, subject=f"Fresh {n}") for n in range(2)]  # back at the cap: 20 unresolved
+    _error(_open(user), 409, "TICKET_OPEN_LIMIT")
+    _error(_post(user, f"/tickets/{resolved[0]['id']}/reopen", {"operationId": _op()}), 409, "TICKET_OPEN_LIMIT")
+    _error(_say(user, resolved[1], "It broke again"), 409, "TICKET_OPEN_LIMIT")
+    with db_conn() as conn:
+        assert studio_support.count_open_tickets(conn, user["id"]) == studio_support.MAX_OPEN_TICKETS
+    assert _get(user, f"/tickets/{resolved[0]['id']}").json()["ticket"]["status"] == "resolved"
+    assert len(_get(user, f"/tickets/{resolved[1]['id']}").json()["messages"]) == 1  # the refused message was not kept
+    # One resolved makes room for exactly one reopen, either way round.
+    assert _post(user, f"/tickets/{fresh[0]['id']}/resolve", {"operationId": _op()}).status_code == 200
+    assert _post(user, f"/tickets/{resolved[0]['id']}/reopen", {"operationId": _op()}).json()["ticket"]["status"] == "open"
+    _error(_say(user, resolved[1], "It broke again"), 409, "TICKET_OPEN_LIMIT")
+    assert _post(user, f"/tickets/{fresh[1]['id']}/resolve", {"operationId": _op()}).status_code == 200
+    assert _say(user, resolved[1], "It broke again").json()["ticket"]["status"] == "open"
+    _error(_post(user, f"/tickets/{fresh[0]['id']}/reopen", {"operationId": _op()}), 409, "TICKET_OPEN_LIMIT")
+    reopened = _post(staff["reviewer"], f"/staff/tickets/{fresh[0]['id']}/status", {"status": "open"}).json()["ticket"]
+    assert reopened["status"] == "open"  # the team is never held by the customer's cap
+    with db_conn() as conn:
+        assert studio_support.count_open_tickets(conn, user["id"]) == studio_support.MAX_OPEN_TICKETS + 1
+
+
+def test_staff_answer_puts_one_item_in_the_customer_inbox(staff):
+    """P3-05 ticket_answered: the team's answer reaches the customer's inbox once per answer, on the
+    answer's own transaction; a replay, the customer's own messages and other customers get nothing."""
+    user = _customer("inbox")
+    other = _customer("inbox-other")
+    ticket = _opened(user)
+    assert _get(user, "/activity").json()["items"] == []  # nothing until the team answers
+    assert _say(user, ticket, "One more detail").status_code == 200  # a customer's own message adds nothing
+    assert _get(user, "/activity").json()["unreadCount"] == 0
+    operation = _op("answer")
+    first = _say(staff["admin"], ticket, "We fixed it.", staff_route=True, operation=operation)
+    replay = _say(staff["admin"], ticket, "We fixed it.", staff_route=True, operation=operation)
+    assert first.status_code == replay.status_code == 200, replay.text
+    feed = _get(user, "/activity").json()
+    assert feed["unreadCount"] == 1 and len(feed["items"]) == 1
+    item = feed["items"][0]
+    assert (item["kind"], item["relatedType"], item["relatedId"], item["unread"]) == ("ticket_answered", "ticket", ticket["id"], True)
+    assert ticket["number"] in item["body"]["en"] and ticket["number"] in item["body"]["ar"]
+    assert "We fixed it" not in json.dumps(feed) and staff["admin"]["id"] not in json.dumps(feed)  # no text, no staff id
+    assert _get(other, "/activity").json() == {"items": [], "unreadCount": 0, "nextCursor": None, "seenAt": None}
+    # A second, different answer is a second item; the customer's reply in between adds none.
+    assert _say(user, ticket, "Thanks").status_code == 200
+    assert _say(staff["reviewer"], ticket, "You are welcome.", staff_route=True).status_code == 200
+    kinds = [entry["kind"] for entry in _get(user, "/activity").json()["items"]]
+    assert kinds == ["ticket_answered", "ticket_answered"]
+    with db_conn() as conn:
+        conn.execute(text("DELETE FROM entities WHERE type = 'studioActivity' AND created_by IN (:a, :b)"),
+                     {"a": user["id"], "b": other["id"]})
 
 
 def test_customer_never_sees_who_answered(staff):

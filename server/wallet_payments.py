@@ -24,6 +24,7 @@ helpers that already guard the wallet ledger are injected from main via
 """
 
 import math
+import re
 import secrets
 import threading
 import time
@@ -85,6 +86,11 @@ def _new_payment_reference() -> str:
     # No 0/O/1/I: the customer reads this code to a bank teller or QR app.
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "PAY-" + "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+# The shape of a reference _new_payment_reference hands out (what a customer types back, e.g. in a
+# help ticket about a payment: payment_request_belongs_to below).
+PAYMENT_REFERENCE_RE = re.compile(r"PAY-[A-Z0-9]{8}")
 
 
 def _whole_minor(value: Any) -> int:
@@ -263,6 +269,27 @@ def pending_payment_requests(conn: Any, user_id: str) -> list[dict[str, Any]]:
         })
     out.sort(key=lambda item: item["createdAt"], reverse=True)
     return out
+
+
+def payment_request_belongs_to(conn: Any, user_id: str, id_or_reference: Any) -> bool:
+    """Read only: True when a charge request with this id or PAY- reference is ``user_id``'s own, in
+    any status (a confirmed or cancelled one too: a help ticket may be about it, Albayan Studio P3-07).
+    Only ``id``, ``userId`` and ``reference`` are read: never the receipt photo, never a staff field."""
+    uid = str(user_id or "")
+    key = str(id_or_reference or "")
+    if not uid or not key:
+        return False
+    by_reference = bool(PAYMENT_REFERENCE_RE.fullmatch(key))
+    where = "type = :type AND deleted = false AND created_by = :uid" + ("" if by_reference else " AND id = :id")
+    rows = conn.execute(
+        text(json_fields_select_sql(("userId", "reference"), ("id",), where)),
+        {"type": WALLET_PAYMENT_COLLECTION, "uid": uid, "id": key},
+    ).mappings().all()
+    return any(
+        str(row.get("f_userid") or "") == uid
+        and ((str(row.get("f_reference") or "") == key) if by_reference else (str(row["id"]) == key))
+        for row in rows
+    )
 
 
 def _campaign_payment_key(campaign: dict[str, Any]) -> str:

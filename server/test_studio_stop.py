@@ -4,12 +4,15 @@
 * ``POST /api/ad-studio/campaigns/{id}/stop-request``: owner only, Approved only, one urgent ticket per
   ad (a repeat answers the same ticket), the request's ``stopRequestedAt``, the staff queue row, the
   owner's inbox item and the audit entry in one transaction; ``afterHours`` and the on-duty line.
-* The queue resolves itself (and its ticket) when the ad is Stopped or Meta shows it paused; a late
-  one raises ``stop_request_overdue``.
+* The queue resolves itself (and its ticket) when the ad is Stopped, or when Meta shows an ad that was
+  delivering at the request paused or ended in a read since the request (never while it is in Meta
+  review, never for an ad that never delivered); a late one raises ``stop_request_overdue``.
+* A help-desk refusal met by the stop request keeps the /api/ad-studio plain-text shape.
 * ``GET /api/studio/staff/pulse`` (counts only; payments for admins only) and ``GET
   /api/studio/staff/customers/{id}/contact`` (WhatsApp only with consent, audited).
-* ``staffDesk`` cannot go off while tickets or stop requests are open; services and the desk never
-  depend on the customer layout.
+* ``staffDesk`` cannot be hidden (off, or pilot with an empty allowlist) while unresolved tickets or
+  open stop requests exist, counted exactly as the pulse and the desk lists count them; services and
+  the desk never depend on the customer layout.
 
 Every test creates its own users (unique e-mails per run) and removes every row they own afterwards,
 so no open stop request outlives its test (the desk switch tests of other modules count them).
@@ -28,6 +31,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("ALBAYAN_META_BACKGROUND_SYNC", "false")
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -40,12 +44,17 @@ from server.systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS
 from server.systems.ads_studio.studio_activity import ACTIVITY_TYPE, activity_id
 from server.systems.ads_studio.studio_jobs import ALERTS_TYPE, alert_id
 from server.systems.ads_studio.studio_profile import profile_id
-from server.systems.ads_studio.studio_results import write_results_row
+from server.systems.ads_studio.studio_results import load_request, load_results_row, write_results_row
+from server.systems.ads_studio.studio_results_sync import fields_after_read
 from server.systems.ads_studio.studio_stop import (
+    REFUSE_RECORD_CHANGED,
+    REFUSE_STOP_OPERATION_USED,
     REFUSE_STOP_REQUEST_OFF,
+    REFUSE_STOP_TICKET,
     STOP_TYPE,
     TICKETS_TYPE,
     check_stop_requests,
+    classic_refusal,
     load_ticket,
     stop_row_id,
     working_due_at,
@@ -178,6 +187,16 @@ def _audits(resource_id: str, action: str) -> list[dict]:
 
 def _fix_clock(monkeypatch, moment: datetime) -> None:
     monkeypatch.setattr(studio_stop, "utc_now", lambda: moment)
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _results(campaign_id: str, owner_id: str, **fields) -> None:
+    """A Meta reading as the results sync would store it (merged over the stored row)."""
+    with db_conn() as conn:
+        write_results_row(conn, campaign_id, owner_id, fields)
 
 
 def _error(response, status: int, code: str) -> dict:
@@ -380,33 +399,119 @@ def test_stop_resolves_the_stop_request_and_its_ticket(people, monkeypatch):
     assert replay.status_code == 200 and replay.json()["ticket"]["status"] == "resolved"
 
 
-def test_meta_pause_resolves_and_late_requests_alert(people):
+def test_meta_handles_a_stop_request_only_after_delivery_and_late_requests_alert(people, monkeypatch):
+    """Meta handled a stop request only when an ad that WAS delivering at the request shows paused (or
+    ended by a Meta end time) in a read made since the request. An ad in Meta review, one that never
+    delivered, or a pause read before the request stays open and goes overdue like any other."""
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
     owner = people["owner"]
     _services_on()
-    paused = _campaign(owner["id"], "paused", metaCampaignId="120200000000777")
-    late = _campaign(owner["id"], "late")
-    asked = {cid: _ask(owner, cid).json() for cid in (paused, late)}
-    with db_conn() as conn:
-        write_results_row(conn, paused, owner["id"], {"metaCampaignId": "120200000000777",
-                                                      "stopEffectiveAt": "2099-01-01T00:00:00Z"})
-    due = datetime.fromisoformat(_row(STOP_TYPE, stop_row_id(late))["data"]["dueAt"].replace("Z", "+00:00"))
+    before_ask, after_ask = THURSDAY_OPEN - timedelta(minutes=10), THURSDAY_OPEN + timedelta(minutes=15)
+    meta_ids = {label: f"1202000000{n:05d}" for n, label in enumerate(("paused", "ended", "review", "early", "never"))}
+    ads = {label: _campaign(owner["id"], label, metaCampaignId=meta_id) for label, meta_id in meta_ids.items()}
+    late = _campaign(owner["id"], "late")  # never linked: no Meta reading at all
+    for label in ("paused", "ended", "review", "early"):
+        _results(ads[label], owner["id"], metaCampaignId=meta_ids[label], adStatusCounts={"ACTIVE": 1}, lastSyncedAt=_stamp(before_ask))
+    _results(ads["never"], owner["id"], metaCampaignId=meta_ids["never"], adStatusCounts={"PENDING_REVIEW": 1}, lastSyncedAt=_stamp(before_ask))
+    everything = {**ads, "late": late}
+    asked = {label: _ask(owner, cid).json() for label, cid in everything.items()}
+    queue = {label: _row(STOP_TYPE, stop_row_id(cid))["data"] for label, cid in everything.items()}
+    assert [queue[label]["deliveringAtRequest"] for label in ("paused", "ended", "review", "early", "never", "late")] == [
+        True, True, True, True, False, False]
+    # What Meta shows after the request (the sync's p90 metric stopEffectiveAt is stamped on every one).
+    _results(ads["paused"], owner["id"], adStatusCounts={"PAUSED": 1}, campaignEffectiveStatus="PAUSED",
+             stopEffectiveAt=_stamp(after_ask), lastSyncedAt=_stamp(after_ask))
+    _results(ads["ended"], owner["id"], adStatusCounts={"ACTIVE": 1}, adsetEndTime=_stamp(after_ask),  # Meta's end time passed
+             stopEffectiveAt=_stamp(after_ask), lastSyncedAt=_stamp(after_ask))
+    _results(ads["review"], owner["id"], adStatusCounts={"PENDING_REVIEW": 1}, stopEffectiveAt=_stamp(after_ask),
+             lastSyncedAt=_stamp(after_ask))
+    _results(ads["early"], owner["id"], adStatusCounts={"PAUSED": 1}, campaignEffectiveStatus="PAUSED",
+             stopEffectiveAt=_stamp(before_ask), lastSyncedAt=_stamp(before_ask))  # no read since the request
+    _results(ads["never"], owner["id"], adStatusCounts={"PAUSED": 1}, campaignEffectiveStatus="PAUSED",
+             stopEffectiveAt=_stamp(after_ask), lastSyncedAt=_stamp(after_ask))
+    due = datetime.fromisoformat(queue["late"]["dueAt"].replace("Z", "+00:00"))
+    assert due == THURSDAY_OPEN + timedelta(hours=2)  # 120 working minutes (D11 default)
     before = check_stop_requests(due - timedelta(minutes=1))
-    assert paused in before["resolved"] and late not in before["overdue"]
-    assert _row(STOP_TYPE, stop_row_id(paused))["data"]["resolvedReason"] == "meta_paused"
-    with db_conn() as conn:
-        assert load_ticket(conn, asked[paused]["ticket"]["id"])["status"] == "resolved"
+    assert set(before["resolved"]) == {ads["paused"], ads["ended"]} and before["overdue"] == []
+    for label in ("paused", "ended"):
+        assert _row(STOP_TYPE, stop_row_id(ads[label]))["data"]["resolvedReason"] == "meta_paused"
+        with db_conn() as conn:
+            assert load_ticket(conn, asked[label]["ticket"]["id"])["status"] == "resolved"
+    for label in ("review", "early", "never", "late"):
+        assert _row(STOP_TYPE, stop_row_id(everything[label]))["data"]["state"] == "open", label
+        with db_conn() as conn:
+            assert load_ticket(conn, asked[label]["ticket"]["id"])["status"] == "open", label
     after = check_stop_requests(due + timedelta(minutes=1))
-    assert after["overdue"] == [late] and after["resolved"] == []
+    assert set(after["overdue"]) == {ads["review"], ads["early"], ads["never"], late} and after["resolved"] == []
     day = studio_jobs.libya_today(due + timedelta(minutes=1)).isoformat()
     alert = _row(ALERTS_TYPE, alert_id("stop_request_overdue", late, day))
     assert alert is not None and alert["created_by"] == owner["id"] and alert["data"]["kind"] == "stop_request_overdue"
     assert owner["email"] not in alert["data_json"] and "Summer" not in alert["data_json"]  # no personal data
+    assert _row(ALERTS_TYPE, alert_id("stop_request_overdue", ads["review"], day)) is not None
     check_stop_requests(due + timedelta(minutes=6))
     with db_conn() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM entities WHERE type = :t AND id = :id"),
                              {"t": ALERTS_TYPE, "id": alert_id("stop_request_overdue", late, day)}).scalar()
     assert count == 1  # one alert per ad and day
     assert set(studio_jobs.ALERT_LABELS["stop_request_overdue"]) == {"en", "ar"}
+    # Meta approves the reviewed ad later and it runs: still not handled (staff stop it with /stop).
+    _results(ads["review"], owner["id"], adStatusCounts={"ACTIVE": 1}, lastSyncedAt=_stamp(due + timedelta(hours=1)))
+    assert check_stop_requests(due + timedelta(hours=2))["resolved"] == []
+
+
+def test_sync_metric_stamp_never_handles_a_stop_request(people, monkeypatch):
+    """The results sync still stamps ``stopEffectiveAt`` (the p90 metric, PLAN.md §7.1) on the first read
+    after the request that shows nothing delivering, a PENDING_REVIEW read too; the jobs check leaves
+    that queue row open."""
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
+    owner = people["owner"]
+    _services_on()
+    meta_id = "120200000009001"
+    campaign_id = _campaign(owner["id"], "metric", metaCampaignId=meta_id, metaAdAccountId="act_123456")
+    _results(campaign_id, owner["id"], metaCampaignId=meta_id, metaAdAccountId="act_123456", adStatusCounts={"ACTIVE": 1},
+             lastSyncedAt=_stamp(THURSDAY_OPEN - timedelta(minutes=10)))
+    assert _ask(owner, campaign_id).status_code == 200
+    assert _row(STOP_TYPE, stop_row_id(campaign_id))["data"]["deliveringAtRequest"] is True
+    read = {"campaignId": meta_id, "accountId": "123456", "name": "Summer sale", "status": "ACTIVE", "effectiveStatus": "ACTIVE",
+            "startTime": "", "stopTime": "", "adStatusCounts": {"PENDING_REVIEW": 1}, "adsTotal": 1, "anyAdDelivering": False,
+            "adsetEndTime": "", "reviewFeedback": "", "insightsState": "unavailable", "spendMinor": None, "currency": "",
+            "impressions": None, "reach": None, "clicks": None, "resultType": "", "resultCount": None}
+    later = THURSDAY_OPEN + timedelta(minutes=15)
+    with db_conn() as conn:
+        request = load_request(conn, campaign_id)
+        previous, _version = load_results_row(conn, campaign_id)
+    fields, _facts = fields_after_read(previous, request, read, later, studio_settings.read_all_settings())
+    assert datetime.fromisoformat(fields["stopEffectiveAt"].replace("Z", "+00:00")) == later  # the metric is stamped
+    _results(campaign_id, owner["id"], **fields)
+    checked = check_stop_requests(later + timedelta(minutes=5))
+    assert checked["resolved"] == [] and checked["open"] == 1
+    assert _row(STOP_TYPE, stop_row_id(campaign_id))["data"]["state"] == "open"
+
+
+def test_stop_request_help_desk_refusals_keep_the_classic_shape(people, monkeypatch):
+    """A refusal raised by the help desk while the stop ticket is opened (an operationId the customer
+    already used for another ticket) answers a plain text like every /api/ad-studio route, never the
+    /api/studio {code, message} dict, and records nothing."""
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
+    _services_on()
+    owner = people["owner"]
+    campaign_id = _campaign(owner["id"], "classic")
+    operation = f"stop-shared-{TAG}"
+    ticket = client.post("/api/studio/tickets", cookies=owner["cookies"],
+                         json={"subject": "A question about my ad", "category": "ad", "message": "Hello?", "operationId": operation})
+    assert ticket.status_code == 200, ticket.text
+    refused = _ask(owner, campaign_id, operation)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"] == REFUSE_STOP_OPERATION_USED  # a string, not {code, message}
+    assert _row(CAMPAIGNS, campaign_id)["data"].get("stopRequestedAt") is None and _row(STOP_TYPE, stop_row_id(campaign_id)) is None
+    assert _ask(owner, campaign_id).status_code == 200  # a fresh operationId records it
+    conflict = classic_refusal(HTTPException(409, {"code": "VERSION_CONFLICT", "message": "x"}))
+    assert (conflict.status_code, conflict.detail) == (409, REFUSE_RECORD_CHANGED)
+    assert classic_refusal(HTTPException(409, {"code": "TICKET_OPEN_LIMIT", "message": "x"})).detail == REFUSE_STOP_TICKET
+    plain = HTTPException(404, "Campaign request not found")
+    assert classic_refusal(plain) is plain
+    for prefix in (REFUSE_STOP_OPERATION_USED, REFUSE_RECORD_CHANGED, REFUSE_STOP_TICKET):
+        assert isinstance(prefix, str) and prefix and "{" not in prefix
 
 
 def test_jobs_tick_runs_the_stop_check_on_the_waiting_turn(people, monkeypatch):
@@ -548,25 +653,61 @@ def _put_rollout(user: dict, value: dict):
     return client.put("/api/studio/admin/settings/rollout", json=body, cookies=user["cookies"])
 
 
-def test_staff_desk_cannot_go_off_while_in_use(people):
-    owner, admin = people["owner"], people["admin"]
+def test_staff_desk_cannot_go_off_while_in_use(people, monkeypatch):
+    """P3-20: the guard counts exactly what the pulse and the desk lists show (open queue rows, unresolved
+    tickets), refuses hiding the desk as pilot with nobody on the allowlist too, and lets a stop request
+    Meta handled go (its ad still Approved, waiting for /stop)."""
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
+    owner, admin, reviewer = people["owner"], people["admin"], people["reviewer"]
     with db_conn() as conn:
         baseline = studio_stop.staff_desk_in_use(conn)
-    assert baseline == {"openTickets": 0, "stopRequests": 0}, "an earlier test left an open ticket or stop request"
+    assert baseline == {"tickets": 0, "stopRequests": 0}, "an earlier test left an open ticket or stop request"
     assert _put_rollout(admin, {"staffDesk": "on", "services": {"stopRequest": "on"}}).status_code == 200
     campaign_id = _campaign(owner["id"], "desk")
     assert _ask(owner, campaign_id).status_code == 200
     detail = _error(_put_rollout(admin, {"staffDesk": "off"}), 409, "STAFF_DESK_IN_USE")
-    assert "1 open ticket" in detail["message"] and "1 stop" in detail["message"]
+    assert "1 unresolved ticket" in detail["message"] and "1 open stop" in detail["message"]
     assert studio_settings.read_setting("rollout")["value"]["staffDesk"] == "on"  # nothing saved
-    assert _put_rollout(admin, {"ui": "on", "staffDesk": "pilot"}).status_code == 200  # other changes still save
+    # Hiding the desk as pilot with nobody on the allowlist is the same refusal; a pilot with staff is not.
+    _error(_put_rollout(admin, {"staffDesk": "pilot", "staffAllowlist": []}), 409, "STAFF_DESK_IN_USE")
+    assert _put_rollout(admin, {"ui": "on", "staffDesk": "pilot", "staffAllowlist": [reviewer["id"]]}).status_code == 200  # other changes still save
+    _error(_put_rollout(admin, {"staffDesk": "pilot", "staffAllowlist": []}), 409, "STAFF_DESK_IN_USE")
+    assert client.get("/api/studio/me", cookies=reviewer["cookies"]).json()["staffDesk"] == "v2"
+    # A request Stopped by hand still has its queue row open: the guard says what the pulse says.
     with db_conn() as conn:
         conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
                      {"d": json_dumps({**_row(CAMPAIGNS, campaign_id)["data"], "status": "Stopped"}),
                       "t": CAMPAIGNS, "id": campaign_id})
-    detail = _error(_put_rollout(admin, {"staffDesk": "off"}), 409, "STAFF_DESK_IN_USE")  # the ticket is still open
-    assert "0 stop" in detail["message"]
+    detail = _error(_put_rollout(admin, {"staffDesk": "off"}), 409, "STAFF_DESK_IN_USE")
+    pulse = _pulse(admin).json()
+    assert "1 unresolved ticket" in detail["message"] and "1 open stop" in detail["message"]
+    assert (pulse["stopRequests"], pulse["openTickets"]) == (1, 1)
     assert check_stop_requests()["resolved"] == [campaign_id]  # the jobs loop closes it and its ticket
+    with db_conn() as conn:
+        assert studio_stop.staff_desk_in_use(conn) == {"tickets": 0, "stopRequests": 0}
+    # An answered ticket the customer never closes is still the desk's work (its active list shows it).
+    answered = _ticket_row(owner["id"], "answered", "answered", "staff")
+    detail = _error(_put_rollout(admin, {"staffDesk": "off"}), 409, "STAFF_DESK_IN_USE")
+    assert "1 unresolved ticket" in detail["message"] and "0 open stop" in detail["message"]
+    assert _pulse(admin).json()["openTickets"] == 0  # it waits for the customer, not for the team
+    active = client.get("/api/studio/staff/tickets", params={"status": "active"}, cookies=admin["cookies"]).json()["tickets"]
+    assert [item["id"] for item in active] == [answered]
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                     {"d": json_dumps({**_row(TICKETS_TYPE, answered)["data"], "status": "resolved"}), "t": TICKETS_TYPE, "id": answered})
+    # A stop request Meta handled (resolved meta_paused) no longer holds the switch, although its ad is
+    # still Approved with its marker set and waits for its settlement through /stop.
+    second = _campaign(owner["id"], "metadesk", metaCampaignId="120200000000555")
+    _results(second, owner["id"], metaCampaignId="120200000000555", adStatusCounts={"ACTIVE": 1},
+             lastSyncedAt=_stamp(THURSDAY_OPEN - timedelta(minutes=5)))
+    assert _ask(owner, second).status_code == 200
+    _error(_put_rollout(admin, {"staffDesk": "off"}), 409, "STAFF_DESK_IN_USE")
+    _results(second, owner["id"], adStatusCounts={"PAUSED": 1}, campaignEffectiveStatus="PAUSED",
+             lastSyncedAt=_stamp(THURSDAY_OPEN + timedelta(minutes=15)))
+    assert check_stop_requests(THURSDAY_OPEN + timedelta(minutes=20))["resolved"] == [second]
+    data = _row(CAMPAIGNS, second)["data"]
+    assert data["status"] == "Approved" and data["stopRequestedAt"]
+    assert _pulse(admin).json()["stopRequests"] == 0
     assert _put_rollout(admin, {"staffDesk": "off"}).status_code == 200
 
 

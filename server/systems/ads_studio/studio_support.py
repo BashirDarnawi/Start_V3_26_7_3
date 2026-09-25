@@ -93,7 +93,7 @@ from sqlalchemy import text
 
 from ...db import db_conn, get_engine, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from ...rate_limiter import check_rate_limit
-from ...wallet_payments import WALLET_PAYMENT_COLLECTION
+from ...wallet_payments import payment_request_belongs_to
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_errors import studio_error
 from .studio_hours import iso, target_due_at
@@ -146,7 +146,6 @@ STAFF_STATUS_FIELDS = ("status", "operationId")
 _OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}")  # as ad_campaign_actions (PLAN.md §7.3)
 _TICKET_ID_RE = re.compile(r"tkt_[0-9a-f]{40}")
 _ENTITY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")
-_PAYMENT_REFERENCE_RE = re.compile(r"PAY-[A-Z0-9]{8}")
 _CURSOR_RE = re.compile(r"([01]):([0-9]{1,15}):(tkt_[0-9a-f]{40})")
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")  # every control character but the line break
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
@@ -619,6 +618,15 @@ def open_ticket(owner_id: str, *, settings: dict[str, Any] | None = None, **kwar
         return open_ticket_conn(conn, owner_id=owner_id, settings=settings, **kwargs)
 
 
+def _refuse_reopen_past_cap(conn: Any, owner_id: str) -> None:
+    """A customer's reopen of a resolved ticket counts against MAX_OPEN_TICKETS like a new ticket (409
+    TICKET_OPEN_LIMIT). The counter row is locked first, as open_ticket_conn does, so parallel reopens
+    and opens count the same rows and never pass the cap together."""
+    _lock_counter(conn)
+    if count_open_tickets(conn, owner_id) >= MAX_OPEN_TICKETS:
+        studio_error(409, "TICKET_OPEN_LIMIT", f"You already have {MAX_OPEN_TICKETS} open tickets. Resolve one before reopening this ticket.")
+
+
 def post_message_conn(
     conn: Any,
     row_id: str,
@@ -634,7 +642,9 @@ def post_message_conn(
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """Add a message by the owner (``author`` 'customer') or the team ('team'); returns (ticket data,
     message data, created). A customer's message moves the ticket to ``open`` (reopening a resolved
-    one within REOPEN_DAYS), a team answer to ``answered``."""
+    one within REOPEN_DAYS, and only inside the open-ticket cap), a team answer to ``answered`` and
+    puts the ``ticket_answered`` item in the owner's inbox (studio_activity, P3-05) on the same
+    transaction; a replay adds no second item."""
     if author not in ("customer", "team"):
         raise ValueError("author must be 'customer' or 'team'")
     now = now or utc_now()
@@ -647,8 +657,10 @@ def post_message_conn(
         if bool(existing["deleted"]) or old.get("text") != body or old.get("author") != author:
             studio_error(409, "IDEMPOTENCY_MISMATCH", "This operationId was already used for a different message")
         return data, {**old, "id": new_id}, False
-    if author == "customer" and data.get("status") == "resolved" and not _can_reopen(data, now):
-        studio_error(409, "TICKET_CLOSED", f"This ticket was resolved more than {REOPEN_DAYS} days ago. Open a new ticket.")
+    if author == "customer" and data.get("status") == "resolved":
+        if not _can_reopen(data, now):
+            studio_error(409, "TICKET_CLOSED", f"This ticket was resolved more than {REOPEN_DAYS} days ago. Open a new ticket.")
+        _refuse_reopen_past_cap(conn, str(row["created_by"] or ""))
     count = _whole(data.get("messageCount"))
     if count >= MAX_MESSAGES:
         studio_error(409, "TICKET_MESSAGE_LIMIT", f"This ticket already holds {MAX_MESSAGES} messages. Open a new ticket.")
@@ -667,6 +679,13 @@ def post_message_conn(
     if not _insert(conn, SUPPORT_TICKET_MESSAGES_TYPE, new_id, message, row["created_by"], now_ms()):
         studio_error(409, "IDEMPOTENCY_MISMATCH", "This operationId was already used for a different message")
     _update(conn, SUPPORT_TICKETS_TYPE, row, data)
+    if author == "team":
+        from .studio_activity import record_activity  # late, as ad_campaign_actions does (no import cycle either way)
+
+        # One inbox item per answer (the message's operationId is its key); a scrubbed owner gets none.
+        record_activity(conn, owner_id=row["created_by"] or data.get("ownerId"), kind="ticket_answered",
+                        related_type="ticket", related_id=row_id, key=operation_id, at=now,
+                        params={"number": data.get("number")})
     if audit is not None:
         audit(conn, "ticket_message", row_id, f"Ticket {data.get('number')}: {author} message", {
             "number": data.get("number"), "from": author, "statusBefore": was, "status": data["status"],
@@ -688,8 +707,9 @@ def change_status_conn(
     audit: Callable[[Any, str, str, str, dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Move a ticket to ``status``; returns (ticket data, changed). ``by`` 'customer' may only
-    resolve or reopen (open) their own ticket, reopening within REOPEN_DAYS; 'team' may set any
-    status. The state it already has is a no-op (nothing written, nothing audited)."""
+    resolve or reopen (open) their own ticket, reopening within REOPEN_DAYS and only inside the
+    open-ticket cap (409 TICKET_OPEN_LIMIT); 'team' may set any status. The state it already has is
+    a no-op (nothing written, nothing audited)."""
     if status not in STATUSES or by not in ("customer", "team"):
         raise ValueError("unknown status or actor")
     now = now or utc_now()
@@ -702,6 +722,8 @@ def change_status_conn(
             return data, False  # reopen of a ticket that is not resolved: nothing to do
         if status == "open" and not _can_reopen(data, now):
             studio_error(409, "TICKET_CLOSED", f"This ticket was resolved more than {REOPEN_DAYS} days ago. Open a new ticket.")
+        if status == "open":
+            _refuse_reopen_past_cap(conn, str(row["created_by"] or ""))
     if was == status:
         return data, False
     _set_status(data, status, by=by, now=now, settings=settings)
@@ -785,7 +807,9 @@ def clean_create_body(body: Any) -> dict[str, Any]:
 
 def check_related(owner_id: str, related_type: str | None, related_id: str | None) -> None:
     """404 unless the item a ticket is about is the owner's own (PLAN.md §7.5): a request (archived
-    ones are gone), a charge request (its id or its PAY- reference) or a linked page."""
+    ones are gone), a charge request (its id or its PAY- reference, asked through the platform door
+    wallet_payments.payment_request_belongs_to: D36, never a read of the payment rows here) or a
+    linked page."""
     if not related_type:
         return
     uid = str(owner_id or "")
@@ -801,14 +825,8 @@ def check_related(owner_id: str, related_type: str | None, related_id: str | Non
             if found is None:
                 studio_error(404, "UNKNOWN_CAMPAIGN", "Campaign request not found")
             return
-        by_reference = bool(_PAYMENT_REFERENCE_RE.fullmatch(str(related_id)))
-        where = "type = :type AND deleted = false AND created_by = :uid" + ("" if by_reference else " AND id = :id")
-        rows = conn.execute(
-            text(json_fields_select_sql(("userId", "reference"), ("id",), where)),
-            {"type": WALLET_PAYMENT_COLLECTION, "uid": uid, "id": related_id},
-        ).mappings().all()
-    wanted = (lambda row: row.get("f_reference") == related_id) if by_reference else (lambda row: str(row["id"]) == related_id)
-    if not any(str(row.get("f_userid") or "") == uid and wanted(row) for row in rows):
+        owned = payment_request_belongs_to(conn, uid, str(related_id or ""))
+    if not owned:
         studio_error(404, "UNKNOWN_PAYMENT", "Payment request not found")
 
 

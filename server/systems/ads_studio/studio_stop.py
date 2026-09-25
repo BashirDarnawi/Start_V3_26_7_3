@@ -9,7 +9,10 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
   with /stop). An Approved request only: 409 "Only Approved campaigns can be stopped" (the same text
   as /stop). A lapsed plan is fine (it only protects the owner's own money). The ``stopRequest``
   service must be on for this user (studio_settings.service_access), else 403 REFUSE_STOP_REQUEST_OFF;
-  the customer layout never matters (P3-20).
+  the customer layout never matters (P3-20). A help-desk refusal met while the ticket is opened (an
+  operationId the customer already used for another ticket, a counter race) is answered in the same
+  plain shape (``classic_refusal``: REFUSE_STOP_OPERATION_USED, "Conflict: record has changed",
+  REFUSE_STOP_TICKET), never as the /api/studio ``{code, message}`` dict.
 * ONE transaction on the locked request row: an urgent ticket (category ``ad``, related ``campaign``,
   made by studio_support.open_ticket_conn, see Tickets below), the request's ``stopRequestedAt``,
   ``stopRequestTicketId`` and ``lastStopRequestOperationId``, the staff queue row below, the owner's
@@ -24,13 +27,19 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
 
 **The staff queue.** ``studioStopRequests``: one slim row per ad (id ``ssr_`` + sha256(campaign
 id)[:40], ``created_by`` = the owner): campaignId, ownerId, ticketId, ticketNumber, requestedAt,
-``dueAt`` (``targets.stopRequestMinutes`` WORKING minutes after the request), afterHours, ``state``
+``dueAt`` (``targets.stopRequestMinutes`` WORKING minutes after the request), afterHours,
+``deliveringAtRequest`` (the last Meta read before the request showed an ad delivering), ``state``
 open | resolved, resolvedAt, resolvedReason (``stopped`` | ``meta_paused``). The desk counts it
 without reading the ad requests themselves (their rows carry the photos). ``check_stop_requests``
-(the studio jobs loop, on its 5-minute waiting-requests turn) resolves a row, and its ticket, once the
-request is Stopped (or archived) or the Meta sync saw nothing delivering after the request
-(``adCampaignResults.stopEffectiveAt``); an open row past its ``dueAt`` raises ``stop_request_overdue``
-(one alert per ad and Tripoli day). A stop through /stop resolves it at once (``on_campaign_stopped``).
+(the studio jobs loop, on its 5-minute waiting-requests turn) resolves a row, and its ticket, ONLY
+once the request is Stopped (or archived), or once Meta shows the ad paused or ended AFTER it had
+been delivering and after the stop was asked (``meta_handled_stop``: ``deliveringAtRequest``, then a
+read since the request with no ad delivering or in review and every ad paused, the campaign
+paused/deleted/archived or a Meta end time passed). An ad in Meta review, with issues or that never
+started delivering is NOT a handled stop request: its row and ticket stay open and go overdue as
+configured (``adCampaignResults.stopEffectiveAt`` stays the p90 metric only, PLAN.md §7.1). An open
+row past its ``dueAt`` raises ``stop_request_overdue`` (one alert per ad and Tripoli day). A stop
+through /stop resolves it at once (``on_campaign_stopped``).
 
 **Staff pulse (P3-17).** ``GET /api/studio/staff/pulse`` (staff: admins and reviewers; others 403
 STAFF_ONLY): counts only, ``{waitingReview, stopRequests, openTickets, paymentsWaiting, alerts,
@@ -50,9 +59,12 @@ reviewer reaches only a customer with a request the team can see or a ticket tha
 and never an admin-only ticket (404 UNKNOWN_CUSTOMER, as for an unknown id); admins reach every
 customer. Each number handed out is audited ``contact_link`` (kept forever) without the number.
 
-**Team desk in use (P3-20).** ``staff_desk_in_use(conn)`` = open tickets (not resolved or closed) and
-stop requests (``stopRequestedAt`` on a request that is not Stopped); studio_settings refuses to switch
-``staffDesk`` off while either is non-zero (409 STAFF_DESK_IN_USE).
+**Team desk in use (P3-20).** ``desk_counts(conn)`` is the ONE source of the desk's numbers: open
+queue rows (``stopRequests``), tickets waiting for the team (``openTickets``, status open) and
+unresolved tickets (``unresolvedTickets``: open, answered or waiting for the customer, the desk's
+``active`` list), through studio_support.staff_ticket_counts. The pulse and ``staff_desk_in_use(conn)``
+(unresolved tickets + open stop requests) read it, so studio_settings' refusal to hide ``staffDesk``
+while either is non-zero (409 STAFF_DESK_IN_USE) names only work the desk shows.
 
 **Tickets.** The urgent ticket is opened by ``studio_support.open_ticket_conn`` on the stop request's
 own transaction (priority urgent, kind stop_request, the open-ticket cap not enforced, settings read
@@ -88,11 +100,18 @@ from .ad_campaign_actions import (
 )
 from .studio_activity import create_studio_activity_router, record_activity
 from .studio_diagnostics import parse_time
-from .studio_errors import studio_error
+from .studio_errors import error_code, studio_error
 from .studio_jobs import ALERTS_TYPE, _day_hours, _zone, raise_alert
 from .studio_privacy import redact_staff_identity
 from .studio_profile import profile_id, profile_view
-from .studio_results import load_request, load_results_row
+from .studio_results import (
+    PAUSED_STATUSES,
+    REVIEW_STATUSES,
+    load_request,
+    load_results_row,
+    meta_delivery,
+    meta_time_ended_at,
+)
 from .studio_settings import read_all_settings, service_access, service_open_at
 from .studio_types import (
     STUDIO_PROFILES_TYPE,
@@ -114,11 +133,16 @@ PULSE_READS_PER_MINUTE = 30
 CONTACT_READS_PER_MINUTE = 20
 PAYMENTS_CACHE_SECONDS = 60
 ALERTS_WINDOW = timedelta(hours=24)
-TICKET_DONE_STATUSES = ("resolved", "closed")
+# Meta statuses that mean "not delivering, and not about to": every ad paused, deleted or archived.
+GONE_STATUSES = PAUSED_STATUSES + ("DELETED", "ARCHIVED")
 # Refusal texts of the /api/ad-studio stop-request route (the classic Arabic map carries each prefix).
 REFUSE_STOP_REQUEST_OFF = "Stop requests are not open yet. Please contact the Albayan team"
 REFUSE_STOP_NOT_APPROVED = "Only Approved campaigns can be stopped"  # the same text as /stop
 REFUSE_NOTE = "note must be text"
+# The help desk's refusals (studio_support, {code, message}) in this route's plain shape (PLAN.md §7.3).
+REFUSE_STOP_OPERATION_USED = "operationId was already used for another ticket"  # IDEMPOTENCY_MISMATCH
+REFUSE_RECORD_CHANGED = "Conflict: record has changed"  # VERSION_CONFLICT: the same text as /stop
+REFUSE_STOP_TICKET = "Stop request could not be recorded. Please try again"  # anything else
 DEFAULT_STOP_MESSAGE = "Please stop this ad. — أرجو إيقاف هذا الإعلان."
 TICKET_VIEW_FIELDS = (
     "id", "number", "subject", "category", "status", "audience", "relatedType", "relatedId", "createdAt",
@@ -260,6 +284,57 @@ def resolve_ticket(conn: Any, ticket_id: str, reason: str, at: str) -> None:
     studio_support.system_resolve_ticket_conn(conn, ticket_id, reason=reason)
 
 
+def classic_refusal(error: HTTPException) -> HTTPException:
+    """A /api/studio ``{code, message}`` refusal (studio_error) as this /api/ad-studio route answers
+    it: a plain text with a stable prefix, so the classic Arabic map matches. A plain-text error is
+    returned as it is."""
+    code = error_code(error.detail)
+    if not code:
+        return error
+    if code == "IDEMPOTENCY_MISMATCH":
+        detail = REFUSE_STOP_OPERATION_USED
+    elif code == "VERSION_CONFLICT":
+        detail = REFUSE_RECORD_CHANGED
+    else:
+        detail = REFUSE_STOP_TICKET
+    return HTTPException(status_code=error.status_code, detail=detail, headers=error.headers)
+
+
+def delivering_at_request(request: dict[str, Any], results: dict[str, Any] | None, now: datetime) -> bool:
+    """The last Meta read of the request's linked campaign shows an ad delivering (the ``delivering``
+    rule of studio_results.meta_delivery). False without a link, without a read, or with a results
+    row of another campaign: then Meta can never be the one that handled the stop request."""
+    meta_id = str(request.get("metaCampaignId") or "").strip()
+    if not results or not meta_id or results["metaCampaignId"] != meta_id or not results["lastSyncedAt"]:
+        return False
+    return meta_delivery(request, results, now)["delivering"]
+
+
+def meta_handled_stop(item: dict[str, Any], results: dict[str, Any] | None, now: datetime) -> bool:
+    """True when Meta shows the ad paused or ended AFTER it had been delivering and after the stop
+    was asked (PURE): the queue row saw it delivering at the request (``deliveringAtRequest``), and
+    a Meta read since the request shows no ad delivering or in review, with every ad paused, deleted
+    or archived, the campaign paused/deleted/archived, or a Meta end time passed. An ad in Meta
+    review, with issues, without ads yet or that never started delivering is NOT handled."""
+    if not results or item.get("deliveringAtRequest") is not True:
+        return False
+    requested = parse_time(item.get("requestedAt"))
+    read_at = parse_time(results.get("lastSyncedAt"))
+    if requested is None or read_at is None or read_at <= requested:
+        return False  # no Meta read since the request yet
+    counts = results["adStatusCounts"]
+    total = sum(counts.values())
+    if not total or any(counts.get(status, 0) for status in REVIEW_STATUSES):
+        return False
+    ended = meta_time_ended_at(results, now) is not None
+    if (counts.get("ACTIVE", 0) > 0 or results["anyAdDelivering"]) and not ended:
+        return False  # still delivering
+    paused = results["campaignEffectiveStatus"] in ("PAUSED", "DELETED", "ARCHIVED") or (
+        sum(counts.get(status, 0) for status in GONE_STATUSES) == total
+    )
+    return paused or ended
+
+
 # ------------------------------------------------------------------ the stop-request route
 
 class StopRequestBody(BaseModel):
@@ -361,11 +436,16 @@ def add_stop_request_route(
                 requested_at = _iso(now)
                 due = stop_due_at(now, settings)
                 after_hours = not team_open_now(settings, now)
-                ticket = create_stop_ticket(
-                    conn, owner_id=actor_id, subject=_stop_subject(data), category="ad",
-                    message=note or DEFAULT_STOP_MESSAGE, related_type="campaign", related_id=campaign_id,
-                    urgent=True, operation_id=operation_id, settings=settings,
-                )
+                results, _version = load_results_row(conn, campaign_id)
+                delivering = delivering_at_request(data, results, now)  # the signal check_stop_requests needs
+                try:
+                    ticket = create_stop_ticket(
+                        conn, owner_id=actor_id, subject=_stop_subject(data), category="ad",
+                        message=note or DEFAULT_STOP_MESSAGE, related_type="campaign", related_id=campaign_id,
+                        urgent=True, operation_id=operation_id, settings=settings,
+                    )
+                except HTTPException as error:
+                    raise classic_refusal(error) from None  # the help desk's {code, message}: this route's plain shape
                 ticket_id = str(ticket.get("id") or "")
                 number = str(ticket.get("number") or "")
                 baseline = int(entity.get("lastModified") or 0)
@@ -383,7 +463,7 @@ def add_stop_request_route(
                 _write_stop_row(conn, campaign_id, created_by_or_none(conn, creator), {
                     "ownerId": creator, "ticketId": ticket_id, "ticketNumber": number, "requestedAt": requested_at,
                     "dueAt": _iso(due) if due else None, "afterHours": after_hours, "operationId": operation_id,
-                    "state": "open", "resolvedAt": None, "resolvedReason": None,
+                    "deliveringAtRequest": delivering, "state": "open", "resolvedAt": None, "resolvedReason": None,
                 })
                 record_activity(conn, owner_id=creator, kind="stop_request_received", related_type="campaign",
                                 related_id=campaign_id, key="stop", at=now, params={"number": number})
@@ -469,8 +549,8 @@ def check_stop_requests(now: datetime | None = None) -> dict[str, Any]:
         reason = ""
         if request is None or request["archived"] or str(request.get("status") or "") == "Stopped":
             reason = "stopped"
-        elif results and parse_time(results.get("stopEffectiveAt")):
-            reason = "meta_paused"  # the Meta sync saw nothing delivering after the request
+        elif meta_handled_stop(item, results, now):
+            reason = "meta_paused"  # Meta paused or ended an ad that was delivering when the stop was asked
         if reason:
             if resolve_stop_request(campaign_id, reason, now):
                 resolved.append(campaign_id)
@@ -491,23 +571,26 @@ def check_stop_requests(now: datetime | None = None) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ counts (pulse, desk in use)
 
-def _count_tickets(conn: Any, *, wanted: Callable[[str, str], bool]) -> int:
-    rows = conn.execute(
-        text(json_fields_select_sql(("status", "audience"), (), "type = :type AND deleted = false")),
-        {"type": TICKETS_TYPE},
-    ).mappings().all()
-    return sum(1 for row in rows if wanted(str(row.get("f_status") or ""), str(row.get("f_audience") or "")))
+def desk_counts(conn: Any, *, admin: bool = True, now: datetime | None = None) -> dict[str, int]:
+    """The ONE source of the desk's numbers, so the pulse, the STAFF_DESK_IN_USE guard and the desk
+    lists always agree: ``stopRequests`` = open queue rows; ``openTickets`` = tickets waiting for the
+    team (status open); ``unresolvedTickets`` = open, answered or waiting for the customer (the desk's
+    ``active`` list). Both ticket counts come from studio_support.staff_ticket_counts (a reviewer's
+    counts leave out admin-audience tickets, as their list does)."""
+    from . import studio_support  # late, see create_stop_ticket
+
+    tickets = studio_support.staff_ticket_counts(conn, include_admin=admin, now=now)
+    return {"openTickets": tickets["open"], "unresolvedTickets": tickets["active"],
+            "stopRequests": len(open_stop_requests(conn))}
 
 
 def staff_desk_in_use(conn: Any) -> dict[str, int]:
-    """P3-20: open tickets (not resolved or closed) and stop requests (``stopRequestedAt`` on a request
-    that is not Stopped: only Approved requests take one, so the status index narrows the read)."""
-    tickets = _count_tickets(conn, wanted=lambda status, _audience: status not in TICKET_DONE_STATUSES)
-    where = f"type = '{AD_CAMPAIGN_COLLECTION}' AND deleted = false AND {json_field_sql('status')} = 'Approved'"
-    rows = conn.execute(text(json_fields_select_sql(("status", "stopRequestedAt"), ("id",), where))).mappings().all()
-    stops = sum(1 for row in rows if str(row.get("f_status") or "") == "Approved"
-                and str(row.get("f_stoprequestedat") or "").strip())
-    return {"openTickets": tickets, "stopRequests": stops}
+    """P3-20: the work only the team desk shows, counted as the desk shows it (desk_counts): unresolved
+    ``tickets`` (open, answered or waiting for the customer) and open ``stopRequests`` (queue rows). A
+    stop request Meta handled (resolved ``meta_paused``) no longer counts, even while its ad still
+    waits for its settlement through /stop."""
+    counts = desk_counts(conn)
+    return {"tickets": counts["unresolvedTickets"], "stopRequests": counts["stopRequests"]}
 
 
 def _payments_waiting(conn: Any) -> int:
@@ -532,15 +615,15 @@ def staff_pulse(conn: Any, viewer_id: str, *, admin: bool, now: datetime) -> dic
              f"AND {json_field_sql('status')} = 'Submitted'{not_own}"),
         {} if admin else {"uid": viewer_id},
     ).scalar()
-    tickets = _count_tickets(conn, wanted=lambda status, audience: status == "open" and (admin or audience != "admin"))
+    counts = desk_counts(conn, admin=admin, now=now)
     alert_rows = conn.execute(
         text(json_fields_select_sql(("acknowledgedAt",), (), "type = :type AND deleted = false AND last_modified >= :since")),
         {"type": ALERTS_TYPE, "since": int((now - ALERTS_WINDOW).timestamp() * 1000)},
     ).mappings().all()
     pulse: dict[str, Any] = {
         "waitingReview": int(waiting or 0),
-        "stopRequests": len(open_stop_requests(conn)),
-        "openTickets": tickets,
+        "stopRequests": counts["stopRequests"],
+        "openTickets": counts["openTickets"],
         "alerts": sum(1 for row in alert_rows if not str(row.get("f_acknowledgedat") or "").strip()),
     }
     if admin:

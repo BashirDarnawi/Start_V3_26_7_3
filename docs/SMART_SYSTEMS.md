@@ -15,7 +15,7 @@ one wallet and one set of subscriptions; the code of each system is kept apart.
 ## The rules
 
 1. **Own folder.** Server code in `server/systems/<name>/`; screens in `src/systems/<name>/`, built into the system's own lazy bundle (listed in `src/manifest.json` → `lazy`). Only a tiny loader lives in the startup bundle.
-2. **Own data.** A system reads and writes only the record types in its `OWNED_TYPES`, and its SQL names no table but `entities`. Anything else goes through a platform door (users: `server/user_directory.py`; audit: `ctx["audit"]`).
+2. **Own data.** A system reads and writes only the record types in its `OWNED_TYPES`, and its SQL names no table but `entities`. Anything else goes through a platform door (users: `server/user_directory.py`; audit: `ctx["audit"]`). A platform record type (`walletPaymentRequests`, `walletTransactions`, …) never appears in a system's SQL, neither as text nor as a bound value (not even through the door's constant): a door *function* reads those rows (e.g. `wallet_payments.payment_request_belongs_to`, `wallet_ledger_rows`).
 3. **Platform doors only.** Login/users/permissions, the wallet ledger and payment requests, subscriptions and plans, the Meta client, notifications, audit, design tokens. A system never imports `main.py`; main.py hands it helpers through the router factory's `ctx`.
 4. **No system touches another system.** No imports of another system's package, no calls into another system's screen functions, no SQL on another system's record types.
 5. **Own switch and tests.** Each system can be switched on/off and tested on its own.
