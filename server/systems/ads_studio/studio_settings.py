@@ -14,7 +14,8 @@ Keys (anything else is refused):
   ``services`` (``help``, ``stopRequest``, ``tiktok``: each ``off|pilot|on``, shown in BOTH
   layouts; ``pilot`` = only the users in ``uiAllowlist``; a stored or sent true/false from the
   first shape reads as on/off), ``staffDesk`` (``off|pilot|on`` + ``staffAllowlist``; its own
-  switch, independent of the customer layout and of the env kill switch).
+  switch, independent of the customer layout and of the env kill switch; it cannot go off while
+  open tickets or stop requests exist: 409 STAFF_DESK_IN_USE, P3-20).
 * ``intake``: ``open`` (new submissions allowed) and ``maxSubmissionsPerDay`` (1-500).
 * ``capabilities``: the PLAN.md §7.1 labels ``fbPublicReply``, ``fbPrivateReply``,
   ``igPublicReply``, ``igPrivateReply``, ``tiktokService``, each ``on|gated|off|unavailable``;
@@ -366,8 +367,8 @@ def _fields(rules: dict[str, Rule], check: Callable[[dict[str, Any]], None] | No
 def _apply_rollout(current: dict[str, Any], raw: dict[str, Any], id_validator: Callable[[Any], str] | None) -> None:
     for field, value in raw.items():
         if field in ("ui", "staffDesk"):
-            # TODO(P3-20, Phase 3): refuse staffDesk "off" with 409 STAFF_DESK_IN_USE while open
-            # tickets or stop requests exist. Those record types arrive in P3; nothing to count yet.
+            # staffDesk "off" while open tickets or stop requests exist is refused by save_setting
+            # (refuse_desk_off_while_in_use, P3-20): it needs the database, this rule does not.
             current[field] = _mode(field, value)
         elif field in ("uiAllowlist", "staffAllowlist"):
             current[field] = _allowlist(field, value, id_validator)
@@ -707,6 +708,24 @@ def read_all_settings() -> dict[str, dict[str, Any]]:
 _SAVED_FIRST = "This setting was saved by someone else just now. Reload it, then save again."
 
 
+def refuse_desk_off_while_in_use(conn: Any, before: dict[str, Any], after: dict[str, Any]) -> None:
+    """P3-20: the team desk (``staffDesk``) cannot go off while it still holds work that only it shows:
+    open tickets or stop requests (studio_stop.staff_desk_in_use) -> 409 STAFF_DESK_IN_USE. Counted on
+    the save's own transaction; any other rollout change (the customer layout included) is never held."""
+    if str(before.get("staffDesk") or "off") == "off" or str(after.get("staffDesk") or "off") != "off":
+        return
+    from .studio_stop import staff_desk_in_use  # late: studio_stop imports this module
+
+    in_use = staff_desk_in_use(conn)
+    if in_use["openTickets"] or in_use["stopRequests"]:
+        studio_error(
+            409,
+            "STAFF_DESK_IN_USE",
+            f"The team desk still has {in_use['openTickets']} open ticket(s) and {in_use['stopRequests']} stop "
+            "request(s). Answer or close them before switching the desk off.",
+        )
+
+
 def save_setting(
     key: str,
     raw_value: Any,
@@ -733,6 +752,8 @@ def save_setting(
                 f"This setting changed (now version {before['version']}). Reload it, then save again.",
             )
         value = validate_setting(key, raw_value, before["value"], id_validator)
+        if key == "rollout":
+            refuse_desk_off_while_in_use(conn, before["value"], value)
         stamp = now_ms()
         # A soft-deleted row reads as version 0, but its old numbers were handed out: count on from
         # them, so a page still holding a pre-delete version gets 409 instead of overwriting the revive.

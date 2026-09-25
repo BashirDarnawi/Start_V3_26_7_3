@@ -16,6 +16,10 @@ OWNED_TYPES = frozenset(
         "socialReplyLog",
         "studioSettings",  # /api/studio switches (studio_settings.py)
         "adCampaignResults",  # Meta's view of a linked request (studio_results.py)
+        "studioActivity",  # the owner's in-app inbox items (studio_activity.py, P3-05)
+        "studioStopRequests",  # one urgent stop request per ad: the staff queue (studio_stop.py, P3-10)
+        "supportTickets",  # help tickets (studio_support.py, P3-07; stop-request tickets from studio_stop.py)
+        "supportTicketMessages",  # the messages of a help ticket (studio_support.py, P3-07)
         "studioAlerts",  # staff/admin alerts raised by the studio jobs loop (studio_jobs.py)
         "studioJobState",  # the jobs loop's one heartbeat and claims row (studio_jobs.py)
         "studioProfiles",  # optional WhatsApp number (route P2-07; scrubbed on anonymisation, studio_privacy.py)

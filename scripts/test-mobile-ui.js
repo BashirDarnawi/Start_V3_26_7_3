@@ -4490,6 +4490,39 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P3-05, P3-10, P3-11, P3-17, P3-20 (server: studio_activity.py, studio_stop.py): the new refusals reach Arabic in
+  // both maps (the v2 codes and the classic /api/ad-studio texts), the routes are registered, the stop request
+  // reuses the /stop refusal text, and the built bundles carry the new words.
+  const stopPy = read('server/systems/ads_studio/studio_stop.py');
+  const activityPy = read('server/systems/ads_studio/studio_activity.py');
+  const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
+  const studioApiPy = read('server/systems/ads_studio/studio_api.py');
+  const errorsPy = read('server/systems/ads_studio/studio_errors.py');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const bundle = read('studio.js');
+  const arabicOnly = value => /[؀-ۿ]/.test(value) && !/[A-Za-z]{3}/.test(value);
+  const pyConst = name => (stopPy.match(new RegExp(`^${name} = "([^"]+)"`, 'm')) || [])[1] || '';
+  const v2Text = code => coreSrc.match(new RegExp(`\\n  ${code}: \\['([^']+)', '([^']+)'\\],`)) || [];
+  const classicAr = prefix => (adsStudio.match(new RegExp(`\\n  \\['${prefix}', '([^']+)'\\],`)) || [])[1] || '';
+  const newCodes = [['STAFF_DESK_IN_USE', 409], ['UNKNOWN_CUSTOMER', 404], ['NO_CONSENT', 409]];
+  const off = pyConst('REFUSE_STOP_REQUEST_OFF');
+  const cases = [
+    newCodes.every(([code, status]) => errorsPy.includes(`"${code}": ${status},`) && v2Text(code)[1] && arabicOnly(v2Text(code)[2] || '')),
+    off.startsWith('Stop requests are not open yet') && arabicOnly(classicAr('Stop requests are not open yet')),
+    pyConst('REFUSE_STOP_NOT_APPROVED') === 'Only Approved campaigns can be stopped' && arabicOnly(classicAr('Only Approved campaigns can be stopped'))
+      && actionsPy.includes('detail="Only Approved campaigns can be stopped"'),
+    studioApiPy.includes('router.include_router(create_studio_desk_router(') && actionsPy.includes('add_stop_request_route(router,'),
+    stopPy.includes('@router.post("/{campaign_id}/stop-request")') && stopPy.includes('@router.get("/staff/pulse")')
+      && stopPy.includes('@router.get("/staff/customers/{customer_id}/contact")'),
+    activityPy.includes('@router.get("/activity")') && activityPy.includes('@router.post("/activity/seen")'),
+    newCodes.every(([code]) => bundle.includes(v2Text(code)[2] || '\u0000')) && bundle.includes(classicAr('Stop requests are not open yet') || '\u0000')
+      && read('www/studio.js') === bundle
+  ];
+  check('Studio P3 desk: stop request, inbox, staff pulse and contact link routes registered; new refusals in EN/AR (v2 codes and the classic map); bundles rebuilt',
+    cases.every(Boolean), `cases ${cases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');

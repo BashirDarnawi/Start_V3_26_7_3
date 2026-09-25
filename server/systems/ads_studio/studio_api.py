@@ -38,6 +38,7 @@ from .studio_posts import create_studio_posts_router
 from .studio_profile import create_studio_profile_router
 from .studio_settings import env_switch, me_view, read_all_settings, read_setting, require_known_key, save_setting
 from .studio_support import create_studio_support_router
+from .studio_stop import create_studio_desk_router
 from .studio_types import STUDIO_SETTINGS_TYPE
 from .studio_wallet import create_studio_summaries_router
 
@@ -163,4 +164,5 @@ def create_studio_router(
         router.include_router(e2e_seed)
     router.include_router(create_studio_profile_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # GET/PUT /profile: the owner's optional WhatsApp number (studio_profile.py, P2-07)
     router.include_router(create_studio_support_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /tickets + /staff/tickets: the help desk (studio_support.py, P3-07, P3-13)
+    router.include_router(create_studio_desk_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /activity, /activity/seen, /staff/pulse, /staff/customers/{id}/contact (studio_activity.py, studio_stop.py; P3-05, P3-11, P3-17)
     return router

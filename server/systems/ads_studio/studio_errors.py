@@ -26,6 +26,9 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "UNKNOWN_SETTING": 404,      # a settings key that does not exist
     "VERSION_CONFLICT": 409,     # someone saved a newer version first; reload and retry
     "RATE_LIMITED": 429,         # too many changes in a short time
+    "STAFF_DESK_IN_USE": 409,    # rollout: the team desk cannot go off while open tickets or stop requests wait (P3-20)
+    "UNKNOWN_CUSTOMER": 404,     # staff contact link: no such customer for this staff member (P3-11)
+    "NO_CONSENT": 409,           # staff contact link: the customer gave no WhatsApp number with consent (P3-11)
     "UNKNOWN_PAGE": 404,         # admin checks: no linked studio page with this id
     "NOT_INSTAGRAM": 409,        # admin checks: the Instagram read test needs a linked Instagram account
     "ALREADY_TESTED_TODAY": 409,  # admin checks: one test per page/account per Tripoli day

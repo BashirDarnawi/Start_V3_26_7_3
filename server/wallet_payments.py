@@ -172,6 +172,16 @@ def confirmed_top_up_amounts(conn: Any, currency: str = "USD", limit: int = 5) -
     return {"amounts": [{"amountMinor": amount, "count": count} for amount, count in ranked], "sample": sum(counts.values())}
 
 
+def pending_payment_requests_count(conn: Any) -> int:
+    """Read only: how many charge requests of all users wait for an admin's confirmation (a count,
+    nothing else: the Albayan Studio staff pulse shows it to admins, P3-17). Only ``status`` is read."""
+    rows = conn.execute(
+        text(json_fields_select_sql(("status",), (), "type = :type AND deleted = false")),
+        {"type": WALLET_PAYMENT_COLLECTION},
+    ).mappings().all()
+    return sum(1 for row in rows if str(row.get("f_status") or "") == "pending")
+
+
 def ledger_amount_minor(data: dict[str, Any]) -> int:
     """One ledger row's positive amount in minor units, read exactly as the balance reads it
     (main._wallet_amount_minor): ``amountMinor``, else ``amount`` x 100 rounded; 0 when unusable."""

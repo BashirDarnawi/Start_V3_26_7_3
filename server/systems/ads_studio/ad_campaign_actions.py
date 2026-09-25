@@ -98,6 +98,12 @@ studio runs on the same ad accounts as the agency):
   request is Approved: the claim is released and the removed copies restored in
   one transaction, then the campaign gets its previous Meta name back (best
   effort; _unlink_meta_campaign).
+
+Inbox and stop requests (P3-05, P3-10): a review, the link or "live" marker and
+a staff stop add an item to the owner's inbox after their commit (studio_activity.py;
+never failing the action). ``POST /{id}/stop-request`` is built in studio_stop.py and
+registered on this router; it sets ``stopRequestedAt`` (kept as history), and a stop
+through /stop resolves the ad's open stop request and its ticket.
 """
 
 import math
@@ -255,6 +261,18 @@ def _studio_setting(key: str) -> dict[str, Any]:
     from . import studio_settings  # late: studio_settings imports ad_campaign_fields, which imports this module
 
     return studio_settings.read_setting(key)["value"]
+
+
+_REVIEW_ACTIVITY = {"Approved": "request_approved", "Changes Requested": "request_sent_back", "Rejected": "request_rejected"}
+
+
+def _tell_owner(owner_id: str, kind: str, campaign_id: str, key: Any, **params: Any) -> None:
+    """P3-05: an item in the owner's inbox after a committed change (studio_activity.py). The same
+    event key never writes twice, and a failure never fails the action."""
+    from .studio_activity import record_activity_safe  # late: studio_activity imports this module
+
+    record_activity_safe(owner_id=owner_id, kind=kind, related_type="campaign", related_id=campaign_id, key=key,
+                         params=params)
 
 
 def _whole(value: Any) -> int:
@@ -970,6 +988,7 @@ def _link_meta_campaign(
              "removedManagerCopies": view["removedManagerCopies"], "keptManagerCopies": view["keptManagerCopies"],
              "collisionRepairId": str(copies.get("repairId") or ""), "warnings": warnings, "metaBudgetMinor": budget},
         )
+        _tell_owner(creator, "request_live", campaign_id, "live", studioRef=ref)
     return answer(saved)
 
 
@@ -1529,6 +1548,9 @@ def create_ad_campaign_actions_router(
                  "heldMinorUSD": held_minor, "legacyRules": legacy,
                  **({"studioRef": studio_fields["studioRef"]} if studio_fields else {})},
             )
+        _tell_owner(campaign_owner, _REVIEW_ACTIVITY[decision], campaign_id,
+                    str((saved.get("data") or {}).get("reviewedAt") or reviewed_at), reasonCode=reason_code,
+                    amountMinor=held_minor if decision == "Approved" else None)
         if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
             "Submitted", "Approved", "Rejected", "Stopped"
         }:
@@ -1775,6 +1797,11 @@ def create_ad_campaign_actions_router(
             f"Stopped campaign request {campaign_id}, refunded {refund}",
             {"operationId": operation_id, "refundMinorUSD": refund, "selfStop": actor_id == creator, "closeReason": close_reason},
         )
+        if actor_id != creator:
+            _tell_owner(creator, "settled", campaign_id, "settled", refundMinor=refund)
+        from .studio_stop import on_campaign_stopped  # late: studio_stop imports this module (P3-10)
+
+        on_campaign_stopped(campaign_id)  # its stop request (if any) is handled now
         return ctx["project_entity_media_for_user"](entity, user, False)
 
     @router.post("/{campaign_id}/publish-status")
@@ -1871,6 +1898,8 @@ def create_ad_campaign_actions_router(
                      "keptManagerCopies": len(copies.get("kept") or []),
                      "collisionRepairId": str(copies.get("repairId") or "")},
                 )
+                if value == "live":
+                    _tell_owner(creator, "request_live", campaign_id, "live")
             return ctx["project_entity_media_for_user"](saved, user, False)
         try:
             saved = ctx["patch_entity"](
@@ -1902,6 +1931,8 @@ def create_ad_campaign_actions_router(
             f"Marked campaign {campaign_id} publish status: {value or 'cleared'}",
             {"operationId": operation_id, "publishStatus": value},
         )
+        if value == "live":
+            _tell_owner(creator, "request_live", campaign_id, "live")
         return ctx["project_entity_media_for_user"](saved, user, False)
 
     @router.post("/{campaign_id}/unlink-meta")
@@ -1918,4 +1949,9 @@ def create_ad_campaign_actions_router(
         campaign_id = ctx["validate_entity_id"](campaign_id)
         return _unlink_meta_campaign(ctx, user, campaign_id, _clean_operation_id(ctx, body.operationId), body)
 
+    from .studio_stop import add_stop_request_route  # late: studio_stop imports this module
+
+    # POST /{campaign_id}/stop-request: the owner's urgent "ask to stop" (P3-10, studio_stop.py)
+    add_stop_request_route(router, current_user_dependency=current_user_dependency,
+                           require_same_origin=require_same_origin, ctx=ctx)
     return router

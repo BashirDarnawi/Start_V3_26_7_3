@@ -1059,6 +1059,8 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['Write why the link is removed', 'اكتب سبب إلغاء الربط (من 3 إلى 300 حرف)'],
   ['Only an Approved request can be unlinked from its Meta campaign', 'لا يمكن إلغاء ربط حملة ميتا إلا لطلب معتمد'],
   ['This request is not linked to a Meta campaign', 'هذا الطلب غير مرتبط بحملة ميتا'],
+  // Ask to stop (P3-10, studio_stop.py REFUSE_STOP_REQUEST_OFF); "Only Approved campaigns can be stopped" is above.
+  ['Stop requests are not open yet', 'طلب إيقاف الإعلان غير متاح بعد. تواصل مع فريق البيان.'],
 ];
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {

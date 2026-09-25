@@ -65,6 +65,9 @@ const STUDIO_ERROR_TEXTS = Object.freeze({
   TICKET_OPEN_LIMIT: ['You have too many open tickets. Mark one as solved, then open a new one.', 'لديك تذاكر مفتوحة كثيرة. أغلق واحدة تم حلها ثم افتح تذكرة جديدة.'],
   TICKET_MESSAGE_LIMIT: ['This ticket is full. Open a new ticket to continue.', 'هذه التذكرة ممتلئة. افتح تذكرة جديدة للمتابعة.'],
   TICKET_CLOSED: ['This ticket was closed more than 7 days ago. Open a new ticket.', 'أُغلقت هذه التذكرة منذ أكثر من 7 أيام. افتح تذكرة جديدة.'],
+  STAFF_DESK_IN_USE: ['The team desk still has open tickets or stop requests. Answer or close them first.', 'ما زالت في مكتب الفريق تذاكر مفتوحة أو طلبات إيقاف. أجب عنها أو أغلقها أولاً.'],
+  UNKNOWN_CUSTOMER: ['This customer was not found. Refresh the page.', 'لم نجد هذا العميل. حدّث الصفحة.'],
+  NO_CONSENT: ['This customer has not shared a WhatsApp number with consent. Use a ticket instead.', 'لم يشارك هذا العميل رقم واتساب بموافقته. استخدم التذكرة بدلاً من ذلك.'],
   SESSION_ENDED: ['Your session has ended. Sign in again.', 'انتهت جلستك. سجّل الدخول مرة أخرى.'],
   FORBIDDEN: ['You do not have access to this.', 'لا تملك صلاحية الوصول إلى هذا.'],
   NOT_FOUND: ['This item was not found. Refresh the page.', 'لم نجد هذا العنصر. حدّث الصفحة.']

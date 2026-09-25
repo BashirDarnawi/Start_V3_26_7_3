@@ -39,6 +39,10 @@ remembered in ``studioJobState.lastError`` and runs again at its next turn, and 
   skipped) raises ``review_overdue`` (a kind next to ``stop_request_overdue`` and
   ``payment_confirm_overdue``). Until the service-hours helper (P3-16) exists, a request is due at
   closing time of the Nth working day after the day it was sent.
+* **Stop requests** (P3-10; on the same 5-minute turn, reported as ``stop_requests``):
+  studio_stop.check_stop_requests resolves a handled stop request and its ticket (the request is
+  Stopped, or Meta shows nothing delivering since the request) and raises ``stop_request_overdue``
+  for one still open after its due time (``targets.stopRequestMinutes`` working minutes).
 * **Daily money check** (the first tick at or after 04:00 Tripoli time, once per Tripoli day): the
   full sweep, then studio_integrity.scan_studio_money() on one snapshot → one
   ``integrity_violation`` alert per day holding the findings (counts and request/user ids, for
@@ -164,6 +168,10 @@ ALERT_LABELS: dict[str, dict[str, str]] = {
         "en": "A request has waited for review longer than the target",
         "ar": "انتظر طلب المراجعة أكثر من الوقت المحدد",
     },
+    "stop_request_overdue": {  # P3-10 (studio_stop.check_stop_requests)
+        "en": "A stop request has waited longer than the target: pause the ad in Meta now",
+        "ar": "انتظر طلب إيقاف أكثر من الوقت المحدد: أوقف الإعلان في ميتا الآن",
+    },
     "integrity_violation": {
         "en": "The daily money check found a problem",
         "ar": "وجد فحص الأموال اليومي مشكلة",
@@ -252,6 +260,12 @@ def _run_results_sync(now: datetime) -> dict[str, Any]:
     from .studio_results_sync import run_results_sync  # late: the sync imports this module
 
     return run_results_sync(now)
+
+
+def _run_stop_check(now: datetime) -> dict[str, Any]:
+    from .studio_stop import check_stop_requests  # late: studio_stop imports this module
+
+    return check_stop_requests(now)
 
 
 def resolve_jobs_ctx(router_ctx: dict[str, Any] | None) -> dict[str, Any]:
@@ -739,6 +753,8 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
     ran: dict[str, Any] = {"claimed": list(claimed)}
     for job in claimed:
         ran[job] = _guarded(job, now, jobs[job])
+    if "waiting" in claimed:  # P3-10: the stop requests ride the same 5-minute turn (studio_stop.py)
+        ran["stop_requests"] = _guarded("stop_requests", now, lambda: _run_stop_check(now))
     return ran
 
 

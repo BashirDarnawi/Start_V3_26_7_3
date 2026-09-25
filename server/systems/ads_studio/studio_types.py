@@ -53,6 +53,17 @@ STUDIO_REF_PREFIX = "ALB-S-"
 STUDIO_REF_LENGTH = 8
 STUDIO_REF_RE = re.compile(r"ALB-S-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}")
 
+# Phase 3 service types, router-only too: the owner's inbox (P3-05, studio_activity.py), the staff
+# queue of urgent stop requests (P3-10, studio_stop.py) and the help tickets a stop request opens
+# (P3-07, studio_support.py; listed here so a stop request's ticket is router-only in any case).
+STUDIO_ACTIVITY_TYPE = "studioActivity"
+STUDIO_STOP_REQUESTS_TYPE = "studioStopRequests"
+SUPPORT_TICKETS_TYPE = "supportTickets"
+SUPPORT_TICKET_MESSAGES_TYPE = "supportTicketMessages"
+STUDIO_ROUTER_ONLY_TYPES = STUDIO_ROUTER_ONLY_TYPES | {
+    STUDIO_ACTIVITY_TYPE, STUDIO_STOP_REQUESTS_TYPE, SUPPORT_TICKETS_TYPE, SUPPORT_TICKET_MESSAGES_TYPE,
+}
+
 
 def derived_id(prefix: str, *parts: Any) -> str:
     """``prefix_`` + sha256(part1|part2|...)[:40]. Raises ValueError on a bad prefix or part.
