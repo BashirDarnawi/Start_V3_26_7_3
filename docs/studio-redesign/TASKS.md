@@ -19,7 +19,7 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P0-05c | Done | stage 4 | `GET /api/studio/admin/facts`: facts b, c, d, f, g, i, m, n1, s (counts/flags only; Meta read only on Refresh, cached 24 h). Tests in `server/test_studio_facts.py` |
 | P0-05d | Done | stage 4 | `POST /api/studio/admin/pages/{id}/subscribe-test` (admin, once per page per Tripoli day, audited) |
 | P0-05e | Done | stage 4 | `POST /api/studio/admin/instagram/{id}/read-test` (admin, once per account per day; one public reply at most, audited) |
-| P0-10 | Tooling done | stage 4 | `server/meta_collisions.py` report (`GET /api/meta-ads/collisions`) + `scripts/studio_collision_repair.py` (owner-signed choices, dry run by default, never removes rows with money, reversible, kept forever in the audit log). **Running it needs the owner** |
+| P0-10 | Tooling done | stage 4 | `server/meta_collisions.py` report (`GET /api/meta-ads/collisions`) + `scripts/studio_collision_repair.py` (owner-signed choices with a per-row decision fingerprint, dry run by default, never removes rows with money, reversal refused for a closed month, reversal files kept outside the repo, kept forever in the audit log). **Running it needs the owner** |
 | P0-11 | Done (local) | stage 4 | Every release runs the PostgreSQL money-race tests on a throwaway PostgreSQL 16 (`npm run test:postgres`, ~40 s) before the image push; `publish-image.yml` has the same steps. The GitHub dry run needs the Docker Hub secrets (owner) |
 | P0-05a | Done | stage 3 | `GET /api/studio/admin/diagnostics` (admin only, counts only) |
 | P0-05b | Done | stage 3 | Baselines B1–B6 (archived requests included in the history baselines) + top-up preset source (most common confirmed top-up amounts, counts only) |
