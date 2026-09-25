@@ -1795,7 +1795,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const isDisabled = tag => /\sdisabled(?=[\s>])/.test(tag);
   const pausedCard = String(run("renderAdsStudioCampaignCard(state.adCampaignRequests.find(c => c.id === 'p1-submit'))"));
   notices.length = 0;
-  run("submitAdsStudioCampaignOnce('p1-submit');");
+  // /me was read moments ago, so the submit does not wait for another read (that wait is checked below).
+  run("_adsStudioLimitsFor = 'p1-user'; _adsStudioLimitsState = 'done'; _adsStudioLimitsLoadedAt = Date.now(); submitAdsStudioCampaignOnce('p1-submit');");
   const pausedNotice = (notices[0] || {}).message || '';
   run('_adsStudioIntakeOpen = true;');
   const openHtml = String(run('renderAdsStudioBuilder()'));
@@ -1978,6 +1979,149 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('D19 post picker: linked pages and recent posts, escaped, https only, new ad without a post, link fallback', !loadError && pickerCases.every(Boolean),
     loadError || `cases ${pickerCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // The picker keeps the reply's per-platform Meta state: a platform Meta did not read shows "could
+  // not read" with Try again and the link fallback, never "no recent posts".
+  box.__platformPayload = { checkedAt: '', posts: [], platforms: {
+    fb: { state: 'error', checkedAt: '', errorCode: 'page_access', retryAfterSeconds: 0 },
+    ig: { state: 'ok', checkedAt: '2026-09-25T08:00:00Z', errorCode: '', retryAfterSeconds: 0 },
+    tt: { state: 'error', errorCode: 'x' }
+  } };
+  box.__pausedPayload = { checkedAt: '', posts: [{ id: 'ig_1', platform: 'ig', excerpt: 'Reel', createdAt: '2026-09-24T10:00:00Z' }],
+    platforms: { fb: { state: 'paused', retryAfterSeconds: 300 }, ig: { state: 'ok' } } };
+  box.__keptPayload = { checkedAt: '', posts: [{ id: '123_9', platform: 'fb', excerpt: 'Kept', createdAt: '2026-09-24T10:00:00Z' }],
+    platforms: { fb: { state: 'paused', retryAfterSeconds: 300 }, ig: { state: 'bogus', retryAfterSeconds: -4 } } };
+  box.__okPayload = { checkedAt: '', posts: [], platforms: { fb: { state: 'ok' }, ig: { state: 'ok' } } };
+  const platformPosts = json('adsStudioNormalizeRecentPosts(__platformPayload)') || {};
+  const keptPlatforms = json('adsStudioNormalizeRecentPosts(__keptPayload).platforms') || {};
+  const pickerWith = (entry, language = 'en') => {
+    run(`_adsStudioDraft.sourcePostId = ''; _adsStudioDraft.sourcePostRef = ''; _adsStudioPostPicker.pagesState = 'done';
+      _adsStudioPostPicker.pages = adsStudioNormalizePostPages(__pagesPayload); _adsStudioPostPicker.pageId = 'spg_shop';
+      _adsStudioPostPicker.posts.spg_shop = ${entry};`);
+    return String(inLanguage(language, 'renderAdsStudioBoostBasicsStep()'));
+  };
+  const doneWith = name => `({ state: 'done', error: null, at: Date.now(), ...adsStudioNormalizeRecentPosts(${name}) })`;
+  const fbError = pickerWith(doneWith('__platformPayload'));
+  const fbErrorAr = pickerWith(doneWith('__platformPayload'), 'ar');
+  const fbErrorLink = run('adsStudioShowPostLinkField(_adsStudioDraft)');
+  const fbPaused = pickerWith(doneWith('__pausedPayload'));
+  const fbKept = pickerWith(doneWith('__keptPayload'));
+  const allOk = pickerWith(doneWith('__okPayload'));
+  // A 429 (apiJson's 429 branch sets no payload: the message is the detail as JSON) is RATE_LIMITED.
+  box.__rate429 = Object.assign(new Error(JSON.stringify({ code: 'RATE_LIMITED', message: 'Too many requests. Please wait a minute and try again.' })), { status: 429, retryAfter: 42 });
+  box.__rateShape = new Error('{"code":"RATE_LIMITED","message":"Too many requests. Please wait a minute and try again."}');
+  box.__rateMinute = Object.assign(new Error('Rate limited. Try again in 60 seconds.'), { status: 429, retryAfter: 60 });
+  const rateInfo = json('adsStudioErrorInfo(__rate429)') || {};
+  const rateShape = json('adsStudioErrorInfo(__rateShape)') || {};
+  const rateFailed = pickerWith("({ state: 'failed', posts: [], checkedAt: '', at: Date.now(), error: adsStudioErrorInfo(__rate429) })");
+  const rateFailedAr = pickerWith("({ state: 'failed', posts: [], checkedAt: '', at: Date.now(), error: adsStudioErrorInfo(__rate429) })", 'ar');
+  const linkShown = html => /id="ads-studio-post-link" class=""/.test(html);
+  const linkHidden = html => /id="ads-studio-post-link" class="hidden"/.test(html);
+  const couldNotRead = 'We could not read your posts from Meta right now';
+  const platformCases = [
+    JSON.stringify(Object.keys(platformPosts.platforms || {})) === '["fb","ig"]'
+      && JSON.stringify(platformPosts.platforms.fb) === JSON.stringify({ state: 'error', errorCode: 'page_access', retryAfterSeconds: 0, checkedAt: '' }),
+    keptPlatforms.ig && keptPlatforms.ig.state === '' && keptPlatforms.ig.retryAfterSeconds === 0 && keptPlatforms.fb.retryAfterSeconds === 300,
+    fbError.includes(`${couldNotRead} (Facebook). You can paste the post link below.`) && fbError.includes('Ask us to link it again')
+      && fbError.includes('adsStudioRetryPagePosts()') && linkShown(fbError) && !fbError.includes('No recent posts on this page') && fbErrorLink === true,
+    fbErrorAr.includes('تعذّر علينا قراءة منشوراتك من ميتا الآن (فيسبوك)') && fbErrorAr.includes('يمكنك لصق رابط المنشور بالأسفل') && !fbErrorAr.includes(couldNotRead),
+    fbPaused.includes(`${couldNotRead} (Facebook)`) && fbPaused.includes('Meta is busy right now. Try again in 5 minutes.') && linkShown(fbPaused)
+      && fbPaused.includes('data-post-id="ig_1"'),
+    !fbKept.includes(couldNotRead) && linkHidden(fbKept) && fbKept.includes('data-post-id="123_9"'),
+    allOk.includes('No recent posts on this page') && !allOk.includes(couldNotRead) && linkHidden(allOk),
+    rateInfo.code === 'RATE_LIMITED' && rateInfo.retryAfterSeconds === 42 && rateInfo.message === 'Too many requests. Please wait a minute and try again.',
+    rateShape.code === 'RATE_LIMITED' && rateShape.retryAfterSeconds === 0,
+    String(run('adsStudioPickerErrorText(adsStudioErrorInfo(__rateMinute))')) === 'Too many requests. Please wait a minute and try again.',
+    String(run('adsStudioPickerErrorText(adsStudioErrorInfo(__rateShape))')) === 'Too many requests. Please wait a minute and try again.',
+    rateFailed.includes(`${couldNotRead}. You can paste the post link below. (Too many requests. Please wait 42 seconds and try again.)`)
+      && !rateFailed.includes('&quot;code&quot;') && !rateFailed.includes('{"code"') && linkShown(rateFailed),
+    rateFailedAr.includes('طلبات كثيرة. انتظر 42 ثانية ثم أعد المحاولة.') && !rateFailedAr.includes('RATE_LIMITED'),
+    JSON.stringify(json('[adsStudioWaitText(1), adsStudioWaitText(2), adsStudioWaitText(5), adsStudioWaitText(150), adsStudioWaitText(0)]'))
+      === JSON.stringify([['1 second', 'ثانية واحدة'], ['2 seconds', 'ثانيتين'], ['5 seconds', '5 ثوانٍ'], ['3 minutes', '3 دقائق'], null]),
+    fn('adsStudioErrorInfo').includes('error?.status === 429') && fn('adsStudioLoadPagePosts').includes('platforms: result.platforms')
+      && fn('adsStudioShowPostLinkField').includes('adsStudioPostsUnreadable(picker.posts[picker.pageId])')
+  ];
+  check('post picker: a platform Meta did not read -> could-not-read note, Try again and the link fallback; 429 -> RATE_LIMITED with its wait (EN/AR)',
+    !loadError && platformCases.every(Boolean), loadError || `cases ${platformCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Intake reopened: /me is read again when the list or dashboard is opened from another tab or page
+  // and right before a submit (at most every ADS_STUDIO_INTAKE_RECHECK_MS); a paused-looking submit
+  // waits for that answer; the in-place refresh enables Send again.
+  run("_adsStudioActiveTab = 'campaigns'; _adsStudioShownTab = 'builder';");
+  nodes['.studio-section-tabs'] = {};
+  const opened = [run('adsStudioListOpened()'), run('adsStudioListOpened()')];  // tab changed, then the same tab on screen
+  delete nodes['.studio-section-tabs'];
+  opened.push(run('adsStudioListOpened()'));  // back from another page (no studio tab bar on screen)
+  run("_adsStudioActiveTab = 'builder';");
+  opened.push(run('adsStudioListOpened()'));  // the builder has its own read (last step)
+  run("_adsStudioActiveTab = 'dashboard';");
+  opened.push(run('adsStudioListOpened()'));
+  apiCalls.length = 0;
+  run("_adsStudioLimitsFor = 'p1-user'; _adsStudioLimitsState = 'done'; _adsStudioLimitsLoadedAt = Date.now();");
+  const freshRead = [run('adsStudioRecheckIntake()'), apiCalls.length];
+  run('_adsStudioLimitsLoadedAt = Date.now() - 60000;');
+  const staleRead = [run('adsStudioRecheckIntake() !== null'), run('adsStudioRecheckIntake() === _adsStudioLimitsPending'),
+    apiCalls.filter(call => call.path === '/api/studio/me').length];
+  box.state.adCampaignRequests = [
+    { id: 'p1-reopen', status: 'Draft', createdBy: 'p1-user', name: 'Reopen check', objective: 'messages', platforms: ['facebook'], pageName: 'Page',
+      primaryText: 'Copy', destination: '+218900000000', creativeImages: ['data:image/png;base64,AAAA'], locations: ['Libya'], ageMin: 18, ageMax: 65,
+      startDate: '2099-01-01', endDate: '2099-01-07', durationDays: 7, budgetType: 'lifetime', budgetMinorUSD: 1000, _lastModified: 5 }
+  ];
+  run("_adsStudioLimitsState = 'done'; _adsStudioLimitsLoadedAt = Date.now() - 60000; _adsStudioIntakeOpen = false;");
+  apiCalls.length = 0;
+  notices.length = 0;
+  run("submitAdsStudioCampaignOnce('p1-reopen');");
+  const waitedSubmit = [apiCalls.filter(call => call.path === '/api/studio/me').length, notices.length, apiCalls.some(call => String(call.path).endsWith('/submit'))];
+  const sendNode = { disabled: true, attrs: { title: 'paused' }, getAttribute(name) { return name in this.attrs ? this.attrs[name] : null; },
+    setAttribute(name, value) { this.attrs[name] = String(value); }, removeAttribute(name) { delete this.attrs[name]; } };
+  nodes['ads-studio-submit-button'] = sendNode;
+  run('_adsStudioIntakeOpen = true; adsStudioRefreshIntakeState();');
+  const reenabled = sendNode.disabled === false && !('title' in sendNode.attrs);
+  delete nodes['ads-studio-submit-button'];
+  run("_adsStudioIntakeOpen = null; _adsStudioLimitsState = ''; _adsStudioActiveTab = 'campaigns';");
+  const submitCode = fn('submitAdsStudioCampaignOnce');
+  const intakeCases = [
+    JSON.stringify(opened) === '[true,false,true,false,true]',
+    freshRead[0] === null && freshRead[1] === 0,
+    staleRead[0] === true && staleRead[1] === true && staleRead[2] === 1,
+    JSON.stringify(waitedSubmit) === '[1,0,false]',
+    reenabled,
+    fn('renderAdsStudioView').includes('refreshAdsStudioLimits(adsStudioListOpened() ? ADS_STUDIO_INTAKE_RECHECK_MS : 0)'),
+    submitCode.indexOf('adsStudioRecheckIntake()') > 0 && submitCode.indexOf('adsStudioRecheckIntake()') < submitCode.indexOf('if (_adsStudioIntakeOpen === false) {')
+      && submitCode.includes('await intakeRead'),
+    fn('refreshAdsStudioLimits').includes('finally { settle(); }') && run('ADS_STUDIO_INTAKE_RECHECK_MS') > 0 && run('ADS_STUDIO_INTAKE_RECHECK_MS') <= 60000
+  ];
+  check('intake reopened: /me read again on opening the list and before a submit, Send enabled again without a reload', !loadError && intakeCases.every(Boolean),
+    loadError || `cases ${intakeCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Legacy daily request = legacyRules, or no schemaVersion >= 2 (the server's rule); a schemaVersion 2
+  // request is never "old" because this copy of it carries no totalBudgetMinorUSD.
+  const legacyOf = campaign => run(`adsStudioIsLegacyDailyRequest(${JSON.stringify(campaign)})`);
+  box.state.adCampaignRequests = [
+    { id: 'p1-v2-daily', status: 'Submitted', createdBy: 'customer-9', name: 'New daily', budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7, schemaVersion: 2, _lastModified: 13 }
+  ];
+  const v2Queue = String(run('renderAdsStudioReviewQueue()'));
+  const v2Select = (v2Queue.match(/<select id="ads-review-reason-p1-v2-daily"[\s\S]*?<\/select>/) || [''])[0];
+  const legacyCases = [
+    legacyOf({ budgetType: 'daily', schemaVersion: 2, budgetMinorUSD: 1000, durationDays: 7 }) === false,
+    legacyOf({ budgetType: 'daily', schemaVersion: 2, totalBudgetMinorUSD: 7000, legacyRules: false }) === false,
+    legacyOf({ budgetType: 'daily', schemaVersion: 2, totalBudgetMinorUSD: 7000, legacyRules: true }) === true,
+    legacyOf({ budgetType: 'daily', schemaVersion: 1, totalBudgetMinorUSD: 7000 }) === true,
+    legacyOf({ budgetType: 'daily', budgetMinorUSD: 500 }) === true,
+    legacyOf({ budgetType: 'lifetime', legacyRules: true }) === false,
+    v2Select !== '' && !v2Select.includes('<option value="budget_dates" selected>') && !v2Queue.includes('Old daily request'),
+    !fn('adsStudioIsLegacyDailyRequest').includes('totalBudgetMinorUSD')
+  ];
+  check('legacy daily request only by legacyRules or schemaVersion < 2, never by a missing total', !loadError && legacyCases.every(Boolean),
+    loadError || `cases ${legacyCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // The submit-time refusal while Meta is busy (studio_posts.verify_source_post) has its Arabic.
+  const metaBusyPrefix = 'Meta is busy right now, so the chosen post could not be checked';
+  check('Arabic refusal for "Meta is busy ... the chosen post could not be checked"', !loadError
+    && refusalMap.filter(entry => entry[0] === metaBusyPrefix).length === 1
+    && arabic(`${metaBusyPrefix}. Try again in a minute.`) === 'ميتا مشغولة الآن، لذلك تعذر التحقق من المنشور المختار. حاول مرة أخرى بعد دقيقة.'
+    && String(run(`adsStudioRefusalText(${JSON.stringify(`${metaBusyPrefix}. Try again in a minute.`)})`)) === `${metaBusyPrefix}. Try again in a minute.`,
+  loadError || arabic(`${metaBusyPrefix}. Try again in a minute.`));
 
   const builtStudio = [read('studio.js'), read('www/studio.js')];
   check('built studio bundles carry the P1 classic form', builtStudio.every(bundle => bundle.includes(adsStudio)));

@@ -444,8 +444,9 @@ function renderAdsStudioView() {
     return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}${shellWallet}</div>`;
   }
 
-  // The budget limits arrive long before the budget step (once per session, P1-08b).
-  if (adsStudioCanCreate()) refreshAdsStudioLimits();
+  // The budget limits arrive long before the budget step (once per session, P1-08b). Opening the
+  // campaign list or the dashboard reads /me again for the intake switch (P1-22).
+  if (adsStudioCanCreate()) refreshAdsStudioLimits(adsStudioListOpened() ? ADS_STUDIO_INTAKE_RECHECK_MS : 0);
   let content = '';
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
@@ -719,6 +720,8 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['This page is not linked to your account', 'هذه الصفحة غير مرتبطة بحسابك'],
   ['This post is not from your linked page', 'هذا المنشور ليس من صفحتك المرتبطة'],
   ['durationDays must be a whole number of days', 'يجب أن تكون مدة الإعلان عدداً صحيحاً من الأيام'],
+  // Submit of a picked Instagram post while Meta is busy (studio_posts.verify_source_post, 503).
+  ['Meta is busy right now, so the chosen post could not be checked', 'ميتا مشغولة الآن، لذلك تعذر التحقق من المنشور المختار. حاول مرة أخرى بعد دقيقة.'],
 ];
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {
@@ -1265,11 +1268,24 @@ function resetAdsStudioPostPicker() {
   _adsStudioPostPicker.posts = Object.create(null);
 }
 
-// A failed call as {code, message}: /api/studio sends {detail: {code, message}}, other routes a string.
+// A failed call as {code, message, retryAfterSeconds}: /api/studio sends {detail: {code, message}},
+// other routes a string. apiJson's 429 branch keeps no payload: its message is that detail written
+// as JSON ('{"code":"RATE_LIMITED",...}'), so a 429 (or that shape) is RATE_LIMITED with its wait.
 function adsStudioErrorInfo(error) {
+  const wait = Number(error?.retryAfter);
+  const retryAfterSeconds = Number.isSafeInteger(wait) && wait > 0 ? Math.min(wait, 86400) : 0;
   const detail = error?.payload?.detail;
-  if (detail && typeof detail === 'object' && !Array.isArray(detail)) return { code: String(detail.code || ''), message: String(detail.message || '') };
-  return { code: '', message: typeof detail === 'string' ? detail : String(error?.message || '') };
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) return { code: String(detail.code || ''), message: String(detail.message || ''), retryAfterSeconds };
+  let message = typeof detail === 'string' ? detail : String(error?.message || '');
+  let code = '';
+  if (/^\s*\{/.test(message)) {
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) { code = String(parsed.code || ''); message = String(parsed.message || ''); }
+    } catch (_) { /* not JSON: the text stays as it is */ }
+  }
+  if (error?.status === 429) code = 'RATE_LIMITED';
+  return { code, message, retryAfterSeconds };
 }
 
 // The list refusals that carry a code (studio_posts.py); anything else goes through the refusal map
@@ -1282,8 +1298,22 @@ const ADS_STUDIO_PICKER_ERRORS = {
 
 function adsStudioPickerErrorText(info) {
   const code = String(info?.code || '');
+  const wait = code === 'RATE_LIMITED' ? adsStudioWaitText(info?.retryAfterSeconds) : null;
+  if (wait) return adsStudioText(`Too many requests. Please wait ${wait[0]} and try again.`, `طلبات كثيرة. انتظر ${wait[1]} ثم أعد المحاولة.`);
   const known = Object.prototype.hasOwnProperty.call(ADS_STUDIO_PICKER_ERRORS, code) ? ADS_STUDIO_PICKER_ERRORS[code] : null;
   return known ? adsStudioText(known[0], known[1]) : adsStudioRefusalText(String(info?.message || ''));
+}
+
+// A wait (Retry-After seconds) as [English, Arabic] words, or null for none or exactly a minute (the
+// RATE_LIMITED text already says "a minute"). From two minutes on it counts whole minutes, rounded up.
+function adsStudioWaitText(seconds) {
+  const s = Math.ceil(Number(seconds) || 0);
+  if (!(s > 0) || s === 60) return null;
+  const minutes = s >= 120 ? Math.ceil(s / 60) : 0;
+  const n = minutes || s;
+  const [one, two, few, many] = minutes ? ['دقيقة واحدة', 'دقيقتين', 'دقائق', 'دقيقة'] : ['ثانية واحدة', 'ثانيتين', 'ثوانٍ', 'ثانية'];
+  const en = `${n} ${minutes ? (n === 1 ? 'minute' : 'minutes') : (n === 1 ? 'second' : 'seconds')}`;
+  return [en, n === 1 ? one : n === 2 ? two : n <= 10 ? `${n} ${few}` : `${n} ${many}`];
 }
 
 function adsStudioSafeHttpsUrl(value) {
@@ -1337,7 +1367,53 @@ function adsStudioNormalizeRecentPosts(payload) {
       createdAt: String(raw.createdAt ?? '').slice(0, 40)
     });
   }
-  return { posts, checkedAt: String(payload?.checkedAt ?? '').slice(0, 40) };
+  // Per platform, what Meta answered (studio_posts.py): state 'ok', 'paused' (try again after
+  // retryAfterSeconds) or 'error' (errorCode 'page_access' or 'meta_error'), and when it was read.
+  const platforms = {};
+  const rawPlatforms = payload && payload.platforms && typeof payload.platforms === 'object' && !Array.isArray(payload.platforms) ? payload.platforms : {};
+  for (const name of ['fb', 'ig']) {
+    const part = rawPlatforms[name];
+    if (!part || typeof part !== 'object') continue;
+    const partState = String(part.state || '');
+    const errorCode = String(part.errorCode || '');
+    const wait = Number(part.retryAfterSeconds);
+    platforms[name] = {
+      state: ['ok', 'paused', 'error'].includes(partState) ? partState : '',
+      errorCode: /^[a-z_]{1,40}$/.test(errorCode) ? errorCode : '',
+      retryAfterSeconds: Number.isSafeInteger(wait) && wait > 0 ? Math.min(wait, 86400) : 0,
+      checkedAt: String(part.checkedAt ?? '').slice(0, 40)
+    };
+  }
+  return { posts, checkedAt: String(payload?.checkedAt ?? '').slice(0, 40), platforms };
+}
+
+// The platforms of a page's list that Meta did not read now: 'error', or 'paused' with none of that
+// platform's posts kept to show. A read that failed as a whole is entry.state 'failed'.
+function adsStudioUnreadPostPlatforms(entry) {
+  const platforms = entry && entry.platforms && typeof entry.platforms === 'object' ? entry.platforms : {};
+  const posts = Array.isArray(entry?.posts) ? entry.posts : [];
+  return ['fb', 'ig'].filter(name => {
+    const part = platforms[name];
+    if (!part) return false;
+    return part.state === 'error' || (part.state === 'paused' && !posts.some(post => post.platform === name));
+  });
+}
+
+// True when the page's list could not be read from Meta now (all of it, or one platform of it).
+function adsStudioPostsUnreadable(entry) {
+  return !!entry && (entry.state === 'failed' || adsStudioUnreadPostPlatforms(entry).length > 0);
+}
+
+// Why those platforms were not read: the page's access is gone, or Meta is busy (with the wait).
+function adsStudioUnreadPostsDetail(entry, unread) {
+  const parts = unread.map(name => entry.platforms[name]);
+  if (parts.some(part => part.errorCode === 'page_access')) {
+    return adsStudioText('Albayan can no longer read this page. Ask us to link it again.', 'لم يعد بإمكان البيان قراءة هذه الصفحة. اطلب منا ربطها من جديد.');
+  }
+  if (!parts.every(part => part.state === 'paused')) return '';
+  const wait = adsStudioWaitText(Math.max(...parts.map(part => part.retryAfterSeconds)));
+  return wait ? adsStudioText(`Meta is busy right now. Try again in ${wait[0]}.`, `ميتا مشغولة الآن. أعد المحاولة بعد ${wait[1]}.`)
+    : adsStudioText(ADS_STUDIO_PICKER_ERRORS.META_PAUSED[0], ADS_STUDIO_PICKER_ERRORS.META_PAUSED[1]);
 }
 
 async function adsStudioLoadPostPages(force = false) {
@@ -1381,7 +1457,7 @@ async function adsStudioLoadPagePosts(pageId, force = false) {
   if (current && current.state === 'loading') return;
   if (!force && current && (current.state === 'done' || (current.state === 'failed' && Date.now() - current.at < 60000))) return;
   const generation = picker.generation;
-  picker.posts[id] = { state: 'loading', posts: current?.posts || [], checkedAt: current?.checkedAt || '', error: null, at: Date.now() };
+  picker.posts[id] = { state: 'loading', posts: current?.posts || [], checkedAt: current?.checkedAt || '', platforms: current?.platforms || {}, error: null, at: Date.now() };
   adsStudioRefreshPostPicker();
   let result = null;
   let error = null;
@@ -1391,18 +1467,19 @@ async function adsStudioLoadPagePosts(pageId, force = false) {
   } catch (e) { error = adsStudioErrorInfo(e); }
   if (generation !== picker.generation) return;
   picker.posts[id] = result
-    ? { state: 'done', posts: result.posts, checkedAt: result.checkedAt, error: null, at: Date.now() }
-    : { state: 'failed', posts: current?.posts || [], checkedAt: current?.checkedAt || '', error, at: Date.now() };
+    ? { state: 'done', posts: result.posts, checkedAt: result.checkedAt, platforms: result.platforms, error: null, at: Date.now() }
+    : { state: 'failed', posts: current?.posts || [], checkedAt: current?.checkedAt || '', platforms: current?.platforms || {}, error, at: Date.now() };
   adsStudioRefreshPostPicker();
 }
 
 // The paste-a-link fallback: offline, no linked page, the pages or the page's posts could not be
-// read, or a draft that already holds a pasted link (so it stays editable).
+// read (the whole list, or one platform Meta did not answer), or a draft that already holds a
+// pasted link (so it stays editable).
 function adsStudioShowPostLinkField(draft) {
   const picker = _adsStudioPostPicker;
   if (!isServerModeEnabled() || picker.pagesState === 'failed') return true;
   if (picker.pagesState === 'done' && !picker.pages.length) return true;
-  if (picker.pagesState === 'done' && picker.posts[picker.pageId]?.state === 'failed') return true;
+  if (picker.pagesState === 'done' && adsStudioPostsUnreadable(picker.posts[picker.pageId])) return true;
   return !String(draft?.sourcePostId || '').trim() && !!String(draft?.sourcePostRef || '').trim();
 }
 
@@ -1468,10 +1545,16 @@ function renderAdsStudioPostPickerBody() {
         ${chosen ? `<span class="flex-shrink-0 text-blue-600" aria-label="${isAr ? 'تم الاختيار' : 'Chosen'}"><i data-lucide="circle-check" class="w-5 h-5"></i></span>` : ''}
       </button>`;
     }).join('');
-    const problem = entry.state === 'failed'
-      ? note('triangle-alert', `${isAr ? 'تعذّر تحميل المنشورات. يمكنك لصق رابط المنشور بالأسفل.' : 'The posts could not be loaded. You can paste the post link below.'}${entry.error ? ` (${esc(adsStudioPickerErrorText(entry.error))})` : ''}`, 'text-amber-700 dark:text-amber-300') + retry('adsStudioRetryPagePosts()')
-      : '';
-    const empty = entry.state === 'done' && !entry.posts.length
+    // Meta could not be read now (the whole list, or one of its platforms): say so with Try again and
+    // the link fallback below; never "no recent posts" for a list Meta did not give.
+    const unread = entry.state === 'done' ? adsStudioUnreadPostPlatforms(entry) : [];
+    let problem = '';
+    if (entry.state === 'failed' || unread.length) {
+      const platformName = unread.length === 1 ? (unread[0] === 'ig' ? (isAr ? 'إنستغرام' : 'Instagram') : (isAr ? 'فيسبوك' : 'Facebook')) : '';
+      const detail = entry.state === 'failed' ? (entry.error ? adsStudioPickerErrorText(entry.error) : '') : adsStudioUnreadPostsDetail(entry, unread);
+      problem = note('triangle-alert', `${isAr ? 'تعذّر علينا قراءة منشوراتك من ميتا الآن' : 'We could not read your posts from Meta right now'}${platformName ? ` (${platformName})` : ''}. ${isAr ? 'يمكنك لصق رابط المنشور بالأسفل.' : 'You can paste the post link below.'}${detail ? ` (${esc(detail)})` : ''}`, 'text-amber-700 dark:text-amber-300') + retry('adsStudioRetryPagePosts()');
+    }
+    const empty = entry.state === 'done' && !entry.posts.length && !problem
       ? note('info', isAr ? 'لا توجد منشورات حديثة على هذه الصفحة. انشر شيئاً ثم أعد المحاولة، أو اختر «إعلان جديد بدون منشور».' : 'No recent posts on this page. Post something and try again, or choose "New ad without a post".') + retry('adsStudioRetryPagePosts()')
       : '';
     const checkedText = adsStudioPostDateText(entry.checkedAt, true);
@@ -1675,6 +1758,12 @@ let _adsStudioLimitsGeneration = 0;
 // The intake switch from the same /me reply (P1-22): null until known (the server decides), then
 // true/false. While it is false the Send buttons are disabled; drafts still save.
 let _adsStudioIntakeOpen = null;
+// Staff can pause or reopen intake while the studio is open, so /me is read again (unless it was
+// read in the last ADS_STUDIO_INTAKE_RECHECK_MS) when a list with Send buttons is opened from another
+// page or tab, and right before a submit: reopening intake enables Send again without a reload.
+const ADS_STUDIO_INTAKE_RECHECK_MS = 15000;
+let _adsStudioLimitsPending = null;  // settles once the /me read on its way has been applied
+let _adsStudioShownTab = '';  // the studio tab the last render drew
 
 function resetAdsStudioLimits() {
   _adsStudioLimitsGeneration++;  // a reply still in flight belongs to the old session: dropped
@@ -1684,6 +1773,8 @@ function resetAdsStudioLimits() {
   _adsStudioLimitsFailedAt = 0;
   _adsStudioLimitsLoadedAt = 0;
   _adsStudioIntakeOpen = null;
+  _adsStudioLimitsPending = null;
+  _adsStudioShownTab = '';
 }
 
 function adsStudioIntakePausedText() {
@@ -1730,6 +1821,7 @@ function adsStudioLimits() {
 // maxAgeMs > 0 also re-reads a good answer older than that (the intake switch can change meanwhile);
 // a failed re-read keeps the last good limits.
 async function refreshAdsStudioLimits(maxAgeMs = 0) {
+  let settle = () => {};  // tells a waiting submit that the read this call started has been applied
   try {
     const uid = String(state.currentUser?.id || '');
     if (!uid || !isServerModeEnabled()) return;
@@ -1739,6 +1831,7 @@ async function refreshAdsStudioLimits(maxAgeMs = 0) {
     const generation = ++_adsStudioLimitsGeneration;
     _adsStudioLimitsFor = uid;
     _adsStudioLimitsState = 'loading';
+    _adsStudioLimitsPending = new Promise(resolve => { settle = resolve; });
     let limits = null;
     let intakeOpen = null;
     try {
@@ -1757,7 +1850,25 @@ async function refreshAdsStudioLimits(maxAgeMs = 0) {
     if (hint) hint.textContent = adsStudioBudgetLimitsText(_adsStudioDraft?.budgetType);
     adsStudioRefreshBudgetSummary();
     adsStudioRefreshIntakeState();
-  } catch (_) { /* never breaks the screen */ }
+  } catch (_) { /* never breaks the screen */ } finally { settle(); }
+}
+
+// Reads /me again unless it was read in the last ADS_STUDIO_INTAKE_RECHECK_MS. Returns a promise that
+// settles once the reply on its way has been applied (the intake switch is then current), or null
+// when no read is on its way.
+function adsStudioRecheckIntake() {
+  refreshAdsStudioLimits(ADS_STUDIO_INTAKE_RECHECK_MS);  // runs up to its first await right here
+  return _adsStudioLimitsState === 'loading' ? _adsStudioLimitsPending : null;
+}
+
+// P1-22: the campaign list or dashboard (both carry Send buttons) was opened: another studio tab or
+// another page was on screen before this render (the studio's tab bar is not in the document yet).
+function adsStudioListOpened() {
+  const tab = String(_adsStudioActiveTab || '');
+  const onScreen = typeof document !== 'undefined' && typeof document.querySelector === 'function' && !!document.querySelector('.studio-section-tabs');
+  const opened = !onScreen || tab !== _adsStudioShownTab;
+  _adsStudioShownTab = tab;
+  return opened && (tab === 'campaigns' || tab === 'dashboard');
 }
 
 function adsStudioDaysText(days) {
@@ -1799,10 +1910,13 @@ function adsStudioHeldMinorFor(campaign) {
 
 // A daily request sent under the old rules (it held one day's budget): staff send it back with the
 // reason "budget_dates" so the customer re-sends it under the total rule (owner decision D33).
+// The server's own test (legacy_budget_rules): flagged legacyRules, or no schemaVersion >= 2. A
+// schemaVersion 2 request holds its total even when this copy of it carries no totalBudgetMinorUSD.
 function adsStudioIsLegacyDailyRequest(campaign) {
   if (String(campaign?.budgetType || '') !== 'daily') return false;
-  const total = Number(campaign?.totalBudgetMinorUSD);
-  return campaign?.legacyRules === true || !(Number.isSafeInteger(total) && total > 0);
+  if (campaign?.legacyRules === true) return true;
+  const version = Number(campaign?.schemaVersion);
+  return !(Number.isFinite(version) && version >= 2);
 }
 
 // The card's budget: "$10.00/day × 7 days = $70.00" for a daily request, the amount otherwise.
@@ -2242,7 +2356,15 @@ async function submitAdsStudioCampaignOnce(id) {
     await startAdsStudioCampaign(id);
     return false;
   }
-  // Intake paused (P1-22): the draft stays saved; the server refuses the submit anyway.
+  // Intake paused (P1-22): the draft stays saved; the server refuses the submit anyway. /me is read
+  // again first (unless it was read moments ago). While intake is seen as paused the submit waits for
+  // that answer, so a reopened intake sends at once; otherwise the server decides.
+  const submitUid = String(state.currentUser?.id || '');
+  const intakeRead = adsStudioRecheckIntake();
+  if (intakeRead && _adsStudioIntakeOpen === false) {
+    await intakeRead;
+    if (String(state.currentUser?.id || '') !== submitUid) return false;
+  }
   if (_adsStudioIntakeOpen === false) {
     showNotification(adsStudioText('Not sent', 'لم يُرسل'), adsStudioIntakePausedText(), 'warning');
     return false;
