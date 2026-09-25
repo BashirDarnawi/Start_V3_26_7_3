@@ -11,7 +11,10 @@ The four numbers, plus one that the screen shows only when it is not zero:
 * **Available** = USD ledger balance - Reserved: the same number every debit checks
   (wallet_payments.wallet_available_minor).
 * **Reserved** = the budgets of the owner's Submitted requests
-  (wallet_payments.wallet_campaign_holds_minor), listed per request in ``reserved``.
+  (wallet_payments.wallet_campaign_holds_minor), listed per request in ``reserved``. Each item's
+  ``budgetMinor`` is what that request holds (campaign_hold_minor: a daily request from P1 on
+  holds daily x days, shown also as ``dailyMinor`` and ``days``), so the items add up to
+  ``reservedMinor``.
 * **In your ads** = for each paid cycle (one ``cpay:`` ledger row) whose request is Approved in
   that cycle: paid - returned. ``metaUsedInAdsMinor`` adds Meta's confirmed spend of the linked
   and checked ones (null when there is none: an unlinked ad never shows a Meta-used value);
@@ -51,6 +54,7 @@ from sqlalchemy import text
 from ...db import db_conn
 from ...wallet_payments import (
     _campaign_payment_key,
+    campaign_hold_minor,
     pending_payment_requests,
     wallet_campaign_holds_minor,
     wallet_ledger_rows,
@@ -134,6 +138,18 @@ def _step(kind: str, row: dict[str, Any], name: str) -> dict[str, Any]:
             "ar": labels["ar"].format(name=name or _UNNAMED["ar"]),
         },
     }
+
+
+def _reserved_amounts(request: dict[str, Any]) -> dict[str, Any]:
+    """One Reserved item's amounts. ``budgetMinor`` is what the request holds
+    (wallet_payments.campaign_hold_minor: its total from P1 on, the same number ``reservedMinor``
+    adds up), never one day of a daily budget. A daily request that holds its total also shows
+    ``dailyMinor`` and ``days`` (daily x days = budgetMinor); any other request shows them null."""
+    held = campaign_hold_minor(request)
+    daily, total = minor(request.get("budgetMinorUSD")), minor(request.get("totalBudgetMinorUSD"))
+    if str(request.get("budgetType") or "").lower() == "daily" and 0 < daily <= total and total % daily == 0:
+        return {"budgetMinor": held, "dailyMinor": daily, "days": total // daily}
+    return {"budgetMinor": held, "dailyMinor": None, "days": None}
 
 
 def compute_wallet_summary(
@@ -229,11 +245,11 @@ def compute_wallet_summary(
 
     balance = sum(_signed(row, uid) for row in usd_rows)
     reserved_list = [
-        {"campaignId": request["id"], "name": _name(request), "budgetMinor": minor(request.get("budgetMinorUSD")),
-         "submittedAt": str(request.get("submittedAt") or "") or None}
+        {"campaignId": request["id"], "name": _name(request), "submittedAt": str(request.get("submittedAt") or "") or None,
+         **_reserved_amounts(request)}
         for request in requests
         if not request.get("archived") and str(request.get("status") or "") == "Submitted"
-        and minor(request.get("budgetMinorUSD")) > 0
+        and campaign_hold_minor(request) > 0
     ]
     reserved_list.sort(key=lambda item: str(item["submittedAt"] or ""), reverse=True)
     return {

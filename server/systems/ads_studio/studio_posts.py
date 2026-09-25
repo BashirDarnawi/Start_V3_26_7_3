@@ -34,12 +34,20 @@ Submit rules (``enforce_source_post_rules``, called by ad_campaign_fields.prepar
 in strict mode, i.e. at submit and again at approval):
 
 * ``sourcePostId`` + ``sourcePostPlatform`` must be a post of one of the request owner's linked
-  pages, else 400 "This post is not from your linked page" (T13). A Facebook post id starts with
-  its page's id, so it is checked against the owner's linked pages without Meta. An Instagram
-  media id is looked up in the lists read for the owner's Instagram accounts; at submit, when it
-  is not there, the account's list is read again (Meta busy: 503 with Retry-After). At approval
+  pages, else 400 "This post is not from your linked page" (T13). A Facebook post id is
+  ``{page id}_{post id}``: its page part must be a linked Facebook page, checked without Meta, so
+  a post of any age passes. An Instagram media id is looked up in the lists kept for the owner's
+  Instagram accounts; at submit, when it is not there (a post older than the newest 10: an Extend
+  or a Duplicate of an Instagram boost), Meta is asked ONCE about that media
+  (meta_ads.read_instagram_media_owner, with the page's token) and it passes when its owner is a
+  linked Instagram account (Meta busy or paused: 503 with Retry-After; another page's token is
+  tried only when this one cannot see the media, at most MAX_IG_ACCOUNTS_CHECKED). At approval
   (the request is Submitted) Meta is not asked again: the post was checked at submit, so only the
   link to the account is re-checked.
+* Submit checks the post FIRST (source_post_checked_first), before it takes one of main's two
+  process-wide media validation places, and runs its strict validation inside that place with Meta
+  reads off: an Instagram read never holds a place, so no other user's save, submit or approval
+  gets a 503 because of it.
 * A ``boost_post`` request needs a post: ``sourcePostId`` or the post link ``sourcePostRef``
   (normalize_ad_campaign_source_post_ref, unchanged). With either, it needs no objective, text,
   button, destination or photo of its own. A ``boost_page`` request needs its own text and
@@ -51,8 +59,10 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, Iterator, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
@@ -103,6 +113,9 @@ _CACHE_LOCK = threading.Lock()
 # One reader per list at a time (a second one waits, then finds the first one's list).
 _READ_LOCKS = tuple(threading.Lock() for _ in range(32))
 _clock: Callable[[], float] = time.monotonic
+# False while submit's strict validation runs inside main's media validation slot: the picked post
+# was checked (with its Meta read) just before the slot was taken (source_post_checked_first).
+_META_READS_ALLOWED: ContextVar[bool] = ContextVar("studio_posts_meta_reads_allowed", default=True)
 
 
 def _iso_now() -> str:
@@ -332,6 +345,14 @@ def _kept_list_has(key: tuple[str, str], post_id: str) -> bool:
     return bool(entry) and any(post["id"] == post_id for post in entry["posts"])
 
 
+def _meta_busy(retry_after: int) -> NoReturn:
+    raise HTTPException(
+        status_code=503,
+        detail="Meta is busy right now, so the chosen post could not be checked. Try again in a minute.",
+        headers={"Retry-After": str(max(int(retry_after or 0), 1))},
+    )
+
+
 def verify_source_post(owner_id: str, platform: str, post_id: str, *, may_read_meta: bool) -> None:
     """Raise T13 unless the post is from one of the owner's linked pages (see the module docstring)."""
     groups = owner_page_groups(owner_id)
@@ -345,25 +366,43 @@ def verify_source_post(owner_id: str, platform: str, post_id: str, *, may_read_m
         _not_from_linked_page()
     if any(_kept_list_has(("ig", group["igUserId"]), post_id) for group in accounts):
         return
-    if not may_read_meta:
-        return  # approval: the post was checked at submit and the account is still linked
+    if not may_read_meta or not _META_READS_ALLOWED.get():
+        return  # approval: checked at submit; inside submit's media slot: checked just before it
     if not _meta.load_meta_ads_config().configured:
         _not_from_linked_page(" (Albayan's Meta connection is not set up, so the post cannot be checked; paste the post link instead)")
     pause = _meta.studio_meta_pause_seconds()
-    busy = 0
+    if pause > 0:  # Albayan's Meta pause runs: nothing is asked
+        _meta_busy(pause)
+    linked = {group["igUserId"] for group in accounts}
     for group in accounts[:MAX_IG_ACCOUNTS_CHECKED]:
-        part = read_platform_posts("ig", group["metaPageId"], group["igUserId"], refresh=True, pause_seconds=pause)
-        if any(post["id"] == post_id for post in part["posts"]):
-            return
-        if part["state"] == "paused":
-            busy = max(busy, part["retryAfterSeconds"] or DEFAULT_RETRY_SECONDS)
-    if busy:
-        raise HTTPException(
-            status_code=503,
-            detail="Meta is busy right now, so the chosen post could not be checked. Try again in a minute.",
-            headers={"Retry-After": str(busy)},
-        )
+        try:
+            media = _meta.read_instagram_media_owner(group["metaPageId"], post_id)
+        except _meta.MetaAdsError as error:
+            if error.retryable:
+                _meta_busy(_retry_seconds())
+            continue  # this page's token cannot see the media (another account's, or deleted)
+        if media["ownerId"]:
+            if media["ownerId"] in linked:
+                return
+            break  # Meta named its owner: an account the customer has not linked
     _not_from_linked_page()
+
+
+@contextmanager
+def source_post_checked_first(stored: dict[str, Any]) -> Iterator[None]:
+    """Submit: check the stored request's picked post (T13, with its one Meta read when needed)
+    NOW, before the caller takes main's process-wide media validation slot, then run the block
+    (the strict validation, inside the slot) with Meta reads off. A post id or platform of the
+    wrong shape is left to that validation, which refuses it with its own message."""
+    post_id = str(stored.get("sourcePostId") or "")
+    platform = str(stored.get("sourcePostPlatform") or "")
+    if post_id and platform in SOURCE_POST_PLATFORMS and is_source_post_id(post_id, platform):
+        verify_source_post(str(stored.get("createdBy") or ""), platform, post_id, may_read_meta=True)
+    token = _META_READS_ALLOWED.set(False)
+    try:
+        yield
+    finally:
+        _META_READS_ALLOWED.reset(token)
 
 
 def enforce_source_post_rules(clean: dict[str, Any], raw_data: dict[str, Any]) -> bool:

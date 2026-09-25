@@ -341,6 +341,9 @@ REQUEST_FIELDS = (
     "status", "name", "submittedAt", "budgetMinorUSD", "startDate", "endDate", "metaCampaignId", "publishStatus",
     "spendMinorUSD", "refundMinorUSD", "paidMinorUSD", "stopRequestedAt", "closeReason", "changeReasons",
     "settleBasis", "stoppedAt",
+    # What a Submitted request holds (wallet_payments.campaign_hold_minor: the total from P1 on) and
+    # whether budgetMinorUSD is one day of it (the wallet summary's Reserved list).
+    "totalBudgetMinorUSD", "budgetType",
 )
 
 

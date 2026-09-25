@@ -17,7 +17,8 @@ Albayan Studio v2 fields (plan tasks P1-14 and P1-13 as changed by D19): ``goalD
 must match the objective), ``locationKeys`` (Libya chips) and the picked post
 (``sourcePostId`` + ``sourcePostPlatform``) are validated here. At submit, whether the picked
 post belongs to the customer's linked page and whether a boost has a post or its own photo and
-text is checked by studio_posts.enforce_source_post_rules.
+text is checked by studio_posts.enforce_source_post_rules (submit checks the post, with any Meta
+read, before main's media validation slot: studio_posts.source_post_checked_first).
 """
 
 from __future__ import annotations
@@ -73,8 +74,9 @@ AD_CAMPAIGN_OBJECTIVES = frozenset(
 )
 
 # --- Goal, Libya locations and the post to boost (plan tasks P1-14, P1-13 as changed by D19) ---
-# Customer fields of the studio v2 wizard. main.py's AD_CAMPAIGN_ALLOWED_FIELDS (ctx) is joined
-# with these here, so main.py does not grow; PATCH accepts them and still refuses unknown fields.
+# Customer fields of the studio v2 wizard. main.py's AD_CAMPAIGN_ALLOWED_FIELDS (ctx) names them
+# too, so a PATCH is checked against the STORED ones (an objective changed alone meets the stored
+# goalDetail: T9 at PATCH, not at submit); the join here keeps them allowed whatever ctx holds.
 AD_CAMPAIGN_STUDIO_FIELDS = frozenset({"goalDetail", "locationKeys", "sourcePostId", "sourcePostPlatform"})
 # goalDetail -> (the one objective it runs under, the main result Meta reports for it). The key
 # names never change once released (stored on requests); labels live with the screens.

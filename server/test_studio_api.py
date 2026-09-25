@@ -208,7 +208,9 @@ def test_me_reflects_safe_defaults(actors, monkeypatch):
     admin = _me(actors["admin"])
     assert admin["isStaff"] is True and admin["isAdmin"] is True and admin["ui"] == "classic"
     record = client.get("/api/studio/admin/settings/intake", cookies=actors["admin"]["cookies"]).json()
-    assert record["version"] == 0 and record["value"] == {"open": True, "maxSubmissionsPerDay": 5}
+    # The default cap is the maximum (500, in effect no cap) until the owner decides D29 (plan start value 5).
+    assert record["version"] == 0 and record["value"] == {"open": True, "maxSubmissionsPerDay": 500}
+    assert studio_settings.DEFAULTS["intake"]["maxSubmissionsPerDay"] == studio_settings.MAX_SUBMISSIONS_PER_DAY
     rollout = client.get("/api/studio/admin/settings/rollout", cookies=actors["admin"]["cookies"]).json()
     assert rollout["value"]["services"] == {"help": "off", "stopRequest": "off", "tiktok": "off"}
 
@@ -474,12 +476,12 @@ def test_soft_deleted_setting_never_blocks_a_save(actors):
             {"t": STUDIO_SETTINGS_TYPE, "id": derived_id("sts", "intake")},
         )
     record = client.get("/api/studio/admin/settings/intake", cookies=admin["cookies"]).json()
-    assert record["version"] == 0 and record["value"] == {"open": True, "maxSubmissionsPerDay": 5}  # reads as never saved
+    assert record["version"] == 0 and record["value"] == {"open": True, "maxSubmissionsPerDay": 500}  # reads as never saved
     _error(_put(admin, "intake", {"open": False}, expected_version=1), 409, "VERSION_CONFLICT")
     revived = _put(admin, "intake", {"open": False}, expected_version=0)
     assert revived.status_code == 200, revived.text
     # Version 1 was handed out before the delete, so the revive is version 2 and a page still holding 1 gets 409.
-    assert revived.json()["version"] == 2 and revived.json()["value"] == {"open": False, "maxSubmissionsPerDay": 5}
+    assert revived.json()["version"] == 2 and revived.json()["value"] == {"open": False, "maxSubmissionsPerDay": 500}
     rows = _settings_rows()
     assert len(rows) == 1 and not rows[0]["deleted"] and rows[0]["created_at"] == created  # the same row, revived
     assert json_loads(rows[0]["data_json"])["_deleted"] is False

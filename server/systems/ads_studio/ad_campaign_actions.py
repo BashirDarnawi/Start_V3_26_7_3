@@ -498,7 +498,12 @@ def create_ad_campaign_actions_router(
         legacy = legacy_budget_rules(
             {**current, "schemaVersion": BUDGET_SCHEMA_VERSION, "submittedAt": submitted_at}, limits
         )
-        with ctx["media_validation_slot"](user):
+        from .studio_posts import source_post_checked_first  # late: studio_posts imports this module
+
+        # The picked post (T13, and its Meta read) is checked BEFORE main's process-wide media slot
+        # (2 places) is taken: an Instagram read inside it would give other users' saves, submits
+        # and approvals a 503. Inside the slot the strict validation then reads no Meta.
+        with source_post_checked_first(current), ctx["media_validation_slot"](user):
             prepared = ctx["prepare_ad_campaign_fields"](
                 {k: v for k, v in current.items() if k != "durationDays"} if legacy else current, strict=True
             )

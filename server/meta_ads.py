@@ -4130,6 +4130,33 @@ def read_instagram_recent_media(page_id: Any, ig_user_id: Any, *, limit: Any = 1
     return rows[:count]
 
 
+def read_instagram_media_owner(page_id: Any, media_id: Any) -> dict[str, str]:
+    """Who made one Instagram media: ONE paced GET of the media itself, read with the page's token.
+
+    For the studio's check of a picked post that is older than the recent list (an Extend or a
+    Duplicate of an Instagram boost): the same request lane, pacing and pause as the readers above
+    (refused while Albayan's Meta pause runs, nothing reaching Meta). Returns ``{id, ownerId,
+    username}``: ``ownerId`` is Meta's ``owner.id``, the Instagram account that made the media,
+    which Meta sends only to that account's own token (to anyone else it sends only ``username``);
+    '' when Meta did not send it. Raises MetaAdsError like read_page_recent_posts (a media this
+    token cannot see is Meta's own "does not exist" error, not retryable).
+    """
+    clean_page = _meta_id(page_id, "Meta page")
+    clean_media = _meta_id(media_id, "Instagram media")
+    client = get_meta_ads_client()
+    token = client.page_access_token(clean_page)
+    payload = client._request("GET", clean_media, params={"fields": "id,owner,username"}, access_token=token)
+    if str(payload.get("id") or "") != clean_media:  # an answer about another object names no owner
+        return {"id": "", "ownerId": "", "username": ""}
+    owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+    owner_id = str(owner.get("id") or "")
+    return {
+        "id": clean_media,
+        "ownerId": owner_id if _META_ID_RE.fullmatch(owner_id) else "",
+        "username": _clean_text(payload.get("username"), 120),
+    }
+
+
 def _percentiles(values: list[float]) -> dict[str, Any] | None:
     """Nearest-rank p50/p90/p95 and the maximum (None without values)."""
     if not values:

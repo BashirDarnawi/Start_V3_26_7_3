@@ -46,9 +46,10 @@ ad accounts as the agency (no dedicated Studio ad account), so PLAN.md's ``studi
 and its ``STUDIO_ACCOUNTS_MISMATCH`` check are not built.
 
 Safe defaults (used until an admin saves, and for any stored field that is unreadable):
-everything off / classic, intake open with a cap of 5, capabilities, limits, hours, targets and
-thresholds as in ``DEFAULTS`` below, no contact details. A stored value is always read back
-through today's rules (``normalise_stored``), so a hand-edited row never reaches a customer.
+everything off / classic, intake open with a cap of 500 (in effect no cap until the owner decides
+D29), capabilities, limits, hours, targets and thresholds as in ``DEFAULTS`` below, no contact
+details. A stored value is always read back through today's rules (``normalise_stored``), so a
+hand-edited row never reaches a customer.
 
 Env kill switch ``ALBAYAN_STUDIO_V2`` (read on every request): ``off`` (also when unset or
 misspelt) forces the classic customer layout whatever the record says; ``pilot`` allows the new
@@ -112,7 +113,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "staffDesk": "off",
         "staffAllowlist": [],
     },
-    "intake": {"open": True, "maxSubmissionsPerDay": 5},
+    # MAX_SUBMISSIONS_PER_DAY (500) = effectively no cap: until the owner decides D29 (plan start value 5).
+    # The cap applies to the live classic studio as soon as the image deploys; saved values are unaffected.
+    "intake": {"open": True, "maxSubmissionsPerDay": MAX_SUBMISSIONS_PER_DAY},
     # Honest labels until the facts are in (PLAN.md §8.2, DECISIONS D8a, D24b, D34):
     # * fbPublicReply gated ("waiting for Meta"): it works only after fact P0-01(g) proves
     #   delivery to commenters without an app role and the page is subscribed; if (g) fails,

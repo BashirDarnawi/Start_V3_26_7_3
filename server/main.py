@@ -4604,7 +4604,7 @@ AD_CAMPAIGN_ALLOWED_FIELDS = frozenset(
         "creativeImages",
         "creativeAssetIds",
         "specialAdCategories",
-        "boostType", "sourcePostRef", "autoReply", "extendsCampaignId",
+        "boostType", "sourcePostRef", "autoReply", "extendsCampaignId", "goalDetail", "locationKeys", "sourcePostId", "sourcePostPlatform",
     }
 )
 

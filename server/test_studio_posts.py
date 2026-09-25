@@ -5,7 +5,9 @@
 * D19 / P1-13: GET /api/studio/pages and /pages/{id}/recent-posts are owner-scoped (T12), read
   Meta through the platform door once per 10 minutes, and turn a Meta pause or error into a
   retry code, never a 500. Submit accepts a picked post of the owner's linked page, the post
-  link fallback, or the customer's own photo and text; T11 and T13 otherwise.
+  link fallback, or the customer's own photo and text; T11 and T13 otherwise. An Instagram post
+  older than the newest 10 (Extend, Duplicate) is checked with one direct read of that media,
+  made before main's media validation slot is taken (never while holding it).
 
 Every Meta call is faked (MetaAdsClient._request is replaced); nothing here reaches the network.
 """
@@ -13,6 +15,7 @@ Every Meta call is faked (MetaAdsClient._request is replaced); nothing here reac
 import os
 import secrets
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -224,6 +227,7 @@ def _clean(actors, monkeypatch):
         for bucket in ("linked-pages", "recent-posts"):
             reset_rate_limit(f"studio:{bucket}:{user['id']}")
         reset_rate_limit(f"ad-studio:mutations:{user['id']}")
+        reset_rate_limit(f"ad-studio:media:{user['id']}")
     yield
     meta_ads._PAGE_TOKEN_CACHE.clear()
     studio_posts.clear_cache()
@@ -374,14 +378,34 @@ def test_goal_detail_objective_consistency():
     assert ad_campaign_result_type("", "") == ""
 
 
-def test_goal_detail_mismatch_refused_at_submit_too(actors):
-    # A classic client can change the objective without knowing the goal; submit catches it.
+def test_goal_detail_mismatch_refused_at_patch_and_at_submit(actors):
+    # A classic client can change the objective without knowing the goal: the PATCH is checked
+    # against the STORED goalDetail (T9 at PATCH, not a surprise at submit).
     entity = _create(actors["owner"], {**_boost("Goal mismatch"), "boostType": "", "goalDetail": "messages",
                                        "sourcePostRef": "", "primaryText": "Write to us", "callToAction": "Send Message",
                                        "destination": "https://m.me/ownershop", "creativeImages": [main_png()]})
     changed = _patch(actors["owner"], entity, {"objective": "sales"})
-    assert changed.status_code == 200, changed.text
-    refused = _submit(actors["owner"], changed.json())
+    assert changed.status_code == 400 and changed.json()["detail"].startswith(T9), changed.text
+    stored = next(json_loads(row["data_json"]) for row in _rows_of(CAMPAIGNS) if row["id"] == entity["id"])
+    assert (stored["goalDetail"], stored["objective"]) == ("messages", "messages")  # nothing was saved
+    # The matching objective, or a new goal with its objective, still saves.
+    same = _patch(actors["owner"], entity, {"objective": "messages"})
+    assert same.status_code == 200, same.text
+    both = _patch(actors["owner"], same.json(), {"goalDetail": "sales", "objective": "sales"})
+    assert both.status_code == 200 and both.json()["data"]["goalDetail"] == "sales", both.text
+    # The stored post id and platform are checked together too: a platform changed alone must match.
+    post = _patch(actors["owner"], both.json(), {"sourcePostId": f"{PAGE_A}_901", "sourcePostPlatform": "fb"})
+    assert post.status_code == 200, post.text
+    flipped = _patch(actors["owner"], post.json(), {"sourcePostPlatform": "ig"})
+    assert flipped.status_code == 400 and "sourcePostId must be" in flipped.json()["detail"], flipped.text
+    # A row stored mismatched by an older server is still refused at submit.
+    row = next(row for row in _rows_of(CAMPAIGNS) if row["id"] == entity["id"])
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET data_json=:data WHERE type=:t AND id=:id"),
+                     {"data": json_dumps({**json_loads(row["data_json"]), "goalDetail": "messages", "objective": "sales",
+                                          "sourcePostId": "", "sourcePostPlatform": ""}),
+                      "t": CAMPAIGNS, "id": entity["id"]})
+    refused = _submit(actors["owner"], {"id": entity["id"], "lastModified": int(row["last_modified"])})
     assert refused.status_code == 400 and refused.json()["detail"].startswith(T9), refused.text
 
 
@@ -603,6 +627,18 @@ def test_platform_door_readers_clean_meta_rows(actors, graph):
     assert graph.calls[-1][2]["limit"] == meta_ads.PAGE_RECENT_POSTS_MAX
     with pytest.raises(meta_ads.MetaAdsError):
         meta_ads.read_instagram_recent_media(PAGE_A, "not-digits")
+    # The single-media read: its owner only when Meta answers about THAT media with a numeric owner.
+    graph.routes[("GET", "18000000000000005")] = {"id": "18000000000000005", "owner": {"id": IG_A}, "username": " ownershop "}
+    graph.routes[("GET", "18000000000000006")] = {"id": "18000000000000099", "owner": {"id": IG_A}}
+    graph.routes[("GET", "18000000000000007")] = {"id": "18000000000000007", "owner": {"id": "x1"}, "username": "shop"}
+    assert meta_ads.read_instagram_media_owner(PAGE_A, "18000000000000005") == {
+        "id": "18000000000000005", "ownerId": IG_A, "username": "ownershop"}
+    assert meta_ads.read_instagram_media_owner(PAGE_A, "18000000000000006") == {"id": "", "ownerId": "", "username": ""}
+    assert meta_ads.read_instagram_media_owner(PAGE_A, "18000000000000007")["ownerId"] == ""
+    assert graph.calls[-1][2] == {"fields": "id,owner,username"} and graph.calls[-1][3] == f"PAGE-TOKEN-{PAGE_A}"
+    for page, media in ((PAGE_A, "../me"), ("x", "18000000000000005")):
+        with pytest.raises(meta_ads.MetaAdsError):
+            meta_ads.read_instagram_media_owner(page, media)
 
 
 # ---------------------------------------------------------------------------
@@ -679,13 +715,17 @@ def test_picked_instagram_media_is_checked_against_the_lists(actors, graph, monk
     assert submitted.status_code == 200, submitted.text
     assert len(graph.calls) == calls_after_list  # found in the kept list: Meta is not asked again
 
-    # Not in any kept list: submit reads the account's list once more (found -> accepted).
+    # Not in any kept list: submit asks Meta ONCE about that media, and its owner is the linked
+    # Instagram account -> accepted (no list is read again).
     studio_posts.clear_cache()
+    graph.routes[("GET", "18000000000000001")] = {"id": "18000000000000001", "owner": {"id": IG_A}, "username": "ownershop"}
     fresh = _create(actors["owner"], _boost("IG media read at submit", platforms=["instagram"],
                                             sourcePostId="18000000000000001", sourcePostPlatform="ig"))
     ok = _submit(actors["owner"], fresh)
     assert ok.status_code == 200, ok.text
-    assert graph.paths()[calls_after_list:] == [f"{IG_A}/media"]
+    assert graph.paths()[calls_after_list:] == ["18000000000000001"]
+    _method, _path, params, token = graph.calls[-1]
+    assert params["fields"] == "id,owner,username" and token == f"PAGE-TOKEN-{PAGE_A}"  # the page's token
 
     # Approval does not ask Meta again (the post was checked at submit).
     studio_posts.clear_cache()
@@ -693,14 +733,32 @@ def test_picked_instagram_media_is_checked_against_the_lists(actors, graph, monk
     assert _approve(actors, ok.json()).status_code == 200
     assert len(graph.calls) == before
 
-    unknown = _create(actors["owner"], _boost("Unknown IG media", platforms=["instagram"],
-                                              sourcePostId="18999999999999999", sourcePostPlatform="ig"))
-    studio_posts.clear_cache()
-    refused = _submit(actors["owner"], unknown)
-    assert refused.status_code == 400 and refused.json()["detail"] == T13, refused.text
+    # Media this token cannot see (Meta's "does not exist"), or made by an account the customer
+    # has not linked: T13.
+    graph.routes[("GET", "18999999999999999")] = meta_ads.MetaAdsError(
+        "request_failed", "Unsupported get request.", provider_code="100")
+    graph.routes[("GET", "18999999999999998")] = {"id": "18999999999999998", "owner": {"id": "17841400000000099"}}
+    graph.routes[("GET", "18999999999999997")] = {"id": "18999999999999997", "username": "someone_else"}
+    for media_id in ("18999999999999999", "18999999999999998", "18999999999999997"):
+        foreign = _create(actors["owner"], _boost(f"Foreign IG media {media_id}", platforms=["instagram"],
+                                                  sourcePostId=media_id, sourcePostPlatform="ig"))
+        before = len(graph.calls)
+        refused = _submit(actors["owner"], foreign)
+        assert refused.status_code == 400 and refused.json()["detail"] == T13, refused.text
+        assert graph.paths()[before:] == [media_id]  # one read of that media, nothing else
+    unknown = foreign
 
+    # Meta busy: 503 with Retry-After, from Albayan's own pause (nothing asked) or from Meta.
     studio_posts.clear_cache()
     monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", time.monotonic() + 60)
+    before = len(graph.calls)
+    busy = _submit(actors["owner"], unknown)
+    assert busy.status_code == 503 and int(busy.headers["Retry-After"]) > 0, busy.text
+    assert len(graph.calls) == before
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    graph.routes[("GET", "18999999999999997")] = meta_ads.MetaAdsError(
+        "rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True,
+        provider_code="80002")
     busy = _submit(actors["owner"], unknown)
     assert busy.status_code == 503 and int(busy.headers["Retry-After"]) > 0, busy.text
 
@@ -709,6 +767,77 @@ def test_picked_instagram_media_is_checked_against_the_lists(actors, graph, monk
                                                   sourcePostId="18000000000000001", sourcePostPlatform="ig"))
     refused = _submit(actors["other"], other_media)
     assert refused.status_code == 400 and refused.json()["detail"] == T13, refused.text
+
+
+def test_extend_or_duplicate_of_an_old_post_is_accepted(actors, graph):
+    """An Extend or a Duplicate keeps the boosted post, which by then is often older than the newest
+    10: an Instagram media is checked with one direct read of it, a Facebook post by its page part."""
+    pages = _link_owner_pages(actors)
+    _route_page_a(graph)
+    assert _recent(actors, "owner", pages["a_ig"]).status_code == 200  # the kept list does not hold the old post
+    old_media = "17999999999999001"
+    graph.routes[("GET", old_media)] = {"id": old_media, "owner": {"id": IG_A}, "username": "ownershop"}
+    first = _create(actors["owner"], _boost("Old IG boost", platforms=["instagram"],
+                                            sourcePostId=old_media, sourcePostPlatform="ig"))
+    submitted = _submit(actors["owner"], first)
+    assert submitted.status_code == 200, submitted.text
+    assert _approve(actors, submitted.json()).status_code == 200
+    for label in ("extended", "duplicated"):
+        extra = {"extendsCampaignId": first["id"]} if label == "extended" else {}
+        again = _create(actors["owner"], _boost(f"Old IG boost, {label}", platforms=["instagram"],
+                                                sourcePostId=old_media, sourcePostPlatform="ig", **extra))
+        before = len(graph.calls)
+        sent = _submit(actors["owner"], again)
+        assert sent.status_code == 200, sent.text
+        assert graph.paths()[before:] == [old_media]  # ONE read of that media; no list is read again
+    # An old Facebook post of a linked page needs no Meta read at all.
+    fb_old = _create(actors["owner"], _boost("Old FB boost, extended", sourcePostId=f"{PAGE_A}_1",
+                                             sourcePostPlatform="fb", extendsCampaignId=first["id"]))
+    before = len(graph.calls)
+    assert _submit(actors["owner"], fb_old).status_code == 200
+    assert len(graph.calls) == before
+
+
+def test_instagram_read_at_submit_never_holds_the_media_slot(actors, graph):
+    """The picked post's Meta read runs BEFORE main's process-wide media validation slot (2 places) is
+    taken, so a slow Instagram read never makes another user's save, submit or approval get a 503."""
+    _link_owner_pages(actors)
+    old_media = "17999999999999002"
+    slots = main._AD_CAMPAIGN_MEDIA_VALIDATION_SLOTS
+    reading, finish = threading.Event(), threading.Event()
+    free_places = []
+
+    def slow_read(_params):
+        reading.set()
+        taken = [slots.acquire(blocking=False) for _ in range(2)]  # both places are free during the read
+        for got in taken:
+            if got:
+                slots.release()
+        free_places.append(sum(taken))
+        finish.wait(10)  # Meta is slow
+        return {"id": old_media, "owner": {"id": IG_A}}
+
+    graph.routes[("GET", old_media)] = slow_read
+    entity = _create(actors["owner"], _boost("Slow IG read", platforms=["instagram"],
+                                             sourcePostId=old_media, sourcePostPlatform="ig"))
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(response=_submit(actors["owner"], entity)))
+    worker.start()
+    try:
+        assert reading.wait(10), "the submit never asked Meta about the media"
+        # While Meta is slow, another customer's save that needs a media place goes through.
+        saved = client.post(f"/api/collections/{CAMPAIGNS}",
+                            json={"id": new_id("campaign"), "data": {"name": "Saved meanwhile", "creativeImages": [main_png()]}},
+                            cookies=actors["other"]["cookies"])
+        assert saved.status_code == 200, saved.text
+    finally:
+        finish.set()
+        worker.join(20)
+    assert not worker.is_alive()
+    assert free_places == [2]
+    assert result["response"].status_code == 200, result["response"].text
+    # Inside the slot the strict validation asked Meta nothing more (one read in all).
+    assert graph.paths().count(old_media) == 1
 
 
 def test_stored_row_createdby_decides_the_owner(actors, graph):

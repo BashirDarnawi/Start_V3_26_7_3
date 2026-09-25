@@ -343,6 +343,46 @@ def test_wallet_summary_scenario_3_pending_submit_is_reserved(staff):
     _assert_identity(summary, user["id"])
 
 
+def test_reserved_list_shows_the_total_a_daily_request_holds(staff):
+    """A daily request from P1 on holds daily x days (wallet_payments.campaign_hold_minor): its Reserved
+    item shows that total (plus the day amount and the days), so the list adds up to reservedMinor."""
+    user = _customer("daily")
+    _credit(staff, user["id"], 20_000)
+    daily = _uid("wcmp")
+    created = client.post(f"/api/collections/{CAMPAIGNS}", json={"id": daily, "data": {
+        **_campaign_body("Daily offer", 1_000), "budgetType": "daily", "durationDays": 5}}, cookies=user["cookies"])
+    assert created.status_code == 200, created.text
+    lifetime = _create(user, 2_000, "Lifetime offer")
+    assert _submit(user, daily).status_code == 200
+    assert _submit(user, lifetime).status_code == 200
+    summary = _summary(user)
+    usd = summary["usd"]
+    assert usd["reservedMinor"] == 5 * 1_000 + 2_000 and usd["availableMinor"] == 20_000 - 7_000
+    assert sum(item["budgetMinor"] for item in summary["reserved"]) == usd["reservedMinor"]
+    items = {item["campaignId"]: item for item in summary["reserved"]}
+    assert (items[daily]["budgetMinor"], items[daily]["dailyMinor"], items[daily]["days"]) == (5_000, 1_000, 5)
+    assert (items[lifetime]["budgetMinor"], items[lifetime]["dailyMinor"], items[lifetime]["days"]) == (2_000, None, None)
+    _assert_identity(summary, user["id"])
+
+
+def test_reserved_items_read_the_hold_from_text_fields_and_legacy_rows():
+    """PostgreSQL hands the JSON fields back as text; a daily request submitted before P1 (no
+    totalBudgetMinorUSD) still holds the one day it was submitted with."""
+    now = datetime.now(timezone.utc)
+    requests = [
+        {"id": "p1-daily", "name": "P1 daily", "status": "Submitted", "submittedAt": "2026-09-25T10:00:00Z",
+         "budgetMinorUSD": "1000", "totalBudgetMinorUSD": "7000", "budgetType": "daily", "archived": False},
+        {"id": "legacy-daily", "name": "Legacy daily", "status": "Submitted", "submittedAt": "2026-09-24T10:00:00Z",
+         "budgetMinorUSD": "1500", "totalBudgetMinorUSD": None, "budgetType": "daily", "archived": False},
+        {"id": "no-budget", "name": "Empty", "status": "Submitted", "submittedAt": "2026-09-23T10:00:00Z",
+         "budgetMinorUSD": None, "totalBudgetMinorUSD": None, "budgetType": "lifetime", "archived": False},
+    ]
+    summary = compute_wallet_summary("owner", [], requests, {}, 8_500, [], now)
+    assert [(item["campaignId"], item["budgetMinor"], item["dailyMinor"], item["days"]) for item in summary["reserved"]] == [
+        ("p1-daily", 7_000, 1_000, 7), ("legacy-daily", 1_500, None, None)]
+    assert sum(item["budgetMinor"] for item in summary["reserved"]) == summary["usd"]["reservedMinor"]
+
+
 # ------------------------------------------------------------------ orphan states
 
 def test_crashed_approval_and_crashed_send_back(staff):
