@@ -11,6 +11,8 @@ Routes in this first part:
   never deletes) with the value before and after, in one transaction.
 * ``GET /api/studio/admin/diagnostics`` (admin only): counts, baselines and top-up presets,
   no personal data.
+* ``POST /api/studio/test/seed-results`` exists ONLY in the disposable e2e server (P2-13,
+  studio_e2e_seed.py); with its flag on and a real database the router refuses to build.
 
 main.py hands helpers over through ``ctx`` (late-binding lambdas): ``user_has_permission``,
 ``audit`` (it accepts ``conn=`` to join the caller's transaction) and ``validate_entity_id``.
@@ -27,6 +29,7 @@ from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_alerts_meta import meta_connection_flag
 from .studio_diagnostics import read_diagnostics
+from .studio_e2e_seed import create_studio_e2e_seed_router
 from .studio_errors import studio_error
 from .studio_facts import create_studio_checks_router
 from .studio_ig_poll import create_studio_ig_poll_router
@@ -152,4 +155,8 @@ def create_studio_router(
     router.include_router(create_studio_posts_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /pages, /pages/{id}/recent-posts, /ad-options (studio_posts.py)
     router.include_router(create_studio_jobs_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/alerts + the jobs loop startup/shutdown (studio_jobs.py, P1-21)
     router.include_router(create_studio_ig_poll_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/pages/{id}/check-comments (studio_ig_poll.py, P1-23)
+    # /test/seed-results: only in the disposable e2e server; raises (no start) if the flag meets a real database (P2-13)
+    e2e_seed = create_studio_e2e_seed_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx)
+    if e2e_seed is not None:
+        router.include_router(e2e_seed)
     return router
