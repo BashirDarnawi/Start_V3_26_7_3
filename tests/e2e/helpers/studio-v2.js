@@ -4,6 +4,7 @@
 // here (never the shared e2e admin as a pilot) and adds them through the real admin settings API.
 // The customer layout is never switched on for everyone, so design-system.spec.js and
 // critical-flows.spec.js keep testing the classic studio with the e2e admin.
+const zlib = require('zlib');
 const { expect } = require('@playwright/test');
 
 const ADMIN_EMAIL = 'e2e.admin@albayan.example.com';
@@ -43,6 +44,54 @@ async function openAdminApi(playwright, baseURL) {
   const adminId = String((login && login.user && login.user.id) || '');
   expect(adminId, 'the admin login names the admin').toBeTruthy();
   return { api, adminId };
+}
+
+// An API session of one studio user (the site's own Origin, like the browser). Dispose it when done.
+async function openUserApi(playwright, baseURL, user) {
+  const api = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { Origin: new URL(baseURL).origin } });
+  try {
+    await jsonOrThrow(await api.post('/api/auth/login', { data: { email: user.email, password: user.password } }), `Login of ${user.email}`);
+  } catch (error) {
+    await api.dispose();
+    throw error;
+  }
+  return api;
+}
+
+// A small solid PNG for the builder's photo input (the photo path compresses whatever it gets; the
+// server checks the result).
+function makePng(width = 48, height = 48, rgb = [37, 99, 235]) {
+  const table = new Int32Array(256).map((_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c;
+  });
+  const crc = buffer => {
+    let c = -1;
+    for (const byte of buffer) c = table[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ -1) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const sum = Buffer.alloc(4);
+    sum.writeUInt32BE(crc(body));
+    return Buffer.concat([length, body, sum]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const rows = [];
+  for (let y = 0; y < height; y++) rows.push(Buffer.from([0, ...Array.from({ length: width }, () => rgb).flat()]));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header),
+    chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))),
+    chunk('IEND', Buffer.alloc(0))
+  ]);
 }
 
 // A dedicated studio user (Employee + the studio preset). Customers also get the free ad_maker
@@ -197,7 +246,9 @@ module.exports = {
   createStudioUser,
   expectCustomerTab,
   expectNoPageOverflow,
+  makePng,
   openAdminApi,
+  openUserApi,
   projectToken,
   setLanguage,
   signInStudio,
