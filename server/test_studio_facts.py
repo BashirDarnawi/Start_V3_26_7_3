@@ -335,6 +335,7 @@ def test_fact_reads_counts_only(actors, graph):
     assert s["hoursEndToConfirmation"] == {"sample": 2, "p50": 12.0, "p90": 24.0, "p95": 24.0, "max": 24.0}
     assert facts["i"]["linkedPages"] == 1 and facts["i"]["checked"] is False and facts["i"]["stale"] is True
     assert facts["f"]["checked"] is False and payload["meta"]["configured"] is True
+    assert facts["m"]["total"] == 0 and "rows" not in facts["m"]  # (m) is counts only
     _assert_no_personal_data(payload, actors)
 
 

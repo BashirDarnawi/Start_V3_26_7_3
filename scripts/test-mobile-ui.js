@@ -1538,6 +1538,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     wallet_release: ['returned wallet captures', 'إرجاع المبالغ المخصومة من المحفظة'],
     review: ['advertisement-request review decisions', 'قرارات مراجعة طلبات الإعلانات'],
     studio_setting: ['changes to Ads Studio settings', 'تغيير إعدادات استوديو الإعلانات'],
+    collision_repair: ['owner-approved moves of Ads Studio advertisements out of the agency records', 'نقل إعلانات الاستوديو من سجلات الوكالة بموافقة المالك'],
   };
   const keptLists = [(privacy.match(/settings actions \(([^)]*)\) are kept permanently/) || [])[1], (privacy.match(/وعمليات الإعدادات \(([^)]*)\) فتُحفظ/) || [])[1]];
   const keptProblems = kept.filter(a => !keptWording[a]).map(a => `no wording for ${a}`);

@@ -47,6 +47,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import text
 
 from ... import meta_ads as _meta
+from ... import meta_collisions as _collisions
 from ...db import db_conn, json_fields_select_sql, json_loads_or_raw
 from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
@@ -203,6 +204,7 @@ def read_facts(*, refresh: bool = False, now: datetime | None = None) -> dict[st
         log_rows = load_reply_log_rows(conn, since_ms)
         daily = daily_budget_facts(conn)
         pages = linked_pages(conn)
+        collisions = _collisions.collision_report(conn)["counts"]  # (m): counts only, never the rows
     b, g = reply_facts(log_rows)
     meta_page_ids = sorted({page["metaPageId"] for page in pages if page["metaPageId"]})
     meta = _meta.studio_meta_facts(meta_page_ids, refresh=refresh)
@@ -219,6 +221,7 @@ def read_facts(*, refresh: bool = False, now: datetime | None = None) -> dict[st
             "f": meta["minDailyBudget"],
             "g": g,
             "i": subscriptions,
+            "m": collisions,
             "n1": _meta.studio_funds_flags(),
             "s": {**_meta.core_spend_drift_facts(), "note": S_NOTE},
         },

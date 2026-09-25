@@ -15,7 +15,12 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P0-17 | Done | stage 2 | Boundary guards: `server/test_system_boundaries.py` + `scripts/test-system-boundaries.js` in npm test and CI |
 | P2-00 | Done | stage 2 | Ads Studio screens moved into `src/systems/ads_studio/`; studio.js byte-identical |
 | P0-03 | Done | stage 3 | `studio_types.py`, `/api/studio/me`, router registered (+5 main.py lines) |
-| P0-04 | Part done | stage 3 | `rollout` (layout, staff desk, services off/pilot/on), `intake` (open + daily cap), `capabilities` (the five PLAN channels) + `ALBAYAN_STUDIO_V2` kill switch; version check; audited in the same transaction, history kept permanently. Still to do: `limits`, `settlement`, `hours`, `contact`, `targets`, `thresholds`, `studio-accounts`, `STAFF_DESK_IN_USE` |
+| P0-04 | Done (except P3 part) | stages 3–4 | `rollout`, `intake`, `capabilities`, `limits` ($5–$2,000 total), `settlement` (48 h), `hours` (Sun–Thu 09:00–17:00 Tripoli, holidays, Ramadan), `contact`, `targets`, `thresholds` + `ALBAYAN_STUDIO_V2`; `/me` shows public limits, hours (open now) and contact. `studio-accounts` dropped (D26: same ad accounts). `STAFF_DESK_IN_USE` waits for tickets (P3-20) |
+| P0-05c | Done | stage 4 | `GET /api/studio/admin/facts`: facts b, c, d, f, g, i, m, n1, s (counts/flags only; Meta read only on Refresh, cached 24 h). Tests in `server/test_studio_facts.py` |
+| P0-05d | Done | stage 4 | `POST /api/studio/admin/pages/{id}/subscribe-test` (admin, once per page per Tripoli day, audited) |
+| P0-05e | Done | stage 4 | `POST /api/studio/admin/instagram/{id}/read-test` (admin, once per account per day; one public reply at most, audited) |
+| P0-10 | Tooling done | stage 4 | `server/meta_collisions.py` report (`GET /api/meta-ads/collisions`) + `scripts/studio_collision_repair.py` (owner-signed choices, dry run by default, never removes rows with money, reversible, kept forever in the audit log). **Running it needs the owner** |
+| P0-11 | Done (local) | stage 4 | Every release runs the PostgreSQL money-race tests on a throwaway PostgreSQL 16 (`npm run test:postgres`, ~40 s) before the image push; `publish-image.yml` has the same steps. The GitHub dry run needs the Docker Hub secrets (owner) |
 | P0-05a | Done | stage 3 | `GET /api/studio/admin/diagnostics` (admin only, counts only) |
 | P0-05b | Done | stage 3 | Baselines B1–B6 (archived requests included in the history baselines) + top-up preset source (most common confirmed top-up amounts, counts only) |
 | P0-08 | Done | stage 3 | `studio_errors.py`; `scripts/studio_detail_inventory.py` lists studio, wallet and plan refusals (report only) |
@@ -24,6 +29,7 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P0-12 | Done | stage 3 | Privacy page: 365-day audit retention, the exact kept entries (test compares with the server's keep list), Ads Studio data and comment processing |
 | P0-13 | Done | stage 3 | Webhook delivery counter (counts only, after the signature check, flushed once a minute) |
 | P0-14 | Done | stage 3 | `GET /api/meta-ads/token-health` (platform route), reading tied to the key it checked, at most one Meta check per 10 min except the admin refresh; needs `ALBAYAN_META_APP_ID` |
+| Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
 ## 10. TASKS
