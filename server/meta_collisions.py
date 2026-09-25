@@ -19,6 +19,22 @@ changes them only with the owner's written choice:
   financial month was closed since refuses the whole reversal.
 * ``create_meta_collisions_router``: ``GET /api/meta-ads/collisions``, the report for admins.
 
+The studio desk's LINK step (D26; P1-09, P0-09b) claims one Meta campaign for one request through
+the doors below, in the link's own transaction:
+
+* ``claim_guard()`` (taken BEFORE the transaction; SQLite only: the Meta import's process lock) and
+  ``claim_campaign(conn, campaign_id, request_id)``: a PostgreSQL advisory lock on the campaign id
+  to the end of the transaction, then ``CampaignClaimedError`` when another request (archived ones
+  too) already claimed it, so of two links racing for one campaign exactly one wins.
+* ``remove_untouched_copies(conn, campaign_id, actor_id, request_id=...)``: after claim_campaign, in
+  the transaction that writes the claim, soft-deletes Manager's copies of that campaign that are still exactly as the automatic
+  import wrote them (the report's ``untouched`` rule: no money, no customer, no edit). Rows with
+  money, edits, a closed month or the owner's keep decision are never removed; they are reported.
+  Audited as ``collision_repair`` with a reversal record (``reverse_repair`` can restore them). It
+  takes the import's lock first, so an import running now either finished (its copy is removed
+  here) or sees the claim (``campaign_claimed_by``, read by meta_ads.import_meta_ad_draft).
+* ``claimed_campaign_ids(conn)``: every claimed Meta campaign id (discovery reads it once a pass).
+
 Platform code (D36): it may read Manager's ``ads`` and money rows and Ads Studio's
 ``adCampaignRequests``; systems reach them only through platform doors. The SQL runs on PostgreSQL
 (production) and SQLite (tests). scripts/studio_collision_repair.py is the command line for it.
@@ -30,14 +46,15 @@ import hashlib
 import json
 import math
 import re
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import bindparam, text
 
-from .db import db_conn, json_dumps, json_fields_select_sql, json_loads, now_ms
-from .meta_ads import is_studio_campaign_name
+from .db import db_conn, get_engine, json_dumps, json_fields_select_sql, json_loads, now_ms
+from .meta_ads import _META_WRITE_LOCK, is_studio_campaign_name
 from .operations import financial_period_is_closed
 from .rate_limiter import check_rate_limit
 from .security import new_id
@@ -55,6 +72,7 @@ MAX_CHOICES = 5000
 REPORT_READS_PER_MINUTE = 6
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")  # main.SAFE_ENTITY_ID_RE; no LIKE wildcard but "_"
+_META_CAMPAIGN_ID_RE = re.compile(r"^[0-9]{1,40}$")  # digits only: safe inside a LIKE pattern
 _REPAIR_ID_RE = re.compile(r"^collision_repair_[0-9a-f]{32}$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 # What the owner's choice rests on. Meta's sync rewrites spend, schedule, status, history and
@@ -88,6 +106,14 @@ MONEY_FLAGS = ("receipts", "collections", "wallet", "companyFunding", "paymentSt
 
 class CollisionRepairError(ValueError):
     """A choices or reversal file that cannot be used, or a repair or reversal refused as a whole."""
+
+
+class CampaignClaimedError(ValueError):
+    """claim_campaign: another studio request already claimed this Meta campaign."""
+
+    def __init__(self, request_ids: list[str]):
+        super().__init__("This Meta campaign is already linked to another request")
+        self.request_ids = list(request_ids)
 
 
 def _iso_now() -> str:
@@ -193,10 +219,13 @@ def _reasons(campaign_name: Any, campaign_id: Any, studio: Mapping[str, list[str
 
 
 def _studio_campaigns(conn: Any) -> dict[str, list[str]]:
-    """{Meta campaign id: [Studio request ids]} for every request linked to a Meta campaign (archived too)."""
-    sql = json_fields_select_sql(("metaCampaignId",), ("id",), "type = :type")
+    """{Meta campaign id: [Studio request ids]} for every request linked to a Meta campaign (archived too).
+
+    Only rows whose text names the field are parsed (a request carries its photos inline; a request
+    never linked or marked has no metaCampaignId at all)."""
+    sql = json_fields_select_sql(("metaCampaignId",), ("id",), "type = :type AND data_json LIKE :field")
     found: dict[str, list[str]] = {}
-    for row in conn.execute(text(sql), {"type": STUDIO_REQUEST_TYPE}).mappings():
+    for row in conn.execute(text(sql), {"type": STUDIO_REQUEST_TYPE, "field": "%metaCampaignId%"}).mappings():
         campaign = str(row.get("f_metacampaignid") or "").strip()
         if campaign:
             found.setdefault(campaign, []).append(str(row["id"]))
@@ -605,6 +634,153 @@ def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> 
         _audit(conn, actor_id, ADS_TYPE, ad_id, "Restored to Albayan Manager (collision repair reversed)",
                {"repairId": repair_id, "reversed": True})
     return summary
+
+
+# ------------------------------------------------------------------ the studio link's claim (D26)
+
+LINK_REMOVAL_SIGNER = "Albayan Studio link"  # signedBy of the reversal record a link writes
+
+
+def claimed_campaign_ids(conn: Any) -> set[str]:
+    """Every Meta campaign id an Albayan Studio request claimed (linked), archived requests too."""
+    return set(_studio_campaigns(conn))
+
+
+def campaign_claimed_by(conn: Any, campaign_id: Any) -> list[str]:
+    """The studio request ids (archived ones too) that claimed this Meta campaign id, sorted."""
+    campaign = str(campaign_id or "").strip()
+    if not campaign:
+        return []
+    params: dict[str, Any] = {"type": STUDIO_REQUEST_TYPE}
+    where = "type = :type"
+    if _META_CAMPAIGN_ID_RE.fullmatch(campaign):
+        # Only rows whose text holds the id are parsed: a request carries its photos inline.
+        where += " AND data_json LIKE :pattern"
+        params["pattern"] = f"%{campaign}%"
+    sql = json_fields_select_sql(("metaCampaignId",), ("id",), where)
+    return sorted(
+        str(row["id"]) for row in conn.execute(text(sql), params).mappings()
+        if str(row.get("f_metacampaignid") or "").strip() == campaign
+    )
+
+
+def claim_guard() -> Any:
+    """The process lock a studio link takes BEFORE its transaction on SQLite: the lock Manager's
+    automatic import holds (meta_ads._META_WRITE_LOCK), so a link and an import never interleave.
+    PostgreSQL takes advisory locks inside the transaction instead (a no-op here)."""
+    if str(get_engine().dialect.name or "") == "postgresql":
+        return nullcontext()
+    return _META_WRITE_LOCK
+
+
+def claim_campaign(conn: Any, campaign_id: Any, request_id: Any) -> None:
+    """Lock this Meta campaign's claim to the end of the caller's transaction (a PostgreSQL advisory
+    lock), then raise CampaignClaimedError when another studio request already claimed it.
+
+    The caller writes its request's metaCampaignId in the same transaction, so of two links racing
+    for one campaign the second waits here and then sees the first one's claim.
+    """
+    campaign = str(campaign_id or "").strip()
+    if _postgres(conn):
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"albayan_studio_claim:{campaign}"})
+    others = [rid for rid in campaign_claimed_by(conn, campaign) if rid != str(request_id or "")]
+    if others:
+        raise CampaignClaimedError(others)
+
+
+def remove_untouched_copies(
+    conn: Any, campaign_id: Any, actor_id: str | None = None, *, request_id: Any = ""
+) -> dict[str, Any]:
+    """Soft-delete Albayan Manager's untouched copies of a Meta campaign a studio request just claimed.
+
+    Runs in the link's transaction, after claim_campaign (the link then writes its claim; if that
+    write fails, the removal rolls back with it). A copy is removed only when it is
+    still exactly what the automatic import wrote (the report's ``untouched`` rule: import state
+    ``needs_completion``, no edit, no customer, no money flag or money record), its month is open
+    and the owner did not choose to keep it. Every other copy stays and is reported with its reason
+    (``kept_by_owner``, ``has_money`` + the money kinds, ``edited``, ``closed_period``, ``changed``).
+    Audited as ``collision_repair``: one summary row holding a reversal record (reverse_repair can
+    restore the removed rows) and one row per removed copy.
+
+    Returns ``{"repairId", "removed": [ad ids], "kept": [{"adId", "reason", "money"?}]}``.
+    """
+    campaign = str(campaign_id or "").strip()
+    result: dict[str, Any] = {"repairId": "", "removed": [], "kept": []}
+    if not _META_CAMPAIGN_ID_RE.fullmatch(campaign):
+        return result  # Manager's copies always carry Meta's numeric campaign id
+    if _postgres(conn):
+        # The import's own lock (meta_ads.import_meta_ad_draft): an import running now has finished.
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('albayan_meta_import'))"))
+    _serialize(conn)
+    sql = json_fields_select_sql(
+        ("metaCampaignId",), ("id",), "type = :type AND deleted = false AND data_json LIKE :pattern"
+    )
+    ad_ids = sorted(
+        str(row["id"]) for row in conn.execute(text(sql), {"type": ADS_TYPE, "pattern": f"%{campaign}%"}).mappings()
+        if str(row.get("f_metacampaignid") or "").strip() == campaign
+    )
+    if not ad_ids:
+        return result
+    live = {ad_id: row for ad_id, row in _load_ads(conn, ad_ids, lock=True).items() if not bool(row["deleted"])}
+    references = _money_references(conn, live)
+    kept_by_owner = _load_decisions(conn, lock=False)[1].get("kept") or {}
+    repair_id = new_id("collision_repair")
+    removed: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for ad_id in sorted(live):
+        row = live[ad_id]
+        data = _data(row)
+        flags = _money_flags(data, references.get(ad_id, set()))
+        money = [name for name in MONEY_FLAGS if flags[name]]
+        edited = (
+            str(data.get("metaImportState") or "") != "needs_completion"
+            or _int(data.get("editCount")) > 0
+            or bool(str(data.get("customerId") or "").strip())
+        )
+        if ad_id in kept_by_owner:
+            kept.append({"adId": ad_id, "reason": "kept_by_owner"})
+        elif money:
+            kept.append({"adId": ad_id, "reason": "has_money", "money": money})
+        elif edited:
+            kept.append({"adId": ad_id, "reason": "edited"})
+        elif financial_period_is_closed(ADS_TYPE, data, conn=conn):
+            kept.append({"adId": ad_id, "reason": "closed_period"})
+        else:
+            before = int(row["last_modified"] or 0)
+            after = max(now_ms(), before + 1)
+            done = conn.execute(
+                text(
+                    "UPDATE entities SET deleted = true, last_modified = :after "
+                    "WHERE type = :type AND id = :id AND deleted = false AND last_modified = :before"
+                ),
+                {"type": ADS_TYPE, "id": ad_id, "before": before, "after": after},
+            )
+            if done.rowcount != 1:
+                kept.append({"adId": ad_id, "reason": "changed"})
+                continue
+            removed.append({
+                "adId": ad_id, "lastModifiedBefore": before, "lastModifiedAfter": after,
+                "dataSha256": _sha256(row["data_json"]),
+            })
+    if not removed and not kept:
+        return result
+    applied_at = _iso_now()
+    reversal = {
+        "kind": REVERSAL_KIND, "version": 1, "repairId": repair_id, "appliedAt": applied_at, "database": "",
+        "signedBy": LINK_REMOVAL_SIGNER, "signedAt": applied_at, "choicesSha256": "", "removed": removed, "kept": [],
+    }
+    _audit(
+        conn, actor_id, ADS_TYPE, repair_id,
+        f"Studio link: removed {len(removed)} untouched Albayan Manager copies of a claimed Meta campaign, "
+        f"kept {len(kept)}",
+        {**reversal, "trigger": "studio_link", "metaCampaignId": campaign,
+         "studioRequestId": str(request_id or "")[:80], "reported": kept},
+    )
+    for item in removed:
+        _audit(conn, actor_id, ADS_TYPE, item["adId"],
+               "Removed from Albayan Manager: an untouched copy of a campaign Albayan Studio linked",
+               {"repairId": repair_id, "lastModifiedBefore": item["lastModifiedBefore"], "trigger": "studio_link"})
+    return {"repairId": repair_id, "removed": [item["adId"] for item in removed], "kept": kept}
 
 
 def create_meta_collisions_router(*, current_user_dependency: Callable[..., Any]) -> APIRouter:

@@ -10,12 +10,15 @@
   platform door server/user_directory.py (D36).
 * ``studio_ref(campaign_id)``: the studio code ``ALB-S-XXXXXXXX`` that goes into a studio
   campaign's Meta name (PLAN.md §6, D26).
+* ``studio_campaign_name(ref, request_name)``: the name a studio campaign carries in Meta,
+  ``"<studio code> · <request name>"`` (D26: assigned at approval, set in Meta on link).
 """
 
 import hashlib
 import re
 from typing import Any
 
+from ...meta_ads import STUDIO_CAMPAIGN_NAME_MAX
 from ...user_directory import user_exists
 
 # Record types this module family writes (all listed in the package OWNED_TYPES).
@@ -107,3 +110,25 @@ def studio_ref(campaign_id: Any, attempt: int = 0) -> str:
 
 def is_studio_ref(value: Any) -> bool:
     return bool(STUDIO_REF_RE.fullmatch(str(value or "").strip().upper()))
+
+
+STUDIO_NAME_SEPARATOR = " · "
+_NAME_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def studio_campaign_name(ref: str, request_name: Any) -> str:
+    """``"<ref> · <request name>"``: the Meta campaign name of a studio request (D26).
+
+    The request name loses angle brackets (as every stored text does), control characters become
+    spaces, spaces are collapsed, and it is cut so the whole name stays within
+    meta_ads.STUDIO_CAMPAIGN_NAME_MAX characters; the code itself is never cut. A request without a
+    name gets the code alone.
+    """
+    code = str(ref or "").strip().upper()
+    if not is_studio_ref(code):
+        raise ValueError("studio_campaign_name needs a studio code ALB-S-XXXXXXXX")
+    raw = str(request_name or "").replace("<", "").replace(">", "")
+    name = " ".join(_NAME_CONTROL_RE.sub(" ", raw).split())
+    room = STUDIO_CAMPAIGN_NAME_MAX - len(code) - len(STUDIO_NAME_SEPARATOR)
+    name = name[:room].rstrip()
+    return f"{code}{STUDIO_NAME_SEPARATOR}{name}" if name else code

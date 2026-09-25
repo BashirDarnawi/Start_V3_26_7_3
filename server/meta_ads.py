@@ -3,6 +3,10 @@
 The integration deliberately keeps Meta's live delivery facts in dedicated
 ``meta*`` fields.  It never rewrites Albayan's customer, receipt, payment,
 exchange-rate, or accounting status fields.
+
+Its one write to an ad object is the Albayan Studio link step's campaign rename
+(owner decision D26, ``MetaAdsClient.rename_campaign``), used only when the stored
+token reading shows ``ads_management``.
 """
 
 from __future__ import annotations
@@ -121,6 +125,12 @@ STUDIO_CAMPAIGN_CODE = "ALB-S-"
 # Discovery's slim fallback read has no campaign names; at most this many are read
 # per pass, and an ad whose campaign name stays unknown waits for the next pass.
 _STUDIO_NAME_LOOKUPS_PER_PASS = 5
+# The longest studio campaign name Albayan sends to Meta: a conservative bound for Meta's
+# campaign name field (a studio name is "ALB-S-XXXXXXXX · " + a request name of at most 160
+# characters, so today it never cuts).
+STUDIO_CAMPAIGN_NAME_MAX = 255
+# The permission the automatic rename on link needs (P0-09b; read from the stored token health).
+STUDIO_RENAME_SCOPE = "ads_management"
 # Albayan pauses itself at high usage BEFORE Meta refuses anything; that pause
 # still leaves room for a few small reads the owner asked for.
 _META_HEADROOM_MAX_USAGE_PERCENT = 95
@@ -1674,6 +1684,61 @@ class MetaAdsClient:
         row = self._get(_meta_id(campaign_id, "Meta campaign"), {"fields": "id,name"})
         return _clean_text(row.get("name"), 240)
 
+    def get_campaign(self, campaign_id: Any) -> dict[str, Any]:
+        """One campaign as the studio desk's link step reads it (D26, P3-02).
+
+        ONE paced GET of the campaign (with its ad sets' budgets expanded), plus the owning ad
+        account's currency (one more paced GET, and only for an allowlisted account). Budgets are
+        Meta's minor units of that currency (0 when not set at that level).
+        """
+        clean = _meta_id(campaign_id, "Meta campaign")
+        row = self._get(
+            clean,
+            {"fields": "id,name,account_id,effective_status,daily_budget,lifetime_budget,"
+                       "adsets.limit(50){daily_budget,lifetime_budget}"},
+        )
+        if str(row.get("id") or "") != clean:
+            raise MetaAdsError("not_found", "The selected Meta campaign was not found or is no longer accessible.")
+        try:
+            account = _account_id(row.get("account_id"))
+        except MetaAdsError:
+            account = ""
+        adsets_node = row.get("adsets") if isinstance(row.get("adsets"), dict) else {}
+        adsets = [item for item in (adsets_node.get("data") or []) if isinstance(item, dict)]
+        currency = ""
+        if account and account in set(self.config.allowed_account_ids):
+            try:
+                currency = _clean_text(self._get_account(account).get("currency"), 12).upper()
+            except MetaAdsError as error:
+                if error.retryable:
+                    raise
+        return {
+            "id": clean,
+            "name": _clean_text(row.get("name"), 400),
+            "accountId": account,
+            "effectiveStatus": _clean_text(row.get("effective_status"), 40),
+            "dailyBudgetMinor": _minor_units(row.get("daily_budget")),
+            "lifetimeBudgetMinor": _minor_units(row.get("lifetime_budget")),
+            "adSetDailyBudgetMinor": sum(_minor_units(item.get("daily_budget")) for item in adsets),
+            "adSetLifetimeBudgetMinor": sum(_minor_units(item.get("lifetime_budget")) for item in adsets),
+            "currency": currency,
+        }
+
+    def rename_campaign(self, campaign_id: Any, name: Any) -> None:
+        """Rename one campaign in Meta (D26 / P0-09b): the ONE write this client makes to an ad object.
+
+        ``POST /{campaign-id}`` with ``name``, on the admin lane (Albayan's system token, which needs
+        ``ads_management``), paced and paused like every other call. Only a name that carries the
+        studio code is ever sent. Raises MetaAdsError; a timeout may still have renamed it.
+        """
+        clean = _meta_id(campaign_id, "Meta campaign")
+        new_name = _clean_text(name, STUDIO_CAMPAIGN_NAME_MAX)
+        if not is_studio_campaign_name(new_name):
+            raise MetaAdsError("invalid_request", "A studio campaign name must carry the studio code.")
+        payload = self._post(clean, {"name": new_name})
+        if payload.get("success") is not True:
+            raise MetaAdsError("request_failed", "Meta did not confirm the campaign rename.")
+
     def get_account_funds(self, account_id: Any, *, use_headroom: bool = False) -> dict[str, Any]:
         """What Meta reports about the money in one ad account (read-only).
 
@@ -3225,6 +3290,19 @@ def import_meta_ad_draft(snapshot: dict[str, Any]) -> dict[str, Any]:
         )
         if existing_row is not None and isinstance(existing_data, dict):
             return _thin_ad_entity(_entity_from_row(existing_row, existing_data))
+        campaign_id = _clean_text(snapshot.get("metaCampaignId"), 40)
+        if campaign_id:
+            from .meta_collisions import campaign_claimed_by  # late: meta_collisions imports this module
+
+            # D26: a campaign a studio request claimed is never imported. Read under the import
+            # lock, which the studio link also takes before it removes Manager copies: an import
+            # running now finished first (its copy is removed there) or sees the claim here.
+            if campaign_claimed_by(conn, campaign_id):
+                raise MetaAdsError(
+                    "studio_campaign",
+                    "This Meta ad's campaign is linked to an Albayan Studio request, "
+                    "so it is not imported into Albayan Manager.",
+                )
         # The fast account edge normally gives us the Page ID before Meta lets
         # us read its real name. Wait for the paced enrichment snapshot before
         # creating/linking the local page; otherwise a temporary
@@ -4157,6 +4235,70 @@ def read_instagram_media_owner(page_id: Any, media_id: Any) -> dict[str, str]:
     }
 
 
+# Platform doors for the studio desk's LINK step (D26; P1-09, P3-02, P0-09b). Staff create the ad
+# in Meta with any name; linking it renames the campaign to the request's studio name (when the
+# token holds ads_management) and claims it. Meta is reached only through the shared paced lane
+# (refused while Albayan's Meta pause runs, nothing reaching Meta).
+
+
+def read_studio_campaign(campaign_id: Any) -> dict[str, Any]:
+    """One Meta campaign for the link step: ``{id, name, accountId, effectiveStatus,
+    dailyBudgetMinor, lifetimeBudgetMinor, adSetDailyBudgetMinor, adSetLifetimeBudgetMinor,
+    currency}`` (MetaAdsClient.get_campaign). Raises MetaAdsError (``not_configured``,
+    ``invalid_id``, ``not_found``, ``rate_limited``, ...)."""
+    return get_meta_ads_client().get_campaign(_meta_id(campaign_id, "Meta campaign"))
+
+
+def rename_studio_campaign(campaign_id: Any, name: Any) -> None:
+    """Rename one campaign in Meta to its studio name (MetaAdsClient.rename_campaign)."""
+    get_meta_ads_client().rename_campaign(_meta_id(campaign_id, "Meta campaign"), name)
+
+
+def studio_token_can_manage_ads(account_id: Any) -> bool:
+    """P0-09b: True when the STORED token reading (P0-14, meta_token_health) says Albayan's system
+    token is valid and holds ``ads_management`` for this ad account.
+
+    Never calls Meta (no debug_token per link). A reading that is missing, unchecked, stale (taken
+    for an earlier token), invalid or past its expiry answers False, and so does a permission whose
+    granular targets leave this account out: the link then asks staff to rename by hand.
+    """
+    from . import meta_token_health  # imports this module, so it is loaded on first use
+
+    try:
+        account = _account_id(account_id)
+    except MetaAdsError:
+        return False
+    report = meta_token_health.token_health_report()
+    if not (report.get("configured") is True and report.get("checked") is True and report.get("stale") is False
+            and report.get("isValid") is True):
+        return False
+    if STUDIO_RENAME_SCOPE not in (report.get("scopes") or []):
+        return False
+    days_left = report.get("daysLeft")
+    if isinstance(days_left, int) and days_left < 0:
+        return False
+    coverage = (report.get("pagesCoveredByScope") or {}).get(STUDIO_RENAME_SCOPE)
+    if isinstance(coverage, dict) and coverage.get("allTargets") is not True:
+        return account in {str(item) for item in coverage.get("targetIds") or []}
+    return True
+
+
+def studio_claimed_campaign_ids() -> set[str]:
+    """Meta campaign ids that an Albayan Studio request claimed (linked), archived requests too."""
+    from .meta_collisions import claimed_campaign_ids  # late: meta_collisions imports this module
+
+    with db_conn() as conn:
+        return claimed_campaign_ids(conn)
+
+
+def studio_campaign_claimed(campaign_id: Any) -> bool:
+    """True when an Albayan Studio request (archived ones too) claimed this one Meta campaign."""
+    from .meta_collisions import campaign_claimed_by  # late: meta_collisions imports this module
+
+    with db_conn() as conn:
+        return bool(campaign_claimed_by(conn, campaign_id))
+
+
 def _percentiles(values: list[float]) -> dict[str, Any] | None:
     """Nearest-rank p50/p90/p95 and the maximum (None without values)."""
     if not values:
@@ -4906,12 +5048,28 @@ def discover_meta_ads(
                     return None
             return campaign_names[campaign_id] or None
 
+        # D26: campaigns a studio request claimed (linked) are skipped too, whatever their name.
+        # Read once per pass, and only when there is something new to import.
+        claimed: set[str] | None = None
+
+        def _claimed_campaign(row: dict[str, Any]) -> bool:
+            nonlocal claimed
+            campaign_id = _clean_text(row.get("campaignId"), 40)
+            if not campaign_id:
+                return False
+            if claimed is None:
+                claimed = studio_claimed_campaign_ids()
+            return campaign_id in claimed
+
         imported: list[dict[str, Any]] = []
         failed: set[str] = set()
         studio_skipped: set[str] = set()
         last_error = ""
         for meta_id in candidate_ids:
             account_id, discovery_row = found[meta_id]
+            if _claimed_campaign(discovery_row):
+                studio_skipped.add(meta_id)  # remembered as known: never imported
+                continue
             campaign_name = _discovery_campaign_name(discovery_row)
             if campaign_name is None:
                 failed.add(meta_id)  # stays unknown, so a later pass retries it
@@ -4939,6 +5097,9 @@ def discover_meta_ads(
             try:
                 imported.append(import_meta_ad_draft(snapshot))
             except MetaAdsError as error:
+                if error.code == "studio_campaign":
+                    studio_skipped.add(meta_id)  # claimed while this pass ran: never imported
+                    continue
                 failed.add(meta_id)
                 last_error = error.public_message
             except Exception:
@@ -6865,6 +7026,15 @@ def create_meta_ads_router(
                     "This Meta ad belongs to Albayan Studio (its campaign name carries the studio code ALB-S-). "
                     "It cannot be linked to an Albayan Manager ad." if studio else
                     "Albayan could not read this ad's Meta campaign name to confirm it is not an Albayan Studio ad. Try again in a minute."))
+            claimed_campaign = _clean_text(snapshot.get("metaCampaignId"), 40)
+            if claimed_campaign and studio_campaign_claimed(claimed_campaign):
+                # D26: a campaign a studio request linked stays in Albayan Studio, whatever its name.
+                _audit(str(admin.get("id") or "") or None, "meta_link_refused", _local_id(ad_id),
+                       "Refused a Manager link to a campaign an Albayan Studio request claimed",
+                       {"metaAdId": body.metaAdId, "reason": "studio_claimed"})
+                raise HTTPException(status_code=409, detail=(
+                    "This Meta ad belongs to Albayan Studio (a studio request linked its campaign). "
+                    "It cannot be linked to an Albayan Manager ad."))
             activities, activity_cursor = _snapshot_activity_context(provider, snapshot)
             entity, replayed, changes = apply_meta_snapshot(
                 ad_id,

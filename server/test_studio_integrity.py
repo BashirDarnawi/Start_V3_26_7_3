@@ -118,7 +118,7 @@ def test_studio_money_checks_clean_lifecycle_reports_none(staff):
     settled = _approved(staff, user, 3_000, "Settled ad")
     meta_id = _meta_id()
     assert _link(staff, settled, meta_id).status_code == 200
-    _results(settled, user["id"], meta_id, 300, metaCampaignName="ALB-S-ABCDEFGH · Settled ad")
+    _results(settled, user["id"], meta_id, 300, metaCampaignName=_campaign_data(settled)["studioName"])  # P1-09 name
     assert _stop(staff["reviewer"]["cookies"], settled, refund=2_700).status_code == 200
     running = _approved(staff, user, 2_000, "Running ad")
     rejected = _create(user, 1_500)
@@ -605,6 +605,7 @@ def test_studio_money_checks_linked_name_without_code(staff):
     _results(own_ref, user["id"], metas[own_ref], 0, metaCampaignName="ALB-S-ABCDEFGH · Winter offer")
     with main_module._SQLITE_ENTITY_PATCH_LOCK, db_conn() as conn:
         _force(own_ref, conn, studioRef="ALB-S-ZZZZZZZZ")  # its own code is not in the name
+        _force(coded, conn, studioRef="")  # approved before P1-09 stamped codes: any ALB-S- code counts
     found = _codes(_scan([user["id"]]))
     assert set(found) == {"linked_name_without_code"}
     assert found["linked_name_without_code"]["requestIds"] == sorted([plain, own_ref])

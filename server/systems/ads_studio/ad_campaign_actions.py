@@ -79,18 +79,39 @@ P1-11, P1-12, P1-15, P1-18(a), P1-22; DECISIONS D4 + D5, D33):
 * Review (P1-12): Changes Requested and Rejected need a ``reviewReasonCode``
   from REVIEW_REASON_LABELS (the note is optional); approval needs none. The
   code is stored on the request and in its review history for the owner.
+
+Studio code and the LINK step (P1-09, P3-02, P0-09b; owner decision D26: the
+studio runs on the same ad accounts as the agency):
+
+* Approval stamps ``studioRef`` (``ALB-S-`` + 8 characters, unique among all
+  requests, archived ones too; assign_studio_ref) and ``studioName``
+  ("<studioRef> · <request name>", studio_types.studio_campaign_name).
+* ``publish-status`` with ``metaAdAccountId`` + ``metaCampaignId`` links the
+  Approved request to the Meta campaign staff made (any name): the account must
+  be on the allowlist, the campaign must exist in it and be claimed by no other
+  request; the Meta name is renamed to ``studioName`` when it lacks the code and
+  the stored token reading shows ``ads_management``, else staff get 409
+  NEEDS_MANUAL_RENAME with the name to copy. The link claims the campaign
+  (meta_collisions: discovery and import skip it) and removes Manager's
+  untouched copies of it in the same transaction (_claim_and_write).
 """
 
+import math
 import re
+import unicodedata
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import Field
 from sqlalchemy import text
 
+from ... import meta_ads as _meta
+from ... import meta_collisions as _collisions
 from ...db import db_conn, json_dumps, json_fields_select_sql, json_loads, now_ms
+from ...rate_limiter import check_rate_limit
 from ...schemas import (
     AdCampaignPublishStatusRequest,
     AdCampaignReviewRequest,
@@ -106,6 +127,8 @@ from ...wallet_payments import (
     release_open_campaign_capture,
     release_orphan_campaign_payment,
 )
+from . import studio_types
+from .studio_types import is_studio_ref, studio_campaign_name
 
 AD_CAMPAIGN_COLLECTION = "adCampaignRequests"
 AD_CAMPAIGN_EDITABLE_STATUSES = frozenset({"Draft", "Changes Requested"})
@@ -138,6 +161,23 @@ class AdCampaignWithdrawBody(AdCampaignSubmitRequest):
     version), so a retried withdraw replays its committed result."""
 
 
+class AdCampaignPublishStatusBody(AdCampaignPublishStatusRequest):
+    """publish-status: the LINK step or the launch marker (staff only).
+
+    * Link (P1-09, P3-02, P0-09b): ``metaAdAccountId`` + ``metaCampaignId`` (``publishStatus``
+      left out or ``meta_review``, which the link sets).
+    * Marker: ``publishStatus`` live / paused / '' (cleared), optionally with a Meta campaign id.
+
+    The version baseline is ``expectedVersion`` or ``expectedLastModified`` (the same number: the
+    request's lastModified); one of them is required.
+    """
+
+    expectedLastModified: Optional[int] = Field(default=None, ge=0)
+    expectedVersion: Optional[int] = Field(default=None, ge=0)
+    publishStatus: Optional[Literal["live", "paused", "meta_review", ""]] = None
+    metaAdAccountId: Optional[str] = Field(default=None, max_length=40)
+
+
 # Refusal texts shared with the client's Arabic map: each ``detail`` STARTS with one of these
 # (a dynamic part may follow). Never reword one; add a new text instead.
 REFUSE_TOTAL_MIN = "The total budget must be at least "                   # T1
@@ -151,6 +191,29 @@ REFUSE_REASON_UNKNOWN = "Unknown reason code"                             # T8
 REFUSE_DURATION = "durationDays must be a whole number of days"           # T14
 REFUSE_WITHDRAW_NOT_SUBMITTED = "Only Submitted campaigns can be withdrawn"                # P1-03
 REFUSE_WITHDRAW_APPROVED = "This request was already approved — ask to stop it instead"  # P1-03
+# The staff desk's LINK step (P1-09, P3-02, P0-09b; owner decision D26).
+REFUSE_LINK_NOT_APPROVED = "Only Approved requests can be linked to a Meta campaign"
+REFUSE_LINK_BAD_ACCOUNT_ID = "Invalid Meta ad account id"
+REFUSE_LINK_BAD_CAMPAIGN_ID = "Invalid Meta campaign id"
+REFUSE_LINK_ACCOUNT = "This Meta ad account is not one of Albayan's ad accounts"
+REFUSE_LINK_NOT_FOUND = "The Meta campaign was not found"
+REFUSE_LINK_WRONG_ACCOUNT = "This Meta campaign is not in the chosen ad account"
+REFUSE_LINK_TAKEN = "This Meta campaign is already linked to another request"
+REFUSE_LINK_OTHER_CODE = "This Meta campaign carries another request's studio code"
+REFUSE_LINK_RELINK = "This request is already linked to another Meta campaign"
+REFUSE_LINK_META_BUSY = "Meta is busy right now, so the campaign could not be linked"
+REFUSE_LINK_META_FAILED = "Meta could not return this campaign"
+REFUSE_LINK_NOT_CONFIGURED = "The Meta connection is not configured"
+REFUSE_LINK_RATE = "Too many Meta links"
+REFUSE_STUDIO_REF = "Could not assign a studio code"
+# 409 with detail {code, message, studioRef, studioName}: the token lacks ads_management (or Meta
+# refused the rename), so staff rename the campaign by hand ("Copy name") and link again.
+NEEDS_MANUAL_RENAME = "NEEDS_MANUAL_RENAME"
+REFUSE_NEEDS_MANUAL_RENAME = "Rename the campaign in Meta to the name shown, then link again"
+# Link warnings (codes in the response's ``warnings``; the link still happens).
+LINK_WARNING_BUDGET_ABOVE_PAID = "meta_budget_above_paid"  # Meta's budget is above what the customer paid
+LINK_RATE_PER_MINUTE = 20
+_STUDIO_REF_ATTEMPTS = 8
 
 # P1-12: why staff sent a request back or rejected it (stored as reviewReasonCode). The client
 # shows these labels verbatim; keep the codes stable (D33 sends legacy daily rows back with
@@ -529,6 +592,348 @@ def _redacted_ad_campaign_tombstone(entity: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------- studio code (P1-09, D26)
+
+
+def _studio_ref_taken(conn: Any, ref: str, campaign_id: str) -> bool:
+    """True when ANOTHER request (archived ones too) already carries this studio code. Only rows
+    whose text holds the code are parsed (a request carries its photos inline)."""
+    rows = conn.execute(
+        text(json_fields_select_sql(("studioRef",), ("id",), "type = :type AND id <> :id AND data_json LIKE :pattern")),
+        {"type": AD_CAMPAIGN_COLLECTION, "id": campaign_id, "pattern": f"%{ref}%"},
+    ).mappings().all()
+    return any(str(row.get("f_studioref") or "").strip().upper() == ref for row in rows)
+
+
+def assign_studio_ref(conn: Any, campaign_id: str, data: dict[str, Any]) -> str:
+    """The request's studio code: the one it has, else the first free ``studio_ref(id, attempt)``.
+
+    The code of attempt 0 is fixed by the campaign id, so a retry finds the same code; another
+    request already holding it moves this one to attempt 1, 2, ... Two approvals racing can only
+    collide when two campaign ids share their first 40 hash bits (about one pair in a million
+    million), so the check runs outside the approval's write.
+    """
+    own = str(data.get("studioRef") or "").strip().upper()
+    if is_studio_ref(own):
+        return own
+    for attempt in range(_STUDIO_REF_ATTEMPTS):
+        ref = studio_types.studio_ref(campaign_id, attempt)
+        if not _studio_ref_taken(conn, ref, campaign_id):
+            return ref
+    raise HTTPException(status_code=503, detail=f"{REFUSE_STUDIO_REF}. Try again.")
+
+
+def _studio_fields(campaign_id: str, data: dict[str, Any]) -> dict[str, str]:
+    """``studioRef`` + ``studioName`` ("<code> · <request name>") for an approval."""
+    with db_conn() as conn:
+        ref = assign_studio_ref(conn, campaign_id, data)
+    return {"studioRef": ref, "studioName": studio_campaign_name(ref, data.get("name"))}
+
+
+# ---------------------------------------------------------------- the LINK step (P1-09, P3-02, P0-09b)
+
+
+def _expected_version(body: AdCampaignPublishStatusBody) -> int:
+    value = body.expectedVersion if body.expectedVersion is not None else body.expectedLastModified
+    if value is None:
+        raise HTTPException(status_code=400, detail="expectedVersion is required")
+    return int(value)
+
+
+def _clean_meta_number(value: Any, refusal: str) -> str:
+    raw = str(value or "").strip()
+    digits = raw[4:] if raw.lower().startswith("act_") and refusal == REFUSE_LINK_BAD_ACCOUNT_ID else raw
+    if not (digits.isascii() and digits.isdigit() and 1 <= len(digits) <= 40):
+        raise HTTPException(status_code=400, detail=refusal)
+    return digits
+
+
+def _account_digits(value: Any) -> str:
+    raw = str(value or "").strip()
+    return raw[4:] if raw.startswith("act_") else raw
+
+
+def _name_carries(name: Any, ref: str) -> bool:
+    """The Meta name holds this request's studio code (any case; typed by hand in Ads Manager)."""
+    return bool(ref) and ref in unicodedata.normalize("NFKC", str(name or "")).upper()
+
+
+def _meta_budget_minor(data: dict[str, Any], meta: dict[str, Any]) -> int:
+    """What Meta may spend on the campaign, in the account's minor units (0 = no budget read):
+    the campaign's lifetime budget, else its daily budget x the request's days, else the ad sets'
+    lifetime budgets plus their daily budgets x days."""
+    days = max(campaign_days(data), 1)
+    if _whole(meta.get("lifetimeBudgetMinor")):
+        return _whole(meta.get("lifetimeBudgetMinor"))
+    if _whole(meta.get("dailyBudgetMinor")):
+        return _whole(meta.get("dailyBudgetMinor")) * days
+    return _whole(meta.get("adSetLifetimeBudgetMinor")) + _whole(meta.get("adSetDailyBudgetMinor")) * days
+
+
+def _link_warnings(data: dict[str, Any], meta: dict[str, Any]) -> tuple[list[str], int]:
+    """P3-02: (warning codes, Meta budget in minor units). The budget is compared only for a USD
+    account, with what the customer paid (the approval's capture)."""
+    budget = _meta_budget_minor(data, meta)
+    paid = _whole(data.get("paidMinorUSD")) or campaign_hold_minor(data)
+    warnings = []
+    if str(meta.get("currency") or "").upper() == "USD" and budget and paid and budget > paid:
+        warnings.append(LINK_WARNING_BUDGET_ABOVE_PAID)
+    return warnings, budget
+
+
+def _meta_link_error(error: Any) -> HTTPException:
+    """A MetaAdsError of the link's Meta read, as the desk's refusal."""
+    code = str(getattr(error, "code", "") or "")
+    provider = str(getattr(error, "provider_code", "") or "")
+    if code == "not_configured":
+        return HTTPException(status_code=503, detail=REFUSE_LINK_NOT_CONFIGURED)
+    if getattr(error, "retryable", False):
+        wait = max(_meta.studio_meta_pause_seconds(), 60)
+        return HTTPException(status_code=503, detail=f"{REFUSE_LINK_META_BUSY}. Try again in a minute.",
+                             headers={"Retry-After": str(wait)})
+    if code in {"not_found", "invalid_id"} or provider.split(".")[0] == "100":
+        return HTTPException(status_code=400, detail=REFUSE_LINK_NOT_FOUND)
+    if code == "account_not_allowed":
+        return HTTPException(status_code=400, detail=REFUSE_LINK_ACCOUNT)
+    return HTTPException(status_code=502, detail=f"{REFUSE_LINK_META_FAILED}" + (f" (Meta code {provider})" if provider else ""))
+
+
+def _needs_manual_rename(ref: str, name: str) -> HTTPException:
+    return HTTPException(status_code=409, detail={
+        "code": NEEDS_MANUAL_RENAME, "message": REFUSE_NEEDS_MANUAL_RENAME, "studioRef": ref, "studioName": name,
+    })
+
+
+def _enforce_link_rate(user: dict[str, Any]) -> None:
+    """At most LINK_RATE_PER_MINUTE links per staff account a minute (each one reads Meta)."""
+    allowed, _left, retry_after_ms = check_rate_limit(
+        f"ad-studio:link:{user.get('id')}", LINK_RATE_PER_MINUTE, 60_000
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429, detail=f"{REFUSE_LINK_RATE}. Please wait a minute.",
+            headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))},
+        )
+
+
+def _link_view(data: dict[str, Any]) -> dict[str, Any]:
+    """What a link answers next to the request: {renamed, removedManagerCopies, keptManagerCopies,
+    warnings, studioRef, studioName}, from the result the link stored (a replay answers the same)."""
+    stored = data.get("metaLinkResult") if isinstance(data.get("metaLinkResult"), dict) else {}
+    return {
+        "renamed": stored.get("renamed") is True,
+        "removedManagerCopies": _whole(stored.get("removedManagerCopies")),
+        "keptManagerCopies": _whole(stored.get("keptManagerCopies")),
+        "warnings": [str(item) for item in stored.get("warnings") or [] if isinstance(item, str)][:10],
+        "studioRef": str(data.get("studioRef") or ""),
+        "studioName": str(data.get("studioName") or ""),
+    }
+
+
+def _claim_and_write(
+    ctx: dict[str, Any],
+    campaign_id: str,
+    *,
+    operation_id: str,
+    baseline: int,
+    meta_campaign_id: str,
+    actor_id: str,
+    fields_for: Callable[[dict[str, Any]], dict[str, Any]],
+    not_approved: str,
+    before_write: Optional[Callable[[], None]] = None,
+    complete_marker: bool = False,
+) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
+    """Claim one Meta campaign for this request: ONE transaction.
+
+    Locks (PLAN.md §7.8 order, then the claim): the request row, the campaign's claim
+    (meta_collisions.claim_campaign: exactly one of two links racing for a campaign wins), then
+    ``before_write`` (the Meta rename, if any, so a Meta call runs while these locks are held; a
+    failure rolls everything back), the removal of Manager's untouched copies
+    (meta_collisions.remove_untouched_copies, which takes the import's lock), and the request's
+    write. On SQLite the Meta import's process lock and the entity-patch lock are taken first.
+    Returns (entity, copies); copies is None when an identical request (same operationId) or a
+    link to the same campaign committed first: nothing was written. With ``complete_marker`` a
+    request the classic marker tied to this same campaign (no ``linkedAt``) is linked for real.
+    """
+    patch_guard = nullcontext() if ctx["is_postgres"]() else ctx["sqlite_patch_lock"]()
+    with _collisions.claim_guard(), patch_guard:
+        with db_conn() as conn:
+            row = _lock_campaign_row(conn, ctx, campaign_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Campaign request not found")
+            entity = ctx["entity_from_db_row"](row)
+            data = dict(entity.get("data") or {})
+            linked = str(data.get("metaCampaignId") or "").strip()
+            if str(data.get("lastPublishOperationId") or "") == operation_id:
+                return entity, None
+            if linked == meta_campaign_id and (data.get("linkedAt") or not complete_marker):
+                return entity, None
+            if str(data.get("status") or "Draft") != "Approved":
+                raise HTTPException(status_code=409, detail=not_approved)
+            if int(entity.get("lastModified") or 0) != int(baseline):
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+            if linked and linked != meta_campaign_id:
+                raise HTTPException(status_code=409, detail=REFUSE_LINK_RELINK)
+            try:
+                _collisions.claim_campaign(conn, meta_campaign_id, campaign_id)
+            except _collisions.CampaignClaimedError:
+                raise HTTPException(status_code=409, detail=REFUSE_LINK_TAKEN)
+            if before_write is not None:
+                before_write()
+            copies = _collisions.remove_untouched_copies(conn, meta_campaign_id, actor_id or None, request_id=campaign_id)
+            modified = max(now_ms(), int(baseline) + 1)
+            data.update(fields_for(copies))
+            data["_lastModified"] = modified
+            result = conn.execute(
+                text(
+                    "UPDATE entities SET data_json = :d, last_modified = :m "
+                    "WHERE type = :t AND id = :id AND deleted = false AND last_modified = :baseline"
+                ),
+                {"d": json_dumps(data), "m": modified, "t": AD_CAMPAIGN_COLLECTION, "id": campaign_id, "baseline": int(baseline)},
+            )
+            if int(result.rowcount or 0) != 1:
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")  # rolls the removal back too
+            return {**entity, "data": data, "lastModified": modified}, copies
+
+
+def _link_meta_campaign(
+    ctx: dict[str, Any],
+    user: dict[str, Any],
+    campaign_id: str,
+    operation_id: str,
+    baseline: int,
+    body: AdCampaignPublishStatusBody,
+) -> dict[str, Any]:
+    """The LINK step (owner decision D26; P1-09, P3-02, P0-09b). Staff made the ad in Meta with any
+    name; this links the Approved request to that Meta campaign and claims it.
+
+    Checks, in order: the ids; the request (404 for a private draft); an operationId replay (the
+    first result again); Approved; the version; not linked elsewhere; Meta configured and the account
+    on the allowlist; the campaign not claimed by another request (409); ONE Meta read (the campaign
+    exists and is in that account; its budget -> warning ``meta_budget_above_paid`` above what the
+    customer paid). Then the name: it already carries this request's studio code -> link; it carries
+    ANOTHER request's code -> 409; the stored token reading (never a debug_token call) shows
+    ``ads_management`` -> rename it in Meta to the request's studio name inside the link's
+    transaction, then link; otherwise -> 409 NEEDS_MANUAL_RENAME with the studio name (staff rename
+    it by hand and link again). A rename Meta refuses (not a busy answer) falls back to the same 409.
+
+    The link writes publishStatus ``meta_review``, ``metaCampaignId`` (unique), ``metaAdAccountId``
+    (``act_<id>``), ``metaCampaignName``, ``linkedAt``/``linkedBy``, the studio code and name, and
+    ``metaLinkResult``; Manager's untouched copies of the campaign are removed in the same
+    transaction. Audited ``publish_status`` (with ``renamed``). The answer is the request plus
+    {renamed, removedManagerCopies, keptManagerCopies, warnings, studioRef, studioName}.
+    """
+    account = _clean_meta_number(body.metaAdAccountId, REFUSE_LINK_BAD_ACCOUNT_ID)
+    meta_id = _clean_meta_number(body.metaCampaignId, REFUSE_LINK_BAD_CAMPAIGN_ID)
+    if body.publishStatus not in (None, "meta_review"):
+        raise HTTPException(status_code=400, detail="A link sets publishStatus meta_review; leave publishStatus out")
+    campaign = ctx["get_entity"](AD_CAMPAIGN_COLLECTION, campaign_id)
+    if not campaign or campaign.get("deleted"):
+        raise HTTPException(status_code=404, detail="Campaign request not found")
+    data = campaign.get("data") or {}
+    creator = str(campaign.get("createdBy") or data.get("createdBy") or "")
+    actor_id = str(user.get("id") or "system")
+    if actor_id != creator and str(data.get("status") or "Draft") not in REVIEWER_VISIBLE_STATUSES:
+        raise HTTPException(status_code=404, detail="Campaign request not found")  # never confirm a private draft
+
+    def answer(entity: dict[str, Any]) -> dict[str, Any]:
+        return {**ctx["project_entity_media_for_user"](entity, user, False), **_link_view(entity.get("data") or {})}
+
+    if str(data.get("lastPublishOperationId") or "") == operation_id:
+        if str(data.get("metaCampaignId") or "") != meta_id or _account_digits(data.get("metaAdAccountId")) != account:
+            raise HTTPException(status_code=409, detail="operationId was already used for another update")
+        return answer(campaign)  # the first response was lost after commit: the same result again
+    ctx["enforce_ad_campaign_rate"](user)
+    _enforce_link_rate(user)
+    if str(data.get("status") or "Draft") != "Approved":
+        raise HTTPException(status_code=409, detail=REFUSE_LINK_NOT_APPROVED)
+    if int(campaign.get("lastModified") or 0) != baseline:
+        raise HTTPException(status_code=409, detail="Conflict: record has changed")
+    linked = str(data.get("metaCampaignId") or "").strip()
+    if linked == meta_id and data.get("linkedAt"):
+        return answer(campaign)  # already linked to this campaign (a second press): nothing to change
+    if linked and linked != meta_id:
+        raise HTTPException(status_code=409, detail=REFUSE_LINK_RELINK)
+    config = _meta.load_meta_ads_config()
+    if not config.configured:
+        raise HTTPException(status_code=503, detail=REFUSE_LINK_NOT_CONFIGURED)
+    if account not in set(config.allowed_account_ids):
+        raise HTTPException(status_code=400, detail=REFUSE_LINK_ACCOUNT)  # empty allowlist: fail closed
+    with db_conn() as conn:
+        if [rid for rid in _collisions.campaign_claimed_by(conn, meta_id) if rid != campaign_id]:
+            raise HTTPException(status_code=409, detail=REFUSE_LINK_TAKEN)
+        ref = assign_studio_ref(conn, campaign_id, data)
+    stored_name = str(data.get("studioName") or "")  # the approval's name; built now for older approvals
+    name = stored_name if stored_name.startswith(ref) else studio_campaign_name(ref, data.get("name"))
+    try:
+        meta = _meta.read_studio_campaign(meta_id)
+    except _meta.MetaAdsError as error:
+        raise _meta_link_error(error)
+    if str(meta.get("accountId") or "") != account:
+        raise HTTPException(status_code=400, detail=REFUSE_LINK_WRONG_ACCOUNT)
+    warnings, budget = _link_warnings(data, meta)
+    meta_name = str(meta.get("name") or "")
+    rename = not _name_carries(meta_name, ref)
+    if rename:
+        if _meta.is_studio_campaign_name(meta_name):
+            raise HTTPException(status_code=409, detail=REFUSE_LINK_OTHER_CODE)
+        if not _meta.studio_token_can_manage_ads(account):
+            raise _needs_manual_rename(ref, name)
+
+    def rename_in_meta() -> None:
+        try:
+            _meta.rename_studio_campaign(meta_id, name)
+        except _meta.MetaAdsError as error:
+            if error.retryable or error.code == "not_configured":
+                raise _meta_link_error(error)
+            raise _needs_manual_rename(ref, name)  # Meta refused the rename: staff rename it by hand
+
+    linked_at = ctx["iso_utc"]()
+
+    def link_fields(copies: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "publishStatus": "meta_review",
+            "metaCampaignId": meta_id,
+            "metaAdAccountId": f"act_{account}",
+            "metaCampaignName": name if rename else meta_name,
+            "linkedAt": linked_at,
+            "linkedBy": actor_id,
+            "publishedAt": linked_at,
+            "publishedBy": actor_id,
+            "lastPublishOperationId": operation_id,
+            "studioRef": ref,
+            "studioName": name,
+            "metaLinkResult": {
+                "renamed": rename,
+                "removedManagerCopies": len(copies.get("removed") or []),
+                "keptManagerCopies": len(copies.get("kept") or []),
+                "warnings": warnings,
+                "metaBudgetMinor": budget,
+                "metaCurrency": str(meta.get("currency") or "")[:12],
+            },
+        }
+
+    saved, copies = _claim_and_write(
+        ctx, campaign_id, operation_id=operation_id, baseline=baseline, meta_campaign_id=meta_id,
+        actor_id=actor_id, fields_for=link_fields, not_approved=REFUSE_LINK_NOT_APPROVED,
+        before_write=rename_in_meta if rename else None, complete_marker=True,
+    )
+    if copies is not None:
+        view = _link_view(saved.get("data") or {})
+        ctx["audit"](
+            actor_id,
+            "publish_status",
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            f"Linked campaign {campaign_id} to Meta campaign {meta_id}" + (" and renamed it in Meta" if rename else ""),
+            {"operationId": operation_id, "publishStatus": "meta_review", "metaCampaignId": meta_id,
+             "metaAdAccountId": f"act_{account}", "studioRef": ref, "renamed": rename,
+             "removedManagerCopies": view["removedManagerCopies"], "keptManagerCopies": view["keptManagerCopies"],
+             "collisionRepairId": str(copies.get("repairId") or ""), "warnings": warnings, "metaBudgetMinor": budget},
+        )
+    return answer(saved)
+
+
 def create_ad_campaign_actions_router(
     *,
     current_user_dependency: Callable[..., Any],
@@ -768,6 +1173,7 @@ def create_ad_campaign_actions_router(
         legacy = legacy_budget_rules(current, limits)
         held_minor = campaign_hold_minor(current)
         bumped_dates: dict[str, str] = {}
+        studio_fields: dict[str, str] = {}
         if decision == "Approved":
             today = ctx["business_today"]()  # the Libya day: approval at 00:30 local is already "today"
             _today_iso = today.strftime("%Y-%m-%d")
@@ -799,6 +1205,9 @@ def create_ad_campaign_actions_router(
                     enforce_budget_limits(days, total, limits)
                 if total != held_minor:
                     raise HTTPException(status_code=409, detail="Conflict: record has changed")
+            # P1-09 (D26): the request's unique studio code and its Meta campaign name, read before
+            # the capture so a failure here never leaves one behind.
+            studio_fields = _studio_fields(campaign_id, current)
         actor_id = str(user.get("id") or "system")
         # An approval CAPTURES the held budget before its status write, with a
         # fresh locked status check inside the capture (at most one payment per
@@ -856,6 +1265,7 @@ def create_ad_campaign_actions_router(
                     "paidMinorUSD": held_minor,  # = the capture (the hold); stop reads the ledger row itself
                     "paymentTransactionId": wallet_payment_tx,
                     "paidAt": reviewed_at,
+                    **studio_fields,
                 }
             )
             if p1_row:
@@ -915,7 +1325,8 @@ def create_ad_campaign_actions_router(
                 f"Reviewed campaign request {campaign_id}: {decision}",
                 {"decision": decision, "note": note, "operationId": operation_id, "walletPaymentTx": wallet_payment_tx,
                  "budgetMinorUSD": int(current.get("budgetMinorUSD") or 0), "reviewReasonCode": reason_code,
-                 "heldMinorUSD": held_minor, "legacyRules": legacy},
+                 "heldMinorUSD": held_minor, "legacyRules": legacy,
+                 **({"studioRef": studio_fields["studioRef"]} if studio_fields else {})},
             )
         if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
             "Submitted", "Approved", "Rejected", "Stopped"
@@ -1168,16 +1579,37 @@ def create_ad_campaign_actions_router(
     @router.post("/{campaign_id}/publish-status")
     def set_ad_campaign_publish_status(
         campaign_id: str,
-        body: AdCampaignPublishStatusRequest,
+        body: AdCampaignPublishStatusBody,
         request: Request,
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
-        """Staff marker that the Approved ad was launched/paused on Meta by hand."""
+        """Staff only. With ``metaAdAccountId`` + ``metaCampaignId``: the LINK step (P1-09, P3-02,
+        P0-09b; see _link_meta_campaign).
+
+        Otherwise the marker that the Approved ad was launched/paused on Meta by hand (live /
+        paused / '' = cleared, which clears the link too). A marker that brings a NEW Meta campaign
+        id claims it like a link (unique among requests; Manager's untouched copies removed) but
+        checks nothing in Meta, so the team desk links instead; a request already linked to another
+        campaign is refused.
+        """
         require_same_origin(request)
         if not _is_reviewer(ctx, user):
             raise HTTPException(status_code=403, detail="Forbidden")
         campaign_id = ctx["validate_entity_id"](campaign_id)
         operation_id = _clean_operation_id(ctx, body.operationId)
+        expected = _expected_version(body)
+        if str(body.metaAdAccountId or "").strip():
+            return _link_meta_campaign(ctx, user, campaign_id, operation_id, expected, body)
+        if body.publishStatus is None:
+            raise HTTPException(
+                status_code=400,
+                detail="publishStatus is required (or metaAdAccountId and metaCampaignId to link a Meta campaign)",
+            )
+        if body.publishStatus == "meta_review":
+            raise HTTPException(
+                status_code=400,
+                detail="meta_review is set by linking a Meta campaign (metaAdAccountId and metaCampaignId)",
+            )
         value = str(body.publishStatus)
         campaign = ctx["get_entity"](AD_CAMPAIGN_COLLECTION, campaign_id)
         if not campaign or campaign.get("deleted"):
@@ -1213,13 +1645,39 @@ def create_ad_campaign_actions_router(
                 fields["metaCampaignId"] = ctx["sanitize_str"](str(body.metaCampaignId or ""))[:120]
         else:
             fields.update({"publishedAt": None, "publishedBy": None, "metaCampaignId": ""})
+        if fields.get("metaCampaignId") == "":
+            # No Meta campaign any more: the link's own fields go with it (its result stays as history).
+            fields.update({"metaAdAccountId": "", "metaCampaignName": "", "linkedAt": None, "linkedBy": None})
+        linked = str(data.get("metaCampaignId") or "").strip()
+        new_meta = str(fields.get("metaCampaignId") or "")
+        if new_meta and new_meta != linked:
+            if linked:
+                raise HTTPException(status_code=409, detail=REFUSE_LINK_RELINK)
+            saved, copies = _claim_and_write(
+                ctx, campaign_id, operation_id=operation_id, baseline=expected, meta_campaign_id=new_meta,
+                actor_id=actor_id, fields_for=lambda _copies: fields,
+                not_approved="Only Approved campaigns can be marked launched",
+            )
+            if copies is not None:
+                ctx["audit"](
+                    actor_id,
+                    "publish_status",
+                    AD_CAMPAIGN_COLLECTION,
+                    campaign_id,
+                    f"Marked campaign {campaign_id} publish status: {value}",
+                    {"operationId": operation_id, "publishStatus": value, "metaCampaignId": new_meta,
+                     "removedManagerCopies": len(copies.get("removed") or []),
+                     "keptManagerCopies": len(copies.get("kept") or []),
+                     "collisionRepairId": str(copies.get("repairId") or "")},
+                )
+            return ctx["project_entity_media_for_user"](saved, user, False)
         try:
             saved = ctx["patch_entity"](
                 AD_CAMPAIGN_COLLECTION,
                 campaign_id,
                 fields,
                 actor_id,
-                expected_last_modified=body.expectedLastModified,
+                expected_last_modified=expected,
                 enforce_ad_campaign_quota=False,
             )
         except HTTPException as error:
