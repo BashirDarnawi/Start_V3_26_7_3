@@ -31,7 +31,8 @@ SCHEMA_RE = re.compile(r"^albayan_fin_review_[0-9a-f]{32}$")
 TEST_DATABASE_RE = re.compile(r"^(?:albayan_test|test_albayan)(?:_[a-z0-9_]+)?$")
 SCENARIOS = ("refund", "company_budget", "debt_growth", "concurrent_funding",
              "coverage_lifecycle", "coverage_lock_order", "coverage_overlaps", "period_lock_protocol",
-             "legacy_compatibility", "legacy_backfills")
+             "legacy_compatibility", "legacy_backfills",
+             "campaign_submit_serialisation", "campaign_withdraw_vs_approve", "campaign_approval_self_release")
 
 
 def _guarded_url(raw: str) -> URL:
@@ -521,6 +522,12 @@ def _run_scenario(scenario: str) -> None:
                     compatibility.test_closed_period_old_receipt_is_readable_but_not_rewritten(actors, monkeypatch)
             elif scenario == "legacy_backfills":
                 _legacy_backfills(actors)
+            elif scenario == "campaign_submit_serialisation":
+                _campaign_submit_serialisation(t)
+            elif scenario == "campaign_withdraw_vs_approve":
+                _campaign_withdraw_vs_approve(t)
+            elif scenario == "campaign_approval_self_release":
+                _campaign_approval_self_release(t)
             else:
                 _concurrent_funding(t, actors)
             assert get_engine() is engine, "Financial scenario changed its database target"
@@ -529,6 +536,405 @@ def _run_scenario(scenario: str) -> None:
         print(f"PASS postgresql {scenario}")
     finally:
         engine.dispose()
+
+
+# Albayan Studio money races (PLAN.md 7.8 lock table; TASKS P1-02, P1-03, P1-03b, P1-19).
+# Row-lock statements are told apart by their SQL text: submit and withdraw lock the request
+# with "SELECT * FROM entities", an approval's capture with "SELECT data_json FROM entities
+# WHERE type = 'adCampaignRequests'", its status write (main.patch_entity) with "SELECT type,
+# id, data_json, ...", and submit locks the owner with "SELECT id FROM users".
+
+_ACTION_ROW_LOCK = "SELECT * FROM entities WHERE type = "
+_CAPTURE_ROW_LOCK = "SELECT data_json FROM entities WHERE type = 'adCampaignRequests'"
+_STATUS_WRITE_ROW_LOCK = "SELECT type, id, data_json, deleted, created_at, created_by, last_modified FROM entities"
+_OWNER_ROW_LOCK = "SELECT id FROM users WHERE id = "
+
+
+def _row_lock(statement, parameters, lock_sql: str, row_id: str) -> bool:
+    return (
+        lock_sql in statement and "FOR UPDATE" in statement
+        and isinstance(parameters, dict) and parameters.get("id") == row_id
+    )
+
+
+def _studio_actors():
+    """The Ads Studio actors of test_ad_studio_backend (admin, funded customers, reviewer)."""
+    from server import test_ad_studio_backend as ad
+    return ad, ad.actors.__wrapped__()
+
+
+def _studio_post(app, path: str, body: dict, cookies: dict, barrier=None):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app, headers={"Origin": "http://testserver"}, raise_server_exceptions=False)
+    try:
+        if barrier is not None:
+            barrier.wait(timeout=10)
+        response = client.post(path, json=body, cookies=cookies)
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, response.text
+    finally:
+        client.close()
+
+
+def _studio_sent(ad, cookies: dict, campaign_id: str) -> int:
+    """create -> submit ($25 lifetime); the Submitted row's lastModified."""
+    created = ad._create_campaign(cookies, ad._complete_campaign(f"PG {campaign_id}"), campaign_id)
+    assert created.status_code == 200, created.text
+    sent = ad._submit_campaign(cookies, campaign_id, created.json()["lastModified"], f"{campaign_id}-send")
+    assert sent.status_code == 200, sent.text
+    return sent.json()["lastModified"]
+
+
+def _studio_request(campaign_id: str) -> dict:
+    from server.db import db_conn, json_loads
+
+    with db_conn() as conn:
+        raw = conn.execute(text("SELECT data_json FROM entities WHERE type = 'adCampaignRequests' AND id = :id"),
+                           {"id": campaign_id}).scalar_one()
+    return json_loads(raw) or {}
+
+
+def _studio_money(campaign_id: str) -> dict[str, list[int]]:
+    """One request's ledger rows (every cycle), as amounts by row type."""
+    from server.db import db_conn, json_loads
+
+    with db_conn() as conn:
+        rows = conn.execute(text("SELECT data_json FROM entities WHERE type = 'walletTransactions' AND deleted = false")).scalars().all()
+    money: dict[str, list[int]] = {"campaign_payment": [], "campaign_payment_release": [], "campaign_refund": []}
+    pay = f"cpay:{campaign_id}:"
+    for raw in rows:
+        data = json_loads(raw) or {}
+        if str(data.get("idempotencyKey") or "").startswith((pay, "rel:" + pay, "stoprefund:" + pay)):
+            money.setdefault(str(data.get("type") or ""), []).append(int(data["amountMinor"]))
+    return money
+
+
+def _studio_balance(user_id: str) -> int:
+    from server import main
+    from server.db import db_conn
+
+    with db_conn() as conn:
+        return main._wallet_balance_minor(conn, user_id, "USD")
+
+
+def _assert_studio_wallet_identity(user_id: str) -> dict:
+    """PLAN.md 7.8, from the studio wallet summary (one REPEATABLE READ snapshot): added +
+    adjustments - in ads - being returned - spent = available + reserved, available is the
+    number every debit checks, and available + reserved is the USD ledger balance."""
+    from datetime import datetime, timezone
+    from server import main
+    from server.db import db_conn
+    from server.systems.ads_studio.studio_wallet import wallet_summary
+
+    with db_conn() as conn:
+        usd = wallet_summary(conn, user_id, datetime.now(timezone.utc))["usd"]
+    with db_conn() as conn:
+        balance = main._wallet_balance_minor(conn, user_id, "USD")
+        available = main._wallet_available_after_holds(conn, user_id, "USD")
+    left = usd["addedMinor"] + usd["adjustmentsMinor"] - usd["inAdsMinor"] - usd["beingReturnedMinor"] - usd["spentMinor"]
+    assert left == usd["availableMinor"] + usd["reservedMinor"], usd
+    assert usd["availableMinor"] == available and usd["availableMinor"] + usd["reservedMinor"] == balance, (usd, balance)
+    return usd
+
+
+def _with_hooks(engine, before=None, after=None):
+    """Listen for the duration of a with block (removed even when an assertion fails)."""
+    from contextlib import contextmanager
+    from sqlalchemy import event
+
+    @contextmanager
+    def listening():
+        hooks = [(name, hook) for name, hook in (("before_cursor_execute", before), ("after_cursor_execute", after)) if hook]
+        for name, hook in hooks:
+            event.listen(engine, name, hook)
+        try:
+            yield
+        finally:
+            for name, hook in hooks:
+                event.remove(engine, name, hook)
+    return listening()
+
+
+def _campaign_submit_serialisation(t) -> None:
+    """P1-02: two sends of one owner whose budgets together exceed Available ($25 + $25 > $40).
+
+    The first send to lock the owner's user row keeps it until the second send is queued on
+    that same row, so both are provably inside submit at once; the second then counts the
+    first one's hold. Exactly one is refused with the usual "Insufficient wallet balance" 409.
+    """
+    from server.db import db_conn, get_engine
+    from server.wallet_payments import wallet_campaign_holds_minor
+
+    ad, studio = _studio_actors()
+    user, cookies = ad._fresh_funded_customer(studio, "pgsubmit", 4000)
+    drafts = {}
+    for tag in ("a", "b"):
+        created = ad._create_campaign(cookies, ad._complete_campaign(f"PG submit {tag}"), f"pg_submit_{tag}")
+        assert created.status_code == 200, created.text
+        drafts[f"pg_submit_{tag}"] = created.json()["lastModified"]
+    holder, queued = [], Event()
+
+    def queue_second(conn, cursor, statement, parameters, context, executemany):
+        if _row_lock(statement, parameters, _OWNER_ROW_LOCK, user["id"]) and holder and conn is not holder[0]:
+            queued.set()
+
+    def hold_first(conn, cursor, statement, parameters, context, executemany):
+        if _row_lock(statement, parameters, _OWNER_ROW_LOCK, user["id"]) and not holder:
+            holder.append(conn)
+            assert queued.wait(10), "The second send never queued on the owner's row"
+
+    barrier = Barrier(2)
+    with _with_hooks(get_engine(), before=queue_second, after=hold_first):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                cid: pool.submit(_studio_post, t.app, f"/api/ad-studio/campaigns/{cid}/submit",
+                                 {"expectedLastModified": lm, "operationId": f"{cid}-send"}, cookies, barrier)
+                for cid, lm in drafts.items()
+            }
+            results = {cid: future.result(timeout=40) for cid, future in futures.items()}
+    assert queued.is_set(), results
+    assert sorted(status for status, _ in results.values()) == [200, 409], results
+    refused = next(body for status, body in results.values() if status == 409)
+    assert str(refused["detail"]).startswith("Insufficient wallet balance"), refused
+    assert sorted(_studio_request(cid)["status"] for cid in drafts) == ["Draft", "Submitted"], results
+    with db_conn() as conn:
+        assert wallet_campaign_holds_minor(conn, user["id"]) == 2500
+    usd = _assert_studio_wallet_identity(user["id"])
+    assert (usd["availableMinor"], usd["reservedMinor"]) == (1500, 2500), usd
+
+
+def _campaign_withdraw_vs_approve(t) -> None:
+    """P1-03: a withdraw racing an approval of one Submitted request: exactly one wins.
+
+    Approval first (the withdraw waits until the approval answered): the withdraw gets 409
+    REFUSE_WITHDRAW_APPROVED and the capture stays in the ad. Withdraw first (it holds the row
+    until the approval's capture is queued on it): the capture finds a Draft and takes nothing.
+    Then free races started by one Barrier. The wallet identity holds after every race.
+    """
+    from server.db import get_engine
+    from server.systems.ads_studio.ad_campaign_actions import REFUSE_WITHDRAW_APPROVED
+
+    ad, studio = _studio_actors()
+    ad._reset_reviewer_limits(studio)
+    user, cookies = ad._fresh_funded_customer(studio, "pgwva", 20_000)
+    engine = get_engine()
+
+    def race(cid, last_modified, *, before=None, after=None, approval_answered=None):
+        barrier = Barrier(2)
+
+        def approve():
+            try:
+                return _studio_post(t.app, f"/api/ad-studio/campaigns/{cid}/review",
+                                    {"expectedLastModified": last_modified, "decision": "Approved", "note": "",
+                                     "operationId": f"{cid}-approve"}, studio["reviewer"], barrier)
+            finally:
+                if approval_answered is not None:
+                    approval_answered.set()
+
+        with _with_hooks(engine, before=before, after=after), ThreadPoolExecutor(max_workers=2) as pool:
+            approving = pool.submit(approve)
+            withdrawing = pool.submit(_studio_post, t.app, f"/api/ad-studio/campaigns/{cid}/withdraw",
+                                      {"expectedLastModified": last_modified, "operationId": f"{cid}-withdraw"},
+                                      cookies, barrier)
+            return approving.result(timeout=40), withdrawing.result(timeout=40)
+
+    def assert_approval_won(cid, approval, withdrawal):
+        assert approval[0] == 200 and approval[1]["data"]["status"] == "Approved", (approval, withdrawal)
+        assert withdrawal[0] == 409 and withdrawal[1]["detail"] == REFUSE_WITHDRAW_APPROVED, (approval, withdrawal)
+        money = _studio_money(cid)
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [], money
+        assert _studio_request(cid)["status"] == "Approved"
+
+    def assert_withdraw_won(cid, approval, withdrawal):
+        assert withdrawal[0] == 200 and withdrawal[1]["data"]["status"] == "Draft", (approval, withdrawal)
+        assert approval[0] == 409, (approval, withdrawal)
+        money = _studio_money(cid)
+        # Nothing captured, or captured and returned in the withdraw's own transaction.
+        assert money["campaign_payment"] == money["campaign_payment_release"] and len(money["campaign_payment"]) <= 1, money
+        assert _studio_request(cid)["status"] == "Draft"
+
+    # Order 1: the approval commits first; the withdraw is held before it locks the row.
+    cid = "pg_wva_approve_first"
+    last_modified = _studio_sent(ad, cookies, cid)
+    answered = Event()
+
+    def withdraw_waits(conn, cursor, statement, parameters, context, executemany):
+        if _row_lock(statement, parameters, _ACTION_ROW_LOCK, cid) and not answered.is_set():
+            assert answered.wait(20), "The approval never answered"
+
+    approval, withdrawal = race(cid, last_modified, before=withdraw_waits, approval_answered=answered)
+    assert_approval_won(cid, approval, withdrawal)
+    _assert_studio_wallet_identity(user["id"])
+
+    # Order 2: the withdraw holds the row until the approval's capture is queued on it.
+    cid = "pg_wva_withdraw_first"
+    last_modified = _studio_sent(ad, cookies, cid)
+    holder, capture_queued = [], Event()
+
+    def capture_queues(conn, cursor, statement, parameters, context, executemany):
+        if _row_lock(statement, parameters, _CAPTURE_ROW_LOCK, cid):
+            capture_queued.set()
+
+    def withdraw_holds(conn, cursor, statement, parameters, context, executemany):
+        if _row_lock(statement, parameters, _ACTION_ROW_LOCK, cid) and not holder:
+            holder.append(conn)
+            assert capture_queued.wait(20), "The approval's capture never queued on the row"
+
+    approval, withdrawal = race(cid, last_modified, before=capture_queues, after=withdraw_holds)
+    assert capture_queued.is_set()
+    assert_withdraw_won(cid, approval, withdrawal)
+    assert str(approval[1]["detail"]).startswith("Campaign is no longer awaiting review"), approval
+    assert _studio_money(cid)["campaign_payment"] == []  # the capture saw the Draft: nothing taken
+    _assert_studio_wallet_identity(user["id"])
+
+    # Free races: whoever locks the row first wins; never both, never neither.
+    for n in range(3):
+        cid = f"pg_wva_free_{n}"
+        last_modified = _studio_sent(ad, cookies, cid)
+        approval, withdrawal = race(cid, last_modified)
+        assert sorted([approval[0], withdrawal[0]]) == [200, 409], (approval, withdrawal)
+        (assert_approval_won if approval[0] == 200 else assert_withdraw_won)(cid, approval, withdrawal)
+        _assert_studio_wallet_identity(user["id"])
+
+
+def _campaign_approval_self_release(t) -> None:
+    """P1-03b: an approval that captured the budget and then lost its status write (409).
+
+    (a) capture -> withdraw -> the approval's status write loses: one return in all (the
+        withdraw's), the ledger equals the pre-submit state.
+    (b) capture -> the request left the cycle with no return (a send-back whose release
+        crashed) -> the approval's status write loses: the approval returns the capture itself.
+    (c) two IDENTICAL approvals (same operationId): the one that loses the row adopts its
+        twin's commit; the capture is never returned.
+    (d) two different approvals: the loser answers 409; the winner's capture is never returned.
+    The wallet identity holds after each.
+    """
+    from server.db import db_conn, get_engine, json_dumps, json_loads, now_ms
+
+    ad, studio = _studio_actors()
+    user, cookies = ad._fresh_funded_customer(studio, "pgselfrel", 20_000)
+    engine = get_engine()
+
+    def review_path(cid):
+        return f"/api/ad-studio/campaigns/{cid}/review"
+
+    def approval_body(cid, last_modified, op):
+        return {"expectedLastModified": last_modified, "decision": "Approved", "note": "", "operationId": op}
+
+    def paused_approval(cid, last_modified, meanwhile):
+        """The approval stops right before its status write (its capture has committed);
+        ``meanwhile()`` runs, then the approval goes on."""
+        paused, resume = Event(), Event()
+
+        def pause(conn, cursor, statement, parameters, context, executemany):
+            if _row_lock(statement, parameters, _STATUS_WRITE_ROW_LOCK, cid) and not paused.is_set():
+                paused.set()
+                assert resume.wait(20), "The test never resumed the approval"
+
+        with _with_hooks(engine, before=pause), ThreadPoolExecutor(max_workers=1) as pool:
+            approving = pool.submit(_studio_post, t.app, review_path(cid),
+                                    approval_body(cid, last_modified, f"{cid}-approve"), studio["reviewer"])
+            try:
+                assert paused.wait(30), "The approval never reached its status write"
+                outcome = meanwhile()
+            finally:
+                resume.set()
+            return outcome, approving.result(timeout=40)
+
+    def twin_approvals(cid, last_modified, ops):
+        """Two approvals at once; the first to reach its status write waits until the other
+        one holds the row, so it provably loses the row race."""
+        holder, twin_locked, barrier = [], Event(), Barrier(2)
+
+        def loser_waits(conn, cursor, statement, parameters, context, executemany):
+            if _row_lock(statement, parameters, _STATUS_WRITE_ROW_LOCK, cid) and not holder:
+                holder.append(conn)
+                assert twin_locked.wait(20), "The other approval never locked the row"
+
+        def winner_locked(conn, cursor, statement, parameters, context, executemany):
+            if _row_lock(statement, parameters, _STATUS_WRITE_ROW_LOCK, cid) and holder and conn is not holder[0]:
+                twin_locked.set()
+
+        with _with_hooks(engine, before=loser_waits, after=winner_locked), ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(_studio_post, t.app, review_path(cid), approval_body(cid, last_modified, op),
+                                   studio["reviewer"], barrier) for op in ops]
+            results = [future.result(timeout=40) for future in futures]
+        assert twin_locked.is_set(), results
+        return results
+
+    # (a) capture -> withdraw -> approval 409.
+    ad._reset_reviewer_limits(studio)
+    cid = "pg_selfrel_withdrawn"
+    before = _studio_balance(user["id"])  # a submit writes no ledger row: the pre-submit state
+    last_modified = _studio_sent(ad, cookies, cid)
+
+    def withdraw_now():
+        captured = _studio_money(cid)["campaign_payment"]
+        return captured, _studio_post(t.app, f"/api/ad-studio/campaigns/{cid}/withdraw",
+                                      {"expectedLastModified": last_modified, "operationId": f"{cid}-withdraw"}, cookies)
+
+    (captured, withdrawal), approval = paused_approval(cid, last_modified, withdraw_now)
+    assert captured == [2500], captured  # the capture had committed before the withdraw ran
+    assert withdrawal[0] == 200 and withdrawal[1]["data"]["status"] == "Draft", withdrawal
+    assert approval[0] == 409, approval
+    money = _studio_money(cid)
+    assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [2500], money
+    assert _studio_balance(user["id"]) == before and _studio_request(cid)["status"] == "Draft"
+    usd = _assert_studio_wallet_identity(user["id"])
+    assert usd["beingReturnedMinor"] == 0 and usd["inAdsMinor"] == 0 and usd["availableMinor"] == before, usd
+
+    # (b) capture -> left the cycle with no return -> the approval returns its own capture.
+    cid = "pg_selfrel_sent_back"
+    last_modified = _studio_sent(ad, cookies, cid)
+
+    def sent_back_without_release():
+        with db_conn() as conn:
+            row = conn.execute(text("SELECT data_json, last_modified FROM entities WHERE type = 'adCampaignRequests' AND id = :id"),
+                               {"id": cid}).mappings().one()
+            data = {**(json_loads(row["data_json"]) or {}), "status": "Changes Requested", "reviewDecision": "Changes Requested"}
+            modified = max(now_ms(), int(row["last_modified"]) + 1)
+            data["_lastModified"] = modified
+            conn.execute(text("UPDATE entities SET data_json = :d, last_modified = :m WHERE type = 'adCampaignRequests' AND id = :id"),
+                         {"d": json_dumps(data), "m": modified, "id": cid})
+
+    _, approval = paused_approval(cid, last_modified, sent_back_without_release)
+    assert approval[0] == 409, approval
+    money = _studio_money(cid)
+    assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [2500], money
+    assert _studio_balance(user["id"]) == before
+    with db_conn() as conn:
+        released = conn.execute(text("SELECT count(*) FROM audit_logs WHERE action = 'wallet_release' AND resource_id = :id"),
+                                {"id": cid}).scalar_one()
+    assert released == 1, released
+    usd = _assert_studio_wallet_identity(user["id"])
+    assert usd["beingReturnedMinor"] == 0 and usd["availableMinor"] == before, usd
+
+    # (c) identical approvals: the loser adopts its twin's commit; nothing is returned.
+    ad._reset_reviewer_limits(studio)
+    cid = "pg_selfrel_identical"
+    last_modified = _studio_sent(ad, cookies, cid)
+    results = twin_approvals(cid, last_modified, [f"{cid}-approve"] * 2)
+    assert [status for status, _ in results] == [200, 200], results
+    assert results[0][1]["lastModified"] == results[1][1]["lastModified"], results
+    money = _studio_money(cid)
+    assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [], money
+    assert _studio_request(cid)["status"] == "Approved"
+    usd = _assert_studio_wallet_identity(user["id"])
+    assert usd["inAdsMinor"] == 2500 and usd["beingReturnedMinor"] == 0, usd
+
+    # (d) different approvals: one wins; the loser answers 409 and returns nothing.
+    cid = "pg_selfrel_other"
+    last_modified = _studio_sent(ad, cookies, cid)
+    results = twin_approvals(cid, last_modified, [f"{cid}-approve-a", f"{cid}-approve-b"])
+    assert sorted(status for status, _ in results) == [200, 409], results
+    money = _studio_money(cid)
+    assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [], money
+    assert _studio_request(cid)["status"] == "Approved"
+    usd = _assert_studio_wallet_identity(user["id"])
+    assert usd["inAdsMinor"] == 5000 and usd["beingReturnedMinor"] == 0, usd
 
 
 if __name__ == "__main__":

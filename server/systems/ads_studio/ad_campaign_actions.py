@@ -1,10 +1,12 @@
-"""Ads Studio campaign actions: boost-field validation, submit, review, stop-with-refund, launch marker.
+"""Ads Studio campaign actions: boost-field validation, submit, withdraw, review, stop-with-refund, launch marker.
 
 The campaign lifecycle's money doors, in order:
 
 * submit                      — holds the budget (a Submitted request counts in the owner's holds)
+* withdraw                    — the owner takes a Submitted request back to Draft: the hold ends
 * ``cpay:{id}:{cycle}``       — approval captures the held budget (wallet_payments)
-* ``rel:{cpay-key}``          — a rejected cycle releases a crashed-approval capture
+* ``rel:{cpay-key}``          — a cycle the request left (rejected, sent back, withdrawn, archived,
+  or an approval that lost its status write) returns a capture it already had
 * ``stoprefund:{cpay-key}``   — a stopped APPROVED cycle refunds unspent budget
 
 Submit and review were moved here word for word from main.py (P1-01, P1-10):
@@ -14,6 +16,29 @@ so a monkeypatched main helper (tests, fault injection) still takes effect.
 Exception: ``db_conn`` and the wallet ledger functions are imported directly;
 fault-inject them on this module (server.systems.ads_studio.ad_campaign_actions),
 never on main, or the patch silently misses submit and review.
+
+Races (PLAN.md §7.8, the lock table; proven on PostgreSQL in
+test_postgres_financial_review.py). Every door takes its locks in the one global
+order: user row -> ``cpay:`` key -> campaign row -> ``rel:``/``stoprefund:`` key.
+On SQLite the same doors take the entity-patch lock, then the wallet lock.
+
+* Submit (P1-02) validates first, then runs ONE transaction: the owner's user row,
+  the campaign row, the previous cycle's ``rel:`` key; the money check and the
+  Submitted write happen under those locks. Two sends of one owner queue on the
+  owner's row, so the second counts the first one's hold: together they can never
+  reserve more than Available (the loser gets the usual 409 "Insufficient wallet
+  balance").
+* Withdraw (P1-03) runs ONE transaction: campaign row, then ``rel:`` key. Submitted
+  -> Draft, keeping ``submittedAt`` and ``lastSubmitOperationId`` (the orphan key)
+  and stamping ``withdrawnAt`` and ``lastWithdrawOperationId``; a capture this cycle
+  already had returns in the same transaction. Whoever locks the row first wins: a
+  withdraw that finds the request Approved gets 409 REFUSE_WITHDRAW_APPROVED.
+* An approval whose status write lost (409) after its capture re-reads the row
+  (P1-03b). If the request LEFT the captured cycle (studio_wallet.cycle_state says
+  "being returned"), it returns that capture itself (campaign row, then ``rel:``
+  key) and still answers 409. An identical approval that won (same operationId)
+  is adopted and never released; a request still Submitted, Approved or Stopped in
+  that cycle keeps its capture.
 
 The stop endpoint runs ONE locked transaction: the refund ledger row and the
 ``Stopped`` status write commit or roll back together, so there is no orphan
@@ -65,7 +90,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from ...db import db_conn, json_dumps, json_fields_select_sql, now_ms
+from ...db import db_conn, json_dumps, json_fields_select_sql, json_loads, now_ms
 from ...schemas import (
     AdCampaignPublishStatusRequest,
     AdCampaignReviewRequest,
@@ -78,6 +103,7 @@ from ...wallet_payments import (
     campaign_hold_minor,
     capture_campaign_budget,
     refund_stopped_campaign_budget,
+    release_open_campaign_capture,
     release_orphan_campaign_payment,
 )
 
@@ -107,6 +133,11 @@ class AdCampaignReviewBody(AdCampaignReviewRequest):
     reviewReasonCode: Optional[Any] = None
 
 
+class AdCampaignWithdrawBody(AdCampaignSubmitRequest):
+    """Withdraw (P1-03): the owner's version baseline and an ``operationId`` per (action,
+    version), so a retried withdraw replays its committed result."""
+
+
 # Refusal texts shared with the client's Arabic map: each ``detail`` STARTS with one of these
 # (a dynamic part may follow). Never reword one; add a new text instead.
 REFUSE_TOTAL_MIN = "The total budget must be at least "                   # T1
@@ -118,6 +149,8 @@ REFUSE_DAILY_CAP = "Today's limit of new ad requests is reached"          # T6
 REFUSE_REASON_MISSING = "Choose a reason for this decision"               # T7
 REFUSE_REASON_UNKNOWN = "Unknown reason code"                             # T8
 REFUSE_DURATION = "durationDays must be a whole number of days"           # T14
+REFUSE_WITHDRAW_NOT_SUBMITTED = "Only Submitted campaigns can be withdrawn"                # P1-03
+REFUSE_WITHDRAW_APPROVED = "This request was already approved — ask to stop it instead"  # P1-03
 
 # P1-12: why staff sent a request back or rejected it (stored as reviewReasonCode). The client
 # shows these labels verbatim; keep the codes stable (D33 sends legacy daily rows back with
@@ -377,6 +410,59 @@ def _clean_operation_id(ctx: dict[str, Any], value: Any) -> str:
     return operation_id
 
 
+def _money_guards(ctx: dict[str, Any]) -> tuple[Any, Any]:
+    """The process locks one money transaction takes on SQLite, in the documented order: the
+    entity-patch lock, then the wallet lock. PostgreSQL takes row and advisory locks inside the
+    transaction instead (PLAN.md §7.8), so there both are no-ops."""
+    if ctx["is_postgres"]():
+        return nullcontext(), nullcontext()
+    return ctx["sqlite_patch_lock"](), ctx["sqlite_wallet_lock"]()
+
+
+def _lock_campaign_row(conn: Any, ctx: dict[str, Any], campaign_id: str) -> Any:
+    """The live (not archived) request row, locked FOR UPDATE on PostgreSQL; None when missing."""
+    suffix = " FOR UPDATE" if ctx["is_postgres"]() else ""
+    return conn.execute(
+        text(f"SELECT * FROM entities WHERE type = :type AND id = :id AND deleted = false LIMIT 1{suffix}"),
+        {"type": AD_CAMPAIGN_COLLECTION, "id": campaign_id},
+    ).mappings().first()
+
+
+def release_capture_if_cycle_left(
+    ctx: dict[str, Any], campaign_id: str, cycle: dict[str, Any], actor_id: str
+) -> str:
+    """P1-03b: an approval captured the budget of ``cycle`` (the request as that approval read
+    it) and then lost its status write (409). If the request has LEFT that cycle since, nothing
+    else will spend the capture, so the approval returns it itself (``rel:``, idempotent with
+    every other door) and the ledger is back to its pre-submit state.
+
+    "Left" is the rule of the wallet summary's "Being returned" (studio_wallet.cycle_state):
+    sent back, rejected, withdrawn, resubmitted or archived while Submitted. A request still
+    Submitted in that cycle (approving), Approved in it (a concurrent approval won: never
+    released) or Stopped in it (the stop settled it) keeps its capture. One transaction in the
+    lock order of PLAN.md §7.8: campaign row, then ``rel:`` key. Returns the NEW return row's
+    id, or '' when nothing was returned.
+    """
+    from .studio_wallet import cycle_state  # late: studio_wallet -> studio_results imports this module
+
+    cycle = {**cycle, "id": campaign_id}
+    patch_guard, wallet_guard = _money_guards(ctx)
+    suffix = " FOR UPDATE" if ctx["is_postgres"]() else ""
+    with patch_guard, wallet_guard:
+        with db_conn() as conn:
+            # Archived rows too: an archived request keeps its status and cycle in its tombstone.
+            row = conn.execute(
+                text(f"SELECT data_json, deleted FROM entities WHERE type = :type AND id = :id LIMIT 1{suffix}"),
+                {"type": AD_CAMPAIGN_COLLECTION, "id": campaign_id},
+            ).mappings().first()
+            live = None
+            if row:
+                live = {**(json_loads(row["data_json"] or "{}") or {}), "id": campaign_id, "archived": bool(row["deleted"])}
+            if cycle_state(live, _campaign_payment_key(cycle)) != "being_returned":
+                return ""
+            return release_open_campaign_capture(conn, ctx, cycle, actor_id)
+
+
 def _campaign_start_is_in_future(data: dict[str, Any]) -> bool:
     raw = str(data.get("startDate") or "").strip()[:10]
     try:
@@ -530,67 +616,83 @@ def create_ad_campaign_actions_router(
         if not legacy:
             enforce_budget_limits(days, total, limits)
 
-        # Money gate: the TOTAL must be AVAILABLE in the owner's USD wallet — a
-        # Submitted campaign holds it, approval captures it. The capture
-        # re-checks under its own lock, so this is the UX gate and that one is
-        # the hard guarantee.
-        with db_conn() as conn:
-            if ctx["wallet_available_after_holds"](conn, str(creator or ""), "USD") < total:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Insufficient wallet balance for this budget — charge the wallet first",
-                )
-
         actor_id = str(user.get("id") or "system")
-        # A capture left by a crashed approval of the PREVIOUS cycle would be
-        # charged twice on approval of this one (new key): return it first.
-        with (nullcontext() if ctx["is_postgres"]() else ctx["sqlite_wallet_lock"]()), db_conn() as conn:
-            released_tx = release_orphan_campaign_payment(conn, ctx, {**current, "id": campaign_id}, actor_id)
+        owner_id = str(creator or "")
+        if not owner_id:
+            raise HTTPException(status_code=409, detail="Campaign is missing its owner")
+        released_tx = ""
+        replayed_after_conflict = False
+        # P1-02: ONE transaction in the lock order of PLAN.md §7.8: the owner's user row, the
+        # campaign row, then the previous cycle's rel: key. A second send of the same owner
+        # waits for the owner's row and then counts this one's hold, so two sends can never
+        # reserve more than Available together.
+        patch_guard, wallet_guard = _money_guards(ctx)
+        with patch_guard, wallet_guard:
+            with db_conn() as conn:
+                try:
+                    ctx["lock_and_validate_wallet_users"](conn, [owner_id], postgres=ctx["is_postgres"]())
+                except HTTPException:
+                    raise HTTPException(status_code=409, detail="Campaign is missing its owner")
+                row = _lock_campaign_row(conn, ctx, campaign_id)
+                if not row:
+                    raise HTTPException(status_code=404, detail="Campaign request not found")
+                entity = ctx["entity_from_db_row"](row)
+                data = dict(entity.get("data") or {})
+                if operation_id and str(data.get("lastSubmitOperationId") or "") == operation_id:
+                    # An identical request committed while this one validated or waited for the
+                    # lock: return its committed result and do not duplicate its audit entry.
+                    saved = entity
+                    replayed_after_conflict = True
+                else:
+                    baseline = int(entity.get("lastModified") or 0)
+                    if baseline != int(body.expectedLastModified) or baseline != int(campaign.get("lastModified") or 0):
+                        # Edited, sent, withdrawn or reviewed since the checks above read it.
+                        raise HTTPException(status_code=409, detail="Conflict: record has changed")
+                    # A capture left by a crashed approval of the PREVIOUS cycle would be
+                    # charged twice on approval of this one (new key): return it first, so
+                    # its money counts in the check below.
+                    released_tx = release_open_campaign_capture(conn, ctx, {**data, "id": campaign_id}, actor_id)
+                    # Money gate: the TOTAL must be AVAILABLE in the owner's USD wallet — a
+                    # Submitted campaign holds it, approval captures it.
+                    if ctx["wallet_available_after_holds"](conn, owner_id, "USD") < total:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Insufficient wallet balance for this budget — charge the wallet first",
+                        )
+                    modified = max(now_ms(), baseline + 1)
+                    data.update(
+                        {
+                            "status": "Submitted",
+                            "submittedAt": submitted_at,
+                            "submittedBy": actor_id,
+                            "reviewedAt": None,
+                            "reviewedBy": None,
+                            "reviewNote": "",
+                            "reviewDecision": "",
+                            "reviewReasonCode": "",
+                            "lastSubmitOperationId": operation_id,
+                            "schemaVersion": BUDGET_SCHEMA_VERSION,
+                            "totalBudgetMinorUSD": total,
+                            "legacyRules": legacy,
+                            "submitDay": today,
+                            "submitDayCount": (
+                                _whole(current.get("submitDayCount")) + 1 if str(current.get("submitDay") or "") == today else 1
+                            ),
+                            "_lastModified": modified,
+                        }
+                    )
+                    result = conn.execute(
+                        text(
+                            "UPDATE entities SET data_json = :d, last_modified = :m "
+                            "WHERE type = :t AND id = :id AND deleted = false AND last_modified = :baseline"
+                        ),
+                        {"d": json_dumps(data), "m": modified, "t": AD_CAMPAIGN_COLLECTION, "id": campaign_id, "baseline": baseline},
+                    )
+                    if int(result.rowcount or 0) != 1:
+                        raise HTTPException(status_code=409, detail="Conflict: record has changed")  # rolls the release back too
+                    saved = {**entity, "data": data, "lastModified": modified}
         if released_tx:
             ctx["audit"](actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id, f"Returned an orphan capture for {campaign_id}", {"transactionId": released_tx})
-        replayed_after_conflict = False
-        try:
-            saved = ctx["patch_entity"](
-                AD_CAMPAIGN_COLLECTION,
-                campaign_id,
-                {
-                    "status": "Submitted",
-                    "submittedAt": submitted_at,
-                    "submittedBy": actor_id,
-                    "reviewedAt": None,
-                    "reviewedBy": None,
-                    "reviewNote": "",
-                    "reviewDecision": "",
-                    "reviewReasonCode": "",
-                    "lastSubmitOperationId": operation_id,
-                    "schemaVersion": BUDGET_SCHEMA_VERSION,
-                    "totalBudgetMinorUSD": total,
-                    "legacyRules": legacy,
-                    "submitDay": today,
-                    "submitDayCount": (
-                        _whole(current.get("submitDayCount")) + 1 if str(current.get("submitDay") or "") == today else 1
-                    ),
-                },
-                actor_id,
-                expected_last_modified=body.expectedLastModified,
-                enforce_ad_campaign_quota=False,
-            )
-        except HTTPException as error:
-            if error.status_code != 409:
-                raise
-            latest = ctx["get_entity"](AD_CAMPAIGN_COLLECTION, campaign_id)
-            latest_data = (latest or {}).get("data") or {}
-            if (
-                not latest
-                or latest.get("deleted")
-                or str(latest_data.get("lastSubmitOperationId") or "") != operation_id
-            ):
-                raise
-            # A matching operation won the row-lock race while this identical
-            # request was waiting. Treat the optimistic conflict as the same
-            # committed success and do not duplicate its audit entry.
-            saved = latest
-            replayed_after_conflict = True
         if not replayed_after_conflict:
             ctx["audit"](
                 actor_id,
@@ -775,6 +877,15 @@ def create_ad_campaign_actions_router(
                 or str(latest_data.get("reviewNote") or "") != note
                 or str(latest_data.get("reviewReasonCode") or "") != reason_code
             ):
+                if decision == "Approved" and wallet_payment_tx:
+                    # P1-03b: this approval lost after its capture. If the request left the
+                    # captured cycle (withdrawn, sent back, rejected, archived), return the
+                    # capture now instead of leaving it for a sweep; then answer the 409.
+                    returned_tx = release_capture_if_cycle_left(ctx, campaign_id, current, actor_id)
+                    if returned_tx:
+                        ctx["audit"](actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id,
+                                     f"Returned the capture of an interrupted approval of {campaign_id}",
+                                     {"transactionId": returned_tx, "operationId": operation_id})
                 raise
             saved = latest
             replayed_after_conflict = True
@@ -802,6 +913,86 @@ def create_ad_campaign_actions_router(
         }:
             return EntityResponse(**_redacted_ad_campaign_tombstone(saved))
         return EntityResponse(**ctx["project_entity_media_for_user"](saved, user, False))
+
+    @router.post("/{campaign_id}/withdraw", response_model=EntityResponse)
+    def withdraw_ad_campaign_request(
+        campaign_id: str,
+        body: AdCampaignWithdrawBody,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """P1-03: the owner takes a Submitted request back to Draft; its hold ends at once.
+
+        Owner only (anyone else gets 404, a lapsed plan is fine: it only returns the owner's
+        own money). ONE locked transaction, campaign row then ``rel:`` key (PLAN.md §7.8):
+        Draft + ``withdrawnAt`` + ``lastWithdrawOperationId``, keeping ``submittedAt`` and
+        ``lastSubmitOperationId`` (the cycle's payment key), and a capture this cycle already
+        had (an approval between its capture and its status write) returns in the same
+        transaction. A replay with the same operationId returns the committed result."""
+        require_same_origin(request)
+        campaign_id = ctx["validate_entity_id"](campaign_id)
+        operation_id = _clean_operation_id(ctx, body.operationId)
+        actor_id = str(user.get("id") or "")
+        released_tx = ""
+        patch_guard, wallet_guard = _money_guards(ctx)
+        with patch_guard, wallet_guard:
+            with db_conn() as conn:
+                row = _lock_campaign_row(conn, ctx, campaign_id)
+                if not row:
+                    raise HTTPException(status_code=404, detail="Campaign request not found")
+                entity = ctx["entity_from_db_row"](row)
+                data = dict(entity.get("data") or {})
+                creator = str(entity.get("createdBy") or data.get("createdBy") or "")
+                if not actor_id or actor_id != creator:
+                    # Owner only: staff send a request back instead, and nobody else learns it exists.
+                    raise HTTPException(status_code=404, detail="Campaign request not found")
+                if not ctx["user_has_permission"](user, AD_CAMPAIGN_COLLECTION, "submit", record_creator_id=creator):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+                if str(data.get("lastWithdrawOperationId") or "") == operation_id:
+                    # The first response was lost after commit — replay it.
+                    return EntityResponse(**ctx["project_entity_media_for_user"](entity, user, False))
+                ctx["enforce_ad_campaign_rate"](user)
+                status = str(data.get("status") or "Draft")
+                if status == "Approved":
+                    # The approval locked the row first: the money is in the ad now.
+                    raise HTTPException(status_code=409, detail=REFUSE_WITHDRAW_APPROVED)
+                if status != "Submitted":
+                    raise HTTPException(status_code=409, detail=REFUSE_WITHDRAW_NOT_SUBMITTED)
+                baseline = int(entity.get("lastModified") or 0)
+                if baseline != int(body.expectedLastModified):
+                    raise HTTPException(status_code=409, detail="Conflict: record has changed")
+                released_tx = release_open_campaign_capture(conn, ctx, {**data, "id": campaign_id}, actor_id)
+                modified = max(now_ms(), baseline + 1)
+                data.update(
+                    {
+                        "status": "Draft",
+                        "withdrawnAt": ctx["iso_utc"](),
+                        "lastWithdrawOperationId": operation_id,
+                        "_lastModified": modified,
+                    }
+                )
+                result = conn.execute(
+                    text(
+                        "UPDATE entities SET data_json = :d, last_modified = :m "
+                        "WHERE type = :t AND id = :id AND deleted = false AND last_modified = :baseline"
+                    ),
+                    {"d": json_dumps(data), "m": modified, "t": AD_CAMPAIGN_COLLECTION, "id": campaign_id, "baseline": baseline},
+                )
+                if int(result.rowcount or 0) != 1:
+                    raise HTTPException(status_code=409, detail="Conflict: record has changed")  # rolls the return back too
+                entity = {**entity, "data": data, "lastModified": modified}
+        if released_tx:
+            ctx["audit"](actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id,
+                         f"Returned the capture of withdrawn request {campaign_id}", {"transactionId": released_tx})
+        ctx["audit"](
+            actor_id,
+            "withdraw",
+            AD_CAMPAIGN_COLLECTION,
+            campaign_id,
+            f"Withdrew campaign request {campaign_id} to Draft",
+            {"operationId": operation_id, "submittedAt": str(data.get("submittedAt") or ""), "releasedTransactionId": released_tx},
+        )
+        return EntityResponse(**ctx["project_entity_media_for_user"](entity, user, False))
 
     @router.post("/{campaign_id}/stop")
     def stop_ad_campaign_request(

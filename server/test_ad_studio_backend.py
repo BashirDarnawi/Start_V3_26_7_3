@@ -689,22 +689,30 @@ class TestAdsStudioWorkflow:
         )
         assert created.status_code == 200, created.text
         original_patch = main_module.patch_entity
+        original_prepare = main_module._prepare_ad_campaign_fields
         submit_operation = "submit-concurrent-operation-001"
-        # Proof the simulated 409 really fired: the routes live in
-        # ad_campaign_actions.py now and reach main.patch_entity through a
-        # late-bound ctx lambda. An eager binding would skip this fake and the
-        # test would pass without ever exercising the conflict branch.
+        # Proof the simulated race really fired: the routes live in
+        # ad_campaign_actions.py now and reach main's helpers through
+        # late-bound ctx lambdas. An eager binding would skip these fakes and
+        # the test would pass without ever exercising the race branch.
         fired = {"submit": 0, "review": 0}
 
-        def commit_submit_then_report_conflict(*args, **kwargs):
-            result = original_patch(*args, **kwargs)
-            updates = args[2] if len(args) > 2 else {}
-            if updates.get("lastSubmitOperationId") == submit_operation:
+        def identical_submit_commits_during_validation(*args, **kwargs):
+            # Submit validates first, then locks and re-reads the row (P1-02):
+            # an identical request that committed in between is adopted there.
+            result = original_prepare(*args, **kwargs)
+            if kwargs.get("strict") and not fired["submit"]:
                 fired["submit"] += 1
-                raise HTTPException(status_code=409, detail="simulated lock-race conflict")
+                original_patch(
+                    "adCampaignRequests", campaign_id,
+                    {"status": "Submitted", "submittedAt": main_module._iso_utc(), "submittedBy": actors["owner_id"],
+                     "lastSubmitOperationId": submit_operation, "schemaVersion": 2, "totalBudgetMinorUSD": 2500,
+                     "legacyRules": False},
+                    actors["owner_id"], enforce_ad_campaign_quota=False,
+                )
             return result
 
-        monkeypatch.setattr(main_module, "patch_entity", commit_submit_then_report_conflict)
+        monkeypatch.setattr(main_module, "_prepare_ad_campaign_fields", identical_submit_commits_during_validation)
         submitted = client.post(
             f"/api/ad-studio/campaigns/{campaign_id}/submit",
             json={
@@ -715,7 +723,7 @@ class TestAdsStudioWorkflow:
         )
         assert submitted.status_code == 200, submitted.text
         assert submitted.json()["data"]["status"] == "Submitted"
-        assert fired["submit"] == 1, "the simulated submit conflict never fired"
+        assert fired["submit"] == 1, "the simulated submit race never fired"
 
         review_operation = "review-concurrent-operation-001"
 
@@ -2534,3 +2542,394 @@ class TestStudioBudgetsLimitsIntake:
         assert approved.json()["data"]["reviewReasonCode"] == ""
         assert "reasonCode" not in approved.json()["data"]["reviewHistory"][-1]
         assert approved.json()["data"]["reviewHistory"][0]["reasonCode"] == "budget_dates"  # history keeps it
+
+
+# ------------------------------------------------------------------ P1-02 serialised submit, P1-03 withdraw, P1-03b self-release
+
+import threading  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+from server.systems.ads_studio.ad_campaign_actions import (  # noqa: E402
+    REFUSE_WITHDRAW_APPROVED,
+    REFUSE_WITHDRAW_NOT_SUBMITTED,
+)
+
+
+def _withdraw_campaign(cookies, campaign_id: str, last_modified: int, op: str):
+    return client.post(
+        f"/api/ad-studio/campaigns/{campaign_id}/withdraw",
+        json={"expectedLastModified": last_modified, "operationId": op},
+        cookies=cookies,
+    )
+
+
+def _campaign_money(actors, user_id: str, campaign_id: str) -> dict[str, list[int]]:
+    """This request's ledger rows (every cycle): amounts by row type."""
+    money: dict[str, list[int]] = {"campaign_payment": [], "campaign_payment_release": [], "campaign_refund": []}
+    pay = f"cpay:{campaign_id}:"
+    for row in _wallet_rows_for(actors, user_id):
+        key = str(row.get("idempotencyKey") or "")
+        if key.startswith((pay, f"rel:{pay}", f"stoprefund:{pay}")):
+            money.setdefault(str(row.get("type") or ""), []).append(int(row["amountMinor"]))
+    return money
+
+
+def _available_minor(user_id: str) -> int:
+    """The number every debit and submit checks: ledger balance - Submitted holds."""
+    import server.main as main_module
+
+    with db_conn() as conn:
+        return main_module._wallet_available_after_holds(conn, user_id, "USD")
+
+
+def _assert_wallet_identity(cookies, user_id: str) -> dict:
+    """The studio wallet summary (P1-07) still adds up: added + adjustments - in ads - being
+    returned - spent = available + reserved, and available is the server's own number."""
+    reset_rate_limit(f"studio:wallet-summary:{user_id}")
+    response = client.get("/api/studio/wallet/summary", cookies=cookies)
+    assert response.status_code == 200, response.text
+    usd = response.json()["usd"]
+    left = usd["addedMinor"] + usd["adjustmentsMinor"] - usd["inAdsMinor"] - usd["beingReturnedMinor"] - usd["spentMinor"]
+    assert left == usd["availableMinor"] + usd["reservedMinor"], usd
+    assert usd["availableMinor"] == _available_minor(user_id), usd
+    return usd
+
+
+def _sent_campaign(cookies, campaign_id: str, name: str) -> dict:
+    """create -> submit; returns the submit response entity."""
+    created = _create_campaign(cookies, _complete_campaign(name), campaign_id)
+    assert created.status_code == 200, created.text
+    sent = _submit_campaign(cookies, campaign_id, created.json()["lastModified"], f"{campaign_id}-send")
+    assert sent.status_code == 200, sent.text
+    return sent.json()
+
+
+def _audit_rows(campaign_id: str, action: str) -> list[dict]:
+    with db_conn() as conn:
+        return [
+            json_loads(r[0]) or {} for r in conn.execute(
+                text("SELECT metadata_json FROM audit_logs WHERE resource_id = :id AND action = :action"),
+                {"id": campaign_id, "action": action},
+            )
+        ]
+
+
+def _approval_paused_before_status_write(monkeypatch, actors, campaign_id: str, last_modified: int, op: str, meanwhile):
+    """Run an approval that stops after its capture, right before its status write; run
+    ``meanwhile()`` here while it waits, then let it finish. Returns (meanwhile's result, the
+    approval's response). Only the FIRST status write with ``op`` waits, so an identical
+    approval sent meanwhile goes straight through."""
+    import server.main as main_module
+
+    original_patch = main_module.patch_entity
+    paused, resume = threading.Event(), threading.Event()
+
+    def pause_status_write(*args, **kwargs):
+        updates = args[2] if len(args) > 2 else {}
+        if updates.get("lastReviewOperationId") == op and not paused.is_set():
+            paused.set()
+            if not resume.wait(15):
+                raise HTTPException(status_code=500, detail="the test never resumed the approval")
+        return original_patch(*args, **kwargs)
+
+    def approve():
+        own = TestClient(app, headers={"Origin": "http://testserver"})
+        try:
+            return own.post(
+                f"/api/ad-studio/campaigns/{campaign_id}/review",
+                json={"expectedLastModified": last_modified, "decision": "Approved", "note": "", "operationId": op},
+                cookies=actors["reviewer"],
+            )
+        finally:
+            own.close()
+
+    monkeypatch.setattr(main_module, "patch_entity", pause_status_write)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            approving = pool.submit(approve)
+            try:
+                assert paused.wait(15), "the approval never reached its status write"
+                outcome = meanwhile()
+            finally:
+                resume.set()
+            response = approving.result(timeout=30)
+    finally:
+        monkeypatch.setattr(main_module, "patch_entity", original_patch)
+    return outcome, response
+
+
+class TestStudioSubmitSerialised:
+    """P1-02: submit runs one locked transaction (owner row -> campaign row -> rel: key)."""
+
+    def test_two_parallel_submits_cannot_overreserve(self, actors, monkeypatch):
+        import server.main as main_module
+
+        user, cookies = _fresh_funded_customer(actors, "parallel", 4000)
+        drafts = {}
+        for tag in ("a", "b"):
+            created = _create_campaign(cookies, _complete_campaign(f"Parallel submit {tag}"), f"parallel_submit_{tag}")
+            assert created.status_code == 200, created.text
+            drafts[f"parallel_submit_{tag}"] = created.json()["lastModified"]
+        real_prepare = main_module._prepare_ad_campaign_fields
+        both_validated = threading.Barrier(2)
+
+        def validate_together(*args, **kwargs):
+            result = real_prepare(*args, **kwargs)
+            if kwargs.get("strict") and str((args[0] if args else {}).get("name") or "").startswith("Parallel submit"):
+                both_validated.wait(timeout=10)  # both sends leave validation at the same moment
+            return result
+
+        monkeypatch.setattr(main_module, "_prepare_ad_campaign_fields", validate_together)
+
+        def send(campaign_id):
+            own = TestClient(app, headers={"Origin": "http://testserver"})
+            try:
+                response = own.post(
+                    f"/api/ad-studio/campaigns/{campaign_id}/submit",
+                    json={"expectedLastModified": drafts[campaign_id], "operationId": f"{campaign_id}-send"},
+                    cookies=cookies,
+                )
+                return campaign_id, response.status_code, response.json()
+            finally:
+                own.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(send, drafts))
+        # $25 + $25 against $40 Available: exactly one send holds its budget, the other is refused.
+        assert sorted(status for _, status, _ in results) == [200, 409], results
+        refused = next(body for _, status, body in results if status == 409)
+        assert refused["detail"].startswith("Insufficient wallet balance"), refused
+        statuses = {
+            cid: client.get(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies).json()["data"]["status"]
+            for cid in drafts
+        }
+        assert sorted(statuses.values()) == ["Draft", "Submitted"], statuses
+        from server.wallet_payments import wallet_campaign_holds_minor
+
+        with db_conn() as conn:
+            assert wallet_campaign_holds_minor(conn, user["id"]) == 2500
+        assert _available_minor(user["id"]) == 1500
+        _assert_wallet_identity(cookies, user["id"])
+        assert len(_audit_rows(next(cid for cid, status, _ in results if status == 200), "submit")) == 1
+
+
+class TestStudioWithdraw:
+    """P1-03: the owner takes a Submitted request back to Draft in one locked transaction."""
+
+    def test_withdraw_returns_request_to_draft_and_replays(self, actors):
+        user, cookies = _fresh_funded_customer(actors, "wdbasic", 2500)
+        sent = _sent_campaign(cookies, "withdraw_basic", "Withdraw me")
+        assert _available_minor(user["id"]) == 0  # the request holds the whole wallet
+        withdrawn = _withdraw_campaign(cookies, "withdraw_basic", sent["lastModified"], "withdraw-basic-op")
+        assert withdrawn.status_code == 200, withdrawn.text
+        data = withdrawn.json()["data"]
+        assert data["status"] == "Draft" and data["withdrawnAt"]
+        assert data["lastWithdrawOperationId"] == "withdraw-basic-op"
+        # The cycle's payment key stays readable: submittedAt and the submit operation are kept.
+        assert data["submittedAt"] == sent["data"]["submittedAt"]
+        assert data["lastSubmitOperationId"] == "withdraw_basic-send"
+        assert _available_minor(user["id"]) == 2500  # the hold ended at once
+        money = _campaign_money(actors, user["id"], "withdraw_basic")
+        assert money == {"campaign_payment": [], "campaign_payment_release": [], "campaign_refund": []}, money
+        # A lost response is replayed with the same operationId: the same committed result.
+        replay = _withdraw_campaign(cookies, "withdraw_basic", sent["lastModified"], "withdraw-basic-op")
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["lastModified"] == withdrawn.json()["lastModified"]
+        again = _withdraw_campaign(cookies, "withdraw_basic", withdrawn.json()["lastModified"], "withdraw-basic-op-2")
+        assert again.status_code == 409 and again.json()["detail"].startswith(REFUSE_WITHDRAW_NOT_SUBMITTED), again.text
+        audits = _audit_rows("withdraw_basic", "withdraw")
+        assert len(audits) == 1 and audits[0]["operationId"] == "withdraw-basic-op", audits
+        _assert_wallet_identity(cookies, user["id"])
+        # The Draft is edited and sent again: a new cycle, holding the budget again.
+        edited = client.patch(
+            "/api/collections/adCampaignRequests/withdraw_basic",
+            json={"data": {"headline": "Edited after withdraw"}, "expectedLastModified": withdrawn.json()["lastModified"]},
+            cookies=cookies,
+        )
+        assert edited.status_code == 200, edited.text
+        resent = _submit_campaign(cookies, "withdraw_basic", edited.json()["lastModified"], "withdraw-basic-send-2")
+        assert resent.status_code == 200, resent.text
+        assert resent.json()["data"]["submittedAt"] != sent["data"]["submittedAt"]
+        assert _available_minor(user["id"]) == 0
+
+    def test_withdraw_owner_only_version_checked_and_lapsed_ok(self, actors):
+        user, cookies = _fresh_funded_customer(actors, "wdowner", 2500)
+        sent = _sent_campaign(cookies, "withdraw_owner", "Withdraw owner only")
+        last_modified = sent["lastModified"]
+        for who in ("other", "reviewer", "admin"):
+            probe = _withdraw_campaign(actors[who], "withdraw_owner", last_modified, "withdraw-probe-op")
+            assert probe.status_code == 404, (who, probe.text)  # another account never learns it exists
+        missing = _withdraw_campaign(cookies, "withdraw_owner_missing", 0, "withdraw-probe-op")
+        assert missing.status_code == 404, missing.text
+        stale = _withdraw_campaign(cookies, "withdraw_owner", last_modified - 1, "withdraw-stale-op")
+        assert stale.status_code == 409 and stale.json()["detail"] == "Conflict: record has changed", stale.text
+        still = client.get("/api/collections/adCampaignRequests/withdraw_owner", cookies=cookies).json()
+        assert still["data"]["status"] == "Submitted"
+        # A lapsed plan does not keep the customer's money held: withdraw only returns their own.
+        with db_conn() as conn:
+            rows = conn.execute(
+                text("SELECT id, data_json FROM entities WHERE type='serviceSubscriptions' AND deleted=false")
+            ).mappings().all()
+            for row in rows:
+                data = json_loads(row["data_json"]) or {}
+                if str(data.get("userId") or "") == user["id"]:
+                    data["status"] = "canceled"
+                    conn.execute(
+                        text("UPDATE entities SET data_json=:d WHERE type='serviceSubscriptions' AND id=:id"),
+                        {"d": json_dumps(data), "id": row["id"]},
+                    )
+        withdrawn = _withdraw_campaign(cookies, "withdraw_owner", last_modified, "withdraw-lapsed-op")
+        assert withdrawn.status_code == 200, withdrawn.text
+        assert withdrawn.json()["data"]["status"] == "Draft"
+        assert _available_minor(user["id"]) == 2500
+
+    def test_withdraw_after_capture_returns_money(self, actors, monkeypatch):
+        import server.main as main_module
+
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "wdcapture", 2500)
+        sent = _sent_campaign(cookies, "withdraw_capture", "Withdraw after capture")
+        original_patch = main_module.patch_entity
+
+        def crash_status_write(*args, **kwargs):
+            updates = args[2] if len(args) > 2 else {}
+            if updates.get("lastReviewOperationId") == "withdraw-capture-approve":
+                raise HTTPException(status_code=503, detail="simulated crash after the capture")
+            return original_patch(*args, **kwargs)
+
+        # An approval captures the budget, then dies before its status write.
+        monkeypatch.setattr(main_module, "patch_entity", crash_status_write)
+        crashed = _review_campaign(actors, "withdraw_capture", sent["lastModified"], "Approved", "withdraw-capture-approve")
+        monkeypatch.setattr(main_module, "patch_entity", original_patch)
+        assert crashed.status_code == 503, crashed.text
+        assert _campaign_money(actors, user["id"], "withdraw_capture")["campaign_payment"] == [2500]
+        assert _balance_minor(actors, user["id"]) == 0
+        withdrawn = _withdraw_campaign(cookies, "withdraw_capture", sent["lastModified"], "withdraw-capture-op")
+        assert withdrawn.status_code == 200, withdrawn.text
+        assert withdrawn.json()["data"]["status"] == "Draft"
+        # The capture came back in the same transaction: the ledger is as before the submit.
+        money = _campaign_money(actors, user["id"], "withdraw_capture")
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [2500], money
+        assert _balance_minor(actors, user["id"]) == 2500 and _available_minor(user["id"]) == 2500
+        released = _audit_rows("withdraw_capture", "wallet_release")
+        assert len(released) == 1 and released[0]["transactionId"], released
+        replay = _withdraw_campaign(cookies, "withdraw_capture", sent["lastModified"], "withdraw-capture-op")
+        assert replay.status_code == 200, replay.text
+        # The reviewer's retry of the crashed approval finds a Draft: nothing is captured again.
+        retry = _review_campaign(actors, "withdraw_capture", sent["lastModified"], "Approved", "withdraw-capture-approve")
+        assert retry.status_code == 409, retry.text
+        assert _campaign_money(actors, user["id"], "withdraw_capture") == money
+        assert len(_audit_rows("withdraw_capture", "wallet_release")) == 1
+        _assert_wallet_identity(cookies, user["id"])
+
+    def test_withdraw_after_approval_is_refused(self, actors):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "wdlate", 2500)
+        sent = _sent_campaign(cookies, "withdraw_late", "Withdraw too late")
+        approved = _review_campaign(actors, "withdraw_late", sent["lastModified"], "Approved", "withdraw-late-approve")
+        assert approved.status_code == 200, approved.text
+        late = _withdraw_campaign(cookies, "withdraw_late", sent["lastModified"], "withdraw-late-op")
+        assert late.status_code == 409, late.text
+        assert late.json()["detail"] == REFUSE_WITHDRAW_APPROVED
+        latest = client.get("/api/collections/adCampaignRequests/withdraw_late", cookies=cookies).json()
+        assert latest["data"]["status"] == "Approved"
+        money = _campaign_money(actors, user["id"], "withdraw_late")
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [], money
+        assert _audit_rows("withdraw_late", "withdraw") == []
+        _assert_wallet_identity(cookies, user["id"])
+
+
+class TestStudioApprovalSelfRelease:
+    """P1-03b: an approval that lost its status write after its capture returns that capture
+    when the request left the cycle; a concurrent approval that won keeps it."""
+
+    def test_capture_then_withdraw_then_approval_conflict_returns_money(self, actors, monkeypatch):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "selfrelwd", 2500)
+        sent = _sent_campaign(cookies, "self_release_wd", "Self release withdraw")
+        before = _balance_minor(actors, user["id"])  # a submit writes no ledger row: the pre-submit state
+
+        def withdraw_meanwhile():
+            captured = _campaign_money(actors, user["id"], "self_release_wd")["campaign_payment"]
+            return captured, _withdraw_campaign(cookies, "self_release_wd", sent["lastModified"], "self-release-wd-op")
+
+        (captured, withdrawn), approval = _approval_paused_before_status_write(
+            monkeypatch, actors, "self_release_wd", sent["lastModified"], "self-release-wd-approve", withdraw_meanwhile,
+        )
+        assert captured == [2500]  # the approval's capture had committed when the withdraw ran
+        assert withdrawn.status_code == 200 and withdrawn.json()["data"]["status"] == "Draft", withdrawn.text
+        assert approval.status_code == 409, approval.text  # the withdraw won the row
+        money = _campaign_money(actors, user["id"], "self_release_wd")
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [2500], money
+        assert _balance_minor(actors, user["id"]) == before and _available_minor(user["id"]) == before
+        latest = client.get("/api/collections/adCampaignRequests/self_release_wd", cookies=cookies).json()
+        assert latest["data"]["status"] == "Draft"
+        usd = _assert_wallet_identity(cookies, user["id"])
+        assert usd["beingReturnedMinor"] == 0 and usd["inAdsMinor"] == 0 and usd["availableMinor"] == before
+
+    def test_approval_returns_its_capture_when_the_request_left_the_cycle(self, actors, monkeypatch):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "selfrelback", 2500)
+        sent = _sent_campaign(cookies, "self_release_back", "Self release send back")
+        before = _balance_minor(actors, user["id"])
+
+        def sent_back_without_release():
+            # A send-back whose status write committed but whose release never ran (crash).
+            _force_campaign_fields("self_release_back", status="Changes Requested", reviewDecision="Changes Requested")
+
+        _, approval = _approval_paused_before_status_write(
+            monkeypatch, actors, "self_release_back", sent["lastModified"], "self-release-back-approve",
+            sent_back_without_release,
+        )
+        assert approval.status_code == 409, approval.text
+        # Nothing else would return this capture: the approval returned it itself.
+        money = _campaign_money(actors, user["id"], "self_release_back")
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [2500], money
+        assert _balance_minor(actors, user["id"]) == before and _available_minor(user["id"]) == before
+        released = _audit_rows("self_release_back", "wallet_release")
+        assert len(released) == 1 and released[0]["operationId"] == "self-release-back-approve", released
+        # A retry of the same approval changes nothing.
+        retry = _review_campaign(actors, "self_release_back", sent["lastModified"], "Approved", "self-release-back-approve")
+        assert retry.status_code == 409, retry.text
+        assert _campaign_money(actors, user["id"], "self_release_back") == money
+        usd = _assert_wallet_identity(cookies, user["id"])
+        assert usd["beingReturnedMinor"] == 0 and usd["availableMinor"] == before
+
+    def test_identical_concurrent_approval_is_never_released(self, actors, monkeypatch):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "selfrelsame", 2500)
+        sent = _sent_campaign(cookies, "self_release_same", "Self release identical")
+        op = "self-release-same-approve"
+        winner, loser = _approval_paused_before_status_write(
+            monkeypatch, actors, "self_release_same", sent["lastModified"], op,
+            lambda: _review_campaign(actors, "self_release_same", sent["lastModified"], "Approved", op),
+        )
+        # The paused one lost the row to its identical twin and adopted the twin's commit.
+        assert winner.status_code == 200 and loser.status_code == 200, (winner.text, loser.text)
+        assert loser.json()["lastModified"] == winner.json()["lastModified"]
+        assert loser.json()["data"]["status"] == "Approved"
+        money = _campaign_money(actors, user["id"], "self_release_same")
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [], money
+        assert _balance_minor(actors, user["id"]) == 0
+        assert len(_audit_rows("self_release_same", "review")) == 1
+        assert _audit_rows("self_release_same", "wallet_release") == []
+        usd = _assert_wallet_identity(cookies, user["id"])
+        assert usd["inAdsMinor"] == 2500 and usd["beingReturnedMinor"] == 0
+
+    def test_approval_that_loses_to_another_approval_keeps_the_capture(self, actors, monkeypatch):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "selfrelother", 2500)
+        sent = _sent_campaign(cookies, "self_release_other", "Self release other approval")
+        winner, loser = _approval_paused_before_status_write(
+            monkeypatch, actors, "self_release_other", sent["lastModified"], "self-release-other-a",
+            lambda: _review_campaign(actors, "self_release_other", sent["lastModified"], "Approved", "self-release-other-b"),
+        )
+        assert winner.status_code == 200, winner.text
+        assert loser.status_code == 409, loser.text  # a different approval won: this one reports the conflict
+        money = _campaign_money(actors, user["id"], "self_release_other")
+        # The winner's ad uses the one capture of this cycle: it is never returned.
+        assert money["campaign_payment"] == [2500] and money["campaign_payment_release"] == [], money
+        latest = client.get("/api/collections/adCampaignRequests/self_release_other", cookies=cookies).json()
+        assert latest["data"]["status"] == "Approved" and latest["data"]["lastReviewOperationId"] == "self-release-other-b"
+        assert _audit_rows("self_release_other", "wallet_release") == []
+        _assert_wallet_identity(cookies, user["id"])

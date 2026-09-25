@@ -354,10 +354,10 @@ def release_orphan_campaign_payment(
 ) -> str:
     """Refund a campaign payment left behind by a crashed approval.
 
-    Runs on Reject/Changes Requested. Normally there is NOTHING to do — the
-    payment for this submission cycle only exists if a previous Approved
-    attempt crashed between its capture and its status write. Deterministic
-    key: at most one release per cycle, replay-safe.
+    Runs on Reject/Changes Requested, withdraw and archive. Normally there is
+    NOTHING to do — the payment for this submission cycle only exists if an
+    Approved attempt crashed or lost between its capture and its status write.
+    Deterministic key: at most one release per cycle, replay-safe.
     """
     pay_key = _campaign_payment_key(campaign)
     prior = ctx["find_entity_by_idempotency"](conn, "walletTransactions", pay_key)
@@ -422,6 +422,21 @@ def campaign_capture_open_minor(conn: Any, ctx: dict[str, Any], campaign: dict[s
         if ctx["find_entity_by_idempotency"](conn, "walletTransactions", returned_key):
             return 0
     return max(int((prior.get("data") or {}).get("amountMinor") or 0), 0)
+
+
+def release_open_campaign_capture(
+    conn: Any, ctx: dict[str, Any], campaign: dict[str, Any], actor_id: str
+) -> str:
+    """Return (``rel:``) this cycle's capture only while it is still open.
+
+    The id of the NEW return row, or '' when the cycle has no capture or it already went
+    back through any door (``rel:``, ``stoprefund:``, ``rev:``), so a caller audits only a
+    return it made. Used by submit (the previous cycle), withdraw (P1-03) and an approval
+    that lost its status write (P1-03b), inside the caller's locked transaction.
+    """
+    if campaign_capture_open_minor(conn, ctx, campaign) <= 0:
+        return ""
+    return release_orphan_campaign_payment(conn, ctx, campaign, actor_id)
 
 
 def refund_stopped_campaign_budget(
