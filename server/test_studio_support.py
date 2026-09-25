@@ -745,3 +745,13 @@ def postgres_ticket_numbers() -> None:
             text("SELECT data_json FROM entities WHERE type = :t"), {"t": SUPPORT_TICKETS_TYPE}).all()]
     assert len(seqs) == len(set(seqs)) == 50 + 1 + studio_support.MAX_OPEN_TICKETS
     assert sorted(seqs) == list(range(1, len(seqs) + 1))  # the counter handed out 1..N, nothing skipped
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _desk_rows_cleanup():
+    """Tickets, their messages, stop requests and the ticket counter are this module's own; other modules
+    assert an empty desk (P3-20 STAFF_DESK_IN_USE), so they are removed when the module ends."""
+    yield
+    with db_conn() as conn:
+        for row_type in ("supportTickets", "supportTicketMessages", "studioStopRequests", "studioCounters"):
+            conn.execute(text("DELETE FROM entities WHERE type = :t"), {"t": row_type})

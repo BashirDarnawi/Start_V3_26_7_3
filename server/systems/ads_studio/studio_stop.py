@@ -11,7 +11,7 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
   service must be on for this user (studio_settings.service_access), else 403 REFUSE_STOP_REQUEST_OFF;
   the customer layout never matters (P3-20).
 * ONE transaction on the locked request row: an urgent ticket (category ``ad``, related ``campaign``,
-  made by studio_support.create_ticket, see Tickets below), the request's ``stopRequestedAt``,
+  made by studio_support.open_ticket_conn, see Tickets below), the request's ``stopRequestedAt``,
   ``stopRequestTicketId`` and ``lastStopRequestOperationId``, the staff queue row below, the owner's
   inbox item ``stop_request_received`` (studio_activity.py) and the audit entry ``stop_request``
   (in main's keep list: never deleted).
@@ -54,13 +54,10 @@ customer. Each number handed out is audited ``contact_link`` (kept forever) with
 stop requests (``stopRequestedAt`` on a request that is not Stopped); studio_settings refuses to switch
 ``staffDesk`` off while either is non-zero (409 STAFF_DESK_IN_USE).
 
-**Tickets.** The ticket module (studio_support.py, P3-07) is built in parallel. The urgent ticket
-comes from ``studio_support.create_ticket(conn, *, owner_id, subject, category, message,
-related_type=None, related_id=None, urgent=False, operation_id) -> ticket``, imported when it is
-called. While that module or function is missing, ``_stub_create_ticket`` writes a minimal ticket
-with the same fields (TODO(P3-07): remove the stub once studio_support.create_ticket exists).
-Resolving uses ``studio_support.resolve_ticket_for_system(conn, *, ticket_id, reason)`` when it
-exists, else marks the ticket row resolved (``status``, ``resolvedAt``, ``updatedAt``).
+**Tickets.** The urgent ticket is opened by ``studio_support.open_ticket_conn`` on the stop request's
+own transaction (priority urgent, kind stop_request, the open-ticket cap not enforced, settings read
+before the transaction). Once the ad is Stopped, ``studio_support.system_resolve_ticket_conn``
+resolves it on the same transaction as the stop row; the caller audits.
 
 **Service hours.** ``studio_hours.is_open_now(settings=, now=)`` and ``studio_hours.due_at(start,
 minutes=, settings=)`` (P3-16, built in parallel) when present; until then the same rules:
@@ -68,7 +65,6 @@ studio_settings.service_open_at and ``working_due_at`` below (working minutes in
 holidays and the Ramadan window, Tripoli time).
 """
 
-import hashlib
 import math
 import time
 from contextlib import nullcontext
@@ -226,14 +222,6 @@ def stop_due_at(start: datetime, settings: dict[str, Any]) -> datetime | None:
 
 # ------------------------------------------------------------------ tickets (studio_support.py, P3-07)
 
-def _support_module() -> Any:
-    try:
-        from . import studio_support  # P3-07, built in parallel
-    except ImportError:
-        return None
-    return studio_support
-
-
 def ticket_view(data: Any) -> dict[str, Any]:
     """The contract fields of a ticket (never an internal note or a staff id) plus ``urgent``."""
     data = data if isinstance(data, dict) else {}
@@ -251,94 +239,25 @@ def load_ticket(conn: Any, ticket_id: str) -> dict[str, Any]:
     return data if isinstance(data, dict) and data else {"id": str(ticket_id or "")}
 
 
-def _stub_create_ticket(
-    conn: Any,
-    *,
-    owner_id: str,
-    subject: str,
-    category: str,
-    message: str,
-    related_type: Optional[str] = None,
-    related_id: Optional[str] = None,
-    urgent: bool = False,
-    operation_id: str,
-) -> dict[str, Any]:
-    """A thin stand-in for studio_support.create_ticket (same arguments, same ticket fields) while the
-    ticket module is not there. TODO(P3-07): remove once studio_support.create_ticket exists."""
-    ticket_id = derived_id("tkt", owner_id, operation_id)
-    found = conn.execute(
-        text("SELECT data_json FROM entities WHERE type = :type AND id = :id LIMIT 1"),
-        {"type": TICKETS_TYPE, "id": ticket_id},
-    ).mappings().first()
-    if found:
-        return json_loads(found["data_json"]) or {}
-    now = utc_now()
-    at = _iso(now)
-    settings = read_all_settings()
-    minutes = settings["targets"]["stopRequestMinutes" if urgent else "ticketFirstResponseMinutes"]
-    due = working_due_at(now, int(minutes), settings["hours"])
-    stamp = now_ms()
-    owner = created_by_or_none(conn, owner_id)
-    number = "T-" + f"{int(hashlib.sha256(ticket_id.encode('utf-8')).hexdigest()[:12], 16) % 1_000_000:06d}"
-    data = {
-        "recordType": TICKETS_TYPE, "id": ticket_id, "ownerId": owner_id, "number": number,
-        "subject": str(subject or "")[:120], "category": category, "status": "open",
-        "audience": "admin" if category in ("payment", "account") else "staff",
-        "priority": "urgent" if urgent else "normal", "urgent": bool(urgent),
-        "relatedType": related_type, "relatedId": related_id, "createdAt": at, "updatedAt": at,
-        "dueAt": _iso(due) if due else None, "lastMessageAt": at, "lastCustomerAt": at, "operationId": operation_id,
-        "_created": stamp, "_lastModified": stamp, "_deleted": False,
-    }
-    message_id = derived_id("tkm", ticket_id, operation_id)
-    message_row = {
-        "recordType": TICKET_MESSAGES_TYPE, "id": message_id, "ticketId": ticket_id, "ownerId": owner_id,
-        "author": "customer", "text": str(message or "")[:2000], "at": at, "clientMessageId": operation_id,
-        "_created": stamp, "_lastModified": stamp, "_deleted": False,
-    }
-    for row_type, row_id, row in ((TICKETS_TYPE, ticket_id, data), (TICKET_MESSAGES_TYPE, message_id, message_row)):
-        conn.execute(
-            text(
-                "INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified) "
-                "VALUES (:type, :id, :data, false, :stamp, :owner, :stamp) ON CONFLICT (type, id) DO NOTHING"
-            ),
-            {"type": row_type, "id": row_id, "data": json_dumps(row), "stamp": stamp, "owner": owner},
-        )
-    return data
+def create_stop_ticket(conn: Any, *, settings: dict[str, Any], urgent: bool = True, **arguments: Any) -> dict[str, Any]:
+    """The stop request's ticket (studio_support.open_ticket_conn, P3-07): urgent, kind stop_request, never
+    refused by the open-ticket cap; a replay of the same operationId returns the first ticket."""
+    from . import studio_support  # late: keeps the two desk modules free of an import cycle
 
-
-def create_stop_ticket(conn: Any, **arguments: Any) -> dict[str, Any]:
-    """studio_support.create_ticket when it exists, else the stub (same arguments)."""
-    create = getattr(_support_module(), "create_ticket", None)
-    return (create if callable(create) else _stub_create_ticket)(conn, **arguments)
+    ticket, _first_message, _created = studio_support.open_ticket_conn(
+        conn, priority="urgent" if urgent else "normal", kind="stop_request", enforce_open_limit=False,
+        settings=settings, **arguments,
+    )
+    return ticket
 
 
 def resolve_ticket(conn: Any, ticket_id: str, reason: str, at: str) -> None:
-    """Mark a stop request's ticket resolved (studio_support.resolve_ticket_for_system when it exists)."""
+    """Mark a stop request's ticket resolved on the caller's transaction (studio_support, P3-07)."""
     if not ticket_id:
         return
-    resolver = getattr(_support_module(), "resolve_ticket_for_system", None)
-    if callable(resolver):
-        resolver(conn, ticket_id=ticket_id, reason=reason)
-        return
-    lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
-    row = conn.execute(
-        text(f"SELECT data_json, deleted, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1{lock}"),
-        {"type": TICKETS_TYPE, "id": ticket_id},
-    ).mappings().first()
-    if not row or bool(row["deleted"]):
-        return
-    data = json_loads(row["data_json"]) or {}
-    if str(data.get("status") or "") in TICKET_DONE_STATUSES:
-        return
-    baseline = int(row["last_modified"])
-    modified = max(now_ms(), baseline + 1)
-    data.update({"status": "resolved", "resolvedAt": at, "updatedAt": at, "resolvedReason": reason,
-                 "_lastModified": modified})
-    conn.execute(
-        text("UPDATE entities SET data_json = :data, last_modified = :modified "
-             "WHERE type = :type AND id = :id AND last_modified = :baseline"),
-        {"data": json_dumps(data), "modified": modified, "type": TICKETS_TYPE, "id": ticket_id, "baseline": baseline},
-    )
+    from . import studio_support  # late, see create_stop_ticket
+
+    studio_support.system_resolve_ticket_conn(conn, ticket_id, reason=reason)
 
 
 # ------------------------------------------------------------------ the stop-request route
@@ -445,7 +364,7 @@ def add_stop_request_route(
                 ticket = create_stop_ticket(
                     conn, owner_id=actor_id, subject=_stop_subject(data), category="ad",
                     message=note or DEFAULT_STOP_MESSAGE, related_type="campaign", related_id=campaign_id,
-                    urgent=True, operation_id=operation_id,
+                    urgent=True, operation_id=operation_id, settings=settings,
                 )
                 ticket_id = str(ticket.get("id") or "")
                 number = str(ticket.get("number") or "")
