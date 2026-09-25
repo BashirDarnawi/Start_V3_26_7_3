@@ -2,7 +2,10 @@
 
 ONE daemon thread per process, started by the /api/studio router's startup event
 (``create_studio_jobs_router``, included by studio_api.create_studio_router: 0 main.py lines),
-whether or not Meta is configured: nothing here calls Meta or needs a Meta token. The env switch
+whether or not Meta is configured: the money jobs never call Meta or need a Meta token. The one Meta
+job, the results sync (``results``, studio_results_sync.py, P3-03), is claimed only while a Meta
+token is set (ALBAYAN_META_ACCESS_TOKEN, read without loading the Meta client) and runs one budgeted
+pass per tick (at most 5 reads within 10 seconds). The env switch
 ``ALBAYAN_STUDIO_JOBS`` (default on; ``off``/``false``/``0``/``no`` = off) stops it, and it never starts
 under pytest (``PYTEST_CURRENT_TEST``): the tests call the job functions directly. Every 30 s a tick
 writes the heartbeat and runs the jobs that are due; a job that fails is logged (error type only),
@@ -52,7 +55,8 @@ Records (router-only types: the generic /api/collections API refuses both):
   count, customerVisible (false), acknowledgedAt, acknowledgedBy, channelSentAt, details.
 * ``studioJobState``: one row (``sjs_`` + sha256('studio-jobs')[:40]), ``created_by`` NULL:
   lastTickAt, lastSweepAt, lastWaitingCheckAt, lastIntegrityScanDay, lastIntegrityScanAt,
-  lastIntegrityResult (counts only), lastError (job, error type, time; never a message).
+  lastIntegrityResult (counts only), lastError (job, error type, time; never a message),
+  lastResultsSyncAt and resultsParkedUntil (the results sync's parked ad accounts).
 
 ``GET /api/studio/admin/alerts`` (admin only, 30 reads a minute): newest first, ``limit`` 1-50
 (20 by default), ``before`` = the ``nextBefore`` of the previous page; ``jobs`` = jobs_heartbeat().
@@ -101,6 +105,8 @@ TICK_SECONDS = 30
 FIRST_TICK_DELAY_SECONDS = 15  # let startup settle before the first database work
 SWEEP_EVERY = timedelta(minutes=2)
 WAITING_EVERY = timedelta(minutes=5)
+RESULTS_EVERY = timedelta(seconds=TICK_SECONDS)  # one budgeted Meta results pass per tick (P3-03)
+META_TOKEN_ENV = "ALBAYAN_META_ACCESS_TOKEN"
 SWEEP_LOOKBACK = timedelta(hours=48)
 INTERRUPTED_AFTER_MINUTES = studio_integrity.CAPTURE_GRACE_MINUTES  # 15 (PLAN.md §7.4)
 DAILY_SCAN_AT = "04:00"  # Tripoli time
@@ -112,13 +118,14 @@ ALERTS_PAGE_DEFAULT = 20
 ALERTS_PAGE_MAX = 50
 ALERT_READS_PER_MINUTE = 30
 
-# PLAN.md §7.1 studioAlerts kinds, plus review_overdue (this loop's overdue-review alert).
+# PLAN.md §7.1 studioAlerts kinds, plus review_overdue (this loop's overdue-review alert) and
+# meta_drift (the results sync's post-settle spend drift, P3-03).
 ALERT_KINDS = (
     "reply_failure_burst", "page_health_drop", "meta_overspend", "post_settle_spend_drift", "running_past_end",
     "approval_interrupted", "results_parked", "studio_account_config", "studio_funds_low", "studio_account_inactive",
     "meta_connection_down", "meta_token_expiring", "replies_parked", "instagram_comments_not_arriving",
     "integrity_violation", "jobs_heartbeat_late", "stop_request_overdue", "payment_confirm_overdue",
-    "storage_threshold", "studio_core_collision", "review_overdue",
+    "storage_threshold", "studio_core_collision", "review_overdue", "meta_drift",
 )
 ALERT_LABELS: dict[str, dict[str, str]] = {
     "approval_interrupted": {
@@ -132,6 +139,18 @@ ALERT_LABELS: dict[str, dict[str, str]] = {
     "integrity_violation": {
         "en": "The daily money check found a problem",
         "ar": "وجد فحص الأموال اليومي مشكلة",
+    },
+    "running_past_end": {
+        "en": "An ad is still running on Meta after its end",
+        "ar": "إعلان ما زال يعمل على ميتا بعد موعد انتهائه",
+    },
+    "meta_drift": {
+        "en": "Meta reports more spend than the settled amount (more than $0.50)",
+        "ar": "تُظهر ميتا صرفاً أكبر من المبلغ المسوّى (أكثر من 0.50 دولار)",
+    },
+    "results_parked": {
+        "en": "Meta results reads of an ad account are paused for a few minutes",
+        "ar": "توقفت قراءة نتائج ميتا لحساب إعلاني بضع دقائق",
     },
 }
 # A request in one of these states has left its submission cycle (studio_wallet.cycle_state "being
@@ -193,6 +212,18 @@ def jobs_enabled() -> bool:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
     return str(os.environ.get(ENV_SWITCH) or "on").strip().lower() not in _OFF_VALUES
+
+
+def results_sync_configured() -> bool:
+    """True while a Meta token is set: the only condition for claiming the results job (the pass
+    itself checks the full Meta configuration and Albayan's Meta pause)."""
+    return bool(str(os.environ.get(META_TOKEN_ENV) or "").strip())
+
+
+def _run_results_sync(now: datetime) -> dict[str, Any]:
+    from .studio_results_sync import run_results_sync  # late: the sync imports this module
+
+    return run_results_sync(now)
 
 
 def resolve_jobs_ctx(router_ctx: dict[str, Any] | None) -> dict[str, Any]:
@@ -447,6 +478,7 @@ def jobs_heartbeat(now: datetime | None = None) -> dict[str, Any]:
         "lastSweepAt": _iso_or_none(state.get("lastSweepAt")),
         "lastWaitingCheckAt": _iso_or_none(state.get("lastWaitingCheckAt")),
         "lastIntegrityScanAt": _iso_or_none(state.get("lastIntegrityScanAt")),
+        "lastResultsSyncAt": _iso_or_none(state.get("lastResultsSyncAt")),
         "lastIntegrityResult": None if result is None else {
             "total": int(result.get("total") or 0),
             "byCode": {
@@ -659,6 +691,9 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         if _due(state.get("lastWaitingCheckAt"), WAITING_EVERY, now):
             fields["lastWaitingCheckAt"] = at
             claimed.append("waiting")
+        if results_sync_configured() and _due(state.get("lastResultsSyncAt"), RESULTS_EVERY, now):
+            fields["lastResultsSyncAt"] = at
+            claimed.append("results")
         return fields
 
     if update_job_state(heartbeat) is None:
@@ -667,6 +702,7 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         "daily": lambda: run_daily_money_check(ctx_provider, now),
         "sweep": lambda: sweep_orphans(ctx_provider(), now),
         "waiting": lambda: check_waiting_requests(now),
+        "results": lambda: _run_results_sync(now),
     }
     ran: dict[str, Any] = {"claimed": list(claimed)}
     for job in claimed:
@@ -697,7 +733,7 @@ def start_studio_jobs(ctx_provider: Callable[[], dict[str, Any]]) -> bool:
         _STOP_JOINED = False
         _THREAD = threading.Thread(target=_loop, args=(_STOP, ctx_provider), name="albayan-studio-jobs", daemon=True)
         _THREAD.start()
-    print("[albayan] Studio jobs loop started (orphan sweep, alerts, daily money check; no Meta needed).")
+    print("[albayan] Studio jobs loop started (orphan sweep, alerts, daily money check; Meta results sync when configured).")
     return True
 
 

@@ -1803,6 +1803,352 @@
         "metaUsedMinor": null
       },
       "note": "an unreadable check time means never checked"
+    },
+    {
+      "name": "meta_fed_review_wins_over_disapproved",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PENDING_REVIEW": 1,
+          "DISAPPROVED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 5,
+        "stageKey": "meta_reviewing",
+        "nextActor": "meta",
+        "runningPastEnd": false
+      },
+      "note": "P3-04a: an ad still in Meta's review keeps stage 5 even when another ad was rejected"
+    },
+    {
+      "name": "meta_fed_with_issues_wins_over_paused",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "WITH_ISSUES": 1,
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 7,
+        "stageKey": "delivery_problem",
+        "nextActor": "albayan",
+        "moneyKey": "paid"
+      }
+    },
+    {
+      "name": "meta_fed_campaign_paused_ads",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "PAUSED",
+        "adStatusCounts": {
+          "CAMPAIGN_PAUSED": 2
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 9,
+        "stageKey": "paused",
+        "nextActor": "albayan",
+        "tracker": {
+          "step": "running",
+          "side": true
+        }
+      }
+    },
+    {
+      "name": "meta_fed_active_after_meta_end_time",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 900,
+        "currency": "USD",
+        "adsetEndTime": "2026-10-15T08:00:00Z"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "runningPastEnd": true,
+        "metaUsedMinor": 900
+      },
+      "note": "P3-04a: ACTIVE after the end stays Running with the flag; the results sync raises running_past_end"
+    },
+    {
+      "name": "meta_fed_stop_time_ahead_keeps_running",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD",
+        "campaignStopTime": "2026-10-20T21:59:00Z"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "runningPastEnd": false
+      }
+    },
+    {
+      "name": "meta_fed_campaign_archived_is_ended",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ARCHIVED",
+        "adStatusCounts": {
+          "PAUSED": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 1500,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "moneyKey": "paid_settling",
+        "variant": "",
+        "metaUsedMinor": 1500
+      }
+    },
+    {
+      "name": "meta_fed_reviewing_with_stop_request",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001",
+        "stopRequestedAt": "2026-10-15T09:00:00Z"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "PENDING_REVIEW": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 5,
+        "stageKey": "meta_reviewing",
+        "stopRequested": true,
+        "runningPastEnd": false,
+        "actions": [
+          "ask"
+        ]
+      }
+    },
+    {
+      "name": "meta_fed_disapproved_with_stop_request_is_ended",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001",
+        "stopRequestedAt": "2026-10-15T09:00:00Z"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "DISAPPROVED": 2
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "stopRequested": false
+      }
+    },
+    {
+      "name": "meta_fed_sync_error_keeps_last_good_stage",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "error",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 300,
+        "currency": "USD",
+        "lastErrorCode": "rate_limited:80004"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "metaUsedMinor": 300,
+        "checkedAt": "2026-10-15T09:30:00Z"
+      },
+      "note": "a failed sync never clears the last answered read: the stage and the numbers stay"
+    },
+    {
+      "name": "meta_fed_never_delivered_ignored_while_running",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 0,
+        "currency": "USD",
+        "neverDelivered": true
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "variant": "",
+        "moneyKey": "paid_running"
+      }
+    },
+    {
+      "name": "meta_fed_unreadable_insights_keep_spend",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 1
+        },
+        "insightsState": "unavailable",
+        "spendConfirmedAt": "2026-10-15T08:00:00Z",
+        "spendMinorUSD": 1234,
+        "currency": "USD"
+      },
+      "expect": {
+        "stage": 8,
+        "stageKey": "running",
+        "metaUsedMinor": 1234
+      },
+      "note": "P3-01: an insights read Meta did not answer keeps the last confirmed spend (never 0)"
     }
   ]
 }

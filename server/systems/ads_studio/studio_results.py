@@ -7,8 +7,9 @@ built before any screen:
   a Meta campaign. Id ``acr_`` + sha256(campaign id)[:40] (studio_types.derived_id), so a sync
   always finds the row it wrote; ``created_by`` = the request owner, or NULL when that is not a
   real user (the users.id foreign key rule). Router-only: the generic /api/collections API refuses
-  the type. The Meta sync fills it from P3 (P3-03); until then only tests and the e2e seed write
-  rows (``write_results_row``). Every read goes through ``normalize_results()``: a stored field
+  the type. The Meta sync (studio_results_sync.py, P3-03) fills it through ``write_results_row``
+  with version-checked claims; tests and the e2e seed write rows the same way. Every read goes
+  through ``normalize_results()``: a stored field
   that fails today's rules reads as its safe default, so a hand-edited row never reaches a
   customer. ``spendMinorUSD`` is the last CONFIRMED value (``spendConfirmedAt``); an unreadable
   pass never overwrites it (the sync's job). ``lastSyncedAt`` is the last read Meta answered.
@@ -23,6 +24,12 @@ built before any screen:
   and names are never part of it (the route passes it through studio_privacy.redact_staff_identity,
   P1-05), nor the staff-only Meta review text. ``dueAt`` stays null until the service-hours helper
   exists (P3-16).
+* ``GET /api/studio/campaigns/{id}/results`` (P3-04b; the owner, or staff) and ``POST
+  .../results/refresh`` (P3-04c, staff "Check Meta now"): one request's results card
+  (``results_view``), always from the stored row, so a failed sync shows the last good values.
+  See create_studio_results_router.
+* ``meta_delivery()`` (PURE): delivering / reviewing / past the end / ended, the same rules as the
+  stage, for the sync's schedule (P3-03).
 
 Stage rules (PLAN.md §5.4). Status comes first: Draft 1 (also after a withdraw), Submitted 2,
 Changes Requested 3, Rejected 13, Stopped 11 (``closeReason`` completed; legacy rows without a
@@ -47,16 +54,17 @@ PENDING_BILLING_INFO ad reads as a delivery problem.
 """
 
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from ...db import db_conn, json_dumps, json_fields_select_sql, json_loads, json_loads_or_raw, now_ms
 from ...rate_limiter import check_rate_limit
-from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
+from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION, REVIEWER_VISIBLE_STATUSES
 from .studio_diagnostics import libya_today, parse_day, parse_time
 from .studio_errors import studio_error
 from .studio_privacy import redact_staff_identity
@@ -187,6 +195,9 @@ def stage_tables() -> dict[str, Any]:
 _TIME_FIELDS = (
     "campaignStopTime", "adsetEndTime", "spendConfirmedAt", "deliveryEndedAt", "settleReadDueAt",
     "driftWatchUntil", "stopEffectiveAt", "lastSyncedAt", "nextSyncAt", "syncClaimedUntil",
+    # P3-03/P3-04c (studio_results_sync): the final read at settleReadDueAt, the last attempt, and
+    # the last staff "Check Meta now" that reached Meta (a second press within 10 minutes is cached).
+    "settleReadAt", "lastAttemptAt", "manualCheckAt",
 )
 _COUNT_FIELDS = ("lifetimeImpressions", "reach", "impressions", "clicks", "resultCount", "costPerResultMinorUSD")
 _TEXT_FIELDS = {
@@ -213,9 +224,13 @@ def _int_or_none(value: Any, top: int = _MAX_MINOR) -> int | None:
     return int(number)
 
 
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _iso_or_none(value: Any) -> str | None:
     moment = parse_time(value)
-    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if moment else None
+    return _iso(moment) if moment else None
 
 
 def _meta_id(value: Any) -> str:
@@ -283,13 +298,15 @@ def write_results_row(
     *,
     stamp_ms: int | None = None,
     expected_last_modified: int | None = None,
+    expect_new: bool = False,
 ) -> dict[str, Any]:
     """Insert or update the results row of one request; returns the normalized data.
 
     ``fields`` are merged over the stored row, then the whole row is normalized, so an unknown or
     bad field never lands. ``expected_last_modified`` (optional) makes the update conditional
-    (the P3 sync claims rows this way); a mismatch raises ResultsRowChanged. Run it on the
-    caller's transaction.
+    (the P3 sync claims rows this way); a mismatch raises ResultsRowChanged. ``expect_new`` makes
+    the write an insert only (a row someone wrote since the caller saw none raises it too). Run it
+    on the caller's transaction.
     """
     row_id = results_id(campaign_id)
     stamp = int(stamp_ms or now_ms())
@@ -304,7 +321,7 @@ def write_results_row(
     data["_deleted"] = False
     if found:
         baseline = int(found["last_modified"])
-        if expected_last_modified is not None and int(expected_last_modified) != baseline:
+        if expect_new or (expected_last_modified is not None and int(expected_last_modified) != baseline):
             raise ResultsRowChanged(row_id)
         modified = max(stamp, baseline + 1)
         data["_created"] = int(found["created_at"])
@@ -392,6 +409,47 @@ def load_owner_results(conn: Any, owner_id: str, campaign_ids: Any) -> dict[str,
     return out
 
 
+# What the results sync (P3-03) and the results routes (P3-04b/c) read of ONE request: the stage
+# fields plus the link (account, the currency the link read) and the settled spend. Never images.
+SYNC_REQUEST_FIELDS = REQUEST_FIELDS + ("metaAdAccountId", "settledSpendMinorUSD", "metaLinkResult")
+
+
+def load_request(conn: Any, campaign_id: str) -> dict[str, Any] | None:
+    """One request (archived too) as ``SYNC_REQUEST_FIELDS`` + ``id``, ``ownerId``, ``archived``; None if missing."""
+    row = conn.execute(
+        text(json_fields_select_sql(SYNC_REQUEST_FIELDS, ("id", "deleted", "created_by"), "type = :type AND id = :id")),
+        {"type": AD_CAMPAIGN_COLLECTION, "id": str(campaign_id or "")},
+    ).mappings().first()
+    if not row:
+        return None
+    item = {field: row.get(f"f_{field.lower()}") for field in SYNC_REQUEST_FIELDS}
+    item["changeReasons"] = json_loads_or_raw(item.get("changeReasons"))
+    link = json_loads_or_raw(item.get("metaLinkResult"))
+    item["metaLinkResult"] = link if isinstance(link, dict) else {}
+    item.update({"id": str(row["id"]), "ownerId": str(row.get("created_by") or ""), "archived": bool(row.get("deleted"))})
+    return item
+
+
+def load_results_row(conn: Any, campaign_id: str) -> tuple[dict[str, Any] | None, int | None]:
+    """(normalized results row, its last_modified) of one request, or (None, None)."""
+    row = conn.execute(
+        text("SELECT data_json, deleted, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+        {"type": RESULTS_TYPE, "id": results_id(campaign_id)},
+    ).mappings().first()
+    if not row:
+        return None, None
+    data = normalize_results(json_loads(row["data_json"])) if not bool(row["deleted"]) else None
+    return data, int(row["last_modified"])
+
+
+def linked_meta_ids(request: dict[str, Any]) -> tuple[str, str] | None:
+    """(ad account digits, Meta campaign id) of a request linked by the studio desk, else None."""
+    meta_id = _meta_id(request.get("metaCampaignId"))
+    account = str(request.get("metaAdAccountId") or "").strip()
+    account = _meta_id(account[4:] if account.startswith("act_") else account)
+    return (account, meta_id) if meta_id and account else None
+
+
 # ------------------------------------------------------------------ the pure stage function
 
 def _labels(entry: dict[str, str]) -> dict[str, str]:
@@ -432,6 +490,40 @@ def _stopped_stage(request: dict[str, Any], now: datetime) -> int:
     return 12
 
 
+def _meta_past_end(results: dict[str, Any], now: datetime, end_passed: bool) -> bool:
+    """An end signal from the dates: the request's end date, a Meta end time, a deleted campaign."""
+    meta_end_times = [parse_time(results[field]) for field in ("adsetEndTime", "campaignStopTime")]
+    return (
+        end_passed
+        or results["campaignEffectiveStatus"] in ("DELETED", "ARCHIVED")
+        or any(moment is not None and moment <= now for moment in meta_end_times)
+    )
+
+
+def meta_delivery(request: dict[str, Any], results: Any, now: datetime) -> dict[str, bool]:
+    """What the results sync needs to know about a checked row (PURE, the rules of _meta_stage).
+
+    ``delivering``: an ad is ACTIVE. ``reviewing``: an ad is in Meta's review. ``pastEnd``: an end
+    signal other than a stop request (a Stopped or settled request counts: it is over for Albayan).
+    ``ended``: nothing delivering or in review and an end signal (a stop request too): stage 10.
+    """
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    row = normalize_results(results)
+    end = parse_day(request.get("endDate"))
+    closed = str(request.get("status") or "") == "Stopped" or bool(str(request.get("settleBasis") or "").strip())
+    past_end = closed or _meta_past_end(row, now, bool(end and libya_today(now) > end))
+    counts = row["adStatusCounts"]
+    delivering = counts.get("ACTIVE", 0) > 0 or row["anyAdDelivering"]
+    reviewing = any(counts.get(status, 0) for status in REVIEW_STATUSES)
+    stop = bool(str(request.get("stopRequestedAt") or "").strip())
+    return {
+        "delivering": delivering,
+        "reviewing": reviewing,
+        "pastEnd": past_end,
+        "ended": not delivering and not reviewing and (past_end or stop),
+    }
+
+
 def _meta_stage(request: dict[str, Any], results: dict[str, Any], now: datetime, end_passed: bool) -> tuple[int, bool]:
     """(stage, past the promised end) from a checked results row (precedence of PLAN.md §5.4).
 
@@ -441,12 +533,7 @@ def _meta_stage(request: dict[str, Any], results: dict[str, Any], now: datetime,
     counts = results["adStatusCounts"]
     total = sum(counts.values())
     campaign = results["campaignEffectiveStatus"]
-    meta_end_times = [parse_time(results[field]) for field in ("adsetEndTime", "campaignStopTime")]
-    past_end = (
-        end_passed
-        or campaign in ("DELETED", "ARCHIVED")
-        or any(moment is not None and moment <= now for moment in meta_end_times)
-    )
+    past_end = _meta_past_end(results, now, end_passed)
     ended = past_end or bool(str(request.get("stopRequestedAt") or "").strip())
     if counts.get("ACTIVE", 0) > 0 or results["anyAdDelivering"]:
         return 8, past_end
@@ -615,14 +702,113 @@ def summary_rate_limit(user: dict[str, Any], bucket: str, per_minute: int = SUMM
         )
 
 
+# ------------------------------------------------------------------ one request's results (P3-04b/c)
+
+RESULTS_READS_PER_MINUTE = 120  # the classic list reads one card at a time
+CHECK_NOW_PER_MINUTE = 20
+MANUAL_CHECK_EVERY = timedelta(minutes=10)  # P3-04c: a second "Check Meta now" within 10 minutes is cached
+_CAMPAIGN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")
+# Staff see the sync's own state next to the customer's view (never a person's id: there is none here).
+_STAFF_FIELDS = (
+    "metaCampaignId", "metaAdAccountId", "syncState", "lastErrorCode", "lastSyncedAt", "lastAttemptAt", "nextSyncAt",
+    "campaignEffectiveStatus", "adStatusCounts", "reviewFeedbackStaff", "spendMinorUSD", "spendConfirmedAt",
+    "insightsState", "currency", "deliveryEndedAt", "settleReadDueAt", "settleReadAt", "driftWatchUntil",
+    "neverDelivered", "stopEffectiveAt", "manualCheckAt",
+)
+
+
+def paid_minor(request: dict[str, Any]) -> int:
+    """What the customer paid for the request ("Meta used $Y of $X"): the captured amount, else the total."""
+    return minor(request.get("paidMinorUSD")) or minor(request.get("totalBudgetMinorUSD")) or (
+        0 if str(request.get("budgetType") or "") == "daily" else minor(request.get("budgetMinorUSD"))
+    )
+
+
+def results_view(request: dict[str, Any], row: dict[str, Any] | None, now: datetime, *, staff: bool) -> dict[str, Any]:
+    """The results card of one request: its stage, "Meta used $Y of $X", the lifetime numbers of the
+    last read Meta answered, and "checked X ago". Values always come from the stored row, so a
+    failed sync shows the last good ones. Before a link (or before a first read of THIS campaign)
+    the numbers are empty; ``metaUsedMinor`` follows the stage rules (Approved, checked, USD,
+    confirmed spend). Staff also get the sync's state (``staff``); customers never do."""
+    stage = derive_display_stage(request, row, now)
+    stage["checkedAgo"] = checked_ago(stage["checkedAt"], now)
+    data = normalize_results(row) if row else None
+    meta_id = _meta_id(request.get("metaCampaignId"))
+    read = bool(data and meta_id and data["metaCampaignId"] == meta_id and data["lastSyncedAt"])
+    counted = bool(read and data and data["spendConfirmedAt"])
+    paid = paid_minor(request)
+    out: dict[str, Any] = {
+        "campaignId": str(request.get("id") or ""),
+        "linked": stage["linked"],
+        "stage": stage,
+        "results": {
+            "metaUsedMinor": stage["metaUsedMinor"],
+            "paidMinor": paid or None,
+            "currency": data["currency"] if read and data else "",
+            "impressions": data["lifetimeImpressions"] if counted and data else None,
+            "reach": data["reach"] if counted and data else None,
+            "clicks": data["clicks"] if counted and data else None,
+            "resultType": data["resultType"] if counted and data else "",
+            "resultCount": data["resultCount"] if counted and data else None,
+            "costPerResultMinor": data["costPerResultMinorUSD"] if counted and data else None,
+            "checkedAt": data["lastSyncedAt"] if read and data else None,
+            "checkedAgo": checked_ago(data["lastSyncedAt"], now) if read and data else None,
+            "stale": stage["stale"],
+        },
+    }
+    if staff:
+        stored = data or normalize_results(None)
+        out["staff"] = {field: stored[field] for field in _STAFF_FIELDS}
+        out["staff"]["nextManualCheckAt"] = next_manual_check_at(stored, now)
+    return out
+
+
+def next_manual_check_at(row: dict[str, Any] | None, now: datetime) -> str | None:
+    """When "Check Meta now" may reach Meta again (None: now)."""
+    manual = parse_time((row or {}).get("manualCheckAt"))
+    return _iso(manual + MANUAL_CHECK_EVERY) if manual and manual + MANUAL_CHECK_EVERY > now else None
+
+
 def create_studio_results_router(
     *,
     current_user_dependency: Callable[..., Any],
     require_same_origin: Callable[[Request], None],
     ctx: dict[str, Any],
 ) -> APIRouter:
-    """``GET /campaigns/summary`` under the studio router's /api/studio prefix (read only)."""
+    """Under the studio router's /api/studio prefix:
+
+    * ``GET /campaigns/summary`` (read only; the caller's own requests);
+    * ``GET /campaigns/{id}/results`` (P3-04b; 120 reads a minute): the owner, or staff (admins and
+      reviewers) for a request the review desk sees; anyone else, a private draft, an archived or
+      unknown request -> 404 UNKNOWN_CAMPAIGN. Customers get results_view without the staff part,
+      passed through redact_staff_identity (never a staff id);
+    * ``POST /campaigns/{id}/results/refresh`` (P3-04c, "Check Meta now"): staff only (403
+      STAFF_ONLY), same-origin (403 CROSS_SITE), 20 a minute. A linked request only (409
+      NOT_LINKED). A press within 10 minutes of the last one that reached Meta, Albayan's Meta
+      pause, or a sync already running for the request answers 200 with the stored reading and
+      ``cached: true`` (and ``nextAllowedAt``); otherwise ONE results sync of this request
+      (studio_results_sync.sync_campaign) and ``cached: false``. A Meta failure still answers 200
+      with the last good values and ``checkError`` {code, en, ar}. A press that reached Meta is
+      audited ``results_check``.
+    """
     router = APIRouter()
+
+    def is_staff(user: dict[str, Any]) -> bool:
+        if str(user.get("role") or "").lower() == "admin":
+            return True
+        check = ctx.get("user_has_permission")
+        return bool(check and check(user, AD_CAMPAIGN_COLLECTION, "review"))
+
+    def visible_request(conn: Any, campaign_id: str, user: dict[str, Any], staff: bool) -> dict[str, Any]:
+        request = load_request(conn, campaign_id) if _CAMPAIGN_ID_RE.fullmatch(campaign_id or "") else None
+        own = bool(request) and request["ownerId"] == str(user.get("id") or "")
+        if not request or request["archived"] or not (own or (staff and str(request.get("status") or "") in REVIEWER_VISIBLE_STATUSES)):
+            studio_error(404, "UNKNOWN_CAMPAIGN", "Campaign request not found")
+        return request
+
+    def answer(request: dict[str, Any], row: dict[str, Any] | None, user: dict[str, Any], staff: bool) -> dict[str, Any]:
+        view = results_view(request, row, utc_now(), staff=staff)
+        return view if staff else redact_staff_identity(view, user)  # P1-05: never a staff id
 
     @router.get("/campaigns/summary")
     def get_campaigns_summary(user: dict[str, Any] = Depends(current_user_dependency)):
@@ -630,5 +816,46 @@ def create_studio_results_router(
         with db_conn() as conn:
             summary = campaigns_summary(conn, str(user.get("id") or ""), utc_now())
         return redact_staff_identity(summary, user)  # P1-05: never a staff id, even from a future field
+
+    @router.get("/campaigns/{campaign_id}/results")
+    def read_campaign_results(campaign_id: str, user: dict[str, Any] = Depends(current_user_dependency)):
+        summary_rate_limit(user, "campaign-results", RESULTS_READS_PER_MINUTE)
+        staff = is_staff(user)
+        with db_conn() as conn:
+            request = visible_request(conn, campaign_id, user, staff)
+            row, _version = load_results_row(conn, campaign_id)
+        return answer(request, row, user, staff)
+
+    @router.post("/campaigns/{campaign_id}/results/refresh")
+    def refresh_campaign_results(campaign_id: str, request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
+        try:
+            require_same_origin(request)
+        except HTTPException as error:
+            if error.status_code != 403:
+                raise
+            studio_error(403, "CROSS_SITE", "This change must come from the Albayan site itself")
+        if not is_staff(user):
+            studio_error(403, "STAFF_ONLY", "Only the Albayan team can check Meta now")
+        summary_rate_limit(user, "results-check", CHECK_NOW_PER_MINUTE)
+        with db_conn() as conn:
+            campaign = visible_request(conn, campaign_id, user, True)
+        if not linked_meta_ids(campaign):
+            studio_error(409, "NOT_LINKED", "This request is not linked to a Meta campaign yet")
+        from . import studio_results_sync  # late: the sync imports this module
+
+        outcome = studio_results_sync.check_now(campaign_id, utc_now())
+        with db_conn() as conn:
+            campaign = load_request(conn, campaign_id) or campaign
+            row, _version = load_results_row(conn, campaign_id)
+        if outcome["outcome"] in ("synced", "error"):  # Meta was asked (a stored reading is not audited)
+            ctx["audit"](
+                str(user.get("id") or "") or None, "results_check", AD_CAMPAIGN_COLLECTION, campaign_id,
+                f"Checked Meta now for {campaign_id}",
+                {"outcome": outcome["outcome"], "code": outcome.get("code") or "", "metaCampaignId": campaign.get("metaCampaignId")},
+            )
+        body = answer(campaign, row, user, True)
+        body.update({"cached": outcome["cached"], "nextAllowedAt": outcome.get("nextAllowedAt"),
+                     "checkError": outcome.get("checkError")})
+        return body
 
     return router

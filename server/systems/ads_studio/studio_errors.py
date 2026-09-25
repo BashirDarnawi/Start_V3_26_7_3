@@ -31,6 +31,9 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "ALREADY_TESTED_TODAY": 409,  # admin checks: one test per page/account per Tripoli day
     "META_NOT_CONFIGURED": 409,  # admin checks: Albayan's Meta connection is not set up, so nothing ran
     "META_PAUSED": 409,          # admin checks: Albayan's Meta pause runs, so nothing ran and the day is still free
+    "UNKNOWN_CAMPAIGN": 404,     # results: no such request for this user (another owner's, a private draft, archived)
+    "STAFF_ONLY": 403,           # results: "Check Meta now" is for the Albayan team only
+    "NOT_LINKED": 409,           # results: the request has no Meta campaign linked yet
 }
 
 

@@ -50,6 +50,7 @@ const STUDIO_HEALTH_META_CODES = {
   response_too_large: ['Meta sent more data than Albayan accepts', 'أرسلت ميتا بيانات أكثر مما يقبله البيان'],
   not_configured: ["Albayan's Meta connection is not set up", 'ربط البيان مع ميتا غير مُعدّ'],
   account_not_allowed: ["This ad account is not on Albayan's allowed list", 'هذا الحساب الإعلاني ليس ضمن القائمة المسموحة'],
+  not_allowed: ['Not linked to this Albayan Studio request', 'غير مربوطة بهذا الطلب في استوديو البيان'],
   meta_error: ['Meta returned an error', 'أعادت ميتا خطأ'],
   unexpected: ['Meta sent an unexpected answer', 'أرسلت ميتا رداً غير متوقع'],
   not_confirmed: ['Meta did not confirm it', 'لم تؤكد ميتا ذلك'],

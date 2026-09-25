@@ -7751,3 +7751,175 @@ def create_meta_ads_router(
             )
 
     return router
+
+
+# ---------------------------------------------------------------- Albayan Studio results (P3-01)
+# One combined read of a campaign a studio request linked (PLAN.md §7.4 "Results and status sync"):
+# the campaign's status and times, its ads' statuses (+ Meta's review text for staff), its ad sets'
+# end times and the LIFETIME insights. Only for a linked request: the account must be on the
+# allowlist and the campaign claimed by a studio request (by that request, when one is named);
+# anything else is refused as ``not_allowed`` BEFORE any call. Every read goes through the client's
+# paced, pause-aware request function (``_read`` below: the one place a lane is chosen).
+
+STUDIO_RESULTS_MAX_ADS = 50
+_STUDIO_RESULT_ACTIONS = (
+    "onsite_conversion.messaging_conversation_started_7d",
+    "messaging_conversation_started_7d",
+    "lead",
+    "purchase",
+    "link_click",
+)
+
+
+def _studio_review_feedback(ads: list[dict[str, Any]]) -> str:
+    """Meta's ad review texts (``ad_review_feedback``) as one staff-only text, repeats left out."""
+    lines: list[str] = []
+    for ad in ads:
+        feedback = ad.get("ad_review_feedback") if isinstance(ad.get("ad_review_feedback"), dict) else {}
+        for scope in list(feedback.values())[:5]:
+            for key, value in (list(scope.items())[:10] if isinstance(scope, dict) else []):
+                line = _clean_text(f"{key}: {value}" if value else key, 300)
+                if line and line not in lines:
+                    lines.append(line)
+    return "\n".join(lines)[:2000]
+
+
+def _studio_insights(row: dict[str, Any]) -> dict[str, Any]:
+    """Lifetime spend (minor units of the account currency), impressions, reach, clicks and the
+    main result of one insights row (the same result priorities as get_ad_snapshot)."""
+    _, spend_minor = _decimal_amount(row.get("spend"))
+    actions: list[tuple[str, int]] = []
+    for item in (row.get("actions") if isinstance(row.get("actions"), list) else [])[:50]:
+        if isinstance(item, dict) and _clean_text(item.get("action_type"), 120):
+            actions.append((_clean_text(item.get("action_type"), 120), _metric_int(item.get("value"))))
+    primary = next((pair for wanted in _STUDIO_RESULT_ACTIONS for pair in actions if pair[0] == wanted), None)
+    if primary is None and actions:
+        primary = actions[0]
+    return {
+        "spendMinor": spend_minor,
+        "currency": _clean_text(row.get("account_currency"), 12).upper(),
+        "impressions": _metric_int(row.get("impressions")),
+        "reach": _metric_int(row.get("reach")),
+        "clicks": _metric_int(row.get("clicks")),
+        "resultType": primary[0] if primary else "",
+        "resultCount": primary[1] if primary else 0,
+    }
+
+
+def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any = "") -> dict[str, Any]:
+    """What Meta says about one studio-linked campaign (plan task P3-01), for the results sync.
+
+    Refused with MetaAdsError ``not_allowed`` and NO call when: the ids are not Meta ids, the
+    account is not on ALBAYAN_META_AD_ACCOUNT_IDS (an empty list refuses everything), or no studio
+    request claimed the campaign (with ``request_id``: exactly that request). ``not_configured``
+    without a token. Then ONE combined read (campaign + ads + ad sets + lifetime insights); when
+    Meta refuses that expansion, the slim core read and one read per edge. A campaign that turns
+    out to live in another account is ``not_allowed`` too.
+
+    Returns ``{campaignId, accountId, name, status, effectiveStatus, startTime, stopTime,
+    adStatusCounts, adsTotal, anyAdDelivering, adsetEndTime, reviewFeedback, insightsState,
+    spendMinor, currency, impressions, reach, clicks, resultType, resultCount, readAt}``.
+    ``insightsState`` is ``ok`` (a campaign with no delivery yet reads as zeros) or
+    ``unavailable`` (Meta did not answer the insights read): then every insights number is None,
+    so the caller keeps its last good spend and never overwrites it with 0. ``adsetEndTime`` is
+    the latest ad set end time, '' when an ad set has none (it runs until stopped), or None when
+    Meta did not answer the ad sets read (the caller keeps the end time it knows).
+    """
+    refused = MetaAdsError("not_allowed", "This Meta campaign is not linked to an Albayan Studio request.")
+    try:
+        account = _account_id(account_id)
+        clean = _meta_id(campaign_id, "Meta campaign")
+    except MetaAdsError:
+        raise refused from None
+    config = load_meta_ads_config()
+    if not config.configured:
+        raise MetaAdsError("not_configured", "Meta Ads connection is not configured")
+    if account not in set(config.allowed_account_ids):
+        raise refused
+    from .meta_collisions import campaign_claimed_by  # late: meta_collisions imports this module
+
+    with db_conn() as conn:
+        claimers = campaign_claimed_by(conn, clean)
+    wanted = str(request_id or "").strip()
+    if not claimers or (wanted and claimers != [wanted]):
+        raise refused
+    client = get_meta_ads_client()
+
+    def _read(path: str, params: dict[str, Any]) -> dict[str, Any]:
+        return client._request("GET", path, params=params)
+
+    core = "id,name,account_id,status,effective_status,start_time,stop_time"
+    ads_fields = "effective_status,ad_review_feedback"
+    adset_fields = "effective_status,end_time"
+    insight_fields = "spend,impressions,reach,clicks,actions,account_currency"
+    try:
+        row = _read(clean, {"fields": (
+            f"{core},ads.limit({STUDIO_RESULTS_MAX_ADS}){{{ads_fields}}},"
+            f"adsets.limit({STUDIO_RESULTS_MAX_ADS}){{{adset_fields}}},"
+            f"insights.date_preset(maximum){{{insight_fields}}}"
+        )})
+    except MetaAdsError as error:
+        if error.code not in {"request_failed", "response_too_large", "temporary"}:
+            raise
+        row = _read(clean, {"fields": core})  # Meta refused the expansion: the slim read, then each edge
+    if str(row.get("id") or "") != clean:
+        raise MetaAdsError("not_found", "The selected Meta campaign was not found or is no longer accessible.")
+    try:
+        owner_account = _account_id(row.get("account_id"))
+    except MetaAdsError:
+        owner_account = ""
+    if owner_account != account:
+        raise refused
+
+    def _edge(name: str, fields: str) -> list[dict[str, Any]]:
+        node = row.get(name) if isinstance(row.get(name), dict) else None
+        if node is None or not isinstance(node.get("data"), list):
+            node = _read(f"{clean}/{name}", {"fields": fields, "limit": STUDIO_RESULTS_MAX_ADS})
+        return [item for item in (node.get("data") or []) if isinstance(item, dict)][:STUDIO_RESULTS_MAX_ADS]
+
+    ads = _edge("ads", ads_fields)  # the statuses decide the stage: a failed read fails the sync
+    try:
+        adsets = _edge("adsets", adset_fields)
+    except MetaAdsError as error:
+        if error.code == "rate_limited":
+            raise  # Meta or Albayan's pause said wait: the next read would be refused too
+        adsets = None  # the end times are one end signal among several: the sync goes on without them
+    counts: dict[str, int] = {}
+    for ad in ads:
+        status = _clean_text(ad.get("effective_status"), 40).upper()
+        if status:
+            counts[status] = counts.get(status, 0) + 1
+    end_times = [_clean_time(item.get("end_time")) for item in adsets or []]
+    insights_node = row.get("insights") if isinstance(row.get("insights"), dict) else None
+    insights: dict[str, Any] | None = None
+    if insights_node is None or not isinstance(insights_node.get("data"), list):
+        try:
+            insights_node = _read(f"{clean}/insights", {"fields": insight_fields, "date_preset": "maximum", "limit": 1})
+        except MetaAdsError:
+            insights_node = None  # unreadable is not "spent nothing": the caller keeps what it knows
+    if insights_node is not None and isinstance(insights_node.get("data"), list):
+        data = insights_node["data"]
+        insights = _studio_insights(data[0] if data and isinstance(data[0], dict) else {})
+    return {
+        "campaignId": clean,
+        "accountId": account,
+        "name": _clean_text(row.get("name"), 400),
+        "status": _clean_text(row.get("status"), 40).upper(),
+        "effectiveStatus": _clean_text(row.get("effective_status"), 40).upper(),
+        "startTime": _clean_time(row.get("start_time")),
+        "stopTime": _clean_time(row.get("stop_time")),
+        "adStatusCounts": counts,
+        "adsTotal": len(ads),
+        "anyAdDelivering": counts.get("ACTIVE", 0) > 0,
+        "adsetEndTime": None if adsets is None else (max(end_times) if end_times and all(end_times) else ""),
+        "reviewFeedback": _studio_review_feedback(ads),
+        "insightsState": "ok" if insights is not None else "unavailable",
+        "spendMinor": insights["spendMinor"] if insights is not None else None,
+        "currency": insights["currency"] if insights is not None else "",
+        "impressions": insights["impressions"] if insights is not None else None,
+        "reach": insights["reach"] if insights is not None else None,
+        "clicks": insights["clicks"] if insights is not None else None,
+        "resultType": insights["resultType"] if insights is not None else "",
+        "resultCount": insights["resultCount"] if insights is not None else None,
+        "readAt": _iso_now(),
+    }

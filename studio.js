@@ -75,6 +75,7 @@ function resetAdsStudioSessionState() {
   _adsStudioMetaAccounts.state = '';
   _adsStudioMetaAccounts.list = [];
   _adsStudioBudgetTyped = '';
+  resetAdsStudioResults();
   if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
   resetAdsStudioLimits();
   resetAdsStudioPostPicker();
@@ -684,6 +685,7 @@ function renderAdsStudioCampaignCard(campaign) {
         </div>
       </div>
       ${statusValue === 'Stopped' ? `<div class="mt-4 rounded-xl bg-rose-50 dark:bg-rose-900/20 p-3 text-sm text-rose-800 dark:text-rose-200"><span class="font-bold">${isAr ? 'الأموال:' : 'Money:'}</span> ${isAr ? 'مدفوع' : 'paid'} ${adsStudioMoney(paidMinor)} · ${isAr ? 'مسترد' : 'refunded'} ${adsStudioMoney(refundMinor)}${spendMinor ? ` · ${isAr ? 'مصروف' : 'spent'} ${adsStudioMoney(spendMinor)}` : ''}${campaign.stopReason ? `<div class="mt-1">${Security.escapeHtml(String(campaign.stopReason))}</div>` : ''}</div>` : ''}
+      ${renderAdsStudioResultsCard(campaign)}
       ${campaign.boostType === 'boost_post' && adsStudioIsValidBoostRef(campaign.sourcePostRef) ? `<div class="mt-3 text-xs"><a href="${Security.escapeHtml(String(campaign.sourcePostRef))}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 font-bold text-blue-600 hover:text-blue-700"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>${isAr ? 'فتح المنشور الأصلي' : 'Open the boosted post'}</a></div>` : ''}
       ${renderAdsStudioReviewFeedback(campaign)}
       <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">
@@ -699,6 +701,229 @@ function renderAdsStudioCampaignCard(campaign) {
       ${renderAdsStudioReviewHistory(campaign)}
     </article>
   `;
+}
+
+// ---- Meta results card (P3-04b/c) ----
+// A request linked to a Meta campaign (Approved or Stopped) shows what Meta reports: "Meta used $Y of
+// $X", lifetime impressions, reach and results, and "checked X ago" (amber when older than 6 hours),
+// read from GET /api/studio/campaigns/{id}/results (the stored reading: after a failed Meta check it
+// still shows the last good values). One read per card at a time, kept 2 minutes; a failed read is
+// tried again after a minute. Staff also get "Check Meta now" (POST .../results/refresh): a second
+// press within 10 minutes shows the saved reading instead of asking Meta again.
+const ADS_STUDIO_RESULTS_TTL_MS = 2 * 60 * 1000;
+const ADS_STUDIO_RESULTS_RETRY_MS = 60 * 1000;
+const ADS_STUDIO_RESULTS_MAX_READS = 4;  // cards read at once; the render after each answer starts the next
+const _adsStudioResults = { forUser: '', byId: new Map() };  // campaign id -> { state, data, at, promise }
+const _adsStudioResultsChecks = new Map();  // campaign id -> its "Check Meta now" in flight
+let _adsStudioResultsRenderTimer = null;
+
+// Meta's main result types (meta_ads.get_campaign_results) in words; any other type reads "Results".
+const ADS_STUDIO_RESULT_TYPES = [
+  ['onsite_conversion.messaging_conversation_started_7d', 'Conversations started', 'محادثات بدأت'],
+  ['messaging_conversation_started_7d', 'Conversations started', 'محادثات بدأت'],
+  ['lead', 'Leads', 'عملاء محتملون'],
+  ['purchase', 'Purchases', 'عمليات شراء'],
+  ['link_click', 'Link clicks', 'نقرات على الرابط']
+];
+
+const ADS_STUDIO_RESULTS_ERRORS = {
+  RATE_LIMITED: ['Too many requests. Please wait a minute and try again.', 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.'],
+  STAFF_ONLY: ['Only the Albayan team can check Meta now.', 'فحص ميتا الآن متاح لفريق البيان فقط.'],
+  NOT_LINKED: ['This request is not linked to a Meta campaign yet.', 'هذا الطلب غير مربوط بحملة ميتا بعد.'],
+  UNKNOWN_CAMPAIGN: ['This request was not found. Refresh the page.', 'لم نجد هذا الطلب. حدّث الصفحة.'],
+  CROSS_SITE: ['This change must come from the Albayan site itself.', 'يجب أن يأتي هذا الطلب من موقع البيان نفسه.']
+};
+
+function resetAdsStudioResults() {
+  _adsStudioResults.forUser = '';
+  _adsStudioResults.byId.clear();
+  _adsStudioResultsChecks.clear();
+  if (_adsStudioResultsRenderTimer && typeof clearTimeout === 'function') clearTimeout(_adsStudioResultsRenderTimer);
+  _adsStudioResultsRenderTimer = null;
+}
+
+function adsStudioShowsResults(campaign) {
+  return ['Approved', 'Stopped'].includes(String(campaign?.status || '')) && !!String(campaign?.metaCampaignId || '').trim();
+}
+
+// The server's answer, kept only in the shape the card reads (a count is a whole number or null).
+function adsStudioCleanResults(body) {
+  const src = body && typeof body === 'object' ? body : {};
+  const results = src.results && typeof src.results === 'object' ? src.results : {};
+  const stage = src.stage && typeof src.stage === 'object' ? src.stage : {};
+  const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+  const labels = value => (value && typeof value === 'object' ? { en: String(value.en || ''), ar: String(value.ar || '') } : null);
+  const staff = src.staff && typeof src.staff === 'object' ? src.staff : null;
+  return {
+    stageLabels: labels(stage.labels),
+    variantLabels: labels(stage.variantLabels),
+    runningPastEnd: stage.runningPastEnd === true,
+    metaUsedMinor: count(results.metaUsedMinor),
+    paidMinor: count(results.paidMinor),
+    impressions: count(results.impressions),
+    reach: count(results.reach),
+    resultCount: count(results.resultCount),
+    resultType: String(results.resultType || '').slice(0, 80),
+    checkedAgo: results.checkedAt ? labels(results.checkedAgo) : null,
+    stale: results.stale === true,
+    staff: staff ? {
+      syncState: String(staff.syncState || ''),
+      lastErrorCode: String(staff.lastErrorCode || '').slice(0, 60),
+      nextManualCheckAt: String(staff.nextManualCheckAt || '')
+    } : null
+  };
+}
+
+function adsStudioResultsEntry(campaignId) {
+  const uid = String(state.currentUser?.id || '');
+  if (_adsStudioResults.forUser !== uid) resetAdsStudioResults();
+  _adsStudioResults.forUser = uid;
+  let entry = _adsStudioResults.byId.get(campaignId);
+  if (!entry) {
+    entry = { state: '', data: null, at: 0, promise: null };
+    _adsStudioResults.byId.set(campaignId, entry);
+  }
+  return entry;
+}
+
+// One render after a burst of card reads, not one per card.
+function adsStudioScheduleResultsRender() {
+  if (_adsStudioResultsRenderTimer) return;
+  if (typeof setTimeout !== 'function') { render(); return; }
+  _adsStudioResultsRenderTimer = setTimeout(() => { _adsStudioResultsRenderTimer = null; render(); }, 50);
+}
+
+function adsStudioLoadResults(id, force = false) {
+  const campaignId = String(id || '');
+  if (!campaignId || typeof isServerModeEnabled !== 'function' || !isServerModeEnabled() || typeof apiJson !== 'function') return null;
+  const entry = adsStudioResultsEntry(campaignId);
+  if (entry.promise) return entry.promise;
+  const age = Date.now() - entry.at;
+  if (!force && ((entry.state === 'done' && age < ADS_STUDIO_RESULTS_TTL_MS) || (entry.state === 'failed' && age < ADS_STUDIO_RESULTS_RETRY_MS))) return null;
+  let reading = 0;
+  _adsStudioResults.byId.forEach(item => { if (item.promise) reading += 1; });
+  if (reading >= ADS_STUDIO_RESULTS_MAX_READS) return null;
+  const uid = _adsStudioResults.forUser;
+  entry.state = entry.data ? 'done' : 'loading';
+  entry.promise = apiJson(`/api/studio/campaigns/${encodeURIComponent(campaignId)}/results`, { method: 'GET' })
+    .then(body => {
+      if (uid !== String(state.currentUser?.id || '')) return;
+      entry.data = adsStudioCleanResults(body);
+      entry.state = 'done';
+    })
+    .catch(() => { entry.state = 'failed'; })  // a card that had a reading keeps showing it
+    .finally(() => {
+      entry.at = Date.now();
+      entry.promise = null;
+      if (uid === String(state.currentUser?.id || '')) adsStudioScheduleResultsRender();
+    });
+  return entry.promise;
+}
+
+function adsStudioResultTypeLabel(type) {
+  const hit = ADS_STUDIO_RESULT_TYPES.find(([id]) => id === String(type || ''));
+  return hit ? adsStudioText(hit[1], hit[2]) : adsStudioText('Results', 'النتائج');
+}
+
+// Counts as the rest of the app writes them (1,234 in both languages; ar-LY would print 1.234).
+function adsStudioCount(value) {
+  try { return Number(value).toLocaleString('en-US'); } catch (_) { return String(value); }
+}
+
+function renderAdsStudioResultsCard(campaign) {
+  if (!adsStudioShowsResults(campaign)) return '';
+  const campaignId = String(campaign.id || '');
+  adsStudioLoadResults(campaignId);
+  const entry = _adsStudioResults.byId.get(campaignId);
+  const data = entry ? entry.data : null;
+  const isAr = adsStudioIsAr();
+  const pick = labels => (labels ? (isAr ? labels.ar : labels.en) : '');
+  let body = '';
+  if (!data) {
+    body = `<p class="mt-2 text-sm text-slate-600 dark:text-slate-300">${entry && entry.state === 'failed'
+      ? adsStudioText('Meta results cannot be shown right now.', 'تعذّر عرض نتائج ميتا الآن.')
+      : adsStudioText('Checking Meta…', 'نتحقق من ميتا…')}</p>`;
+  } else {
+    const used = data.metaUsedMinor === null ? '' : (data.paidMinor
+      ? adsStudioText(`Meta used ${adsStudioMoney(data.metaUsedMinor)} of ${adsStudioMoney(data.paidMinor)}`, `استخدمت ميتا ${adsStudioMoney(data.metaUsedMinor)} من ${adsStudioMoney(data.paidMinor)}`)
+      : adsStudioText(`Meta used ${adsStudioMoney(data.metaUsedMinor)} so far`, `استخدمت ميتا ${adsStudioMoney(data.metaUsedMinor)} حتى الآن`));
+    const stats = [
+      [adsStudioText('Impressions', 'مرات الظهور'), data.impressions],
+      [adsStudioText('Reach', 'الوصول'), data.reach],
+      [adsStudioResultTypeLabel(data.resultType), data.resultCount]
+    ].filter(([, value]) => value !== null);
+    const note = data.checkedAgo ? '' : pick(data.variantLabels) || adsStudioText('Checking Meta…', 'نتحقق من ميتا…');
+    body = `${used ? `<p class="mt-2 text-base font-black text-slate-900 dark:text-white" data-ads-studio-meta-used="1">${Security.escapeHtml(used)}</p>` : ''}
+      ${stats.length ? `<dl class="mt-2 grid grid-cols-3 gap-2 text-center">${stats.map(([label, value]) => `<div class="rounded-lg bg-white/80 dark:bg-slate-900/60 p-2"><dt class="text-[11px] font-bold text-slate-500">${Security.escapeHtml(label)}</dt><dd class="text-sm font-black text-slate-900 dark:text-white">${Security.escapeHtml(adsStudioCount(value))}</dd></div>`).join('')}</dl>` : ''}
+      ${note ? `<p class="mt-2 text-sm text-slate-600 dark:text-slate-300">${Security.escapeHtml(note)}</p>` : ''}
+      ${data.runningPastEnd ? `<p class="mt-2 text-sm font-bold text-amber-800 dark:text-amber-200">${Security.escapeHtml(adsStudioText('Running past the promised end — the team is on it', 'ما زال يعمل بعد موعد الانتهاء — الفريق يتابعه'))}</p>` : ''}`;
+  }
+  let staffPart = '';
+  if (adsStudioCanReview()) {
+    const safeId = Security.escapeHtml(campaignId);
+    const busy = _adsStudioResultsChecks.has(campaignId);
+    const problem = data && data.staff && ['error', 'throttled', 'not_found', 'not_allowed'].includes(data.staff.syncState)
+      ? adsStudioText(`Last Meta check failed (${data.staff.lastErrorCode || data.staff.syncState})`, `فشل آخر فحص لميتا (${data.staff.lastErrorCode || data.staff.syncState})`)
+      : '';
+    staffPart = `<div class="mt-3 flex flex-wrap items-center gap-2">
+      <button type="button" data-ads-studio-check-meta="1" onclick="checkAdsStudioMetaNow('${safeId}', this)"${busy ? ' disabled aria-busy="true"' : ''} class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${Security.escapeHtml(adsStudioText('Check Meta now', 'افحص ميتا الآن'))}</button>
+      ${problem ? `<span class="text-xs font-bold text-rose-700 dark:text-rose-300" dir="auto">${Security.escapeHtml(problem)}</span>` : ''}
+    </div>`;
+  }
+  const ago = data && data.checkedAgo ? pick(data.checkedAgo) : '';
+  return `<section class="mt-4 rounded-xl border border-blue-100 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/10 p-3" data-ads-studio-results="${Security.escapeHtml(campaignId)}" aria-live="polite">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <h4 class="inline-flex items-center gap-1.5 text-sm font-black text-blue-900 dark:text-blue-100"><i data-lucide="chart-no-axes-combined" class="w-4 h-4"></i>${Security.escapeHtml(adsStudioText('Meta results', 'نتائج ميتا'))}${data && data.stageLabels ? `<span class="font-bold text-slate-600 dark:text-slate-300">· ${Security.escapeHtml(pick(data.stageLabels))}</span>` : ''}</h4>
+      ${ago ? `<span class="text-xs ${data.stale ? 'font-bold text-amber-700 dark:text-amber-300' : 'text-slate-500'}">${Security.escapeHtml(ago)}</span>` : ''}
+    </div>
+    ${body}
+    ${staffPart}
+  </section>`;
+}
+
+function adsStudioResultsErrorText(error) {
+  const info = adsStudioErrorInfo(error);
+  const known = Object.prototype.hasOwnProperty.call(ADS_STUDIO_RESULTS_ERRORS, info.code) ? ADS_STUDIO_RESULTS_ERRORS[info.code] : null;
+  return known ? adsStudioText(known[0], known[1]) : adsStudioText('Meta could not be checked. Try again later.', 'تعذّر فحص ميتا. أعد المحاولة لاحقاً.');
+}
+
+// Staff "Check Meta now" (P3-04c): single flight per request; the answer replaces the card's reading.
+function checkAdsStudioMetaNow(id, button = null) {
+  const campaignId = String(id || '');
+  if (!campaignId || !adsStudioCanReview()) return Promise.resolve(false);
+  if (_adsStudioResultsChecks.has(campaignId)) return _adsStudioResultsChecks.get(campaignId);
+  setAdsStudioActionButtonBusy(button, true);
+  const uid = String(state.currentUser?.id || '');
+  const operation = (async () => {
+    try {
+      const body = await apiJson(`/api/studio/campaigns/${encodeURIComponent(campaignId)}/results/refresh`, { method: 'POST', body: {} });
+      if (uid !== String(state.currentUser?.id || '')) return false;
+      const entry = adsStudioResultsEntry(campaignId);
+      entry.data = adsStudioCleanResults(body);
+      entry.state = 'done';
+      entry.at = Date.now();
+      const problem = body && body.checkError && typeof body.checkError === 'object' ? body.checkError : null;
+      if (problem) {
+        showNotification(adsStudioText('Saved reading shown', 'تظهر القراءة المحفوظة'), adsStudioText(String(problem.en || ''), String(problem.ar || '')), 'warning');
+      } else if (body && body.cached) {
+        showNotification(adsStudioText('Checked a moment ago', 'فُحصت قبل قليل'), adsStudioText('Meta was checked less than 10 minutes ago, so the saved reading is shown.', 'فُحصت ميتا قبل أقل من 10 دقائق، لذلك تظهر القراءة المحفوظة.'), 'info');
+      } else {
+        showNotification(adsStudioText('Meta checked', 'تم فحص ميتا'), adsStudioText('The results are up to date.', 'النتائج محدّثة الآن.'), 'success');
+      }
+      return true;
+    } catch (error) {
+      showNotification(adsStudioText('Check failed', 'تعذّر الفحص'), adsStudioResultsErrorText(error), 'error');
+      return false;
+    }
+  })();
+  _adsStudioResultsChecks.set(campaignId, operation);
+  const cleanup = () => {
+    if (_adsStudioResultsChecks.get(campaignId) === operation) _adsStudioResultsChecks.delete(campaignId);
+    setAdsStudioActionButtonBusy(button, false);
+    render();
+  };
+  operation.then(cleanup, cleanup);
+  return operation;
 }
 
 function deleteAdsStudioCampaign(id, button = null) {
@@ -4925,6 +5150,7 @@ const STUDIO_HEALTH_META_CODES = {
   response_too_large: ['Meta sent more data than Albayan accepts', 'أرسلت ميتا بيانات أكثر مما يقبله البيان'],
   not_configured: ["Albayan's Meta connection is not set up", 'ربط البيان مع ميتا غير مُعدّ'],
   account_not_allowed: ["This ad account is not on Albayan's allowed list", 'هذا الحساب الإعلاني ليس ضمن القائمة المسموحة'],
+  not_allowed: ['Not linked to this Albayan Studio request', 'غير مربوطة بهذا الطلب في استوديو البيان'],
   meta_error: ['Meta returned an error', 'أعادت ميتا خطأ'],
   unexpected: ['Meta sent an unexpected answer', 'أرسلت ميتا رداً غير متوقع'],
   not_confirmed: ['Meta did not confirm it', 'لم تؤكد ميتا ذلك'],
