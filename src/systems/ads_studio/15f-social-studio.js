@@ -442,6 +442,9 @@ function socialSetPostsFilter(filter) {
 }
 
 function renderSocialStudioPostsTab() {
+  // Studio v2 (P4-06, 15o-studio-pages.js): the new screens while /me says the v2 layout; '' = classic below.
+  const postsV2Html = typeof studioPagesClassicDelegate === 'function' ? studioPagesClassicDelegate('posts') : '';
+  if (postsV2Html) return postsV2Html;
   if (!socialStudioAvailable()) return renderSocialStudioUnavailable();
   socialStudioEnsureLoaded();
   if (_social.screen === 'compose') return renderSocialComposer();
@@ -926,6 +929,9 @@ async function socialToggleRule(ruleId) {
 }
 
 function renderSocialStudioRepliesTab() {
+  // Studio v2 (P4-06, 15o-studio-pages.js): the new screens while /me says the v2 layout; '' = classic below.
+  const repliesV2Html = typeof studioPagesClassicDelegate === 'function' ? studioPagesClassicDelegate('replies') : '';
+  if (repliesV2Html) return repliesV2Html;
   if (!socialStudioAvailable()) return renderSocialStudioUnavailable();
   socialStudioEnsureLoaded();
   if (_social.screen === 'rule') return renderSocialRuleEditor();

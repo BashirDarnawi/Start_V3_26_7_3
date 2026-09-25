@@ -39,7 +39,8 @@
       "systems/ads_studio/15l-studio-builder.js",
       "systems/ads_studio/15m-studio-wallet.js",
       "systems/ads_studio/15n-studio-help.js",
-      "systems/ads_studio/15o0-studio-staff-loader.js"
+      "systems/ads_studio/15o0-studio-staff-loader.js",
+      "systems/ads_studio/15o-studio-pages.js"
     ],
     "studio-staff.js": [
       "systems/ads_studio/15i-studio-health.js",

@@ -1078,6 +1078,28 @@ const _ADS_STUDIO_REFUSAL_AR = [
   // Ask to stop (P3-10, studio_stop.py REFUSE_STOP_REQUEST_OFF); "Only Approved campaigns can be stopped" is above.
   ['Stop requests are not open yet', 'طلب إيقاف الإعلان غير متاح بعد. تواصل مع فريق البيان.'],
   ['note must be text', 'يجب أن تكون الملاحظة نصاً'],
+  // Reply rules and the page check of the v2 Pages & replies screens (P4-06, social_studio.py: _clean_rule,
+  // _text_field, _string_list, editor_refusal, _require_admin, _scope): the server's exact English prefixes.
+  ['Rule name is required', 'اكتب اسماً للقاعدة'],
+  ['Rule name must be 80 characters or fewer', 'اسم القاعدة يجب ألا يتجاوز 80 حرفاً'],
+  ['publicReply must be 1000 characters or fewer', 'الرد العام يجب ألا يتجاوز 1000 حرف'],
+  ['dmText must be 1000 characters or fewer', 'الرسالة الخاصة يجب ألا تتجاوز 1000 حرف'],
+  ['Each keywords entry must be 40 characters or fewer', 'كل كلمة مفتاحية يجب ألا تتجاوز 40 حرفاً'],
+  ['keywords supports at most 30 entries', 'الحد الأقصى 30 كلمة مفتاحية للقاعدة الواحدة'],
+  ['platform must be fb or ig', 'المنصة يجب أن تكون فيسبوك أو إنستغرام'],
+  ['trigger must be every or keywords', 'المُحفّز يجب أن يكون «كل تعليق» أو «كلمات مفتاحية»'],
+  ['Add at least one keyword for a keyword rule', 'أضف كلمة مفتاحية واحدة على الأقل، أو اختر «كل تعليق»'],
+  ['Choose at least one post for a chosen-posts rule', 'اختر منشوراً واحداً على الأقل لقاعدة المنشورات المحددة'],
+  ['A rule needs a public reply or a private message', 'تحتاج القاعدة إلى رد عام أو رسالة خاصة'],
+  ['is not linked to this account', 'هذه الصفحة لم تعد مربوطة بحسابك — حدّث الصفحة واختر صفحة أخرى'],
+  ["is not on this rule's platform", 'هذه الصفحة ليست على منصة هذه القاعدة'],
+  ['Private messages are not available for Facebook pages right now', 'الرسائل الخاصة غير متاحة لصفحات فيسبوك حالياً'],
+  ['Private messages are not available for Instagram accounts right now', 'الرسائل الخاصة غير متاحة لحسابات إنستغرام حالياً'],
+  ['Public replies are not available for Facebook pages right now', 'الردود العامة غير متاحة لصفحات فيسبوك حالياً'],
+  ['Public replies are not available for Instagram accounts right now', 'الردود العامة غير متاحة لحسابات إنستغرام حالياً'],
+  ['Likes are not available for Facebook pages right now', 'الإعجاب بالتعليقات غير متاح لصفحات فيسبوك حالياً'],
+  ['You can only manage your own Social Studio', 'يمكنك إدارة صفحاتك وردودك أنت فقط'],
+  ['Admin only', 'هذا الإجراء للمدير فقط'],
 ];
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {

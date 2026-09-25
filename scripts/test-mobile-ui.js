@@ -5598,6 +5598,413 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P4-06, P4-07, P5-03 (Studio v2 Pages & replies, the page-link request and the help guides, 15o): the real
+  // 15c, 15f, 15g, 15h, 15j, 15k, 15n and 15o run in a sandbox (fake history and timers, a scripted apiJson keyed
+  // by path) with /me answered like the server. Promises settle before each run() returns (microtaskMode
+  // 'afterEvaluate'). Static checks cover the bundle, the styles, the texts, the classic map and the 15f handover.
+  const vm = require('vm');
+  const pagesSrc = read('src/systems/ads_studio/15o-studio-pages.js');
+  const socialSrc = read('src/systems/ads_studio/15f-social-studio.js');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
+  const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
+  const helpSrc = read('src/systems/ads_studio/15n-studio-help.js');
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+  };
+  const hist = {
+    entries: [], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) {
+      const next = this.index + delta;
+      if (!delta || next < 0 || next >= this.entries.length) return;
+      this.index = next; this.show();
+      for (const fn of [...win.listeners.popstate]) fn({ state: this.state });
+    },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let secureSeq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'u1', name: 'Sara', email: 'sara@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [], walletTransactions: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+      generateSecureId: prefix => `${prefix}-${++secureSeq}`,
+      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => false,
+    currentUserHasPermission: (collection, action) => action !== 'review' && action !== 'view',
+    hasSubscription: id => id === 'ad_maker',
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+    getEntityPhotoCountHint: () => 0,
+    updateUrlParams: () => {}, requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 1000 }
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function showNotification(title, message, type) { __notes.push({ title, message, type }); }
+      function getServerSessionIdentity() { return 'session'; }
+      function serverSessionIdentityChanged() { return false; }
+      function getAuthMeIdentity() { return 'session'; }
+      function makeSessionChangedError() { return new Error('session changed'); }
+      function requestValidatedServerEntity(collection, context, loader) { return loader(); }
+      function withRetry(fn) { return fn(); }
+      function markCollectionDirty() {}
+      function saveState() {}
+      function appDateLocale() { return 'en-GB'; }
+      function studioBuilderStart() { return true; }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(socialSrc, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);
+    vm.runInContext(adsSrc, box);
+    vm.runInContext(helpSrc, box);
+    vm.runInContext(pagesSrc, box);
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
+  const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
+  const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && c.path === path);
+  const openAt = url => { hist.reset(url); run('_studioV2.docRendered = false; render();'); };
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const arabicOnly = value => /[؀-ۿ]/.test(value) && !/[A-Za-z]{3}/.test(value.replace(/PAY|LYD|USD|T-|ALB-S/g, ''));
+  const meReply = value => run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: ${JSON.stringify(value)} }]; studioLoadMe();`);
+  const ago = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+  const between = (page, testId) => { const at = page.indexOf(`data-testid="${testId}"`); return at < 0 ? '' : page.slice(at, page.indexOf('</li>', at) > 0 ? page.indexOf('</li>', at) : at + 3000); };
+  const PAGES = '/api/social-studio/pages';
+  const RULES = '/api/social-studio/rules';
+  const SETTINGS = '/api/social-studio/settings';
+  const POSTS = '/api/social-studio/posts';
+  const LOG = '/api/social-studio/log?days=30&limit=50';
+  const labels = { on: { en: 'Working', ar: 'يعمل' }, poll: { en: 'Working, checked every 5 minutes', ar: 'يعمل — نفحص كل 5 دقائق' }, gated: { en: 'Waiting for Meta approval', ar: 'بانتظار موافقة ميتا' }, off: { en: 'Switched off', ar: 'متوقف' }, unavailable: { en: 'Not available now', ar: 'غير متاح حالياً' } };
+  const pageFb = { id: 'spg_fb', platform: 'fb', name: 'Sara <Shop>', metaPageId: '1234567890', healthy: true, health: { state: 'ok', reason: '', label: { en: 'Working', ar: 'يعمل' }, fix: null, teamAction: false, checkedAt: ago(30), since: null } };
+  const pageIg = { id: 'spg_ig', platform: 'ig', name: 'sara.shop', metaPageId: '99887766', healthy: false, health: { state: 'attention', reason: 'instagram_private', label: { en: 'This Instagram account is private, so comments do not reach Albayan', ar: 'حساب إنستغرام هذا خاص، لذلك لا تصل التعليقات إلى البيان' }, fix: { en: 'Make the account public in Instagram settings, then tell the team', ar: 'اجعل حسابك عاماً من إعدادات إنستغرام ثم أبلغ الفريق' }, teamAction: false, checkedAt: ago(10), since: ago(60) } };
+  const pageTeam = { id: 'spg_hook', platform: 'fb', name: 'Hooked page', metaPageId: '5555', healthy: false, health: { state: 'attention', reason: 'webhook_not_subscribed', label: { en: 'Comment notifications are not switched on for this page yet', ar: 'إشعارات التعليقات غير مفعّلة لهذه الصفحة بعد' }, fix: { en: 'The Albayan team switches them on; nothing to do on your side', ar: 'فريق البيان يفعّلها؛ لا شيء مطلوب منك' }, teamAction: true, checkedAt: ago(5), since: ago(5) } };
+  const meBase = { ui: 'v2', staffDesk: 'classic', isStaff: false, isAdmin: false, services: { help: true, stopRequest: true, tiktok: false },
+    capabilities: { fbPublicReply: 'gated', fbPrivateReply: 'unavailable', igPublicReply: 'unavailable', igPrivateReply: 'unavailable', tiktokService: 'off' },
+    serviceHours: { timezone: 'Africa/Tripoli', openNow: true, week: { sun: { open: '09:00', close: '17:00' }, mon: { open: '09:00', close: '17:00' }, tue: { open: '09:00', close: '17:00' }, wed: { open: '09:00', close: '17:00' }, thu: { open: '09:00', close: '17:00' }, fri: null, sat: null }, holidays: [{ date: '2099-03-01', labelEn: 'Spring day', labelAr: 'يوم الربيع' }], ramadan: null, onDutyUntil: null },
+    contact: { whatsapp: '+218912345678', phone: '', email: '' }, metaConnection: { down: false } };
+  const rules = () => ({
+    rules: [
+      { id: 'srule_1', name: 'Price <b>questions</b>', platform: 'fb', enabled: true, trigger: 'keywords', keywords: ['price', 'بكم'], publicReply: 'DM sent!', dmEnabled: true, dmText: 'Hi', likeComment: true, oncePerPerson: true, skipPublicAfterDm: false, pauseDms: false, quietHours: false, scope: 'all', postIds: [], pageRefs: ['spg_fb', 'spg_gone'], pages: [{ id: 'spg_fb', removed: false, name: 'Sara <Shop>', platform: 'fb' }, { id: 'spg_gone', removed: true, name: '', platform: '' }], pageRemoved: true, pageRemovedLabel: { en: 'Page removed', ar: 'الصفحة أُزيلت' } },
+      { id: 'srule_2', name: 'Instagram hello', platform: 'ig', enabled: false, trigger: 'every', keywords: [], publicReply: 'Welcome', dmEnabled: true, dmText: 'Hello there', likeComment: false, oncePerPerson: false, skipPublicAfterDm: false, pauseDms: false, quietHours: true, scope: 'all', postIds: [], pageRefs: [], pages: [], pageRemoved: false, pageRemovedLabel: null }
+    ],
+    channels: { states: { fbPublicReply: 'on', fbPrivateReply: 'gated', igPublicReply: 'poll', igPrivateReply: 'unavailable', tiktokService: 'off' }, labels }
+  });
+  const settings = { id: 'sss_u1', ownerId: 'u1', masterEnabled: true, quietHours: { from: '21:00', to: '07:30' }, timezone: 'Africa/Tripoli' };
+  const allHtml = [];
+
+  // Bundle, manifest and the shell registry.
+  const lazy = bundleManifestJson.lazy['studio.js'];
+  const studioSize = fs.statSync(path.join(ROOT, 'studio.js')).size;
+  check('Studio v2 Pages & replies (15o) ships in the lazy studio bundle right after 15n, in both built copies under 1 MiB, never in script.js, and registers the replies and posts screens with the shell',
+    !loadError && lazy.indexOf('systems/ads_studio/15o-studio-pages.js') > lazy.indexOf('systems/ads_studio/15n-studio-help.js')  // after 15n (the staff loader 15o0 may sit between)
+      && !bundleManifestJson.files.some(file => /15o-studio/.test(file))
+      && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(pagesSrc)) && !read('script.js').includes('renderStudioPagesBody')
+      && studioSize < 1024 * 1024
+      && run("_studioV2Screens.has('replies') && _studioV2Screens.has('posts')") === true
+      && pagesSrc.includes("studioV2RegisterScreen('replies', renderStudioPagesBody)"),
+    loadError || `studio.js ${studioSize} bytes`);
+
+  // Pages: health from the server, checked X ago, one fix with "I did it", the team's fix, no Check now for a customer.
+  meReply(meBase);
+  reply('/api/studio/activity', { items: [], unreadCount: 0, nextCursor: null, seenAt: null });
+  reply(PAGES, { pages: [pageFb, pageIg, pageTeam, { id: 'bad id', platform: 'fb', name: 'dropped' }] });
+  openAt('/studio?tab=replies');
+  const pagesHtml = html();
+  allHtml.push(pagesHtml);
+  const fbCard = between(pagesHtml, 'studio-pg-page-spg_fb');
+  const igCard = between(pagesHtml, 'studio-pg-page-spg_ig');
+  const teamCard = between(pagesHtml, 'studio-pg-page-spg_hook');
+  const pagesAr = inLanguage('ar', 'render(); __html');
+  const pagesCases = [
+    pagesHtml.includes('data-testid="studio-screen-replies"') && pagesHtml.includes('data-testid="studio-pg" data-section="pages"') && pagesHtml.includes('data-testid="studio-pg-section-pages" onclick="studioPgGo(\'pages\')" aria-current="page"') && !pagesHtml.includes('studio-pg-section-tiktok') && !pagesHtml.includes('Coming soon'),
+    fbCard.includes('data-state="ok"') && fbCard.includes('Sara &lt;Shop&gt;') && fbCard.includes('data-testid="studio-pg-health"') && fbCard.includes('Working') && fbCard.includes('checked 30 minutes ago') && fbCard.includes('1234567890') && !fbCard.includes('studio-pg-fix'),
+    igCard.includes('data-state="attention" data-reason="instagram_private"') && igCard.includes('comments do not reach Albayan') && igCard.includes('Make the account public in Instagram settings') && igCard.includes('data-testid="studio-pg-fix-spg_ig" onclick="studioHelpAskAbout(\'page\', \'spg_ig\')"') && igCard.includes('data-testid="studio-ask-page-spg_ig"'),
+    teamCard.includes('Our team is on it') && teamCard.includes('nothing to do on your side') && !teamCard.includes('studio-pg-fix-spg_hook'),
+    !pagesHtml.includes('dropped') && !pagesHtml.includes('studio-pg-check-') && !pagesHtml.includes('studio-pg-connection'),
+    pagesHtml.includes('data-testid="studio-pg-link-request" onclick="studioPgGo(\'pages\', \'link\')"') && pagesHtml.includes('data-testid="studio-guide-link-share-page"') && pagesHtml.includes('data-testid="studio-guide-link-instagram"'),
+    String(pagesAr).includes('dir="rtl"') && String(pagesAr).includes('الصفحات المربوطة') && String(pagesAr).includes('حساب إنستغرام هذا خاص') && String(pagesAr).includes('اطلب منا ربط صفحة') && arabicOnly(String(pagesAr).match(/studio-pg-checked">([^<]*)</)[1]),
+    calls('GET', PAGES).length === 1
+  ];
+  check('Studio v2 Pages (P4-06): the server\'s health per page (state, reason, label, fix step, checked X ago), one fix with "I did it, tell the team", the team\'s fixes without it, no Check now for a customer, the link request and the guides; Arabic RTL',
+    !loadError && pagesCases.every(Boolean), loadError || `cases ${failed(pagesCases)}`);
+
+  // Meta connection down: the neutral banner, per-page reasons give way (the server sends state 'connection').
+  meReply({ ...meBase, metaConnection: { down: true, labels: { en: 'We are fixing the Albayan-Meta connection', ar: 'نعمل على إصلاح اتصال البيان بميتا' } } });
+  run('_studioPg.slots.pages.loadedAt = 0;');
+  reply(PAGES, { pages: [{ ...pageIg, health: { state: 'connection', reason: '', label: { en: 'Facebook and Instagram updates are delayed right now', ar: 'تحديثات فيسبوك وإنستغرام متأخرة حالياً' }, fix: null, teamAction: true, checkedAt: ago(10), since: null } }] });
+  run('render();');
+  const downHtml = html();
+  allHtml.push(downHtml);
+  // Admin: Check now runs the server check once per page at a time and shows the answer's health.
+  meReply({ ...meBase, isAdmin: true, isStaff: true });
+  run('_studioPg.slots.pages.loadedAt = 0;');
+  reply(PAGES, { pages: [pageFb, pageIg] });
+  run('render();');
+  const adminHtml = html();
+  allHtml.push(adminHtml);
+  reply(`${PAGES}/spg_ig/check`, { pageId: 'spg_ig', checked: true, webhook: '', reason: '', errorCode: '', health: { state: 'ok', reason: '', label: { en: 'Working', ar: 'يعمل' }, fix: null, teamAction: false, checkedAt: ago(0), since: null } });
+  run("studioPgCheck('spg_ig'); studioPgCheck('spg_ig');");
+  const checkedHtml = html();
+  const notes = json('__notes') || [];
+  const connectionCases = [
+    downHtml.includes('data-testid="studio-pg-connection"') && downHtml.includes('We are fixing the Albayan-Meta connection') && between(downHtml, 'studio-pg-page-spg_ig').includes('data-state="connection"') && !downHtml.includes('studio-pg-fix'),
+    adminHtml.includes('data-testid="studio-pg-check-spg_ig" onclick="studioPgCheck(\'spg_ig\', this)"') && adminHtml.includes('data-testid="studio-pg-check-spg_fb"'),
+    calls('POST', `${PAGES}/spg_ig/check`).length === 1 && between(checkedHtml, 'studio-pg-page-spg_ig').includes('data-state="ok"') && between(checkedHtml, 'studio-pg-page-spg_ig').includes('checked just now'),
+    notes.some(note => note.type === 'success' && note.title === 'Page checked')
+  ];
+  check('Studio v2 Pages: the neutral Meta-connection banner replaces the per-page reasons; an admin\'s Check now is single flight and shows the server\'s new health',
+    !loadError && connectionCases.every(Boolean), loadError || `cases ${failed(connectionCases)}`);
+
+  // Ask us to link a page (P4-07): the form, the Instagram pre-check, the guide, one ticket with every answer.
+  meReply(meBase);
+  openAt('/studio?tab=replies&section=pages&id=link');
+  const linkForm = html();
+  allHtml.push(linkForm);
+  run('studioPgLinkSend();');
+  const linkProblems = html();
+  const linkNoCall = calls('POST', '/api/studio/tickets').length === 0;
+  run("studioPgLinkPick('platform', 'ig'); studioPgLinkSet('name', 'Sara Shop'); studioPgLinkSet('link', 'https://instagram.com/sara.shop'); studioPgLinkPick('professional', 'yes'); studioPgLinkPick('linked', 'unsure'); studioPgLinkPick('isPublic', 'no'); studioPgLinkShared(true); studioPgLinkSet('note', 'Opens <soon>');");
+  run('render();');
+  const linkFilled = html();
+  allHtml.push(linkFilled);
+  replyError('/api/studio/tickets', { status: 503, message: 'Service Unavailable' });
+  run('studioPgLinkSend();');
+  const linkFailed = html();
+  reply('/api/studio/tickets', { ticket: { id: 'tkt_' + 'a'.repeat(40), number: 'T-000042', subject: 'Link my page: Sara Shop', category: 'page', status: 'open', dueAt: '2099-01-05T08:00:00Z' }, message: { id: 'tkm_x', text: 'x' } });
+  run('studioPgLinkSend();');
+  const linkDone = html();
+  allHtml.push(linkDone);
+  const ticketCalls = calls('POST', '/api/studio/tickets');
+  const linkAr = inLanguage('ar', "_studioPg.link = null; studioPgLinkPick('platform', 'ig'); render(); __html");
+  const linkCases = [
+    linkForm.includes('data-testid="studio-pg-link-form"') && linkForm.includes('id="studio-pg-link-name"') && linkForm.includes('id="studio-pg-link-url"') && linkForm.includes('data-testid="studio-guide-inline-share-page"') && linkForm.includes('Assign partners') && !linkForm.includes('studio-pg-link-professional-yes') && !linkForm.includes('studio-pg-sections'),
+    linkProblems.includes('data-testid="studio-pg-link-problem-platform"') && linkProblems.includes('data-testid="studio-pg-link-problem-page"') && linkNoCall,
+    linkFilled.includes('data-testid="studio-pg-link-platform-ig" aria-pressed="true"') && linkFilled.includes('data-testid="studio-pg-link-professional-yes" aria-pressed="true"') && linkFilled.includes('data-testid="studio-pg-link-isPublic-no" aria-pressed="true"') && linkFilled.includes('Comments reach Albayan only from a public account') && linkFilled.includes('data-testid="studio-guide-link-instagram"') && linkFilled.includes('value="Sara Shop"') && linkFilled.includes('Opens &lt;soon&gt;'),
+    linkFailed.includes('data-testid="studio-pg-link-error"') && linkFailed.includes('Refresh to see the latest state') && !linkFailed.includes('studio-pg-link-done'),
+    ticketCalls.length === 2 && ticketCalls[0].body.operationId === ticketCalls[1].body.operationId && ticketCalls[1].body.category === 'page' && ticketCalls[1].body.subject === 'Link my page: Sara Shop' && !('relatedType' in ticketCalls[1].body),
+    ticketCalls.length === 2 && ['Platform / المنصة: Instagram', 'Page name / اسم الصفحة: Sara Shop', 'Page link / رابط الصفحة: https://instagram.com/sara.shop', 'Professional account (business or creator) / حساب احترافي (أعمال أو صانع محتوى): Yes / نعم', 'Linked to a Facebook page / مربوط بصفحة فيسبوك: Not sure / لست متأكداً', 'Public account / حساب عام: No / لا', 'Albayan added as a partner in Meta Business Suite / أُضيف البيان كشريك في Meta Business Suite: Yes / نعم', 'Note / ملاحظة: Opens <soon>'].every(line => ticketCalls[1].body.message.includes(line)) && ticketCalls[1].body.message.length <= 2000,
+    linkDone.includes('data-testid="studio-pg-link-done"') && linkDone.includes('data-testid="studio-pg-link-number">T-000042<') && linkDone.includes('We reply by') && linkDone.includes(`data-testid="studio-pg-link-open" onclick="studioHelpOpen('tkt_${'a'.repeat(40)}')"`),
+    String(linkAr).includes('هل الحساب عام (غير خاص)؟') && String(linkAr).includes('اطلب منا ربط صفحة') && String(linkAr).includes('Assign partners') && String(linkAr).includes('أضفت البيان شريكاً')
+  ];
+  check('Studio v2 page-link request (P4-07): platform and page, the three Instagram answers as Yes / No / Not sure chips, the sharing guide with Meta\'s menu names, a lost answer replays the same operationId, one \'page\' ticket whose message carries every answer in both languages, the ticket number and a way to it',
+    !loadError && linkCases.every(Boolean), loadError || `cases ${failed(linkCases)}`);
+  meReply({ ...meBase, services: { help: false, stopRequest: false, tiktok: false } });
+  run('_studioPg.link = null; render();');
+  const linkOff = html();
+  check('Studio v2 page-link request: while the Help service is off the form gives way to the contact card, and nothing is sent',
+    !loadError && linkOff.includes('data-testid="studio-pg-link-off"') && !linkOff.includes('studio-pg-link-form') && linkOff.includes('data-testid="studio-help-contact"') && calls('POST', '/api/studio/tickets').length === 2);
+
+  // Rules: master switch, honest channel labels, pageRefs with the removed page, on/off, the editor.
+  meReply(meBase);
+  reply(RULES, rules());
+  reply(SETTINGS, settings);
+  reply(PAGES, { pages: [pageFb, pageIg] });
+  openAt('/studio?tab=replies&section=rules');
+  const rulesHtml = html();
+  allHtml.push(rulesHtml);
+  const rule1 = between(rulesHtml, 'studio-pg-rule-srule_1');
+  const rule2 = between(rulesHtml, 'studio-pg-rule-srule_2');
+  reply(`${RULES}/srule_1`, { ...rules().rules[0], enabled: false });
+  run("studioPgRuleToggle('srule_1'); studioPgRuleToggle('srule_1');");
+  const toggled = html();
+  reply(SETTINGS, { ...settings, masterEnabled: false });
+  run('studioPgMaster();');
+  const paused = html();
+  const rulesCases = [
+    rulesHtml.includes('data-testid="studio-pg-master" onclick="studioPgMaster()"') && rulesHtml.includes('data-testid="studio-pg-master" onclick="studioPgMaster()"') && /data-testid="studio-pg-master"[^>]*aria-checked="true"/.test(rulesHtml.replace(/aria-checked="true" aria-label="[^"]*" data-testid="studio-pg-master"/, 'data-testid="studio-pg-master" aria-checked="true"')) && rulesHtml.includes('Auto-reply is on') && rulesHtml.includes('data-testid="studio-pg-rule-new" onclick="studioPgGo(\'rules\', \'new\')"'),
+    rule1.includes('Price &lt;b&gt;questions&lt;/b&gt;') && rule1.includes('Keywords: price, بكم') && rule1.includes('data-testid="studio-pg-rule-page-removed-srule_1"') && rule1.includes('Page removed') && rule1.includes('Sara &lt;Shop&gt;') && rule1.includes('data-action="public" data-state="on"') && rule1.includes('data-action="dm" data-state="gated"') && rule1.includes('Private message — Waiting for Meta approval') && rule1.includes('data-action="like" data-state="on"'),
+    rule2.includes('data-enabled="0"') && rule2.includes('Every comment') && rule2.includes('All linked pages') && rule2.includes('data-action="public" data-state="poll"') && rule2.includes('data-action="dm" data-state="unavailable"') && rule2.includes('Not available now'),
+    rulesHtml.includes('data-testid="studio-pg-channels"') && rulesHtml.includes('data-testid="studio-pg-channel-igPublicReply" data-state="poll"') && rulesHtml.includes('checked every 5 minutes') && rulesHtml.includes('data-testid="studio-pg-channel-fbPrivateReply" data-state="gated"'),
+    calls('PATCH', `${RULES}/srule_1`).length === 1 && calls('PATCH', `${RULES}/srule_1`)[0].body.enabled === false && between(toggled, 'studio-pg-rule-srule_1').includes('data-enabled="0"'),
+    calls('PUT', SETTINGS).length === 1 && calls('PUT', SETTINGS)[0].body.masterEnabled === false && paused.includes('Auto-reply is paused')
+  ];
+  check('Studio v2 reply rules (P4-06, P4-05): the master switch, every rule with its pages (the server\'s "Page removed" label), its actions with the honest channel state, on/off per rule as one PATCH, the channels card',
+    !loadError && rulesCases.every(Boolean), loadError || `cases ${failed(rulesCases)}`);
+
+  // The editor: a gated / unavailable channel cannot be picked and says why; validation; the saved body; a refusal in Arabic.
+  openAt('/studio?tab=replies&section=rules&id=new');
+  const editorNew = html();
+  allHtml.push(editorNew);
+  run("studioPgRulePick('platform', 'ig'); render();");
+  const editorIg = html();
+  allHtml.push(editorIg);
+  run("studioPgRuleFlip('dmEnabled'); studioPgRuleSave();");
+  const editorProblems = html();
+  const editorNoCall = calls('POST', RULES).length === 0;
+  run("studioPgRulePick('platform', 'fb'); studioPgRuleSet('name', 'Prices'); studioPgRuleSet('keywordInput', 'Price, بكم'); studioPgKeywordAdd(); studioPgRuleSet('publicReply', 'See the price list'); studioPgRulePage('spg_fb'); studioPgRulePage('spg_ig'); render();");
+  const editorFilled = html();
+  allHtml.push(editorFilled);
+  replyError(RULES, { status: 400, payload: { detail: 'Public replies are not available for Facebook pages right now' } });
+  inLanguage('ar', 'studioPgRuleSave();');
+  const editorRefused = inLanguage('ar', 'render(); __html');
+  const savedRule = { ...rules().rules[0], id: 'srule_3', name: 'Prices', keywords: ['price', 'بكم'], pageRefs: ['spg_fb'], pages: [{ id: 'spg_fb', removed: false, name: 'Sara <Shop>', platform: 'fb' }], pageRemoved: false, pageRemovedLabel: null, dmEnabled: false, dmText: '' };
+  reply(RULES, savedRule);
+  reply(RULES, { ...rules(), rules: rules().rules.concat([savedRule]) });
+  run('studioPgRuleSave();');
+  const afterSave = html();
+  const saveCalls = calls('POST', RULES);
+  reply(`${RULES}/srule_1`, rules().rules[0]);
+  openAt('/studio?tab=replies&section=rules&id=srule_1');
+  const editorExisting = html();
+  allHtml.push(editorExisting);
+  const editorCases = [
+    editorNew.includes('data-testid="studio-pg-rule-form" data-rule="new"') && editorNew.includes('id="studio-rule-name"') && editorNew.includes('data-testid="studio-pg-rule-page-spg_fb"') && !editorNew.includes('studio-pg-rule-page-spg_ig') && editorNew.includes('data-testid="studio-pg-rule-channel-public" data-state="on"') && editorNew.includes('data-testid="studio-pg-rule-channel-dm" data-state="gated"') && editorNew.includes('sent once Meta approves private messages') && editorNew.includes('data-testid="studio-pg-rule-like"') && editorNew.includes('(21:00–07:30, Libya time)'),
+    editorIg.includes('data-testid="studio-pg-rule-platform-ig" aria-pressed="true"') && editorIg.includes('data-testid="studio-pg-rule-channel-dm" data-state="unavailable"') && /data-testid="studio-pg-rule-dm" onclick="studioPgRuleFlip\('dmEnabled'\)" disabled/.test(editorIg) && editorIg.includes('data-testid="studio-pg-rule-dm-why"') && editorIg.includes('cannot be picked on this platform right now') && editorIg.includes('data-testid="studio-pg-rule-like-why"') && !editorIg.includes('studio-pg-rule-page-spg_fb'),
+    editorProblems.includes('data-testid="studio-pg-rule-problem-name"') && editorProblems.includes('data-testid="studio-pg-rule-problem-keywords"') && editorProblems.includes('data-testid="studio-pg-rule-problem-reply"') && !editorProblems.includes('id="studio-rule-dm"') && editorNoCall,
+    editorFilled.includes('value="Prices"') && editorFilled.includes('data-testid="studio-pg-rule-keyword-remove-1"') && editorFilled.includes('>بكم<') && editorFilled.includes('data-testid="studio-pg-rule-page-spg_fb" aria-pressed="true"') && editorFilled.includes('The rule answers on the chosen pages only'),
+    String(editorRefused).includes('data-testid="studio-pg-rule-error"') && String(editorRefused).includes('الردود العامة غير متاحة لصفحات فيسبوك حالياً') && !String(editorRefused).includes('right now'),
+    saveCalls.length === 2 && JSON.stringify(saveCalls[1].body) === JSON.stringify({ name: 'Prices', platform: 'fb', enabled: true, trigger: 'keywords', keywords: ['price', 'بكم'], pageRefs: ['spg_fb'], publicReply: 'See the price list', dmEnabled: false, dmText: '', likeComment: false, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false }),
+    afterSave.includes('data-testid="studio-pg" data-section="rules" data-id=""') && afterSave.includes('data-testid="studio-pg-rule-srule_3"') && calls('GET', RULES).length === 2 && (json('__notes') || []).some(note => note.title === 'Rule saved'),
+    editorExisting.includes('data-rule="srule_1"') && editorExisting.includes('value="Price &lt;b&gt;questions&lt;/b&gt;"') && editorExisting.includes('data-testid="studio-pg-rule-delete" onclick="studioPgRuleDelete(this)"') && editorExisting.includes('id="studio-rule-dm"') && editorExisting.includes('data-testid="studio-pg-rule-back" onclick="studioPgGo(\'rules\')"') && run("studioPgRuleDelete()") === false
+  ];
+  check('Studio v2 rule editor: where (the platform\'s pages), when (keywords), the actions with their channel state (a channel that is off or unavailable cannot be picked and says why; a gated one is saved as waiting), inline validation before any call, the exact saved body, a server refusal in Arabic, edit and delete of an existing rule',
+    !loadError && editorCases.every(Boolean), loadError || `cases ${failed(editorCases)}`);
+
+  // Reply log: the server's outcome labels and counters, a problem in plain words, the filter and older rows.
+  const logRow = (id, outcome, extra = {}) => ({ id, at: ago(90), commentAt: ago(91), platform: 'fb', pageId: 'spg_fb', pageName: 'Sara <Shop>', ruleId: 'srule_1', ruleName: 'Price questions', commentId: 'c1', postId: 'p1', actions: outcome === 'sent' ? ['public', 'like'] : [], skipped: [], outcome, problemCode: '', error: '', source: 'webhook', receivedAt: ago(91), sentAt: ago(90), latencySeconds: 42, attempts: 1, retryAfter: null, parkedReason: null, ...extra });
+  const logLabels = { outcome: { sent: { en: 'Sent (server)', ar: 'أُرسل (الخادم)' }, failed: { en: 'Failed (server)', ar: 'فشل (الخادم)' }, skipped: { en: 'Not sent: channel not available', ar: 'لم يُرسل: القناة غير متاحة' }, missed: { en: 'Missed during the outage', ar: 'فات أثناء الانقطاع' } }, channelState: labels, problem: {}, pageRemoved: { en: 'Page removed', ar: 'الصفحة أُزيلت' } };
+  const logPage = { rows: [logRow('log_1', 'sent'), logRow('log_2', 'skipped', { skipped: [{ action: 'dm', channel: 'fbPrivateReply', state: 'gated' }], latencySeconds: null, sentAt: null }), logRow('log_3', 'missed', { problemCode: 'missed_during_outage', latencySeconds: null }), logRow('log_4', 'failed', { error: 'Meta said no', pageName: '', platform: 'ig', latencySeconds: null })],
+    nextBefore: '1700000000000:log_4', counters: { total: 12, byAction: { dm: 3, public: 9, like: 6 }, byOutcome: { sent: 8, partial: 1, failed: 2, waiting: 0, parked: 0, missed: 1, skipped: 0, sending: 0, none: 0 }, latency: {} }, windowDays: 30, windowTruncated: false, labels: logLabels };
+  reply(LOG, logPage);
+  openAt('/studio?tab=replies&section=log');
+  const logHtml = html();
+  allHtml.push(logHtml);
+  reply(`${LOG}&before=1700000000000%3Alog_4`, { ...logPage, rows: [logRow('log_5', 'sent')], nextBefore: null });
+  run('studioPgLogMore();');
+  const logMore = html();
+  reply(`${LOG}&status=failed`, { ...logPage, rows: [logRow('log_4', 'failed', { error: 'x' })], nextBefore: null });
+  run("studioPgLogFilter('failed');");
+  const logFailed = html();
+  const logCases = [
+    logHtml.includes('data-testid="studio-pg-log-counters"') && logHtml.includes('>12<') && logHtml.includes('>9<') && logHtml.includes('>3<') && logHtml.includes('comments handled'),
+    between(logHtml, 'studio-pg-log-log_1').includes('data-outcome="sent"') && between(logHtml, 'studio-pg-log-log_1').includes('Sent (server)') && between(logHtml, 'studio-pg-log-log_1').includes('replied in 42 s') && between(logHtml, 'studio-pg-log-log_1').includes('Rule: Price questions') && between(logHtml, 'studio-pg-log-log_1').includes('Sara &lt;Shop&gt;'),
+    between(logHtml, 'studio-pg-log-log_2').includes('Private message — Waiting for Meta approval') && between(logHtml, 'studio-pg-log-log_3').includes('Missed during the outage') && between(logHtml, 'studio-pg-log-log_3').includes('could not be sent in time') && between(logHtml, 'studio-pg-log-log_4').includes('Failed (server)') && between(logHtml, 'studio-pg-log-log_4').includes('Page removed') && between(logHtml, 'studio-pg-log-log_4').includes('Meta refused this reply') && !logHtml.includes('Meta said no'),
+    logHtml.includes('data-testid="studio-pg-log-filter-all" aria-pressed="true"') && logHtml.includes('data-testid="studio-pg-log-filter-failed" aria-pressed="false"') && logHtml.includes('Failed (server)</button>') && logHtml.includes('data-testid="studio-pg-log-more"'),
+    calls('GET', `${LOG}&before=1700000000000%3Alog_4`).length === 1 && logMore.includes('studio-pg-log-log_5') && logMore.includes('studio-pg-log-log_1') && !logMore.includes('studio-pg-log-more'),
+    calls('GET', `${LOG}&status=failed`).length === 1 && logFailed.includes('data-testid="studio-pg-log-filter-failed" aria-pressed="true"') && logFailed.includes('studio-pg-log-log_4') && !logFailed.includes('studio-pg-log-log_1')
+  ];
+  check('Studio v2 reply log (P4-06 consumer of P4-02): the window counters, the server\'s outcome labels, a skipped action with its channel state, the problem in plain words (never the raw Meta error), the filter by outcome and older rows by cursor',
+    !loadError && logCases.every(Boolean), loadError || `cases ${failed(logCases)}`);
+
+  // Posts as they are, the posts tab, the classic handover and the plan-ended state.
+  reply(POSTS, { posts: [{ id: 'sp_1', status: 'scheduled', caption: 'Ramadan <offer>', pageIds: ['spg_fb'], scheduledAt: '2099-03-01T10:00:00Z', mediaCount: 2 }, { id: 'sp_2', status: 'failed', caption: 'Old', pageIds: ['spg_ig'], updatedAt: ago(500), lastError: 'Meta refused <it>' }, { id: 'sp_3', status: 'published', caption: 'Done', pageIds: [], publishedAt: ago(100) }] });
+  openAt('/studio?tab=posts');
+  const postsHtml = html();
+  allHtml.push(postsHtml);
+  run("studioPgPostsFilter('failed');");
+  const postsFailed = html();
+  box.state.language = 'en';
+  run("_adsStudioActiveTab = 'replies';");
+  const classicV2 = run('renderSocialStudioRepliesTab()');
+  const classicPostsV2 = run('renderSocialStudioPostsTab()');
+  meReply({ ...meBase, ui: 'classic' });
+  const classicPlain = run('renderSocialStudioRepliesTab()');
+  meReply(meBase);
+  box.hasSubscription = () => false;
+  openAt('/studio?tab=replies');
+  const ended = html();
+  box.hasSubscription = id => id === 'ad_maker';
+  const postsCases = [
+    postsHtml.includes('data-testid="studio-screen-posts"') && postsHtml.includes('data-testid="studio-pg-posts-card"') && !postsHtml.includes('studio-pg-sections') && postsHtml.includes('data-testid="studio-pg-posts-all" onclick="studioV2Open(\'replies\')"'),
+    between(postsHtml, 'studio-pg-post-sp_1').includes('data-status="scheduled"') && between(postsHtml, 'studio-pg-post-sp_1').includes('Ramadan &lt;offer&gt;') && between(postsHtml, 'studio-pg-post-sp_1').includes('2 photos') && between(postsHtml, 'studio-pg-post-sp_1').includes('Sara &lt;Shop&gt;') && !postsHtml.includes('studio-pg-post-sp_2'),
+    postsHtml.includes('data-testid="studio-pg-posts-filter-failed"') && postsFailed.includes('data-testid="studio-pg-post-sp_2" data-status="failed"') && postsFailed.includes('Meta refused &lt;it&gt;'),
+    String(classicV2).includes('data-testid="studio-pg-classic"') && String(classicV2).includes('data-testid="studio-pg" data-section="pages"') && String(classicPostsV2).includes('data-testid="studio-pg-posts-card"'),
+    !String(classicPlain).includes('studio-pg') && (socialSrc.match(/apiJson\(/g) || []).length === 1 && socialSrc.includes("typeof studioPagesClassicDelegate === 'function' ? studioPagesClassicDelegate('replies') : ''") && socialSrc.includes("studioPagesClassicDelegate('posts')"),
+    ended.includes('data-testid="studio-pg-plan-ended"') && ended.includes('data-testid="studio-pg-renew" onclick="studioV2Open(\'wallet\')"') && !ended.includes('studio-pg-pages')
+  ];
+  check('Studio v2 posts as they are (statuses, pages, photos, the failed reason), the posts tab, the classic Replies / Posts tabs hand over to 15o only while /me says v2 (15f keeps exactly one apiJson), the plan-ended state',
+    !loadError && postsCases.every(Boolean), loadError || `cases ${failed(postsCases)}`);
+
+  // Help guides (P5-03): seven bilingual guides, the hours guide reads /me, the card and the sheet handlers.
+  const guideKeys = json('studioGuideKeys()') || [];
+  const STUDIO_GUIDE_STEPS_EN = key => (json(`STUDIO_GUIDES[${JSON.stringify(key)}].steps`) || []).map(pair => pair[0].slice(0, 24));
+  const guideBodies = guideKeys.map(key => [key, String(run(`renderStudioGuideBody(${JSON.stringify(key)})`)), String(inLanguage('ar', `renderStudioGuideBody(${JSON.stringify(key)})`))]);
+  const guidesCard = String(run('renderStudioGuidesCard()'));
+  const hoursGuide = String(run("renderStudioGuideBody('hours')"));
+  const guideCases = [
+    JSON.stringify(guideKeys) === JSON.stringify(['money', 'stages', 'settle', 'share-page', 'instagram', 'tiktok', 'hours']),
+    guideBodies.every(([, en, ar]) => en.includes('studio-guide-steps') && (en.match(/<li>/g) || []).length >= 2 && !/[؀-ۿ]/.test(en) && /[؀-ۿ]/.test(ar) && !/[A-Za-z]{4}/.test(ar.replace(/<[^>]+>|business\.facebook\.com|Meta Business Suite|Business settings|Business ID|Assign partners|Full control|Content|Messages and calls|Community activity|Assign|Add a Page|Add|Accounts|Pages|Settings and privacy|Account type and tools|Switch to professional account|Business|Creator|Linked accounts|Instagram|Connect account|Account privacy|Private account|Settings|Meta|LYD|Albayan|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Spring day/g, ''))),
+    guideBodies.find(([key]) => key === 'money')[1].includes('Reserved') && guideBodies.find(([key]) => key === 'settle')[1].includes('48 hours') && guideBodies.find(([key]) => key === 'share-page')[1].includes('Assign partners') && guideBodies.find(([key]) => key === 'instagram')[1].includes('Switch to professional account') && guideBodies.find(([key]) => key === 'instagram')[1].includes('Private account') && guideBodies.find(([key]) => key === 'stages')[1].includes('own report, never from a button'),
+    !/connected|linked|managed|automated/i.test(guideBodies.find(([key]) => key === 'tiktok')[1].replace(/not linked|is linked/g, '')) && guideBodies.find(([key]) => key === 'tiktok')[1].includes('help by hand'),
+    hoursGuide.includes('data-testid="studio-guide-hours"') && hoursGuide.includes('Sunday') && hoursGuide.includes('09:00–17:00') && hoursGuide.includes('data-testid="studio-guide-open-now"') && hoursGuide.includes('Open now') && hoursGuide.includes('2099-03-01 (Spring day)'),
+    guidesCard.includes('data-testid="studio-guides"') && guideKeys.every(key => guidesCard.includes(`data-testid="studio-guide-link-${key}" onclick="studioGuideOpen('${key}', this)"`)),
+    run("studioGuideOpen('money')") === false && run("studioGuideOpen('nope')") === false && run("studioGuideTitle('settle')") === 'Why the final amount takes 2-3 days'
+  ];
+  check('Studio help guides (P5-03): seven guides in English and Arabic (money numbers, stages, why 2-3 days, sharing a page with the Meta menu names, Instagram professional + public, TikTok today in honest words, our working hours from /me), the card for Help and the sheet handlers',
+    !loadError && guideCases.every(Boolean), loadError || `cases ${failed(guideCases)}`);
+
+  // Texts, handlers, the classic map and the styles.
+  const textPairs = [...pagesSrc.matchAll(/(?:adsStudioText|studioPgText)\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
+  const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
+  const safeHandler = /^\son(?:click|input|change|submit|keydown)="(event\.preventDefault\(\); studioPg(LinkSend|RuleSave)\(\);|studioPg(Go|Retry|Refresh|LinkSend|LinkCancel|Master|KeywordAdd|RuleSave|DeleteConfirm|CloseSheet|LogMore)\((?:'[a-z]+'(?:, '(?:new|link|[A-Za-z0-9_.:-]+)')?)?\)|studioPg(Check|RuleDelete|RuleToggle|RulePage|LogFilter|PostsFilter|RuleFlip)\((?:'[A-Za-z0-9_.:-]*'(?:, this)?|this)?\)|studioPg(LinkSet|RuleSet)\('[A-Za-z]+', this\.value\)|studioPg(LinkPick|RulePick)\('[A-Za-z]+', '[a-z]+'\)|studioPgLinkShared\(this\.checked\)|studioPgKeywordRemove\(\d+\)|studioPgKeywordKey\(event\)|studioGuide(Open\('[a-z-]+', this\)|Close\(\))|studioHelp(AskAbout\('page', '[A-Za-z0-9_.:-]+'\)|Open\('tkt_[0-9a-f]{40}'\))|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|setAdsStudioTab\('[a-z]+'\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
+  const workspaceCss = read('assets/ads-workspace.css');
+  const pagesCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio v2 Pages & replies'));
+  const refusalMap = json('_ADS_STUDIO_REFUSAL_AR') || [];
+  const arabic = detail => String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(detail)})`));
+  const socialPy = read('server/systems/ads_studio/social_studio.py');
+  const addedFrom = refusalMap.findIndex(entry => entry[0] === 'Rule name is required');
+  const added = refusalMap.slice(addedFrom);
+  const staticCases = [
+    textPairs.length >= 150 && textPairs.every(ar => /[؀-ۿ]/.test(ar)),
+    onclicks.length > 60 && onclicks.every(attr => safeHandler.test(attr)),
+    !/\b(confirm|alert|prompt)\(/.test(pagesSrc) && !/\bsetInterval\(/.test(pagesSrc),
+    pagesCss.length > 4000 && read('www/assets/ads-workspace.css') === workspaceCss
+      && ['html.dark :is(.studio-pg, .studio-pg-overlay)', 'min-height: 44px', 'overflow-wrap: anywhere', '.studio-pg-switch { position: relative;', '@media (max-width: 900px)', 'inset-inline-start'].every(rule => pagesCss.includes(rule))
+      && !/background(-color)?:\s*#|[^-]color:\s*#/.test(pagesCss),
+    addedFrom > 0 && refusalMap[addedFrom - 1][0] === 'note must be text' && added.length >= 20 && added.every(([en, ar, extra]) => /[؀-ۿ]/.test(ar) && !extra && refusalMap.filter(entry => entry[0] === en).length === 1),
+    ['"Rule name"', 'is required"', 'Add at least one keyword for a keyword rule', 'A rule needs a public reply or a private message', 'is not linked to this account', "is not on this rule's platform", 'Admin only', 'You can only manage your own Social Studio'].every(needle => socialPy.includes(needle))
+      && ['Private messages', 'Public replies', 'Likes'].every(action => socialPy.includes(`"${action.split(' ')[0] === 'Likes' ? 'like' : action === 'Private messages' ? 'dm' : 'public'}": "${action}"`)) && socialPy.includes('are not available for {_PLATFORM_WORDS[platform]} right now'),
+    arabic('Private messages are not available for Instagram accounts right now') === 'الرسائل الخاصة غير متاحة لحسابات إنستغرام حالياً' && arabic('Page spg_x is not linked to this account') === 'هذه الصفحة لم تعد مربوطة بحسابك — حدّث الصفحة واختر صفحة أخرى' && arabic('Rule name is required') === 'اكتب اسماً للقاعدة'
+  ];
+  check('Studio v2 Pages & replies: every text pair has Arabic, only known handlers reach the page, no native dialog or timer loop, the styles use the tokens with dark tones and logical insets, the classic map gained (only appended) the reply-rule refusals whose English the server really sends',
+    !loadError && staticCases.every(Boolean), loadError || `cases ${failed(staticCases)} pairs ${textPairs.length} handlers ${onclicks.filter(attr => !safeHandler.test(attr)).slice(0, 3).join(' | ')}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');
