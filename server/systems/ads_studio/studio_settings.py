@@ -25,7 +25,8 @@ Keys (anything else is refused):
   with its zone, or null until the P1 release stamps it, P1-18). Always minimum total <= maximum
   total, and per-day floor <= minimum total.
 * ``settlement`` (D28): ``spendDelayHours`` (0-168; the wait after delivery ends),
-  ``neverDeliveredImmediate`` and ``driftWatchDays`` (1-90; it must outlast the wait).
+  ``neverDeliveredImmediate`` and ``driftWatchDays`` (1-90; it must outlast the wait: days x 24 >
+  hours, equal is refused).
 * ``hours`` (D11): the working-hours calendar, always read in ``Africa/Tripoli`` time. ``week``
   (per weekday ``{open, close}`` as HH:MM, or null = closed; at least one working day),
   ``holidays`` (``{date, labelEn, labelAr}``, ISO dates, labels optional), ``ramadan`` (null or
@@ -95,8 +96,10 @@ RAMADAN_FIELDS = ("from", "to", "open", "close")
 HOLIDAY_FIELDS = ("date", "labelEn", "labelAr")
 MAX_HOLIDAYS = 60
 MAX_LABEL_CHARS = 60
-# What /api/studio/me shows every signed-in user (nothing private, nothing staff-only).
-PUBLIC_LIMIT_FIELDS = ("minTotalMinorUSD", "maxTotalMinorUSD", "maxDays")
+# What /api/studio/me shows every signed-in user (nothing private, nothing staff-only). The budget
+# form checks the same limits the server enforces (PLAN.md §7.3, P1-08b, P1-15), per-day floor
+# included; only p1CutoverAt (a release stamp) stays out.
+PUBLIC_LIMIT_FIELDS = ("minTotalMinorUSD", "maxTotalMinorUSD", "minPerDayMinorUSD", "maxDays")
 PUBLIC_CONTACT_FIELDS = ("whatsapp", "phone", "email")
 
 _WORKDAY = {"open": "09:00", "close": "17:00"}
@@ -287,7 +290,7 @@ def _instant_or_null(field: str, value: Any) -> str | None:
     if isinstance(value, str) and _INSTANT_RE.fullmatch(value):
         try:
             moment = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-        except ValueError:
+        except (ValueError, OverflowError):  # OverflowError: year 1 or 9999 moved past the calendar by its zone
             moment = None
     if moment is None or not _YEARS[0] <= moment.year <= _YEARS[1]:
         _bad(field, "must be null or a time with its zone, such as 2026-10-01T08:00:00Z")
@@ -329,7 +332,6 @@ def _allowlist(field: str, value: Any, id_validator: Callable[[Any], str] | None
         _bad(field, "must be a list of user ids")
     if len(value) > MAX_ALLOWLIST:
         _bad(field, f"may hold at most {MAX_ALLOWLIST} user ids")
-    clean: list[str] = []
     for item in value:
         ok = isinstance(item, str) and looks_like_user_id(item)
         if ok and id_validator is not None:
@@ -339,9 +341,7 @@ def _allowlist(field: str, value: Any, id_validator: Callable[[Any], str] | None
                 ok = False
         if not ok:
             _bad(field, "must hold user ids only (letters, numbers, dot, underscore, colon or hyphen)")
-        if item not in clean:
-            clean.append(item)
-    return clean
+    return list(dict.fromkeys(value))  # repeats dropped, first order kept
 
 
 def _fields(rules: dict[str, Rule], check: Callable[[dict[str, Any]], None] | None = None) -> Callable[..., None]:
@@ -399,8 +399,8 @@ def _limits_check(value: dict[str, Any]) -> None:
 
 
 def _settlement_check(value: dict[str, Any]) -> None:
-    if value["driftWatchDays"] * 24 < value["spendDelayHours"]:
-        _bad("driftWatchDays", "must last at least as long as spendDelayHours (the spend watch outlives the wait)")
+    if value["driftWatchDays"] * 24 <= value["spendDelayHours"]:
+        _bad("driftWatchDays", "must last longer than spendDelayHours (the spend watch outlives the wait)")
 
 
 def _targets_check(value: dict[str, Any]) -> None:
@@ -565,6 +565,9 @@ def validate_setting(
 
 
 _MERGED_FIELDS = ("services", "week")  # objects whose entries are saved one by one (a partial change merges)
+# Lists whose items must not repeat by one part of the item (holidays: one per date); in the other
+# lists the whole checked item must not repeat.
+_UNIQUE_ITEM_PART = {"holidays": "date"}
 
 
 def _try_field(key: str, raw: dict[str, Any], value: dict[str, Any]) -> dict[str, Any]:
@@ -574,11 +577,52 @@ def _try_field(key: str, raw: dict[str, Any], value: dict[str, Any]) -> dict[str
         return value
 
 
+def _salvage_items(key: str, field: str, items: list[Any]) -> list[Any]:
+    """The stored list items that pass their own rule, in their order, a repeat dropped (the first
+    is kept). Each item is checked once, alone, against the safe default: an item's own rule never
+    depends on the other fields, and the list as a whole is checked afterwards (``_try_list``)."""
+    base = default_value(key)
+    part = _UNIQUE_ITEM_PART.get(field)
+    kept: list[Any] = []
+    seen: set[str] = set()
+    for item in items:
+        trial = _try_field(key, {field: [item]}, base)
+        if trial is base:
+            continue
+        checked = trial.get(field) or []
+        identity = repr([entry[part] for entry in checked] if part else checked)
+        if identity not in seen:
+            seen.add(identity)
+            kept.append(item)
+    return kept
+
+
+def _try_list(key: str, field: str, items: list[Any], value: dict[str, Any]) -> dict[str, Any]:
+    """``value`` with the kept ``items`` checked once as a whole (the list rules and the rules
+    between fields). Over a length cap, the longest leading run that passes is kept (found by
+    halving, a few checks instead of one per item). No items = ``value`` unchanged."""
+    if not items:
+        return value
+    whole = _try_field(key, {field: items}, value)
+    if whole is not value:
+        return whole
+    best, low, high = value, 1, len(items) - 1
+    while low <= high:
+        middle = (low + high) // 2
+        trial = _try_field(key, {field: items[:middle]}, value)
+        if trial is value:
+            high = middle - 1
+        else:
+            best, low = trial, middle + 1
+    return best
+
+
 def normalise_stored(key: str, stored: Any) -> dict[str, Any]:
     """A stored value read back through today's rules. The whole value is tried first, so the
-    rules between fields (min <= max) see every stored field; if it fails, each field, each entry
-    of an object and each item of a list that fails keeps its safe default instead of breaking
-    /api/studio/me. Unknown stored fields are dropped. The field-by-field pass runs twice, so a
+    rules between fields (min <= max) see every stored field; if it fails, each field and each
+    entry of an object that fails keeps its safe default instead of breaking /api/studio/me, and
+    a list keeps the items that pass (each item checked once on its own, then the kept list once
+    as a whole). Unknown stored fields are dropped. The field-by-field pass runs twice, so a
     field refused only because a later field was still at its default gets a second chance."""
     value = default_value(key)
     if not isinstance(stored, dict):
@@ -587,18 +631,18 @@ def normalise_stored(key: str, stored: Any) -> dict[str, Any]:
     whole = _try_field(key, known, value)
     if whole is not value:
         return whole
+    lists = {
+        field: _salvage_items(key, field, field_value)
+        for field, field_value in known.items()
+        if isinstance(field_value, list)
+    }
     for _pass in range(2):
         for field, field_value in known.items():
             if field in _MERGED_FIELDS and isinstance(field_value, dict):
                 for name, item in field_value.items():
                     value = _try_field(key, {field: {name: item}}, value)
-            elif isinstance(field_value, list):
-                kept: list[Any] = []
-                for item in field_value:
-                    trial = _try_field(key, {field: [*kept, item]}, value)
-                    if trial is not value:
-                        kept.append(item)
-                        value = trial
+            elif field in lists:
+                value = _try_list(key, field, lists[field], value)
             else:
                 value = _try_field(key, {field: field_value}, value)
     return value

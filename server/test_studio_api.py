@@ -192,7 +192,8 @@ def test_me_reflects_safe_defaults(actors, monkeypatch):
         "capabilities": {"fbPublicReply": "gated", "fbPrivateReply": "unavailable", "igPublicReply": "unavailable",
                          "igPrivateReply": "unavailable", "tiktokService": "off"},
         "intake": {"open": True},
-        "adLimits": {"minTotalMinorUSD": 500, "maxTotalMinorUSD": 200_000, "maxDays": 90},  # D4 + D5: $5 - $2,000
+        # D4 + D5: $5 - $2,000; the $1 per-day floor too (client limits = server limits, P1-08b)
+        "adLimits": {"minTotalMinorUSD": 500, "maxTotalMinorUSD": 200_000, "minPerDayMinorUSD": 100, "maxDays": 90},
         "serviceHours": {  # D11 default: Sun-Thu 09:00-17:00 Tripoli
             "timezone": "Africa/Tripoli", "openNow": True,
             "week": {"sun": workday, "mon": workday, "tue": workday, "wed": workday, "thu": workday, "fri": None, "sat": None},
@@ -981,6 +982,9 @@ _SIXTY_ONE_DAYS = [{"date": (date(2027, 1, 1) + timedelta(days=i)).isoformat()} 
     ("limits", {"p1CutoverAt": "2026-13-01T08:00:00Z"}, "INVALID_VALUE"),
     ("limits", {"p1CutoverAt": "2019-12-31T08:00:00Z"}, "INVALID_VALUE"),
     ("limits", {"p1CutoverAt": 1_790_000_000_000}, "INVALID_VALUE"),
+    # moved to UTC these fall off the calendar (OverflowError): still a 400, never a 500
+    ("limits", {"p1CutoverAt": "0001-01-01T00:30:00+01:00"}, "INVALID_VALUE"),
+    ("limits", {"p1CutoverAt": "9999-12-31T23:59:59-01:00"}, "INVALID_VALUE"),
     ("limits", {"minTotalMinorUSD": 300_000}, "INVALID_VALUE"),  # above the (default) maximum
     ("limits", {"maxTotalMinorUSD": 400}, "INVALID_VALUE"),      # below the (default) minimum
     ("limits", {"minPerDayMinorUSD": 600}, "INVALID_VALUE"),     # a floor above the minimum total
@@ -992,6 +996,8 @@ _SIXTY_ONE_DAYS = [{"date": (date(2027, 1, 1) + timedelta(days=i)).isoformat()} 
     ("settlement", {"neverDeliveredImmediate": "yes"}, "INVALID_VALUE"),
     ("settlement", {"driftWatchDays": 91}, "INVALID_VALUE"),
     ("settlement", {"driftWatchDays": 1}, "INVALID_VALUE"),  # 24 h < the 48 h wait
+    ("settlement", {"driftWatchDays": 2}, "INVALID_VALUE"),  # 48 h = the 48 h wait: the watch must outlast it
+    ("settlement", {"spendDelayHours": 168, "driftWatchDays": 7}, "INVALID_VALUE"),  # 7 x 24 = 168: equal is refused
     ("settlement", {"waitHours": 48}, "UNKNOWN_FIELD"),
     # hours
     ("hours", {"timezone": "Europe/London"}, "INVALID_VALUE"),
@@ -1075,13 +1081,16 @@ def test_limits_rules_hold_across_partial_saves(actors):
     assert _put(admin, "limits", {"minTotalMinorUSD": 400_000}, expected_version=2).json()["version"] == 3  # min == max is fine
     _error(_put(admin, "limits", {"minTotalMinorUSD": 299_999}, expected_version=3), 400, "INVALID_VALUE")  # below the floor
     assert _get_setting(admin, "limits")["version"] == 3  # refused saves never used a version
-    assert _me(actors["customer"])["adLimits"] == {"minTotalMinorUSD": 400_000, "maxTotalMinorUSD": 400_000, "maxDays": 90}
+    assert _me(actors["customer"])["adLimits"] == {
+        "minTotalMinorUSD": 400_000, "maxTotalMinorUSD": 400_000, "minPerDayMinorUSD": 300_000, "maxDays": 90}
 
 
 def test_settlement_and_target_rules_between_fields(actors):
     admin = actors["admin"]
-    assert _put(admin, "settlement", {"spendDelayHours": 168, "driftWatchDays": 7}).status_code == 200  # 7 x 24 = 168
-    _error(_put(admin, "settlement", {"driftWatchDays": 6}, expected_version=1), 400, "INVALID_VALUE")
+    # The drift watch must outlast the settle wait: 7 x 24 = 168 h equals the wait and is refused.
+    _error(_put(admin, "settlement", {"spendDelayHours": 168, "driftWatchDays": 7}), 400, "INVALID_VALUE")
+    assert _put(admin, "settlement", {"spendDelayHours": 168, "driftWatchDays": 8}).status_code == 200  # 192 h > 168 h
+    _error(_put(admin, "settlement", {"driftWatchDays": 7}, expected_version=1), 400, "INVALID_VALUE")  # partial: equal again
     zero = _put(admin, "settlement", {"spendDelayHours": 0, "driftWatchDays": 1}, expected_version=1)
     assert zero.status_code == 200 and zero.json()["value"]["spendDelayHours"] == 0
     assert _put(admin, "targets", {"stopRequestMinutes": 240}).status_code == 200  # equal to the ticket target
@@ -1129,13 +1138,56 @@ def test_stored_new_settings_are_renormalised_on_read(actors, monkeypatch):
     assert response.status_code == 200, response.text
     me = response.json()
     assert me["contact"] == {"whatsapp": None, "phone": "+218214444444", "email": "help@albayanhub.com"}
-    assert me["adLimits"] == {"minTotalMinorUSD": 300_000, "maxTotalMinorUSD": 400_000, "maxDays": 90}
+    assert me["adLimits"] == {"minTotalMinorUSD": 300_000, "maxTotalMinorUSD": 400_000, "minPerDayMinorUSD": 100, "maxDays": 90}
     assert me["serviceHours"]["openNow"] is True and "<" not in response.text
     # The next save starts from the clean value, so nothing refused is ever written back.
     saved = _put(admin, "hours", {"onDutyUntil": "22:00"}, expected_version=3)
     assert saved.status_code == 200 and saved.json()["value"]["timezone"] == "Africa/Tripoli"
     stored = json_loads(next(r for r in _settings_rows() if r["id"] == derived_id("sts", "hours"))["data_json"])
     assert stored["value"]["holidays"] == [{"date": "2026-12-24", "labelEn": "Independence Day", "labelAr": ""}]
+
+
+def test_long_allowlists_with_bad_ids_are_salvaged_in_one_pass(actors, monkeypatch):
+    """A stored rollout with 200 + 200 ids and a few bad ones keeps every valid id (in order, a repeat
+    once) and drops the bad ones. Each id is checked a few times, not once per id kept before it: the
+    old item-by-item pass made tens of thousands of checks here (~100 ms on every /me). Counted, not timed."""
+    ui = [f"studio_user_ui_{index:03d}" for index in range(200)]
+    staff = [f"studio_user_staff_{index:03d}" for index in range(200)]
+    bad = {7: "bad id!", 50: 5, 120: "<b>x</b>", 199: None}
+    for index, item in bad.items():
+        ui[index] = item
+    ui[150] = actors["customer"]["id"]
+    staff[10] = "system"  # a placeholder, never a user id
+    staff[20] = staff[19]  # a repeat
+    staff[100] = actors["staff"]["id"]
+    checks: list[str] = []
+    real = studio_settings.looks_like_user_id
+    monkeypatch.setattr(studio_settings, "looks_like_user_id", lambda value: checks.append(value) or real(value))
+    stored = {"ui": "pilot", "uiAllowlist": ui, "staffDesk": "pilot", "staffAllowlist": staff}
+    value = studio_settings.normalise_stored("rollout", stored)
+    assert value["uiAllowlist"] == [item for index, item in enumerate(ui) if index not in bad]
+    assert value["staffAllowlist"] == [item for index, item in enumerate(staff) if index not in (10, 20)]
+    assert value["ui"] == "pilot" and value["staffDesk"] == "pilot"
+    assert len(checks) <= 10 * (len(ui) + len(staff)), len(checks)  # linear in the ids
+    # The same row through /me: the salvaged allowlists still let the pilot users in.
+    monkeypatch.setenv(studio_settings.ENV_SWITCH, "on")
+    _store({"rollout": stored})
+    assert _me(actors["customer"])["ui"] == "v2" and _me(actors["customer2"])["ui"] == "classic"
+    assert _me(actors["staff"])["staffDesk"] == "v2" and _me(actors["staff2"])["staffDesk"] == "classic"
+
+
+def test_stored_lists_over_a_cap_keep_their_leading_items():
+    """Over a length cap (a hand edit, or a cap lowered later) the first items that fit are kept, as
+    the item-by-item pass did; bad items and repeats do not use up the cap."""
+    ids = [f"studio_user_{index:03d}" for index in range(205)]
+    assert studio_settings.normalise_stored("rollout", {"uiAllowlist": ["bad id!", ids[0], *ids]})["uiAllowlist"] == ids[:200]
+    warn_days = studio_settings.normalise_stored("thresholds", {"tokenExpiryWarnDays": [9, "x", 9, 1, 2, 3, 4, 5, 6]})
+    assert warn_days["tokenExpiryWarnDays"] == [9, 4, 3, 2, 1]
+    dates = [(date(2027, 1, 1) + timedelta(days=index)).isoformat() for index in range(62)]
+    days = [{"date": day} for day in dates]
+    hours = studio_settings.normalise_stored("hours", {"holidays": [days[61], {"date": "bad"}, days[61], *days]})
+    assert [item["date"] for item in hours["holidays"]] == [*dates[:59], dates[61]]  # the first 60 kept, sorted
+    assert studio_settings.normalise_stored("thresholds", {"tokenExpiryWarnDays": ["x", 0]})["tokenExpiryWarnDays"] == [14, 7, 2]
 
 
 def test_me_gives_customers_public_fields_only(actors, monkeypatch):
@@ -1161,7 +1213,8 @@ def test_me_gives_customers_public_fields_only(actors, monkeypatch):
         me = response.json()
         assert set(me) == {"ui", "services", "staffDesk", "capabilities", "intake", "adLimits", "serviceHours", "contact",
                            "isAdmin", "isStaff"}
-        assert me["adLimits"] == {"minTotalMinorUSD": 700, "maxTotalMinorUSD": 150_000, "maxDays": 45}
+        # The per-day floor is not secret: the form checks the same limits as the server (P1-08b, P1-15).
+        assert me["adLimits"] == {"minTotalMinorUSD": 700, "maxTotalMinorUSD": 150_000, "minPerDayMinorUSD": 250, "maxDays": 45}
         assert me["contact"] == {"whatsapp": "+218912345678", "phone": "+218214444444", "email": "help@albayanhub.com"}
         assert me["serviceHours"] == {
             "timezone": "Africa/Tripoli", "openNow": True, "week": DEFAULT_WEEK,
@@ -1171,7 +1224,7 @@ def test_me_gives_customers_public_fields_only(actors, monkeypatch):
         }
         # The urgent line (only for the after-hours stop answer) and staff-only settings never reach /me
         # (the exact comparisons above already pin every value that does).
-        for private in (urgent, "urgentWhatsapp", "p1CutoverAt", "2026-10-01", "minPerDayMinorUSD", "spendDelayHours",
+        for private in (urgent, "urgentWhatsapp", "p1CutoverAt", "2026-10-01", "spendDelayHours",
                         "tokenMinDaysLeft", "paymentConfirmMinutes", "settlement", "targets", "thresholds"):
             assert private not in response.text, (who, private)
     # Without an urgent line to call, no on-duty time is promised.
