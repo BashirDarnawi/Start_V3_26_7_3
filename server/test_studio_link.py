@@ -937,7 +937,20 @@ def test_unlink_refusals(staff, meta):
     assert response.status_code == 409 and detail(response) == actions.REFUSE_UNLINK_NOT_APPROVED
     assert _unlink(staff, _create(staff, "Private draft")).status_code == 404
 
-    # A finished ad (Stopped) keeps its link and its claim.
+    # A finished ad (Stopped) keeps its link and its claim. Since P3-06a a staff stop of a linked ad waits for
+    # Meta's final read unless the ad never delivered, so seed that: no impressions, no spend, ended.
+    from datetime import datetime, timezone
+    from server.systems.ads_studio.studio_results import write_results_row
+    stamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    with db_conn() as conn:
+        owner = conn.execute(text("SELECT created_by FROM entities WHERE type = 'adCampaignRequests' AND id = :id"),
+                             {"id": campaign_id}).scalar()
+        write_results_row(conn, campaign_id, str(owner or ""), {
+            "metaCampaignId": meta_id, "metaAdAccountId": _data(campaign_id).get("metaAdAccountId"), "currency": "USD",
+            "syncState": "ok", "insightsState": "ok", "lastSyncedAt": stamp, "campaignEffectiveStatus": "PAUSED",
+            "adStatusCounts": {"PAUSED": 1}, "neverDelivered": True, "spendMinorUSD": 0, "lifetimeImpressions": 0,
+            "deliveryEndedAt": stamp, "settleReadAt": stamp,
+        })
     stopped = client.post(f"/api/ad-studio/campaigns/{campaign_id}/stop", json={
         "expectedLastModified": _last_modified(campaign_id), "operationId": _uid("stop-op"), "refundMinorUSD": 0,
         "closeReason": "completed",
