@@ -305,6 +305,114 @@ def test_rule_create_normalizes_keywords_and_lists_in_creation_order(actors):
     assert [r["id"] for r in listed] == [rule["id"], second["id"]]
 
 
+def test_rule_active_since_moves_only_when_the_rule_starts_answering_other_comments(actors, monkeypatch):
+    """activeSince (P1-23 follow-up): a comment Albayan reads later is answered only by rules that already
+    applied to it when it was written, so switching a rule on or pointing it elsewhere moves it to now."""
+    cookies = actors["a"]["cookies"]
+    clock = [1_800_000_000_000]
+    monkeypatch.setattr(studio, "now_ms", lambda: clock[0])
+    rule = _rule(cookies, activeSince=5)  # a client's value is never taken
+    assert rule["activeSince"] == clock[0]
+
+    def patch(body):
+        clock[0] += 1000
+        response = client.patch(f"{API}/rules/{rule['id']}", json=body, cookies=cookies)
+        assert response.status_code == 200, response.text
+        return response.json()["activeSince"]
+
+    start = clock[0]
+    assert patch({"publicReply": "Thanks again", "name": "Renamed", "oncePerPerson": True, "quietHours": True}) == start
+    assert patch({"activeSince": 7, "dmEnabled": True, "dmText": "Hi"}) == start
+    assert patch({"enabled": False}) == start  # switched off: nothing new is answered
+    assert patch({"enabled": False, "likeComment": True}) == start
+    assert patch({"enabled": True}) == clock[0]  # switched on again
+    for body in ({"platform": "ig"}, {"scope": "chosen", "postIds": ["p1"]}, {"postIds": ["p1", "p2"]},
+                 {"trigger": "keywords", "keywords": ["price"]}, {"keywords": ["price", "cost"]}):
+        assert patch(body) == clock[0], body
+    assert patch({"keywords": ["PRICE", "cost"]}) == clock[0] - 1000  # the same keywords once normalized
+
+
+def test_reply_log_keeps_the_comment_time(actors, graph):
+    _link(actors, "a", "5100000000031")
+    _rule(actors["a"]["cookies"])
+    _webhook(_fb_comment("5100000000031", "5100000000031_1", "9031", "hello"))
+    [log] = _log_rows(actors["a"]["id"])
+    assert log["source"] == "webhook" and log["commentAt"] == log["at"]  # a webhook comes as it is written
+    written = datetime.now(timezone.utc) - timedelta(days=2, hours=3)
+    handled = studio.process_comment(platform="fb", entry_id="5100000000031", comment_id="5100000000031_2",
+                                     post_ref="post_1", from_id="9032", text="hi", source="manual_check",
+                                     comment_at=written.isoformat())
+    assert handled is None  # the rule is younger than the comment: never answered, nothing claimed
+    old_rule = next(iter(studio._rows(studio.RULES_TYPE, actors["a"]["id"])))
+    made = now_ms() - 3 * 86_400_000  # the rule is older than the comment now (list_entities reads created_at)
+    data = {**old_rule["data"], "_created": made}
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET data_json=:d, created_at=:c WHERE type='socialReplyRules' AND id=:id"),
+                     {"d": json_dumps(data), "c": made, "id": old_rule["id"]})
+    handled = studio.process_comment(platform="fb", entry_id="5100000000031", comment_id="5100000000031_3",
+                                     post_ref="post_1", from_id="9033", text="hi", source="manual_check",
+                                     comment_at=written.isoformat())
+    assert handled is None  # activeSince (set when the rule was made) is still after the comment
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET data_json=:d WHERE type='socialReplyRules' AND id=:id"),
+                     {"d": json_dumps({k: v for k, v in data.items() if k != "activeSince"}), "id": old_rule["id"]})
+    handled = studio.process_comment(platform="fb", entry_id="5100000000031", comment_id="5100000000031_4",
+                                     post_ref="post_1", from_id="9034", text="hi", source="manual_check",
+                                     comment_at=written.isoformat())
+    assert handled and handled["commentAt"] == studio._iso_at(written) != handled["at"]  # a rule from before activeSince
+
+
+def _parked_reply(owner, page_id, rule_id, comment_id, *, claimed_ago, written_ago=None):
+    """A reply-log row a temporary Meta problem parked for the retry pass."""
+    now = datetime.now(timezone.utc)
+    data = {"id": f"srl_{comment_id}", "ownerId": owner, "pageId": page_id, "platform": "fb", "ruleId": rule_id,
+            "commentId": comment_id, "fromId": f"from_{comment_id}", "actions": [], "processing": False,
+            "error": "Meta paused", "attempts": 1, "retryAfter": studio._iso_at(now - timedelta(minutes=1)),
+            "at": studio._iso_at(now - claimed_ago)}
+    if written_ago is not None:
+        data["commentAt"] = studio._iso_at(now - written_ago)
+    with db_conn() as conn:
+        conn.execute(text("INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                          "VALUES ('socialReplyLog',:id,:data,false,:t,:owner,:t)"),
+                     {"id": data["id"], "data": json_dumps(data), "t": now_ms(), "owner": owner})
+    return data["id"]
+
+
+def test_retry_window_is_measured_from_the_comment(monkeypatch):
+    """Meta's 7-day private-reply window starts when the comment was written: a comment a manual check
+    read six days late has one day of retries left, not seven."""
+    owner, page_id, rule_id = new_id("owner_window"), new_id("spg_window"), new_id("srule_window")
+    with db_conn() as conn:
+        for entity_type, entity_id, data in (
+            ("socialPages", page_id, {"ownerId": owner, "metaPageId": "5100000000041", "platform": "fb", "name": "P"}),
+            ("socialReplyRules", rule_id, {"ownerId": owner, "enabled": True, "platform": "fb", "publicReply": "Thanks"}),
+        ):
+            conn.execute(text("INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                              "VALUES (:type,:id,:data,false,:t,:owner,:t)"),
+                         {"type": entity_type, "id": entity_id, "data": json_dumps({"id": entity_id, **data}),
+                          "t": now_ms(), "owner": owner})
+    late = _parked_reply(owner, page_id, rule_id, "c_late", claimed_ago=timedelta(minutes=5), written_ago=timedelta(days=8))
+    within = _parked_reply(owner, page_id, rule_id, "c_within", claimed_ago=timedelta(minutes=5), written_ago=timedelta(days=6))
+    legacy = _parked_reply(owner, page_id, rule_id, "c_legacy", claimed_ago=timedelta(minutes=5))  # no commentAt: the claim time
+    monkeypatch.setattr(studio, "_owner_can_automate", lambda owner_id: owner_id == owner)
+    sent = []
+    monkeypatch.setattr(studio, "_execute_rule_actions",
+                        lambda page, rule, platform, comment_id: sent.append(comment_id) or (["public"], [], False))
+    try:
+        studio._retry_pending_replies(datetime.now(timezone.utc))
+        assert sorted(sent) == ["c_legacy", "c_within"]
+        with db_conn() as conn:
+            rows = {row["id"]: json_loads(row["data_json"]) for row in conn.execute(
+                text("SELECT id, data_json FROM entities WHERE id IN (:a, :b, :c)"), {"a": late, "b": within, "c": legacy},
+            ).mappings()}
+        assert rows[late]["retryAfter"] == "" and "expired" in rows[late]["error"] and rows[late]["actions"] == []
+        assert rows[within]["actions"] == ["public"] and rows[legacy]["actions"] == ["public"]
+    finally:
+        with db_conn() as conn:
+            for entity_id in (page_id, rule_id, late, within, legacy):
+                conn.execute(text("DELETE FROM entities WHERE id=:id"), {"id": entity_id})
+
+
 @pytest.mark.parametrize(
     "overrides, fragment",
     [

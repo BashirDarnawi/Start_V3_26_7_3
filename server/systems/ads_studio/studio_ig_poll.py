@@ -39,8 +39,9 @@ What is new (old comments are never answered):
 * written in the last MAX_COMMENT_AGE (Meta's 7-day private-reply window);
 * written after the account was linked to Albayan (its socialPages row was created; a webhook never
   delivers older comments either);
-* not older than the owner's oldest enabled Instagram rule; process_comment then lets only rules
-  created before the comment answer it.
+* not older than the earliest time one of the owner's enabled Instagram rules applied as it is now
+  (its creation, or its ``activeSince``: switched on, or its platform, posts or trigger changed);
+  process_comment then lets only rules active since before the comment answer it.
 
 Dedupe: process_comment keeps ONE reply-log row per owner, platform and comment, whatever the
 source, inserted as the claim before anything is sent. A comment answered by a check is never
@@ -214,13 +215,16 @@ def load_instagram_page(page_id: str) -> dict[str, Any]:
 
 
 def rule_floor_second(conn: Any, owner_id: str) -> int | None:
-    """The creation second of the owner's oldest enabled Instagram rule (None: no such rule)."""
+    """The earliest second from which one of the owner's enabled Instagram rules has applied as it is:
+    per rule max(creation, ``activeSince``) as process_comment counts it (rule_active_since_ms; a rule
+    from before activeSince has only its creation). None: no such rule."""
     if not owner_id:
         return None
-    sql = json_fields_select_sql(("platform", "enabled", "ownerId"), ("created_at",),
+    sql = json_fields_select_sql(("platform", "enabled", "ownerId", "activeSince"), ("created_at",),
                                  "type = :type AND deleted = false AND created_by = :owner")
     rows = conn.execute(text(sql), {"type": RULES_TYPE, "owner": owner_id}).mappings().all()
-    seconds = [int(row.get("created_at") or 0) // 1000 for row in rows
+    seconds = [_social.rule_active_since_ms({"_created": row.get("created_at"), "activeSince": row.get("f_activesince")}) // 1000
+               for row in rows
                if str(row.get("f_platform") or "") == "ig" and str(row.get("f_ownerid") or "") == owner_id
                and _enabled(row.get("f_enabled"))]
     return min(seconds) if seconds else None

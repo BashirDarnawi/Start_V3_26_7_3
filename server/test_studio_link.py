@@ -215,6 +215,8 @@ class FakeMeta:
         self.after_read = None
         self.rows: list[dict] = []
         self.snapshots: dict[str, dict] = {}
+        self.posts: list[tuple[str, dict]] = []
+        self.post_error = None
 
     def add(self, meta_id: str, name: str = "Spring promo", **fields) -> str:
         self.campaigns[meta_id] = {"name": name, "accountId": ACCOUNT, "currency": "USD", **fields}
@@ -242,6 +244,14 @@ class FakeMeta:
             raise self.rename_error
         self.renames.append((str(campaign_id), str(name)))
         self.campaigns[str(campaign_id)]["name"] = str(name)
+
+    def _post(self, path, data=None, *, access_token=None):
+        """The unlink's rename back (the paced system-token lane, any name)."""
+        self.posts.append((str(path), dict(data or {})))
+        if self.post_error is not None:
+            raise self.post_error
+        self.campaigns[str(path)]["name"] = str((data or {})["name"])
+        return {"success": True}
 
     # Discovery and Manager's link route
     def list_ads(self, account_id, search="", *, max_pages=5):
@@ -521,7 +531,9 @@ def test_a_request_the_marker_tied_to_a_campaign_is_linked_for_real(staff, meta)
     linked = _link(staff, campaign_id, meta_id)
     assert linked.status_code == 200, linked.text
     data = linked.json()["data"]
-    assert data["publishStatus"] == "meta_review" and data["linkedAt"] and data["metaAdAccountId"] == f"act_{ACCOUNT}"
+    # Marked live by hand before: the link keeps 'live' (never back to 'meta_review').
+    assert data["publishStatus"] == "live" and data["linkedAt"] and data["metaAdAccountId"] == f"act_{ACCOUNT}"
+    assert _audit_rows(campaign_id, "publish_status")[-1]["publishStatus"] == "live"
     assert linked.json()["renamed"] is True and meta.renames == [(meta_id, data["studioName"])]
     again = _link(staff, campaign_id, meta_id)
     assert again.status_code == 200 and again.json()["data"]["linkedAt"] == data["linkedAt"]
@@ -790,6 +802,211 @@ def _core_ads(meta_ad_id: str) -> list[str]:
     with db_conn() as conn:
         rows = conn.execute(text("SELECT id, data_json FROM entities WHERE type = 'ads' AND deleted = false")).mappings().all()
     return [row["id"] for row in rows if (json_loads(row["data_json"]) or {}).get("metaAdId") == meta_ad_id]
+
+
+# ------------------------------------------------------------------ the UNLINK step (staff)
+
+def _unlink(staff, campaign_id: str, *, reason="Linked the wrong campaign", op: str = "", version=None,
+            who: str = "reviewer"):
+    return client.post(f"/api/ad-studio/campaigns/{campaign_id}/unlink-meta", json={
+        "expectedLastModified": _last_modified(campaign_id) if version is None else version,
+        "operationId": op or _uid("unlink-op"), "reason": reason,
+    }, cookies=staff[who]["cookies"])
+
+
+def _linked_with_a_removed_copy(staff, meta, name: str = "Agency promo", **copy) -> tuple[str, str, str]:
+    """An Approved request linked to a Meta campaign the link renamed; the link removed its untouched Manager copy."""
+    _grant(["ads_read", "ads_management"])
+    campaign_id = _approved(staff, "Linked by mistake")
+    meta_id = meta.add(_meta_id(), name)
+    copy_id = _manager_copy(meta_id, "unlink", **copy)
+    linked = _link(staff, campaign_id, meta_id)
+    assert linked.status_code == 200 and linked.json()["renamed"] is True, linked.text
+    assert _ad_deleted(copy_id) is True
+    return campaign_id, meta_id, copy_id
+
+
+def test_link_stores_what_the_unlink_undoes(staff, meta):
+    campaign_id, meta_id, _copy = _linked_with_a_removed_copy(staff, meta, name="Agency promo")
+    stored = _data(campaign_id)["metaLinkResult"]
+    audit = _audit_rows(campaign_id, "publish_status")[-1]
+    assert stored["previousMetaName"] == audit["previousMetaName"] == "Agency promo"
+    assert stored["metaCampaignId"] == meta_id and stored["renamed"] is True
+    assert stored["collisionRepairId"] == audit["collisionRepairId"] and stored["collisionRepairId"].startswith("collision_repair_")
+    # A link that renames nothing and removes nothing keeps the name it read and no repair id.
+    plain = _approved(staff, "Typed code")
+    typed = f"{_data(plain)['studioRef']} typed by hand"
+    assert _link(staff, plain, meta.add(_meta_id(), typed)).status_code == 200
+    stored = _data(plain)["metaLinkResult"]
+    assert stored["previousMetaName"] == typed and stored["collisionRepairId"] == "" and stored["renamed"] is False
+
+
+def test_link_keeps_a_paused_marker(staff, meta):
+    campaign_id = _approved(staff, "Paused by hand")
+    meta_id = meta.add(_meta_id(), _data(campaign_id)["studioRef"])
+    marked = client.post(f"/api/ad-studio/campaigns/{campaign_id}/publish-status", json={
+        "expectedLastModified": _last_modified(campaign_id), "operationId": _uid("mark-op"), "publishStatus": "paused",
+        "metaCampaignId": meta_id,
+    }, cookies=staff["reviewer"]["cookies"])
+    assert marked.status_code == 200, marked.text
+    linked = _link(staff, campaign_id, meta_id)
+    assert linked.status_code == 200 and linked.json()["data"]["publishStatus"] == "paused", linked.text
+
+
+def test_unlink_restores_copies_renames_back_and_releases_the_claim(staff, meta):
+    campaign_id, meta_id, copy_id = _linked_with_a_removed_copy(staff, meta)
+    assert meta.campaigns[meta_id]["name"] == _data(campaign_id)["studioName"] and meta_ads.studio_campaign_claimed(meta_id)
+    op, version = _uid("unlink-op"), _last_modified(campaign_id)
+    unlinked = _unlink(staff, campaign_id, op=op, version=version, reason="  Linked the   wrong campaign ")
+    assert unlinked.status_code == 200, unlinked.text
+    body = unlinked.json()
+    assert body["restoredCopies"] == 1 and body["restoreProblem"] == ""
+    assert body["renamedBack"] is True and body["renameBack"] == "done"
+    assert body["previousMetaName"] == "Agency promo" and body["unlinkedMetaCampaignId"] == meta_id
+    data = body["data"]
+    for key in ("publishStatus", "metaCampaignId", "metaAdAccountId", "metaCampaignName"):
+        assert data[key] == "", key
+    assert data["linkedAt"] is None and data["linkedBy"] is None and data["publishedAt"] is None
+    assert data["metaLinkResult"] is None and data["status"] == "Approved"
+    assert data["unlinkedBy"] == staff["reviewer"]["id"] and data["metaUnlinkResult"]["renamedBack"] is True
+    assert body["lastModified"] == _last_modified(campaign_id) > version
+    # Manager has its copy back, the claim is gone, Meta has the old name again.
+    assert _ad_deleted(copy_id) is False
+    assert not meta_ads.studio_campaign_claimed(meta_id) and meta_id not in meta_ads.studio_claimed_campaign_ids()
+    assert meta.posts == [(meta_id, {"name": "Agency promo"})] and meta.campaigns[meta_id]["name"] == "Agency promo"
+    audit = _audit_rows(campaign_id, "publish_status")[-1]
+    assert audit["unlink"] is True and audit["reason"] == "Linked the wrong campaign"
+    assert audit["previousMetaName"] == "Agency promo" and audit["restoredCopies"] == 1 and audit["renamedBack"] is True
+    assert _audit_rows(copy_id, "collision_repair")[-1] == {"repairId": audit["collisionRepairId"], "reversed": True}
+
+    # A replay answers the first result: nothing restored, renamed or audited twice.
+    replay = _unlink(staff, campaign_id, op=op, version=version)
+    assert replay.status_code == 200, replay.text
+    for key in ("restoredCopies", "renamedBack", "renameBack", "previousMetaName", "unlinkedMetaCampaignId", "lastModified"):
+        assert replay.json()[key] == body[key], key
+    assert len(meta.posts) == 1 and len(_audit_rows(campaign_id, "publish_status")) == 2
+    again = _unlink(staff, campaign_id)
+    assert again.status_code == 409 and again.json()["detail"] == actions.REFUSE_UNLINK_NOT_LINKED, again.text
+    # The customer sees the unlink as the team's.
+    own = client.get(f"/api/collections/{CAMPAIGNS}/{campaign_id}", cookies=staff["customer"]["cookies"])
+    assert own.status_code == 200 and own.json()["data"]["unlinkedBy"] == "team"
+    # The request links again, here to the right campaign; the restored copy of the wrong one stays in Manager.
+    right = meta.add(_meta_id(), "The right draft")
+    relinked = _link(staff, campaign_id, right)
+    assert relinked.status_code == 200 and relinked.json()["data"]["metaCampaignId"] == right, relinked.text
+    assert _ad_deleted(copy_id) is False
+
+
+def test_unlink_refusals(staff, meta):
+    campaign_id, meta_id, copy_id = _linked_with_a_removed_copy(staff, meta)
+
+    def detail(response):
+        return response.json()["detail"]
+
+    assert _unlink(staff, campaign_id, who="customer").status_code == 403
+    for reason in (None, "", "  ab  ", 12345, "x" * 301):
+        response = _unlink(staff, campaign_id, reason=reason)
+        assert response.status_code == 400 and detail(response) == actions.REFUSE_UNLINK_REASON, (reason, response.text)
+    assert _unlink(staff, campaign_id, op="bad op id!").status_code == 400
+    stale = _unlink(staff, campaign_id, version=1)
+    assert stale.status_code == 409 and detail(stale) == "Conflict: record has changed"
+    assert _data(campaign_id)["metaCampaignId"] == meta_id and _ad_deleted(copy_id) and meta.posts == []
+
+    never = _approved(staff, "Never linked")
+    response = _unlink(staff, never)
+    assert response.status_code == 409 and detail(response) == actions.REFUSE_UNLINK_NOT_LINKED
+    waiting = _create(staff, "Waiting")
+    _submit(staff, waiting)
+    response = _unlink(staff, waiting)
+    assert response.status_code == 409 and detail(response) == actions.REFUSE_UNLINK_NOT_APPROVED
+    assert _unlink(staff, _create(staff, "Private draft")).status_code == 404
+
+    # A finished ad (Stopped) keeps its link and its claim.
+    stopped = client.post(f"/api/ad-studio/campaigns/{campaign_id}/stop", json={
+        "expectedLastModified": _last_modified(campaign_id), "operationId": _uid("stop-op"), "refundMinorUSD": 0,
+        "closeReason": "completed",
+    }, cookies=staff["reviewer"]["cookies"])
+    assert stopped.status_code == 200, stopped.text
+    response = _unlink(staff, campaign_id)
+    assert response.status_code == 409 and detail(response) == actions.REFUSE_UNLINK_NOT_APPROVED
+    assert meta_ads.studio_campaign_claimed(meta_id) and _ad_deleted(copy_id) is True
+
+
+def test_unlink_in_a_closed_month_is_refused_as_a_whole(staff, meta):
+    campaign_id, meta_id, copy_id = _linked_with_a_removed_copy(staff, meta, startDate="2019-05-15")
+    before = _last_modified(campaign_id)
+    close_id = "financial-close-2019-05"
+    with db_conn() as conn:
+        saved = conn.execute(text("SELECT * FROM entities WHERE type = 'financialClosures' AND id = :id"),
+                             {"id": close_id}).mappings().first()
+        saved = dict(saved) if saved else None
+        conn.execute(text("DELETE FROM entities WHERE type = 'financialClosures' AND id = :id"), {"id": close_id})
+        conn.execute(text("INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                          "VALUES ('financialClosures',:id,:d,false,:s,NULL,:s)"),
+                     {"id": close_id, "d": json_dumps({"status": "closed", "period": "2019-05"}), "s": now_ms()})
+    try:
+        refused = _unlink(staff, campaign_id)
+        assert refused.status_code == 423, refused.text
+        assert refused.json()["detail"] == "Financial period 2019-05 is closed. An Admin must unlock it before editing."
+        assert _last_modified(campaign_id) == before and _data(campaign_id)["metaCampaignId"] == meta_id
+        assert _ad_deleted(copy_id) is True and meta_ads.studio_campaign_claimed(meta_id) and meta.posts == []
+        assert [row for row in _audit_rows(campaign_id, "publish_status") if row.get("unlink")] == []
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type = 'financialClosures' AND id = :id"), {"id": close_id})
+            if saved:
+                conn.execute(text("INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                                  "VALUES (:type,:id,:data_json,:deleted,:created_at,:created_by,:last_modified)"), saved)
+    # The month open again: the unlink goes through.
+    assert _unlink(staff, campaign_id).status_code == 200 and _ad_deleted(copy_id) is False
+
+
+@pytest.mark.parametrize("case", ["no_permission", "name_changed", "meta_refused", "not_renamed"])
+def test_the_rename_back_is_best_effort(staff, meta, case):
+    if case == "not_renamed":
+        campaign_id = _approved(staff, "Code typed")
+        meta_id = meta.add(_meta_id(), f"{_data(campaign_id)['studioRef']} typed by hand")
+        assert _link(staff, campaign_id, meta_id).status_code == 200
+    else:
+        campaign_id, meta_id, _copy = _linked_with_a_removed_copy(staff, meta)
+    if case == "no_permission":
+        _grant(["ads_read"])
+    elif case == "name_changed":
+        meta.campaigns[meta_id]["name"] = "Renamed by staff later"
+    elif case == "meta_refused":
+        meta.post_error = meta_ads.MetaAdsError("rate_limited", "paused", retryable=True)
+    unlinked = _unlink(staff, campaign_id)
+    assert unlinked.status_code == 200, unlinked.text  # never failed because of Meta
+    expected = {"no_permission": "no_permission", "name_changed": "name_changed", "meta_refused": "failed",
+                "not_renamed": ""}[case]
+    body = unlinked.json()
+    assert body["renamedBack"] is False and body["renameBack"] == expected
+    assert _data(campaign_id)["metaUnlinkResult"]["renameBack"] == expected
+    assert body["data"]["metaCampaignId"] == "" and not meta_ads.studio_campaign_claimed(meta_id)
+    assert _audit_rows(campaign_id, "publish_status")[-1]["renamedBack"] is False
+    assert len(meta.posts) == (1 if case == "meta_refused" else 0)
+
+
+def test_unlink_flags_a_copy_it_cannot_restore(staff, meta):
+    # The owner's tool already brought the copy back: nothing left to restore, nothing to flag.
+    campaign_id, _meta_id_1, copy_id = _linked_with_a_removed_copy(staff, meta)
+    repair_id = _data(campaign_id)["metaLinkResult"]["collisionRepairId"]
+    summary = next(row for row in _audit_rows(repair_id, "collision_repair") if row.get("kind"))
+    with db_conn() as conn:
+        meta_collisions.reverse_repair(conn, summary)
+    body = _unlink(staff, campaign_id).json()
+    assert body["restoredCopies"] == 0 and body["restoreProblem"] == "" and _ad_deleted(copy_id) is False
+    # A copy that changed since the removal: the claim is still released and the answer says why nothing came back.
+    campaign_id, meta_id, copy_id = _linked_with_a_removed_copy(staff, meta)
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET last_modified = last_modified + 5 WHERE type = 'ads' AND id = :id"),
+                     {"id": copy_id})
+    unlinked = _unlink(staff, campaign_id)
+    assert unlinked.status_code == 200, unlinked.text
+    problem = unlinked.json()["restoreProblem"]
+    assert unlinked.json()["restoredCopies"] == 0 and f"{copy_id} changed after the repair" in problem
+    assert _ad_deleted(copy_id) is True and not meta_ads.studio_campaign_claimed(meta_id)
+    assert _audit_rows(campaign_id, "publish_status")[-1]["restoreProblem"] == problem
 
 
 # ------------------------------------------------------------------ races

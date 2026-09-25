@@ -37,7 +37,7 @@ from sqlalchemy import text
 
 from ... import meta_ads as _meta
 from ...startup_support import read_env_int
-from ...db import db_conn, get_engine, json_loads
+from ...db import db_conn, get_engine, json_loads, now_ms
 from ...rate_limiter import check_rate_limit
 from ...auth_limits import _client_ip as _shared_client_ip
 from ...security import constant_time_equal, new_id
@@ -581,6 +581,25 @@ def _settings_entity(ctx: dict[str, Any], owner_id: str) -> dict[str, Any]:
         if error.status_code != 409:
             raise
         return ctx["get_entity"](SETTINGS_TYPE, settings_id)
+
+
+# What decides which comments a rule answers: a change to any of them (or switching the rule on)
+# moves its ``activeSince`` to now, so a comment Albayan reads later is answered only by rules that
+# already applied to it when it was written.
+RULE_MATCH_FIELDS = ("platform", "scope", "postIds", "trigger", "keywords")
+
+
+def rule_active_since_ms(rule: dict[str, Any]) -> int:
+    """Since when (ms) the rule has applied as it is: max(_created, activeSince); a rule from before
+    activeSince has only _created. 0 = unknown creation (such a rule never answers a read comment)."""
+    def ms(value: Any) -> int:
+        try:
+            return max(int(float(value or 0)), 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    created = ms(rule.get("_created"))
+    return max(created, ms(rule.get("activeSince"))) if created else 0
 
 
 def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -1226,23 +1245,26 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
 
     The reservation row kept the claim; without this pass such a comment was
     never answered ("will resume automatically" was a lie). Meta's private
-    reply window is seven days, so older rows are left alone."""
+    reply window is seven days from the COMMENT (``commentAt``; a row from
+    before it has only ``at``, the claim time), so older rows are left alone:
+    a comment a manual check read six days late has one day left, not seven."""
     ctx = _ctx()
     now_iso = _iso_at(now)
     cutoff = _iso_at(now - timedelta(days=7))
+    written = f"COALESCE(NULLIF({_json_field('commentAt')}, ''), {_json_field('at')})"
     with db_conn() as conn:
         rows = conn.execute(
             text(
                 f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
                 f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {_json_field('retryAfter')} <= :now "
-                f"AND {_json_field('at')} >= :cutoff ORDER BY {_json_field('retryAfter')} ASC LIMIT :limit"
+                f"AND {written} >= :cutoff ORDER BY {_json_field('retryAfter')} ASC LIMIT :limit"
             ),
             {"type": LOG_TYPE, "now": now_iso, "cutoff": cutoff, "limit": max(1, int(limit))},
         ).mappings().all()
         expired = conn.execute(
             text(
                 f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
-                f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {_json_field('at')} < :cutoff LIMIT :limit"
+                f"AND COALESCE({_json_field('retryAfter')}, '') <> '' AND {written} < :cutoff LIMIT :limit"
             ),
             {"type": LOG_TYPE, "cutoff": cutoff, "limit": max(1, int(limit))},
         ).mappings().all()
@@ -1252,7 +1274,7 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
             text(
                 f"SELECT id, data_json FROM entities WHERE type=:type AND deleted=false "
                 f"AND CAST(COALESCE({_json_field('processing')}, '') AS TEXT) IN ('true', '1') AND COALESCE({_json_field('retryAfter')}, '') = '' "
-                f"AND {_json_field('at')} < :stuck AND {_json_field('at')} >= :cutoff LIMIT :limit"
+                f"AND {_json_field('at')} < :stuck AND {written} >= :cutoff LIMIT :limit"
             ),
             {"type": LOG_TYPE, "stuck": stuck_cutoff, "cutoff": cutoff, "limit": max(1, int(limit))},
         ).mappings().all()
@@ -1333,19 +1355,24 @@ def process_comment(
     ``source`` is kept on the log row: ``webhook`` (Meta delivered the comment)
     or ``poll`` / ``manual_check`` (Albayan read it itself, studio_ig_poll.py,
     so it may be old). A comment Albayan read needs its time ``comment_at``
-    (unknown: never answered), and only rules created before it (the same
-    second counts) may answer it. The log row id depends on owner, platform
-    and comment only, never on the source, so a comment is answered once
-    however many times a check, a poll or the webhook hands it over.
+    (unknown: never answered), and only rules active since before it
+    (rule_active_since_ms; the same second counts) may answer it. The log row
+    keeps the comment's time as ``commentAt`` (a webhook's: the delivery time),
+    which starts Meta's 7-day private-reply window for the retry pass. The log
+    row id depends on owner, platform and comment only, never on the source, so
+    a comment is answered once however many times a check, a poll or the webhook
+    hands it over.
     """
     if source not in COMMENT_SOURCES:
         raise ValueError(f"Unknown comment source {str(source)[:40]!r}")
     written_second: int | None = None
+    written_at = ""
     if source != "webhook":
         written = _parse_iso(comment_at)
         if written is None:
             return None  # a comment read without its time may be old: never answered
         written_second = int(written.timestamp())
+        written_at = _iso_at(written)
     ctx = _ctx()
     page_entity = _find_page(platform, entry_id)
     if not page_entity:
@@ -1363,8 +1390,9 @@ def process_comment(
             key=lambda r: (int(r.get("_created") or 0), str(r.get("id") or "")),
         )
         if written_second is not None:
-            # A rule never answers a comment written before the rule existed (unknown creation: never).
-            rules = [r for r in rules if 0 < int(r.get("_created") or 0) // 1000 <= written_second]
+            # A rule never answers a comment written before it applied as it is now: before it was
+            # made, switched on or pointed at other comments (unknown creation: never).
+            rules = [r for r in rules if 0 < rule_active_since_ms(r) // 1000 <= written_second]
         if not rules:
             return None
         replied_rules = (
@@ -1400,6 +1428,7 @@ def process_comment(
         if not rule:
             return None
         log_id = _log_id(owner_id, platform, comment_id)
+        claimed_at = _iso_now()
         log_data = {
             "ownerId": owner_id,
             "pageId": page_entity["id"],
@@ -1411,7 +1440,8 @@ def process_comment(
             "fromId": str(from_id or ""),
             "actions": [],
             "processing": True,
-            "at": _iso_now(),
+            "at": claimed_at,
+            "commentAt": written_at or claimed_at,
             "error": "",
             "source": source,
         }
@@ -1578,7 +1608,7 @@ def create_social_studio_router(
     ):
         scope = _mutation(request, user, ctx, ownerId)
         now = _iso_now()
-        clean = {**_clean_rule(ctx, scope.owner, body or {}), "createdAt": now, "updatedAt": now}
+        clean = {**_clean_rule(ctx, scope.owner, body or {}), "createdAt": now, "updatedAt": now, "activeSince": now_ms()}
         rule_id = new_id("srule")
         saved = ctx["upsert_entity"](RULES_TYPE, rule_id, clean, scope.owner, reject_existing=True)
         ctx["audit"](scope.uid, "create", RULES_TYPE, rule_id, f"Created auto-reply rule {clean['name']}", {"ownerId": scope.owner})
@@ -1597,6 +1627,11 @@ def create_social_studio_router(
         owner_id = str(entity["data"].get("ownerId") or "")
         merged = {**entity["data"], **(body or {})}
         clean = {**_clean_rule(ctx, owner_id, merged), "updatedAt": _iso_now()}
+        old = entity["data"]
+        if (clean["enabled"] and not _bool(old.get("enabled"), True)) or any(
+            old.get(field) != clean[field] for field in RULE_MATCH_FIELDS
+        ):
+            clean["activeSince"] = now_ms()  # switched on or pointed elsewhere: older comments are not its
         saved = ctx["patch_entity"](RULES_TYPE, entity["id"], clean, scope.uid)
         ctx["audit"](scope.uid, "update", RULES_TYPE, entity["id"], "Updated auto-reply rule", {"ownerId": owner_id})
         return _public(saved, user)

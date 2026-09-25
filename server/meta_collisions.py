@@ -34,6 +34,9 @@ the doors below, in the link's own transaction:
   takes the import's lock first, so an import running now either finished (its copy is removed
   here) or sees the claim (``campaign_claimed_by``, read by meta_ads.import_meta_ad_draft).
 * ``claimed_campaign_ids(conn)``: every claimed Meta campaign id (discovery reads it once a pass).
+  The claim lookups filter in SQL through the index idx_ad_campaign_requests_meta_campaign.
+* ``reverse_link_removal(conn, repair_id)``: the studio UNLINK restores the copies its link removed
+  (reverse_repair of the link's reversal record; a closed month refuses with the usual 423).
 
 Platform code (D36): it may read Manager's ``ads`` and money rows and Ads Studio's
 ``adCampaignRequests``; systems reach them only through platform doors. The SQL runs on PostgreSQL
@@ -53,9 +56,9 @@ from typing import Any, Callable, Iterable, Mapping
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import bindparam, text
 
-from .db import db_conn, get_engine, json_dumps, json_fields_select_sql, json_loads, now_ms
+from .db import db_conn, get_engine, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from .meta_ads import _META_WRITE_LOCK, is_studio_campaign_name
-from .operations import financial_period_is_closed
+from .operations import assert_financial_period_open, financial_period_is_closed
 from .rate_limiter import check_rate_limit
 from .security import new_id
 
@@ -218,17 +221,31 @@ def _reasons(campaign_name: Any, campaign_id: Any, studio: Mapping[str, list[str
     return reasons
 
 
-def _studio_campaigns(conn: Any) -> dict[str, list[str]]:
-    """{Meta campaign id: [Studio request ids]} for every request linked to a Meta campaign (archived too).
+def _claim_rows(conn: Any, campaign: str | None = None) -> list[tuple[str, str]]:
+    """(request id, Meta campaign id) of the studio requests (archived ones too) that name a Meta
+    campaign, or only those naming ``campaign``. The database filters them: live rows through the
+    partial expression index idx_ad_campaign_requests_meta_campaign (add_jsonb_indexes.py; type and
+    deleted are literals so PostgreSQL can use it), archived rows (tombstones without their photos)
+    by the same expression. A request that names no campaign is never parsed."""
+    field = json_field_sql("metaCampaignId")
+    found: list[tuple[str, str]] = []
+    for deleted in ("false", "true"):
+        where = f"type = '{STUDIO_REQUEST_TYPE}' AND deleted = {deleted}"
+        if campaign is None:
+            sql = f"SELECT id, {field} AS campaign FROM entities WHERE {where} AND {field} IS NOT NULL"
+            rows = conn.execute(text(sql)).mappings()
+            found += [(str(row["id"]), str(row["campaign"] or "").strip()) for row in rows]
+        else:  # only the id: the index answers, no document is parsed
+            sql = f"SELECT id FROM entities WHERE {where} AND {field} = :campaign"
+            found += [(str(row["id"]), campaign) for row in conn.execute(text(sql), {"campaign": campaign}).mappings()]
+    return [(request_id, meta_id) for request_id, meta_id in found if meta_id]
 
-    Only rows whose text names the field are parsed (a request carries its photos inline; a request
-    never linked or marked has no metaCampaignId at all)."""
-    sql = json_fields_select_sql(("metaCampaignId",), ("id",), "type = :type AND data_json LIKE :field")
+
+def _studio_campaigns(conn: Any) -> dict[str, list[str]]:
+    """{Meta campaign id: [Studio request ids]} for every request linked to a Meta campaign (archived too)."""
     found: dict[str, list[str]] = {}
-    for row in conn.execute(text(sql), {"type": STUDIO_REQUEST_TYPE, "field": "%metaCampaignId%"}).mappings():
-        campaign = str(row.get("f_metacampaignid") or "").strip()
-        if campaign:
-            found.setdefault(campaign, []).append(str(row["id"]))
+    for request_id, campaign in _claim_rows(conn):
+        found.setdefault(campaign, []).append(request_id)
     return found
 
 
@@ -651,17 +668,7 @@ def campaign_claimed_by(conn: Any, campaign_id: Any) -> list[str]:
     campaign = str(campaign_id or "").strip()
     if not campaign:
         return []
-    params: dict[str, Any] = {"type": STUDIO_REQUEST_TYPE}
-    where = "type = :type"
-    if _META_CAMPAIGN_ID_RE.fullmatch(campaign):
-        # Only rows whose text holds the id are parsed: a request carries its photos inline.
-        where += " AND data_json LIKE :pattern"
-        params["pattern"] = f"%{campaign}%"
-    sql = json_fields_select_sql(("metaCampaignId",), ("id",), where)
-    return sorted(
-        str(row["id"]) for row in conn.execute(text(sql), params).mappings()
-        if str(row.get("f_metacampaignid") or "").strip() == campaign
-    )
+    return sorted(request_id for request_id, _campaign in _claim_rows(conn, campaign))  # filtered by the index
 
 
 def claim_guard() -> Any:
@@ -781,6 +788,42 @@ def remove_untouched_copies(
                "Removed from Albayan Manager: an untouched copy of a campaign Albayan Studio linked",
                {"repairId": repair_id, "lastModifiedBefore": item["lastModifiedBefore"], "trigger": "studio_link"})
     return {"repairId": repair_id, "removed": [item["adId"] for item in removed], "kept": kept}
+
+
+def reverse_link_removal(conn: Any, repair_id: Any, actor_id: str | None = None) -> list[str]:
+    """The studio UNLINK's door: bring back the Manager copies one link removed (remove_untouched_copies).
+
+    Runs in the unlink's transaction, after claim_campaign. Reads that removal's reversal record from
+    its ``collision_repair`` audit row (by the repair id the link stored), takes the import's lock as
+    the removal did, refuses with the closed-month 423 of operations.assert_financial_period_open when
+    a removed copy's month is closed now (nothing changes), then reverse_repair restores every copy.
+    Returns the restored ad ids: [] without a repair id or when the removal was already reversed (the
+    owner's tool). Raises CollisionRepairError when the record is gone or reverse_repair refuses (a
+    copy changed or no longer exists); reverse_repair writes nothing before it refuses.
+    """
+    repair = str(repair_id or "").strip()
+    if not repair:
+        return []
+    if not _REPAIR_ID_RE.fullmatch(repair):
+        raise CollisionRepairError("The link's removal record id is damaged.")
+    rows = conn.execute(
+        text("SELECT metadata_json FROM audit_logs WHERE action = :action AND resource_type = :type AND resource_id = :id"),
+        {"action": AUDIT_ACTION, "type": ADS_TYPE, "id": repair},
+    ).scalars().all()
+    records = [record for record in (json_loads(raw or "{}") for raw in rows) if isinstance(record, dict)]
+    if any(record.get("reversed") is True for record in records):
+        return []
+    reversal = next((record for record in records if record.get("kind") == REVERSAL_KIND), None)
+    if reversal is None:
+        raise CollisionRepairError("The record of the Manager copies this link removed was not found.")
+    if _postgres(conn):
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('albayan_meta_import'))"))  # as remove_untouched_copies
+    _serialize(conn)
+    removed = reversal.get("removed") if isinstance(reversal.get("removed"), list) else []
+    ids = [str(item.get("adId") or "") for item in removed if isinstance(item, dict)]
+    for row in _load_ads(conn, ids, lock=True).values():
+        assert_financial_period_open(ADS_TYPE, _data(row), conn=conn)  # 423: the whole unlink is refused
+    return reverse_repair(conn, reversal, actor_id=actor_id)["restored"]
 
 
 def create_meta_collisions_router(*, current_user_dependency: Callable[..., Any]) -> APIRouter:

@@ -88,6 +88,27 @@ def test_studio_waiting_requests_status_index(monkeypatch):
     )
 
 
+def test_studio_claim_lookup_index(monkeypatch):
+    """The D26 claim lookups (meta_collisions._claim_rows: the link, every discovery pass, every imported
+    agency ad) filter live requests by metaCampaignId with literal type and deleted; this partial
+    expression index serves exactly that predicate."""
+    connections = []
+    monkeypatch.setattr(module, "get_engine", lambda: _Engine("postgresql"))
+    monkeypatch.setattr(module, "db_conn", _recording_db_conn(connections))
+
+    module.add_jsonb_indexes()
+
+    found = [statements for statements in connections
+             if any("idx_ad_campaign_requests_meta_campaign" in s for s in statements)]
+    assert len(found) == 1 and len(found[0]) == 3, connections  # its own connection: 2 SET LOCAL + the DDL
+    ddl = " ".join(found[0][-1].split())
+    assert ddl == (
+        "CREATE INDEX IF NOT EXISTS idx_ad_campaign_requests_meta_campaign "
+        "ON entities (((data_json::jsonb->>'metaCampaignId'))) "
+        "WHERE type = 'adCampaignRequests' AND deleted = false"
+    )
+
+
 def test_index_pass_is_a_no_op_on_sqlite(monkeypatch):
     connections = []
     monkeypatch.setattr(module, "get_engine", lambda: _Engine("sqlite"))

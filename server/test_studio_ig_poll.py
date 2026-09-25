@@ -206,12 +206,15 @@ def _ig_page(actors, page_id: str = "spg_ig_1", *, platform: str = "ig", deleted
 
 
 def _rule(actors, rule_id: str, *, created_ago: timedelta, trigger: str = "every", keywords=(), reply: str = THANKS,
-          platform: str = "ig", enabled: bool = True) -> str:
+          platform: str = "ig", enabled: bool = True, active_ago: timedelta | None = None) -> str:
+    """A rule made ``created_ago``; with ``active_ago`` it was switched on or changed then (activeSince)."""
     owner = actors["customer"]["id"]
+    extra = {} if active_ago is None else {"activeSince": now_ms() - int(active_ago.total_seconds() * 1000)}
     _insert("socialReplyRules", rule_id, {
         "ownerId": owner, "name": rule_id, "platform": platform, "enabled": enabled, "scope": "all", "postIds": [],
         "trigger": trigger, "keywords": list(keywords), "publicReply": reply, "dmEnabled": False, "dmText": "",
         "likeComment": False, "oncePerPerson": False, "skipPublicAfterDm": False, "pauseDms": False, "quietHours": False,
+        **extra,
     }, owner=owner, created_at=now_ms() - int(created_ago.total_seconds() * 1000))
     return rule_id
 
@@ -394,6 +397,39 @@ def test_no_enabled_instagram_rule_answers_nothing_and_moves_the_cursor(actors, 
     _next_minute()
     _check(actors, read=1, new=0, replied=0, skipped=1)
     assert graph.posts() == []
+
+
+def test_a_rule_switched_on_later_never_answers_comments_from_while_it_was_off(actors, graph):
+    _ig_page(actors)
+    # Made three hours ago, off until 30 minutes ago (activeSince): the check's floor is its activeSince.
+    owner = actors["customer"]["id"]
+    _rule(actors, "srule_back_on", created_ago=timedelta(hours=3), active_ago=timedelta(minutes=30))
+    later = _comment("18500000000000002", timedelta(minutes=10), "after it came back")
+    Account(graph, {MEDIA_1: [_comment("18500000000000001", timedelta(hours=1), "while it was off"), later]})
+    _check(actors, read=2, new=1, replied=1, skipped=1)
+    assert [path for path, _body, _token in graph.posts()] == ["18500000000000002/replies"]
+    [log] = _logs()
+    assert log["commentAt"] == later["timestamp"].replace("+0000", "Z") != log["at"]  # the retry window starts here
+    with db_conn() as conn:
+        floor = studio_ig_poll.rule_floor_second(conn, owner)
+    assert abs(floor - (now_ms() // 1000 - 30 * 60)) <= 2  # its activeSince, not its creation three hours ago
+    _rule(actors, "srule_legacy", created_ago=timedelta(hours=2))  # a rule from before activeSince: its creation
+    with db_conn() as conn:
+        floor = studio_ig_poll.rule_floor_second(conn, owner)
+    assert abs(floor - (now_ms() // 1000 - 2 * 3600)) <= 2
+
+
+def test_a_rule_pointed_at_instagram_later_never_answers_older_comments(actors, graph):
+    """The floor comes from an older rule, so the comment is fed; process_comment still keeps the rule
+    moved from Facebook to Instagram 20 minutes ago away from a comment written an hour ago."""
+    _ig_page(actors)
+    _rule(actors, "srule_price", created_ago=timedelta(hours=3), trigger="keywords", keywords=["price"], reply="Price sent")
+    _rule(actors, "srule_moved", created_ago=timedelta(hours=3), active_ago=timedelta(minutes=20))
+    Account(graph, {MEDIA_1: [_comment("18510000000000001", timedelta(hours=1), "hello"),
+                              _comment("18510000000000002", timedelta(minutes=5), "hello again")]})
+    _check(actors, read=2, new=2, replied=1)
+    assert [path for path, _body, _token in graph.posts()] == ["18510000000000002/replies"]
+    assert [log["ruleId"] for log in _logs()] == ["srule_moved"]
 
 
 # ---------------------------------------------------------------------------

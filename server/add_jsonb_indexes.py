@@ -69,6 +69,9 @@ def add_jsonb_indexes():
         # Albayan Studio: the jobs loop reads the live Submitted requests every 5 minutes
         # (studio_jobs.waiting_requests_sql); without this it parsed every request, images included.
         ("idx_ad_campaign_requests_status", "adCampaignRequests", "((data_json::jsonb->>'status'))"),
+        # D26 claim lookups (the link, every discovery pass, every imported agency ad) read which request
+        # names a Meta campaign (meta_collisions._claim_rows); without this they parsed every request.
+        ("idx_ad_campaign_requests_meta_campaign", "adCampaignRequests", "((data_json::jsonb->>'metaCampaignId'))"),
     ]
     
     # FINANCIAL-INTEGRITY GUARANTEE: receipt numbers must be unique.

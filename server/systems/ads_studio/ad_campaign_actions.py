@@ -94,6 +94,10 @@ studio runs on the same ad accounts as the agency):
   NEEDS_MANUAL_RENAME with the name to copy. The link claims the campaign
   (meta_collisions: discovery and import skip it) and removes Manager's
   untouched copies of it in the same transaction (_claim_and_write).
+* ``unlink-meta`` (staff, with a reason) undoes a link made by mistake while the
+  request is Approved: the claim is released and the removed copies restored in
+  one transaction, then the campaign gets its previous Meta name back (best
+  effort; _unlink_meta_campaign).
 """
 
 import math
@@ -178,6 +182,13 @@ class AdCampaignPublishStatusBody(AdCampaignPublishStatusRequest):
     metaAdAccountId: Optional[str] = Field(default=None, max_length=40)
 
 
+class AdCampaignUnlinkBody(AdCampaignSubmitRequest):
+    """unlink-meta (staff only): the version baseline, an ``operationId`` (a replay answers the first
+    result) and ``reason``, checked by the route (3-300 characters) so a bad one gets its refusal text."""
+
+    reason: Optional[Any] = None
+
+
 # Refusal texts shared with the client's Arabic map: each ``detail`` STARTS with one of these
 # (a dynamic part may follow). Never reword one; add a new text instead.
 REFUSE_TOTAL_MIN = "The total budget must be at least "                   # T1
@@ -213,6 +224,13 @@ REFUSE_NEEDS_MANUAL_RENAME = "Rename the campaign in Meta to the name shown, the
 # Link warnings (codes in the response's ``warnings``; the link still happens).
 LINK_WARNING_BUDGET_ABOVE_PAID = "meta_budget_above_paid"  # Meta's budget is above what the customer paid
 LINK_RATE_PER_MINUTE = 20
+# The staff UNLINK (undoes a link made by mistake). A closed month refuses it with the platform's
+# closed-month 423 ("Financial period YYYY-MM is closed. An Admin must unlock it before editing.").
+REFUSE_UNLINK_REASON = "Write why the link is removed (3 to 300 characters)"
+REFUSE_UNLINK_NOT_APPROVED = "Only an Approved request can be unlinked from its Meta campaign"
+REFUSE_UNLINK_NOT_LINKED = "This request is not linked to a Meta campaign"
+UNLINK_REASON_CHARS = (3, 300)
+LAUNCHED_MARKERS = frozenset({"live", "paused"})  # a link keeps these (a legacy request marked by hand)
 _STUDIO_REF_ATTEMPTS = 8
 
 # P1-12: why staff sent a request back or rejected it (stored as reviewReasonCode). The client
@@ -817,11 +835,13 @@ def _link_meta_campaign(
     transaction, then link; otherwise -> 409 NEEDS_MANUAL_RENAME with the studio name (staff rename
     it by hand and link again). A rename Meta refuses (not a busy answer) falls back to the same 409.
 
-    The link writes publishStatus ``meta_review``, ``metaCampaignId`` (unique), ``metaAdAccountId``
-    (``act_<id>``), ``metaCampaignName``, ``linkedAt``/``linkedBy``, the studio code and name, and
-    ``metaLinkResult``; Manager's untouched copies of the campaign are removed in the same
-    transaction. Audited ``publish_status`` (with ``renamed``). The answer is the request plus
-    {renamed, removedManagerCopies, keptManagerCopies, warnings, studioRef, studioName}.
+    The link writes publishStatus ``meta_review`` (a legacy request already marked ``live`` or
+    ``paused`` keeps its marker), ``metaCampaignId`` (unique), ``metaAdAccountId`` (``act_<id>``),
+    ``metaCampaignName``, ``linkedAt``/``linkedBy``, the studio code and name, and ``metaLinkResult``
+    (with what the UNLINK undoes: ``previousMetaName``, the name read before any rename, and
+    ``collisionRepairId``); Manager's untouched copies of the campaign are removed in the same
+    transaction. Audited ``publish_status`` (with ``renamed`` and ``previousMetaName``). The answer is
+    the request plus {renamed, removedManagerCopies, keptManagerCopies, warnings, studioRef, studioName}.
     """
     account = _clean_meta_number(body.metaAdAccountId, REFUSE_LINK_BAD_ACCOUNT_ID)
     meta_id = _clean_meta_number(body.metaCampaignId, REFUSE_LINK_BAD_CAMPAIGN_ID)
@@ -889,10 +909,14 @@ def _link_meta_campaign(
             raise _needs_manual_rename(ref, name)  # Meta refused the rename: staff rename it by hand
 
     linked_at = ctx["iso_utc"]()
+    # A legacy request staff already marked launched keeps its marker (the version check makes this
+    # the same row _claim_and_write locks).
+    marker = str(data.get("publishStatus") or "")
+    publish_status = marker if marker in LAUNCHED_MARKERS else "meta_review"
 
     def link_fields(copies: dict[str, Any]) -> dict[str, Any]:
         return {
-            "publishStatus": "meta_review",
+            "publishStatus": publish_status,
             "metaCampaignId": meta_id,
             "metaAdAccountId": f"act_{account}",
             "metaCampaignName": name if rename else meta_name,
@@ -910,6 +934,10 @@ def _link_meta_campaign(
                 "warnings": warnings,
                 "metaBudgetMinor": budget,
                 "metaCurrency": str(meta.get("currency") or "")[:12],
+                # What the UNLINK undoes: this campaign's name before any rename, and the removal.
+                "metaCampaignId": meta_id,
+                "previousMetaName": meta_name,
+                "collisionRepairId": str(copies.get("repairId") or ""),
             },
         }
 
@@ -926,12 +954,174 @@ def _link_meta_campaign(
             AD_CAMPAIGN_COLLECTION,
             campaign_id,
             f"Linked campaign {campaign_id} to Meta campaign {meta_id}" + (" and renamed it in Meta" if rename else ""),
-            {"operationId": operation_id, "publishStatus": "meta_review", "metaCampaignId": meta_id,
-             "metaAdAccountId": f"act_{account}", "studioRef": ref, "renamed": rename,
+            {"operationId": operation_id, "publishStatus": publish_status, "metaCampaignId": meta_id,
+             "metaAdAccountId": f"act_{account}", "studioRef": ref, "renamed": rename, "previousMetaName": meta_name,
              "removedManagerCopies": view["removedManagerCopies"], "keptManagerCopies": view["keptManagerCopies"],
              "collisionRepairId": str(copies.get("repairId") or ""), "warnings": warnings, "metaBudgetMinor": budget},
         )
     return answer(saved)
+
+
+# ---------------------------------------------------------------- the UNLINK step (staff)
+
+
+def _unlink_reason(ctx: dict[str, Any], raw: Any) -> str:
+    low, high = UNLINK_REASON_CHARS
+    reason = " ".join(ctx["sanitize_str"](raw, 4 * high).split()) if isinstance(raw, str) else ""
+    if not low <= len(reason) <= high:
+        raise HTTPException(status_code=400, detail=REFUSE_UNLINK_REASON)
+    return reason
+
+
+def _unlink_view(data: dict[str, Any]) -> dict[str, Any]:
+    """What an unlink answers next to the request, from the result it stored (a replay answers the same)."""
+    stored = data.get("metaUnlinkResult") if isinstance(data.get("metaUnlinkResult"), dict) else {}
+    return {
+        "unlinkedMetaCampaignId": str(stored.get("metaCampaignId") or ""),
+        "previousMetaName": str(stored.get("previousMetaName") or ""),
+        "restoredCopies": _whole(stored.get("restoredCopies")),
+        "restoreProblem": str(stored.get("restoreProblem") or ""),
+        "renamedBack": stored.get("renamedBack") is True,
+        "renameBack": str(stored.get("renameBack") or ""),
+    }
+
+
+def _rename_back(meta_id: str, account: str, ref: str, previous: str) -> str:
+    """Best effort, after the unlink committed: the Meta campaign gets back ``previous``, the name the
+    link read before it renamed it. Only while the stored token reading shows ``ads_management`` for
+    the account, no request claimed the campaign again and Meta's name still carries this request's
+    studio code (a name staff changed since is left alone). The client's rename_campaign sends studio
+    names only, so this goes through the same paced system-token lane (MetaAdsClient._post, as Social
+    Studio's replies do). Returns done, no_permission, linked_again, name_changed or failed; never raises.
+    """
+    try:
+        if not _meta.studio_token_can_manage_ads(account):
+            return "no_permission"
+        with db_conn() as conn:
+            if _collisions.campaign_claimed_by(conn, meta_id):
+                return "linked_again"
+        if not _name_carries(_meta.read_studio_campaign(meta_id).get("name"), ref):
+            return "name_changed"
+        answer = _meta.get_meta_ads_client()._post(meta_id, {"name": previous})
+    except Exception:  # Meta busy or refusing, Albayan's Meta pause, a lost connection: the unlink stands
+        return "failed"
+    return "done" if isinstance(answer, dict) and answer.get("success") is True else "failed"
+
+
+def _write_campaign(conn: Any, campaign_id: str, data: dict[str, Any], baseline: int) -> int:
+    """Version-checked write of the request's data; the new lastModified, or 0 when the row changed."""
+    modified = max(now_ms(), int(baseline) + 1)
+    result = conn.execute(
+        text(
+            "UPDATE entities SET data_json = :d, last_modified = :m "
+            "WHERE type = :t AND id = :id AND deleted = false AND last_modified = :baseline"
+        ),
+        {"d": json_dumps({**data, "_lastModified": modified}), "m": modified, "t": AD_CAMPAIGN_COLLECTION,
+         "id": campaign_id, "baseline": int(baseline)},
+    )
+    return modified if int(result.rowcount or 0) == 1 else 0
+
+
+def _unlink_meta_campaign(
+    ctx: dict[str, Any], user: dict[str, Any], campaign_id: str, operation_id: str, body: AdCampaignUnlinkBody
+) -> dict[str, Any]:
+    """The UNLINK step (staff): undo a link made by mistake, so the Meta campaign is Manager's again.
+
+    Checks: the reason (3-300 characters); the request (404 for a private draft); an operationId replay
+    (the first result again); Approved (not Stopped or finished); the version; linked. Then ONE
+    transaction under the link's own locks (_claim_and_write: the import's process lock on SQLite, the
+    request row, the campaign's claim): publishStatus '', metaCampaignId, metaAdAccountId,
+    metaCampaignName, linkedAt/linkedBy and publishedAt/publishedBy cleared (the claim is released),
+    and the Manager copies that link removed restored (meta_collisions.reverse_link_removal with the
+    stored collisionRepairId; a closed month refuses the whole unlink with the closed-month 423). A
+    restore the reversal refuses otherwise (a copy changed or is gone) is flagged in
+    ``restoreProblem``, never a refusal. The result is kept in ``metaUnlinkResult``.
+
+    After commit, when the link renamed the campaign, _rename_back gives it its previous Meta name
+    (best effort; ``renamedBack``). Audited ``publish_status`` with {unlink: true, reason,
+    previousMetaName, restoredCopies, renamedBack}. The answer is the request plus _unlink_view.
+    Discovery keeps every Meta ad id it saw (knownMetaAdIds holds no reason), so ads it skipped while
+    the campaign was claimed come back through Manager's "import existing ads" pass or by hand.
+    """
+    reason = _unlink_reason(ctx, body.reason)
+    actor_id = str(user.get("id") or "system")
+
+    def answer(entity: dict[str, Any]) -> dict[str, Any]:
+        return {**ctx["project_entity_media_for_user"](entity, user, False), **_unlink_view(entity.get("data") or {})}
+
+    patch_guard = nullcontext() if ctx["is_postgres"]() else ctx["sqlite_patch_lock"]()
+    with _collisions.claim_guard(), patch_guard:
+        with db_conn() as conn:
+            row = _lock_campaign_row(conn, ctx, campaign_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Campaign request not found")
+            entity = ctx["entity_from_db_row"](row)
+            data = dict(entity.get("data") or {})
+            status = str(data.get("status") or "Draft")
+            if actor_id != str(entity.get("createdBy") or data.get("createdBy") or "") and status not in REVIEWER_VISIBLE_STATUSES:
+                raise HTTPException(status_code=404, detail="Campaign request not found")  # never confirm a private draft
+            if str(data.get("lastUnlinkOperationId") or "") == operation_id:
+                return answer(entity)  # the first response was lost after commit: the same result again
+            ctx["enforce_ad_campaign_rate"](user)
+            if status != "Approved":
+                raise HTTPException(status_code=409, detail=REFUSE_UNLINK_NOT_APPROVED)
+            baseline = int(entity.get("lastModified") or 0)
+            if baseline != int(body.expectedLastModified):
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")
+            meta_id = str(data.get("metaCampaignId") or "").strip()
+            if not meta_id:
+                raise HTTPException(status_code=409, detail=REFUSE_UNLINK_NOT_LINKED)
+            try:
+                _collisions.claim_campaign(conn, meta_id, campaign_id)  # the claim's lock, to the end of this transaction
+            except _collisions.CampaignClaimedError:
+                pass  # another request's claim is not this unlink's to release
+            stored = data.get("metaLinkResult") if isinstance(data.get("metaLinkResult"), dict) else {}
+            link = stored if str(stored.get("metaCampaignId") or "") == meta_id else {}  # this campaign's link only
+            repair_id = str(link.get("collisionRepairId") or "")
+            restored: list[str] = []
+            problem = ""
+            try:
+                restored = _collisions.reverse_link_removal(conn, repair_id, actor_id or None)
+            except _collisions.CollisionRepairError as error:
+                problem = str(error)[:500]  # flagged, not refused: the claim is still released
+            previous = str(link.get("previousMetaName") or "")
+            rename_back = link.get("renamed") is True and bool(previous) and not _meta.is_studio_campaign_name(previous)
+            account = _account_digits(data.get("metaAdAccountId"))
+            result = {
+                "metaCampaignId": meta_id, "metaAdAccountId": str(data.get("metaAdAccountId") or ""),
+                "previousMetaName": previous, "collisionRepairId": repair_id, "restoredCopies": len(restored),
+                "restoreProblem": problem, "renamedBack": False, "renameBack": "pending" if rename_back else "",
+            }
+            data.update({
+                "publishStatus": "", "metaCampaignId": "", "metaAdAccountId": "", "metaCampaignName": "",
+                "linkedAt": None, "linkedBy": None, "publishedAt": None, "publishedBy": None, "metaLinkResult": None,
+                "unlinkedAt": ctx["iso_utc"](), "unlinkedBy": actor_id, "lastUnlinkOperationId": operation_id,
+                "metaUnlinkResult": result,
+            })
+            modified = _write_campaign(conn, campaign_id, data, baseline)
+            if not modified:
+                raise HTTPException(status_code=409, detail="Conflict: record has changed")  # rolls the restore back too
+    entity = {**entity, "data": {**data, "_lastModified": modified}, "lastModified": modified}
+    if rename_back:
+        outcome = _rename_back(meta_id, account, str(data.get("studioRef") or ""), previous)
+        result = {**result, "renamedBack": outcome == "done", "renameBack": outcome}
+        later_data = {**data, "metaUnlinkResult": result}
+        with (nullcontext() if ctx["is_postgres"]() else ctx["sqlite_patch_lock"]()), db_conn() as conn:
+            later = _write_campaign(conn, campaign_id, later_data, modified)
+        if later:  # else the request changed meanwhile: the answer still says what happened in Meta
+            entity = {**entity, "data": {**later_data, "_lastModified": later}, "lastModified": later}
+    ctx["audit"](
+        actor_id,
+        "publish_status",
+        AD_CAMPAIGN_COLLECTION,
+        campaign_id,
+        f"Unlinked campaign {campaign_id} from Meta campaign {meta_id}",
+        {"unlink": True, "operationId": operation_id, "reason": reason, "metaCampaignId": meta_id,
+         "metaAdAccountId": result["metaAdAccountId"], "previousMetaName": previous, "restoredCopies": len(restored),
+         "collisionRepairId": repair_id, "restoreProblem": problem, "renamedBack": result["renamedBack"],
+         "renameBack": result["renameBack"]},
+    )
+    return {**answer(entity), **_unlink_view({"metaUnlinkResult": result})}
 
 
 def create_ad_campaign_actions_router(
@@ -1702,5 +1892,19 @@ def create_ad_campaign_actions_router(
             {"operationId": operation_id, "publishStatus": value},
         )
         return ctx["project_entity_media_for_user"](saved, user, False)
+
+    @router.post("/{campaign_id}/unlink-meta")
+    def unlink_ad_campaign_meta(
+        campaign_id: str,
+        body: AdCampaignUnlinkBody,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """Staff only: undo the LINK of an Approved request (see _unlink_meta_campaign)."""
+        require_same_origin(request)
+        if not _is_reviewer(ctx, user):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        campaign_id = ctx["validate_entity_id"](campaign_id)
+        return _unlink_meta_campaign(ctx, user, campaign_id, _clean_operation_id(ctx, body.operationId), body)
 
     return router

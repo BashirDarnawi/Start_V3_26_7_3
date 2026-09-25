@@ -430,6 +430,72 @@ def test_damaged_reversal_files_are_refused(reversal, message):
         mc.reverse_repair(conn, reversal)
 
 
+def test_claim_lookups_filter_in_sql_and_count_archived_requests():
+    """The link, discovery and every import ask who claimed a campaign: the database answers through the
+    indexed expression (add_jsonb_indexes: idx_ad_campaign_requests_meta_campaign), never by reading every
+    request's text; an archived request keeps its claim; an empty id (unlinked) claims nothing."""
+    from sqlalchemy import event
+
+    from server.db import get_engine
+
+    live, archived = f"2386{int(TAG, 16) % 10**8:08d}1", f"2386{int(TAG, 16) % 10**8:08d}2"
+    with db_conn() as conn:
+        _insert(conn, "adCampaignRequests", f"camp_live_{TAG}", {"status": "Approved", "metaCampaignId": live})
+        _insert(conn, "adCampaignRequests", f"camp_gone_{TAG}", {"status": "Stopped", "metaCampaignId": archived},
+                deleted=True)
+        _insert(conn, "adCampaignRequests", f"camp_unlinked_{TAG}", {"status": "Approved", "metaCampaignId": ""})
+        _insert(conn, "adCampaignRequests", f"camp_plain_{TAG}", {"status": "Draft", "note": f"mentions {live}"})
+    statements: list[str] = []
+
+    def record(_conn, _cursor, statement, *_args):
+        statements.append(" ".join(str(statement).split()))
+
+    event.listen(get_engine(), "before_cursor_execute", record)
+    try:
+        with db_conn() as conn:
+            assert mc.campaign_claimed_by(conn, live) == [f"camp_live_{TAG}"]
+            assert mc.campaign_claimed_by(conn, archived) == [f"camp_gone_{TAG}"]
+            assert mc.campaign_claimed_by(conn, "") == []
+            claimed = mc.claimed_campaign_ids(conn)
+    finally:
+        event.remove(get_engine(), "before_cursor_execute", record)
+    assert {live, archived} <= claimed and "" not in claimed
+    lookups = [s for s in statements if "metaCampaignId" in s]
+    assert lookups and all("LIKE" not in s for s in lookups), lookups
+    assert all("type = 'adCampaignRequests' AND deleted = " in s for s in lookups), lookups  # literals: the partial index
+    assert any("json_extract(data_json, '$.metaCampaignId') = ?" in s for s in lookups), lookups
+
+
+def test_reverse_link_removal_restores_once_and_refuses_a_closed_month():
+    campaign = f"2387{int(TAG, 16) % 10**8:08d}"
+    with db_conn() as conn:
+        _insert(conn, "adCampaignRequests", f"camp_rev_{TAG}", {"status": "Approved"})
+    copy = _ad("link_copy", name="Agency promo", campaign=campaign, startDate="2019-06-10")
+    with db_conn() as conn:
+        removal = mc.remove_untouched_copies(conn, campaign, "staff_tester", request_id=f"camp_rev_{TAG}")
+    assert removal["removed"] == [copy] and _row(copy)["deleted"]
+    with db_conn() as conn:
+        assert mc.reverse_link_removal(conn, "") == []  # a link that removed nothing
+        with pytest.raises(mc.CollisionRepairError, match="damaged"):
+            mc.reverse_link_removal(conn, "not-a-repair-id")
+        with pytest.raises(mc.CollisionRepairError, match="was not found"):
+            mc.reverse_link_removal(conn, "collision_repair_" + "0" * 32)
+
+    with _financial_month("2019-06") as close_month:
+        close_month()
+        with db_conn() as conn, pytest.raises(HTTPException) as refused:
+            mc.reverse_link_removal(conn, removal["repairId"], "staff_tester")
+        assert refused.value.status_code == 423
+        assert refused.value.detail == "Financial period 2019-06 is closed. An Admin must unlock it before editing."
+        assert _row(copy)["deleted"]
+
+    with db_conn() as conn:
+        assert mc.reverse_link_removal(conn, removal["repairId"], "staff_tester") == [copy]
+    assert not _row(copy)["deleted"]
+    with db_conn() as conn:  # already reversed: nothing to do, nothing refused
+        assert mc.reverse_link_removal(conn, removal["repairId"], "staff_tester") == []
+
+
 def _user(role: str) -> dict:
     password = hash_password(PASSWORD, iterations=PBKDF2_ITERATIONS_DEFAULT)
     user = {"id": new_id(f"col_{TAG}"), "email": f"collisions-{role.lower()}-{TAG}@tests.albayanhub.com"}
