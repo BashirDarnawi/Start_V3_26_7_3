@@ -899,4 +899,40 @@ textarea.studio-pg-input { resize: vertical; }
 @media (max-width: 359px) {
   .studio-pg-card { padding: 14px 12px; }
   .studio-pg-section { padding: 0 10px; font-size: 13px; }
+
+}
+
+/* Albayan Studio extras (P5-02 TikTok service, P3-04b results card; src/systems/ads_studio/15r-studio-extras.js).
+   The TikTok section and the desk rows sit inside .studio-help (its tones, cards, rows, chips and inputs
+   are reused), so only what is new is declared here: the service line, the wants list and its 44px
+   check rows, the team's note, the "sent" status line, the static desk row, and the results card drawn
+   outside My ads (its stats grid is scoped to the detail there). Every surface uses the --ui-* tokens
+   (light and dark come from them); nothing may widen the page at 320-820 px. */
+.studio-tiktok-service { font-size: 15px; font-weight: 750; line-height: 1.6; color: var(--ui-ink); overflow-wrap: anywhere; }
+.studio-tiktok-wants { min-width: 0; margin: 0; padding: 0; border: 0; }
+.studio-tiktok-wants > legend { padding: 0; margin-bottom: 6px; }
+.studio-tiktok-want { display: flex; align-items: flex-start; gap: 10px; min-height: 44px; padding: 8px 0; font-size: 14px; line-height: 1.6; color: var(--ui-ink); cursor: pointer; overflow-wrap: anywhere; }
+.studio-tiktok-want > span { min-width: 0; }
+.studio-tiktok-check { flex-shrink: 0; width: 22px; height: 22px; margin: 4px 0 0; accent-color: var(--ui-accent); }
+.studio-tiktok-wants-list { display: flex; flex-direction: column; gap: 4px; max-width: 100%; padding-inline-start: 18px; font-size: 13px; line-height: 1.6; color: var(--ui-ink); list-style: disc; overflow-wrap: anywhere; }
+.studio-tiktok-handle { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; font-weight: 750; color: var(--ui-accent); text-decoration: none; overflow-wrap: anywhere; }
+.studio-tiktok-handle:hover { text-decoration: underline; }
+.studio-tiktok-note { display: flex; flex-direction: column; gap: 2px; max-width: 100%; padding: 8px 12px; border-radius: 12px; background: var(--ui-accent-soft); font-size: 13px; line-height: 1.6; color: var(--ui-ink); overflow-wrap: anywhere; }
+.studio-tiktok-note-from { font-size: 12px; font-weight: 800; color: var(--ui-accent); }
+.studio-tiktok-sent { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 12px; background: var(--studio-help-green-bg); color: var(--studio-help-green-fg); font-size: 14px; font-weight: 700; line-height: 1.6; overflow-wrap: anywhere; }
+.studio-tiktok-sent > span { min-width: 0; }
+.studio-help-row.studio-tiktok-item { cursor: default; }
+.studio-help-row.studio-tiktok-item.is-fresh { border-color: var(--ui-accent); }
+.studio-tiktok-item .studio-help-link { margin-top: 2px; }
+.studio-help-row.is-static { cursor: default; }
+.studio-tiktok-desk-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; min-width: 0; }
+.studio-tiktok-desk-actions > .studio-help-form { width: 100%; }
+.studio-tiktok-desk > li { min-width: 0; }
+.studio-results-card { display: flex; flex-direction: column; gap: 8px; }
+.studio-results-card .studio-ads-h3 { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 15px; font-weight: 800; line-height: 1.5; color: var(--ui-ink); }
+.studio-results-card .studio-ads-money-meaning { font-size: 13px; line-height: 1.6; color: var(--ui-muted); }
+.studio-results-card .studio-ads-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 2px 0; }
+.studio-results-card .studio-ads-money-note { font-size: 12px; line-height: 1.6; color: var(--ui-muted); }
+@media (max-width: 359px) {
+  .studio-results-card .studio-ads-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

@@ -301,6 +301,7 @@ async function handleAndroidBackButton(event = {}) {
     _mobileLastBackAt = 0;
     return;
   }
+  if (typeof studioHandleBack === 'function' && studioHandleBack()) return;
 
   const landingView = getMobileLandingView();
   const currentView = typeof state !== 'undefined' ? String(state.currentView || '') : '';

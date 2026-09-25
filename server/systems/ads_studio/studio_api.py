@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
+from ...auth_limits import _client_ip as client_ip  # the platform's real-client-IP rule (Cloudflare / proxy aware)
 from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_alert_out import create_studio_alert_out_router
@@ -37,7 +38,7 @@ from .studio_ig_poll import create_studio_ig_poll_router
 from .studio_jobs import create_studio_jobs_router, jobs_heartbeat
 from .studio_posts import create_studio_posts_router
 from .studio_profile import create_studio_profile_router
-from .studio_settings import env_switch, me_view, read_all_settings, read_setting, require_known_key, save_setting
+from .studio_settings import env_switch, me_view, public_contact, read_all_settings, read_setting, require_known_key, save_setting
 from .studio_support import create_studio_support_router
 from .studio_stop import create_studio_desk_router
 from .studio_types import STUDIO_SETTINGS_TYPE
@@ -45,6 +46,7 @@ from .studio_wallet import create_studio_summaries_router
 
 SETTINGS_WRITES_PER_MINUTE = 30
 DIAGNOSTICS_READS_PER_MINUTE = 20
+PUBLIC_CONTACT_READS_PER_MINUTE = 60  # per client IP (PLAN.md §7.3: the login help line, P2-09)
 
 
 def _iso_now() -> str:
@@ -93,6 +95,21 @@ def create_studio_router(
         if record["key"] == "rollout":
             out["envSwitch"] = env_switch()  # so the admin sees why v2 may still be hidden
         return out
+
+    @router.get("/public/contact")
+    def studio_public_contact(request: Request):
+        """PUBLIC (no login): the contact fields every customer may see (studio_settings.public_contact:
+        whatsapp, phone, email; never the on-duty urgent line), for the studio front door's login help
+        line (P2-09, journey J0). 60 reads a minute per client IP."""
+        allowed, _left, retry_after_ms = check_rate_limit(f"studio:public-contact:{client_ip(request)}", PUBLIC_CONTACT_READS_PER_MINUTE, 60_000)
+        if not allowed:
+            studio_error(
+                429,
+                "RATE_LIMITED",
+                "Too many requests. Please wait a minute and try again.",
+                headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))},
+            )
+        return public_contact(read_all_settings()["contact"])
 
     @router.get("/me")
     def studio_me(user: dict[str, Any] = Depends(current_user_dependency)):

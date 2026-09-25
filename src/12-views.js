@@ -756,6 +756,7 @@ function _renderLoginBrandHeader(subtitle) {
             </div>
             <h1 class="text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">${isAr ? 'استوديو إعلانات البيان' : 'Albayan Ads Studio'}</h1>
             <p class="text-slate-500 mt-2">${isAr ? 'سجّل الدخول لإدارة حملاتك ومحفظتك' : 'Sign in to manage your campaigns and wallet'}</p>
+            <div id="studio-login-help">${typeof renderStudioLoginHelp === 'function' ? renderStudioLoginHelp() : ''}</div>
           </div>`;
   }
   return `

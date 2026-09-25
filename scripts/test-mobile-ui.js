@@ -6005,6 +6005,396 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P5-02, P3-05 (client), P3-04b, P2-09, P2-11 (Studio v2 extras 15r): the real files run in a sandbox after
+  // 15c/15g/15h/15j/15k/15n (the same fake browser, timers and scripted apiJson as the help-desk block above),
+  // next to static checks of the TikTok wording, the startup hooks, the public contact route and the refusal
+  // maps against the server files.
+  const vm = require('vm');
+  const extrasSrc = read('src/systems/ads_studio/15r-studio-extras.js');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
+  const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
+  const helpSrc = read('src/systems/ads_studio/15n-studio-help.js');
+  const studioApiPy = read('server/systems/ads_studio/studio_api.py');
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+  };
+  const hist = {
+    entries: [{ url: '/studio', state: null }], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) { const next = this.index + delta; if (!delta || next < 0 || next >= this.entries.length) return; this.index = next; this.show(); for (const fn of [...win.listeners.popstate]) fn({ state: this.state }); },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let secureSeq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'u1', name: 'Sara', email: 'sara@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [], walletTransactions: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+      generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++secureSeq).padStart(12, '0')}`,
+      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => false,
+    currentUserHasPermission: (collection, action) => action !== 'review' && action !== 'view',
+    hasSubscription: id => id === 'ad_maker',
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+    getEntityPhotoCountHint: () => 0,
+    updateUrlParams: () => {}, requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 1000 }
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var __dom = new Map();
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, getElementById(id) { return __dom.get(id) || null; } };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function __runTimers() { for (let round = 0; round < 5 && __timers.size; round++) { const due = Array.from(__timers.entries()); __timers.clear(); due.forEach(([, t]) => t.fn()); } }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function showNotification(title, message, type) { __notes.push({ title, message, type }); }
+      function getServerSessionIdentity() { return 'session'; }
+      function serverSessionIdentityChanged() { return false; }
+      function makeSessionChangedError() { return new Error('session changed'); }
+      function requestValidatedServerEntity(collection, context, loader) { return loader(); }
+      function withRetry(fn) { return fn(); }
+      function markCollectionDirty() {}
+      function saveState() {}
+      function studioBuilderStart() { return true; }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);
+    vm.runInContext(adsSrc, box);
+    vm.runInContext(helpSrc, box);
+    vm.runInContext(extrasSrc, box);
+    // The pieces here are drawn by name; a whole-frame render would only add the shell's own reads.
+    vm.runInContext('var __renders = 0; function render() { __renders++; }', box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
+  const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
+  const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && c.path === path);
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const meReply = value => run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: ${JSON.stringify(value)} }]; studioLoadMe();`);
+  const latin = /[A-Za-z]/;
+  const arabic = /[؀-ۿ]/;
+  const forbiddenEn = /\b(connected|linked|managed|manages|automated)\b/i;  // server/test_studio_tiktok.py FORBIDDEN_EN
+  const forbiddenAr = /(متصل|مربوط|يدير|مؤتمت)/;                             // FORBIDDEN_AR
+  const T1 = 'tkt_' + 'a'.repeat(40);
+  const T2 = 'tkt_' + 'b'.repeat(40);
+  const ago = minutes => new Date(Date.now() - minutes * 60000).toISOString();
+  const tiktokRequest = (id, number, state, extra = {}) => ({
+    id, number, subject: 'TikTok service · خدمة تيك توك · @my.shop', category: 'tiktok', status: state === 'done' || state === 'declined' ? 'resolved' : 'open',
+    audience: 'staff', priority: 'normal', kind: 'tiktok_request', relatedType: null, relatedId: null, createdAt: ago(120), updatedAt: ago(30),
+    dueAt: state === 'open' ? new Date(Date.now() + 3600000).toISOString() : null, lastMessageAt: ago(30), resolvedAt: null, reopenUntil: null,
+    tiktok: { handle: 'my.shop', profileUrl: 'https://www.tiktok.com/@my.shop', wants: ['auto_replies_help', 'advice'], state,
+      stateLabels: { en: `server words for ${state}`, ar: `كلمات الخادم لحالة ${state}` }, note: state === 'in_progress' ? { en: 'We <b>called</b> you', ar: 'اتصلنا بك' } : null, stateAt: ago(10) },
+    ...extra
+  });
+  const service = { open: true, labels: { en: 'TikTok service: hands-on help from the Albayan team, without automatic replies', ar: 'خدمة تيك توك — مساعدة يدوية من فريق البيان، بدون ردود تلقائية' },
+    notice: { en: 'Albayan cannot reply on TikTok for you yet. We help you by hand.', ar: 'لا يستطيع البيان حالياً الرد تلقائياً على تيك توك. سنساعدك يدوياً.' },
+    promise: { en: 'A team member contacts you within one business day.', ar: 'يتواصل معك أحد أعضاء الفريق خلال يوم عمل.' },
+    wants: [{ key: 'auto_replies_help', labels: { en: "Help setting up TikTok's own built-in auto-messages (TikTok runs them, not Albayan)", ar: 'مساعدة في إعداد الرسائل التلقائية المدمجة في تيك توك' } }, { key: 'advice', labels: { en: 'Advice on answering comments by hand and on TikTok ads', ar: 'نصائح للرد على التعليقات يدوياً' } }],
+    maxOpen: 3 };
+  const meV2 = { ui: 'v2', staffDesk: 'classic', isStaff: false, isAdmin: false, services: { help: true, stopRequest: true, tiktok: true }, intake: { open: true },
+    serviceHours: { timezone: 'Africa/Tripoli', openNow: true, week: {}, holidays: [], ramadan: null }, contact: { whatsapp: '+218912345678', phone: '', email: '' } };
+  const allHtml = [];
+
+  // Bundle and manifest.
+  check('Studio extras (15r) ship after the help desk in the lazy studio bundle, in both built copies, never in the startup bundle; every studio bundle stays under 1 MiB',
+    !loadError && bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15r-studio-extras.js') > bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15n-studio-help.js')
+      && !bundleManifestJson.files.some(file => /15r-studio/.test(file))
+      && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(extrasSrc)) && !read('script.js').includes('renderStudioTikTokSection')
+      && Object.keys(bundleManifestJson.lazy).filter(name => /^studio/.test(name)).every(name => fs.statSync(path.join(ROOT, name)).size < 1024 * 1024),
+    loadError);
+
+  // P5-02 TikTok: the words. The marked block, the drawn section (EN and AR, every state) and the desk rows never
+  // call TikTok connected, linked, managed or automated (server/test_studio_tiktok.py's list).
+  const textsBlock = extrasSrc.slice(extrasSrc.indexOf('// TIKTOK-TEXTS-BEGIN'), extrasSrc.indexOf('// TIKTOK-TEXTS-END'));
+  const pairs = [...textsBlock.matchAll(/\[(['"])((?:(?!\1)[^\\]|\\.)*)\1,\s*(['"])((?:(?!\3)[^\\]|\\.)*)\3\]/g)].map(m => [m[2], m[4]]);
+  run(`studioResetMe(); _studioTikTok.forUser = '__none__';`);
+  meReply(meV2);
+  reply('/api/studio/tiktok/requests', { requests: [tiktokRequest(T1, 'T-000101', 'open'), tiktokRequest(T2, 'T-000102', 'in_progress')], nextCursor: null, openCount: 2, maxOpen: 3, service });
+  hist.reset('/studio?tab=help&section=tiktok');
+  const tiktokFirst = String(run('renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 })'));  // the first draw reads (its answer lands after the draw)
+  const tiktokEn = String(run('renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 })'));
+  const tiktokEnAfter = String(run('renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 })'));
+  const tiktokAr = String(inLanguage('ar', 'renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 })'));
+  const deskItems = [tiktokRequest(T1, 'T-000101', 'open', { ownerId: 'cust-1', overdue: true, dueAt: ago(5) }), tiktokRequest(T2, 'T-000102', 'in_progress'), { id: 'nope' }, null];
+  const deskEn = String(run(`renderStudioTikTokDeskRows(${JSON.stringify(deskItems)}, { open: 'studioStaffOpen', onChange: 'studioStaffRetry' })`));
+  const deskAr = String(inLanguage('ar', `renderStudioTikTokDeskRows(${JSON.stringify(deskItems)}, { actions: false })`));
+  const deskEmpty = String(run('renderStudioTikTokDeskRows([])'));
+  const everyState = ['open', 'in_progress', 'done', 'declined', 'cancelled'].map(state => String(inLanguage('ar', `renderStudioTikTokDeskRows([${JSON.stringify(tiktokRequest(T1, 'T-1', state, { tiktok: { handle: 'x_y', wants: ['advice'], state } }))}])`)));
+  const textOf = html => html.replace(/<[^>]+>/g, ' ');
+  allHtml.push(tiktokFirst, tiktokEn, tiktokEnAfter, tiktokAr, deskEn, deskAr, deskEmpty, ...everyState);
+  const wordCases = [
+    pairs.length >= 40 && pairs.every(([en, ar]) => en.trim() && arabic.test(ar)),
+    !forbiddenEn.test(textsBlock) && !forbiddenAr.test(textsBlock),
+    allHtml.every(html => !forbiddenEn.test(textOf(html)) && !forbiddenAr.test(textOf(html))),
+    textsBlock.includes('by hand') && textsBlock.includes('TikTok runs them, not Albayan') && textsBlock.includes('مساعدة يدوية') && textsBlock.includes('يدوياً')
+  ];
+  check('Studio TikTok (P5-02): every text pair has Arabic; neither the words nor the drawn screens (EN/AR, every state, the desk rows) say connected, linked, managed or automated; the copy says "by hand" and that TikTok runs its own auto-messages',
+    !loadError && wordCases.every(Boolean), loadError || `cases ${failed(wordCases)} pairs ${pairs.length}`);
+
+  // P5-02 TikTok: the section and the form on real (scripted) server answers.
+  const firstRead = calls('GET', '/api/studio/tiktok/requests').length;
+  const T3 = 'tkt_' + 'c'.repeat(40);
+  run('studioTikTokSet("handle", "https://www.tiktok.com/@My.Shop_1"); studioTikTokToggleWant("auto_replies_help", false); studioTikTokToggleWant("advice", true); studioTikTokSet("note", "Please call after 5 pm");');
+  // The scripted replies are queued per path: the POST takes the first, the read after it the second.
+  reply('/api/studio/tiktok/requests', { request: tiktokRequest(T3, 'T-000103', 'open', { tiktok: { handle: 'My.Shop_1', wants: ['advice'], state: 'open', stateLabels: { en: 'Received', ar: 'وصل الطلب' } } }), message: {} });
+  reply('/api/studio/tiktok/requests', { requests: [tiktokRequest(T3, 'T-000103', 'open'), tiktokRequest(T1, 'T-000101', 'open'), tiktokRequest(T2, 'T-000102', 'in_progress')], nextCursor: null, openCount: 2, maxOpen: 3, service });
+  run('var __sendOk = null; var __sendMid = ""; studioTikTokSend().then(ok => { __sendOk = ok; }); __sendMid = renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 });');
+  const sendingHtml = String(run('__sendMid'));
+  const sendOk = run('__sendOk');
+  const postBody = (calls('POST', '/api/studio/tiktok/requests')[0] || {}).body || {};
+  const sentHtml = String(run('renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 })'));
+  run('studioTikTokSet("handle", "bad handle!"); studioTikTokToggleWant("advice", false); studioTikTokToggleWant("auto_replies_help", false);');
+  run('studioTikTokSend();');
+  const invalidHtml = String(run('renderStudioTikTokSection({ tab: "help", section: "tiktok", id: "", step: 0 })'));
+  const handles = json("['name', '@name', 'tiktok.com/@a.b_c', 'https://www.tiktok.com/@shop99?lang=en', 'ends.', 'a', 'too_long_' + 'x'.repeat(20), 'bad handle', ''].map(studioTikTokHandle)");
+  const onclicks = allHtml.concat([sendingHtml, sentHtml, invalidHtml]).join('').match(/on(click|change|input|submit)="[^"]*"/g) || [];
+  const safeHandler = /^on(click|change|input|submit)="(studioTikTok(OpenTicket|Open|Retry|More|Send|DeskEdit|DeskSend)\(('[A-Za-z0-9_-]*'(, '[A-Za-z0-9_-]*')*)?\)(; return false;)?|studioTikTokSet\('(handle|note)', this\.value\)|studioTikTokToggleWant\('[a-z_]+', this\.checked\)|studioStaffOpen\('tkt_[0-9a-f]{40}'\))"$/;
+  const tiktokCases = [
+    firstRead === 1 && tiktokFirst.includes('data-testid="studio-tiktok-loading"') && tiktokEn.includes('data-testid="studio-tiktok"') && tiktokEn.includes(`data-testid="studio-tiktok-item-${T1}"`) && tiktokEn.includes('data-state="in_progress"') && tiktokEnAfter === tiktokEn,
+    tiktokEn.includes('server words for open') && tiktokAr.includes('كلمات الخادم لحالة open') && tiktokEn.includes('href="https://www.tiktok.com/@my.shop"') && tiktokEn.includes('We &lt;b&gt;called&lt;/b&gt; you'),
+    tiktokEn.includes('id="studio-tiktok-handle"') && tiktokEn.includes('id="studio-tiktok-want-advice"') && tiktokEn.includes('id="studio-tiktok-note"') && tiktokEn.includes('data-testid="studio-tiktok-send"'),
+    JSON.stringify(handles) === JSON.stringify(['name', 'name', 'a.b_c', 'shop99', '', '', '', '', '']),
+    sendOk === true && sendingHtml.includes('aria-busy="true"') && JSON.stringify(postBody) === JSON.stringify({ handle: 'My.Shop_1', wants: ['advice'], operationId: postBody.operationId, note: 'Please call after 5 pm' })
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(String(postBody.operationId)) && calls('POST', '/api/studio/tiktok/requests').length === 1
+      && sentHtml.includes('data-testid="studio-tiktok-sent"') && sentHtml.includes(`data-testid="studio-tiktok-item-${T3}"`) && sentHtml.includes('data-testid="studio-tiktok-form"') && calls('GET', '/api/studio/tiktok/requests').length === 2,
+    invalidHtml.includes('data-testid="studio-tiktok-problem-handle"') && invalidHtml.includes('data-testid="studio-tiktok-problem-wants"') && calls('POST', '/api/studio/tiktok/requests').length === 1,
+    onclicks.length > 12 && onclicks.every(attr => safeHandler.test(attr)),
+    deskEn.includes(`data-testid="studio-tiktok-desk-${T1}"`) && deskEn.includes(`onclick="studioStaffOpen('${T1}')"`) && deskEn.includes(`data-testid="studio-tiktok-desk-start-${T1}"`) && deskEn.includes(`data-testid="studio-tiktok-desk-done-${T2}"`)
+      && !deskEn.includes('nope') && deskAr.includes('is-static') && !deskAr.includes('studio-tiktok-desk-start') && deskEmpty.includes('data-testid="studio-tiktok-desk-empty"') && deskEn.includes('Overdue since'),
+    (() => {
+      run(`studioTikTokDeskEdit('${T1}', 'in_progress');`);
+      const form = String(run(`renderStudioTikTokDeskRows(${JSON.stringify(deskItems)}, { open: 'studioStaffOpen', onChange: 'studioStaffRetry' })`));
+      run(`__dom.set('studio-tiktok-note-en-${T1}', { value: 'We called you' }); __dom.set('studio-tiktok-note-ar-${T1}', { value: '' });`);
+      run(`studioTikTokDeskSend('${T1}', 'in_progress');`);  // an empty Arabic note: refused on the screen, nothing sent
+      const refused = String(run(`renderStudioTikTokDeskRows(${JSON.stringify(deskItems)})`));
+      run(`__dom.set('studio-tiktok-note-ar-${T1}', { value: 'اتصلنا بك' });`);
+      run(`studioTikTokDeskSend('${T1}', 'in_progress'); studioTikTokDeskSend('${T1}', 'in_progress');`);  // single flight
+      const posts = calls('POST', `/api/studio/staff/tiktok/${T1}/status`);
+      return form.includes(`id="studio-tiktok-note-en-${T1}"`) && form.includes(`data-testid="studio-tiktok-desk-save-${T1}"`) && refused.includes('data-testid="studio-tiktok-desk-problem"')
+        && posts.length === 1 && JSON.stringify(posts[0].body) === JSON.stringify({ status: 'in_progress', note: { en: 'We called you', ar: 'اتصلنا بك' }, operationId: posts[0].body.operationId })
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(String(posts[0].body.operationId));
+    })(),
+    !/\b(?:confirm|prompt|alert)\(/.test(extrasSrc) && !/<(input|textarea)\b(?![^>]*\bid=")/.test(extrasSrc),
+    extrasSrc.includes("studioV2Go({ tab: 'help', section: 'tiktok' })") && extrasSrc.includes('function renderStudioTikTokEntry()') && extrasSrc.includes('function renderStudioTikTokDeskRows(items, options = {})')
+  ];
+  check('Studio TikTok (P5-02): the section reads GET /tiktok/requests once, draws the server\'s state words and the team note escaped, validates the handle rule, POSTs one request with an operationId, refuses an invalid form without sending; the desk rows open, step and note with single flight; no native dialogs; every input has an id',
+    !loadError && tiktokCases.every(Boolean), loadError || `cases ${failed(tiktokCases)} handlers ${onclicks.filter(attr => !safeHandler.test(attr)).slice(0, 3).join(' | ')}`);
+
+  // P3-05 (client): the bell's count follows the pulse hook while the customer layout is on.
+  run("__calls.length = 0; studioPulseStop('inbox'); _studioInbox.forUser = '__none__'; studioInboxScope();");
+  meReply(meV2);  // the /me listener starts the watch
+  reply('/api/studio/activity', { items: [], nextCursor: null, unreadCount: 0, seenAt: null });
+  run('__runTimers();');
+  const firstPolls = calls('GET', '/api/studio/activity').length;
+  reply('/api/studio/activity', { items: [{ id: 'act_1', kind: 'request_approved', title: { en: 'Your ad was approved', ar: 'تمت الموافقة على إعلانك' }, body: { en: '$5.00 was paid', ar: 'دُفع $5.00' }, relatedType: 'campaign', relatedId: 'r1', createdAt: ago(1), unread: true }], nextCursor: null, unreadCount: 1, seenAt: null });
+  reply('/api/studio/activity', { items: [{ id: 'act_1', kind: 'request_approved', title: { en: 'Your ad was approved', ar: 'تمت الموافقة على إعلانك' }, body: { en: '$5.00 was paid', ar: 'دُفع $5.00' }, relatedType: 'campaign', relatedId: 'r1', createdAt: ago(1), unread: true }], nextCursor: null, unreadCount: 1, seenAt: null });
+  run('__runTimers();');
+  const afterChange = calls('GET', '/api/studio/activity').length;
+  const badgeHtml = String(run("studioInboxBadge('home')"));
+  run("__calls.length = 0;");
+  meReply({ ...meV2, ui: 'classic' });  // classic layout: the watch stops
+  run('__runTimers(); __runTimers();');
+  const classicPolls = calls('GET', '/api/studio/activity').length;
+  const pulseCases = [
+    firstPolls === 1,
+    afterChange === 3,  // the second poll saw unreadCount move: the Inbox read again (15n) and drew the badge
+    badgeHtml.includes('data-testid="studio-inbox-badge"') && badgeHtml.includes('>1<'),
+    classicPolls === 0,
+    extrasSrc.includes("studioPulseWatch(STUDIO_INBOX_PULSE_KEY, { path: '/api/studio/activity', field: 'unreadCount', intervalMs: STUDIO_INBOX_PULSE_MS") && extrasSrc.includes('studioMeSubscribe(studioInboxPulseStart)')
+      && extrasSrc.includes('const STUDIO_INBOX_PULSE_MS = 30 * 1000;') && helpSrc.includes("studioV2RegisterScreen('inbox', renderStudioInboxBody)") && helpSrc.includes("studioV2Go({ tab: 'campaigns', id: item.relatedId })")
+  ];
+  check('Studio inbox badge (P3-05 client): the pulse hook polls the feed only in the v2 customer layout, a moved unreadCount makes the Inbox read again and the bell shows the count; the watch stops in classic',
+    !loadError && pulseCases.every(Boolean), loadError || `cases ${failed(pulseCases)} polls ${firstPolls}/${afterChange}/${classicPolls}`);
+
+  // P3-04b: the results card. Nothing before a link; the numbers once linked; the last good values on a failed read.
+  run("__calls.length = 0; resetAdsStudioResults(); state.adCampaignRequests = [{ id: 'r_unlinked', createdBy: 'u1', status: 'Approved', name: 'A', paidMinorUSD: 5000, _created: 5, _lastModified: 15 }, { id: 'r_linked', createdBy: 'u1', status: 'Approved', name: 'B', paidMinorUSD: 5000, metaCampaignId: '120', metaAdAccountId: '9', _created: 6, _lastModified: 16 }];");
+  const noLink = String(run("renderStudioResultsCard('r_unlinked')"));
+  const loading = String(run("renderStudioResultsCard('r_linked')"));
+  reply('/api/studio/campaigns/r_linked/results', { campaignId: 'r_linked', linked: true, stage: { stage: 8, labels: { en: 'Running', ar: 'يعمل الآن' } },
+    results: { metaUsedMinor: 340, paidMinor: 5000, currency: 'USD', impressions: 1234, reach: 800, clicks: 20, resultType: 'link_click', resultCount: 20, costPerResultMinor: 17, checkedAt: ago(3), checkedAgo: { en: 'checked 3 min ago', ar: 'تحقّقنا قبل 3 دقائق' }, stale: false } });
+  run("resetAdsStudioResults(); renderStudioResultsCard('r_linked');");  // the read
+  const ready = String(run("renderStudioResultsCard('r_linked')"));
+  const readyAr = String(inLanguage('ar', "renderStudioResultsCard('r_linked')"));
+  replyError('/api/studio/campaigns/r_linked/results', { status: 503, message: 'Service Unavailable' });
+  run("_adsStudioResults.byId.get('r_linked').at = 0; renderStudioResultsCard('r_linked');");  // a failed re-read
+  const stale = String(run("renderStudioResultsCard('r_linked')"));
+  const resultCases = [
+    noLink === '' && String(run("renderStudioResultsCard('')")) === '' && String(run("renderStudioResultsCard('missing')")) === '',
+    loading.includes('data-testid="studio-results-card"') && loading.includes('data-state="loading"') && loading.includes('Checking Meta'),
+    ready.includes('data-state="ready"') && ready.includes('<p class="studio-ads-results-used" data-testid="studio-results-used">Meta used $3.40 of $50.00</p>')
+      && ready.includes('data-testid="studio-results-stat-impressions"') && ready.includes('<dd>1,234</dd>') && ready.includes('<dd>800</dd>') && ready.includes('Link clicks') && ready.includes('<dd>20</dd>')
+      && ready.includes('data-testid="studio-results-checked">checked 3 min ago<') && ready.includes('Running') && ready.includes('Reported by Meta'),
+    readyAr.includes('استخدمت ميتا $3.40 من $50.00') && readyAr.includes('تحقّقنا قبل 3 دقائق') && readyAr.includes('يعمل الآن') && readyAr.includes('نقرات على الرابط') && !latin.test(readyAr.replace(/<[^>]+>/g, '').replace(/[\d$.,]/g, '')),
+    stale.includes('data-state="stale"') && stale.includes('Meta used $3.40 of $50.00') && stale.includes('the last ones we read') && calls('GET', '/api/studio/campaigns/r_linked/results').length === 3,
+    extrasSrc.includes('function renderStudioResultsCard(campaignId)') && extrasSrc.includes('adsStudioShowsResults(request)') && adsSrc.includes('${renderStudioAdsResults(request)}')
+  ];
+  check('Studio results card (P3-04b): nothing before a Meta link; "Meta used $Y of $X", impressions, reach, results and "checked X ago" from GET campaigns/{id}/results in EN/AR; the last good values stay on a failed read',
+    !loadError && resultCases.every(Boolean), loadError || `cases ${failed(resultCases)}`);
+
+  // P2-09: the login help line from the public contact (cached), and the two startup hooks within the byte budget.
+  run("__calls.length = 0; window.localStorage.removeItem('albayan.studio.public.contact'); _studioPublicContact.value = null; _studioPublicContact.at = 0; _studioPublicContact.failedAt = 0; __dom.set('studio-login-help', { innerHTML: '' });");
+  reply('/api/studio/public/contact', { whatsapp: '+218912345678', phone: '0913333333', email: 'help@albayan.example', urgentWhatsapp: '+218911111111' });
+  const emptyHelp = String(run('renderStudioLoginHelp()'));  // nothing cached yet: the neutral line, and the read (its answer mounts the line)
+  const mounted = String(run("__dom.get('studio-login-help').innerHTML"));
+  const helpEn = String(run('renderStudioLoginHelp()'));
+  const helpAr = String(inLanguage('ar', 'renderStudioLoginHelp()'));
+  const cached = json("JSON.parse(window.localStorage.getItem('albayan.studio.public.contact'))");
+  run("_studioPublicContact.value = null; _studioPublicContact.at = 0; renderStudioLoginHelp();");  // a new page: the cache answers, no second read within 6 h
+  const contactReads = calls('GET', '/api/studio/public/contact').length;
+  const loginHookAt = views.indexOf('<div id="studio-login-help">');
+  const loginCases = [
+    emptyHelp.includes('data-testid="studio-login-help"') && emptyHelp.includes('data-contact="0"') && emptyHelp.includes('Contact the Albayan team.') && calls('GET', '/api/studio/public/contact').length === 1,
+    mounted.includes('data-contact="1"') && mounted.includes('href="https://wa.me/218912345678"') && mounted.includes('data-testid="studio-login-whatsapp"') && mounted.includes('href="tel:+218913333333"') && !mounted.includes('+218911111111'),
+    helpEn.startsWith('<p class="mt-3') && helpEn.includes('New customer or forgot your password? message us on WhatsApp') && helpEn.includes('or call') && helpEn.includes('rel="noopener noreferrer"'),
+    helpAr.includes('عميل جديد أو نسيت كلمة المرور؟ راسلنا على واتساب') && helpAr.includes('أو اتصل بنا على') && helpAr.includes('href="tel:+218913333333"'),
+    cached && cached.value && cached.value.whatsapp === '+218912345678' && cached.value.phone === '+218913333333' && contactReads === 1,
+    loginHookAt > 0 && views.slice(loginHookAt - 400, loginHookAt).includes("'Sign in to manage your campaigns and wallet'") && views.includes(`<div id="studio-login-help">\${typeof renderStudioLoginHelp === 'function' ? renderStudioLoginHelp() : ''}</div>`),
+    mobileRuntime.includes("  if (typeof studioHandleBack === 'function' && studioHandleBack()) return;\n") && mobileRuntime.indexOf('studioHandleBack') > mobileRuntime.indexOf('async function handleAndroidBackButton(') && mobileRuntime.indexOf('studioHandleBack') < mobileRuntime.indexOf('const landingView = getMobileLandingView();'),
+    fs.statSync(path.join(ROOT, 'script.js')).size <= 2516582 && shellSrc.includes('function studioHandleBack()'),
+    studioApiPy.includes('@router.get("/public/contact")') && /def studio_public_contact\(request: Request\):/.test(studioApiPy) && !/def studio_public_contact\([^)]*Depends/.test(studioApiPy)
+      && studioApiPy.includes('studio:public-contact:{client_ip(request)}') && studioApiPy.includes('return public_contact(read_all_settings()["contact"])') && studioApiPy.includes('PUBLIC_CONTACT_READS_PER_MINUTE = 60')
+  ];
+  check('Studio login help line (P2-09): the public contact is read once (no login), cached for the next visit and mounted into the login header in EN/AR (WhatsApp and phone links, never the urgent line); the Android Back and login hooks sit in the startup files inside the byte budget; the server route is public, IP-limited and returns only the public fields',
+    !loadError && loginCases.every(Boolean), loadError || `cases ${failed(loginCases)}`);
+
+  // P2-11: error-map completeness. Every plain-text refusal (400/403/409/413) of the older routes in the server files
+  // has an Arabic entry in the classic map (15c) or the v2 patterns (15g); the coded ones of ad_campaign_actions are
+  // in STUDIO_ERROR_TEXTS; and an Arabic reader never sees raw English for them.
+  const unquote = lit => { const q = lit[0]; return lit.slice(1, -1).replace(new RegExp(`\\\\${q}`, 'g'), q).replace(/\\n/g, '\n').replace(/\\\\/g, '\\'); };
+  const pyFiles = ['server/systems/ads_studio/ad_campaign_actions.py', 'server/systems/ads_studio/ad_campaign_fields.py', 'server/systems/ads_studio/social_studio.py',
+    'server/systems/ads_studio/studio_stop.py', 'server/systems/ads_studio/studio_posts.py', 'server/wallet_payments.py'];
+  const pySources = Object.fromEntries(pyFiles.map(file => [file, read(file)]));
+  const consts = new Map();
+  for (const source of Object.values(pySources)) for (const m of source.matchAll(/^([A-Z][A-Z0-9_]+)\s*=\s*\(?\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/gm)) consts.set(m[1], unquote(m[2]));
+  const literalTemplate = expr => {
+    let rest = expr.trim();
+    let out = '';
+    let any = false;
+    for (let guard = 0; guard < 12; guard++) {
+      const m = rest.match(/^(f?)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/);
+      if (m) {
+        let text = unquote(m[2]);
+        if (m[1]) text = text.replace(/\{\{/g, '\u0001').replace(/\}\}/g, '\u0002').replace(/\{([^{}]*)\}/g, (_, inner) => (consts.has(inner.trim()) ? consts.get(inner.trim()) : '\u0000')).replace(/\u0001/g, '{').replace(/\u0002/g, '}');
+        out += text; any = true; rest = rest.slice(m[0].length).trim();
+      } else {
+        const n = rest.match(/^([A-Z][A-Z0-9_]*)\b/);
+        if (n && consts.has(n[1])) { out += consts.get(n[1]); any = true; rest = rest.slice(n[0].length).trim(); }
+        else if (n) return { template: out, dynamic: true };
+        else break;
+      }
+      if (rest.startsWith('+')) rest = rest.slice(1).trim();
+      else if (!/^(f?)["']/.test(rest)) break;
+    }
+    return { template: out, dynamic: !any };
+  };
+  const pyRefusals = (source, file, spans = null) => {
+    const out = [];
+    let at = 0;
+    while ((at = source.indexOf('HTTPException(', at)) !== -1) {
+      let depth = 0, i = at + 'HTTPException'.length, end = -1, quote = '';
+      for (; i < source.length; i++) {
+        const ch = source[i];
+        if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
+        if (ch === '"' || ch === "'") { quote = ch; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      const start = at;
+      const call = source.slice(at, end + 1);
+      const line = source.slice(0, at).split('\n').length;
+      at = end + 1;
+      if (spans && !spans.some(([a, b]) => start >= a && start < b)) continue;
+      const inner = call.slice('HTTPException('.length, -1);
+      const status = (inner.match(/status_code\s*=\s*(\d{3})/) || [])[1] || (inner.match(/^\s*(\d{3})\s*,/) || [])[1] || '';
+      let expr = ((inner.match(/detail\s*=\s*([\s\S]*)$/) || inner.match(/^\s*\d{3}\s*,\s*([\s\S]*)$/) || [])[1] || '').replace(/,\s*headers\s*=[\s\S]*$/, '').trim();
+      const parsed = literalTemplate(expr);
+      out.push({ file, line, status, template: parsed.template, dynamic: parsed.dynamic || (!parsed.template && expr !== '') });
+    }
+    return out;
+  };
+  const mainRouteSpans = source => {
+    const spans = [];
+    const re = /^@app\.(?:get|post|put|patch|delete|api_route)\(\s*"(\/api\/(?:ad-studio|social-studio|wallet)[^"]*)"/gm;
+    let m;
+    while ((m = re.exec(source))) {
+      const after = source.indexOf('\n', source.indexOf('def ', m.index));
+      const next = source.slice(after).search(/\n(?=@app\.|def |async def |class |[A-Za-z_]+ = )/);
+      spans.push([m.index, next === -1 ? source.length : after + next]);
+    }
+    return spans;
+  };
+  const mainPySrc = read('server/main.py');
+  const refusals = pyFiles.flatMap(file => pyRefusals(pySources[file], file)).concat(pyRefusals(mainPySrc, 'server/main.py', mainRouteSpans(mainPySrc)));
+  const classicMapText = adsStudio.slice(adsStudio.indexOf('const _ADS_STUDIO_REFUSAL_AR = ['), adsStudio.indexOf('];', adsStudio.indexOf('const _ADS_STUDIO_REFUSAL_AR = [')) + 2);
+  const classicMap = vm.runInNewContext(`${classicMapText} _ADS_STUDIO_REFUSAL_AR;`, {});
+  const patternsText = coreSrc.slice(coreSrc.indexOf('const STUDIO_OPEN_REQUESTS_RE'), coreSrc.indexOf(']);', coreSrc.indexOf('const STUDIO_ERROR_PATTERNS')) + 3);
+  const patterns = vm.runInNewContext(`${patternsText} STUDIO_ERROR_PATTERNS;`, {});
+  const needles = classicMap.map(entry => entry[0]);
+  const inScope = refusals.filter(r => ['400', '403', '409', '413'].includes(r.status));
+  const plain = inScope.filter(r => !r.dynamic);
+  const covered = r => { const text = r.template.replace(/\u0000/g, '0'); return needles.some(n => text.includes(n)) || patterns.some(([re]) => re.test(text)); };
+  const uncovered = plain.filter(r => !covered(r));
+  const clientTexts = json('STUDIO_ERROR_TEXTS') || {};
+  const info = (message, language, status = 400) => { box.state.language = language; const out = json(`studioErrorInfo(Object.assign(new Error(${JSON.stringify(message)}), { status: ${status}, payload: { detail: ${JSON.stringify(message)} } }), 'action')`) || {}; box.state.language = 'en'; return out; };
+  const samples = ['creativeImages contains invalid base64', 'Photo 2: not an image', 'name is required', 'Unsupported callToAction', 'primaryText is required before submission',
+    'Public replies are not available for Instagram accounts right now', 'Payment request is confirmed', 'The wallet is charged in USD or LYD', 'Meta is still delivering this ad', 'Only Draft or Changes Requested campaigns can be submitted'];
+  const sampleInfo = samples.map(text => [info(text, 'ar'), info(text, 'en')]);
+  const generic = info('nobody translated this', 'ar').text;
+  const coded = (code, language) => json(`(function () { state.language = ${JSON.stringify(language)}; const out = studioErrorInfo(Object.assign(new Error('x'), { status: 409, payload: { detail: { code: ${JSON.stringify(code)}, message: 'server words' } } }), 'action'); state.language = 'en'; return out; })()`) || {};
+  const mapCases = [
+    refusals.length >= 200 && plain.length >= 180 && inScope.filter(r => r.dynamic).length <= 6,
+    uncovered.length === 0,
+    patterns.length >= 50 && patterns.every(([re, en, ar]) => Object.prototype.toString.call(re) === '[object RegExp]' && typeof en === 'string' && en.length > 8 && arabic.test(ar) && !latin.test(ar.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, ''))),
+    sampleInfo.every(([ar, en]) => arabic.test(ar.text) && !latin.test(ar.text.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, '')) && ar.text !== generic && en.text && !/^(creativeImages|Photo \d|name is|Unsupported|primaryText)/.test(en.text)),
+    ['SETTLE_NOT_READY', 'NEEDS_MANUAL_RENAME'].every(code => Array.isArray(clientTexts[code]) && arabic.test(clientTexts[code][1]) && coded(code, 'ar').text === clientTexts[code][1] && coded(code, 'en').text === clientTexts[code][0])
+      && /"code": SETTLE_NOT_READY/.test(pySources['server/systems/ads_studio/ad_campaign_actions.py']) && /"code": NEEDS_MANUAL_RENAME/.test(pySources['server/systems/ads_studio/ad_campaign_actions.py']),
+    // the map's generic shapes never shadow the classic map's own words for these
+    info('expectedVersion is required', 'ar').text === inLanguage('ar', "adsStudioRefusalText('expectedVersion is required')") && info('note must be text', 'ar').text === inLanguage('ar', "adsStudioRefusalText('note must be text')")
+  ];
+  check('Studio error map completeness (P2-11): every plain-text 400/403/409/413 refusal of /api/ad-studio, /api/social-studio and /api/wallet in the server files has an Arabic entry in the classic map or the v2 patterns; the coded settle/rename refusals are in STUDIO_ERROR_TEXTS; Arabic readers never get raw English',
+    !loadError && mapCases.every(Boolean), loadError || `cases ${failed(mapCases)} uncovered ${uncovered.slice(0, 5).map(r => `${r.file}:${r.line} ${JSON.stringify(r.template.replace(/\u0000/g, '{…}'))}`).join(' | ')}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');
