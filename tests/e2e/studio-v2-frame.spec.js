@@ -31,7 +31,9 @@ async function answerMe(page, overrides) {
   await page.route('**/api/studio/me', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(meReply(overrides)) }));
 }
 
-const tab = page => new URL(page.url()).searchParams.get('tab');
+// ?tab=dashboard is the pinned classic alias of Home (PLAN §5.1); WebKit restores that name after a Back (seen in the release
+// run), so both spell Home here — the screen assertions that follow prove which screen is on.
+const tab = page => { const value = new URL(page.url()).searchParams.get('tab'); return value === 'dashboard' ? 'home' : value; };
 const param = (page, name) => new URL(page.url()).searchParams.get(name);
 
 test('the v2 frame draws when /me says v2; nav drives ?tab= and Back follows the model', async ({ page }) => {

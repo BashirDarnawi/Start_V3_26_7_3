@@ -114,8 +114,17 @@ async function openHome(page, user) {
   await expect(page.getByTestId('studio-money-available')).toHaveAttribute('data-minor', /^-?\d+$/, { timeout: BOOT_TIMEOUT });
 }
 
-function walletSummary(page) {
-  return page.evaluate(() => apiJson('/api/studio/wallet/summary', { method: 'GET' }));
+// The app cancels its in-flight reads on a navigation and during the post-login restore (AbortError); this read is
+// only a comparison value, so ask again rather than fail the journey on that timing (seen once on desktop-chromium).
+async function walletSummary(page) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await page.evaluate(() => apiJson('/api/studio/wallet/summary', { method: 'GET' }));
+    } catch (error) {
+      if (attempt >= 6 || !/abort/i.test(String(error && error.message))) throw error;
+      await page.waitForTimeout(500);
+    }
+  }
 }
 
 // The strip shows exactly the server's numbers (data-minor and the text), and Being returned only when non-zero.
