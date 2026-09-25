@@ -688,11 +688,17 @@ class TestAdsStudioWorkflow:
         assert created.status_code == 200, created.text
         original_patch = main_module.patch_entity
         submit_operation = "submit-concurrent-operation-001"
+        # Proof the simulated 409 really fired: the routes live in
+        # ad_campaign_actions.py now and reach main.patch_entity through a
+        # late-bound ctx lambda. An eager binding would skip this fake and the
+        # test would pass without ever exercising the conflict branch.
+        fired = {"submit": 0, "review": 0}
 
         def commit_submit_then_report_conflict(*args, **kwargs):
             result = original_patch(*args, **kwargs)
             updates = args[2] if len(args) > 2 else {}
             if updates.get("lastSubmitOperationId") == submit_operation:
+                fired["submit"] += 1
                 raise HTTPException(status_code=409, detail="simulated lock-race conflict")
             return result
 
@@ -707,6 +713,7 @@ class TestAdsStudioWorkflow:
         )
         assert submitted.status_code == 200, submitted.text
         assert submitted.json()["data"]["status"] == "Submitted"
+        assert fired["submit"] == 1, "the simulated submit conflict never fired"
 
         review_operation = "review-concurrent-operation-001"
 
@@ -714,6 +721,7 @@ class TestAdsStudioWorkflow:
             result = original_patch(*args, **kwargs)
             updates = args[2] if len(args) > 2 else {}
             if updates.get("lastReviewOperationId") == review_operation:
+                fired["review"] += 1
                 raise HTTPException(status_code=409, detail="simulated lock-race conflict")
             return result
 
@@ -730,6 +738,22 @@ class TestAdsStudioWorkflow:
         )
         assert reviewed.status_code == 200, reviewed.text
         assert reviewed.json()["data"]["status"] == "Approved"
+        assert fired["review"] == 1, "the simulated review conflict never fired"
+        # The conflict branch adopts the identical winner's commit: it writes no
+        # audit row of its own (the winner audits) and the budget is captured once.
+        with db_conn() as conn:
+            audit_actions = [
+                str(r[0]) for r in conn.execute(
+                    text("SELECT action FROM audit_logs WHERE resource_id = :id AND action IN ('submit','review')"),
+                    {"id": campaign_id},
+                )
+            ]
+        assert audit_actions == [], audit_actions
+        captures = [
+            r for r in _wallet_rows_for(actors, actors["owner_id"])
+            if r.get("type") == "campaign_payment" and r.get("referenceId") == campaign_id
+        ]
+        assert len(captures) == 1, captures
 
     def test_submit_changes_resubmit_and_approve(self, actors):
         created = _create_campaign(
@@ -1386,12 +1410,15 @@ class TestStudioWalletPayments:
 
 
 def _stop_campaign(cookies, campaign_id: str, last_modified: int, op: str,
-                   reason: str | None = None, refund: int | None = None):
+                   reason: str | None = None, refund: int | None = None,
+                   close_reason: str | None = None):
     body: dict = {"expectedLastModified": last_modified, "operationId": op}
     if reason is not None:
         body["reason"] = reason
     if refund is not None:
         body["refundMinorUSD"] = refund
+    if close_reason is not None:
+        body["closeReason"] = close_reason
     return client.post(
         f"/api/ad-studio/campaigns/{campaign_id}/stop", json=body, cookies=cookies
     )
@@ -2020,3 +2047,145 @@ class TestStopRefundReviewFindings:
         )
         assert stopped.status_code == 200, stopped.text
         assert _balance_minor(actors, user["id"]) == 2500
+
+
+def _reset_reviewer_limits(actors) -> None:
+    """Approvals share the reviewer's per-minute mutation and image-check budgets."""
+    for kind in ("mutations", "media"):
+        reset_rate_limit(f"ad-studio:{kind}:{actors['reviewer_id']}")
+
+
+class TestStudioCloseReason:
+    """P1-04: why a request reached Stopped, and finished requests leave the lists."""
+
+    def test_close_reason_completed_staff_only(self, actors):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "closewhy", 7500)
+        approved = _approved_campaign(actors, cookies, "closewhy", 2500)
+        cid, lm = approved["id"], approved["lastModified"]
+
+        # A customer cannot declare their own ad finished or staff-stopped.
+        for index, reason in enumerate(("completed", "staff_stop")):
+            refused = _stop_campaign(cookies, cid, lm, f"close-why-owner-0{index}", close_reason=reason)
+            assert refused.status_code == 403, refused.text
+            assert "Only staff can choose how a campaign closed" in refused.text
+        unknown = _stop_campaign(cookies, cid, lm, "close-why-owner-09", close_reason="refunded")
+        assert unknown.status_code in (400, 422), unknown.text
+        still = client.get(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies)
+        assert still.status_code == 200, still.text
+        assert still.json()["data"]["status"] == "Approved"
+        assert still.json()["lastModified"] == lm
+        assert "closeReason" not in still.json()["data"]
+        assert not [r for r in _wallet_rows_for(actors, user["id"]) if r.get("type") == "campaign_refund"]
+
+        # The owner's own stop is always customer_stop, named or not.
+        own = _stop_campaign(cookies, cid, lm, "close-why-owner-10", close_reason="customer_stop")
+        assert own.status_code == 200, own.text
+        assert own.json()["data"]["closeReason"] == "customer_stop"
+        implicit = _approved_campaign(actors, cookies, "closewhyown", 2500)
+        own_default = _stop_campaign(cookies, implicit["id"], implicit["lastModified"], "close-why-owner-11")
+        assert own_default.status_code == 200, own_default.text
+        assert own_default.json()["data"]["closeReason"] == "customer_stop"
+
+        # Staff: staff_stop by default (completed is covered by the archive test).
+        by_staff = _approved_campaign(actors, cookies, "closewhystaff", 2500)
+        staff = _stop_campaign(
+            actors["reviewer"], by_staff["id"], by_staff["lastModified"], "close-why-staff-01", refund=2500,
+        )
+        assert staff.status_code == 200, staff.text
+        assert staff.json()["data"]["closeReason"] == "staff_stop"
+        with db_conn() as conn:
+            meta = conn.execute(
+                text("SELECT metadata_json FROM audit_logs WHERE action = 'stop' AND resource_id = :id"),
+                {"id": by_staff["id"]},
+            ).scalar_one()
+        assert json_loads(meta)["closeReason"] == "staff_stop"
+
+        # The generic API can neither create nor forge it.
+        draft = _create_campaign(
+            cookies, {**_complete_campaign("Close forge"), "closeReason": "completed"}, "close_why_forge",
+        )
+        assert draft.status_code == 200, draft.text
+        assert "closeReason" not in draft.json()["data"]
+        forged = client.patch(
+            "/api/collections/adCampaignRequests/close_why_forge",
+            json={"data": {"closeReason": "completed"}, "expectedLastModified": draft.json()["lastModified"]},
+            cookies=cookies,
+        )
+        assert forged.status_code == 403, forged.text
+
+    def test_finished_request_can_be_archived(self, actors):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "finished", 2500)
+        approved = _approved_campaign(actors, cookies, "finished", 2500)
+        cid = approved["id"]
+        live = _publish_status(
+            actors["reviewer"], cid, approved["lastModified"], "finished-live-01", "live", meta_id="555000111",
+        )
+        assert live.status_code == 200, live.text
+        lm = live.json()["lastModified"]
+
+        # The ad ran: the owner can neither self-stop it nor archive it while the capture is open.
+        assert _stop_campaign(cookies, cid, lm, "finished-owner-stop-01").status_code == 409
+        blocked = client.delete(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies)
+        assert blocked.status_code == 409, blocked.text
+
+        # Staff finish it: Meta used $20.00, the unused $5.00 comes back.
+        finished = _stop_campaign(
+            actors["reviewer"], cid, lm, "finished-staff-01", refund=500, close_reason="completed",
+        )
+        assert finished.status_code == 200, finished.text
+        data = finished.json()["data"]
+        assert data["status"] == "Stopped" and data["closeReason"] == "completed"
+        assert data["refundMinorUSD"] == 500 and data["spendMinorUSD"] == 2000
+        assert _balance_minor(actors, user["id"]) == 500
+        replay = _stop_campaign(
+            actors["reviewer"], cid, lm, "finished-staff-01", refund=500, close_reason="completed",
+        )
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["lastModified"] == finished.json()["lastModified"]
+
+        # The owner archives the finished request; the money history stays as it was.
+        ledger_before = _wallet_rows_for(actors, user["id"])
+        archived = client.delete(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies)
+        assert archived.status_code == 200, archived.text
+        assert client.get(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies).status_code == 404
+        listed = client.get("/api/collections/adCampaignRequests", cookies=cookies)
+        assert listed.status_code == 200, listed.text
+        assert all(row["id"] != cid for row in listed.json())
+        ledger_after = _wallet_rows_for(actors, user["id"])
+        assert len(ledger_after) == len(ledger_before)
+        payment_tx = approved["data"]["paymentTransactionId"]
+        chain = sorted(
+            str(r.get("type")) for r in ledger_after if r.get("referenceId") in (cid, payment_tx)
+        )
+        assert chain == ["campaign_payment", "campaign_refund"], chain
+        assert _balance_minor(actors, user["id"]) == 500
+        again = client.delete(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies)
+        assert again.status_code == 200, again.text
+
+    def test_lifecycle_audit_entries_are_kept_forever(self):
+        import server.main as main_module
+
+        new_kept = (
+            "stop", "withdraw", "publish_status", "stop_request", "settle_override",
+            "contact_link", "subscribe_smoke_test", "ig_read_test", "check_comments",
+        )
+        for action in new_kept:
+            assert f"'{action}'" in main_module._AUDIT_KEEP_ACTIONS, action
+        old_ts = now_ms() - 400 * 24 * 3600 * 1000  # older than the 365-day default
+        ids = {action: f"audit_p104_{action}" for action in (*new_kept, "update")}
+        with db_conn() as conn:
+            for action, row_id in ids.items():
+                conn.execute(
+                    text("INSERT INTO audit_logs (id, ts, user_id, action, resource_type, resource_id, message, metadata_json) "
+                         "VALUES (:id, :ts, NULL, :action, 'adCampaignRequests', 'p104_kept', 'P1-04 keep list', '{}')"),
+                    {"id": row_id, "ts": old_ts, "action": action},
+                )
+        main_module.cleanup_old_audit_logs()
+        with db_conn() as conn:
+            left = {
+                str(r[0]) for r in conn.execute(text("SELECT id FROM audit_logs WHERE resource_id = 'p104_kept'"))
+            }
+            conn.execute(text("DELETE FROM audit_logs WHERE resource_id = 'p104_kept'"))
+        assert left == {ids[action] for action in new_kept}, left

@@ -78,6 +78,7 @@ from .backfills import (
 from .data_compatibility import DATA_COMPATIBILITY_VERSION
 from .financial_compatibility import project_financial_entity
 from .systems.ads_studio.ad_campaign_actions import (
+    AD_CAMPAIGN_EDITABLE_STATUSES,
     apply_boost_campaign_fields,
     create_ad_campaign_actions_router,
     enforce_boost_submission_rules,
@@ -141,7 +142,6 @@ from .subscription_plans import (
 )
 from .wallet_payments import (
     campaign_capture_open_minor,
-    capture_campaign_budget,
     create_wallet_payments_router,
     release_orphan_campaign_payment,
     wallet_campaign_holds_minor,
@@ -194,8 +194,6 @@ from sqlalchemy.exc import IntegrityError
 from .schemas import (
     AdminBulkImportRequest,
     AdminRestoreEntityRequest,
-    AdCampaignReviewRequest,
-    AdCampaignSubmitRequest,
     AdMutationRequest,
     AdMutationResponse,
     AdStopRequest,
@@ -1200,8 +1198,8 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
 # Audit log retention: keep 365 days / 500,000 rows by default (the UI promises "keeps last 1 year")
 AUDIT_LOG_RETENTION_DAYS = read_env_int("ALBAYAN_AUDIT_LOG_RETENTION_DAYS", 365)   # the UI promises "keeps last 1 year"
 AUDIT_LOG_MAX_RECORDS = read_env_int("ALBAYAN_AUDIT_LOG_MAX_RECORDS", 500000)
-# Money-history actions are never auto-deleted (closing a month, unlocking it, imports, restores, company money).
-_AUDIT_KEEP_ACTIONS = "('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review','studio_setting','collision_repair')"
+# Money-history actions are never auto-deleted (closing a month, unlocking it, imports, restores, company money, Ads Studio lifecycle and staff tests; P1-04).
+_AUDIT_KEEP_ACTIONS = "('close','unlock','cleanup','import','restore','company_coverage','wallet_release','review','studio_setting','collision_repair','stop','withdraw','publish_status','stop_request','settle_override','contact_link','subscribe_smoke_test','ig_read_test','check_comments')"
 
 
 def cleanup_old_audit_logs():
@@ -1275,25 +1273,6 @@ def _project_entity_media_for_user(
         entity, _can_include_entity_media(user, entity_type, requested)
     )
     return _project_entity_contacts_for_user(media_projected, user)
-
-
-def _redacted_ad_campaign_tombstone(entity: dict[str, Any]) -> dict[str, Any]:
-    """Tell a reviewer to remove an out-of-scope campaign without leaking it."""
-    entity_id = str(entity.get("id") or "")
-    last_modified = int(entity.get("lastModified") or 0)
-    return {
-        "id": entity_id,
-        "type": AD_CAMPAIGN_COLLECTION,
-        "deleted": True,
-        "createdAt": int(entity.get("createdAt") or last_modified),
-        "createdBy": None,
-        "lastModified": last_modified,
-        "data": {
-            "id": entity_id,
-            "_lastModified": last_modified,
-            "_deleted": True,
-        },
-    }
 
 
 def list_entities(
@@ -4547,18 +4526,15 @@ def _require_clothes_subscription(user: dict[str, Any]) -> None:
 
 AD_CAMPAIGN_COLLECTION = "adCampaignRequests"
 AD_CAMPAIGN_SERVICE_ID = "ad_maker"
-AD_CAMPAIGN_EDITABLE_STATUSES = frozenset({"Draft", "Changes Requested"})
 AD_CAMPAIGN_OPEN_STATUSES = frozenset({"Draft", "Submitted", "Changes Requested"})
 AD_CAMPAIGN_DELETABLE_STATUSES = frozenset(
     {"Draft", "Changes Requested", "Approved", "Rejected", "Stopped"}
 )
-AD_CAMPAIGN_REVIEW_DECISIONS = frozenset({"Approved", "Changes Requested", "Rejected"})
 MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER = 50
 # Customer content stays below this boundary, leaving ample headroom for
 # server-owned workflow/audit history so submit/review can never be bricked by
 # a few new timestamps or notes.
 MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES = 48 * 1024 * 1024
-MAX_AD_CAMPAIGN_REVIEW_HISTORY = 100
 # Full image decoding is intentionally bounded per API process. A customer can
 # upload from several phone tabs, but cannot make every worker allocate a large
 # pixel buffer at the same time.
@@ -4590,7 +4566,7 @@ AD_CAMPAIGN_WORKFLOW_FIELDS = frozenset(
         "paidMinorUSD",
         "paymentTransactionId",
         "paidAt",
-        "stoppedAt", "stoppedBy", "stopReason", "refundMinorUSD",
+        "stoppedAt", "stoppedBy", "stopReason", "refundMinorUSD", "closeReason",
         "refundTransactionId", "lastStopOperationId", "lastPublishOperationId",
         "createdBy",
         "creatorId",
@@ -4905,27 +4881,6 @@ def _create_ad_campaign_atomic(
         "lastModified": now,
         "data": clean,
     }
-
-
-def _ad_campaign_review_history(value: Any) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        return []
-    history: list[dict[str, str]] = []
-    for raw in value[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]:
-        if not isinstance(raw, dict):
-            continue
-        decision = sanitize_str(str(raw.get("decision") or ""), 40)
-        if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
-            continue
-        history.append(
-            {
-                "decision": decision,
-                "note": sanitize_str(str(raw.get("note") or ""), 2000),
-                "reviewedAt": sanitize_str(str(raw.get("reviewedAt") or ""), 80),
-                "reviewedBy": sanitize_str(str(raw.get("reviewedBy") or ""), 80),
-            }
-        )
-    return history
 
 
 def _soft_delete_ad_campaign_atomic(
@@ -10312,305 +10267,6 @@ def _delivery_patch_allowed(user: dict[str, Any], existing: dict[str, Any], upda
     )
 
 
-@app.post(
-    "/api/ad-studio/campaigns/{campaign_id}/submit",
-    response_model=EntityResponse,
-)
-def submit_ad_campaign_request(
-    campaign_id: str,
-    body: AdCampaignSubmitRequest,
-    request: Request,
-    user: dict[str, Any] = Depends(current_user),
-):
-    """Submit a complete request for human review; never publish a live ad."""
-    require_same_origin(request)
-    _require_ad_maker_subscription(user)
-    campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
-    if not campaign or campaign.get("deleted"):
-        raise HTTPException(status_code=404, detail="Campaign request not found")
-    creator = campaign.get("createdBy") or (campaign.get("data") or {}).get("createdBy")
-    if not user_has_permission(
-        user,
-        AD_CAMPAIGN_COLLECTION,
-        "submit",
-        record_creator_id=str(creator or ""),
-    ):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    current = campaign.get("data") or {}
-    operation_id = sanitize_str(str(body.operationId or ""), 120)
-    if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
-        raise HTTPException(status_code=400, detail="Invalid operationId")
-    if operation_id and str(current.get("lastSubmitOperationId") or "") == operation_id:
-        # The first response may have been lost after commit. Replaying the
-        # same operation returns authoritative current state instead of a
-        # misleading 409/failure notification.
-        return EntityResponse(
-            **_project_entity_media_for_user(campaign, user, False)
-        )
-    _enforce_ad_campaign_mutation_rate(user)
-    current_status = str(current.get("status") or "Draft")
-    if current_status not in AD_CAMPAIGN_EDITABLE_STATUSES:
-        raise HTTPException(
-            status_code=409,
-            detail="Only Draft or Changes Requested campaigns can be submitted",
-        )
-    with _ad_campaign_media_validation_slot(user):
-        _prepare_ad_campaign_fields(current, strict=True)
-
-    # Money gate: the requested budget must be AVAILABLE in the owner's USD
-    # wallet — a Submitted campaign holds it, approval captures it. The
-    # capture re-checks under its own lock, so this is the UX gate and that
-    # one is the hard guarantee.
-    try:
-        _budget_minor = max(int(current.get("budgetMinorUSD") or 0), 0)
-    except (TypeError, ValueError, OverflowError):
-        _budget_minor = 0
-    if _budget_minor <= 0:
-        raise HTTPException(status_code=400, detail="A campaign needs a budget greater than zero before submission")
-    with db_conn() as conn:
-        if _wallet_available_after_holds(conn, str(creator or ""), "USD") < _budget_minor:
-            raise HTTPException(
-                status_code=409,
-                detail="Insufficient wallet balance for this budget — charge the wallet first",
-            )
-
-    actor_id = str(user.get("id") or "system")
-    # A capture left by a crashed approval of the PREVIOUS cycle would be
-    # charged twice on approval of this one (new key): return it first.
-    with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK), db_conn() as conn:
-        released_tx = release_orphan_campaign_payment(conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id}, actor_id)
-    if released_tx:
-        audit(actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id, f"Returned an orphan capture for {campaign_id}", {"transactionId": released_tx})
-    replayed_after_conflict = False
-    try:
-        saved = patch_entity(
-            AD_CAMPAIGN_COLLECTION,
-            campaign_id,
-            {
-                "status": "Submitted",
-                "submittedAt": _iso_utc(),
-                "submittedBy": actor_id,
-                "reviewedAt": None,
-                "reviewedBy": None,
-                "reviewNote": "",
-                "reviewDecision": "",
-                "lastSubmitOperationId": operation_id,
-            },
-            actor_id,
-            expected_last_modified=body.expectedLastModified,
-            enforce_ad_campaign_quota=False,
-        )
-    except HTTPException as error:
-        if error.status_code != 409:
-            raise
-        latest = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
-        latest_data = (latest or {}).get("data") or {}
-        if (
-            not latest
-            or latest.get("deleted")
-            or str(latest_data.get("lastSubmitOperationId") or "") != operation_id
-        ):
-            raise
-        # A matching operation won the row-lock race while this identical
-        # request was waiting. Treat the optimistic conflict as the same
-        # committed success and do not duplicate its audit entry.
-        saved = latest
-        replayed_after_conflict = True
-    if not replayed_after_conflict:
-        audit(
-            actor_id,
-            "submit",
-            AD_CAMPAIGN_COLLECTION,
-            campaign_id,
-            f"Submitted campaign request {campaign_id} for review",
-            {"operationId": operation_id},
-        )
-    return EntityResponse(**_project_entity_media_for_user(saved, user, False))
-
-
-@app.post(
-    "/api/ad-studio/campaigns/{campaign_id}/review",
-    response_model=EntityResponse,
-)
-def review_ad_campaign_request(
-    campaign_id: str,
-    body: AdCampaignReviewRequest,
-    request: Request,
-    user: dict[str, Any] = Depends(current_user),
-):
-    """Record a human decision without creating an internal or Meta ad."""
-    require_same_origin(request)
-    _require_ad_maker_subscription(user)
-    if not user_has_permission(user, AD_CAMPAIGN_COLLECTION, "review"):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    campaign = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
-    if not campaign or campaign.get("deleted"):
-        raise HTTPException(status_code=404, detail="Campaign request not found")
-    if str(user.get("role") or "").lower() != "admin" and str(campaign.get("createdBy") or "") == str(user.get("id") or ""):
-        raise HTTPException(status_code=403, detail="You cannot review your own campaign")
-    decision = str(body.decision)
-    if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
-        # Pydantic rejects this first; keep a defense-in-depth check if the
-        # schema is ever widened independently.
-        raise HTTPException(status_code=400, detail="Invalid review decision")
-    current = campaign.get("data") or {}
-    operation_id = sanitize_str(str(body.operationId or ""), 120)
-    if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
-        raise HTTPException(status_code=400, detail="Invalid operationId")
-    note = sanitize_str(str(body.note or ""), 2000)
-    if operation_id and str(current.get("lastReviewOperationId") or "") == operation_id:
-        if (
-            str(current.get("reviewDecision") or "") != decision
-            or str(current.get("reviewNote") or "") != note
-        ):
-            raise HTTPException(status_code=409, detail="operationId was already used for another review")
-        if str(current.get("reviewDecision") or "") in {"Rejected", "Changes Requested"}:
-            # A crash may have parted the non-approval status write from its
-            # orphan-capture release; rel: is idempotent, so replay it too.
-            _rg = nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK
-            with _rg, db_conn() as conn:
-                release_orphan_campaign_payment(
-                    conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id},
-                    str(user.get("id") or "system"),
-                )
-        if str(current.get("status") or "Draft") not in {"Submitted", "Approved", "Rejected", "Stopped"}:
-            # A repeated review request may arrive after the customer has
-            # already edited a Changes Requested draft. Never return those
-            # newer private revisions to the reviewer through idempotency.
-            return EntityResponse(**_redacted_ad_campaign_tombstone(campaign))
-        return EntityResponse(
-            **_project_entity_media_for_user(campaign, user, False)
-        )
-    _enforce_ad_campaign_mutation_rate(user)
-    current_status = str(current.get("status") or "Draft")
-    if current_status != "Submitted":
-        raise HTTPException(status_code=409, detail="Only Submitted campaigns can be reviewed")
-    bumped_start = ""
-    if decision == "Approved":
-        # A start date that passed while the request waited is not the
-        # customer's fault: it starts on approval day (written below).
-        _today_iso = _business_today().strftime("%Y-%m-%d")  # the Libya day: approval at 00:30 local is already "today"
-        if str(current.get("startDate") or "")[:10] < _today_iso <= str(current.get("endDate") or "9999")[:10]:
-            bumped_start = _today_iso
-            current = {**current, "startDate": bumped_start}
-        elif str(current.get("endDate") or "9999")[:10] < _today_iso:
-            raise HTTPException(status_code=409, detail="The campaign dates have passed; request changes so the customer can re-date it")
-        # Approval means launch-ready. Revalidate server-side so older clients
-        # and legacy drafts cannot bypass today's targeting/link rules.
-        with _ad_campaign_media_validation_slot(user):
-            _prepare_ad_campaign_fields(current, strict=True)
-    actor_id = str(user.get("id") or "system")
-    if decision in {"Changes Requested", "Rejected"} and not note:
-        raise HTTPException(
-            status_code=400,
-            detail="A review note is required when requesting changes or rejecting a campaign",
-        )
-    # An approval CAPTURES the held budget before its status write, with a
-    # fresh locked status check inside the capture (at most one payment per
-    # submission cycle). Refunds of crashed-approval captures run only AFTER
-    # a successful non-approval status write — a reject can never refund a
-    # live approval that is still winning the version race.
-    campaign_owner = str(campaign.get("createdBy") or current.get("createdBy") or "")
-    wallet_payment_tx = ""
-    _wallet_guard = (
-        nullcontext()
-        if str(get_engine().dialect.name or "") == "postgresql"
-        else _SQLITE_WALLET_LOCK
-    )
-    if decision == "Approved":
-        with _wallet_guard, db_conn() as conn:
-            wallet_payment_tx = capture_campaign_budget(
-                conn,
-                _WALLET_PAYMENTS_CTX,
-                {**current, "id": campaign_id, "createdBy": campaign_owner},
-                actor_id,
-            )
-
-    reviewed_at = _iso_utc()
-    history = _ad_campaign_review_history(current.get("reviewHistory"))
-    history.append(
-        {
-            "decision": decision,
-            "note": note,
-            "reviewedAt": reviewed_at,
-            "reviewedBy": actor_id,
-        }
-    )
-    history = history[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]
-    transition_fields: dict[str, Any] = {
-        "status": decision,
-        "reviewDecision": decision,
-        "reviewedAt": reviewed_at,
-        "reviewedBy": actor_id,
-        "reviewNote": note,
-        "reviewHistory": history,
-        "lastReviewOperationId": operation_id,
-    }
-    if decision == "Approved":
-        transition_fields.update(
-            {
-                "approvedAt": reviewed_at,
-                "approvedBy": actor_id,
-                "paidMinorUSD": int(current.get("budgetMinorUSD") or 0),
-                "paymentTransactionId": wallet_payment_tx,
-                "paidAt": reviewed_at,
-            }
-        )
-    elif decision == "Rejected":
-        transition_fields.update({"rejectedAt": reviewed_at, "rejectedBy": actor_id})
-    if bumped_start:
-        transition_fields["startDate"] = bumped_start
-    replayed_after_conflict = False
-    try:
-        saved = patch_entity(
-            AD_CAMPAIGN_COLLECTION,
-            campaign_id,
-            transition_fields,
-            actor_id,
-            expected_last_modified=body.expectedLastModified,
-            enforce_ad_campaign_quota=False,
-        )
-    except HTTPException as error:
-        if error.status_code != 409:
-            raise
-        latest = get_entity(AD_CAMPAIGN_COLLECTION, campaign_id)
-        latest_data = (latest or {}).get("data") or {}
-        if (
-            not latest
-            or latest.get("deleted")
-            or str(latest_data.get("lastReviewOperationId") or "") != operation_id
-            or str(latest_data.get("reviewDecision") or "") != decision
-            or str(latest_data.get("reviewNote") or "") != note
-        ):
-            raise
-        saved = latest
-        replayed_after_conflict = True
-    if decision != "Approved":
-        # The campaign has now LEFT Submitted, so no new capture can happen
-        # for this cycle (the capture verifies live status under lock): any
-        # capture found here is a crashed approval's orphan — refund it.
-        with _wallet_guard, db_conn() as conn:
-            released_tx = release_orphan_campaign_payment(conn, _WALLET_PAYMENTS_CTX, {**current, "id": campaign_id}, actor_id)
-        if released_tx:
-            audit(actor_id, "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id, f"Returned an orphan capture for {campaign_id}", {"transactionId": released_tx})
-    if not replayed_after_conflict:
-        audit(
-            actor_id,
-            "review",
-            AD_CAMPAIGN_COLLECTION,
-            campaign_id,
-            f"Reviewed campaign request {campaign_id}: {decision}",
-            {"decision": decision, "note": note, "operationId": operation_id, "walletPaymentTx": wallet_payment_tx,
-             "budgetMinorUSD": int(current.get("budgetMinorUSD") or 0)},
-        )
-    if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
-        "Submitted", "Approved", "Rejected", "Stopped"
-    }:
-        return EntityResponse(**_redacted_ad_campaign_tombstone(saved))
-    return EntityResponse(**_project_entity_media_for_user(saved, user, False))
-
-
 SYNC_WATERMARK_COLLECTIONS = (
     "ads",
     "receipts",
@@ -13919,7 +13575,7 @@ _WALLET_PAYMENTS_CTX = {
     "audit": audit,
     "sqlite_wallet_lock": lambda: _SQLITE_WALLET_LOCK,
     "is_postgres": lambda: str(get_engine().dialect.name or "") == "postgresql",
-    # Campaign-actions extras (stop / publish-status router):
+    # Campaign-actions extras (submit / review / stop / publish-status router):
     "sqlite_patch_lock": lambda: _SQLITE_ENTITY_PATCH_LOCK,
     "require_ad_maker_subscription": _require_ad_maker_subscription,
     "user_has_permission": user_has_permission,
@@ -13948,10 +13604,21 @@ app.include_router(
     )
 )
 app.include_router(
-    create_ad_campaign_actions_router(
+    create_ad_campaign_actions_router(  # submit/review/stop/publish-status (server/systems/ads_studio/ad_campaign_actions.py)
         current_user_dependency=current_user,
         require_same_origin=require_same_origin,
-        ctx=_WALLET_PAYMENTS_CTX,
+        # Late-bound (P1-01, P1-10): submit/review moved out of this file still call main's helpers as they are at call time.
+        ctx={**_WALLET_PAYMENTS_CTX,
+             "get_entity": lambda *a, **k: get_entity(*a, **k), "patch_entity": lambda *a, **k: patch_entity(*a, **k),
+             "audit": lambda *a, **k: audit(*a, **k), "iso_utc": lambda *a, **k: _iso_utc(*a, **k),
+             "sanitize_str": lambda *a, **k: sanitize_str(*a, **k), "user_has_permission": lambda *a, **k: user_has_permission(*a, **k),
+             "require_ad_maker_subscription": lambda *a, **k: _require_ad_maker_subscription(*a, **k),
+             "enforce_ad_campaign_rate": lambda *a, **k: _enforce_ad_campaign_mutation_rate(*a, **k),
+             "project_entity_media_for_user": lambda *a, **k: _project_entity_media_for_user(*a, **k),
+             "prepare_ad_campaign_fields": lambda *a, **k: _prepare_ad_campaign_fields(*a, **k),
+             "media_validation_slot": lambda *a, **k: _ad_campaign_media_validation_slot(*a, **k),
+             "wallet_available_after_holds": lambda *a, **k: _wallet_available_after_holds(*a, **k),
+             "business_today": lambda *a, **k: _business_today(*a, **k)},
     )
 )
 

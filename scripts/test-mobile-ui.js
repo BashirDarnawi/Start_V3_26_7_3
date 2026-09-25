@@ -1539,6 +1539,13 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     review: ['advertisement-request review decisions', 'قرارات مراجعة طلبات الإعلانات'],
     studio_setting: ['changes to Ads Studio settings', 'تغيير إعدادات استوديو الإعلانات'],
     collision_repair: ['owner-approved moves of Ads Studio advertisements out of the agency records', 'نقل إعلانات الاستوديو من سجلات الوكالة بموافقة المالك'],
+    stop: ['stopping advertisements', 'إيقاف الإعلانات'], withdraw: ['withdrawn ad requests', 'سحب طلبات الإعلانات'],
+    publish_status: ['advertisement publishing status changes', 'تغييرات حالة نشر الإعلانات'],
+    stop_request: ['customer requests to stop an advertisement', 'طلبات العملاء لإيقاف إعلان'],
+    settle_override: ['manual settlement decisions', 'قرارات التسوية اليدوية'],
+    contact_link: ['opened customer contact links', 'فتح روابط التواصل مع العملاء'],
+    subscribe_smoke_test: ['page connection tests', 'اختبارات ربط الصفحات'], ig_read_test: ['page connection tests', 'اختبارات ربط الصفحات'],
+    check_comments: ['manual comment checks', 'الفحص اليدوي للتعليقات'],
   };
   const keptLists = [(privacy.match(/settings actions \(([^)]*)\) are kept permanently/) || [])[1], (privacy.match(/وعمليات الإعدادات \(([^)]*)\) فتُحفظ/) || [])[1]];
   const keptProblems = kept.filter(a => !keptWording[a]).map(a => `no wording for ${a}`);
