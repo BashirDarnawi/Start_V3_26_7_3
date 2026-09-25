@@ -12,6 +12,7 @@ token reading shows ``ads_management``.
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import ipaddress
@@ -23,7 +24,7 @@ import socket
 import threading
 import time
 import unicodedata
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -64,6 +65,51 @@ _META_LAST_REMOTE_REQUEST_MONOTONIC = 0.0
 _META_LAST_REMOTE_REQUEST_AT = ""
 _META_PROVIDER_STATE_REFRESH_LOCK = threading.Lock()
 _META_PROVIDER_STATE_REFRESHED_AT = 0.0
+# Meta call lanes (PLAN P3-00a-c). Each lane has its own request lock, pacing clock and back-off
+# record, so a slow or limited lane never holds up another one:
+#   admin          Albayan Manager (sync, discovery, funds, link, rename): every caller from before
+#                  the lanes. Its record is the _META_REMOTE_* state above, with today's behaviour.
+#   studio_results Albayan Studio results reads: an ads limit parks only the ad account it names.
+#   page           Social Studio replies, posts and page reads: a page limit parks only that page.
+# App-wide signals (codes 4/17/613, x-app-usage, usage types Albayan does not know) pause every lane.
+META_LANES = ("admin", "studio_results", "page")
+_META_LANE_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "albayan_meta_lane", default=None
+)
+_META_ADS_CODES = frozenset({"80000", "80003", "80004", "80014"})
+_META_PAGE_CODES = frozenset({"32", "80001", "80002", "80006"})
+# X-Business-Use-Case-Usage types (Meta's rate-limiting page); any other type counts as app-wide.
+_META_ADS_USAGE_TYPES = frozenset({"ads_insights", "ads_management", "custom_audience"})
+_META_PAGE_USAGE_TYPES = frozenset({"pages", "instagram", "messenger"})
+_META_LANE_MAX_PARKS = 200
+_META_LANE_REPORT_MAX_PARKS = 50
+_META_LANE_STATE_ID = "lanes"  # metaProviderState/"lanes", beside metaProviderState/"global" (the admin lane)
+_META_LANE_STATE_REFRESH_LOCK = threading.Lock()
+_META_LANE_STATE_REFRESHED_AT = 0.0
+_META_PARK_KEY_RE = re.compile(r"[0-9a-f]{24}")
+
+
+class _MetaLaneState:
+    """One lane other than admin: its request lock, pacing clock, last usage and parked objects.
+
+    ``parks`` maps a park key (a hash of the lane and the object id; never the id itself) to
+    ``{"until": monotonic seconds, "reason", "usagePercent", "object": the id's last 4 digits}``.
+    Guarded by _META_REMOTE_BACKOFF_LOCK, like the admin record.
+    """
+
+    def __init__(self) -> None:
+        self.request_lock = threading.Lock()
+        self.last_request_monotonic = 0.0
+        self.last_request_at = ""
+        self.usage_percent = 0
+        self.parks: dict[str, dict[str, Any]] = {}
+
+
+_META_LANE_STATES: dict[str, _MetaLaneState] = {"studio_results": _MetaLaneState(), "page": _MetaLaneState()}
+# An app-wide pause is always part of the admin pause (the admin record holds it, so every admin
+# check sees it as before the lanes). This mark says until when the other lanes wait with it.
+_META_APP_WIDE_UNTIL = 0.0
+_META_APP_WIDE_REASON = ""
 _META_IMPORT_STATE_TYPE = "metaImportState"
 _META_IMPORT_STATE_ID = "automatic"
 _META_PROVIDER_STATE_TYPE = "metaProviderState"
@@ -292,6 +338,15 @@ def _server_token_matches(config: "MetaAdsConfig") -> bool:
     return bool(configured and hmac.compare_digest(configured, config.access_token))
 
 
+def _backoff_delay_seconds(seconds: Any) -> int:
+    try:
+        # Meta can explicitly ask for more than fifteen minutes. Retrying before
+        # that time only extends the throttle, so respect up to one hour.
+        return min(max(int(float(seconds or 60)), 30), 60 * 60)
+    except (TypeError, ValueError, OverflowError):
+        return 60
+
+
 def _set_meta_remote_backoff(
     seconds: Any = 60,
     *,
@@ -301,12 +356,7 @@ def _set_meta_remote_backoff(
 ) -> None:
     global _META_REMOTE_BACKOFF_UNTIL, _META_REMOTE_BACKOFF_REASON
     global _META_REMOTE_USAGE_PERCENT
-    try:
-        # Meta can explicitly ask for more than fifteen minutes. Retrying before
-        # that time only extends the throttle, so respect up to one hour.
-        delay = min(max(int(float(seconds or 60)), 30), 60 * 60)
-    except (TypeError, ValueError, OverflowError):
-        delay = 60
+    delay = _backoff_delay_seconds(seconds)
     try:
         parsed_usage = min(max(int(float(usage_percent or 0)), 0), 100)
     except (TypeError, ValueError, OverflowError):
@@ -329,35 +379,328 @@ def _meta_request_interval_seconds() -> float:
     return min(max(milliseconds, 100), 5_000) / 1000.0
 
 
-def _observe_meta_response(response: Any, config: "MetaAdsConfig") -> None:
-    """Slow down before Meta has to reject a request."""
-    global _META_REMOTE_USAGE_PERCENT
-    usage_percent, regain_seconds = _response_usage(response)
-    if usage_percent <= 0:
-        return
-    with _META_REMOTE_BACKOFF_LOCK:
-        _META_REMOTE_USAGE_PERCENT = usage_percent
+def _meta_usage_pause_percent() -> int:
     try:
         threshold = int(float(os.getenv("ALBAYAN_META_USAGE_PAUSE_PERCENT") or 85))
     except (TypeError, ValueError, OverflowError):
         threshold = 85
-    threshold = min(max(threshold, 60), 99)
+    return min(max(threshold, 60), 99)
+
+
+def _usage_pause_seconds(usage_percent: int, regain_seconds: int) -> int:
+    if regain_seconds > 0:
+        return regain_seconds
+    if usage_percent >= 98:
+        return 15 * 60
+    if usage_percent >= 92:
+        return 8 * 60
+    return 3 * 60
+
+
+def _lane_name(lane: Any) -> str:
+    name = str(lane or "").strip()
+    if name not in META_LANES:
+        raise MetaAdsError("invalid_request", "Invalid Meta API request")
+    return name
+
+
+def _lane_object_id(value: Any) -> str:
+    """The object a call or a usage entry names, as parks key it: an ad account without "act_",
+    the page part of a "<page>_<post>" id, or a plain id; '' for anything else."""
+    text_value = str(value or "").strip()
+    if text_value.startswith("act_"):
+        text_value = text_value[4:]
+    if re.fullmatch(r"[0-9]{1,40}_[0-9]{1,40}", text_value):
+        text_value = text_value.split("_", 1)[0]
+    return text_value if re.fullmatch(r"[A-Za-z0-9]{1,40}", text_value) else ""
+
+
+@contextmanager
+def meta_call_lane(lane: str, *, subject: Any = ""):
+    """Send the Meta calls made inside this block on one lane (PLAN P3-00a).
+
+    ``subject`` is the ad account or page the calls are for: while it is parked the calls are
+    refused before anything reaches Meta (MetaAdsError "rate_limited", no provider code), and a
+    limit Meta names no object for parks it. The innermost block wins; a call given its own
+    ``lane=`` keeps that lane.
+    """
+    marker = _META_LANE_CONTEXT.set((_lane_name(lane), _lane_object_id(subject)))
+    try:
+        yield
+    finally:
+        _META_LANE_CONTEXT.reset(marker)
+
+
+def _resolve_call_lane(lane: str | None, access_token: str | None) -> tuple[str, str]:
+    """(lane, subject) of one request: its own lane, else the surrounding meta_call_lane block,
+    else the page lane for a call sent with a Page token, else the admin lane."""
+    context = _META_LANE_CONTEXT.get()
+    if lane:
+        name = _lane_name(lane)
+        return name, (context[1] if context and context[0] == name else "")
+    if context:
+        return context
+    return ("page", "") if access_token else ("admin", "")
+
+
+def _page_id_for_token(token: str) -> str:
+    """The page a cached Page token belongs to ('' when it is not in the cache)."""
+    wanted = str(token or "").encode("utf-8")
+    with _PAGE_TOKEN_LOCK:
+        for page_id, (cached, _expires) in _PAGE_TOKEN_CACHE.items():
+            if hmac.compare_digest(cached.encode("utf-8"), wanted):
+                return page_id
+    return ""
+
+
+def _call_subjects(lane: str, safe_path: str, access_token: str | None, subject: str) -> tuple[str, ...]:
+    """The objects one call is for, its own object first: its lane block's subject, else (on the
+    page lane) the page whose token it sends, else the first part of its path. A park of any of
+    them holds the call; a limit that names no object parks only the first."""
+    ids = [subject]
+    if lane == "page" and access_token:
+        ids.append(_page_id_for_token(str(access_token)))
+    ids.append(_lane_object_id(safe_path.split("/", 1)[0]))
+    return tuple(dict.fromkeys(item for item in ids if item))
+
+
+def _lane_park_key(lane: str, object_id: str) -> str:
+    """A park's key: a hash of the lane and the object id, so neither memory nor the stored row
+    needs the id itself."""
+    return hashlib.sha256(f"metaLane|{lane}|{object_id}".encode("utf-8")).hexdigest()[:24]
+
+
+def _trim_parks(state: _MetaLaneState, now: float) -> None:
+    """Drop ended parks; beyond the cap, keep the ones that end last. Caller holds the lock."""
+    live = {key: park for key, park in state.parks.items() if park.get("until", 0.0) > now}
+    if len(live) > _META_LANE_MAX_PARKS:
+        kept = sorted(live.items(), key=lambda item: item[1]["until"], reverse=True)[:_META_LANE_MAX_PARKS]
+        live = dict(kept)
+    state.parks = live
+
+
+def _park_lane_objects(
+    lane: str, object_ids: Any, seconds: Any, *, reason: str, usage_percent: Any = 0
+) -> bool:
+    """Park these objects (ad accounts or pages) on one lane; the rest of the lane keeps going."""
+    state = _META_LANE_STATES.get(lane)
+    ids = [item for item in dict.fromkeys(object_ids or ()) if item]
+    if state is None or not ids:
+        return False
+    delay = _backoff_delay_seconds(seconds)
+    try:
+        usage = min(max(int(float(usage_percent or 0)), 0), 100)
+    except (TypeError, ValueError, OverflowError):
+        usage = 0
+    now = time.monotonic()
+    with _META_REMOTE_BACKOFF_LOCK:
+        for object_id in ids:
+            key = _lane_park_key(lane, object_id)
+            park = state.parks.get(key) or {"until": 0.0, "usagePercent": 0, "object": account_tail(object_id)}
+            park["until"] = max(park["until"], now + delay)
+            park["reason"] = _clean_text(reason, 80) or "rate_limited"
+            park["usagePercent"] = max(int(park.get("usagePercent") or 0), usage)
+            state.parks[key] = park
+        _trim_parks(state, now)
+    return True
+
+
+def _lane_park_remaining(lane: str, subjects: tuple[str, ...]) -> int:
+    state = _META_LANE_STATES.get(lane)
+    if state is None or not subjects:
+        return 0
+    keys = [_lane_park_key(lane, subject) for subject in subjects]
+    with _META_REMOTE_BACKOFF_LOCK:
+        until = max((state.parks.get(key) or {}).get("until", 0.0) for key in keys)
+    return max(0, int(math.ceil(until - time.monotonic())))
+
+
+def _mark_app_wide(seconds: Any, *, reason: str) -> None:
+    """Mark the next ``seconds`` of the admin pause as app-wide: every lane waits with it. The
+    caller also sets the admin pause, after this mark, so the admin record holds the whole pause."""
+    global _META_APP_WIDE_UNTIL, _META_APP_WIDE_REASON
+    delay = _backoff_delay_seconds(seconds)
+    with _META_REMOTE_BACKOFF_LOCK:
+        _META_APP_WIDE_UNTIL = max(_META_APP_WIDE_UNTIL, time.monotonic() + delay)
+        _META_APP_WIDE_REASON = _clean_text(reason, 80) or "rate_limited"
+
+
+def _app_wide_remaining() -> int:
+    with _META_REMOTE_BACKOFF_LOCK:
+        until = min(_META_APP_WIDE_UNTIL, _META_REMOTE_BACKOFF_UNTIL)
+    return max(0, int(math.ceil(until - time.monotonic())))
+
+
+def _lane_refusal_seconds(lane: str, subjects: tuple[str, ...], use_headroom: bool) -> int:
+    """Seconds a call on this lane must still wait (0: it may be sent). The admin lane answers as
+    before the lanes (its own pause, the headroom exception included); the other lanes wait for an
+    app-wide pause and for a park of the object the call is for."""
+    if lane == "admin":
+        remaining = _meta_remote_backoff_remaining()
+        return 0 if remaining and use_headroom and _meta_pause_leaves_headroom() else remaining
+    return max(_app_wide_remaining(), _lane_park_remaining(lane, subjects))
+
+
+def _lane_request_lock(lane: str) -> Any:
+    return _META_REMOTE_REQUEST_LOCK if lane == "admin" else _META_LANE_STATES[lane].request_lock
+
+
+def _lane_last_request(lane: str) -> float:
+    if lane == "admin":
+        return _META_LAST_REMOTE_REQUEST_MONOTONIC
+    return _META_LANE_STATES[lane].last_request_monotonic
+
+
+def _touch_lane_clock(lane: str) -> None:
+    global _META_LAST_REMOTE_REQUEST_MONOTONIC, _META_LAST_REMOTE_REQUEST_AT
+    if lane == "admin":
+        _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
+        _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+        return
+    state = _META_LANE_STATES[lane]
+    state.last_request_monotonic = time.monotonic()
+    state.last_request_at = _iso_now()
+
+
+def _usage_entries(response: Any) -> list[tuple[str, str, int, int]]:
+    """(scope, object id, usage percent, regain seconds) of each usage entry in Meta's headers.
+
+    ``x-app-usage`` is app-wide; ``x-ad-account-usage`` is ads (its object is the account the
+    call named, so none is given); each ``x-business-use-case-usage`` entry takes the scope of its
+    documented type and is keyed by the business object id. An unknown or missing type, or a
+    header shape Albayan does not know, is app-wide.
+    """
+    entries: list[tuple[str, str, int, int]] = []
+    for header, scope in (("x-app-usage", "app"), ("x-ad-account-usage", "ads"), ("x-business-use-case-usage", "")):
+        raw = response.headers.get(header)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if scope or not isinstance(payload, dict):
+            entries.append((scope or "app", "", _find_usage_percent(payload), _find_regain_minutes(payload) * 60))
+            continue
+        for object_id, rows in list(payload.items())[:50]:
+            for row in (rows if isinstance(rows, list) else [rows])[:20]:
+                kind = str(row.get("type") or "").strip().lower() if isinstance(row, dict) else ""
+                entry_scope = "ads" if kind in _META_ADS_USAGE_TYPES else "page" if kind in _META_PAGE_USAGE_TYPES else "app"
+                entries.append((entry_scope, _lane_object_id(object_id), _find_usage_percent(row), _find_regain_minutes(row) * 60))
+    return entries
+
+
+def _throttle_scope(code: str) -> str:
+    """The scope of one of Meta's limit codes: "app", "ads" or "page". The app-wide codes 4, 17
+    and 613, and any limit Albayan does not map (HTTP 429 alone, the other 80xxx use cases),
+    count as app-wide."""
+    if code in _META_ADS_CODES:
+        return "ads"
+    if code in _META_PAGE_CODES:
+        return "page"
+    return "app"
+
+
+def _record_meta_throttle(
+    response: Any,
+    code: str,
+    *,
+    lane: str,
+    subjects: tuple[str, ...],
+    seconds: Any,
+    reason: str,
+    usage_percent: Any,
+    persist: bool,
+) -> None:
+    """Meta refused a call for a limit: act by the limit's scope (PLAN P3-00b).
+
+    App-wide codes pause every lane. On the admin lane every limit pauses the admin lane, as
+    before the lanes, and a page code also parks the page (the ones the usage header names, else
+    the call's own) on the page lane. Ads codes on the studio_results lane park only the ad
+    account the call was for (and any the usage header names); on the page lane they pause the
+    admin lane, the lane of the ads allowance. Page codes on the other lanes park the call's own
+    object and any page the usage header names, never a whole lane.
+    """
+    scope = _throttle_scope(code)
+    threshold = _meta_usage_pause_percent()
+    named = tuple(dict.fromkeys(
+        object_id for kind, object_id, usage, regain in _usage_entries(response)
+        if kind == scope and object_id and (usage >= threshold or regain > 0)
+    ))
+    own = subjects[:1]
+    lanes_changed = False
+    if scope == "app":
+        _mark_app_wide(seconds, reason=reason)
+        lanes_changed = True
+    if lane == "admin" or scope == "app" or (scope == "ads" and lane == "page"):
+        _set_meta_remote_backoff(seconds, reason=reason, usage_percent=usage_percent, persist=persist)
+    if scope == "ads" and lane == "studio_results":
+        lanes_changed |= _park_lane_objects(lane, named + own, seconds, reason=reason, usage_percent=usage_percent)
+    elif scope == "page" and lane == "admin":
+        lanes_changed |= _park_lane_objects("page", named or own, seconds, reason=reason, usage_percent=usage_percent)
+    elif scope == "page":
+        lanes_changed |= _park_lane_objects("page", named, seconds, reason=reason, usage_percent=usage_percent)
+        lanes_changed |= _park_lane_objects(lane, own, seconds, reason=reason, usage_percent=usage_percent)
+    if persist and lanes_changed:
+        _persist_meta_lane_state()
+
+
+def _observe_meta_response(
+    response: Any, config: "MetaAdsConfig", *, lane: str = "admin", subjects: tuple[str, ...] = ()
+) -> None:
+    """Slow down before Meta has to reject a request.
+
+    The admin lane pauses itself when the highest usage of all headers reaches the threshold, as
+    before the lanes. Entries at or over the threshold also act by their scope (PLAN P3-00b):
+    app-wide ones pause every lane; page ones park the page they name; ads ones park the ad account
+    they name on the studio_results lane and pause the admin lane from the page lane.
+    """
+    global _META_REMOTE_USAGE_PERCENT
+    usage_percent, regain_seconds = _response_usage(response)
+    if usage_percent <= 0:
+        return
+    lane_state = _META_LANE_STATES.get(lane)
+    with _META_REMOTE_BACKOFF_LOCK:
+        if lane_state is None:
+            _META_REMOTE_USAGE_PERCENT = usage_percent
+        else:
+            lane_state.usage_percent = usage_percent
+    threshold = _meta_usage_pause_percent()
     if usage_percent < threshold:
         return
-    if regain_seconds > 0:
-        pause_seconds = regain_seconds
-    elif usage_percent >= 98:
-        pause_seconds = 15 * 60
-    elif usage_percent >= 92:
-        pause_seconds = 8 * 60
-    else:
-        pause_seconds = 3 * 60
-    _set_meta_remote_backoff(
-        pause_seconds,
-        reason="usage_high",
-        usage_percent=usage_percent,
-        persist=_server_token_matches(config),
-    )
+    app_usage = app_regain = ads_usage = ads_regain = 0
+    parks: dict[tuple[str, str], tuple[int, int]] = {}
+    for scope, object_id, usage, regain in _usage_entries(response):
+        if usage < threshold:
+            continue
+        if scope == "app":
+            app_usage, app_regain = max(app_usage, usage), max(app_regain, regain)
+        elif scope == "ads" and lane != "studio_results":
+            ads_usage, ads_regain = max(ads_usage, usage), max(ads_regain, regain)
+        else:
+            target = "page" if scope == "page" else "studio_results"
+            for parked in ((object_id,) if object_id else subjects[:1]):
+                earlier_usage, earlier_regain = parks.get((target, parked), (0, 0))
+                parks[(target, parked)] = (max(earlier_usage, usage), max(earlier_regain, regain))
+    admin_seconds = admin_usage = 0
+    if lane_state is None:  # the admin lane, as before the lanes: the highest usage of all headers
+        admin_seconds, admin_usage = _usage_pause_seconds(usage_percent, regain_seconds), usage_percent
+    elif ads_usage:
+        admin_seconds, admin_usage = _usage_pause_seconds(ads_usage, ads_regain), ads_usage
+    if app_usage:
+        app_seconds = _usage_pause_seconds(app_usage, app_regain)
+        _mark_app_wide(app_seconds, reason="usage_high")
+        admin_seconds, admin_usage = max(admin_seconds, app_seconds), max(admin_usage, app_usage)
+    persist = _server_token_matches(config)
+    if admin_seconds:
+        _set_meta_remote_backoff(admin_seconds, reason="usage_high", usage_percent=admin_usage, persist=persist)
+    parked_any = False
+    for (target, object_id), (usage, regain) in parks.items():
+        parked_any |= _park_lane_objects(
+            target, (object_id,), _usage_pause_seconds(usage, regain), reason="usage_high", usage_percent=usage
+        )
+    if persist and (app_usage or parked_any):
+        _persist_meta_lane_state()
 
 
 META_AD_LINK_FIELDS = frozenset(
@@ -1149,7 +1492,9 @@ class MetaAdsClient:
             raise MetaAdsError("account_not_allowed", "This Meta ad account is not allowed")
         return normalized
 
-    def _safe_error(self, response: httpx.Response, payload: Any) -> MetaAdsError:
+    def _safe_error(
+        self, response: httpx.Response, payload: Any, *, lane: str = "admin", subjects: tuple[str, ...] = ()
+    ) -> MetaAdsError:
         status = int(response.status_code or 0)
         error = payload.get("error") if isinstance(payload, dict) else {}
         code = str(error.get("code") or status or "meta_error") if isinstance(error, dict) else str(status)
@@ -1163,15 +1508,20 @@ class MetaAdsClient:
         # Marketing API's per-ad-account/business throttling, which arrives as
         # a plain HTTP 400. Both mean "wait, then continue" — treating them as
         # permanent failures is what used to freeze photos and budgets behind
-        # multi-hour backoffs whenever an account was busy.
+        # multi-hour backoffs whenever an account was busy. Which lanes wait is
+        # decided by the limit's scope (_record_meta_throttle, PLAN P3-00b).
         if status == 429 or code in {
             "4", "17", "32", "613",
             "80000", "80001", "80002", "80003", "80004",
             "80005", "80006", "80008", "80009", "80014",
         }:
             usage_percent, regain_seconds = _response_usage(response)
-            _set_meta_remote_backoff(
-                max(_estimated_backoff_seconds(response), regain_seconds),
+            _record_meta_throttle(
+                response,
+                code,
+                lane=lane,
+                subjects=subjects,
+                seconds=max(_estimated_backoff_seconds(response), regain_seconds),
                 reason=f"meta_{provider_code}",
                 usage_percent=usage_percent,
                 persist=_server_token_matches(self.config),
@@ -1205,8 +1555,9 @@ class MetaAdsClient:
         """POST form data to Graph (Social Studio publishing and replies).
 
         ``access_token`` lets a call use a Page token instead of the system
-        token; the appsecret_proof is always computed for the token actually
-        sent. Nested dict/list values are JSON-encoded the way Graph expects.
+        token (such a call goes on the page lane); the appsecret_proof is always
+        computed for the token actually sent. Nested dict/list values are
+        JSON-encoded the way Graph expects.
         """
         form: dict[str, Any] = {}
         for key, value in (data or {}).items():
@@ -1224,6 +1575,7 @@ class MetaAdsClient:
         """Page token for publishing/replying, cached in memory for 50 minutes.
 
         Never persisted and never logged: the cache lives only in this process.
+        Read on the page lane (a reply never waits behind the admin lane).
         """
         clean_id = re.sub(r"\D", "", str(page_id or ""))
         if not clean_id:
@@ -1232,7 +1584,8 @@ class MetaAdsClient:
             cached = _PAGE_TOKEN_CACHE.get(clean_id)
             if cached and cached[1] > time.monotonic():
                 return cached[0]
-        payload = self._get(clean_id, {"fields": "access_token"})
+        with meta_call_lane("page", subject=clean_id):
+            payload = self._get(clean_id, {"fields": "access_token"})
         token = str(payload.get("access_token") or "")
         if not token:
             raise MetaAdsError(
@@ -1252,10 +1605,19 @@ class MetaAdsClient:
         data: dict[str, Any] | None = None,
         access_token: str | None = None,
         use_headroom: bool = False,
+        lane: str | None = None,
     ) -> dict[str, Any]:
+        """One Graph call on one lane (PLAN P3-00a).
+
+        ``lane`` is "admin" by default: a call made inside a meta_call_lane block goes on that
+        block's lane, and a call sent with a Page token goes on the page lane. ``use_headroom``
+        applies to the admin lane only.
+        """
         safe_path = str(path or "").strip("/")
         if not safe_path or ".." in safe_path or not re.fullmatch(r"[A-Za-z0-9_/-]+", safe_path):
             raise MetaAdsError("invalid_path", "Invalid Meta API request")
+        lane_name, subject = _resolve_call_lane(lane, access_token)
+        subjects = _call_subjects(lane_name, safe_path, access_token, subject)
         token = str(access_token or self.config.access_token)
         query = dict(params or {})
         form = dict(data or {})
@@ -1270,24 +1632,27 @@ class MetaAdsClient:
             else:
                 query["appsecret_proof"] = proof
         url = f"https://graph.facebook.com/{self.config.graph_version}/{safe_path}"
-        # Every Meta caller (background import, details refresh, manual action,
-        # webhook wake-up and partner statistics) shares this one request lane.
-        # That prevents separate jobs from unknowingly exhausting the same
-        # business-use-case allowance at the same time.
-        with _META_REMOTE_REQUEST_LOCK:
+        # The callers of one lane share its lock and pacing clock, so separate jobs
+        # never unknowingly exhaust the same allowance at the same time. The admin
+        # lane is every caller from before the lanes (background import, details
+        # refresh, manual actions, webhook wake-up, partner statistics, funds, link);
+        # a slow or paused lane never holds up the studio_results or page lane.
+        with _lane_request_lock(lane_name):
             server_config = _server_token_matches(self.config)
             if server_config:
                 _refresh_meta_provider_state()
-            if _meta_remote_backoff_remaining() and not (use_headroom and _meta_pause_leaves_headroom()):
+                if lane_name != "admin":
+                    _refresh_meta_lane_state()
+            if _lane_refusal_seconds(lane_name, subjects, use_headroom):
                 raise MetaAdsError(
                     "rate_limited",
                     "Meta synchronization is paused safely and will resume automatically.",
                     retryable=True,
                 )
-            global _META_LAST_REMOTE_REQUEST_MONOTONIC, _META_LAST_REMOTE_REQUEST_AT
-            elapsed = time.monotonic() - _META_LAST_REMOTE_REQUEST_MONOTONIC
+            last_request = _lane_last_request(lane_name)
+            elapsed = time.monotonic() - last_request
             wait_seconds = _meta_request_interval_seconds() - elapsed
-            if server_config and _META_LAST_REMOTE_REQUEST_MONOTONIC and wait_seconds > 0:
+            if server_config and last_request and wait_seconds > 0:
                 time.sleep(min(wait_seconds, _meta_request_interval_seconds()))  # never longer than one interval
             try:
                 with httpx.Client(
@@ -1308,15 +1673,12 @@ class MetaAdsClient:
                         )
             except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.CloseError):
                 # The request left the building: Meta may have applied it.
-                _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
-                _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+                _touch_lane_clock(lane_name)
                 raise MetaAdsError("timeout", "Meta did not answer in time. Albayan will retry.", retryable=True)
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError):
-                _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
-                _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+                _touch_lane_clock(lane_name)
                 raise MetaAdsError("network", "Meta could not be reached. Albayan will retry.", retryable=True)
-            _META_LAST_REMOTE_REQUEST_MONOTONIC = time.monotonic()
-            _META_LAST_REMOTE_REQUEST_AT = _iso_now()
+            _touch_lane_clock(lane_name)
             if response_body is None:
                 raise MetaAdsError("response_too_large", "Meta returned too much data for one synchronization.")
             try:
@@ -1324,13 +1686,13 @@ class MetaAdsClient:
             except ValueError:
                 payload = {}
             if not 200 <= response.status_code < 300 or (isinstance(payload, dict) and payload.get("error")):
-                error = self._safe_error(response, payload)
+                error = self._safe_error(response, payload, lane=lane_name, subjects=subjects)
                 # Only a dead token (Graph code 190, any subcode, or HTTP 401) is forgotten; a
                 # permission refusal or a limit sent as 403 leaves a working Page token cached.
                 if access_token and (response.status_code == 401 or error.provider_code.split(".")[0] == "190"):
                     _evict_page_token(str(access_token))
                 raise error
-            _observe_meta_response(response, self.config)
+            _observe_meta_response(response, self.config, lane=lane_name, subjects=subjects)
             if not isinstance(payload, dict):
                 raise MetaAdsError("invalid_response", "Meta returned an invalid response.")
             return payload
@@ -3533,6 +3895,229 @@ def _public_meta_provider_state(*, refresh: bool = False) -> dict[str, Any]:
     }
 
 
+# Meta call lanes: the app-wide mark and the lane parks are kept in metaProviderState/"lanes"
+# (created_by NULL), beside the admin lane's metaProviderState/"global", so a restart or another
+# process keeps them (PLAN P3-00c). A park is stored by its hashed key and the object's last 4
+# digits only; never an id, a name or a token.
+
+
+def _clean_stored_park(row: Any, now_epoch_ms: int) -> dict[str, Any] | None:
+    if not isinstance(row, dict) or not _META_PARK_KEY_RE.fullmatch(str(row.get("key") or "")):
+        return None
+    until_ms = _metric_int(row.get("untilMs"))
+    if until_ms <= now_epoch_ms:
+        return None
+    tail = _clean_text(row.get("object"), 8)
+    return {
+        "key": str(row["key"]),
+        "object": tail if re.fullmatch(r"…[0-9]{1,4}", tail) else "",
+        "untilMs": until_ms,
+        "reason": _clean_text(row.get("reason"), 80) or "rate_limited",
+        "usagePercent": min(_metric_int(row.get("usagePercent")), 100),
+    }
+
+
+def _lane_state_for_storage() -> dict[str, Any]:
+    """This process's app-wide mark and live parks, in wall-clock milliseconds."""
+    now = time.monotonic()
+    stamp = now_ms()
+    with _META_REMOTE_BACKOFF_LOCK:
+        app_remaining = max(0.0, _META_APP_WIDE_UNTIL - now)
+        app_reason = _META_APP_WIDE_REASON
+        lanes = {
+            name: [
+                {"key": key, "object": park.get("object") or "", "untilMs": stamp + int(math.ceil((park["until"] - now) * 1000)),
+                 "reason": park.get("reason") or "", "usagePercent": park.get("usagePercent") or 0}
+                for key, park in state.parks.items()
+                if park.get("until", 0.0) > now
+            ]
+            for name, state in _META_LANE_STATES.items()
+        }
+    return {
+        "appWide": {"untilMs": stamp + int(math.ceil(app_remaining * 1000)) if app_remaining else 0,
+                    "reason": _clean_text(app_reason, 80) if app_remaining else ""},
+        "lanes": lanes,
+    }
+
+
+def _merged_lane_row(stored: dict[str, Any], fresh: dict[str, Any]) -> dict[str, Any]:
+    """The stored row and this process's state together: per park the later end wins."""
+    stamp = now_ms()
+    stored_app = stored.get("appWide") if isinstance(stored.get("appWide"), dict) else {}
+    fresh_app = fresh["appWide"]
+    app = fresh_app if _metric_int(fresh_app.get("untilMs")) >= _metric_int(stored_app.get("untilMs")) else stored_app
+    if _metric_int(app.get("untilMs")) <= stamp:
+        app = {"untilMs": 0, "reason": ""}
+    stored_lanes = stored.get("lanes") if isinstance(stored.get("lanes"), dict) else {}
+    lanes: dict[str, Any] = {}
+    for name in META_LANES[1:]:
+        stored_lane = stored_lanes.get(name) if isinstance(stored_lanes.get(name), dict) else {}
+        stored_parks = stored_lane.get("parks") if isinstance(stored_lane.get("parks"), list) else []
+        merged: dict[str, dict[str, Any]] = {}
+        for row in [*stored_parks[:_META_LANE_MAX_PARKS], *fresh["lanes"].get(name, [])]:
+            clean = _clean_stored_park(row, stamp)
+            if clean and (clean["key"] not in merged or clean["untilMs"] >= merged[clean["key"]]["untilMs"]):
+                merged[clean["key"]] = clean
+        parks = sorted(merged.values(), key=lambda park: park["untilMs"], reverse=True)[:_META_LANE_MAX_PARKS]
+        lanes[name] = {"parks": parks}
+    return {
+        "recordType": _META_PROVIDER_STATE_TYPE,
+        "appWide": {"untilMs": _metric_int(app.get("untilMs")), "reason": _clean_text(app.get("reason"), 80)},
+        "lanes": lanes,
+        "updatedAt": _iso_now(),
+    }
+
+
+def _load_meta_lane_state() -> dict[str, Any]:
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT data_json FROM entities "
+                "WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+            ),
+            {"type": _META_PROVIDER_STATE_TYPE, "id": _META_LANE_STATE_ID},
+        ).mappings().first()
+    data = json_loads(row.get("data_json") or "{}") if row else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _persist_meta_lane_state() -> None:
+    """Best-effort checkpoint of the app-wide mark and the lane parks, merged with what another
+    process stored."""
+    fresh = _lane_state_for_storage()
+    try:
+        with db_conn() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
+                    "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+                ),
+                {"type": _META_PROVIDER_STATE_TYPE, "id": _META_LANE_STATE_ID},
+            ).mappings().first()
+            stored = json_loads(row.get("data_json") or "{}") if row else {}
+            clean = _merged_lane_row(stored if isinstance(stored, dict) else {}, fresh)
+            if row:
+                _write_entity_data(conn, row, clean)
+            else:
+                _insert_internal_entity(conn, _META_PROVIDER_STATE_TYPE, _META_LANE_STATE_ID, clean)
+    except Exception:
+        # Like _persist_meta_provider_state: a database outage never replaces Meta's answer
+        # with a second failure. The parks and the mark stay active in this process.
+        return
+
+
+def _refresh_meta_lane_state(*, force: bool = False) -> None:
+    """Restore the stored app-wide mark and lane parks at most once every five seconds."""
+    global _META_LANE_STATE_REFRESHED_AT, _META_APP_WIDE_UNTIL, _META_APP_WIDE_REASON
+    current_monotonic = time.monotonic()
+    if not force and current_monotonic - _META_LANE_STATE_REFRESHED_AT < 5:
+        return
+    if not _META_LANE_STATE_REFRESH_LOCK.acquire(blocking=False):
+        return
+    try:
+        _META_LANE_STATE_REFRESHED_AT = current_monotonic
+        try:
+            state = _load_meta_lane_state()
+        except Exception:
+            return
+        stamp = now_ms()
+        now = time.monotonic()
+        app = state.get("appWide") if isinstance(state.get("appWide"), dict) else {}
+        app_remaining_ms = _metric_int(app.get("untilMs")) - stamp
+        lanes = state.get("lanes") if isinstance(state.get("lanes"), dict) else {}
+        with _META_REMOTE_BACKOFF_LOCK:
+            if app_remaining_ms > 0:
+                _META_APP_WIDE_UNTIL = max(_META_APP_WIDE_UNTIL, now + app_remaining_ms / 1000)
+                _META_APP_WIDE_REASON = _clean_text(app.get("reason"), 80) or "rate_limited"
+            for name, lane_state in _META_LANE_STATES.items():
+                stored_lane = lanes.get(name) if isinstance(lanes.get(name), dict) else {}
+                rows = stored_lane.get("parks") if isinstance(stored_lane.get("parks"), list) else []
+                for row in rows[:_META_LANE_MAX_PARKS]:
+                    clean = _clean_stored_park(row, stamp)
+                    if clean is None:
+                        continue
+                    until = now + (clean["untilMs"] - stamp) / 1000
+                    park = lane_state.parks.get(clean["key"])
+                    if park is None or park.get("until", 0.0) < until:
+                        lane_state.parks[clean["key"]] = {"until": until, "reason": clean["reason"],
+                                                          "usagePercent": clean["usagePercent"], "object": clean["object"]}
+                _trim_parks(lane_state, now)
+    finally:
+        _META_LANE_STATE_REFRESH_LOCK.release()
+
+
+def meta_lane_pause_seconds(lane: str = "admin", subject: Any = "") -> int:
+    """Seconds before a call on this lane, for this ad account or page, may be sent (0: now).
+
+    Restores what another process stored first, as every request does. For the admin lane this is
+    studio_meta_pause_seconds(); for the other lanes an app-wide pause or a park of ``subject``.
+    """
+    name = _lane_name(lane)
+    config = load_meta_ads_config()
+    if config.configured and _server_token_matches(config):
+        _refresh_meta_provider_state()
+        if name != "admin":
+            _refresh_meta_lane_state()
+    object_id = _lane_object_id(subject)
+    return _lane_refusal_seconds(name, (object_id,) if object_id else (), False)
+
+
+def lane_state_report(*, refresh: bool = False) -> dict[str, Any]:
+    """The Meta call lanes for diagnostics (PLAN P3-00c), read-only.
+
+    Per lane: whether the whole lane waits (admin: its own pause; the other lanes: an app-wide
+    pause), the seconds left and the reason, the last usage percent and request time, and its
+    parked ad accounts or pages, counted and listed by their last 4 digits (longest wait first,
+    at most 50 listed). Never a token and never more of an id than its last 4 digits.
+    ``refresh`` first restores what another process stored.
+    """
+    if refresh:
+        _refresh_meta_provider_state(force=True)
+        _refresh_meta_lane_state(force=True)
+    admin_remaining = _meta_remote_backoff_remaining()
+    app_remaining = _app_wide_remaining()
+    now = time.monotonic()
+    with _META_REMOTE_BACKOFF_LOCK:
+        lanes: dict[str, Any] = {
+            "admin": {
+                "paused": bool(admin_remaining),
+                "retryAfterSeconds": admin_remaining,
+                "reason": _clean_text(_META_REMOTE_BACKOFF_REASON, 80) if admin_remaining else "",
+                "usagePercent": min(max(int(_META_REMOTE_USAGE_PERCENT or 0), 0), 100),
+                "lastRequestAt": _clean_time(_META_LAST_REMOTE_REQUEST_AT),
+                "parkCount": 0,
+                "parks": [],
+            }
+        }
+        app_reason = _clean_text(_META_APP_WIDE_REASON, 80) if app_remaining else ""
+        for name in META_LANES[1:]:
+            state = _META_LANE_STATES[name]
+            parks = sorted(
+                (
+                    {"object": park.get("object") or "", "retryAfterSeconds": int(math.ceil(park["until"] - now)),
+                     "reason": _clean_text(park.get("reason"), 80), "usagePercent": int(park.get("usagePercent") or 0)}
+                    for park in state.parks.values()
+                    if park.get("until", 0.0) > now
+                ),
+                key=lambda row: row["retryAfterSeconds"],
+                reverse=True,
+            )
+            lanes[name] = {
+                "paused": bool(app_remaining),
+                "retryAfterSeconds": app_remaining,
+                "reason": app_reason,
+                "usagePercent": min(max(int(state.usage_percent or 0), 0), 100),
+                "lastRequestAt": _clean_time(state.last_request_at),
+                "parkCount": len(parks),
+                "parks": parks[:_META_LANE_REPORT_MAX_PARKS],
+            }
+    return {
+        "appWide": {"paused": bool(app_remaining), "retryAfterSeconds": app_remaining, "reason": app_reason},
+        "lanes": lanes,
+        "minimumRequestIntervalMs": int(_meta_request_interval_seconds() * 1000),
+    }
+
+
 def _public_import_state(state: dict[str, Any] | None = None) -> dict[str, Any]:
     source = state if isinstance(state, dict) else _load_import_state()
     return {
@@ -3831,8 +4416,8 @@ def webhook_counts_report() -> dict[str, Any]:
 # Platform reads for the studio's admin "Studio health" section. Everything they return is
 # a count, a flag, a currency, a Meta error code or an ad account's LAST 4 DIGITS: never an
 # id, a name or a text. The two Meta readings (f: min_daily_budget per allowed ad account;
-# i: subscribed_apps per linked page) go through the same paced request lane and backoff as
-# every other Meta call, only when an admin asks for a refresh, and are kept for 24 hours in
+# i: subscribed_apps per linked page) are paced and paused like every other Meta call (f on the
+# admin lane, i on the page lane), only when an admin asks for a refresh, and are kept for 24 hours in
 # metaHealthState/"studioFacts" so a plain read never calls Meta.
 _STUDIO_FACTS_STATE_ID = "studioFacts"
 STUDIO_FACTS_MAX_AGE_SECONDS = 24 * 60 * 60
@@ -3888,7 +4473,8 @@ def _iso_age_seconds(value: Any) -> int | None:
 
 
 def studio_meta_pause_seconds() -> int:
-    """Seconds left on Albayan's shared Meta pause (0: Meta may be asked).
+    """Seconds left on Albayan's Meta pause of the admin lane, app-wide pauses included (0: Meta
+    may be asked). meta_lane_pause_seconds() answers for the other lanes.
 
     Restores a pause another process stored first, as every Meta request does, so a studio
     check can refuse before it spends anything (a refresh, a once-a-day claim).
@@ -3952,8 +4538,9 @@ def _page_subscription_state(client: "MetaAdsClient", page_id: str, app_id: str)
     when it is not set) lists every field in STUDIO_PAGE_WEBHOOK_FIELDS.
     """
     try:
-        token = client.page_access_token(page_id)
-        payload = client._request("GET", f"{page_id}/subscribed_apps", params={}, access_token=token)
+        with meta_call_lane("page", subject=page_id):
+            token = client.page_access_token(page_id)
+            payload = client._request("GET", f"{page_id}/subscribed_apps", params={}, access_token=token)
     except MetaAdsError as error:
         return "error", error
     for app in payload.get("data") if isinstance(payload.get("data"), list) else []:
@@ -4126,10 +4713,10 @@ def studio_funds_flags() -> dict[str, Any]:
 # Recent posts of a linked page (Albayan Studio post picker; owner decision D19, P1-13)
 # ---------------------------------------------------------------------------
 # Platform reads for the studio's "pick a post of your page" list. Each is ONE paced GET with the
-# page's own token (plus the page-token read when it is not in memory) on the shared request lane,
-# so it waits its turn behind every other Meta call and is refused while Albayan's Meta pause runs
-# (MetaAdsError "rate_limited", retryable, no provider code). When the per-lane request state
-# (PLAN P3-00) arrives these move to the page lane. Rows hold public page content only: an id,
+# page's own token (plus the page-token read when it is not in memory) on the page lane (PLAN
+# P3-00), so it waits its turn behind the other page calls only, and is refused while an app-wide
+# Meta pause or a park of that page runs (MetaAdsError "rate_limited", retryable, no provider
+# code). Rows hold public page content only: an id,
 # a bounded text, and public HTTPS image and post links; never a token, a commenter or a count.
 PAGE_RECENT_POSTS_MAX = 25
 _PAGE_POST_ID_RE = re.compile(r"[0-9]{1,40}_[0-9]{1,40}")
@@ -4164,12 +4751,13 @@ def read_page_recent_posts(page_id: Any, *, limit: Any = 10) -> list[dict[str, s
     clean_page = _meta_id(page_id, "Meta page")
     count = _recent_post_limit(limit)
     client = get_meta_ads_client()
-    token = client.page_access_token(clean_page)
-    payload = client._request(
-        "GET", f"{clean_page}/posts",
-        params={"fields": "id,message,created_time,permalink_url,full_picture", "limit": count},
-        access_token=token,
-    )
+    with meta_call_lane("page", subject=clean_page):
+        token = client.page_access_token(clean_page)
+        payload = client._request(
+            "GET", f"{clean_page}/posts",
+            params={"fields": "id,message,created_time,permalink_url,full_picture", "limit": count},
+            access_token=token,
+        )
     rows: list[dict[str, str]] = []
     for item in payload.get("data") if isinstance(payload.get("data"), list) else []:
         post_id = str(item.get("id") or "") if isinstance(item, dict) else ""
@@ -4191,12 +4779,13 @@ def read_instagram_recent_media(page_id: Any, ig_user_id: Any, *, limit: Any = 1
     clean_ig = _meta_id(ig_user_id, "Instagram account")
     count = _recent_post_limit(limit)
     client = get_meta_ads_client()
-    token = client.page_access_token(clean_page)
-    payload = client._request(
-        "GET", f"{clean_ig}/media",
-        params={"fields": "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp", "limit": count},
-        access_token=token,
-    )
+    with meta_call_lane("page", subject=clean_page):
+        token = client.page_access_token(clean_page)
+        payload = client._request(
+            "GET", f"{clean_ig}/media",
+            params={"fields": "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp", "limit": count},
+            access_token=token,
+        )
     rows: list[dict[str, str]] = []
     for item in payload.get("data") if isinstance(payload.get("data"), list) else []:
         media_id = str(item.get("id") or "") if isinstance(item, dict) else ""
@@ -4222,8 +4811,9 @@ def read_instagram_media_owner(page_id: Any, media_id: Any) -> dict[str, str]:
     clean_page = _meta_id(page_id, "Meta page")
     clean_media = _meta_id(media_id, "Instagram media")
     client = get_meta_ads_client()
-    token = client.page_access_token(clean_page)
-    payload = client._request("GET", clean_media, params={"fields": "id,owner,username"}, access_token=token)
+    with meta_call_lane("page", subject=clean_page):
+        token = client.page_access_token(clean_page)
+        payload = client._request("GET", clean_media, params={"fields": "id,owner,username"}, access_token=token)
     if str(payload.get("id") or "") != clean_media:  # an answer about another object names no owner
         return {"id": "", "ownerId": "", "username": ""}
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
@@ -4237,7 +4827,7 @@ def read_instagram_media_owner(page_id: Any, media_id: Any) -> dict[str, str]:
 
 # Platform doors for the studio desk's LINK step (D26; P1-09, P3-02, P0-09b). Staff create the ad
 # in Meta with any name; linking it renames the campaign to the request's studio name (when the
-# token holds ads_management) and claims it. Meta is reached only through the shared paced lane
+# token holds ads_management) and claims it. Meta is reached only through the paced admin lane
 # (refused while Albayan's Meta pause runs, nothing reaching Meta).
 
 
