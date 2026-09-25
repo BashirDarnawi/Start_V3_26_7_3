@@ -76,8 +76,25 @@ Records (router-only types: the generic /api/collections API refuses both):
   last pass; its per-account state is metaHealthState/"studioIgPoll", studio_ig_source.py).
 
 ``GET /api/studio/admin/alerts`` (admin only, 30 reads a minute): newest first, ``limit`` 1-50
-(20 by default), ``before`` = the ``nextBefore`` of the previous page; ``jobs`` = jobs_heartbeat().
-Diagnostics shows the same heartbeat; it is ``late`` after 5 minutes (§7.4).
+(20 by default), ``before`` = the ``nextBefore`` of the previous page, ``status`` = ``open`` (the
+default: alerts nobody acknowledged) or ``all``; ``jobs`` = jobs_heartbeat(). Diagnostics shows the
+same heartbeat; it is ``late`` after 5 minutes (§7.4).
+
+``POST /api/studio/admin/alerts/{id}/ack`` (P3-23; admin only, from the Albayan site itself, 30 a
+minute): stamps ``acknowledgedAt`` and ``acknowledgedBy`` (the staff id; alerts are never shown to
+customers) on one alert with a version check (the row's ``last_modified``), audited ``alert_ack``
+in the same transaction. An acknowledged alert leaves the open list, the staff pulse's ``alerts``
+count (studio_stop.staff_pulse) and the channel queue (studio_alert_out.send_pending); a repeat of
+the same finding that day refreshes its counts but keeps the acknowledgement. Acknowledging it
+again is a no-op 200 (``replay`` true, no second audit entry); an unknown id is 404.
+
+``POST /api/studio/admin/integrity/scan`` (P3-24; admin only, from the site itself, one per 10
+minutes per admin, 429 with ``Retry-After`` otherwise): run_daily_money_check on the caller's
+request, so the report (``violations`` with counts and ids, ``counts``, ``alertId``, ``swept``) and
+the ``integrity_violation`` alert are exactly the daily job's (the alert is deduped per day; the
+daily run still runs at 04:00, since ``lastIntegrityScanDay`` is not stamped here). Audited
+``integrity_scan`` with counts only. It answers synchronously: the job state keeps counts, not a
+full report, so there is no stored result to answer 202 with.
 
 The wallet helpers (locks, idempotency lookups, the ledger insert, audit, the SQL balance the daily
 scan checks the wallet screen against) come from main.py through a router ctx (D36: never an import
@@ -94,7 +111,7 @@ from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
 from ...db import db_conn, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
@@ -137,6 +154,12 @@ STATE_WRITE_ATTEMPTS = 3
 ALERTS_PAGE_DEFAULT = 20
 ALERTS_PAGE_MAX = 50
 ALERT_READS_PER_MINUTE = 30
+ALERT_ACKS_PER_MINUTE = 30  # P3-23
+ALERT_STATUSES = ("open", "all")  # GET /admin/alerts?status=
+SCAN_EVERY_MS = 10 * 60 * 1000  # P3-24: one on-demand money scan per 10 minutes per admin
+AUDIT_ALERT_ACK = "alert_ack"  # the audit action of an acknowledgement (studio_alert_out: alert_channel_test)
+AUDIT_INTEGRITY_SCAN = "integrity_scan"  # the audit action of an on-demand money scan
+_ALERT_ID_RE = re.compile(r"sal_[0-9a-f]{40}")  # alert_id(): ``sal_`` + sha256[:40]
 
 # PLAN.md §7.1 studioAlerts kinds, plus review_overdue (this loop's overdue-review alert) and
 # meta_drift (the results sync's post-settle spend drift, P3-03).
@@ -447,12 +470,20 @@ def _public_alert(row: Any) -> dict[str, Any]:
     }
 
 
-def list_alerts_page(conn: Any, limit: int = ALERTS_PAGE_DEFAULT, before: tuple[int, str] | None = None) -> dict[str, Any]:
-    """Newest first (created_at, then id); ``nextBefore`` is the cursor of the next page or None."""
+def list_alerts_page(
+    conn: Any, limit: int = ALERTS_PAGE_DEFAULT, before: tuple[int, str] | None = None, status: str = "open",
+) -> dict[str, Any]:
+    """Newest first (created_at, then id); ``nextBefore`` is the cursor of the next page or None.
+    ``status`` ``open`` (the default) leaves out the acknowledged alerts (the database filters them);
+    ``all`` lists every alert."""
+    if status not in ALERT_STATUSES:
+        raise ValueError(f"unknown alert status {status!r}")
     params: dict[str, Any] = {"type": ALERTS_TYPE, "limit": int(limit) + 1}
     after = ""
+    if status == "open":
+        after += f" AND COALESCE({json_field_sql('acknowledgedAt')}, '') = ''"
     if before is not None:
-        after = " AND (created_at < :before_at OR (created_at = :before_at AND id < :before_id))"
+        after += " AND (created_at < :before_at OR (created_at = :before_at AND id < :before_id))"
         params.update({"before_at": int(before[0]), "before_id": str(before[1])})
     rows = conn.execute(
         text(
@@ -467,6 +498,60 @@ def list_alerts_page(conn: Any, limit: int = ALERTS_PAGE_DEFAULT, before: tuple[
         "alerts": [_public_alert(row) for row in page],
         "nextBefore": f"{int(page[-1]['created_at'])}:{page[-1]['id']}" if more and page else None,
     }
+
+
+def _alert_row(conn: Any, row_id: str) -> Any:
+    return conn.execute(
+        text("SELECT id, data_json, deleted, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1"),
+        {"type": ALERTS_TYPE, "id": row_id},
+    ).mappings().first()
+
+
+def acknowledge_alert(
+    row_id: str, staff_id: str, audit: Callable[..., Any], now: datetime | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Stamp ``acknowledgedAt`` / ``acknowledgedBy`` on one alert (P3-23); returns (public alert, replay).
+
+    The write is conditional on the row's version (``last_modified``, the way raise_alert refreshes
+    it): a refresh that lands between the read and the write costs a retry on a fresh read, never a
+    lost acknowledgement or a lost refresh. An alert already acknowledged is answered as it is
+    (``replay`` true; nothing written, nothing audited). The audit entry (``alert_ack``: the kind,
+    the day and the related item, never a customer's name) joins the same transaction.
+    """
+    now = _aware(now or utc_now())
+    for _ in range(STATE_WRITE_ATTEMPTS):
+        with db_conn() as conn:
+            row = _alert_row(conn, row_id)
+            if row is None or bool(row["deleted"]):
+                studio_error(404, "UNKNOWN_CAMPAIGN", "No studio alert has this id")
+            current = json_loads(row["data_json"]) or {}
+            if str(current.get("acknowledgedAt") or "").strip():
+                return _public_alert(row), True
+            baseline = int(row["last_modified"])
+            updated = {
+                **current, "acknowledgedAt": _iso(now), "acknowledgedBy": str(staff_id or "") or None,
+                "_lastModified": max(now_ms(), baseline + 1),
+            }
+            written = conn.execute(
+                text(
+                    "UPDATE entities SET data_json = :data, last_modified = :modified "
+                    "WHERE type = :type AND id = :id AND deleted = false AND last_modified = :baseline"
+                ),
+                {"data": json_dumps(updated), "modified": updated["_lastModified"], "type": ALERTS_TYPE, "id": row_id,
+                 "baseline": baseline},
+            )
+            if int(written.rowcount or 0) != 1:
+                continue  # a refresh got there first: read it again
+            kind, day = str(current.get("kind") or ""), str(current.get("day") or "")
+            audit(
+                str(staff_id or "") or None, AUDIT_ALERT_ACK, ALERTS_TYPE, row_id,
+                f"Acknowledged studio alert {kind} of {day}",
+                {"kind": kind, "day": day, "relatedType": current.get("relatedType"), "relatedId": current.get("relatedId"),
+                 "count": int(current.get("count") or 0), "acknowledgedAt": updated["acknowledgedAt"]},
+                conn=conn,
+            )
+            return _public_alert({"id": row_id, "data_json": json_dumps(updated)}), False
+    studio_error(409, "VERSION_CONFLICT", "The alert changed while it was being acknowledged; try again")
 
 
 # ------------------------------------------------------------------ studioJobState
@@ -725,6 +810,30 @@ def run_daily_money_check(
     return {"swept": swept, "violations": violations, "counts": counts, "alertId": alert_id_raised}
 
 
+def scan_money_now(
+    ctx_provider: Callable[[], dict[str, Any]],
+    staff_id: str,
+    audit: Callable[..., Any],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """An admin's "scan now" (P3-24): run_daily_money_check itself (the full sweep, the scan on one
+    snapshot, the deduped ``integrity_violation`` alert, the job state's counts), then one
+    ``integrity_scan`` audit entry holding the counts only. Returns the daily job's report plus
+    ``scannedAt``."""
+    now = _aware(now or utc_now())
+    result = run_daily_money_check(ctx_provider, now)
+    counts = result["counts"]
+    swept = result.get("swept") if isinstance(result.get("swept"), dict) else {}
+    audit(
+        str(staff_id or "") or None, AUDIT_INTEGRITY_SCAN, JOB_STATE_TYPE, "scan_studio_money",
+        f"Ran the studio money scan on demand: {int(counts['total'])} finding(s)",
+        {"total": int(counts["total"]), "byCode": dict(counts["byCode"]), "alertId": result["alertId"],
+         "examined": int(swept.get("examined") or 0), "released": len(swept.get("released") or []),
+         "sweepError": swept.get("error"), "scannedAt": _iso(now)},
+    )
+    return {**result, "scannedAt": _iso(now)}
+
+
 # ------------------------------------------------------------------ the tick and the loop
 
 def _due(last: Any, every: timedelta, now: datetime) -> bool:
@@ -870,14 +979,44 @@ def _parse_cursor(raw: Any) -> tuple[int, str] | None:
     return int(match.group(1)), match.group(2)
 
 
+def _parse_status(raw: Any) -> str:
+    if raw is None or raw == "":
+        return "open"
+    value = str(raw).strip()
+    if value not in ALERT_STATUSES:
+        studio_error(400, "INVALID_VALUE", "status must be open or all")
+    return value
+
+
 def create_studio_jobs_router(
     *,
     current_user_dependency: Callable[..., Any],
     require_same_origin: Callable[[Request], None],
     ctx: dict[str, Any],
 ) -> APIRouter:
-    """``GET /admin/alerts`` under /api/studio, and the startup/shutdown events of the jobs loop."""
+    """``GET /admin/alerts``, ``POST /admin/alerts/{id}/ack`` and ``POST /admin/integrity/scan`` under
+    /api/studio, and the startup/shutdown events of the jobs loop (``ctx``: audit)."""
     router = APIRouter()
+
+    def require_admin(user: dict[str, Any]) -> None:
+        if str(user.get("role") or "").lower() != "admin":
+            studio_error(403, "ADMIN_ONLY", "Only an admin can use this")
+
+    def same_origin(request: Request) -> None:
+        try:
+            require_same_origin(request)
+        except HTTPException as error:
+            if error.status_code != 403:
+                raise
+            studio_error(403, "CROSS_SITE", "This change must come from the Albayan site itself")
+
+    def rate_limit(key: str, attempts: int, window_ms: int, message: str) -> None:
+        allowed, _left, retry_after_ms = check_rate_limit(key, attempts, window_ms)
+        if not allowed:
+            studio_error(
+                429, "RATE_LIMITED", message,
+                headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))},
+            )
 
     @router.on_event("startup")
     def _start_studio_jobs() -> None:
@@ -889,19 +1028,39 @@ def create_studio_jobs_router(
 
     @router.get("/admin/alerts")
     def list_studio_alerts(request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
-        if str(user.get("role") or "").lower() != "admin":
-            studio_error(403, "ADMIN_ONLY", "Only an admin can use this")
-        allowed, _left, retry_after_ms = check_rate_limit(f"studio:alerts:{user.get('id')}", ALERT_READS_PER_MINUTE, 60_000)
-        if not allowed:
-            studio_error(
-                429, "RATE_LIMITED", "Too many requests. Please wait a minute and try again.",
-                headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))},
-            )
+        require_admin(user)
+        rate_limit(f"studio:alerts:{user.get('id')}", ALERT_READS_PER_MINUTE, 60_000,
+                   "Too many requests. Please wait a minute and try again.")
         limit = _parse_limit(request.query_params.get("limit"))
         before = _parse_cursor(request.query_params.get("before"))
+        status = _parse_status(request.query_params.get("status"))
         with db_conn() as conn:
-            page = list_alerts_page(conn, limit, before)
+            page = list_alerts_page(conn, limit, before, status)
+        page["status"] = status
         page["jobs"] = jobs_heartbeat()
         return page
+
+    @router.post("/admin/alerts/{alert_row_id}/ack")
+    def acknowledge_studio_alert(
+        alert_row_id: str, request: Request, user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """P3-23: see acknowledge_alert. The id must look like alert_id() makes them; any other is unknown."""
+        same_origin(request)
+        require_admin(user)
+        rate_limit(f"studio:alert-ack:{user.get('id')}", ALERT_ACKS_PER_MINUTE, 60_000,
+                   "Too many requests. Please wait a minute and try again.")
+        if not _ALERT_ID_RE.fullmatch(str(alert_row_id or "")):
+            studio_error(404, "UNKNOWN_CAMPAIGN", "No studio alert has this id")
+        alert, replay = acknowledge_alert(str(alert_row_id), str(user.get("id") or ""), ctx["audit"])
+        return {"alert": alert, "replay": replay}
+
+    @router.post("/admin/integrity/scan")
+    def scan_studio_money_now(request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
+        """P3-24: see scan_money_now. Synchronous (the module docstring says why there is no 202)."""
+        same_origin(request)
+        require_admin(user)
+        rate_limit(f"studio:integrity-scan:{user.get('id')}", 1, SCAN_EVERY_MS,
+                   "One money scan every 10 minutes. Please wait and try again.")
+        return scan_money_now(lambda: resolve_jobs_ctx(ctx), str(user.get("id") or ""), ctx["audit"])
 
     return router

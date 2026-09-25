@@ -656,3 +656,46 @@ def test_scan_reads_no_names_or_amounts(staff):
     text_out = json.dumps(found, ensure_ascii=False)
     for secret in ("Very Private Campaign Name", "2000", "@", "memo"):
         assert secret not in text_out
+
+
+# ------------------------------------------------------------------ the admin's "scan now" (P3-24, studio_jobs.py)
+
+def test_on_demand_scan_route_reports_like_the_daily_scan(staff, monkeypatch):
+    """POST /api/studio/admin/integrity/scan answers with the daily job's report: the violations
+    scan_studio_money finds on the same snapshot, in the same shape, and the same per-day alert."""
+    from server.systems.ads_studio import studio_jobs
+    from server.systems.ads_studio.studio_jobs import ALERTS_TYPE, alert_id
+    from server.systems.ads_studio.studio_settings import read_all_settings
+
+    monkeypatch.setattr(studio_integrity, "MAX_IDS", 100_000)  # the whole shared test database is scanned
+    user = _customer("scan-route")
+    _credit(staff, user["id"], 5_000)
+    campaign_id = _create(user, 2_000, "Very Private Route Name")
+    assert _submit(user, campaign_id).status_code == 200
+    _crash_capture(staff, campaign_id)
+    later = _now(16)
+    monkeypatch.setattr(studio_jobs, "utc_now", lambda: later)
+    admin = staff["admin"]
+    key = f"studio:integrity-scan:{admin['id']}"
+    reset_rate_limit(key)
+    response = client.post("/api/studio/admin/integrity/scan", cookies=admin["cookies"])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    stranded = read_all_settings()["thresholds"]["strandedCaptureMaxMinutes"]
+    with db_conn() as conn:
+        direct = scan_studio_money(conn, later, stranded_minutes=stranded)
+    assert body["violations"] == direct  # the route ran the same scan on the same (already swept) state
+    assert body["counts"] == violation_counts(direct)
+    for item in body["violations"]:
+        assert set(item) - {"checks"} == {"code", "count", "requestIds", "userIds", "moreIds", "labels"}, item
+        assert item["labels"] == VIOLATION_LABELS[item["code"]]
+    found = _codes(body["violations"])
+    assert campaign_id in found["capture_without_approval"]["requestIds"]
+    assert user["id"] in found["capture_without_approval"]["userIds"]
+    assert "Very Private Route Name" not in json.dumps(body, ensure_ascii=False)
+    assert body["alertId"] == alert_id("integrity_violation", "scan_studio_money", studio_jobs.libya_today(later).isoformat())
+    with db_conn() as conn:
+        raw = conn.execute(text("SELECT data_json FROM entities WHERE type = :t AND id = :id"),
+                           {"t": ALERTS_TYPE, "id": body["alertId"]}).scalar()
+    assert json_loads(raw)["details"]["violations"] == direct
+    reset_rate_limit(key)

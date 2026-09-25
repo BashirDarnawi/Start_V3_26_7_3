@@ -639,3 +639,281 @@ def test_diagnostics_shows_the_jobs_heartbeat(staff, monkeypatch):
     jobs = response.json()["jobs"]
     assert jobs["late"] is False and 0 <= jobs["ageSeconds"] < 60 and jobs["enabled"] is False  # never under pytest
     assert jobs["lastTickAt"] and jobs["lateAfterSeconds"] == 300
+
+
+# ------------------------------------------------------------------ acknowledging alerts (P3-23) and the admin's scan now (P3-24)
+
+def _audits(action: str, resource_id: str) -> list[dict]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            text("SELECT user_id, metadata_json FROM audit_logs WHERE action = :action AND resource_id = :id ORDER BY ts"),
+            {"action": action, "id": resource_id},
+        ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _ack(user: dict, row_id: str, **kwargs):
+    return client.post(f"/api/studio/admin/alerts/{row_id}/ack", cookies=user["cookies"], **kwargs)
+
+
+def _listed_ids(admin: dict, **params) -> list[str]:
+    """Every alert id the admin list shows for ``params`` (all pages, newest first)."""
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page = client.get("/api/studio/admin/alerts", cookies=admin["cookies"],
+                          params={"limit": 50, **params, **({"before": cursor} if cursor else {})})
+        assert page.status_code == 200, page.text
+        body = page.json()
+        seen.extend(alert["id"] for alert in body["alerts"])
+        cursor = body["nextBefore"]
+        if not cursor:
+            return seen
+
+
+def _scan_now(user: dict, **kwargs):
+    return client.post("/api/studio/admin/integrity/scan", cookies=user["cookies"], **kwargs)
+
+
+def test_alert_ack(staff):
+    from server.systems.ads_studio.studio_stop import staff_pulse
+
+    admin = staff["admin"]
+    user = _customer("ack-owner")
+    now = _now()
+    campaign_id = _uid("cmp")
+    with db_conn() as conn:
+        owned, _inserted = raise_alert(conn, "review_overdue", related_type=CAMPAIGNS, related_id=campaign_id,
+                                       owner_id=user["id"], details={"campaignId": campaign_id}, now=now)
+        other, _inserted = raise_alert(conn, "integrity_violation", related_type=JOB_STATE_TYPE, related_id=_uid("scan"),
+                                       details={"violations": []}, now=now)
+    reset_rate_limit(f"studio:alerts:{admin['id']}")
+    reset_rate_limit(f"studio:alert-ack:{admin['id']}")
+
+    # Who may: an admin only, signed in, from the Albayan site itself. Nothing below wrote anything.
+    for who in (staff["reviewer"], user):
+        refused = _ack(who, owned["id"])
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "ADMIN_ONLY", refused.text
+    cross = _ack(admin, owned["id"], headers={"Origin": "https://evil.example"})
+    assert cross.status_code == 403 and cross.json()["detail"]["code"] == "CROSS_SITE", cross.text
+    client.cookies.clear()
+    assert client.post(f"/api/studio/admin/alerts/{owned['id']}/ack").status_code == 401
+    assert _alert(owned["id"])[0]["acknowledgedAt"] is None
+    assert _audits(studio_jobs.AUDIT_ALERT_ACK, owned["id"]) == []
+    with db_conn() as conn:
+        pulse_before = staff_pulse(conn, admin["id"], admin=True, now=now)["alerts"]
+    assert {owned["id"], other["id"]} <= set(_listed_ids(admin))
+
+    # The acknowledgement: the stamps, the staff id, one audit entry in the same transaction.
+    done = _ack(admin, owned["id"])
+    assert done.status_code == 200, done.text
+    body = done.json()
+    assert body["replay"] is False and body["alert"]["id"] == owned["id"]
+    assert body["alert"]["acknowledgedBy"] == admin["id"] and body["alert"]["acknowledgedAt"]
+    data, created_by = _alert(owned["id"])
+    acknowledged_at = data["acknowledgedAt"]
+    assert acknowledged_at == body["alert"]["acknowledgedAt"] and data["acknowledgedBy"] == admin["id"]
+    assert studio_jobs.parse_time(acknowledged_at) is not None
+    assert created_by == user["id"] and data["ownerId"] == user["id"] and data["count"] == 1  # the rest is untouched
+    audits = _audits(studio_jobs.AUDIT_ALERT_ACK, owned["id"])
+    assert len(audits) == 1 and audits[0]["user_id"] == admin["id"]
+    meta = json.loads(audits[0]["metadata_json"])
+    assert meta["kind"] == "review_overdue" and meta["day"] == _day(now) and meta["relatedId"] == campaign_id
+    assert meta["acknowledgedAt"] == acknowledged_at and user["id"] not in json.dumps(meta)
+
+    # A replay is a no-op 200: the same stamp, no second audit entry.
+    again = _ack(admin, owned["id"])
+    assert again.status_code == 200 and again.json()["replay"] is True, again.text
+    assert again.json()["alert"]["acknowledgedAt"] == acknowledged_at
+    assert _alert(owned["id"])[0]["acknowledgedAt"] == acknowledged_at
+    assert len(_audits(studio_jobs.AUDIT_ALERT_ACK, owned["id"])) == 1
+
+    # It leaves the open list (the default) and the pulse's count; ?status=all still shows it.
+    open_ids = _listed_ids(admin)
+    assert owned["id"] not in open_ids and other["id"] in open_ids
+    assert _listed_ids(admin, status="open") == open_ids
+    everything = _listed_ids(admin, status="all")
+    assert owned["id"] in everything and other["id"] in everything
+    assert client.get("/api/studio/admin/alerts", cookies=admin["cookies"]).json()["status"] == "open"
+    assert client.get("/api/studio/admin/alerts", params={"status": "all"}, cookies=admin["cookies"]).json()["status"] == "all"
+    for status in ("closed", "acknowledged", "OPEN"):
+        bad = client.get("/api/studio/admin/alerts", params={"status": status}, cookies=admin["cookies"])
+        assert bad.status_code == 400 and bad.json()["detail"]["code"] == "INVALID_VALUE", status
+    with db_conn() as conn:
+        pulse_after = staff_pulse(conn, admin["id"], admin=True, now=now)["alerts"]
+    assert pulse_after == pulse_before - 1
+
+    # A repeat of the same finding that day refreshes the row but keeps the acknowledgement.
+    with db_conn() as conn:
+        refreshed, inserted = raise_alert(conn, "review_overdue", related_type=CAMPAIGNS, related_id=campaign_id,
+                                          owner_id=user["id"], count=2, details={"campaignId": campaign_id, "again": True},
+                                          now=now + timedelta(seconds=5))
+    assert not inserted and refreshed["count"] == 2 and refreshed["acknowledgedAt"] == acknowledged_at
+    assert refreshed["acknowledgedBy"] == admin["id"] and owned["id"] not in _listed_ids(admin)
+
+    # Unknown ids: one nobody raised, malformed ones, and an archived alert.
+    for missing in (alert_id("review_overdue", _uid("never"), _day(now)), "not-an-id", "sal_" + "z" * 40, "sal_" + "a" * 39):
+        refused = _ack(admin, missing)
+        assert refused.status_code == 404 and refused.json()["detail"]["code"] == "UNKNOWN_CAMPAIGN", (missing, refused.text)
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": ALERTS_TYPE, "id": other["id"]})
+    gone = _ack(admin, other["id"])
+    assert gone.status_code == 404 and gone.json()["detail"]["code"] == "UNKNOWN_CAMPAIGN", gone.text
+    assert _alert(other["id"])[0]["acknowledgedAt"] is None and _audits(studio_jobs.AUDIT_ALERT_ACK, other["id"]) == []
+
+
+def test_alert_ack_version_check(staff, monkeypatch):
+    """The write is conditional on the row's version: a refresh that lands between the read and the
+    write costs a retry on a fresh read (nothing lost); a row that keeps moving is a 409."""
+    admin = staff["admin"]
+    now = _now()
+    related = _uid("race")
+    with db_conn() as conn:
+        alert, _inserted = raise_alert(conn, "integrity_violation", related_type=JOB_STATE_TYPE, related_id=related,
+                                       details={"violations": []}, now=now)
+    real_row = studio_jobs._alert_row
+    reads: list[int] = []
+
+    def racing_row(conn, row_id):
+        row = real_row(conn, row_id)
+        reads.append(1)
+        if len(reads) == 1 and row is not None:
+            stale = dict(row)  # the refresh lands after this read: the first write must lose
+            raise_alert(conn, "integrity_violation", related_type=JOB_STATE_TYPE, related_id=related, count=3,
+                        details={"violations": [], "refreshed": True}, now=now + timedelta(seconds=1))
+            return stale
+        return row
+
+    monkeypatch.setattr(studio_jobs, "_alert_row", racing_row)
+    reset_rate_limit(f"studio:alert-ack:{admin['id']}")
+    done = _ack(admin, alert["id"])
+    assert done.status_code == 200 and done.json()["replay"] is False, done.text
+    assert len(reads) == 2
+    data, _created_by = _alert(alert["id"])
+    assert data["acknowledgedBy"] == admin["id"] and data["count"] == 3 and data["details"]["refreshed"] is True
+    assert len(_audits(studio_jobs.AUDIT_ALERT_ACK, alert["id"])) == 1
+
+    with db_conn() as conn:
+        moving, _inserted = raise_alert(conn, "integrity_violation", related_type=JOB_STATE_TYPE, related_id=_uid("moving"),
+                                        details={"violations": []}, now=now)
+    reads.clear()
+
+    def always_stale(conn, row_id):
+        row = real_row(conn, row_id)
+        reads.append(1)
+        return None if row is None else {**dict(row), "last_modified": int(row["last_modified"]) - 1}
+
+    monkeypatch.setattr(studio_jobs, "_alert_row", always_stale)
+    lost = _ack(admin, moving["id"])
+    assert lost.status_code == 409 and lost.json()["detail"]["code"] == "VERSION_CONFLICT", lost.text
+    assert len(reads) == studio_jobs.STATE_WRITE_ATTEMPTS
+    assert _alert(moving["id"])[0]["acknowledgedAt"] is None and _audits(studio_jobs.AUDIT_ALERT_ACK, moving["id"]) == []
+    monkeypatch.setattr(studio_jobs, "_alert_row", real_row)
+    assert _ack(admin, moving["id"]).status_code == 200  # a fresh read wins
+
+
+def test_alert_ack_is_rate_limited(staff):
+    admin = staff["admin"]
+    with db_conn() as conn:
+        alert, _inserted = raise_alert(conn, "integrity_violation", related_type=JOB_STATE_TYPE, related_id=_uid("limit"),
+                                       details={"violations": []}, now=_now())
+    key = f"studio:alert-ack:{admin['id']}"
+    reset_rate_limit(key)
+    for _ in range(studio_jobs.ALERT_ACKS_PER_MINUTE):
+        assert _ack(admin, alert["id"]).status_code == 200  # the first acknowledges, the others replay
+    limited = _ack(admin, alert["id"])
+    assert limited.status_code == 429 and limited.json()["detail"]["code"] == "RATE_LIMITED", limited.text
+    assert int(limited.headers["Retry-After"]) >= 1
+    reset_rate_limit(key)
+    assert len(_audits(studio_jobs.AUDIT_ALERT_ACK, alert["id"])) == 1
+
+
+def test_admin_integrity_scan_route(staff, monkeypatch):
+    monkeypatch.setattr(studio_integrity, "MAX_IDS", 100_000)  # the whole shared test database is scanned
+    admin = staff["admin"]
+    user = _customer("scan-now")
+    _credit(staff, user["id"], 5_000)
+    campaign_id = _create(user, 2_000, "Very Private Scan Name")
+    assert _submit(user, campaign_id).status_code == 200
+    _crash_capture(staff, campaign_id)
+    before = _ledger(user["id"])
+    later = _now(20)
+    monkeypatch.setattr(studio_jobs, "utc_now", lambda: later)
+    key = f"studio:integrity-scan:{admin['id']}"
+    reset_rate_limit(key)
+    _reset_state()
+    audits_before = len(_audits(studio_jobs.AUDIT_INTEGRITY_SCAN, "scan_studio_money"))
+    expected_alert = alert_id("integrity_violation", "scan_studio_money", _day(later))
+    untouched = _alert(expected_alert)  # today's alert may exist from the daily-scan test above: it must not move
+
+    # Who may: an admin only, signed in, from the Albayan site itself. Nothing below ran the scan.
+    for who in (staff["reviewer"], user):
+        refused = _scan_now(who)
+        assert refused.status_code == 403 and refused.json()["detail"]["code"] == "ADMIN_ONLY", refused.text
+    cross = _scan_now(admin, headers={"Origin": "https://evil.example"})
+    assert cross.status_code == 403 and cross.json()["detail"]["code"] == "CROSS_SITE", cross.text
+    client.cookies.clear()
+    assert client.post("/api/studio/admin/integrity/scan").status_code == 401
+    assert _alert(expected_alert) == untouched
+    assert len(_audits(studio_jobs.AUDIT_INTEGRITY_SCAN, "scan_studio_money")) == audits_before
+
+    # The scan: the daily job's report, its alert (a system alert), its job-state counts, one audit entry.
+    response = _scan_now(admin)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) == {"swept", "violations", "counts", "alertId", "scannedAt"}
+    assert body["scannedAt"] == studio_jobs._iso(later) and body["swept"]["full"] is True
+    found = {item["code"]: item for item in body["violations"]}
+    assert campaign_id in found["capture_without_approval"]["requestIds"]
+    assert user["id"] in found["capture_without_approval"]["userIds"]
+    assert body["counts"] == studio_integrity.violation_counts(body["violations"]) and body["alertId"] == expected_alert
+    data, created_by = _alert(expected_alert)
+    assert created_by is None and data["ownerId"] is None
+    assert data["details"]["violations"] == body["violations"] and data["count"] == body["counts"]["total"]
+    text_out = json.dumps(body, ensure_ascii=False)
+    assert "Very Private Scan Name" not in text_out and "@" not in text_out
+    assert _ledger(user["id"]) == before  # never repairs; the sweep never returns an approving capture
+    heartbeat = jobs_heartbeat(later)
+    assert heartbeat["lastIntegrityResult"] == body["counts"] and heartbeat["lastIntegrityScanAt"] == studio_jobs._iso(later)
+    assert studio_jobs.read_job_state().get("lastIntegrityScanDay") is None  # the 04:00 daily run is still due
+    audits = _audits(studio_jobs.AUDIT_INTEGRITY_SCAN, "scan_studio_money")
+    assert len(audits) == audits_before + 1 and audits[-1]["user_id"] == admin["id"]
+    meta = json.loads(audits[-1]["metadata_json"])
+    assert meta["total"] == body["counts"]["total"] and meta["byCode"] == body["counts"]["byCode"]
+    assert meta["alertId"] == expected_alert and meta["scannedAt"] == body["scannedAt"]
+    assert campaign_id not in json.dumps(meta) and user["id"] not in json.dumps(meta)  # counts only
+
+    # One per 10 minutes per admin: the second press waits; another admin has their own turn, and the
+    # day's alert is one row however many scans see the finding.
+    limited = _scan_now(admin)
+    assert limited.status_code == 429 and limited.json()["detail"]["code"] == "RATE_LIMITED", limited.text
+    assert 1 <= int(limited.headers["Retry-After"]) <= 600
+    assert len(_audits(studio_jobs.AUDIT_INTEGRITY_SCAN, "scan_studio_money")) == audits_before + 1
+    other_admin = _insert_user("jobs-admin-2", "Admin", {})
+    reset_rate_limit(f"studio:integrity-scan:{other_admin['id']}")
+    second = _scan_now(other_admin)
+    assert second.status_code == 200 and second.json()["alertId"] == expected_alert, second.text
+    with db_conn() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM entities WHERE type = :t AND id = :id"),
+                             {"t": ALERTS_TYPE, "id": expected_alert}).scalar()
+    assert count == 1
+    assert len(_audits(studio_jobs.AUDIT_INTEGRITY_SCAN, "scan_studio_money")) == audits_before + 2
+    reset_rate_limit(key)
+    reset_rate_limit(f"studio:integrity-scan:{other_admin['id']}")
+
+
+def test_scan_now_reports_a_failed_scan_as_a_finding(monkeypatch):
+    def broken(conn, now, **kwargs):
+        raise RuntimeError("secret database text")
+
+    monkeypatch.setattr(studio_integrity, "scan_studio_money", broken)
+    monkeypatch.setattr(studio_jobs, "sweep_orphans", lambda ctx, now, full=False: {"full": full, "examined": 0, "released": []})
+    entries: list[tuple] = []
+    now = datetime(2031, 5, 7, 3, 0, tzinfo=UTC)
+    result = studio_jobs.scan_money_now(lambda: {}, "staff-1", lambda *args, **kwargs: entries.append((args, kwargs)), now)
+    (finding,) = result["violations"]
+    assert finding["code"] == "check_failed" and result["scannedAt"] == "2031-05-07T03:00:00Z"
+    assert result["alertId"] == alert_id("integrity_violation", "scan_studio_money", "2031-05-07")
+    ((args, kwargs),) = entries
+    assert args[:4] == ("staff-1", studio_jobs.AUDIT_INTEGRITY_SCAN, JOB_STATE_TYPE, "scan_studio_money")
+    assert args[5]["total"] == 1 and args[5]["byCode"] == {"check_failed": 1} and "secret" not in json.dumps(args)

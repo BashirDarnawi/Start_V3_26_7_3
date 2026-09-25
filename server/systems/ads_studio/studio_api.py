@@ -174,7 +174,7 @@ def create_studio_router(
     router.include_router(create_studio_checks_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/facts + checks (studio_facts.py)
     router.include_router(create_studio_summaries_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /wallet/summary + /campaigns/summary (studio_wallet.py, studio_results.py)
     router.include_router(create_studio_posts_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /pages, /pages/{id}/recent-posts, /ad-options (studio_posts.py)
-    router.include_router(create_studio_jobs_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/alerts + the jobs loop startup/shutdown (studio_jobs.py, P1-21)
+    router.include_router(create_studio_jobs_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/alerts, /admin/alerts/{id}/ack, /admin/integrity/scan + the jobs loop startup/shutdown (studio_jobs.py, P1-21, P3-23, P3-24)
     router.include_router(create_studio_ig_poll_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/pages/{id}/check-comments (studio_ig_poll.py, P1-23)
     # /test/seed-results: only in the disposable e2e server; raises (no start) if the flag meets a real database (P2-13)
     e2e_seed = create_studio_e2e_seed_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx)
