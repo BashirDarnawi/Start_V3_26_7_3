@@ -59,6 +59,10 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P3-01 + P3-03 | Done | stage 9 | Results read only for a linked request on an allowed account; sync in the jobs loop (≤5 reads / 10 s per pass, per-account parking), final read 48 h after delivery ends, daily drift reads, `meta_drift` alert |
 | P3-04a/b/c | Done | stage 9 | Meta-fed stages (in review, rejected, delivery problem, running, paused, ended — also by end time), results route + classic results card, staff "Check Meta now" (10-min cache) |
 | P3-18a/b/c | Done | stage 9 | Daily token check + 14/7/2-day expiry alerts; `meta_connection_down` only after a failed check; parked replies resent after recovery (7 d / 24 h windows, never a timed-out send twice); ad-account funds/status alerts |
+| P2-01 | Done | stage 10 | `15g-studio-core.js`: API wrapper + one error map (every studio code EN/AR), `/me` loader, pulse hook, stage consumer (parity with `stage_cases.json`), USD/LYD formatting, strict amount and phone parsers |
+| P2-02a-d | Done | stage 10 | `15h-studio-shell.js`: v2 frame behind `/me` (`ui==='v2'` only), bottom nav + side rail + header, `?tab/section/id/step` + Back model, builder focus mode, Team desk frame; staff with a classic desk keep the classic review queue |
+| P2-08 | Part done | stage 10 | v2 frame styles in `assets/ads-workspace.css` (320–820 px, light/dark, RTL); screen styles follow with each screen |
+| P2-13 | Done | stage 10 | E2E harness: `ALBAYAN_STUDIO_V2=pilot`, guarded seed route (SQLite + flag only), dedicated pilot users; classic specs unchanged |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
