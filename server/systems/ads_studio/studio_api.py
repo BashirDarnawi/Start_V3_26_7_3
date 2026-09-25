@@ -26,6 +26,7 @@ from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_diagnostics import read_diagnostics
 from .studio_errors import studio_error
+from .studio_facts import create_studio_checks_router
 from .studio_settings import env_switch, me_view, read_all_settings, read_setting, require_known_key, save_setting
 from .studio_types import STUDIO_SETTINGS_TYPE
 
@@ -137,4 +138,5 @@ def create_studio_router(
         report["generatedAt"] = _iso_now()
         return report
 
+    router.include_router(create_studio_checks_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/facts + checks (studio_facts.py)
     return router

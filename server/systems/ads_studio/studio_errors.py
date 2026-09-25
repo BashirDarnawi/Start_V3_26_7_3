@@ -26,6 +26,10 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "UNKNOWN_SETTING": 404,      # a settings key that does not exist
     "VERSION_CONFLICT": 409,     # someone saved a newer version first; reload and retry
     "RATE_LIMITED": 429,         # too many changes in a short time
+    "UNKNOWN_PAGE": 404,         # admin checks: no linked studio page with this id
+    "NOT_INSTAGRAM": 409,        # admin checks: the Instagram read test needs a linked Instagram account
+    "ALREADY_TESTED_TODAY": 409,  # admin checks: one test per page/account per Tripoli day
+    "META_NOT_CONFIGURED": 409,  # admin checks: Albayan's Meta connection is not set up, so nothing ran
 }
 
 

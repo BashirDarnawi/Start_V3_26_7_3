@@ -31,7 +31,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-from .db import db_conn, get_engine, json_dumps, json_field_sql, json_loads, now_ms
+from .db import db_conn, get_engine, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from .entity_projection import _without_inline_media
 from .operations import assert_financial_period_open
 from .rate_limiter import check_rate_limit
@@ -3744,6 +3744,267 @@ def webhook_counts_report() -> dict[str, Any]:
         "since": _clean_time(stored.get("since")),
         "updatedAt": _clean_time(stored.get("updatedAt")),
         "notYetStored": waiting,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Albayan Studio admin facts (plan task P0-05c; P0-01 d, f, i, n1, s)
+# ---------------------------------------------------------------------------
+# Platform reads for the studio's admin "Studio health" section. Everything they return is
+# a count, a flag, a currency, a Meta error code or an ad account's LAST 4 DIGITS: never an
+# id, a name or a text. The two Meta readings (f: min_daily_budget per allowed ad account;
+# i: subscribed_apps per linked page) go through the same paced request lane and backoff as
+# every other Meta call, only when an admin asks for a refresh, and are kept for 24 hours in
+# metaHealthState/"studioFacts" so a plain read never calls Meta.
+_STUDIO_FACTS_STATE_ID = "studioFacts"
+STUDIO_FACTS_MAX_AGE_SECONDS = 24 * 60 * 60
+_STUDIO_FACTS_MAX_PAGES = 10  # page token + subscribed_apps = 2 paced reads per page (a refresh stays under ~30 s)
+_STUDIO_FACTS_LOCK = threading.Lock()
+# The page webhook field Social Studio answers Facebook comments from (handle_meta_webhook).
+STUDIO_PAGE_WEBHOOK_FIELDS = ("feed",)
+_CORE_ADS_TYPE = "ads"  # Albayan Manager's record type: read here, in platform code, never by a system
+_DRIFT_FIELDS = (
+    "finalSpendConfirmedAt", "finalSpendMetaMinorAtConfirmation", "finalSpendMetaCurrencyAtConfirmation",
+    "metaSpendMinor", "metaCurrency", "metaSyncedAt", "metaEndTime",
+)
+# MetaAdsError public messages -> the error class they stand for (P0-01 b reads the class of a
+# stored reply failure from its text; Meta's own texts fall into "request_failed").
+_PUBLIC_MESSAGE_CLASSES = {
+    "Meta authorization failed. Reconnect the access token.": "authorization",
+    "Albayan's Meta token cannot manage this page. Reconnect the access token.": "authorization",
+    "The selected Meta ad was not found or is no longer accessible.": "not_found",
+    "Meta is temporarily limiting synchronization. Albayan will retry.": "rate_limited",
+    "Meta synchronization is paused safely and will resume automatically.": "rate_limited",
+    "Meta is temporarily unavailable. Albayan will retry.": "temporary",
+    "Meta did not answer in time. Albayan will retry.": "timeout",
+    "Meta could not be reached. Albayan will retry.": "network",
+    "Meta returned too much data for one synchronization.": "invalid_response",
+    "Meta returned an invalid response.": "invalid_response",
+    "Invalid Meta API request": "invalid_request",
+    "Invalid Meta page id": "invalid_request",
+}
+
+
+def meta_error_class(public_message: Any) -> str:
+    """The MetaAdsError class of a stored public message ("request_failed" for Meta's own texts)."""
+    return _PUBLIC_MESSAGE_CLASSES.get(str(public_message or "").strip(), "request_failed")
+
+
+def account_tail(account_id: Any) -> str:
+    """An ad account as counts-only reports show it: its last 4 digits ("…1234")."""
+    digits = re.sub(r"\D", "", str(account_id or ""))
+    return f"…{digits[-4:]}" if digits else ""
+
+
+def ad_account_allowlist_configured() -> bool:
+    """P0-01 (d): ALBAYAN_META_AD_ACCOUNT_IDS holds at least one valid account (flag only)."""
+    return bool(load_meta_ads_config().allowed_account_ids)
+
+
+def _iso_age_seconds(value: Any) -> int | None:
+    stamp = _clean_time(value)
+    if not stamp:
+        return None
+    moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    return max(0, int((datetime.now(timezone.utc) - moment).total_seconds()))
+
+
+def _read_min_daily_budgets(client: "MetaAdsClient", account_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+    """P0-01 (f): Meta's min_daily_budget and currency of each allowed ad account (one paced GET each)."""
+    rows: list[dict[str, Any]] = []
+    pause: MetaAdsError | None = None
+    for account_id in account_ids[:_META_FUNDS_MAX_ACCOUNTS]:
+        row: dict[str, Any] = {"account": account_tail(account_id), "currency": "", "minDailyBudget": None,
+                               "unit": "minor", "errorCode": "", "providerCode": ""}
+        error = pause
+        if error is None:
+            try:
+                payload = client._get(f"act_{account_id}", {"fields": "currency,min_daily_budget"})
+                raw = payload.get("min_daily_budget")
+                row["currency"] = _clean_text(payload.get("currency"), 12).upper()
+                row["minDailyBudget"] = _metric_int(raw) if raw not in (None, "") else None
+                rows.append(row)
+                continue
+            except MetaAdsError as caught:
+                error = caught
+                if caught.retryable:
+                    pause = caught  # Meta asked Albayan to wait: the other accounts are not read now
+        row.update({"errorCode": error.code, "providerCode": error.provider_code})
+        rows.append(row)
+    return rows
+
+
+def _page_subscription_state(client: "MetaAdsClient", page_id: str, app_id: str) -> tuple[str, str]:
+    """P0-01 (i): ("subscribed" | "not_subscribed" | "error", error code) for one page.
+
+    Read with the page's own token. Subscribed = Albayan's app (ALBAYAN_META_APP_ID; any app
+    when it is not set) lists every field in STUDIO_PAGE_WEBHOOK_FIELDS.
+    """
+    try:
+        token = client.page_access_token(page_id)
+        payload = client._request("GET", f"{page_id}/subscribed_apps", params={}, access_token=token)
+    except MetaAdsError as error:
+        return "error", error.code
+    for app in payload.get("data") if isinstance(payload.get("data"), list) else []:
+        if not isinstance(app, dict) or (app_id and str(app.get("id") or "") != app_id):
+            continue
+        fields = app.get("subscribed_fields") if isinstance(app.get("subscribed_fields"), list) else []
+        if all(field in fields for field in STUDIO_PAGE_WEBHOOK_FIELDS):
+            return "subscribed", ""
+    return "not_subscribed", ""
+
+
+def _read_page_subscriptions(client: "MetaAdsClient", page_ids: list[str]) -> dict[str, Any]:
+    app_id = (os.getenv("ALBAYAN_META_APP_ID") or "").strip()
+    app_id = app_id if _META_ID_RE.fullmatch(app_id) else ""
+    counts = {"subscribed": 0, "notSubscribed": 0, "error": 0}
+    codes: dict[str, int] = {}
+    for page_id in page_ids[:_STUDIO_FACTS_MAX_PAGES]:
+        state, code = _page_subscription_state(client, page_id, app_id)
+        key = {"subscribed": "subscribed", "not_subscribed": "notSubscribed"}.get(state, "error")
+        counts[key] += 1
+        if code:
+            codes[code] = codes.get(code, 0) + 1
+    return {**counts, "errorCodes": codes, "pagesChecked": min(len(page_ids), _STUDIO_FACTS_MAX_PAGES),
+            "notChecked": max(len(page_ids) - _STUDIO_FACTS_MAX_PAGES, 0), "appIdConfigured": bool(app_id)}
+
+
+def _public_fact_block(block: Any) -> dict[str, Any]:
+    clean = dict(block) if isinstance(block, dict) else {}
+    checked_at = _clean_time(clean.get("checkedAt"))
+    age = _iso_age_seconds(checked_at)
+    clean.update({"checked": bool(checked_at), "checkedAt": checked_at, "ageSeconds": age,
+                  "stale": age is None or age > STUDIO_FACTS_MAX_AGE_SECONDS})
+    return clean
+
+
+def studio_meta_facts(page_ids: Any = (), *, refresh: bool = False) -> dict[str, Any]:
+    """P0-01 (f) and (i): the stored 24-hour reading, or a fresh one when ``refresh`` is set.
+
+    ``page_ids`` are the Meta page ids the studio has linked (used in memory only; the
+    stored reading keeps counts). A refresh while another one runs returns the stored
+    reading with ``busy`` set. Without a Meta connection nothing is read.
+    """
+    config = load_meta_ads_config()
+    state = load_meta_health_state(_STUDIO_FACTS_STATE_ID)
+    refreshed = busy = False
+    if refresh and config.configured:
+        if _STUDIO_FACTS_LOCK.acquire(blocking=False):
+            try:
+                pages = list(dict.fromkeys(re.sub(r"\D", "", str(p or "")) for p in (page_ids or ())))
+                client = get_meta_ads_client()
+                reading = {
+                    "minDailyBudget": {"checkedAt": _iso_now(), "accounts": _read_min_daily_budgets(client, config.allowed_account_ids)},
+                    "pageSubscriptions": {"checkedAt": _iso_now(), **_read_page_subscriptions(client, [p for p in pages if p])},
+                }
+                try:
+                    state = save_meta_health_state(_STUDIO_FACTS_STATE_ID, lambda _current: reading)
+                except Exception:
+                    state = reading  # shown now, stored next time (best effort)
+                refreshed = True
+            finally:
+                _STUDIO_FACTS_LOCK.release()
+        else:
+            busy = True
+    return {
+        "configured": config.configured,
+        "refreshed": refreshed,
+        "busy": busy,
+        "minDailyBudget": _public_fact_block(state.get("minDailyBudget")),
+        "pageSubscriptions": _public_fact_block(state.get("pageSubscriptions")),
+    }
+
+
+def studio_funds_flags() -> dict[str, Any]:
+    """P0-01 (n1): the last stored funds reading (metaFundsState) of each allowed ad account, as flags."""
+    config = load_meta_ads_config()
+    allowed = set(config.allowed_account_ids)
+    stored = _load_funds_state()
+    accounts: list[dict[str, Any]] = []
+    for row in stored.get("accounts") or []:
+        account_id = re.sub(r"\D", "", str(row.get("id") or "")) if isinstance(row, dict) else ""
+        if not account_id or (allowed and account_id not in allowed):
+            continue
+        accounts.append({
+            "account": account_tail(account_id),
+            "isPrepay": row.get("isPrepay") if isinstance(row.get("isPrepay"), bool) else None,
+            "fundsTextPresent": bool(_clean_text(row.get("fundsText"), 160)),
+            "currency": _clean_text(row.get("currency"), 12).upper(),
+            "fundsHidden": row.get("fundsHidden") is True,
+            "readError": bool(row.get("error")),
+        })
+    return {"readAt": _clean_time(stored.get("updatedAt")), "allowlistConfigured": bool(allowed),
+            "accounts": accounts[:_META_FUNDS_MAX_ACCOUNTS]}
+
+
+def _percentiles(values: list[float]) -> dict[str, Any] | None:
+    """Nearest-rank p50/p90/p95 and the maximum (None without values)."""
+    if not values:
+        return None
+    ordered = sorted(values)
+
+    def rank(percent: int) -> float:
+        return round(ordered[min(len(ordered), max(1, math.ceil(percent * len(ordered) / 100))) - 1], 2)
+
+    return {"sample": len(ordered), "p50": rank(50), "p90": rank(90), "p95": rank(95), "max": round(ordered[-1], 2)}
+
+
+def _drift_time(value: Any) -> datetime | None:
+    stamp = _clean_time(value)
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
+
+
+def core_spend_drift_facts() -> dict[str, Any]:
+    """P0-01 (s): how Meta's spend moved after staff confirmed a core ad's final spend.
+
+    Albayan Manager's ``ads`` rows are read here (platform code), only the few fields
+    below, parsed once per row, and only rows whose JSON mentions a confirmation.
+    Counts and percentiles only.
+    """
+    sql = json_fields_select_sql(_DRIFT_FIELDS, (), "type = :type AND deleted = false AND data_json LIKE :marker")
+    with db_conn() as conn:
+        rows = conn.execute(text(sql), {"type": _CORE_ADS_TYPE, "marker": '%"finalSpendConfirmedAt"%'}).mappings().all()
+    confirmed = evidence = compared = mismatch = unchanged = higher = lower = before_end = 0
+    drift_minor: list[float] = []
+    drift_percent: list[float] = []
+    hours: list[float] = []
+    for row in rows:
+        confirmed_at = _drift_time(row.get("f_finalspendconfirmedat"))
+        if confirmed_at is None:
+            continue
+        confirmed += 1
+        end = _drift_time(row.get("f_metaendtime"))
+        if end is not None:
+            gap = (confirmed_at - end).total_seconds() / 3600
+            if gap < 0:
+                before_end += 1
+            else:
+                hours.append(gap)
+        at_confirmation = row.get("f_finalspendmetaminoratconfirmation")
+        if at_confirmation in (None, ""):
+            continue
+        evidence += 1
+        synced = _drift_time(row.get("f_metasyncedat"))
+        if synced is None or synced <= confirmed_at or row.get("f_metaspendminor") in (None, ""):
+            continue  # no Meta reading after the confirmation to compare with
+        was_currency = str(row.get("f_finalspendmetacurrencyatconfirmation") or "USD").upper()
+        if was_currency != str(row.get("f_metacurrency") or "USD").upper():
+            mismatch += 1
+            continue
+        compared += 1
+        before, after = _metric_int(at_confirmation), _metric_int(row.get("f_metaspendminor"))
+        change = after - before
+        unchanged += change == 0
+        higher += change > 0
+        lower += change < 0
+        drift_minor.append(abs(change))
+        if before > 0:
+            drift_percent.append(100 * abs(change) / before)
+    return {
+        "confirmed": confirmed, "withMetaEvidence": evidence, "resyncedAfterConfirmation": compared + mismatch,
+        "compared": compared, "currencyMismatch": mismatch, "unchanged": unchanged, "higher": higher, "lower": lower,
+        "driftMinor": _percentiles(drift_minor), "driftPercent": _percentiles(drift_percent),
+        "hoursEndToConfirmation": _percentiles(hours), "confirmedBeforeEnd": before_end,
     }
 
 

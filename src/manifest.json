@@ -31,7 +31,8 @@
   "lazy": {
     "studio.js": [
       "systems/ads_studio/15c-ads-studio.js",
-      "systems/ads_studio/15f-social-studio.js"
+      "systems/ads_studio/15f-social-studio.js",
+      "systems/ads_studio/15i-studio-health.js"
     ],
     "clothes.js": [
       "15b-clothes.js"
