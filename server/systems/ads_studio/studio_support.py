@@ -77,6 +77,38 @@ category and status change, never a subject or a message text, so the anonymisat
 **For other studio features** (the stop request P3-10, the staff pulse P3-17, the activity feed
 P3-05): ``open_ticket`` / ``open_ticket_conn`` (priority, kind and the open cap are parameters),
 ``system_resolve_ticket_conn``, ``staff_ticket_counts``, ``ticket_view`` and ``message_view``.
+
+**TikTok service requests (P5-01; PLAN.md §4.1 M11, §8.4, D14).** A TikTok request is a help
+ticket of category ``tiktok`` and kind ``tiktok_request`` (audience staff: reviewers and admins
+see it in the desk), so it needs no second record type: the ticket thread carries the
+conversation and four extra fields carry the service: ``tiktokHandle`` (the username without
+``@``; the profile link is derived on read), ``tiktokWants`` (``auto_replies_help`` and/or
+``advice``), ``tiktokState`` (``open -> in_progress -> done | declined``; the customer may
+``cancelled`` an open one by resolving the ticket) and ``tiktokNote`` (the team's bilingual note
+at each step). The words say what it is: hands-on help from the team; nothing here ever calls
+TikTok "connected", "linked", "managed" or "automated" (test_studio_tiktok checks the texts).
+
+* ``POST /tiktok/requests`` ``{handle, wants, note?, operationId}`` -> ``{request, message}``
+  (the ``tiktok`` service must be open for the caller: ``rollout.services.tiktok``, else 403
+  SERVICE_OFF; at most TIKTOK_CREATES_PER_DAY a day and MAX_OPEN_TIKTOK_REQUESTS open or in
+  progress at once, else 409 TICKET_OPEN_LIMIT). ``handle``: the TikTok username, with or without
+  ``@``, or the profile link ``tiktok.com/@name`` (2-24 letters, digits, underscores or periods,
+  not ending with a period). ``wants``: one value or a list of TIKTOK_WANTS. The same
+  ``operationId`` again returns the first request (409 IDEMPOTENCY_MISMATCH when anything differs).
+* ``GET /tiktok/requests?cursor=&limit=`` -> ``{requests, nextCursor, openCount, maxOpen,
+  service}`` (the caller's own, newest first; ``service`` says whether new requests are open).
+* ``GET /staff/tiktok?state=&cursor=&limit=`` (staff) -> ``{requests, nextCursor}``; ``state`` is
+  one of TIKTOK_STATES or ``active`` (open and in progress).
+* ``POST /staff/tiktok/{id}/status`` ``{status, note: {en, ar}, operationId}`` (staff) ->
+  ``{request, message}``: ``in_progress`` from open, ``done`` from in progress, ``declined`` from
+  either. The note (1-TIKTOK_NOTE_MAX characters in each language) is appended to the thread as a
+  team message, so the customer reads it where the rest of the conversation is; ``done`` and
+  ``declined`` also resolve the ticket. A finished request answers 409 TICKET_CLOSED, a step that
+  skips the order 400 INVALID_VALUE, a ticket that is not a TikTok request 404 UNKNOWN_TICKET.
+  Audited ``tiktok_status`` (number and states, never the note).
+
+The request appears in every ticket view as ``tiktok: {handle, profileUrl, wants, state,
+stateLabels, note, stateAt}``.
 """
 
 import hashlib
@@ -120,9 +152,64 @@ RELATED_TYPES = ("campaign", "payment", "page")
 STATUSES = ("open", "answered", "waiting_customer", "resolved")
 STATUS_FILTERS = STATUSES + ("active",)
 PRIORITIES = ("normal", "urgent")
-KINDS = ("question", "stop_request")
+TIKTOK_KIND = "tiktok_request"
+KINDS = ("question", "stop_request", TIKTOK_KIND)
 AUDIENCE_STAFF = "staff"
 AUDIENCE_ADMIN = "admin"
+
+# ---- TikTok service requests (P5-01): a service done by hand, never a connection
+TIKTOK_CATEGORY = "tiktok"
+TIKTOK_WANTS = ("auto_replies_help", "advice")
+TIKTOK_STATES = ("open", "in_progress", "done", "declined", "cancelled")
+TIKTOK_STATE_FILTERS = TIKTOK_STATES + ("active",)
+TIKTOK_OPEN_STATES = frozenset({"open", "in_progress"})
+TIKTOK_TRANSITIONS: dict[str, tuple[str, ...]] = {"open": ("in_progress", "declined"), "in_progress": ("done", "declined")}
+MAX_OPEN_TIKTOK_REQUESTS = 3
+TIKTOK_CREATES_PER_DAY = 5
+TIKTOK_HANDLE_MIN = 2
+TIKTOK_HANDLE_MAX = 24
+TIKTOK_NOTE_MAX = 500  # each language of the team's note
+TIKTOK_CUSTOMER_NOTE_MAX = 1000
+TIKTOK_CREATE_FIELDS = ("handle", "wants", "note", "operationId")
+TIKTOK_STATUS_FIELDS = ("status", "note", "operationId")
+TIKTOK_PROFILE_URL = "https://www.tiktok.com/@{handle}"
+# Every customer-facing TikTok text lives here (test_studio_tiktok greps them for the forbidden
+# words "connected", "linked", "managed", "automated" / متصل, مربوط, يدير, مؤتمت: PLAN.md §8.4).
+TIKTOK_TEXTS: dict[str, Any] = {
+    "service": {
+        "en": "TikTok service: hands-on help from the Albayan team, without automatic replies",
+        "ar": "خدمة تيك توك — مساعدة يدوية من فريق البيان، بدون ردود تلقائية",
+    },
+    "notice": {
+        "en": "Albayan cannot reply on TikTok for you yet, because TikTok has not opened that service to us. "
+              "We help you by hand and tell you as soon as it becomes available.",
+        "ar": "لا يستطيع البيان حالياً الرد تلقائياً على تيك توك، لأن تيك توك لم يفتح هذه الخدمة لنا بعد. "
+              "سنساعدك يدوياً ونخبرك فور توفرها.",
+    },
+    "promise": {
+        "en": "A team member contacts you within one business day, in this ticket or on WhatsApp.",
+        "ar": "يتواصل معك أحد أعضاء الفريق خلال يوم عمل، في هذه التذكرة أو عبر واتساب.",
+    },
+    "wants": {
+        "auto_replies_help": {
+            "en": "Help setting up TikTok's own built-in auto-messages (TikTok runs them, not Albayan)",
+            "ar": "مساعدة في إعداد الرسائل التلقائية المدمجة في تيك توك (تيك توك يشغّلها، لا البيان)",
+        },
+        "advice": {
+            "en": "Advice on answering comments by hand and on TikTok ads",
+            "ar": "نصائح للرد على التعليقات يدوياً وعلى إعلانات تيك توك",
+        },
+    },
+    "states": {
+        "open": {"en": "Received: the team contacts you within one business day", "ar": "وصل الطلب: يتواصل معك الفريق خلال يوم عمل"},
+        "in_progress": {"en": "In progress with the Albayan team", "ar": "قيد العمل مع فريق البيان"},
+        "done": {"en": "Done", "ar": "تم"},
+        "declined": {"en": "Not possible right now", "ar": "غير ممكن حالياً"},
+        "cancelled": {"en": "Cancelled by you", "ar": "ألغيته"},
+    },
+    "subject": {"en": "TikTok service", "ar": "خدمة تيك توك"},
+    "firstMessage": {"en": "I would like help with TikTok: {wants}.", "ar": "أريد مساعدة في تيك توك: {wants}."},
+}
 
 SUBJECT_MIN = 3
 SUBJECT_MAX = 120
@@ -149,6 +236,12 @@ _ENTITY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")
 _CURSOR_RE = re.compile(r"([01]):([0-9]{1,15}):(tkt_[0-9a-f]{40})")
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")  # every control character but the line break
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
+# A TikTok username: letters, digits, underscores and periods, 2-24 long, no period at the end (TikTok's
+# own rule); accepted bare, with a leading @, or inside the profile link tiktok.com/@name.
+_TIKTOK_HANDLE_RE = re.compile(r"[A-Za-z0-9_.]{2,24}")
+_TIKTOK_URL_RE = re.compile(
+    r"(?:https?://)?(?:[a-z]{1,3}\.)?tiktok\.com/@([A-Za-z0-9_.]{2,24})/?(?:[?#].*)?", re.IGNORECASE | re.DOTALL,
+)
 
 _SQLITE_WRITE_LOCK = threading.RLock()
 
@@ -367,7 +460,41 @@ def ticket_view(data: dict[str, Any], *, staff: bool = False, now: datetime | No
             "messageCount": _whole(data.get("messageCount")),
             "overdue": bool(due and due < (now or utc_now())),
         })
+    if out["kind"] == TIKTOK_KIND:
+        out["tiktok"] = tiktok_view(data)
     return out
+
+
+def tiktok_view(data: dict[str, Any]) -> dict[str, Any]:
+    """The service part of a TikTok request ticket, read back through its rules."""
+    handle = tiktok_handle(data.get("tiktokHandle")) or ""
+    state = _one_of(data.get("tiktokState"), TIKTOK_STATES, "open")
+    wants = data.get("tiktokWants") if isinstance(data.get("tiktokWants"), list) else []
+    note = data.get("tiktokNote") if isinstance(data.get("tiktokNote"), dict) else None
+    return {
+        "handle": handle,
+        "profileUrl": TIKTOK_PROFILE_URL.format(handle=handle) if handle else None,
+        "wants": [want for want in TIKTOK_WANTS if want in wants],
+        "state": state,
+        "stateLabels": dict(TIKTOK_TEXTS["states"][state]),
+        "note": {lang: note.get(lang) if isinstance(note.get(lang), str) else "" for lang in ("en", "ar")} if note else None,
+        "stateAt": _text_or_none(data.get("tiktokStateAt")),
+    }
+
+
+def tiktok_handle(raw: Any) -> str | None:
+    """The username of a TikTok handle as typed (``name``, ``@name`` or ``tiktok.com/@name``), or None."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    link = _TIKTOK_URL_RE.fullmatch(value)
+    if link:
+        value = link.group(1)
+    elif value.startswith("@"):
+        value = value[1:]
+    if not _TIKTOK_HANDLE_RE.fullmatch(value) or value.endswith(".") or not TIKTOK_HANDLE_MIN <= len(value) <= TIKTOK_HANDLE_MAX:
+        return None
+    return value
 
 
 def message_view(data: dict[str, Any], *, staff: bool = False) -> dict[str, Any]:
@@ -429,12 +556,15 @@ def list_tickets_page(
     admin: bool = False,
     status: str | None = None,
     priority: str | None = None,
+    kind: str | None = None,
+    tiktok_state: str | None = None,
     cursor: tuple[int, int, str] | None = None,
     limit: int = PAGE_DEFAULT,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """A page of tickets: the owner's own (``owner_id``, newest first) or the team queue (unresolved
-    urgent tickets first, then newest first; reviewers only ``audience: 'staff'``)."""
+    urgent tickets first, then newest first; reviewers only ``audience: 'staff'``). ``kind`` narrows
+    to one ticket kind and ``tiktok_state`` (a TIKTOK_STATE_FILTERS value) to one service state."""
     status_sql, priority_sql = json_field_sql("status"), json_field_sql("priority")
     where = ["type = :type", "deleted = false"]
     params: dict[str, Any] = {"type": SUPPORT_TICKETS_TYPE, "limit": int(limit) + 1}
@@ -452,6 +582,14 @@ def list_tickets_page(
     if priority:
         where.append(f"COALESCE({priority_sql}, 'normal') = :priority")
         params["priority"] = priority
+    if kind:
+        where.append(f"COALESCE({json_field_sql('kind')}, 'question') = :kind")
+        params["kind"] = kind
+    if tiktok_state == "active":
+        where.append(f"COALESCE({json_field_sql('tiktokState')}, 'open') IN ('open', 'in_progress')")
+    elif tiktok_state:
+        where.append(f"COALESCE({json_field_sql('tiktokState')}, 'open') = :tiktok_state")
+        params["tiktok_state"] = tiktok_state
     rank = f"(CASE WHEN {priority_sql} = 'urgent' AND COALESCE({status_sql}, '') <> 'resolved' THEN 1 ELSE 0 END)" if staff else "0"
     if cursor is not None:
         where.append(f"({rank} < :cp OR ({rank} = :cp AND (created_at < :cc OR (created_at = :cc AND id < :cid))))")
@@ -481,6 +619,18 @@ def count_open_tickets(conn: Any, owner_id: str) -> int:
         ),
         {"type": SUPPORT_TICKETS_TYPE, "uid": str(owner_id or "")},
     ).scalar() or 0)
+
+
+def count_open_tiktok_requests(conn: Any, owner_id: str) -> int:
+    """The owner's TikTok requests still open or in progress (the MAX_OPEN_TIKTOK_REQUESTS count)."""
+    rows = conn.execute(
+        text(json_fields_select_sql(("kind", "tiktokState"), (), "type = :type AND created_by = :uid AND deleted = false")),
+        {"type": SUPPORT_TICKETS_TYPE, "uid": str(owner_id or "")},
+    ).mappings().all()
+    return sum(
+        1 for row in rows
+        if str(row.get("f_kind") or "") == TIKTOK_KIND and str(row.get("f_tiktokstate") or "open") in TIKTOK_OPEN_STATES
+    )
 
 
 def staff_ticket_counts(conn: Any | None = None, *, include_admin: bool, now: datetime | None = None) -> dict[str, int]:
@@ -554,6 +704,7 @@ def open_ticket_conn(
     priority: str = "normal",
     kind: str = "question",
     enforce_open_limit: bool = True,
+    extra: dict[str, Any] | None = None,
     settings: dict[str, Any],
     now: datetime | None = None,
     audit: Callable[[Any, str, str, str, dict[str, Any]], None] | None = None,
@@ -562,7 +713,9 @@ def open_ticket_conn(
     message data, created). The same operationId again returns the first result (created False), or
     409 IDEMPOTENCY_MISMATCH when anything differs. ``settings``: read_all_settings(), read BEFORE the
     transaction. ``audit(conn, action, ticket id, message, metadata)`` joins the transaction.
-    The texts and the related item must already be checked (clean_create_body, check_related)."""
+    ``extra``: more fields stored on the ticket (a TikTok request's service fields), part of the
+    replay fingerprint. The texts and the related item must already be checked (clean_create_body,
+    check_related)."""
     uid = str(owner_id or "")
     if not uid or not _OPERATION_ID_RE.fullmatch(str(operation_id or "")):
         raise ValueError("open_ticket_conn needs an owner and a valid operationId")
@@ -573,7 +726,9 @@ def open_ticket_conn(
     now = now or utc_now()
     row_id = ticket_id(uid, operation_id)
     first_id = message_id(row_id, operation_id)
-    fingerprint = _fingerprint(subject, category, related_type or "", related_id or "", message, priority, kind)
+    extra = dict(extra or {})
+    fingerprint = _fingerprint(subject, category, related_type or "", related_id or "", message, priority, kind,
+                               *([sorted(extra.items())] if extra else []))
     counter_row, value = _lock_counter(conn)  # every open queues here first: numbers and the cap stay exact
     existing = _select(conn, SUPPORT_TICKETS_TYPE, row_id)
     if existing is not None:
@@ -584,10 +739,14 @@ def open_ticket_conn(
         return {**data, "id": row_id}, {**first, "id": first_id}, False
     if enforce_open_limit and count_open_tickets(conn, uid) >= MAX_OPEN_TICKETS:
         studio_error(409, "TICKET_OPEN_LIMIT", f"You already have {MAX_OPEN_TICKETS} open tickets. Resolve one, then open a new one.")
+    if kind == TIKTOK_KIND and count_open_tiktok_requests(conn, uid) >= MAX_OPEN_TIKTOK_REQUESTS:
+        studio_error(409, "TICKET_OPEN_LIMIT",
+                     f"You already have {MAX_OPEN_TIKTOK_REQUESTS} TikTok requests in progress. Wait for the team, then send a new one.")
     seq = _advance_counter(conn, counter_row, value)
     at = iso(now)
     owner = created_by_or_none(conn, uid)
     ticket: dict[str, Any] = {
+        **extra,
         "number": ticket_number(seq), "seq": seq, "ownerId": uid, "subject": subject, "category": category,
         "audience": audience_for(category), "priority": priority, "kind": kind,
         "relatedType": related_type or None, "relatedId": related_id or None,
@@ -595,6 +754,8 @@ def open_ticket_conn(
         "lastCustomerAt": at, "lastStaffAt": None, "firstStaffAt": None, "resolvedAt": None,
         "messageCount": 1, "operationId": operation_id, "createFingerprint": fingerprint,
     }
+    if kind == TIKTOK_KIND:  # the service starts open at the ticket's own time (never part of the replay fingerprint)
+        ticket.update({"tiktokState": "open", "tiktokStateAt": at, "tiktokNote": None})
     ticket["dueAt"] = _due(ticket, now, settings)
     first = {"ticketId": row_id, "ownerId": uid, "seq": 1, "author": "customer", "authorUserId": uid,
              "text": message, "createdAt": at, "operationId": operation_id}
@@ -650,6 +811,35 @@ def post_message_conn(
     now = now or utc_now()
     owner_filter = str(author_id or "") if author == "customer" else None
     row, data = load_ticket(conn, row_id, owner_id=owner_filter, admin=admin, lock=True)
+    was = data.get("status")
+    message, created = _append_message(conn, row, data, author=author, author_id=author_id, operation_id=operation_id,
+                                       body=body, now=now, settings=settings)
+    if not created:
+        return data, message, False
+    _update(conn, SUPPORT_TICKETS_TYPE, row, data)
+    if audit is not None:
+        audit(conn, "ticket_message", row_id, f"Ticket {data.get('number')}: {author} message", {
+            "number": data.get("number"), "from": author, "statusBefore": was, "status": data["status"],
+        })
+    return data, message, True
+
+
+def _append_message(
+    conn: Any,
+    row: Any,
+    data: dict[str, Any],
+    *,
+    author: str,
+    author_id: str,
+    operation_id: str,
+    body: str,
+    now: datetime,
+    settings: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Insert one message of the locked ticket ``row`` and move ``data`` (status, counts, times) for
+    it; the caller writes the ticket back. Returns (message data, created): a replay of the
+    operationId returns the stored message (created False), a different content is 409."""
+    row_id = str(row["id"])
     new_id = message_id(row_id, operation_id)
     existing = _select(conn, SUPPORT_TICKET_MESSAGES_TYPE, new_id)
     if existing is not None:
@@ -665,7 +855,6 @@ def post_message_conn(
     if count >= MAX_MESSAGES:
         studio_error(409, "TICKET_MESSAGE_LIMIT", f"This ticket already holds {MAX_MESSAGES} messages. Open a new ticket.")
     at = iso(now)
-    was = data.get("status")
     if author == "customer":
         _set_status(data, "open", by="customer", now=now, settings=settings)
         data["lastCustomerAt"] = at
@@ -727,6 +916,13 @@ def change_status_conn(
     if was == status:
         return data, False
     _set_status(data, status, by=by, now=now, settings=settings)
+    if by == "customer" and data.get("kind") == TIKTOK_KIND:
+        # A customer resolving an open TikTok request cancels it; reopening within the window undoes that.
+        state = _one_of(data.get("tiktokState"), TIKTOK_STATES, "open")
+        if status == "resolved" and state == "open":
+            _set_tiktok_state(data, "cancelled", now)
+        elif status == "open" and state == "cancelled":
+            _set_tiktok_state(data, "open", now)
     if operation_id:
         data["lastStatusOperationId"] = operation_id
     _update(conn, SUPPORT_TICKETS_TYPE, row, data)
@@ -735,6 +931,60 @@ def change_status_conn(
             "number": data.get("number"), "by": by, "statusBefore": was, "status": status,
         })
     return data, True
+
+
+def _set_tiktok_state(data: dict[str, Any], state: str, now: datetime, note: dict[str, str] | None = None) -> None:
+    data["tiktokState"] = state
+    data["tiktokStateAt"] = iso(now)
+    if note is not None:
+        data["tiktokNote"] = {"en": note["en"], "ar": note["ar"]}
+
+
+def tiktok_transition_conn(
+    conn: Any,
+    row_id: str,
+    state: str,
+    *,
+    note: dict[str, str],
+    actor_id: str,
+    operation_id: str,
+    admin: bool = False,
+    settings: dict[str, Any],
+    now: datetime | None = None,
+    audit: Callable[[Any, str, str, str, dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
+    """The team moves a TikTok request to ``state`` (TIKTOK_TRANSITIONS) with a bilingual ``note``
+    ``{en, ar}``, appended to the thread as a team message; ``done`` and ``declined`` resolve the
+    ticket. Returns (ticket data, the note's message or None, changed). The state it already has, or
+    a replay of the operationId, changes nothing (200)."""
+    if state not in TIKTOK_STATES or state == "cancelled":
+        raise ValueError("a TikTok request moves to in_progress, done or declined")
+    now = now or utc_now()
+    row, data = load_ticket(conn, row_id, admin=admin, lock=True)
+    if data.get("kind") != TIKTOK_KIND:
+        studio_error(404, "UNKNOWN_TICKET", "Ticket not found")
+    current = _one_of(data.get("tiktokState"), TIKTOK_STATES, "open")
+    existing = _select(conn, SUPPORT_TICKET_MESSAGES_TYPE, message_id(row_id, operation_id))
+    if existing is not None and not bool(existing["deleted"]):
+        return data, {**_data(existing), "id": message_id(row_id, operation_id)}, False  # the same step, sent again
+    if current == state:
+        return data, None, False
+    if current not in TIKTOK_TRANSITIONS:
+        studio_error(409, "TICKET_CLOSED", f"This TikTok request is already {current}. Ask the customer for a new request.")
+    if state not in TIKTOK_TRANSITIONS[current]:
+        studio_error(400, "INVALID_VALUE", "status must follow open -> in_progress -> done or declined (declined is allowed from open too)")
+    message, _created = _append_message(conn, row, data, author="team", author_id=actor_id, operation_id=operation_id,
+                                        body=f"{note['en']}\n\n{note['ar']}", now=now, settings=settings)
+    _set_tiktok_state(data, state, now, note)
+    if state in ("done", "declined"):
+        _set_status(data, "resolved", by="team", now=now, settings=settings)
+    data["lastStatusOperationId"] = operation_id
+    _update(conn, SUPPORT_TICKETS_TYPE, row, data)
+    if audit is not None:
+        audit(conn, "tiktok_status", row_id, f"Ticket {data.get('number')}: TikTok request {current} -> {state}", {
+            "number": data.get("number"), "stateBefore": current, "state": state, "status": data["status"],
+        })
+    return data, message, True
 
 
 def system_resolve_ticket_conn(conn: Any, row_id: str, *, reason: str, now: datetime | None = None) -> dict[str, Any] | None:
@@ -828,6 +1078,64 @@ def check_related(owner_id: str, related_type: str | None, related_id: str | Non
         owned = payment_request_belongs_to(conn, uid, str(related_id or ""))
     if not owned:
         studio_error(404, "UNKNOWN_PAYMENT", "Payment request not found")
+
+
+def _tiktok_wants(raw: Any) -> list[str]:
+    values = [raw] if isinstance(raw, str) else raw
+    if not isinstance(values, list) or not values or len(values) > len(TIKTOK_WANTS) or len(set(values)) != len(values) \
+            or any(value not in TIKTOK_WANTS for value in values):
+        studio_error(400, "INVALID_VALUE", "wants must be one or more of: " + ", ".join(TIKTOK_WANTS))
+    return [want for want in TIKTOK_WANTS if want in values]
+
+
+def tiktok_first_message(wants: list[str]) -> str:
+    """The bilingual first message of a request sent without a note (the wants in words)."""
+    labels = {lang: "; ".join(TIKTOK_TEXTS["wants"][want][lang] for want in wants) for lang in ("en", "ar")}
+    return "\n\n".join(TIKTOK_TEXTS["firstMessage"][lang].format(wants=labels[lang]) for lang in ("en", "ar"))
+
+
+def clean_tiktok_body(body: Any) -> dict[str, Any]:
+    """The checked fields of a new TikTok request: the handle as typed, the wants, the note (or the
+    default first message) and the operationId."""
+    body = _fields_only(body, TIKTOK_CREATE_FIELDS)
+    handle = tiktok_handle(body.get("handle"))
+    if handle is None:
+        studio_error(400, "INVALID_VALUE",
+                     f"handle must be your TikTok username ({TIKTOK_HANDLE_MIN} to {TIKTOK_HANDLE_MAX} letters, digits, "
+                     "underscores or periods, not ending with a period), with or without @, or your profile link")
+    wants = _tiktok_wants(body.get("wants"))
+    note = None
+    if body.get("note") not in (None, ""):
+        note = clean_text(body.get("note"), multiline=True)
+        if not note or len(note) > TIKTOK_CUSTOMER_NOTE_MAX:
+            studio_error(400, "INVALID_VALUE", f"note must be text of 1 to {TIKTOK_CUSTOMER_NOTE_MAX} characters")
+    return {"handle": handle, "wants": wants, "message": note or tiktok_first_message(wants), "operation_id": _operation_id(body)}
+
+
+def clean_tiktok_status_body(body: Any) -> dict[str, Any]:
+    """``{status, note: {en, ar}, operationId}`` of a team step; both languages of the note are required."""
+    body = _fields_only(body, TIKTOK_STATUS_FIELDS)
+    state = body.get("status")
+    if state not in TIKTOK_STATES or state in ("open", "cancelled"):
+        studio_error(400, "INVALID_VALUE", "status must be one of: in_progress, done, declined")
+    note = body.get("note")
+    if not isinstance(note, dict) or set(note) - {"en", "ar"}:
+        studio_error(400, "INVALID_VALUE", "note must be {en, ar}: the same note in English and Arabic")
+    clean: dict[str, str] = {}
+    for lang in ("en", "ar"):
+        words = clean_text(note.get(lang), multiline=True)
+        if not words or len(words) > TIKTOK_NOTE_MAX:
+            studio_error(400, "INVALID_VALUE", f"note.{lang} must be text of 1 to {TIKTOK_NOTE_MAX} characters")
+        clean[lang] = words
+    return {"state": state, "note": clean, "operation_id": _operation_id(body)}
+
+
+def _tiktok_state_filter(raw: Any) -> str | None:
+    if raw is None or raw == "":
+        return None
+    if raw not in TIKTOK_STATE_FILTERS:
+        studio_error(400, "INVALID_VALUE", "state must be one of: " + ", ".join(TIKTOK_STATE_FILTERS))
+    return str(raw)
 
 
 def _status_filter(raw: Any) -> str | None:
@@ -1041,5 +1349,80 @@ def create_studio_support_router(
                 settings=settings, audit=auditor(uid),
             )
         return {"ticket": ticket_view(data, staff=True)}
+
+    # -------------------------------------------------------------- TikTok service requests (P5-01)
+
+    def tiktok_service(settings: dict[str, Any], uid: str) -> dict[str, Any]:
+        return {
+            "open": bool(service_access(settings["rollout"], uid)["tiktok"]),
+            "labels": dict(TIKTOK_TEXTS["service"]),
+            "notice": dict(TIKTOK_TEXTS["notice"]),
+            "promise": dict(TIKTOK_TEXTS["promise"]),
+            "wants": [{"key": want, "labels": dict(TIKTOK_TEXTS["wants"][want])} for want in TIKTOK_WANTS],
+            "maxOpen": MAX_OPEN_TIKTOK_REQUESTS,
+        }
+
+    @router.post("/tiktok/requests")
+    def open_tiktok_request(request: Request, body: Any = Body(None), user: dict[str, Any] = Depends(current_user_dependency)):
+        same_origin(request)
+        uid = str(user.get("id") or "")
+        rate_limit(user, "tiktok-create", TIKTOK_CREATES_PER_DAY, 86_400_000)
+        clean = clean_tiktok_body(body)
+        settings = read_all_settings()
+        if not service_access(settings["rollout"], uid)["tiktok"]:
+            studio_error(403, "SERVICE_OFF", "The TikTok service is not open for your account yet")
+        subject = f"{TIKTOK_TEXTS['subject']['en']} · {TIKTOK_TEXTS['subject']['ar']} · @{clean['handle']}"
+        with write_transaction() as conn:
+            ticket, first, _created = open_ticket_conn(
+                conn, owner_id=uid, operation_id=clean["operation_id"], subject=subject, category=TIKTOK_CATEGORY,
+                message=clean["message"], kind=TIKTOK_KIND, settings=settings, now=utc_now(), audit=auditor(uid),
+                extra={"tiktokHandle": clean["handle"], "tiktokWants": clean["wants"]},
+            )
+        return for_customer({"request": ticket_view(ticket), "message": message_view(first)}, user)
+
+    @router.get("/tiktok/requests")
+    def list_tiktok_requests(request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
+        rate_limit(user, "ticket-read", READS_PER_MINUTE)
+        uid = str(user.get("id") or "")
+        query = request.query_params
+        settings = read_all_settings()
+        with db_conn() as conn:
+            page = list_tickets_page(
+                conn, owner_id=uid, kind=TIKTOK_KIND, tiktok_state=_tiktok_state_filter(query.get("state")),
+                cursor=_parse_cursor(query.get("cursor")), limit=_limit(query.get("limit")),
+            )
+            open_count = count_open_tiktok_requests(conn, uid)
+        return for_customer({
+            "requests": page["tickets"], "nextCursor": page["nextCursor"], "openCount": open_count,
+            "maxOpen": MAX_OPEN_TIKTOK_REQUESTS, "service": tiktok_service(settings, uid),
+        }, user)
+
+    @router.get("/staff/tiktok")
+    def list_staff_tiktok_requests(request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
+        admin = require_staff(user)
+        rate_limit(user, "staff-ticket-read", READS_PER_MINUTE)
+        query = request.query_params
+        with db_conn() as conn:
+            page = list_tickets_page(
+                conn, admin=admin, kind=TIKTOK_KIND, tiktok_state=_tiktok_state_filter(query.get("state")),
+                cursor=_parse_cursor(query.get("cursor")), limit=_limit(query.get("limit")), now=utc_now(),
+            )
+        return {"requests": page["tickets"], "nextCursor": page["nextCursor"]}
+
+    @router.post("/staff/tiktok/{ticket}/status")
+    def set_tiktok_request_status(ticket: str, request: Request, body: Any = Body(None),
+                                  user: dict[str, Any] = Depends(current_user_dependency)):
+        same_origin(request)
+        admin = require_staff(user)
+        rate_limit(user, "staff-ticket-write", STAFF_WRITES_PER_MINUTE)
+        clean = clean_tiktok_status_body(body)
+        uid = str(user.get("id") or "")
+        settings = read_all_settings()
+        with write_transaction() as conn:
+            data, message, _changed = tiktok_transition_conn(
+                conn, ticket, clean["state"], note=clean["note"], actor_id=uid, operation_id=clean["operation_id"],
+                admin=admin, settings=settings, audit=auditor(uid),
+            )
+        return {"request": ticket_view(data, staff=True), "message": message_view(message, staff=True) if message else None}
 
     return router

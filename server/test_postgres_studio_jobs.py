@@ -21,6 +21,10 @@ scenario runs the application in a child process inside its own random schema, d
 * ``studio_ticket_numbers`` (P3-07, test_studio_support.postgres_ticket_numbers): 50 parallel ticket
   opens by 5 customers get 50 different T- numbers without gaps; 10 parallel sends of one operationId
   make one ticket; 25 parallel opens by one customer stop exactly at the 20-open cap.
+* ``studio_projection_cost`` (P3-14): 50 requests carrying ~1 MB of inline images each; EXPLAIN of
+  the diagnostics projection shows ONE jsonb cast per row (the per-field form shows one per field),
+  the projected read is faster than the per-field read, and the timings of the diagnostics, the
+  staff pulse and the customer feed on that table are printed for the record.
 """
 
 from __future__ import annotations
@@ -48,7 +52,9 @@ from server.test_postgres_financial_review import (  # noqa: E402, F401  (postgr
     postgres_scenario_target,
 )
 
-SCENARIOS = ("campaign_orphan_sweep", "studio_system_alert_insert", "studio_ticket_numbers")
+SCENARIOS = ("campaign_orphan_sweep", "studio_system_alert_insert", "studio_ticket_numbers", "studio_projection_cost")
+PROJECTION_ROWS = 50
+PROJECTION_IMAGE_BYTES = 1024 * 1024
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -330,6 +336,86 @@ def _studio_system_alert_insert(j, staff) -> None:
     assert created_by(studio_jobs.JOB_STATE_ID, studio_jobs.JOB_STATE_TYPE) is None  # the state row is a system row
 
 
+def _studio_projection_cost(j, staff) -> None:
+    """P3-14: the projected reads parse each 1 MB document once; the timings go to the test output."""
+    from datetime import timedelta
+
+    from server.add_jsonb_indexes import add_jsonb_indexes
+    from server.db import db_conn, json_dumps, json_field_sql, now_ms
+    from server.systems.ads_studio import studio_activity, studio_diagnostics, studio_stop
+
+    owner = j._customer("pg-projection")
+    now = j._now()
+    image = "data:image/png;base64," + "A" * PROJECTION_IMAGE_BYTES
+    ids = [f"cmp_proj_{owner['id'][-8:]}_{index:03d}" for index in range(PROJECTION_ROWS)]
+    with db_conn() as conn:
+        for index, campaign_id in enumerate(ids):
+            sent = studio_diagnostics._iso(now - timedelta(days=1, hours=index))
+            data = {
+                "id": campaign_id, "recordType": j.CAMPAIGNS, "status": "Approved" if index % 2 else "Submitted",
+                "name": f"Projection {index}", "budgetMinorUSD": 1000, "totalBudgetMinorUSD": 1000, "paidMinorUSD": 1000,
+                "submittedAt": sent, "reviewedAt": sent if index % 2 else None, "approvedAt": sent if index % 2 else None,
+                "reviewHistory": [{"decision": "Approved", "reviewedAt": sent}] if index % 2 else [],
+                "creativeImages": [image], "createdBy": owner["id"],
+            }
+            stamp = now_ms()
+            conn.execute(text(
+                "INSERT INTO entities (type, id, data_json, deleted, created_at, created_by, last_modified) "
+                "VALUES (:type, :id, :data, false, :stamp, :owner, :stamp)"
+            ), {"type": j.CAMPAIGNS, "id": campaign_id, "data": json_dumps(data), "stamp": stamp, "owner": owner["id"]})
+    add_jsonb_indexes()  # the production partial indexes (main.py runs this at startup)
+    with db_conn() as conn:
+        conn.execute(text("ANALYZE entities"))
+
+    def timed(sql: str, params: dict | None = None) -> tuple[float, int]:
+        with db_conn() as conn:
+            start = time.perf_counter()
+            rows = conn.execute(text(sql), params or {}).all()
+            return time.perf_counter() - start, len(rows)
+
+    def plan_of(sql: str) -> str:
+        """The plan with its Output lines: the casts a row goes through are visible only with VERBOSE."""
+        with db_conn() as conn:
+            return "\n".join(str(row[0]) for row in conn.execute(text("EXPLAIN (VERBOSE, COSTS OFF) " + sql)).all())
+
+    literal = f"'{j.CAMPAIGNS}'"
+    projected_sql = studio_diagnostics.campaign_rows_sql(columns=("id",) + studio_diagnostics._ROW_COLUMNS).replace(":type", literal)
+    fields = ", ".join(f"{json_field_sql(field)} AS f_{field.lower()}" for field in studio_diagnostics._FIELDS)
+    per_field_sql = f"SELECT id, created_at, created_by, deleted, {fields} FROM entities WHERE type = {literal}"
+    projected_plan, per_field_plan = plan_of(projected_sql), plan_of(per_field_sql)
+    assert projected_plan.count("::jsonb") == 1, projected_plan  # one cast per row
+    assert per_field_plan.count("::jsonb") == len(studio_diagnostics._FIELDS), per_field_plan  # one cast per field
+    timed(projected_sql)  # warm the cache once for both forms
+    projected, rows = timed(projected_sql)
+    per_field, rows_again = timed(per_field_sql)
+    assert rows == rows_again >= PROJECTION_ROWS
+    print(f"P3-14 projection over {rows} rows of ~1 MB, {len(studio_diagnostics._FIELDS)} fields: "
+          f"one cast per row {projected * 1000:.0f} ms, one cast per field {per_field * 1000:.0f} ms")
+    assert projected < per_field, (projected, per_field)
+
+    waiting_sql = (f"SELECT COUNT(*) FROM entities WHERE type = {literal} AND deleted = false "
+                   f"AND {json_field_sql('status')} = 'Submitted'")
+    waiting_plan = plan_of(waiting_sql)
+    print("P3-14 staff pulse waiting-review plan uses idx_ad_campaign_requests_status: "
+          f"{'idx_ad_campaign_requests_status' in waiting_plan}")
+
+    start = time.perf_counter()
+    report = studio_diagnostics.read_diagnostics(now)
+    diagnostics_ms = (time.perf_counter() - start) * 1000
+    assert report["campaigns"]["byStatus"]["Submitted"] >= PROJECTION_ROWS // 2
+    assert report["operations"]["money"]["owed"]["inAdsMinorUSD"] >= 1000 * (PROJECTION_ROWS // 2)
+    with db_conn() as conn:
+        start = time.perf_counter()
+        pulse = studio_stop.staff_pulse(conn, staff["admin"]["id"], admin=True, now=now)
+        pulse_ms = (time.perf_counter() - start) * 1000
+        start = time.perf_counter()
+        feed = studio_activity.load_feed(conn, owner["id"])
+        feed_ms = (time.perf_counter() - start) * 1000
+    assert pulse["waitingReview"] >= PROJECTION_ROWS // 2 and feed["items"] == []
+    print(f"P3-14 timings on {rows} x 1 MB rows: read_diagnostics {diagnostics_ms:.0f} ms, staff pulse {pulse_ms:.0f} ms, "
+          f"customer feed {feed_ms:.0f} ms")
+
+
 def _run_scenario(scenario: str) -> None:
     if scenario not in SCENARIOS:
         raise ValueError("Unknown PostgreSQL studio jobs scenario")
@@ -369,6 +455,8 @@ def _run_scenario(scenario: str) -> None:
                     from server import test_studio_support
 
                     test_studio_support.postgres_ticket_numbers()
+                elif scenario == "studio_projection_cost":
+                    _studio_projection_cost(j, staff)
                 else:
                     _studio_system_alert_insert(j, staff)
             assert get_engine() is engine, "The studio scenario changed its database target"

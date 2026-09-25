@@ -188,6 +188,63 @@ def pending_payment_requests_count(conn: Any) -> int:
     return sum(1 for row in rows if str(row.get("f_status") or "") == "pending")
 
 
+def payment_request_timings(conn: Any) -> list[dict[str, str]]:
+    """Read only: ``{status, currency, createdAt, confirmedAt}`` of every live charge request, for
+    the Albayan Studio diagnostics queue line "payment confirmations within the target" (P3-19).
+    No id, user, amount, reference or receipt photo leaves here: each row's JSON is parsed once
+    for these four fields only."""
+    rows = conn.execute(
+        text(json_fields_select_sql(("status", "currency", "createdAt", "confirmedAt"), (), "type = :type AND deleted = false")),
+        {"type": WALLET_PAYMENT_COLLECTION},
+    ).mappings().all()
+    return [
+        {
+            "status": str(row.get("f_status") or ""),
+            "currency": str(row.get("f_currency") or "USD").strip().upper(),
+            "createdAt": str(row.get("f_createdat") or ""),
+            "confirmedAt": str(row.get("f_confirmedat") or ""),
+        }
+        for row in rows
+    ]
+
+
+# Ledger ids that are not customers: the system side of a campaign payment and the placeholders
+# the studio never treats as users (studio_types.looks_like_user_id agrees).
+_NOT_A_CUSTOMER = frozenset({"", "system", "team", "none", "null", "undefined"})
+
+
+def usd_customer_balances_total(conn: Any) -> dict[str, int]:
+    """Read only: what the USD wallets of ALL customers add up to, as three counts only
+    (the Albayan Studio diagnostics line "USD owed to customers", P3-19):
+
+    ``{"balanceMinor": sum of the positive USD balances, "users": how many wallets hold money,
+    "negative": how many are below zero}``. Each user's balance follows main._wallet_balance_minor
+    row by row (live rows, the stored currency upper-cased, ledger_amount_minor); the system side
+    of campaign payments is never a customer. One projection over the ledger, no user ids out.
+    """
+    rows = conn.execute(
+        text(json_fields_select_sql(
+            ("currency", "amountMinor", "amount", "fromUserId", "toUserId"), (),
+            "type = 'walletTransactions' AND deleted = false",
+        )),
+    ).mappings().all()
+    balances: dict[str, int] = {}
+    for row in rows:
+        if str(row.get("f_currency") or "").upper() != "USD":
+            continue
+        amount = ledger_amount_minor({"amountMinor": row.get("f_amountminor"), "amount": row.get("f_amount")})
+        receiver, sender = str(row.get("f_touserid") or ""), str(row.get("f_fromuserid") or "")
+        if receiver.lower() not in _NOT_A_CUSTOMER:
+            balances[receiver] = balances.get(receiver, 0) + amount
+        if sender.lower() not in _NOT_A_CUSTOMER:
+            balances[sender] = balances.get(sender, 0) - amount
+    return {
+        "balanceMinor": sum(value for value in balances.values() if value > 0),
+        "users": sum(1 for value in balances.values() if value > 0),
+        "negative": sum(1 for value in balances.values() if value < 0),
+    }
+
+
 def ledger_amount_minor(data: dict[str, Any]) -> int:
     """One ledger row's positive amount in minor units, read exactly as the balance reads it
     (main._wallet_amount_minor): ``amountMinor``, else ``amount`` x 100 rounded; 0 when unusable."""
