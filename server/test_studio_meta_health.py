@@ -5,7 +5,8 @@
   permission codes stay per-page), shown to customers as a neutral /api/studio/me flag.
 * P3-18b: Social Studio replies Meta refused for authorization while the connection is down are
   parked (parkedReason, retryAfter, giveUpAt) and resent after the recovery; past giveUpAt they are
-  missed_during_outage.
+  missed_during_outage. A refusal the token check has no verdict on yet (a saved "valid" reading
+  older than the refusal) is parked pending and checked again; a timed-out send is never resent.
 * P3-18c: the funds/status alerts of the ad accounts that carry studio campaigns.
 
 Meta is always faked: Graph debug_token through httpx.MockTransport (as test_meta_token_health.py),
@@ -179,7 +180,7 @@ def test_page_role_lost_is_not_global(actors, graph, token):
 
 def test_invalid_token_sets_global_state(actors, token, caplog):
     token.update(valid=False, code="190.460")
-    assert watch.after_authorization_failure() is True
+    assert watch.after_authorization_failure() == "down"
     state = watch.connection_state()
     assert state["state"] == "down" and state["errorCode"] == "190.460" and state["since"]
     stored, raw = _stored_connection()
@@ -196,18 +197,18 @@ def test_invalid_token_sets_global_state(actors, token, caplog):
     assert shown and shown[0]["labels"]["en"] and shown[0]["labels"]["ar"]
 
     # A second failure within 10 minutes: no new Meta check, still down, no second alert.
-    assert watch.after_authorization_failure() is True and len(token["requests"]) == 1
+    assert watch.after_authorization_failure() == "down" and len(token["requests"]) == 1
     # Meta unreachable is not a verdict: the state stays as it was.
     _ten_minutes_pass()
     token["unreachable"] = True
-    assert watch.after_authorization_failure() is True and watch.connection_down()
+    assert watch.after_authorization_failure() == "down" and watch.connection_down()
     # A valid reading from BEFORE the outage never clears it.
     before = {"configured": True, "isValid": True, "checkedAt": "2020-01-01T00:00:00Z"}
     assert watch.apply_token_reading(before) == "down"
     # Recovery: the next check that says valid clears it.
     _ten_minutes_pass()
     token.update(unreachable=False, valid=True, code=None)
-    assert watch.after_authorization_failure() is False
+    assert watch.after_authorization_failure() == "ok_fresh"
     state = watch.connection_state()
     assert state["state"] == "ok" and state["recoveredAt"] and state["since"] is None
     assert _me(actors)["metaConnection"] == {"down": False}
@@ -218,12 +219,12 @@ def test_invalid_token_sets_global_state(actors, token, caplog):
 
 
 def test_unknown_check_never_sets_the_state(actors, token, monkeypatch):
-    """No app id, or Meta unreachable: no verdict, so no outage is declared."""
+    """No app id, or Meta unreachable: no verdict, so no outage is declared (and the refusal is pending)."""
     token["unreachable"] = True
-    assert watch.after_authorization_failure() is False and not watch.connection_down()
+    assert watch.after_authorization_failure() == "pending" and not watch.connection_down()
     monkeypatch.delenv("ALBAYAN_META_APP_ID")
     _ten_minutes_pass()
-    assert watch.after_authorization_failure() is False and not watch.connection_down()
+    assert watch.after_authorization_failure() == "pending" and not watch.connection_down()
     assert token_health.token_verdict({"configured": False}) == "unknown"
     assert token_health.token_verdict({"configured": True, "lastCheckError": "network"}) == "unknown"
     assert token_health.token_verdict(
@@ -419,7 +420,7 @@ def test_page_role_lost_not_parked(actors, graph, token):
     _link(actors, "a", meta_page)
     _rule(actors["a"]["cookies"], name="DM", publicReply="Thanks!", dmEnabled=True, dmText="Details sent")
     token.update(valid=False, code="190.460")
-    assert watch.after_authorization_failure() is True  # the connection is down
+    assert watch.after_authorization_failure() == "down"  # the connection is down
     for suffix in ("/messages", "/comments"):
         graph.fail[suffix] = meta_ads.MetaAdsError(*AUTH_TOKEN_DEAD, provider_code="190.492")
     _webhook(_fb_comment(meta_page, f"{meta_page}_1", "9301", "hello"))
@@ -452,6 +453,146 @@ def test_a_comment_already_past_its_window_is_missed_not_parked(actors, graph, t
                                      comment_at=(datetime.now(UTC) - timedelta(days=2)).isoformat())
     assert handled and handled["problemCode"] == "missed_during_outage" and handled["retryAfter"] == ""
     assert handled["parkedReason"] == "" and watch.connection_down()
+
+
+def _token_checked_minutes_ago(minutes: int) -> None:
+    """The saved token reading (the one check_token_now hands back within 10 minutes) is that old."""
+    at = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+    meta_ads.save_meta_health_state(token_health._STATE_ID, lambda current: {**current, "checkedAt": at})
+
+
+def test_a_refusal_after_a_cached_valid_check_is_parked_pending(actors, graph, token):
+    """Reproduction (10:00 / 10:02): the token check said valid at 10:00, the token died, and a reply
+    was refused at 10:02. check_token_now handed back the saved 10:00 reading (one Meta call per 10
+    minutes), so the refusal was dropped for good. Now it is parked 'pending' and checked again."""
+    meta_page = _meta_page_id()
+    _link(actors, "a", meta_page)
+    _rule(actors["a"]["cookies"], name="Both", publicReply="Thanks!", dmEnabled=True, dmText="Details sent")
+    assert token_health.check_token_now(max_age_seconds=0)["isValid"] is True  # "10:00": valid
+    _token_checked_minutes_ago(2)
+    token.update(valid=False, code="190.460")  # the token dies
+    _dead_token_everywhere(graph)
+    _webhook(_fb_comment(meta_page, f"{meta_page}_1", "9501", "hello"))  # "10:02": refused
+    assert len(token["requests"]) == 1 and not watch.connection_down()  # the saved reading: no verdict yet
+    log_id = studio._log_id(actors["a"]["id"], "fb", f"{meta_page}_1")
+    pending = _row(log_id)
+    assert pending["actions"] == [] and pending["parkedReason"] == "meta_connection_down"  # kept, not dropped
+    assert studio._parse_iso(pending["authCheckPendingSince"]) > datetime.now(UTC) - timedelta(minutes=1)  # the refusal
+    assert studio._parse_iso(pending["retryAfter"]) > datetime.now(UTC) + timedelta(minutes=9)
+    assert studio._parse_iso(pending["giveUpAt"]) - studio._parse_iso(pending["commentAt"]) == timedelta(days=7)
+    assert watch.parked_reply_count() == 1
+    sent = len(graph.calls)
+    # The next retry pass checks again (the 10 minutes have passed): invalid -> down; nothing is resent.
+    _ten_minutes_pass()
+    later = datetime.now(UTC) + timedelta(minutes=11)
+    studio._retry_pending_replies(later)
+    assert len(token["requests"]) == 2 and watch.connection_down() and len(graph.calls) == sent
+    parked = _row(log_id)
+    assert parked["parkedReason"] == "meta_connection_down" and parked["authCheckPendingSince"] == ""
+    assert len(_alerts("meta_connection_down")) == 1
+    # Recovery: resent like any parked reply.
+    graph.fail.clear()
+    token.update(valid=True, code=None)
+    _ten_minutes_pass()
+    studio._retry_pending_replies(later + timedelta(minutes=11))
+    done = _row(log_id)
+    assert done["actions"] == ["dm", "public"] and done["retryAfter"] == "" and done["parkedReason"] == ""
+    assert not watch.connection_down()
+
+
+def test_a_pending_refusal_the_check_clears_is_resent_once(actors, graph, token):
+    """The re-check says valid, checked after the refusal: the refusal was the page's own. The reply
+    is resent once, and a second refusal finishes it (never a park/resend loop)."""
+    meta_page = _meta_page_id()
+    _link(actors, "a", meta_page)
+    _rule(actors["a"]["cookies"], name="Public", publicReply="Thanks!")
+    token_health.check_token_now(max_age_seconds=0)
+    _token_checked_minutes_ago(2)
+    graph.fail["/comments"] = meta_ads.MetaAdsError(*AUTH_TOKEN_DEAD, provider_code="190.460")
+    _webhook(_fb_comment(meta_page, f"{meta_page}_1", "9601", "hello"))
+    log_id = studio._log_id(actors["a"]["id"], "fb", f"{meta_page}_1")
+    assert _row(log_id)["authCheckPendingSince"] and _row(log_id)["parkedReason"] == "meta_connection_down"
+    _ten_minutes_pass()
+    later = datetime.now(UTC) + timedelta(minutes=11)
+    studio._retry_pending_replies(later)
+    once = _row(log_id)
+    assert len(token["requests"]) == 2 and not watch.connection_down()
+    assert once["actions"] == [] and once["retryAfter"] == "" and once["parkedReason"] == ""
+    assert once["authCheckPendingSince"] == "" and "190.460" in once["error"]
+    replies = [path for path, _data in graph.paths() if path == f"{meta_page}_1/comments"]
+    assert len(replies) == 2  # the refused one and one resend
+    studio._retry_pending_replies(later + timedelta(minutes=30))
+    assert len([path for path, _data in graph.paths() if path == f"{meta_page}_1/comments"]) == 2  # finished
+
+
+def test_a_pending_refusal_still_without_a_verdict_is_resent(actors, graph, token):
+    """Still no verdict at the next pass (Meta's token check unreachable, or no app id): the reply
+    itself tries again. Refused again, it is parked pending again (until giveUpAt); it goes out once
+    Meta accepts it."""
+    meta_page = _meta_page_id()
+    _link(actors, "a", meta_page)
+    _rule(actors["a"]["cookies"], name="Public", publicReply="Thanks!")
+    token_health.check_token_now(max_age_seconds=0)
+    _token_checked_minutes_ago(2)
+    graph.fail["/comments"] = meta_ads.MetaAdsError(*AUTH_TOKEN_DEAD, provider_code="190.460")
+    _webhook(_fb_comment(meta_page, f"{meta_page}_1", "9651", "hello"))
+    log_id = studio._log_id(actors["a"]["id"], "fb", f"{meta_page}_1")
+    first = _row(log_id)
+    token["unreachable"] = True
+    _ten_minutes_pass()
+    later = datetime.now(UTC) + timedelta(minutes=11)
+    studio._retry_pending_replies(later)
+    again = _row(log_id)
+    assert again["parkedReason"] == "meta_connection_down" and again["attempts"] == 2 and not watch.connection_down()
+    assert studio._parse_iso(again["authCheckPendingSince"]) > studio._parse_iso(first["authCheckPendingSince"])
+    assert again["retryAfter"] == studio._iso_at(later + watch.RECHECK_EVERY)
+    graph.fail.clear()
+    _ten_minutes_pass()
+    studio._retry_pending_replies(later + timedelta(minutes=11))
+    done = _row(log_id)
+    assert done["actions"] == ["public"] and done["retryAfter"] == "" and done["parkedReason"] == ""
+    assert done["authCheckPendingSince"] == ""
+    assert len([path for path, _data in graph.paths() if path == f"{meta_page}_1/comments"]) == 3
+
+
+def test_a_timed_out_public_reply_is_never_sent_twice(actors, graph, token):
+    """The public reply timed out (it may have landed) while the private reply was refused for a dead
+    token: the parked reply keeps skipActions ['public'], and the resend after the recovery sends the
+    private reply only."""
+    meta_page = _meta_page_id()
+    _link(actors, "a", meta_page)
+    _rule(actors["a"]["cookies"], name="Both", publicReply="Thanks!", dmEnabled=True, dmText="Details sent")
+    token.update(valid=False, code="190.460")
+    graph.fail["/messages"] = meta_ads.MetaAdsError(*AUTH_TOKEN_DEAD, provider_code="190.460")
+    graph.fail["/comments"] = meta_ads.MetaAdsError("timeout", "Meta did not answer in time.", retryable=True)
+    _webhook(_fb_comment(meta_page, f"{meta_page}_1", "9701", "hello"))
+    log_id = studio._log_id(actors["a"]["id"], "fb", f"{meta_page}_1")
+    parked = _row(log_id)
+    assert parked["parkedReason"] == "meta_connection_down" and parked["skipActions"] == ["public"]
+    assert studio._parse_iso(parked["giveUpAt"]) - studio._parse_iso(parked["commentAt"]) == timedelta(days=7)
+    graph.fail.clear()
+    token.update(valid=True, code=None)
+    _ten_minutes_pass()
+    studio._retry_pending_replies(datetime.now(UTC) + timedelta(minutes=11))
+    done = _row(log_id)
+    assert done["actions"] == ["dm"] and done["retryAfter"] == "" and done["parkedReason"] == ""
+    paths = [path for path, _data in graph.paths()]
+    assert paths.count(f"{meta_page}_1/comments") == 1  # the timed-out send only: never a second public reply
+    assert paths.count(f"{meta_page}/messages") == 2  # refused once, sent once
+    # Pure rules: a timed-out private reply leaves only the 24-hour window; skipActions add up and
+    # are never resent; only 'down' and 'pending' park.
+    now = datetime.now(UTC)
+    rule = {"dmEnabled": True, "dmText": "Hi", "publicReply": "Thanks!", "likeComment": True}
+    outcome = studio._ReplyOutcome.of([], ["dm: refused"], False, ["190.460"], now, ["dm"])
+    data = {"commentAt": studio._iso_at(now), "skipActions": ["like"]}
+    patch = studio._parked_patch(outcome, data, rule, now, "down")
+    assert patch["skipActions"] == ["dm", "like"] and patch["authCheckPendingSince"] == ""
+    assert studio._parse_iso(patch["giveUpAt"]) - now == timedelta(hours=24)
+    assert studio._parked_patch(outcome, data, rule, now, "pending")["authCheckPendingSince"] == studio._iso_at(now)
+    assert studio._parked_patch(outcome, data, rule, now, "ok_fresh") is None
+    resend = studio._rule_for_resend(rule, {**data, "skipActions": ["dm", "like"]}, now)
+    assert resend["dmEnabled"] is False and resend["likeComment"] is False and resend["publicReply"] == "Thanks!"
+    assert studio._rule_for_resend(rule, {"commentAt": studio._iso_at(now)}, now) is rule
 
 
 # ------------------------------------------------------------------ P3-18c: ad-account funds and status
@@ -517,7 +658,8 @@ def test_studio_funds_low_alert(accounts):
     ids, request = accounts["ids"], accounts["request"]
     running = request(ids["a"], "700000000000001", 10_000)
     with db_conn() as conn:  # Meta confirmed $30 used: $70 of it can still be spent
-        write_results_row(conn, running, accounts["owner"], {"metaCampaignId": "700000000000001", "spendMinorUSD": 3_000})
+        write_results_row(conn, running, accounts["owner"], {"metaCampaignId": "700000000000001", "spendMinorUSD": 3_000,
+                                                             "currency": "USD"})
     request(ids["a"], "700000000000002", 50_000, settleBasis="final_read")  # settled: no longer exposure
     request(ids["b"], "700000000000003", 4_000)
     request("", "", 2_000)  # approved, not linked yet: no account
@@ -551,6 +693,20 @@ def test_studio_funds_low_alert(accounts):
     assert watch.account_findings(1, None) == [("studio_funds_unreadable", {"reason": "not_read"})]
     assert watch.account_findings(1, _funds_row("1", currency="EUR", fundsMinor=10)) == [
         ("studio_funds_unreadable", {"reason": "currency_not_usd", "currency": "EUR"})]
+
+
+def test_exposure_never_subtracts_another_currency(accounts):
+    """EUR 60.00 of Meta spend is not $60.00: that request's whole payment stays exposure."""
+    ids, request = accounts["ids"], accounts["request"]
+    euro = request(ids["c"], "700000000000031", 10_000)
+    dollars = request(ids["c"], "700000000000032", 10_000)
+    with db_conn() as conn:
+        write_results_row(conn, euro, accounts["owner"],
+                          {"metaCampaignId": "700000000000031", "spendMinorUSD": 6_000, "currency": "EUR"})
+        write_results_row(conn, dollars, accounts["owner"],
+                          {"metaCampaignId": "700000000000032", "spendMinorUSD": 6_000, "currency": "USD"})
+        exposure, _not_linked = watch.studio_account_exposure(conn)
+    assert exposure[ids["c"]] == {"exposureMinorUSD": 10_000 + 4_000, "campaigns": 2}
 
 
 def test_card_funded_inactive_alert(accounts):

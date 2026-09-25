@@ -1925,12 +1925,45 @@
         "adsetEndTime": "2026-10-15T08:00:00Z"
       },
       "expect": {
-        "stage": 8,
-        "stageKey": "running",
-        "runningPastEnd": true,
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "runningPastEnd": false,
         "metaUsedMinor": 900
       },
-      "note": "P3-04a: ACTIVE after the end stays Running with the flag; the results sync raises running_past_end"
+      "note": "Meta keeps ads ACTIVE after the ad set end_time, but nothing delivers then: Ended, never Running (and no running_past_end)"
+    },
+    {
+      "name": "meta_fed_active_after_campaign_stop_time",
+      "now": "2026-10-15T10:00:00Z",
+      "request": {
+        "status": "Approved",
+        "startDate": "2026-10-10",
+        "endDate": "2026-10-20",
+        "metaCampaignId": "120200000000001"
+      },
+      "results": {
+        "campaignId": "cmp_case",
+        "metaCampaignId": "120200000000001",
+        "syncState": "ok",
+        "lastSyncedAt": "2026-10-15T09:30:00Z",
+        "campaignEffectiveStatus": "ACTIVE",
+        "adStatusCounts": {
+          "ACTIVE": 2
+        },
+        "anyAdDelivering": true,
+        "insightsState": "ok",
+        "spendConfirmedAt": "2026-10-15T09:30:00Z",
+        "spendMinorUSD": 1500,
+        "currency": "USD",
+        "campaignStopTime": "2026-10-14T21:59:00Z"
+      },
+      "expect": {
+        "stage": 10,
+        "stageKey": "ended_settling",
+        "runningPastEnd": false,
+        "metaUsedMinor": 1500
+      },
+      "note": "The campaign stop_time passed: the ads still say ACTIVE but the campaign has ended on Meta"
     },
     {
       "name": "meta_fed_stop_time_ahead_keeps_running",

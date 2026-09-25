@@ -6,7 +6,9 @@
   unreadable insights are "unknown", never 0.
 * studio_results_sync: claims (one worker per request), the per-pass budget (<= 5 reads, <= 10 s),
   per-account parking, the 15-minute cadence, the final read at deliveryEndedAt + 48 h, daily drift
-  reads until day 28, the post-settle drift and running-past-end alerts, the jobs-loop job.
+  reads until day 28, the post-settle drift and running-past-end alerts, the jobs-loop job; a Meta
+  end time ends a campaign whose ads still say ACTIVE, a relink after an unlink is read again, a
+  non-USD account never writes USD spend, and a steady due check parses no request.
 * GET /api/studio/campaigns/{id}/results and POST .../results/refresh ("Check Meta now").
 
 Meta is always faked: MetaAdsClient._request is replaced by FakeGraph (no network), so
@@ -28,10 +30,10 @@ os.environ.setdefault("ALBAYAN_META_BACKGROUND_SYNC", "false")
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 import server.meta_ads as meta_ads
-from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
+from server.db import db_conn, get_engine, init_db, json_dumps, json_loads, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
@@ -259,12 +261,14 @@ def _request(seeded: list, owner: dict, *, meta_id: str = "", account: str = ACC
 
 
 def _patch_request(campaign_id: str, **fields) -> None:
+    """A staff-side write of the request: like the app's writes, it always moves last_modified on."""
     with db_conn() as conn:
-        row = conn.execute(text("SELECT data_json FROM entities WHERE type = :t AND id = :id"),
-                           {"t": CAMPAIGNS, "id": campaign_id}).scalar()
-        data = {**(json_loads(row) or {}), **fields}
+        row = conn.execute(text("SELECT data_json, last_modified FROM entities WHERE type = :t AND id = :id"),
+                           {"t": CAMPAIGNS, "id": campaign_id}).mappings().first()
+        data = {**(json_loads(row["data_json"]) or {}), **fields}
         conn.execute(text("UPDATE entities SET data_json = :d, last_modified = :m WHERE type = :t AND id = :id"),
-                     {"d": json_dumps(data), "m": now_ms(), "t": CAMPAIGNS, "id": campaign_id})
+                     {"d": json_dumps(data), "m": max(now_ms(), int(row["last_modified"]) + 1), "t": CAMPAIGNS,
+                      "id": campaign_id})
 
 
 def _row(campaign_id: str) -> dict:
@@ -660,6 +664,165 @@ def test_currency_mismatch_hides_meta_used(meta, people, seeded):
         request = studio_results.load_request(conn, campaign_id)
     shown = derive_display_stage(request, row, T0)
     assert shown["stage"] == 8 and shown["metaUsedMinor"] is None
+
+
+def test_a_non_usd_ad_account_never_writes_usd_spend(meta, people, seeded):
+    """EUR 12.34 is never stored as $12.34: no spendMinorUSD, spendConfirmedAt or final read; the raw
+    amount and its currency are kept apart for staff."""
+    campaign_id, meta_id = _linked(seeded, people, meta, currency="EUR", spend="12.34", ads=("PAUSED",))
+    _patch_request(campaign_id, endDate="2027-03-05")  # delivery has ended
+    assert _sync(campaign_id, T0)["stage"] == 10
+    row = _row(campaign_id)
+    assert row["spendMinorUSD"] == 0 and row["spendConfirmedAt"] is None and row["costPerResultMinorUSD"] is None
+    assert row["rawSpendMinor"] == 1234 and row["rawSpendCurrency"] == "EUR" and row["currency"] == "EUR"
+    assert row["syncState"] == "error" and row["lastErrorCode"] == "currency_mismatch"
+    assert row["impressions"] == 4321 and row["neverDelivered"] is False  # counts are not money: kept
+    settle_due = T0 + timedelta(hours=48)
+    assert row["nextSyncAt"] == _iso(settle_due)
+    # The final read never lands in another currency: no settleReadAt, then one read a day (not every
+    # 30 minutes), and none after the drift watch.
+    _sync(campaign_id, settle_due)
+    final = _row(campaign_id)
+    assert final["settleReadAt"] is None and final["spendConfirmedAt"] is None and final["spendMinorUSD"] == 0
+    assert final["nextSyncAt"] == _iso(settle_due + timedelta(days=1))
+    _sync(campaign_id, T0 + timedelta(days=28))
+    assert _row(campaign_id)["nextSyncAt"] is None
+    # Staff see the raw amount; the customer sees the counts but no "Meta used" value.
+    with db_conn() as conn:
+        request = studio_results.load_request(conn, campaign_id)
+    view = studio_results.results_view(request, _row(campaign_id), T0, staff=True)
+    assert view["results"]["metaUsedMinor"] is None and view["results"]["costPerResultMinor"] is None
+    assert view["results"]["impressions"] == 4321 and "rawSpendMinor" not in json.dumps(view["results"])
+    assert (view["staff"]["rawSpendMinor"], view["staff"]["rawSpendCurrency"]) == (1234, "EUR")
+    # Settled: the drift check never compares EUR with USD.
+    _patch_request(campaign_id, status="Stopped", closeReason="completed", spendMinorUSD=0)
+    meta.set(meta_id, spend="99.00")
+    assert _sync(campaign_id, T0 + timedelta(days=3))["alerts"] == []
+    assert _row(campaign_id)["rawSpendMinor"] == 9900 and _row(campaign_id)["spendMinorUSD"] == 0
+
+
+# ------------------------------------------------------------------ Meta end times, relinks, the due check
+
+def test_a_campaign_ended_on_its_meta_end_time_is_not_running(meta, people, seeded):
+    """Reproduction: Meta keeps the ads ACTIVE after the ad set end_time, and the request stayed
+    Running forever (no deliveryEndedAt, no 48 h final read, a running_past_end alert every day)."""
+    campaign_id, meta_id = _linked(seeded, people, meta, adset_ends=("2027-03-09T22:00:00+0000",))
+    outcome = _sync(campaign_id, T0)
+    assert outcome["stage"] == 10 and outcome["alerts"] == []
+    row = _row(campaign_id)
+    assert row["adStatusCounts"] == {"ACTIVE": 1} and row["metaStage"] == "ended_settling"
+    assert row["deliveryEndedAt"] == "2027-03-09T22:00:00Z"  # when Meta stopped, not when Albayan looked
+    settle_due = datetime(2027, 3, 11, 22, 0, tzinfo=UTC)
+    assert row["settleReadDueAt"] == _iso(settle_due) and row["nextSyncAt"] == _iso(settle_due)
+    assert _alert("running_past_end", campaign_id, T0) is None
+    with db_conn() as conn:
+        request = studio_results.load_request(conn, campaign_id)
+    assert studio_results.meta_delivery(request, row, T0) == {
+        "delivering": False, "reviewing": False, "pastEnd": True, "ended": True}
+    shown = derive_display_stage(request, row, T0)
+    assert shown["stage"] == 10 and shown["runningPastEnd"] is False and shown["metaUsedMinor"] == 1234
+    day2 = T0 + timedelta(days=1)
+    assert _sync(campaign_id, day2)["alerts"] == [] and _alert("running_past_end", campaign_id, day2) is None
+    _sync(campaign_id, settle_due)  # the final read, 48 h after Meta's end
+    final = _row(campaign_id)
+    assert final["settleReadAt"] == _iso(settle_due) and final["nextSyncAt"] == _iso(settle_due + timedelta(days=1))
+    # The campaign's stop_time ends it the same way; with both passed the earlier one is the end.
+    stopped, _meta_stopped = _linked(seeded, people, meta, stop_time="2027-03-10T06:00:00+0000")
+    assert _sync(stopped, T0)["stage"] == 10 and _row(stopped)["deliveryEndedAt"] == "2027-03-10T06:00:00Z"
+    both, _meta_both = _linked(seeded, people, meta, stop_time="2027-03-10T06:00:00+0000",
+                               adset_ends=("2027-03-09T20:00:00+0000",))
+    assert _sync(both, T0)["stage"] == 10 and _row(both)["deliveryEndedAt"] == "2027-03-09T20:00:00Z"
+    # An end time still ahead keeps it Running (and a later extension starts delivery again).
+    meta.set(meta_id, adset_ends=("2027-03-20T21:59:00+0000",))
+    extended = settle_due + timedelta(hours=1)
+    assert _sync(campaign_id, extended)["stage"] == 8
+    assert _row(campaign_id)["deliveryEndedAt"] is None and _row(campaign_id)["nextSyncAt"] == _iso(extended + sync.ACTIVE_EVERY)
+    # The pure helper.
+    ends = studio_results.normalize_results({"adsetEndTime": "2027-03-10T12:00:00Z", "campaignStopTime": "2027-03-10T09:00:00Z"})
+    assert studio_results.meta_time_ended_at(ends, T0) == datetime(2027, 3, 10, 9, 0, tzinfo=UTC)
+    assert studio_results.meta_time_ended_at(ends, T0 - timedelta(hours=2)) is None
+    assert studio_results._meta_time_ended(ends, T0 + timedelta(hours=2)) is True
+    assert studio_results._meta_time_ended(studio_results.normalize_results({}), T0) is False
+
+
+def test_relink_of_the_same_campaign_after_an_unlink_is_read_again(meta, people, seeded):
+    """Reproduction: the sync saw the unlink (not_allowed, no nextSyncAt, the Meta id kept); staff then
+    linked the SAME campaign again and it was never read again."""
+    campaign_id, meta_id = _linked(seeded, people, meta)
+    assert _sync(campaign_id, T0)["outcome"] == "synced"
+    _patch_request(campaign_id, metaCampaignId="", metaAdAccountId="", publishStatus="")
+    later = T0 + timedelta(minutes=15)
+    assert _sync(campaign_id, later)["outcome"] == "not_linked"
+    stranded = _row(campaign_id)
+    assert stranded["syncState"] == "not_allowed" and stranded["nextSyncAt"] is None
+    assert stranded["metaCampaignId"] == meta_id
+    assert _mine(later + timedelta(minutes=1)) == []  # not linked: nothing to read
+    _patch_request(campaign_id, metaCampaignId=meta_id, metaAdAccountId=f"act_{ACCOUNT}", publishStatus="meta_review")
+    relinked = later + timedelta(minutes=2)
+    assert [(item["campaignId"], item["dueAt"]) for item in _mine(relinked)] == [(campaign_id, sync._EPOCH)]
+    meta.set(meta_id, spend="30.00")
+    assert sync.run_results_sync(relinked, settings=SETTINGS)["synced"] == [campaign_id]
+    row = _row(campaign_id)
+    assert row["syncState"] == "ok" and row["spendMinorUSD"] == 3000
+    assert row["nextSyncAt"] == _iso(relinked + sync.ACTIVE_EVERY)
+    assert _mine(relinked + timedelta(minutes=1)) == []  # read: its nextSyncAt decides again
+    # A Meta refusal (not_allowed with a retry time) is not stranded: it waits its 6 hours.
+    meta.set(meta_id, account=OTHER_ACCOUNT)
+    assert _sync(campaign_id, relinked + timedelta(minutes=15))["outcome"] == "error"
+    assert _row(campaign_id)["syncState"] == "not_allowed" and _mine(relinked + timedelta(minutes=16)) == []
+
+
+def _sql_spy(statements: list):
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append((statement, parameters))
+
+    return record
+
+
+def test_a_steady_due_check_parses_no_request(meta, people, seeded, monkeypatch):
+    """The 30-second tick reads the live Approved requests' ids and versions only (the status index);
+    a request's JSON (images included) is parsed again only after it changed, and the answers stay
+    the same as a fresh process's."""
+    monkeypatch.setattr(sync, "_LINK_MEMO", {})
+    campaign_id, _meta_first = _linked(seeded, people, meta)
+    waiting = _request(seeded, people["owner"])  # Approved, not linked yet
+    _sync(campaign_id, T0)
+    REAL_DUE(T0)  # a first look reads each Approved request once
+    engine = get_engine()
+    statements: list = []
+    spy = _sql_spy(statements)
+    event.listen(engine, "before_cursor_execute", spy)
+    try:
+        REAL_DUE(T0 + timedelta(minutes=1))
+    finally:
+        event.remove(engine, "before_cursor_execute", spy)
+    reads = [statement for statement, _params in statements if CAMPAIGNS in statement]
+    assert reads == [sync.approved_requests_sql()], reads
+    assert reads[0].startswith("SELECT id, last_modified FROM entities WHERE ")
+    # Literal type and status: the partial index idx_ad_campaign_requests_status (add_jsonb_indexes.py) matches it.
+    assert f"type = '{CAMPAIGNS}' AND deleted = false AND " in reads[0] and reads[0].endswith("= 'Approved'")
+    # The staff link changes one request: that one alone is read again, at once.
+    _patch_request(waiting, metaCampaignId=meta.add(_meta_id()), metaAdAccountId=f"act_{ACCOUNT}")
+    statements.clear()
+    event.listen(engine, "before_cursor_execute", spy)
+    try:
+        due = [item["campaignId"] for item in REAL_DUE(T0 + timedelta(minutes=2)) if item["campaignId"].startswith(PREFIX)]
+    finally:
+        event.remove(engine, "before_cursor_execute", spy)
+    parsed = [params for statement, params in statements if CAMPAIGNS in statement and statement != reads[0]]
+    assert len(parsed) == 1 and waiting in (list(parsed[0].values()) if isinstance(parsed[0], dict) else list(parsed[0]))
+    assert len(parsed[0]) == 1 and due == [waiting]  # its first read; the other waits for its nextSyncAt
+    # The memo changes nothing: a fresh process gives the same answer.
+    monkeypatch.setattr(sync, "_LINK_MEMO", {})
+    assert [item["campaignId"] for item in REAL_DUE(T0 + timedelta(minutes=2)) if item["campaignId"].startswith(PREFIX)] == due
+    # An unchanged request is still read again after LINK_MEMO_FOR (a write that kept its last_modified).
+    statements.clear()
+    event.listen(engine, "before_cursor_execute", spy)
+    try:
+        REAL_DUE(T0 + timedelta(minutes=2) + sync.LINK_MEMO_FOR)
+    finally:
+        event.remove(engine, "before_cursor_execute", spy)
+    assert any(CAMPAIGNS in statement and statement != reads[0] for statement, _params in statements)
 
 
 def test_meta_errors_keep_the_last_good_values(meta, people, seeded):

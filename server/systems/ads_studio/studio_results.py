@@ -11,8 +11,10 @@ built before any screen:
   with version-checked claims; tests and the e2e seed write rows the same way. Every read goes
   through ``normalize_results()``: a stored field
   that fails today's rules reads as its safe default, so a hand-edited row never reaches a
-  customer. ``spendMinorUSD`` is the last CONFIRMED value (``spendConfirmedAt``); an unreadable
-  pass never overwrites it (the sync's job). ``lastSyncedAt`` is the last read Meta answered.
+  customer. ``spendMinorUSD`` is the last CONFIRMED value (``spendConfirmedAt``), from a USD ad
+  account only (another currency is kept apart as ``rawSpendMinor`` + ``rawSpendCurrency``, staff
+  only, never money); an unreadable pass never overwrites it (the sync's job). ``lastSyncedAt`` is
+  the last read Meta answered.
 * ``derive_display_stage(request, results, now)``: PURE. The 13 stages of PLAN.md §5.4 with their
   labels (EN/AR), colour + icon, money meaning, next actor, customer actions and flags.
   stage_cases.json (next to this file) holds the same tables plus the cases, so the client
@@ -46,9 +48,11 @@ Changes Requested 3, Rejected 13, Stopped 11 (``closeReason`` completed; legacy 
    (``publishStatus``) without a Meta campaign id is 10 without the full-return promise.
 
 End signals: ad set ``end_time`` or campaign ``stop_time`` passed, campaign DELETED/ARCHIVED, the
-request's end date passed, or a stop was requested. Running or reviewing past an end DATE (not a
-stop request: that has its own chip, ``stopRequested`` on stages 4-9) keeps the stage and sets
-``runningPastEnd``. A check older than 6 hours keeps the stage and sets
+request's end date passed, or a stop was requested. A Meta end time that passed ends delivery on
+Meta's side even while the ads still say ACTIVE (Meta keeps that status after the end), so such a
+campaign is never Running (8): it is Ended (10) (``meta_time_ended_at``). Running or reviewing past
+an end DATE (not a stop request: that has its own chip, ``stopRequested`` on stages 4-9) keeps the
+stage and sets ``runningPastEnd``. A check older than 6 hours keeps the stage and sets
 ``stale`` (the screen turns "checked X ago" amber). The customer never sees "billing": a
 PENDING_BILLING_INFO ad reads as a delivery problem.
 """
@@ -281,8 +285,12 @@ def normalize_results(data: Any) -> dict[str, Any]:
     out["insightsState"] = insights if insights in INSIGHTS_STATES else "never"
     sync = str(raw.get("syncState") or "")
     out["syncState"] = sync if sync in SYNC_STATES else "never"
-    currency = str(raw.get("currency") or "").strip().upper()
-    out["currency"] = currency if len(currency) == 3 and currency.isalpha() and currency.isascii() else ""
+    for field in ("currency", "rawSpendCurrency"):
+        currency = str(raw.get(field) or "").strip().upper()
+        out[field] = currency if len(currency) == 3 and currency.isalpha() and currency.isascii() else ""
+    # An ad account that does not bill in USD (currency_mismatch): Meta's spend in ITS currency, kept
+    # for staff only. Never money: nothing adds or subtracts it (spendMinorUSD stays USD only).
+    out["rawSpendMinor"] = _int_or_none(raw.get("rawSpendMinor"))
     return out
 
 
@@ -490,22 +498,36 @@ def _stopped_stage(request: dict[str, Any], now: datetime) -> int:
     return 12
 
 
+def meta_time_ended_at(results: dict[str, Any], now: datetime) -> datetime | None:
+    """The earliest Meta end time (ad set ``end_time`` or campaign ``stop_time``) that has passed at
+    ``now``, else None (PURE). ``adsetEndTime`` is the LATEST ad set end, so once it passed every ad
+    set has ended; Meta stops delivering then even while the ads still say ACTIVE."""
+    passed = [moment for moment in (parse_time(results.get(field)) for field in ("adsetEndTime", "campaignStopTime"))
+              if moment is not None and moment <= now]
+    return min(passed) if passed else None
+
+
+def _meta_time_ended(results: dict[str, Any], now: datetime) -> bool:
+    """A Meta end time passed (PURE): nothing of this campaign delivers any more, ACTIVE ads or not."""
+    return meta_time_ended_at(results, now) is not None
+
+
 def _meta_past_end(results: dict[str, Any], now: datetime, end_passed: bool) -> bool:
     """An end signal from the dates: the request's end date, a Meta end time, a deleted campaign."""
-    meta_end_times = [parse_time(results[field]) for field in ("adsetEndTime", "campaignStopTime")]
     return (
         end_passed
         or results["campaignEffectiveStatus"] in ("DELETED", "ARCHIVED")
-        or any(moment is not None and moment <= now for moment in meta_end_times)
+        or _meta_time_ended(results, now)
     )
 
 
 def meta_delivery(request: dict[str, Any], results: Any, now: datetime) -> dict[str, bool]:
     """What the results sync needs to know about a checked row (PURE, the rules of _meta_stage).
 
-    ``delivering``: an ad is ACTIVE. ``reviewing``: an ad is in Meta's review. ``pastEnd``: an end
-    signal other than a stop request (a Stopped or settled request counts: it is over for Albayan).
-    ``ended``: nothing delivering or in review and an end signal (a stop request too): stage 10.
+    ``delivering``: an ad is ACTIVE and no Meta end time has passed. ``reviewing``: an ad is in
+    Meta's review. ``pastEnd``: an end signal other than a stop request (a Stopped or settled
+    request counts: it is over for Albayan). ``ended``: nothing delivering or in review and an end
+    signal (a stop request too): stage 10.
     """
     now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     row = normalize_results(results)
@@ -513,7 +535,7 @@ def meta_delivery(request: dict[str, Any], results: Any, now: datetime) -> dict[
     closed = str(request.get("status") or "") == "Stopped" or bool(str(request.get("settleBasis") or "").strip())
     past_end = closed or _meta_past_end(row, now, bool(end and libya_today(now) > end))
     counts = row["adStatusCounts"]
-    delivering = counts.get("ACTIVE", 0) > 0 or row["anyAdDelivering"]
+    delivering = (counts.get("ACTIVE", 0) > 0 or row["anyAdDelivering"]) and not _meta_time_ended(row, now)
     reviewing = any(counts.get(status, 0) for status in REVIEW_STATUSES)
     stop = bool(str(request.get("stopRequestedAt") or "").strip())
     return {
@@ -528,14 +550,15 @@ def _meta_stage(request: dict[str, Any], results: dict[str, Any], now: datetime,
     """(stage, past the promised end) from a checked results row (precedence of PLAN.md §5.4).
 
     A stop request is an end signal too, but "past the promised end" is about dates only: a
-    running ad with a stop request shows the stop chip instead.
+    running ad with a stop request shows the stop chip instead. ACTIVE ads after a Meta end time
+    are not running (Meta stopped them): they fall through to Ended.
     """
     counts = results["adStatusCounts"]
     total = sum(counts.values())
     campaign = results["campaignEffectiveStatus"]
     past_end = _meta_past_end(results, now, end_passed)
     ended = past_end or bool(str(request.get("stopRequestedAt") or "").strip())
-    if counts.get("ACTIVE", 0) > 0 or results["anyAdDelivering"]:
+    if (counts.get("ACTIVE", 0) > 0 or results["anyAdDelivering"]) and not _meta_time_ended(results, now):
         return 8, past_end
     if any(counts.get(status, 0) for status in REVIEW_STATUSES):
         return 5, past_end
@@ -713,7 +736,7 @@ _STAFF_FIELDS = (
     "metaCampaignId", "metaAdAccountId", "syncState", "lastErrorCode", "lastSyncedAt", "lastAttemptAt", "nextSyncAt",
     "campaignEffectiveStatus", "adStatusCounts", "reviewFeedbackStaff", "spendMinorUSD", "spendConfirmedAt",
     "insightsState", "currency", "deliveryEndedAt", "settleReadDueAt", "settleReadAt", "driftWatchUntil",
-    "neverDelivered", "stopEffectiveAt", "manualCheckAt",
+    "neverDelivered", "stopEffectiveAt", "manualCheckAt", "rawSpendMinor", "rawSpendCurrency",
 )
 
 
@@ -735,7 +758,8 @@ def results_view(request: dict[str, Any], row: dict[str, Any] | None, now: datet
     data = normalize_results(row) if row else None
     meta_id = _meta_id(request.get("metaCampaignId"))
     read = bool(data and meta_id and data["metaCampaignId"] == meta_id and data["lastSyncedAt"])
-    counted = bool(read and data and data["spendConfirmedAt"])
+    # Meta's numbers were read (a non-USD account's too: its counts show, its spend never does).
+    counted = bool(read and data and (data["spendConfirmedAt"] or data["rawSpendMinor"] is not None))
     paid = paid_minor(request)
     out: dict[str, Any] = {
         "campaignId": str(request.get("id") or ""),

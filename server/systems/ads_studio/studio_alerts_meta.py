@@ -15,7 +15,10 @@ Three things the team must hear about before a customer does:
     Only a check that says INVALID (``is_valid`` false, or a 190 on the token itself) sets the
     global state ``meta_connection_down``; 190.492 (page role lost) and the permission codes stay
     per-page problems (``is_per_page_auth_code``) and never set it, and a check that could not run
-    changes nothing. A later check that says valid clears it (recovery).
+    changes nothing. A later check that says valid clears it (recovery). Its answer about the
+    refusal itself is ``down``, ``ok_fresh`` (valid, checked at or after the refusal) or
+    ``pending`` (no verdict yet, e.g. a saved "valid" reading from before the token died): a
+    pending refusal is kept and checked again, never dropped as if the token were fine.
   - The state is the platform record metaHealthState/"connection" ``{state: ok|down, since,
     lastDirectCheckAt, errorCode, recoveredAt}``, written through meta_ads' door (codes and times
     only, never a token). ``/api/studio/me`` shows it as the neutral ``metaConnection`` flag with a
@@ -26,7 +29,8 @@ Three things the team must hear about before a customer does:
 * **Ad-account funds and status (P3-18c).** D26: studio campaigns run on the same allowlisted ad
   accounts as the agency. Each account that carries a studio campaign (an Approved, unsettled
   request linked to a Meta campaign on it) is compared with its EXPOSURE: for each such request,
-  what the customer paid minus what Meta confirmed it used (``adCampaignResults.spendMinorUSD``).
+  what the customer paid minus what Meta confirmed it used (``adCampaignResults.spendMinorUSD`` of a
+  USD row; another currency is never subtracted).
   The funds come from meta_ads' stored reading (metaFundsState, refreshed every 10 minutes by the
   Meta worker); only when no reading younger than an hour exists, get_meta_account_funds() reads
   Meta (its own cache first). Per account:
@@ -204,25 +208,37 @@ def apply_token_reading(reading: Any, now: datetime | None = None) -> str:
     return before["state"]
 
 
-def after_authorization_failure() -> bool:
-    """Meta refused something in the studio for authorization: run the token check and apply it.
+def after_authorization_failure(failed_at: datetime | None = None) -> str:
+    """Meta refused something in the studio for authorization at ``failed_at`` (default now): run the
+    token check and apply it. check_token_now() reaches Meta at most once per 10 minutes per process
+    (it hands back the saved reading in between); a check that cannot run (no app id, Meta
+    unreachable, the database away) leaves the state as it was. Returns:
 
-    check_token_now() reaches Meta at most once per 10 minutes per process (it hands back the saved
-    reading in between). True when the connection is down afterwards; a check that cannot run
-    (no app id, Meta unreachable, the database away) leaves the state as it was.
+    * ``down``: the connection is down afterwards;
+    * ``ok_fresh``: the token check says valid AND ran at or after the refusal, so the refusal was not
+      about Albayan's token;
+    * ``pending``: no verdict about THIS refusal yet: the check could not run, said unknown, or handed
+      back a saved "valid" reading older than the refusal (a token that died after the last check).
+      The caller keeps what failed (P3-18b parks it) and asks again on its next retry.
     """
+    failed_at = _aware(failed_at)
     try:
         reading = _token_health.check_token_now()
     except Exception:
-        return connection_down()
-    return apply_token_reading(reading) == "down"
+        return "down" if connection_down() else "pending"
+    if apply_token_reading(reading) == "down":
+        return "down"
+    checked = parse_time(reading.get("checkedAt")) if isinstance(reading, dict) else None
+    if _token_health.token_verdict(reading) == "valid" and checked is not None and checked >= failed_at:
+        return "ok_fresh"
+    return "pending"
 
 
 def recheck_connection() -> bool:
     """While the connection is down: one more token check (the same 10-minute limit). True while down."""
     if not connection_down():
         return False
-    return after_authorization_failure()
+    return after_authorization_failure() == "down"
 
 
 def is_per_page_auth_code(code: Any) -> bool:
@@ -275,7 +291,8 @@ def studio_account_exposure(conn: Any) -> tuple[dict[str, dict[str, int]], int]:
 
     Only Approved, live (not archived) requests without a ``settleBasis``; exposure = what the
     customer paid (``paidMinorUSD``, else the request's total, as the link's budget check reads it)
-    minus the spend Meta confirmed for that same Meta campaign, never below 0.
+    minus the spend Meta confirmed for that same Meta campaign in USD, never below 0. A results row
+    in another currency subtracts nothing (the whole payment stays exposure).
     """
     where = f"type = '{AD_CAMPAIGN_COLLECTION}' AND deleted = false AND {json_field_sql('status')} = 'Approved'"
     rows = conn.execute(text(json_fields_select_sql(
@@ -285,12 +302,13 @@ def studio_account_exposure(conn: Any) -> tuple[dict[str, dict[str, int]], int]:
     ))).mappings().all()
     spend: dict[str, tuple[str, int]] = {}
     results = conn.execute(text(json_fields_select_sql(
-        ("campaignId", "metaCampaignId", "spendMinorUSD"), ("id",), "type = :type AND deleted = false",
+        ("campaignId", "metaCampaignId", "spendMinorUSD", "currency"), ("id",), "type = :type AND deleted = false",
     )), {"type": RESULTS_TYPE}).mappings().all()
     for row in results:
         campaign_id = str(row.get("f_campaignid") or "")
         if campaign_id and str(row["id"]) == results_id(campaign_id):
-            spend[campaign_id] = (str(row.get("f_metacampaignid") or ""), minor(row.get("f_spendminorusd")))
+            usd = str(row.get("f_currency") or "").strip().upper() == "USD"  # never subtract another currency
+            spend[campaign_id] = (str(row.get("f_metacampaignid") or ""), minor(row.get("f_spendminorusd")) if usd else 0)
     accounts: dict[str, dict[str, int]] = {}
     not_linked = 0
     for row in rows:

@@ -1159,15 +1159,23 @@ def _retry_after_iso(attempt: int) -> str:
 
 class _ReplyOutcome(tuple):
     """What _execute_rule_actions returns: (actions, errors, retryable), plus ``auth_codes``, Meta's
-    codes of the authorization refusals among the failures (P3-18b). A plain 3-tuple (a test's
-    stand-in) has none."""
+    codes of the authorization refusals among the failures, ``auth_failed_at``, when the first one
+    came, and ``timed_out``, the actions whose send timed out and so may have landed (P3-18b). A plain
+    3-tuple (a test's stand-in) has none."""
 
     auth_codes: tuple[str, ...] = ()
+    auth_failed_at: datetime | None = None
+    timed_out: tuple[str, ...] = ()
 
     @classmethod
-    def of(cls, actions: list[str], errors: list[str], retryable: bool, auth_codes: list[str]) -> "_ReplyOutcome":
+    def of(
+        cls, actions: list[str], errors: list[str], retryable: bool, auth_codes: list[str],
+        auth_failed_at: datetime | None = None, timed_out: list[str] | None = None,
+    ) -> "_ReplyOutcome":
         outcome = cls((actions, errors, retryable))
         outcome.auth_codes = tuple(auth_codes)
+        outcome.auth_failed_at = auth_failed_at
+        outcome.timed_out = tuple(timed_out or ())
         return outcome
 
 
@@ -1191,46 +1199,90 @@ def _missed_patch() -> dict[str, Any]:
     }
 
 
-def _parked_patch(outcome: Any, data: dict[str, Any], rule: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+_REPLY_ACTIONS = ("dm", "public", "like")
+
+
+def _skip_actions(value: Any) -> set[str]:
+    """``skipActions`` of a reply-log row: the actions never sent again (their send timed out)."""
+    return {str(kind) for kind in value if str(kind) in _REPLY_ACTIONS} if isinstance(value, list) else set()
+
+
+def _without_actions(rule: dict[str, Any], skip: set[str]) -> dict[str, Any]:
+    changes: dict[str, Any] = {}
+    if "dm" in skip:
+        changes["dmEnabled"] = False
+    if "public" in skip:
+        changes["publicReply"] = ""
+    if "like" in skip:
+        changes["likeComment"] = False
+    return {**rule, **changes} if changes else rule
+
+
+def _parked_patch(
+    outcome: Any, data: dict[str, Any], rule: dict[str, Any], now: datetime, verdict: str | None = None,
+) -> dict[str, Any] | None:
     """P3-18b: how a reply Meta refused for authorization keeps waiting, or None (it is not parked).
 
     Any authorization refusal runs the token check (studio_alerts_meta.after_authorization_failure: at
-    most one Meta call per 10 minutes). The reply is parked only when that check leaves the connection
-    DOWN, nothing was sent, and a refusal is not a per-page one (190.492 page role lost, the permission
-    codes: those stay per-page problems). Parked = ``parkedReason`` meta_connection_down, ``retryAfter``
-    the next check, ``giveUpAt`` the comment's time + 7 days while a private reply is owed, else + 24
-    hours; a reply already past that window is finished as missed_during_outage.
+    most one Meta call per 10 minutes) unless the caller already has its ``verdict``. The reply is
+    parked when that check leaves the connection DOWN, or has no verdict on this refusal yet
+    (``pending``: e.g. a saved "valid" reading from before the token died), nothing was sent, and a
+    refusal is not a per-page one (190.492 page role lost, the permission codes: those stay per-page
+    problems). Parked = ``parkedReason`` meta_connection_down, ``retryAfter`` the next check,
+    ``giveUpAt`` the comment's time + 7 days while a private reply is owed, else + 24 hours; a reply
+    already past that window is finished as missed_during_outage. A pending one also keeps
+    ``authCheckPendingSince`` (the refusal's time): the retry pass checks again before resending. An
+    action whose send timed out may have landed: it goes into ``skipActions`` and is never resent.
     """
     codes = tuple(getattr(outcome, "auth_codes", ()) or ())
     if not codes:
         return None
     from . import studio_alerts_meta  # late: it imports this module
 
-    try:
-        down = studio_alerts_meta.after_authorization_failure()
-    except Exception as error:  # the webhook path never raises: without a verdict nothing is parked
-        print(f"[albayan] Social Studio connection check failed ({type(error).__name__}).")
-        return None
+    failed_at = getattr(outcome, "auth_failed_at", None) or datetime.now(timezone.utc)
+    if verdict is None:
+        try:
+            verdict = studio_alerts_meta.after_authorization_failure(failed_at)
+        except Exception as error:  # the webhook path never raises: without a verdict nothing is parked
+            print(f"[albayan] Social Studio connection check failed ({type(error).__name__}).")
+            return None
     actions = list(outcome[0] or [])
-    if not down or actions or all(studio_alerts_meta.is_per_page_auth_code(code) for code in codes):
+    if verdict not in ("down", "pending") or actions or all(
+        studio_alerts_meta.is_per_page_auth_code(code) for code in codes
+    ):
         return None
-    window = PRIVATE_REPLY_WINDOW if _dm_pending(rule, actions) else PUBLIC_REPLY_WINDOW
+    skip = _skip_actions(data.get("skipActions")) | set(getattr(outcome, "timed_out", ()) or ())
+    window = PRIVATE_REPLY_WINDOW if _dm_pending(_without_actions(rule, skip), actions) else PUBLIC_REPLY_WINDOW
     give_up = _comment_time(data, now) + window
     if now >= give_up:
         return _missed_patch()
-    return {
+    patch = {
         "parkedReason": PARKED_REASON,
         "retryAfter": _iso_at(min(now + studio_alerts_meta.RECHECK_EVERY, give_up)),
         "giveUpAt": _iso_at(give_up),
+        "authCheckPendingSince": _iso_at(failed_at) if verdict == "pending" else "",
     }
+    if skip:
+        patch["skipActions"] = sorted(skip)
+    return patch
 
 
 def _rule_for_resend(rule: dict[str, Any], data: dict[str, Any], now: datetime) -> dict[str, Any]:
-    """A parked reply sent after the outage: past 24 hours after the comment only the private reply
-    still goes out (public replies and likes only within 24 hours, PLAN §7.4)."""
-    if data.get("parkedReason") != PARKED_REASON or now < _comment_time(data, now) + PUBLIC_REPLY_WINDOW:
-        return rule
-    return {**rule, "publicReply": "", "likeComment": False}
+    """The rule a retried reply is sent with: never an action in ``skipActions`` (its send timed out
+    and may have landed), and for a parked reply sent after the outage, past 24 hours after the
+    comment only the private reply still goes out (public replies and likes only within 24 hours,
+    PLAN §7.4). The rule itself when nothing changes."""
+    skip = _skip_actions(data.get("skipActions"))
+    if data.get("parkedReason") == PARKED_REASON and now >= _comment_time(data, now) + PUBLIC_REPLY_WINDOW:
+        skip |= {"public", "like"}
+    return _without_actions(rule, skip)
+
+
+def _reply_left(rule: dict[str, Any], platform: str) -> bool:
+    """The rule still has something to send for a comment on ``platform``."""
+    return _dm_pending(rule, []) or bool(str(rule.get("publicReply") or "")) or (
+        platform == "fb" and _bool(rule.get("likeComment"))
+    )
 
 
 def _execute_rule_actions(
@@ -1241,14 +1293,23 @@ def _execute_rule_actions(
     Returns (actions, errors, retryable): retryable when nothing was sent and
     every failure was a temporary Meta condition (pause, outage), so the
     scheduler may try again instead of the comment being lost. The tuple also
-    carries ``auth_codes`` (_ReplyOutcome) for the parking rule (P3-18b)."""
+    carries ``auth_codes``, ``auth_failed_at`` and ``timed_out`` (_ReplyOutcome)
+    for the parking rule (P3-18b)."""
     actions: list[str] = _actions_holder if _actions_holder is not None else []  # visible to the caller on a crash
     errors: list[str] = []
     auth_codes: list[str] = []
+    timed_out: list[str] = []
+    auth_failed: list[datetime] = []
     failures = 0
     temporary = 0
     client: Any = None
     token = ""
+
+    def refused(code: Any) -> None:
+        auth_codes.append(str(code or ""))
+        if not auth_failed:
+            auth_failed.append(datetime.now(timezone.utc))  # the first refusal's time (the token check's yardstick)
+
     try:
         client = _meta.get_meta_ads_client()
         token = client.page_access_token(str(page.get("metaPageId") or ""))
@@ -1258,7 +1319,7 @@ def _execute_rule_actions(
         failures += 1
         temporary += 1 if error.retryable else 0
         if error.code == "authorization":
-            auth_codes.append(error.provider_code)
+            refused(error.provider_code)
     dm_sent = False
     refreshed = False
 
@@ -1281,7 +1342,9 @@ def _execute_rule_actions(
 
     def note(kind: str, error: Any) -> str:
         if getattr(error, "code", "") == "authorization":
-            auth_codes.append(str(getattr(error, "provider_code", "") or ""))
+            refused(getattr(error, "provider_code", ""))
+        if getattr(error, "code", "") == "timeout":
+            timed_out.append(kind)  # the send may have landed: never resent (parking's skipActions)
         code = f" ({error.provider_code})" if getattr(error, "provider_code", "") else ""
         return f"{kind}: {error.public_message}{code}"
 
@@ -1326,7 +1389,7 @@ def _execute_rule_actions(
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
     retryable = not actions and failures > 0 and temporary == failures
-    return _ReplyOutcome.of(actions, errors, retryable, auth_codes)
+    return _ReplyOutcome.of(actions, errors, retryable, auth_codes, auth_failed[0] if auth_failed else None, timed_out)
 
 
 def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
@@ -1343,7 +1406,12 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     Meta call per 10 minutes, to notice the recovery); after it they are
     resent like any other, a private reply until 7 days after the comment, a
     public reply or a like until 24 hours after it. Past ``giveUpAt`` they
-    are finished as missed_during_outage, visible in the reply log."""
+    are finished as missed_during_outage, visible in the reply log. One parked
+    while the token check had no verdict (``authCheckPendingSince``) is checked
+    again first: down, it waits like the others; valid (checked after the
+    refusal), it is resent once and a new refusal finishes it; still no verdict,
+    it is resent and a new refusal parks it again until ``giveUpAt``. An action
+    in ``skipActions`` (its send timed out and may have landed) is never resent."""
     from . import studio_alerts_meta  # late: it imports this module
 
     ctx = _ctx()
@@ -1443,17 +1511,37 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 patch = {"retryAfter": _iso_at(now + timedelta(minutes=30))}  # quiet hours: later
             else:
                 patch = None
+        pending_since = _parse_iso(data.get("authCheckPendingSince")) if parked else None
+        verdict: str | None = None
+        if patch is None and pending_since is not None:
+            # The token check had no verdict on this refusal (P3-18b): ask again before resending.
+            try:
+                verdict = studio_alerts_meta.after_authorization_failure(pending_since)
+            except Exception:
+                verdict = "pending"
+            if verdict == "down":  # an ordinary parked reply now: it waits for the recovery
+                later = now + studio_alerts_meta.RECHECK_EVERY
+                patch = {"retryAfter": _iso_at(min(later, give_up) if give_up else later), "authCheckPendingSince": ""}
+            # ok_fresh (the token is fine) or still no verdict (no app id, Meta unreachable): the reply
+            # itself tries again below. A refused send applied nothing on Meta, so it cannot double up.
         if patch is None:
             rule = _rule_for_resend(rule_entity["data"], data, now)
-            if rule is not rule_entity["data"] and not _dm_pending(rule, []):
-                patch = _missed_patch()  # a parked reply past its public 24 hours with no private reply owed
+            if rule is not rule_entity["data"] and not _reply_left(rule, str(data.get("platform") or "")):
+                # A parked reply past its public 24 hours with no private reply owed (or nothing left
+                # that did not time out before).
+                patch = _missed_patch() if parked else {"retryAfter": ""}
             else:
                 outcome = _execute_rule_actions(
                     page_entity["data"], rule, str(data.get("platform") or ""), str(data.get("commentId") or "")
                 )
                 actions, errors, retryable = outcome
                 patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
-                kept = _parked_patch(outcome, data, rule_entity["data"], now)
+                if pending_since is not None:
+                    patch["authCheckPendingSince"] = ""
+                # A new refusal is judged by the check just made: ok_fresh (the token was fine after
+                # the first refusal) finishes it, so a page-level refusal cannot loop; pending parks
+                # it again until giveUpAt.
+                kept = _parked_patch(outcome, data, rule_entity["data"], now, verdict)
                 if kept:
                     patch.update(kept)  # Albayan's Meta connection went down (again): parked, not lost
                 else:

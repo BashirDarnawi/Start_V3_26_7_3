@@ -17,21 +17,27 @@ on the allowlist and the campaign is claimed by THIS request.
   (another process, a manual check) wins and the late result is dropped. A crashed sync's claim
   simply runs out.
 * **What is due.** A linked Approved request never read for its current Meta campaign (a first link
-  or a relink: the row starts again, nothing carries over from another campaign), else a row whose
-  ``nextSyncAt`` has come:
+  or a relink: the row starts again, nothing carries over from another campaign) or whose row an
+  unlink left stranded (``not_allowed`` with no ``nextSyncAt``: staff linked the same campaign
+  again), else a row whose ``nextSyncAt`` has come:
   - linked and not ended (running, in review, paused, rejected, a delivery problem): every 15 minutes;
   - ended (nothing delivering or in review, and an end signal: the request's end date, a Meta end
-    time, a deleted campaign, a stop request, a Stopped or settled request): ``deliveryEndedAt`` is
-    stamped once, ``settleReadDueAt`` = deliveryEndedAt + ``settlement.spendDelayHours`` (48 h,
-    D28) and ``driftWatchUntil`` = deliveryEndedAt + ``settlement.driftWatchDays`` (28). The next
+    time, a deleted campaign, a stop request, a Stopped or settled request; ACTIVE ads after a Meta
+    end time do not deliver): ``deliveryEndedAt`` is stamped once (the earliest Meta end time that
+    passed, else the read's time), ``settleReadDueAt`` = deliveryEndedAt +
+    ``settlement.spendDelayHours`` (48 h, D28) and ``driftWatchUntil`` = deliveryEndedAt +
+    ``settlement.driftWatchDays`` (28). The next
     read is AT settleReadDueAt (the final read, stamped ``settleReadAt`` once Meta's insights
     answered), then one a day until driftWatchUntil, then none. Delivery that starts again clears
     those times;
   - a request no longer linked, or neither Approved nor Stopped: never read (``not_allowed``).
 * **Money numbers** are Meta's LIFETIME spend, impressions, reach, clicks and main result. When the
   insights read fails (``insightsState`` unavailable) the stored numbers stay: spend is never
-  overwritten with 0. A currency other than USD is kept and flagged (``currency_mismatch``); the
-  stage then shows no "Meta used" value. ``neverDelivered``: 0 impressions and $0 once delivery
+  overwritten with 0. An ad account billing in another currency is flagged (``syncState`` error,
+  ``lastErrorCode`` currency_mismatch): its spend is kept apart (``rawSpendMinor`` +
+  ``rawSpendCurrency``) and never written as ``spendMinorUSD`` / ``spendConfirmedAt`` / the final
+  read ``settleReadAt`` (then read once a day until the drift watch ends); the stage shows no "Meta
+  used" value. ``neverDelivered``: 0 impressions and $0 once delivery
   ended (at once with ``settlement.neverDeliveredImmediate``, else from the final read).
 * **Errors** are stored as ``syncState`` + ``lastErrorCode`` (Albayan's error class and Meta's
   numeric code; never a message, never a token) and the last good values stay: ``not_found`` and
@@ -40,8 +46,9 @@ on the allowlist and the campaign is claimed by THIS request.
   (``studioJobState.resultsParkedUntil``, a ``results_parked`` alert once a day per account): the
   pass skips its requests and goes on with the others.
 * **Alerts** (studio_jobs.raise_alert: one per request and Tripoli day). ``running_past_end``: an ad
-  ACTIVE past the end (the end date or a Meta end time passed, the campaign deleted, the request
-  Stopped or settled). ``meta_drift``: once the request is settled (Stopped, or a ``settleBasis``),
+  ACTIVE past the end (the end date passed, the campaign deleted, the request Stopped or settled;
+  after a Meta end time Meta itself stopped it, so that is Ended, not an alert). ``meta_drift``:
+  once the request is settled (Stopped, or a ``settleBasis``),
   Meta's spend above the settled spend (``settledSpendMinorUSD``, else what the stop recorded as
   spent) by more than $0.50. Albayan absorbs it (D27); the alert feeds the owner's reconciliation.
 """
@@ -66,6 +73,7 @@ from .studio_results import (
     load_request,
     load_results_row,
     meta_delivery,
+    meta_time_ended_at,
     minor,
     next_manual_check_at,
     normalize_results,
@@ -87,6 +95,12 @@ SYNCED_STATUSES = frozenset({"Approved", "Stopped"})  # Stopped: the drift reads
 PARKS_FIELD = "resultsParkedUntil"  # studioJobState: {ad account digits: until}
 DRIFT_ALERT = "meta_drift"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+LINK_MEMO_FOR = timedelta(minutes=10)  # due_candidates reads an unchanged request's link again this often
+_LINK_READ_CHUNK = 200
+# due_candidates' memo of the live Approved requests: {request id: (last_modified, read at, (account
+# digits, Meta campaign id) or None when not linked)}. Keyed by the row version, so a changed request
+# is read again at once; the age limit covers a write that kept its last_modified.
+_LINK_MEMO: dict[str, tuple[int, datetime, tuple[str, str] | None]] = {}
 
 # A first read of a Meta campaign (a first link or a relink) starts from these: nothing of another
 # campaign carries over.
@@ -95,7 +109,8 @@ _FRESH: dict[str, Any] = {
     "anyAdDelivering": False, "adsetEndTime": None, "reviewFeedbackPublic": "", "reviewFeedbackStaff": "",
     "metaStage": "", "spendMinorUSD": 0, "spendConfirmedAt": None, "insightsState": "never",
     "lifetimeImpressions": None, "impressions": None, "reach": None, "clicks": None, "resultType": "",
-    "resultCount": None, "costPerResultMinorUSD": None, "currency": "", "deliveryEndedAt": None,
+    "resultCount": None, "costPerResultMinorUSD": None, "currency": "", "rawSpendMinor": None,
+    "rawSpendCurrency": "", "deliveryEndedAt": None,
     "settleReadDueAt": None, "settleReadAt": None, "driftWatchUntil": None, "neverDelivered": False,
     "stopEffectiveAt": None, "lastSyncedAt": None, "syncState": "never", "lastErrorCode": "", "nextSyncAt": None,
 }
@@ -196,40 +211,54 @@ def fields_after_read(
     link = request.get("metaLinkResult") if isinstance(request.get("metaLinkResult"), dict) else {}
     currency = str(read.get("currency") or "").upper() or base["currency"] or str(link.get("metaCurrency") or "").upper()
     fields["currency"] = currency
+    usd = currency == "USD"  # only a USD amount is money here: another currency is never counted as USD
     insights_ok = read.get("insightsState") == "ok" and read.get("spendMinor") is not None
     spend = minor(read.get("spendMinor"))
     impressions = minor(read.get("impressions"))
     if insights_ok:
         count = read.get("resultCount")
         fields.update({
-            "insightsState": "ok", "spendMinorUSD": spend, "spendConfirmedAt": at,
+            "insightsState": "ok",
             "lifetimeImpressions": read.get("impressions"), "impressions": read.get("impressions"),
             "reach": read.get("reach"), "clicks": read.get("clicks"), "resultType": read.get("resultType") or "",
             "resultCount": count,
-            "costPerResultMinorUSD": spend // count if isinstance(count, int) and count > 0 else None,
         })
+        if usd:
+            fields.update({
+                "spendMinorUSD": spend, "spendConfirmedAt": at, "rawSpendMinor": None, "rawSpendCurrency": "",
+                "costPerResultMinorUSD": spend // count if isinstance(count, int) and count > 0 else None,
+            })
+        else:  # kept apart for staff; spendMinorUSD, spendConfirmedAt and the final read stay untouched
+            fields.update({"rawSpendMinor": spend, "rawSpendCurrency": currency, "costPerResultMinorUSD": None})
     else:
         fields["insightsState"] = "unavailable"  # the last confirmed numbers stay: never 0 for "unknown"
-    if currency and currency != "USD":
+    if currency and not usd:
         fields.update({"syncState": "error", "lastErrorCode": "currency_mismatch"})
 
-    delivery = meta_delivery(request, {**base, **fields}, now)
+    current = normalize_results({**base, **fields})
+    delivery = meta_delivery(request, current, now)
     if str(request.get("stopRequestedAt") or "").strip() and not delivery["delivering"] and not base["stopEffectiveAt"]:
         fields["stopEffectiveAt"] = at
     next_at: datetime | None = now + ACTIVE_EVERY
     if delivery["ended"]:
         rules = settings["settlement"]
-        ended_at = parse_time(base["deliveryEndedAt"]) or now
+        # Stamped once: a Meta end time that passed is when Meta stopped delivering (its ads may still
+        # say ACTIVE), else this read.
+        ended_at = parse_time(base["deliveryEndedAt"]) or meta_time_ended_at(current, now) or now
         settle_due = ended_at + timedelta(hours=int(rules["spendDelayHours"]))
         watch_until = ended_at + timedelta(days=int(rules["driftWatchDays"]))
         final_at = parse_time(base["settleReadAt"])
-        if final_at is None and insights_ok and now >= settle_due:
+        if final_at is None and insights_ok and usd and now >= settle_due:
             final_at = now  # this is the final read (D28)
         fields.update({
             "deliveryEndedAt": _iso(ended_at), "settleReadDueAt": _iso(settle_due),
             "driftWatchUntil": _iso(watch_until), "settleReadAt": _iso(final_at) if final_at else None,
         })
-        if final_at is None:
+        if final_at is None and now >= settle_due and insights_ok and not usd:
+            # A non-USD account never gives a final read (staff must fix the link): once a day until
+            # the drift watch ends, not every 30 minutes forever.
+            next_at = min(now + DRIFT_EVERY, watch_until) if now < watch_until else None
+        elif final_at is None:
             next_at = settle_due if now < settle_due else now + RETRY_AFTER_ERROR  # the final read needs insights
         elif now >= watch_until:
             next_at = None  # the drift watch is over
@@ -383,27 +412,63 @@ def sync_campaign(
 
 # ------------------------------------------------------------------ the pass (the jobs loop)
 
+def approved_requests_sql() -> str:
+    """The live Approved requests as ``id, last_modified`` only: no JSON is parsed for the answer. Type
+    and status are literals, so PostgreSQL filters through the partial expression index
+    idx_ad_campaign_requests_status (add_jsonb_indexes.py), as studio_jobs.waiting_requests_sql does."""
+    return (
+        f"SELECT id, last_modified FROM entities WHERE type = '{AD_CAMPAIGN_COLLECTION}' "
+        f"AND deleted = false AND {json_field_sql('status')} = 'Approved'"
+    )
+
+
+def _approved_links(conn: Any, now: datetime) -> dict[str, tuple[str, str]]:
+    """{request id: (account digits, Meta campaign id)} of the live Approved LINKED requests.
+
+    A steady tick reads ids and versions only (approved_requests_sql). A request's own fields are
+    read (its JSON parsed, images and all) only when it is new to this process, changed since (a
+    new ``last_modified``), or its memo entry is ``LINK_MEMO_FOR`` old, in chunks by id.
+    """
+    global _LINK_MEMO
+    versions = {str(row["id"]): int(row["last_modified"])
+                for row in conn.execute(text(approved_requests_sql())).mappings().all()}
+    memo = dict(_LINK_MEMO)
+    stale = [
+        request_id for request_id, version in versions.items()
+        if not (request_id in memo and memo[request_id][0] == version
+                and timedelta(0) <= now - memo[request_id][1] < LINK_MEMO_FOR)
+    ]
+    for start in range(0, len(stale), _LINK_READ_CHUNK):
+        chunk = {f"i{index}": request_id for index, request_id in enumerate(stale[start:start + _LINK_READ_CHUNK])}
+        where = (f"type = '{AD_CAMPAIGN_COLLECTION}' AND deleted = false "
+                 f"AND id IN ({', '.join(':' + name for name in chunk)})")
+        for item in conn.execute(text(json_fields_select_sql(
+            ("status", "metaCampaignId", "metaAdAccountId"), ("id", "last_modified"), where,
+        )), chunk).mappings().all():
+            ids = linked_meta_ids({"metaCampaignId": item.get("f_metacampaignid"),
+                                   "metaAdAccountId": item.get("f_metaadaccountid")})
+            memo[str(item["id"])] = (int(item["last_modified"]), now,
+                                     ids if str(item.get("f_status") or "") == "Approved" else None)
+    _LINK_MEMO = {request_id: memo[request_id] for request_id in versions if request_id in memo}
+    return {request_id: entry[2] for request_id, entry in _LINK_MEMO.items() if entry[2]}
+
+
 def due_candidates(now: datetime) -> list[dict[str, Any]]:
     """The requests to read, oldest due first: ``[{campaignId, account, dueAt}]`` (claimed rows left out).
 
-    Two reads that parse no image: the linked live requests (the index on metaCampaignId answers,
-    as meta_collisions does) and the results rows (small documents).
+    Two reads that parse no image in a steady tick: the live Approved requests (ids and versions,
+    _approved_links) and the results rows (small documents). A first read is due for an Approved
+    linked request with no row for its Meta campaign, or whose row the sync STRANDED when it saw the
+    request unlinked or closed (``syncState`` not_allowed, no ``nextSyncAt``): a relink of the same
+    campaign reads it again.
     """
     now = _aware(now)
-    linked = f"type = '{AD_CAMPAIGN_COLLECTION}' AND deleted = false AND {json_field_sql('metaCampaignId')} IS NOT NULL"
     with db_conn() as conn:
-        requests = conn.execute(text(json_fields_select_sql(
-            ("status", "metaCampaignId", "metaAdAccountId"), ("id",), linked,
-        ))).mappings().all()
+        approved = _approved_links(conn, now)
         rows = conn.execute(text(json_fields_select_sql(
-            ("campaignId", "metaCampaignId", "metaAdAccountId", "nextSyncAt", "syncClaimedUntil"), ("id",),
+            ("campaignId", "metaCampaignId", "metaAdAccountId", "nextSyncAt", "syncClaimedUntil", "syncState"), ("id",),
             "type = :type AND deleted = false",
         )), {"type": RESULTS_TYPE}).mappings().all()
-    approved: dict[str, tuple[str, str]] = {}
-    for item in requests:
-        ids = linked_meta_ids({"metaCampaignId": item.get("f_metacampaignid"), "metaAdAccountId": item.get("f_metaadaccountid")})
-        if str(item.get("f_status") or "") == "Approved" and ids:
-            approved[str(item["id"])] = ids
     stored: dict[str, Any] = {}
     for item in rows:
         campaign_id = str(item.get("f_campaignid") or "")
@@ -412,7 +477,9 @@ def due_candidates(now: datetime) -> list[dict[str, Any]]:
     due: dict[str, dict[str, Any]] = {}
     for campaign_id, (account, meta_id) in approved.items():
         item = stored.get(campaign_id)
-        if item is not None and str(item.get("f_metacampaignid") or "") == meta_id:
+        stranded = (item is not None and str(item.get("f_syncstate") or "") == "not_allowed"
+                    and parse_time(item.get("f_nextsyncat")) is None)
+        if item is not None and str(item.get("f_metacampaignid") or "") == meta_id and not stranded:
             continue  # read before: its nextSyncAt decides (below)
         claim = parse_time(item.get("f_syncclaimeduntil")) if item is not None else None
         if claim is None or claim <= now:
