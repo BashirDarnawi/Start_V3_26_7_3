@@ -3,7 +3,9 @@
 Instagram sends comment webhooks only after Meta's approval (Advanced Access, the app Live, a
 public account; PLAN.md §0 findings 19 and 25). Until then, and for the App Review recording, an
 admin presses "Check recent comments now" and the owner's rules answer as if the webhook had
-delivered the comments.
+delivered the comments. The polling source (studio_ig_source.py, P4-09) runs the same
+``check_recent_comments`` with ``source='poll'`` from the studio jobs loop, every few minutes per
+account, once an admin sets ``capabilities.igPublicReply`` to ``poll``; both share the cursor below.
 
 Route (admin only; mounted under /api/studio by studio_api.create_studio_router):
 
@@ -157,9 +159,10 @@ def read_recent_ig_comments(
     why (``pausedLocally``: Albayan's own Meta pause refused the call, so it never reached Meta).
     """
     out: dict[str, Any] = {"mediaRead": 0, "mediaWithComments": 0, "commentsRead": 0, "comments": [], "media": [],
-                           "mediaDone": [], "errorCode": "", "providerCode": "", "pausedLocally": False}
+                           "mediaDone": [], "errorCode": "", "providerCode": "", "pausedLocally": False, "calls": 0}
     try:
         with _meta.meta_call_lane("page", subject=meta_page_id):
+            out["calls"] += 1  # the Meta reads made (the poll pass's budget, P4-09): the media list ...
             media = client._get(f"{ig_user_id}/media", {"fields": "id,comments_count,timestamp", "limit": IG_MEDIA_READ})
             rows = [row for row in (media.get("data") or []) if isinstance(row, dict)][:IG_MEDIA_READ]
             out["mediaRead"] = len(rows)
@@ -173,6 +176,7 @@ def read_recent_ig_comments(
                 media_id = str(row["id"])
                 if skip_media is not None and skip_media(media_id, _meta._metric_int(row.get("comments_count"))):
                     continue
+                out["calls"] += 1  # ... and one read per media whose comments are read
                 payload = client._get(f"{media_id}/comments", {"fields": fields, "limit": IG_COMMENTS_PER_MEDIA})
                 for item in payload.get("data") or []:
                     comment_id = str(item.get("id") or "") if isinstance(item, dict) else ""
@@ -188,6 +192,8 @@ def read_recent_ig_comments(
     except _meta.MetaAdsError as error:
         out["errorCode"], out["providerCode"] = error.code, error.provider_code
         out["pausedLocally"] = _meta.is_meta_pause_refusal(error)
+        if out["pausedLocally"]:
+            out["calls"] -= 1  # Albayan's own pause refused that call: it never reached Meta
     out["commentsRead"] = len(out["comments"])
     return out
 
@@ -335,7 +341,9 @@ def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "m
     """Read the account's recent comments and feed the new ones to process_comment (module docstring).
 
     Returns ``read``, ``new``, ``replied``, ``skipped`` plus ``errorCode``, ``providerCode``,
-    ``mediaRead`` and ``pausedLocally`` (Albayan's Meta pause refused the read: nothing reached Meta).
+    ``mediaRead``, ``pausedLocally`` (Albayan's Meta pause refused the read: nothing reached Meta),
+    ``reads`` (the Meta reads made: the media list and one per media read, the poll pass's budget)
+    and ``waiting`` (new comments left for the next check: past MAX_FED_PER_CHECK, or crashed).
     """
     if source not in CHECK_SOURCES:
         raise ValueError(f"Unknown check source {str(source)[:40]!r}")
@@ -406,7 +414,7 @@ def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "m
     comments.clear()
     return {"read": total, "new": len(fresh), "replied": replied, "skipped": total - len(fresh),
             "errorCode": read["errorCode"], "providerCode": read["providerCode"], "mediaRead": read["mediaRead"],
-            "pausedLocally": read["pausedLocally"]}
+            "pausedLocally": read["pausedLocally"], "reads": max(int(read["calls"]), 0), "waiting": len(unsettled)}
 
 
 # ---------------------------------------------------------------------------

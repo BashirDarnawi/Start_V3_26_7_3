@@ -2,10 +2,12 @@
 
 ONE daemon thread per process, started by the /api/studio router's startup event
 (``create_studio_jobs_router``, included by studio_api.create_studio_router: 0 main.py lines),
-whether or not Meta is configured: the money jobs never call Meta or need a Meta token. Two Meta
+whether or not Meta is configured: the money jobs never call Meta or need a Meta token. Three Meta
 jobs run only while a Meta token is set (ALBAYAN_META_ACCESS_TOKEN, read without loading the Meta
 client): the results sync (``results``, studio_results_sync.py, P3-03), one budgeted pass per tick
-(at most 5 reads within 10 seconds), and the Meta watch (token health and funds, P3-18). The env switch
+(at most 5 reads within 10 seconds), the Meta watch (token health and funds, P3-18), and the
+Instagram polling source (``ig_poll``, studio_ig_source.py, P4-09), one budgeted pass per tick (at
+most 20 reads within 10 seconds) claimed only while ``capabilities.igPublicReply`` is ``poll``. The env switch
 ``ALBAYAN_STUDIO_JOBS`` (default on; ``off``/``false``/``0``/``no`` = off) stops it, and it never starts
 under pytest (``PYTEST_CURRENT_TEST``): the tests call the job functions directly. Every 30 s a tick
 writes the heartbeat and runs the jobs that are due; a job that fails is logged (error type only),
@@ -65,7 +67,8 @@ Records (router-only types: the generic /api/collections API refuses both):
   lastTickAt, lastSweepAt, lastWaitingCheckAt, lastIntegrityScanDay, lastIntegrityScanAt,
   lastIntegrityResult (counts only), lastError (job, error type, time; never a message),
   lastResultsSyncAt and resultsParkedUntil (the results sync's parked ad accounts),
-  lastMetaWatchAt and lastFundsCheckAt (the Meta watch's turns).
+  lastMetaWatchAt and lastFundsCheckAt (the Meta watch's turns), lastIgPollAt (the Instagram poll's
+  last pass; its per-account state is metaHealthState/"studioIgPoll", studio_ig_source.py).
 
 ``GET /api/studio/admin/alerts`` (admin only, 30 reads a minute): newest first, ``limit`` 1-50
 (20 by default), ``before`` = the ``nextBefore`` of the previous page; ``jobs`` = jobs_heartbeat().
@@ -102,6 +105,7 @@ from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_alerts_meta import WATCH_EVERY as META_WATCH_EVERY, meta_watch_configured, run_meta_watch
 from .studio_diagnostics import libya_today, parse_time
 from .studio_errors import studio_error
+from .studio_ig_source import ig_poll_configured, run_ig_poll
 from .studio_settings import SERVICE_TIMEZONE, WEEKDAYS, read_all_settings
 from .studio_types import created_by_or_none, derived_id
 
@@ -116,6 +120,7 @@ FIRST_TICK_DELAY_SECONDS = 15  # let startup settle before the first database wo
 SWEEP_EVERY = timedelta(minutes=2)
 WAITING_EVERY = timedelta(minutes=5)
 RESULTS_EVERY = timedelta(seconds=TICK_SECONDS)  # one budgeted Meta results pass per tick (P3-03)
+IG_POLL_EVERY = timedelta(seconds=TICK_SECONDS)  # one budgeted Instagram poll pass per tick (P4-09, studio_ig_source.py)
 META_TOKEN_ENV = "ALBAYAN_META_ACCESS_TOKEN"
 SWEEP_LOOKBACK = timedelta(hours=48)
 INTERRUPTED_AFTER_MINUTES = studio_integrity.CAPTURE_GRACE_MINUTES  # 15 (PLAN.md §7.4)
@@ -187,6 +192,14 @@ ALERT_LABELS: dict[str, dict[str, str]] = {
     "results_parked": {
         "en": "Meta results reads of an ad account are paused for a few minutes",
         "ar": "توقفت قراءة نتائج ميتا لحساب إعلاني بضع دقائق",
+    },
+    "meta_overspend": {  # D27: the settle step's admin override above paid - Meta spend (P3-06d)
+        "en": "Meta spent more than the customer paid on an ad; Albayan absorbs the difference",
+        "ar": "أنفقت ميتا أكثر مما دفعه العميل على إعلان؛ يتحمل البيان الفرق",
+    },
+    "replies_parked": {  # P3-18b: comment replies kept for the retry pass while the connection is down
+        "en": "Comment replies are parked until the Meta connection is back",
+        "ar": "الردود على التعليقات محفوظة حتى يعود اتصال ميتا",
     },
 }
 # A request in one of these states has left its submission cycle (studio_wallet.cycle_state "being
@@ -521,6 +534,7 @@ def jobs_heartbeat(now: datetime | None = None) -> dict[str, Any]:
         "lastWaitingCheckAt": _iso_or_none(state.get("lastWaitingCheckAt")),
         "lastIntegrityScanAt": _iso_or_none(state.get("lastIntegrityScanAt")),
         "lastResultsSyncAt": _iso_or_none(state.get("lastResultsSyncAt")),
+        "lastIgPollAt": _iso_or_none(state.get("lastIgPollAt")),  # P4-09 (studio_ig_source.py)
         "lastIntegrityResult": None if result is None else {
             "total": int(result.get("total") or 0),
             "byCode": {
@@ -717,6 +731,7 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
     """One tick: the heartbeat plus the claims of the due jobs in one conditional write, then those jobs."""
     now = _aware(now or utc_now())
     claimed: list[str] = []
+    poll_on = ig_poll_configured()  # P4-09: a Meta token and capabilities.igPublicReply = poll (one settings read)
 
     def heartbeat(state: dict[str, Any]) -> dict[str, Any]:
         claimed.clear()
@@ -739,6 +754,9 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         if results_sync_configured() and _due(state.get("lastResultsSyncAt"), RESULTS_EVERY, now):
             fields["lastResultsSyncAt"] = at
             claimed.append("results")
+        if poll_on and _due(state.get("lastIgPollAt"), IG_POLL_EVERY, now):
+            fields["lastIgPollAt"] = at
+            claimed.append("ig_poll")
         return fields
 
     if update_job_state(heartbeat) is None:
@@ -749,6 +767,7 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         "meta_watch": lambda: run_meta_watch(now),  # P3-18a/c (studio_alerts_meta.py)
         "waiting": lambda: check_waiting_requests(now),
         "results": lambda: _run_results_sync(now),
+        "ig_poll": lambda: run_ig_poll(now),  # P4-09: the Instagram polling source (studio_ig_source.py)
     }
     ran: dict[str, Any] = {"claimed": list(claimed)}
     for job in claimed:
@@ -781,7 +800,8 @@ def start_studio_jobs(ctx_provider: Callable[[], dict[str, Any]]) -> bool:
         _STOP_JOINED = False
         _THREAD = threading.Thread(target=_loop, args=(_STOP, ctx_provider), name="albayan-studio-jobs", daemon=True)
         _THREAD.start()
-    print("[albayan] Studio jobs loop started (orphan sweep, alerts, daily money check; Meta results sync when configured).")
+    print("[albayan] Studio jobs loop started (orphan sweep, alerts, daily money check; Meta results sync when configured; "
+          "Instagram poll when switched on).")
     return True
 
 

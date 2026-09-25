@@ -408,6 +408,26 @@ def test_page_throttle_code_parks_only_that_page(graph, code):
     assert [(park["object"], park["reason"]) for park in parks] == [(f"…{PAGE_A[-4:]}", f"meta_{code}")]
 
 
+def test_page_park_is_per_page(graph):
+    """P4-04: a back-off on the page lane is per page. Page A throttled (Meta code 80001) parks page A
+    alone: page B still replies, the page lane as a whole is not paused, nothing is app-wide, and a
+    read for page A's Instagram account (the P4-09 poll asks the same question) waits while B's does not."""
+    graph.route_page(PAGE_A, reply=_refused(80001))
+    graph.route_page(PAGE_B)
+    assert _reply(PAGE_A)[0] == []
+    seen = len(graph.seen)
+    assert _reply(PAGE_A)[0] == [] and len(graph.seen) == seen  # page A waits, nothing sent
+    assert _reply(PAGE_B)[0] == ["public"]  # page B keeps replying
+    assert meta_ads.meta_lane_pause_seconds("page", PAGE_A) > 0
+    assert meta_ads.meta_lane_pause_seconds("page", PAGE_B) == 0
+    assert meta_ads.meta_lane_pause_seconds("page") == 0  # the lane itself is not paused
+    report = meta_ads.lane_state_report()
+    page = report["lanes"]["page"]
+    assert page["paused"] is False and page["parkCount"] == 1 and report["appWide"]["paused"] is False
+    assert [(park["object"], park["reason"]) for park in page["parks"]] == [(f"…{PAGE_A[-4:]}", "meta_80001")]
+    _no_ids_or_tokens(report)
+
+
 def test_admin_page_code_keeps_the_admin_pause_and_parks_the_page(graph):
     graph.routes[("GET", PAGE_A)] = _refused(32)  # Manager's page-name read
     graph.route_page(PAGE_B)
