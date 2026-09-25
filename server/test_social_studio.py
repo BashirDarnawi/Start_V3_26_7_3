@@ -31,9 +31,13 @@ from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 import server.meta_ads as meta_ads
 import server.systems.ads_studio.social_studio as studio
+from server.systems.ads_studio import studio_settings
+from server.systems.ads_studio.studio_types import STUDIO_SETTINGS_TYPE
 
 
 client = TestClient(app, headers={"Origin": "http://testserver"})
+# P4-05: every reply channel open (the capability gates arm with the first save of the setting).
+ALL_ON = {"fbPublicReply": "on", "fbPrivateReply": "on", "igPublicReply": "on", "igPrivateReply": "on"}
 PASSWORD = "SocialStudio123!Secure"
 APP_SECRET = "app-secret-must-never-leak"
 SYSTEM_TOKEN = "system-token-must-never-leak"
@@ -117,11 +121,26 @@ def _wipe_social_rows():
         )
 
 
+def _arm(capabilities):
+    """Save the ``capabilities`` setting (partial: the rest keeps its default): the gates are armed."""
+    record = studio_settings.read_setting("capabilities")
+    studio_settings.save_setting("capabilities", capabilities, record["version"], "test", studio._iso_now(),
+                                 audit=lambda conn, before, after: None)
+
+
+def _disarm():
+    """Remove the ``capabilities`` setting row: the gates are not armed (classic behaviour)."""
+    with db_conn() as conn:
+        conn.execute(text("DELETE FROM entities WHERE type = :type AND id = :id"),
+                     {"type": STUDIO_SETTINGS_TYPE, "id": studio_settings.setting_id("capabilities")})
+
+
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch, actors):
     for who in actors.values():
         reset_rate_limit(f"social-studio:mutations:{who['id']}")
         reset_rate_limit(f"social-studio:available:{who['id']}")
+        reset_rate_limit(f"social-studio:log:{who['id']}")
     monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", SYSTEM_TOKEN)
     monkeypatch.setenv("ALBAYAN_META_APP_SECRET", APP_SECRET)
     monkeypatch.setenv("ALBAYAN_META_BACKGROUND_SYNC", "false")
@@ -131,7 +150,9 @@ def _fresh(monkeypatch, actors):
     monkeypatch.setattr(meta_ads, "discover_meta_ads", lambda *args, **kwargs: {})
     meta_ads._PAGE_TOKEN_CACHE.clear()
     _wipe_social_rows()
+    _disarm()
     yield
+    _disarm()
 
 
 class FakeGraph:
@@ -1344,3 +1365,273 @@ def test_webhook_signature_and_verify_token_reject_non_ascii_cleanly(monkeypatch
     assert verify.status_code == 403
     ok = client.get("/api/meta-ads/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "verify-me-please", "hub.challenge": "x"})
     assert ok.status_code == 200 and ok.text == "x"
+
+
+# ---------------------------------------------------------------------------
+# P4-01: rules scoped to pages (pageRefs)
+# ---------------------------------------------------------------------------
+
+
+def test_page_refs_must_be_the_owners_live_pages(actors):
+    a, admin = actors["a"]["cookies"], actors["admin"]["cookies"]
+    a_page = _link(actors, "a", "5100000000055", name="Shop A")
+    b_page = _link(actors, "b", "5100000000056")
+    ig_page = _link(actors, "a", "5100000000057", platform="ig", ig_user_id="17800000000057")
+    body = {"name": "Scoped", "platform": "fb", "publicReply": "Thanks"}
+    refused = client.post(f"{API}/rules", json={**body, "pageRefs": [b_page["id"]]}, cookies=a)
+    assert refused.status_code == 400 and "is not linked to this account" in refused.json()["detail"]
+    assert client.post(f"{API}/rules", json={**body, "pageRefs": ["spg_nobody"]}, cookies=a).status_code == 400
+    wrong = client.post(f"{API}/rules", json={**body, "pageRefs": [ig_page["id"]]}, cookies=a)
+    assert wrong.status_code == 400 and "not on this rule's platform" in wrong.json()["detail"]
+    rule = _rule(a, **body, pageRefs=[a_page["id"]])
+    assert rule["pageRefs"] == [a_page["id"]] and rule["pageRemoved"] is False and rule["pageRemovedLabel"] is None
+    assert rule["pages"] == [{"id": a_page["id"], "removed": False, "name": "Shop A", "platform": "fb"}]
+    assert client.patch(f"{API}/rules/{rule['id']}", json={"pageRefs": [b_page["id"]]}, cookies=a).status_code == 400
+    widened = client.patch(f"{API}/rules/{rule['id']}", json={"pageRefs": []}, cookies=a)
+    assert widened.status_code == 200 and widened.json()["pageRefs"] == [] and widened.json()["pages"] == []
+    # An admin editing on the owner's behalf is held to the owner's pages too.
+    assert client.patch(f"{API}/rules/{rule['id']}", json={"pageRefs": [b_page["id"]]}, cookies=admin).status_code == 400
+    listed = client.get(f"{API}/rules", cookies=a).json()
+    assert listed["rules"][0]["pageRefs"] == [] and listed["channels"]["labels"]["gated"]["ar"] == "بانتظار موافقة ميتا"
+
+
+def test_page_refs_scope_which_page_answers(actors, graph):
+    a = actors["a"]["cookies"]
+    first = _link(actors, "a", "5100000000058")
+    _link(actors, "a", "5100000000059")
+    _rule(a, name="Only the first page", publicReply="Thanks", pageRefs=[first["id"]])
+    _webhook(_fb_comment("5100000000059", "5100000000059_1", "9059", "hi"))
+    assert graph.calls == [] and _log_rows(actors["a"]["id"]) == []  # the other page: the rule does not apply
+    _webhook(_fb_comment("5100000000058", "5100000000058_1", "9058", "hi"))
+    assert graph.paths() == [("5100000000058_1/comments", {"message": "Thanks"})]
+    assert _log_rows(actors["a"]["id"])[0]["pageId"] == first["id"]
+
+
+def test_page_refs_unlink_shows_page_removed_and_relink_keeps_the_rule_firing(actors, graph):
+    a, admin = actors["a"]["cookies"], actors["admin"]["cookies"]
+    page = _link(actors, "a", "5100000000060", name="Shop")
+    rule = _rule(a, name="Shop rule", publicReply="Thanks", pageRefs=[page["id"]])
+    _webhook(_fb_comment("5100000000060", "5100000000060_1", "9060", "hi"))
+    assert len(graph.calls) == 1
+    assert client.post(f"{API}/pages/{page['id']}/unlink", cookies=admin).status_code == 200
+    shown = client.get(f"{API}/rules", cookies=a).json()["rules"][0]
+    assert shown["pageRemoved"] is True and shown["pages"] == [{"id": page["id"], "removed": True, "name": "Shop", "platform": "fb"}]
+    assert shown["pageRemovedLabel"] == {"en": "Page removed", "ar": "الصفحة أُزيلت"}
+    _webhook(_fb_comment("5100000000060", "5100000000060_2", "9061", "hi"))
+    assert len(graph.calls) == 1  # unlinked: nothing fires
+    # The same Meta page linked again to the same owner: the same row id, so the rule fires again.
+    relinked = client.post(f"{API}/pages/link", json={"ownerId": actors["a"]["id"], "metaPageId": "5100000000060",
+                                                       "platform": "fb", "name": "Shop again"}, cookies=admin)
+    assert relinked.status_code == 200, relinked.text
+    assert relinked.json()["id"] == page["id"] and relinked.json()["name"] == "Shop again"
+    assert relinked.json()["healthy"] is True and relinked.json()["health"]["state"] == "ok"
+    listed = client.get(f"{API}/pages", cookies=a).json()["pages"]
+    assert [p["id"] for p in listed] == [page["id"]]
+    shown = client.get(f"{API}/rules", cookies=a).json()["rules"][0]
+    assert shown["pageRemoved"] is False and shown["pages"][0]["name"] == "Shop again"
+    _webhook(_fb_comment("5100000000060", "5100000000060_3", "9062", "hi"))
+    assert len(graph.calls) == 2 and _log_rows(actors["a"]["id"])[-1]["pageId"] == page["id"]
+    with db_conn() as conn:
+        actions = [row["action"] for row in conn.execute(
+            text("SELECT action FROM audit_logs WHERE resource_type = 'socialPages' AND resource_id = :id"),
+            {"id": page["id"]}).mappings().all()]
+    assert sorted(actions) == ["link", "relink", "unlink"]
+    # Linked to ANOTHER owner after an unlink: a new row; the first owner's rule stays "page removed".
+    assert client.post(f"{API}/pages/{page['id']}/unlink", cookies=admin).status_code == 200
+    moved = client.post(f"{API}/pages/link", json={"ownerId": actors["b"]["id"], "metaPageId": "5100000000060", "platform": "fb"}, cookies=admin)
+    assert moved.status_code == 200 and moved.json()["id"] != page["id"]
+    assert client.get(f"{API}/rules", cookies=a).json()["rules"][0]["pageRemoved"] is True
+    assert rule["id"] == shown["id"]
+
+
+# ---------------------------------------------------------------------------
+# P4-02: the reply log, its counters and the latency fields
+# ---------------------------------------------------------------------------
+
+
+def test_reply_log_owner_only(actors, graph):
+    a, b, admin = actors["a"]["cookies"], actors["b"]["cookies"], actors["admin"]["cookies"]
+    a_page = _link(actors, "a", "5100000000062", name="Page A")
+    _link(actors, "b", "5100000000063", name="Page B")
+    a_rule = _rule(a, name="Rule A", publicReply="Thanks A")
+    _rule(b, name="Rule B", publicReply="Thanks B", dmEnabled=True, dmText="DM B")
+    _webhook(_fb_comment("5100000000062", "5100000000062_1", "9062", "hi"))
+    _webhook(_fb_comment("5100000000063", "5100000000063_1", "9063", "hi"))
+    graph.fail["/comments"] = meta_ads.MetaAdsError("request_failed", "Meta refused the reply.", provider_code="100")
+    _webhook(_fb_comment("5100000000062", "5100000000062_2", "9064", "again"))
+    log = client.get(f"{API}/log", cookies=a).json()
+    assert [r["commentId"] for r in log["rows"]] == ["5100000000062_2", "5100000000062_1"]  # newest first
+    sent, failed = log["rows"][1], log["rows"][0]
+    assert sent["outcome"] == "sent" and sent["actions"] == ["public"] and sent["pageName"] == "Page A" and sent["ruleName"] == "Rule A"
+    assert sent["pageId"] == a_page["id"] and sent["ruleId"] == a_rule["id"] and sent["source"] == "webhook"
+    assert sent["receivedAt"] and sent["sentAt"] and isinstance(sent["latencySeconds"], int) and sent["latencySeconds"] >= 0
+    assert failed["outcome"] == "failed" and failed["actions"] == [] and "Meta refused the reply. (100)" in failed["error"]
+    assert failed["sentAt"] is None and failed["latencySeconds"] is None
+    for row in log["rows"]:
+        assert "fromId" not in row and "ownerId" not in row  # the commenter's id never leaves the row
+    assert log["counters"]["total"] == 2 and log["counters"]["byAction"] == {"dm": 0, "public": 1, "like": 0}
+    assert log["counters"]["byOutcome"]["sent"] == 1 and log["counters"]["byOutcome"]["failed"] == 1
+    assert log["counters"]["latency"]["webhook"]["count"] == 1 and log["counters"]["latency"]["poll"] == {"count": 0, "p50Seconds": None, "p95Seconds": None}
+    assert log["labels"]["outcome"]["failed"] == {"en": "Failed", "ar": "فشل"} and log["windowDays"] == 30
+    # Owner B sees only B's row; a customer without the subscription gets 403; the admin sees everyone
+    # (or one owner by ?ownerId=); an owner cannot read another owner.
+    b_log = client.get(f"{API}/log", cookies=b).json()
+    assert [r["commentId"] for r in b_log["rows"]] == ["5100000000063_1"] and b_log["rows"][0]["actions"] == ["dm", "public"]
+    assert b_log["counters"]["byAction"]["dm"] == 1
+    assert client.get(f"{API}/log", cookies=actors["c"]["cookies"]).status_code == 403
+    assert len(client.get(f"{API}/log", cookies=admin).json()["rows"]) == 3
+    assert [r["pageName"] for r in client.get(f"{API}/log?ownerId={actors['b']['id']}", cookies=admin).json()["rows"]] == ["Page B"]
+    assert client.get(f"{API}/log?ownerId={actors['b']['id']}", cookies=a).status_code == 403
+    # Filters and paging.
+    assert [r["outcome"] for r in client.get(f"{API}/log?status=failed", cookies=a).json()["rows"]] == ["failed"]
+    assert client.get(f"{API}/log?status=bogus", cookies=a).status_code == 400
+    assert client.get(f"{API}/log?before=bogus", cookies=a).status_code == 400
+    first = client.get(f"{API}/log?limit=1", cookies=a).json()
+    assert len(first["rows"]) == 1 and first["nextBefore"]
+    second = client.get(f"{API}/log?limit=1&before={first['nextBefore']}", cookies=a).json()
+    assert [r["commentId"] for r in second["rows"]] == ["5100000000062_1"] and second["nextBefore"] is None
+    assert second["counters"]["total"] == 2  # the counters cover the window, not the page
+
+
+def test_reply_latency_recorded(actors, graph):
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000064")
+    _rule(a, name="All", publicReply="Thanks")
+    _webhook(_fb_comment("5100000000064", "5100000000064_1", "9065", "hi"))
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    handled = studio.process_comment(platform="fb", entry_id="5100000000064", comment_id="5100000000064_2", post_ref="post_1",
+                                     from_id="9066", text="hi", source="poll", comment_at=soon)
+    assert handled["source"] == "poll" and handled["receivedAt"] and handled["sentAt"] and handled["actions"] == ["public"]
+    rows = {r["commentId"]: r for r in client.get(f"{API}/log", cookies=a).json()["rows"]}
+    assert rows["5100000000064_1"]["source"] == "webhook" and rows["5100000000064_2"]["source"] == "poll"
+    assert all(isinstance(r["latencySeconds"], int) for r in rows.values())
+    latency = studio.reply_latency_by_source(days=1)
+    assert set(latency) == set(studio.COMMENT_SOURCES)
+    assert latency["webhook"]["count"] == 1 and latency["poll"]["count"] == 1 and latency["manual_check"]["count"] == 0
+    assert isinstance(latency["poll"]["p95Seconds"], int) and isinstance(latency["webhook"]["p50Seconds"], int)
+    assert studio.reply_latency_by_source(days=1, owner_id=actors["b"]["id"])["webhook"]["count"] == 0
+    assert studio._percentile([5, 1, 9, 3], 0.95) == 9 and studio._percentile([5, 1, 9, 3], 0.5) == 3 and studio._percentile([], 0.95) is None
+
+
+def test_reply_actions_saved_as_they_succeed(actors, graph):
+    """P4-02: each action lands on the log row when Meta accepts it, so a server killed mid-reply
+    leaves the exact list behind and the rest of the rule is never replayed in full."""
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000065")
+    _rule(a, name="All", publicReply="Thanks", dmEnabled=True, dmText="DM", likeComment=True)
+    seen = []
+    real_post = graph.post
+
+    def watching_post(path, data, token):
+        rows = _log_rows(actors["a"]["id"])
+        seen.append((path.rsplit("/", 1)[-1], list(rows[0]["actions"]), bool(rows[0].get("sentAt"))))
+        if path.endswith("/likes"):
+            raise RuntimeError("the process died here")  # a non-Meta failure in the middle of the rule
+        return real_post(path, data, token)
+
+    graph.post = watching_post
+    with pytest.raises(RuntimeError):
+        studio.process_comment(platform="fb", entry_id="5100000000065", comment_id="5100000000065_1", post_ref="post_1",
+                               from_id="9067", text="hi")
+    # At the public reply the DM was already on the row; at the like both were.
+    assert seen == [("messages", [], False), ("comments", ["dm"], True), ("likes", ["dm", "public"], True)]
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == ["dm", "public"] and row["processing"] is False and row["error"] == "interrupted"
+    assert not row.get("retryAfter") and row["sentAt"]
+    graph.post = real_post
+    studio._retry_pending_replies(datetime.now(timezone.utc) + timedelta(hours=1))
+    assert [p for p, _d in graph.paths() if p.endswith("/messages")] == ["5100000000065/messages"]  # never resent
+
+
+# ---------------------------------------------------------------------------
+# P4-05: capability gates in the executor and the editor
+# ---------------------------------------------------------------------------
+
+
+def test_capability_gate_unarmed_sends_everything(actors, graph):
+    """Before an admin saves the capabilities setting the gates are not armed: the classic Social
+    Studio keeps sending every action a rule asks for (a dark deploy switches nothing off)."""
+    assert studio.capability_gates() is None
+    assert studio.channel_state(None, "fb", "dm") is None and studio.webhook_wanted("fb", None) is False
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000066")
+    _rule(a, name="All", publicReply="Thanks", dmEnabled=True, dmText="DM", likeComment=True)
+    _webhook(_fb_comment("5100000000066", "5100000000066_1", "9068", "hi"))
+    assert [p for p, _d in graph.paths()] == ["5100000000066/messages", "5100000000066_1/comments", "5100000000066_1/likes"]
+    assert "skipped" not in _log_rows(actors["a"]["id"])[0]
+
+
+def test_capability_gate_holds_gated_actions_and_logs_the_reason(actors, graph):
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000067")
+    _rule(a, name="All", publicReply="Thanks", dmEnabled=True, dmText="DM", likeComment=True)
+    _arm({**ALL_ON, "fbPrivateReply": "gated"})
+    assert studio.capability_gates()["fbPrivateReply"] == "gated"
+    _webhook(_fb_comment("5100000000067", "5100000000067_1", "9069", "hi"))
+    assert [p for p, _d in graph.paths()] == ["5100000000067_1/comments", "5100000000067_1/likes"]  # no private message
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == ["public", "like"] and row["error"] == "" and "problemCode" not in row
+    assert row["skipped"] == [{"action": "dm", "channel": "fbPrivateReply", "state": "gated"}]
+    shown = client.get(f"{API}/log", cookies=a).json()
+    assert shown["rows"][0]["outcome"] == "sent" and shown["rows"][0]["skipped"] == row["skipped"]
+    assert shown["labels"]["channelState"]["gated"] == {"en": "Waiting for Meta approval", "ar": "بانتظار موافقة ميتا"}
+
+
+def test_capability_gate_all_closed_never_reaches_meta(actors, graph):
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000068")
+    _rule(a, name="All", publicReply="Thanks", dmEnabled=True, dmText="DM", likeComment=True)  # saved while open
+    _arm({"fbPublicReply": "off", "fbPrivateReply": "unavailable", "igPublicReply": "off", "igPrivateReply": "off"})
+    _webhook(_fb_comment("5100000000068", "5100000000068_1", "9070", "hi"))
+    assert graph.calls == []  # not even a page token read
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == [] and row["error"] == "" and row["processing"] is False and not row.get("retryAfter")
+    assert [s["state"] for s in row["skipped"]] == ["unavailable", "off", "off"] and row["problemCode"] == "channel_unavailable"
+    shown = client.get(f"{API}/log", cookies=a).json()
+    assert shown["rows"][0]["outcome"] == "skipped" and shown["counters"]["byOutcome"]["skipped"] == 1
+    assert shown["labels"]["problem"]["channel_off"] == {"en": "Switched off", "ar": "متوقف"}
+    # The person is not "answered": a once-per-person rule may still reach them once the channel opens.
+    assert studio._person_replied_rule_ids(actors["a"]["id"], _log_rows(actors["a"]["id"])[0]["pageId"], "9070") == set()
+
+
+def test_capability_gate_poll_only_for_instagram_public(actors, graph):
+    a = actors["a"]["cookies"]
+    _link(actors, "a", "5100000000069", platform="ig", ig_user_id="17800000000069")
+    _rule(a, name="IG", platform="ig", publicReply="Replied on IG", dmEnabled=True, dmText="IG private")
+    _arm({"igPublicReply": "poll", "igPrivateReply": "gated", "fbPublicReply": "on", "fbPrivateReply": "on"})
+    _webhook({"object": "instagram", "entry": [{"id": "17800000000069", "changes": [{"field": "comments", "value": {
+        "id": "17900000000069", "media": {"id": "17950000000069"}, "from": {"id": "9071", "username": "buyer"}, "text": "price?",
+    }}]}]})
+    assert graph.paths() == [("17900000000069/replies", {"message": "Replied on IG"})]
+    row = _log_rows(actors["a"]["id"])[0]
+    assert row["actions"] == ["public"] and row["skipped"] == [{"action": "dm", "channel": "igPrivateReply", "state": "gated"}]
+    # poll never opens a Facebook channel (studio_settings refuses it there anyway).
+    assert studio.channel_state({"fbPublicReply": "poll"}, "fb", "public") == "gated"
+    assert studio.channel_state({"igPublicReply": "poll"}, "ig", "public") is None
+    assert studio.channel_state({"igPublicReply": "on"}, "ig", "like") is None  # no such action on Instagram
+    assert studio.channel_state({}, "fb", "dm") == "unavailable"  # armed but unknown: closed
+
+
+def test_capability_gate_editor_refuses_actions_the_channel_cannot_do(actors):
+    a = actors["a"]["cookies"]
+    _arm({"fbPrivateReply": "unavailable", "fbPublicReply": "off", "igPublicReply": "gated", "igPrivateReply": "on"})
+    refused = client.post(f"{API}/rules", json={"name": "DM", "platform": "fb", "dmEnabled": True, "dmText": "hi"}, cookies=a)
+    assert refused.status_code == 400 and refused.json()["detail"] == "Private messages are not available for Facebook pages right now"
+    refused = client.post(f"{API}/rules", json={"name": "Public", "platform": "fb", "publicReply": "hi"}, cookies=a)
+    assert refused.status_code == 400 and refused.json()["detail"] == "Public replies are not available for Facebook pages right now"
+    # Gated (waiting for Meta) is saved and shown as waiting; an open channel is saved.
+    waiting = _rule(a, name="IG public", platform="ig", publicReply="hi")
+    assert waiting["publicReply"] == "hi"
+    open_dm = _rule(a, name="IG dm", platform="ig", dmEnabled=True, dmText="hi")
+    assert open_dm["dmEnabled"] is True
+    # A like follows the public-reply switch.
+    _arm({"fbPrivateReply": "on", "fbPublicReply": "off"})
+    refused = client.post(f"{API}/rules", json={"name": "Like", "platform": "fb", "dmEnabled": True, "dmText": "hi", "likeComment": True}, cookies=a)
+    assert refused.status_code == 400 and refused.json()["detail"] == "Likes are not available for Facebook pages right now"
+    saved = _rule(a, name="DM only", platform="fb", publicReply="", dmEnabled=True, dmText="hi")
+    refused = client.patch(f"{API}/rules/{saved['id']}", json={"publicReply": "now public"}, cookies=a)
+    assert refused.status_code == 400 and "Public replies are not available" in refused.json()["detail"]
+    # Unarmed again: everything may be saved.
+    _disarm()
+    assert _rule(a, name="Any", platform="fb", publicReply="hi", dmEnabled=True, dmText="x", likeComment=True)["likeComment"] is True
+    assert client.get(f"{API}/rules", cookies=a).json()["channels"]["states"] == {}

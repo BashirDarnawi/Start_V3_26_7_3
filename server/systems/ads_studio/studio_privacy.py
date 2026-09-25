@@ -41,11 +41,14 @@ arrives with P2-07) and the commenters' identifiers and texts from the account's
 later release stores them) and, since P3-12, the texts of the account's help-desk tickets: every
 ticket subject (``supportTickets``) and every message text of those tickets, the team's answers
 included (``supportTicketMessages``, which carry the ticket owner's created_by), keeping the ids,
-the T- numbers, the status and every time (studio_support.py). It never
-reads or writes the wallet ledger, payment requests or ad requests (money history stays exact),
-and it only ever touches this system's own record types. It is idempotent: a second run changes
-nothing. On PostgreSQL it locks the rows it rewrites (ORDER BY id, FOR UPDATE); main.py's creator-
-name scrub already holds the account's rows in (type, id) order, so no new lock order appears.
+the T- numbers, the status and every time (studio_support.py), and, since P5-04, the account's
+Social Studio rows: the texts of its reply rules (name, keywords, the public reply, the private
+message), the names of its linked pages and the captions and photos of its posts (``socialReplyRules``,
+``socialPages``, ``socialPosts``; ids, platforms, Meta ids, statuses, times and Meta results stay).
+It never reads or writes the wallet ledger, payment requests or ad requests (money history stays
+exact), and it only ever touches this system's own record types. It is idempotent: a second run
+changes nothing. On PostgreSQL it locks the rows it rewrites (ORDER BY id, FOR UPDATE); main.py's
+creator-name scrub already holds the account's rows in (type, id) order, so no new lock order appears.
 """
 
 from functools import lru_cache
@@ -56,6 +59,9 @@ from sqlalchemy import text
 from ...db import json_dumps, json_loads, now_ms
 from ...rbac import can_browse_user_directory
 from .social_studio import LOG_TYPE as REPLY_LOG_TYPE
+from .social_studio import PAGES_TYPE as SOCIAL_PAGES_TYPE
+from .social_studio import POSTS_TYPE as SOCIAL_POSTS_TYPE
+from .social_studio import RULES_TYPE as SOCIAL_RULES_TYPE
 from .studio_types import STUDIO_PROFILES_TYPE, SUPPORT_TICKET_MESSAGES_TYPE, SUPPORT_TICKETS_TYPE, derived_id
 
 TEAM_ID = "team"
@@ -193,6 +199,10 @@ REPLY_LOG_COMMENTER_FIELDS = (
 # replays) of a ticket, and the text of each message; ids, numbers, status and times stay.
 TICKET_PERSONAL_FIELDS = ("subject", "createFingerprint")
 TICKET_MESSAGE_PERSONAL_FIELDS = ("text",)
+# Social Studio rows (P5-04): what the account wrote or named; ids and Meta ids stay.
+SOCIAL_RULE_PERSONAL_FIELDS = ("name", "keywords", "publicReply", "dmText")
+SOCIAL_PAGE_PERSONAL_FIELDS = ("name",)
+SOCIAL_POST_PERSONAL_FIELDS = ("caption", "media")
 _SCRUB_BATCH = 500
 
 
@@ -264,4 +274,23 @@ def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
         TICKET_PERSONAL_FIELDS,
         stamp,
     )
-    return {"profiles": profiles, "replyLog": reply_log, "tickets": tickets}
+    # P5-04: the account's Social Studio rows (rules, pages, posts; every row carries created_by = owner).
+    # Their count ``social`` joins the answer only when such a row changed: the three classic counts
+    # stay the whole answer for accounts without Social Studio rows.
+    social = 0
+    for entity_type, fields in (
+        (SOCIAL_RULES_TYPE, SOCIAL_RULE_PERSONAL_FIELDS),
+        (SOCIAL_PAGES_TYPE, SOCIAL_PAGE_PERSONAL_FIELDS),
+        (SOCIAL_POSTS_TYPE, SOCIAL_POST_PERSONAL_FIELDS),
+    ):
+        social += _scrub_fields(
+            conn,
+            "SELECT id, data_json, last_modified FROM entities WHERE type = :type AND created_by = :uid",
+            {"type": entity_type, "uid": uid},
+            fields,
+            stamp,
+        )
+    counts = {"profiles": profiles, "replyLog": reply_log, "tickets": tickets}
+    if social:
+        counts["social"] = social
+    return counts

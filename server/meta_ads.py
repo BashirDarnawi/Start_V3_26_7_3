@@ -7980,3 +7980,79 @@ def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any =
         "resultCount": insights["resultCount"] if insights is not None else None,
         "readAt": _iso_now(),
     }
+
+
+# ---------------------------------------------------------------------------
+# P4-03 page webhook subscription (Albayan Studio plan; social_studio's page health)
+# ---------------------------------------------------------------------------
+# Two small doors for the studio: read whether Albayan's app is subscribed to a page's webhook,
+# and subscribe it (``POST /{page-id}/subscribed_apps`` with ``subscribed_fields=feed``, VERIFIED
+# PLAN §8.2). Both use the page's own token on the page lane (P3-00a), so a page limit parks that
+# page only. Answers carry codes and flags, never a token.
+
+
+def _studio_app_id() -> str:
+    app_id = (os.getenv("ALBAYAN_META_APP_ID") or "").strip()
+    return app_id if _META_ID_RE.fullmatch(app_id) else ""
+
+
+def _page_reason_of(error: MetaAdsError) -> str:
+    """The per-page health reason a refusal stands for ('' for a global or ordinary failure); the
+    studio's page_problem_reason has the same table (190.460 token_revoked, 190.492 or no page
+    token page_role_lost, permission codes permission_missing, Meta's page-scoped limits 32 /
+    80001 / 80002 / 80006 throttled)."""
+    provider = str(error.provider_code or "").strip()
+    major, _dot, sub = provider.partition(".")
+    if error.code == "authorization":
+        if not major:
+            return "page_role_lost"
+        if major == "190":
+            return {"460": "token_revoked", "492": "page_role_lost"}.get(sub, "")
+        if major in {"3", "10"} or (major.isdigit() and 200 <= int(major) <= 299):
+            return "permission_missing"
+        return ""
+    if error.code == "rate_limited" and major in {"32", "80001", "80002", "80006"}:
+        return "throttled"
+    return ""
+
+
+def read_page_webhook_subscription(page_id: Any, *, client: "MetaAdsClient | None" = None) -> dict[str, Any]:
+    """``{state, errorCode, providerCode, retryable, pageReason}``: ``subscribed`` when Albayan's app
+    (ALBAYAN_META_APP_ID; any app when unset) lists every STUDIO_PAGE_WEBHOOK_FIELDS field on the
+    page, ``not_subscribed`` otherwise, ``error`` when Meta did not answer (with the codes)."""
+    out: dict[str, Any] = {"state": "error", "errorCode": "", "providerCode": "", "retryable": False, "pageReason": ""}
+    try:
+        clean_id = _meta_id(page_id, "Meta page")
+        client = client or get_meta_ads_client()
+    except MetaAdsError as error:
+        out.update({"errorCode": error.code, "providerCode": error.provider_code, "retryable": bool(error.retryable)})
+        return out
+    state, error = _page_subscription_state(client, clean_id, _studio_app_id())
+    if error is not None:
+        out.update({"errorCode": error.code, "providerCode": error.provider_code, "retryable": bool(error.retryable),
+                    "pageReason": _page_reason_of(error)})
+        return out
+    out["state"] = state
+    return out
+
+
+def subscribe_page_webhook(page_id: Any, *, client: "MetaAdsClient | None" = None) -> dict[str, Any]:
+    """Subscribe Albayan's app to the page's webhook fields (STUDIO_PAGE_WEBHOOK_FIELDS) with the
+    page token on the page lane. ``{ok, errorCode, providerCode, retryable, pageReason}``; ``ok``
+    only when Meta confirmed (``success: true``)."""
+    out: dict[str, Any] = {"ok": False, "errorCode": "", "providerCode": "", "retryable": False, "pageReason": ""}
+    fields = ",".join(STUDIO_PAGE_WEBHOOK_FIELDS)
+    try:
+        clean_id = _meta_id(page_id, "Meta page")
+        client = client or get_meta_ads_client()
+        with meta_call_lane("page", subject=clean_id):
+            token = client.page_access_token(clean_id)
+            answer = client._post(f"{clean_id}/subscribed_apps", {"subscribed_fields": fields}, access_token=token)
+    except MetaAdsError as error:
+        out.update({"errorCode": error.code, "providerCode": error.provider_code, "retryable": bool(error.retryable),
+                    "pageReason": _page_reason_of(error)})
+        return out
+    out["ok"] = answer.get("success") is True
+    if not out["ok"]:
+        out["errorCode"] = "not_confirmed"
+    return out

@@ -15,6 +15,28 @@ Meta traffic goes through :class:`server.meta_ads.MetaAdsClient` (one paced
 request lane, app-secret proof, shared backoff). Page access tokens are
 fetched on demand and cached in memory only: nothing token-shaped is ever
 written to the database, returned to a browser, or printed.
+
+Albayan Studio redesign (PLAN.md stage P4; DECISIONS D9, D24b, D34):
+
+* **P4-01 pages by ``pageRefs``.** A rule may name the socialPages rows (this owner's, on the
+  rule's platform) it answers on; empty = every page. An unlinked page shows as "page removed"
+  on the rule (``pages[].removed``) and the rule no longer fires there; linking the same Meta
+  page to the same owner again revives the old row (same id), so the rule fires again.
+* **P4-02 reply log.** ``GET /api/social-studio/log``: the owner's rows only (an admin may name an
+  owner), paged, with counters by action and outcome and the ``receivedAt`` / ``sentAt`` /
+  ``source`` latency; ``reply_latency_by_source()`` gives diagnostics the p95 per source. Each
+  reply action is saved to its log row the moment Meta accepts it (``_reply_row``), so a server
+  killed mid-reply never replays the whole rule.
+* **P4-03 page health.** ``_set_page_health()`` is the one writer of ``healthState`` /
+  ``healthReason`` / ``healthy``; ``health`` in the page list carries the bilingual label and fix
+  step; ``check_page_health()`` reads the webhook subscription (subscribing on link and as a
+  backfill while the platform's public replies are switched on), maps Meta's per-page refusals
+  and runs the Instagram "comments not arriving" heuristic; ``run_page_health_pass()`` is the
+  daily, budgeted turn; staff set ``instagram_private`` through ``POST /pages/{id}/health``.
+* **P4-05 capability gates.** Once an admin saves the ``capabilities`` setting (the gates arm:
+  ``capability_gates()``), the executor sends an action only on an ``on`` channel (``poll`` for
+  Instagram public replies) and the log row records what was held and why; the rule editor
+  refuses an action whose channel is ``off`` or ``unavailable``.
 """
 
 from __future__ import annotations
@@ -29,6 +51,7 @@ import re
 import secrets
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -37,7 +60,7 @@ from sqlalchemy import text
 
 from ... import meta_ads as _meta
 from ...startup_support import read_env_int
-from ...db import db_conn, get_engine, json_loads, now_ms
+from ...db import db_conn, get_engine, json_dumps, json_fields_select_sql, json_loads, now_ms
 from ...rate_limiter import check_rate_limit
 from ...auth_limits import _client_ip as _shared_client_ip
 from ...security import constant_time_equal, new_id
@@ -95,6 +118,134 @@ PARKED_REASON = "meta_connection_down"
 MISSED_DURING_OUTAGE = "missed_during_outage"
 PRIVATE_REPLY_WINDOW = timedelta(days=7)
 PUBLIC_REPLY_WINDOW = timedelta(hours=24)
+
+# ---------------------------------------------------------------------------
+# P4-03 page health (PLAN §5.5 J7, §7.1 socialPages, §7.4 "Page health check")
+# ---------------------------------------------------------------------------
+# ``healthState`` / ``healthReason`` / ``healthy`` of a socialPages row are written only by
+# _set_page_health(), so the classic dot (``healthy``) and the v2 health chip (``health``) agree.
+PAGE_HEALTH_STATES = ("ok", "attention")
+PAGE_HEALTH_REASONS = (
+    "token_revoked", "page_role_lost", "permission_missing", "webhook_not_subscribed",
+    "instagram_not_professional_or_unlinked", "instagram_private", "instagram_comments_not_arriving", "throttled",
+)
+# Reasons a reply or a check finds on its own; a later success or check clears them. The staff-set
+# and heuristic Instagram reasons are cleared by a comment that arrives (or by staff).
+REPLY_CLEARED_REASONS = frozenset({"token_revoked", "page_role_lost", "permission_missing", "throttled"})
+IG_EVENT_CLEARED_REASONS = frozenset({"instagram_comments_not_arriving", "instagram_private"})
+STAFF_SET_HEALTH_REASONS = ("instagram_private",)
+TEAM_ACTION_REASONS = frozenset({"webhook_not_subscribed", "throttled"})  # nothing the customer can do
+PAGE_THROTTLE_CODES = frozenset({"32", "80001", "80002", "80006"})  # Meta's page / IG / Messenger limits (PLAN §8.1)
+PAGE_HEALTH_EVERY = timedelta(hours=24)  # the daily check per page (run_page_health_pass)
+PAGE_HEALTH_PASS_EVERY_TICKS = 60  # about every 20 minutes of the worker (WORKER_INTERVAL_SECONDS)
+PAGE_HEALTH_PASS_LIMIT = 5  # pages per pass (budgeted, PLAN §7.4)
+IG_EVENT_SILENCE = timedelta(hours=24)  # comments_count grew over this long with no comment event
+IG_EVENT_STAMP_EVERY = timedelta(minutes=10)  # igLastCommentEventAt is rewritten at most this often
+IG_MEDIA_COUNTED = 10  # recent media whose comments_count the heuristic adds up
+PAGE_HEALTH_OK_LABEL = {"en": "Working", "ar": "يعمل"}
+PAGE_HEALTH_GENERIC_LABEL = {
+    "label": {"en": "Needs attention", "ar": "يحتاج انتباهاً"},
+    "fix": {"en": "Tell the team; they will check the page", "ar": "أبلغ الفريق ليفحص الصفحة"},
+}
+# When Albayan's own Meta connection is down (P3-18a) per-page reasons are suppressed: the neutral
+# banner explains it (PLAN §5.5 J7).
+PAGE_HEALTH_CONNECTION_LABEL = {
+    "en": "Facebook and Instagram updates are delayed right now; page checks resume once the connection is back",
+    "ar": "تحديثات فيسبوك وإنستغرام متأخرة حالياً؛ تعود فحوص الصفحات بعد عودة الاتصال",
+}
+PAGE_HEALTH_LABELS: dict[str, dict[str, dict[str, str]]] = {
+    "token_revoked": {
+        "label": {"en": "Albayan's access to this page stopped working", "ar": "توقف وصول البيان إلى هذه الصفحة"},
+        "fix": {"en": "Share the page with Albayan again in Meta Business Suite, then tell the team",
+                "ar": "شارك الصفحة مع البيان مرة أخرى من Meta Business Suite ثم أبلغ الفريق"},
+    },
+    "page_role_lost": {
+        "label": {"en": "Albayan no longer has a role on this page", "ar": "لم يعد للبيان دور على هذه الصفحة"},
+        "fix": {"en": "Give Albayan access to the page again in Meta Business Suite",
+                "ar": "أعد منح البيان صلاحية الوصول إلى الصفحة من Meta Business Suite"},
+    },
+    "permission_missing": {
+        "label": {"en": "A permission Albayan needs on this page is missing", "ar": "ينقص البيان إذن يحتاجه على هذه الصفحة"},
+        "fix": {"en": "In Meta Business Suite, give Albayan full access to the page (content, messages and comments)",
+                "ar": "من Meta Business Suite امنح البيان وصولاً كاملاً إلى الصفحة (المحتوى والرسائل والتعليقات)"},
+    },
+    "webhook_not_subscribed": {
+        "label": {"en": "Comment notifications are not switched on for this page yet", "ar": "إشعارات التعليقات غير مفعّلة لهذه الصفحة بعد"},
+        "fix": {"en": "The Albayan team switches them on; nothing to do on your side", "ar": "فريق البيان يفعّلها؛ لا شيء مطلوب منك"},
+    },
+    "instagram_not_professional_or_unlinked": {
+        "label": {"en": "This Instagram account is not a professional account linked to a Facebook page",
+                  "ar": "حساب إنستغرام هذا ليس حساباً احترافياً مربوطاً بصفحة فيسبوك"},
+        "fix": {"en": "Switch the account to a business or creator account and link it to your Facebook page",
+                "ar": "حوّل الحساب إلى حساب أعمال أو صانع محتوى واربطه بصفحة فيسبوك الخاصة بك"},
+    },
+    "instagram_private": {
+        "label": {"en": "This Instagram account is private, so comments do not reach Albayan",
+                  "ar": "حساب إنستغرام هذا خاص، لذلك لا تصل التعليقات إلى البيان"},
+        "fix": {"en": "Make the account public in Instagram settings, then tell the team",
+                "ar": "اجعل حسابك عاماً من إعدادات إنستغرام ثم أبلغ الفريق"},
+    },
+    "instagram_comments_not_arriving": {
+        "label": {"en": "New comments on this Instagram account are not reaching Albayan",
+                  "ar": "التعليقات الجديدة على حساب إنستغرام هذا لا تصل إلى البيان"},
+        "fix": {"en": "First make sure the account is public in Instagram settings, then tell the team",
+                "ar": "تأكد أولاً أن الحساب عام من إعدادات إنستغرام ثم أبلغ الفريق"},
+    },
+    "throttled": {
+        "label": {"en": "Meta is limiting this page for a while; replies resume automatically",
+                  "ar": "تحدّ ميتا من هذه الصفحة لفترة؛ تعود الردود تلقائياً"},
+        "fix": {"en": "Nothing to do; the team is watching it", "ar": "لا شيء مطلوب؛ الفريق يتابع الأمر"},
+    },
+}
+PAGE_REMOVED_LABEL = {"en": "Page removed", "ar": "الصفحة أُزيلت"}  # P4-01: a rule's page was unlinked
+
+# ---------------------------------------------------------------------------
+# P4-05 capability gates (PLAN §7.1 studioCapabilities, §8.2, §12.2 (c); DECISIONS D9, D24b, D34)
+# ---------------------------------------------------------------------------
+# Which capability switch (studio_settings ``capabilities``) each reply action of each platform
+# needs. A like is public engagement, so it follows the public-reply switch; Instagram has no like.
+CHANNEL_OF: dict[tuple[str, str], str] = {
+    ("fb", "dm"): "fbPrivateReply", ("fb", "public"): "fbPublicReply", ("fb", "like"): "fbPublicReply",
+    ("ig", "dm"): "igPrivateReply", ("ig", "public"): "igPublicReply",
+}
+CHANNEL_OPEN_STATES = frozenset({"on", "poll"})  # poll is accepted for igPublicReply only (studio_settings)
+# The rule editor refuses an action whose channel is off or not available (D34: removed from the
+# editor rather than shown as waiting); a gated one is saved and shown as waiting (D9), never sent.
+EDITOR_REFUSED_STATES = frozenset({"off", "unavailable"})
+CHANNEL_STATE_LABELS: dict[str, dict[str, str]] = {
+    "on": {"en": "Working", "ar": "يعمل"},
+    "poll": {"en": "Working, checked every 5 minutes", "ar": "يعمل — نفحص كل 5 دقائق"},
+    "gated": {"en": "Waiting for Meta approval", "ar": "بانتظار موافقة ميتا"},
+    "off": {"en": "Switched off", "ar": "متوقف"},
+    "unavailable": {"en": "Not available now", "ar": "غير متاح حالياً"},
+}
+_ACTION_WORDS = {"dm": "Private messages", "public": "Public replies", "like": "Likes"}
+_PLATFORM_WORDS = {"fb": "Facebook pages", "ig": "Instagram accounts"}
+
+# ---------------------------------------------------------------------------
+# P4-02 reply log (PLAN §7.1 socialReplyLog, §7.3 GET /api/social-studio/log)
+# ---------------------------------------------------------------------------
+LOG_PAGE_DEFAULT = 50
+LOG_PAGE_MAX = 100
+LOG_WINDOW_DAYS_DEFAULT = 30
+LOG_WINDOW_DAYS_MAX = 90
+LOG_WINDOW_ROWS_MAX = 5000  # the rows of one window read for the counters (newest first)
+LOG_OUTCOMES = ("sent", "partial", "failed", "waiting", "parked", "missed", "skipped", "sending", "none")
+LOG_OUTCOME_LABELS: dict[str, dict[str, str]] = {
+    "sent": {"en": "Sent", "ar": "أُرسل"},
+    "partial": {"en": "Partly sent", "ar": "أُرسل جزئياً"},
+    "failed": {"en": "Failed", "ar": "فشل"},
+    "waiting": {"en": "Waiting to retry", "ar": "بانتظار إعادة المحاولة"},
+    "parked": {"en": "Waiting for the Meta connection", "ar": "بانتظار عودة ربط ميتا"},
+    "missed": {"en": "Missed during the outage", "ar": "فات أثناء الانقطاع"},
+    "skipped": {"en": "Not sent: channel not available", "ar": "لم يُرسل: القناة غير متاحة"},
+    "sending": {"en": "Sending", "ar": "قيد الإرسال"},
+    "none": {"en": "Nothing to send", "ar": "لا شيء للإرسال"},
+}
+_CURSOR_RE = re.compile(r"^(\d{1,15}):([A-Za-z0-9][A-Za-z0-9._:-]{0,79})$")
+# The reply-log row the actions sent inside a _reply_row() block are saved to as each one succeeds
+# (P4-02): a server killed mid-reply leaves the exact list behind, so nothing is ever replayed.
+_REPLY_ROW: ContextVar[tuple[str, str] | None] = ContextVar("albayan_social_reply_row", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +376,7 @@ def evaluate_rules(
     already_replied_from_ids: set[str],
     now_local: datetime,
     already_replied_rule_ids: set[str] | None = None,
+    page_id: str = "",
 ) -> dict[str, Any] | None:
     """Pick the first enabled rule that applies to a comment (pure, no I/O).
 
@@ -233,6 +385,9 @@ def evaluate_rules(
     "chosen posts" can name either. ``already_replied_from_ids`` are commenters
     the page already answered automatically. Rules are checked in the order
     given; the caller passes them oldest-first so the first match wins.
+    ``page_id`` is the socialPages row the comment came in on: a rule with
+    ``pageRefs`` (P4-01) answers only on the pages it names; an empty list
+    means every page (rules from before pageRefs).
     """
     if not _bool((settings or {}).get("masterEnabled"), True):
         return None
@@ -248,6 +403,9 @@ def evaluate_rules(
         if not isinstance(rule, dict) or not _bool(rule.get("enabled"), True):
             continue
         if str(rule.get("platform") or "") != platform:
+            continue
+        page_refs = [str(x) for x in (rule.get("pageRefs") or []) if str(x or "")]
+        if page_refs and str(page_id or "") not in page_refs:
             continue
         if str(rule.get("scope") or "all") == "chosen":
             wanted = {str(x) for x in (rule.get("postIds") or []) if str(x or "")}
@@ -296,15 +454,51 @@ def _entity_from_row(row: Any) -> dict[str, Any]:
     }
 
 
-def _public(entity: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+def _public(
+    entity: dict[str, Any], user: dict[str, Any], *, connection_down: bool = False,
+    pages: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """One row as ``user`` may see it: through studio_privacy.redact_staff_identity (P1-05), so a
-    customer never gets a staff id (a page's ``linkedBy`` admin becomes 'team'); staff see it as is."""
+    customer never gets a staff id (a page's ``linkedBy`` admin becomes 'team'); staff see it as is.
+
+    A page carries its ``health`` view (P4-03; ``connection_down`` swaps the per-page reason for
+    the neutral connection text) and ``healthy`` derived from the same stored state; a rule carries
+    ``pages``, one entry per ``pageRefs`` id with ``removed`` for an unlinked page (P4-01; ``pages``
+    = the owner's live pages by id when the caller already has them)."""
     from .studio_privacy import redact_staff_identity  # late: studio_privacy imports this module
 
     data = {k: v for k, v in (entity.get("data") or {}).items() if k not in _PRIVATE_KEYS}
     data["id"] = str(entity.get("id") or data.get("id") or "")
     data["lastModified"] = int(entity.get("lastModified") or 0)
+    entity_type = str(entity.get("type") or "")
+    if entity_type == PAGES_TYPE:
+        data["health"] = page_health_view(data, connection_down=connection_down)
+        data["healthy"] = page_health_state(data)[0] == "ok"
+    elif entity_type == RULES_TYPE:
+        refs = [str(r) for r in (data.get("pageRefs") or []) if str(r or "")]
+        data["pageRefs"] = refs
+        data["pages"] = _rule_pages_view(refs, str(data.get("ownerId") or ""), pages)
+        data["pageRemoved"] = any(p["removed"] for p in data["pages"])
+        data["pageRemovedLabel"] = dict(PAGE_REMOVED_LABEL) if data["pageRemoved"] else None
     return redact_staff_identity(data, user)
+
+
+def _rule_pages_view(refs: list[str], owner_id: str, live: dict[str, dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """P4-01: what a rule's ``pageRefs`` point at now. ``removed``: the page was unlinked (or is
+    another owner's): the rule no longer fires there and the screen shows «الصفحة أُزيلت»."""
+    out: list[dict[str, Any]] = []
+    for ref in refs:
+        page = (live or {}).get(ref)
+        if page is None and _SAFE_ID_RE.fullmatch(ref):
+            page = _ctx()["get_entity"](PAGES_TYPE, ref)
+        data = (page or {}).get("data") or {}
+        removed = not page or bool(page.get("deleted")) or str(data.get("ownerId") or "") != owner_id
+        out.append({
+            "id": ref, "removed": removed,
+            "name": str(data.get("name") or "") if page and str(data.get("ownerId") or "") == owner_id else "",
+            "platform": str(data.get("platform") or "") if page and str(data.get("ownerId") or "") == owner_id else "",
+        })
+    return out
 
 
 def _rows(entity_type: str, owner_id: str | None, *, limit: int = 1000) -> list[dict[str, Any]]:
@@ -352,6 +546,47 @@ def _rows_where_json(
             ).mappings().all()
     entities = [_entity_from_row(r) for r in rows]
     return [e for e in entities if str(e["data"].get(field) or "") == value][: params["limit"]]
+
+
+def _unlinked_page_row(owner_id: str, platform: str, meta_page_id: str) -> Any:
+    """The owner's most recently unlinked (soft-deleted) row for this Meta page and platform, or None."""
+    sql = json_fields_select_sql(("metaPageId", "platform", "ownerId"), ("id", "created_at", "last_modified"),
+                                 "type = :type AND deleted = true AND created_by = :owner")
+    with db_conn() as conn:
+        rows = conn.execute(text(sql), {"type": PAGES_TYPE, "owner": owner_id}).mappings().all()
+    matches = [
+        row for row in rows
+        if str(row.get("f_metapageid") or "") == meta_page_id and str(row.get("f_platform") or "") == platform
+        and str(row.get("f_ownerid") or "") == owner_id
+    ]
+    return max(matches, key=lambda row: (int(row["last_modified"] or 0), str(row["id"]))) if matches else None
+
+
+def _revive_unlinked_page(
+    ctx: dict[str, Any], owner_id: str, platform: str, meta_page_id: str, data: dict[str, Any]
+) -> dict[str, Any] | None:
+    """P4-01: link the same Meta page to the same owner again on its OLD row (same id, fresh data),
+    so the rules whose ``pageRefs`` name it fire again. main's upsert never revives a soft-deleted
+    row (a late PATCH must not resurrect a record), so this is one conditional UPDATE on this
+    system's own type. None when the owner never had that page (a new row is made)."""
+    row = _unlinked_page_row(owner_id, platform, meta_page_id)
+    if row is None:
+        return None
+    page_id = str(row["id"])
+    baseline = int(row["last_modified"] or 0)
+    stamp = max(now_ms(), baseline + 1)
+    full = ctx["sanitize_json"]({**data, "id": page_id, "_created": int(row["created_at"] or stamp), "createdBy": owner_id, "_lastModified": stamp})
+    with db_conn() as conn:
+        result = conn.execute(
+            text(
+                "UPDATE entities SET deleted = false, data_json = :data, last_modified = :stamp "
+                "WHERE type = :type AND id = :id AND deleted = true AND last_modified = :baseline"
+            ),
+            {"data": json_dumps(full), "stamp": stamp, "type": PAGES_TYPE, "id": page_id, "baseline": baseline},
+        )
+    if int(result.rowcount or 0) != 1:
+        raise HTTPException(status_code=409, detail="This page is already linked to an account")  # someone linked it first
+    return ctx["get_entity"](PAGES_TYPE, page_id)
 
 
 def _lean_posts(owner_id: str | None, status: str = "", *, limit: int = 500) -> list[dict[str, Any]]:
@@ -592,8 +827,66 @@ def _settings_entity(ctx: dict[str, Any], owner_id: str) -> dict[str, Any]:
 
 # What decides which comments a rule answers: a change to any of them (or switching the rule on)
 # moves its ``activeSince`` to now, so a comment Albayan reads later is answered only by rules that
-# already applied to it when it was written.
-RULE_MATCH_FIELDS = ("platform", "scope", "postIds", "trigger", "keywords")
+# already applied to it when it was written. pageRefs (P4-01) is a list a rule from before it lacks.
+RULE_MATCH_FIELDS = ("platform", "scope", "postIds", "trigger", "keywords", "pageRefs")
+
+
+def _match_fields_changed(old: dict[str, Any], clean: dict[str, Any]) -> bool:
+    for field in RULE_MATCH_FIELDS:
+        before, after = old.get(field), clean.get(field)
+        if isinstance(after, list):
+            before = list(before or [])
+        if before != after:
+            return True
+    return False
+
+
+def capability_gates() -> dict[str, str] | None:
+    """P4-05: the reply channels' states (fbPublicReply, fbPrivateReply, igPublicReply,
+    igPrivateReply: on/poll/gated/off/unavailable) once an admin has saved the ``capabilities``
+    setting, or None while it was never saved.
+
+    The gates ARM with that first save (PLAN §12.2 switch (c)): until then the classic Social
+    Studio keeps sending every action a rule asks for, as it does today, so a dark deploy of the
+    redesign never switches off replies that already work. Saved once, the executor sends only on
+    an open channel and the editor refuses what a channel cannot do.
+    """
+    from .studio_settings import read_setting  # late: studio_settings loads before this module's router
+
+    record = read_setting("capabilities")
+    if int(record.get("version") or 0) < 1:
+        return None
+    value = record.get("value") or {}
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
+def channel_state(gates: dict[str, str] | None, platform: str, kind: str) -> str | None:
+    """None when the action may be sent (gates not armed, an open state, or an action without a
+    channel); else the closed state (gated / off / unavailable) the log row records."""
+    if gates is None:
+        return None
+    channel = CHANNEL_OF.get((str(platform or ""), str(kind or "")))
+    if channel is None:
+        return None
+    state = str(gates.get(channel) or "")
+    if state == "poll" and channel != "igPublicReply":
+        state = "gated"  # poll means "read by polling": only Instagram public replies work that way
+    return None if state in CHANNEL_OPEN_STATES else (state or "unavailable")
+
+
+def webhook_wanted(platform: str, gates: dict[str, str] | None) -> bool:
+    """P4-03: whether Albayan's app should be subscribed to the page's webhook: the platform's public
+    replies are switched ``on`` (webhook delivery). ``poll`` reads Instagram itself, and while the
+    gates are not armed (or the channel waits) no subscribe call is made."""
+    if gates is None:
+        return False
+    channel = "fbPublicReply" if str(platform or "") == "fb" else "igPublicReply"
+    return str(gates.get(channel) or "") == "on"
+
+
+def editor_refusal(platform: str, kind: str) -> str:
+    """The stable English refusal of the rule editor (its Arabic lives in the client map)."""
+    return f"{_ACTION_WORDS[kind]} are not available for {_PLATFORM_WORDS[platform]} right now"
 
 
 def rule_active_since_ms(rule: dict[str, Any]) -> int:
@@ -632,12 +925,30 @@ def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any]) -> dict
     public_reply = _text_field(ctx, raw.get("publicReply"), "publicReply", 1000)
     dm_text = _text_field(ctx, raw.get("dmText"), "dmText", 1000)
     dm_enabled = _bool(raw.get("dmEnabled"))
+    like_comment = _bool(raw.get("likeComment"))
     if trigger == "keywords" and not keywords:
         raise HTTPException(status_code=400, detail="Add at least one keyword for a keyword rule")
     if scope == "chosen" and not post_ids:
         raise HTTPException(status_code=400, detail="Choose at least one post for a chosen-posts rule")
     if not public_reply and not (dm_enabled and dm_text):
         raise HTTPException(status_code=400, detail="A rule needs a public reply or a private message")
+    # P4-01: the pages the rule answers on, by socialPages row id; each must be a live page of this
+    # owner on the rule's platform. Empty = every page (rules from before pageRefs).
+    page_refs: list[str] = []
+    for ref in _string_list(raw.get("pageRefs"), "pageRefs", max_items=MAX_POST_PAGES, max_chars=80):
+        page = ctx["get_entity"](PAGES_TYPE, ctx["validate_entity_id"](ref))
+        if not page or page.get("deleted") or str(page["data"].get("ownerId") or "") != owner_id:
+            raise HTTPException(status_code=400, detail=f"Page {ref} is not linked to this account")
+        if str(page["data"].get("platform") or "") != platform:
+            raise HTTPException(status_code=400, detail=f"Page {ref} is not on this rule's platform")
+        page_refs.append(ref)
+    # P4-05: an action its channel cannot do is refused here, with the reason; a gated one is
+    # saved and shown as waiting for Meta, and the executor holds it (channel_state).
+    gates = capability_gates()
+    wanted = [("dm", dm_enabled and bool(dm_text)), ("public", bool(public_reply)), ("like", like_comment)]
+    for kind, asked in wanted:
+        if asked and channel_state(gates, platform, kind) in EDITOR_REFUSED_STATES:
+            raise HTTPException(status_code=400, detail=editor_refusal(platform, kind))
     return {
         "ownerId": owner_id,
         "name": name,
@@ -645,12 +956,13 @@ def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any]) -> dict
         "enabled": _bool(raw.get("enabled"), True),
         "scope": scope,
         "postIds": post_ids,
+        "pageRefs": page_refs,
         "trigger": trigger,
         "keywords": keywords,
         "publicReply": public_reply,
         "dmEnabled": dm_enabled,
         "dmText": dm_text,
-        "likeComment": _bool(raw.get("likeComment")),
+        "likeComment": like_comment,
         "oncePerPerson": _bool(raw.get("oncePerPerson")),
         "skipPublicAfterDm": _bool(raw.get("skipPublicAfterDm")),
         "pauseDms": _bool(raw.get("pauseDms")),
@@ -862,7 +1174,7 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
         elif not page or page.get("deleted") or str(page["data"].get("ownerId") or "") != owner_id:
             result["error"] = "This page is no longer linked to the account."
         else:
-            healthy = True
+            page_reason = ""
             try:
                 result["metaPostId"] = _publish_to_page(client, page["data"], post_id, data)
             except _meta.MetaAdsError as error:
@@ -871,14 +1183,11 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
                 ambiguous = error.code == "timeout"  # sent but unanswered; a connect failure ("network") is a normal retry
                 result["error"] = "Meta did not answer in time; it may have published. Check the page before retrying." if ambiguous else error.public_message
                 result["retryable"] = bool(error.retryable) and not ambiguous
-                healthy = error.code != "authorization"
+                page_reason = page_problem_reason(error)
             except Exception as error:  # never leak tokens/stack traces into rows
                 result["error"] = f"Publishing failed ({type(error).__name__})."
-            if bool(page["data"].get("healthy", True)) != healthy:
-                try:
-                    ctx["patch_entity"](PAGES_TYPE, page_id, {"healthy": healthy, "updatedAt": _iso_now()}, owner_id)
-                except HTTPException:
-                    pass
+            # The one health writer (P4-03): a per-page refusal marks the page, a success clears it.
+            _page_health_after_meta({**page["data"], "id": page_id}, page_reason, succeeded=bool(result["metaPostId"]))
         if result["error"]:
             errors.append(result["error"])
         results.append(result)
@@ -1033,6 +1342,13 @@ def run_scheduler_tick(*, now: datetime | None = None, limit: int = 20) -> int:
             _retry_pending_replies(current)
         except Exception:
             print("[albayan] Social Studio reply retry pass failed; it will retry.")
+    # P4-03: the daily page check, a few pages at a time, about every 20 minutes (a no-op until the
+    # capability gates are armed). The studio jobs loop may take this turn over (run_page_health_pass).
+    if _RETRY_TICK % PAGE_HEALTH_PASS_EVERY_TICKS == 2:
+        try:
+            run_page_health_pass(current)
+        except Exception:
+            print("[albayan] Social Studio page health pass failed; it will retry.")
     return attempted
 
 
@@ -1160,23 +1476,75 @@ def _retry_after_iso(attempt: int) -> str:
 class _ReplyOutcome(tuple):
     """What _execute_rule_actions returns: (actions, errors, retryable), plus ``auth_codes``, Meta's
     codes of the authorization refusals among the failures, ``auth_failed_at``, when the first one
-    came, and ``timed_out``, the actions whose send timed out and so may have landed (P3-18b). A plain
-    3-tuple (a test's stand-in) has none."""
+    came, ``timed_out``, the actions whose send timed out and so may have landed (P3-18b),
+    ``skipped``, the actions a capability gate held back (P4-05: ``{action, channel, state}``
+    each), and ``sent_at``, when Meta accepted the first action (P4-02 latency). A plain 3-tuple
+    (a test's stand-in) has none."""
 
     auth_codes: tuple[str, ...] = ()
     auth_failed_at: datetime | None = None
     timed_out: tuple[str, ...] = ()
+    skipped: tuple[dict[str, str], ...] = ()
+    sent_at: str = ""
 
     @classmethod
     def of(
         cls, actions: list[str], errors: list[str], retryable: bool, auth_codes: list[str],
         auth_failed_at: datetime | None = None, timed_out: list[str] | None = None,
+        skipped: list[dict[str, str]] | None = None, sent_at: str = "",
     ) -> "_ReplyOutcome":
         outcome = cls((actions, errors, retryable))
         outcome.auth_codes = tuple(auth_codes)
         outcome.auth_failed_at = auth_failed_at
         outcome.timed_out = tuple(timed_out or ())
+        outcome.skipped = tuple(dict(item) for item in (skipped or ()))
+        outcome.sent_at = str(sent_at or "")
         return outcome
+
+
+@contextmanager
+def _reply_row(log_id: str, owner_id: str):
+    """P4-02: the reply-log row the actions sent inside this block are saved to as each succeeds."""
+    marker = _REPLY_ROW.set((str(log_id or ""), str(owner_id or "")))
+    try:
+        yield
+    finally:
+        _REPLY_ROW.reset(marker)
+
+
+def _save_sent_actions(actions: list[str], sent_at: str) -> None:
+    """Write the actions sent so far to the reply-log row of the surrounding _reply_row() block (none:
+    nothing to do). Best effort: the final write repeats it, and a failure here never undoes a reply
+    Meta already accepted; what it buys is that a process killed after this write never resends."""
+    row = _REPLY_ROW.get()
+    if not row or not row[0]:
+        return
+    try:
+        _ctx()["patch_entity"](LOG_TYPE, row[0], {"actions": list(actions), "sentAt": sent_at}, row[1] or "system")
+    except Exception:
+        pass
+
+
+def page_problem_reason(error: Any) -> str:
+    """P4-03: the page health reason a Meta refusal stands for, or '' (a global problem, P3-18a, or
+    an ordinary failure): 190.460 (the token was revoked, e.g. a password change) -> token_revoked;
+    190.492 (the page role was lost) or no page token at all -> page_role_lost; the permission
+    family (3, 10, 200-299) -> permission_missing; one of Meta's PAGE-scoped limits (32, 80001,
+    80002, 80006; PLAN §8.1) -> throttled (an app-wide limit is not the page's problem)."""
+    code = str(getattr(error, "code", "") or "")
+    provider = str(getattr(error, "provider_code", "") or "").strip()
+    major, _dot, sub = provider.partition(".")
+    if code == "authorization":
+        if not major:
+            return "page_role_lost"
+        if major == "190":
+            return {"460": "token_revoked", "492": "page_role_lost"}.get(sub, "")
+        if major in {"3", "10"} or (major.isdigit() and 200 <= int(major) <= 299):
+            return "permission_missing"
+        return ""
+    if code == "rate_limited" and major in PAGE_THROTTLE_CODES:
+        return "throttled"
+    return ""
 
 
 def _dm_pending(rule: dict[str, Any], actions: list[str]) -> bool:
@@ -1294,21 +1662,51 @@ def _execute_rule_actions(
     every failure was a temporary Meta condition (pause, outage), so the
     scheduler may try again instead of the comment being lost. The tuple also
     carries ``auth_codes``, ``auth_failed_at`` and ``timed_out`` (_ReplyOutcome)
-    for the parking rule (P3-18b)."""
+    for the parking rule (P3-18b), ``skipped`` (P4-05: an action whose channel
+    is gated, off or unavailable is never sent; nothing reaches Meta when every
+    action is held) and ``sent_at`` (P4-02). Each action is saved to the reply
+    log row of the surrounding _reply_row() block as soon as Meta accepts it,
+    and a per-page refusal (page_problem_reason) or a success updates the
+    page's health (P4-03) when ``page`` carries its row ``id``."""
     actions: list[str] = _actions_holder if _actions_holder is not None else []  # visible to the caller on a crash
     errors: list[str] = []
     auth_codes: list[str] = []
     timed_out: list[str] = []
     auth_failed: list[datetime] = []
+    skipped: list[dict[str, str]] = []
+    sent_at = ""
+    page_reasons: list[str] = []
     failures = 0
     temporary = 0
     client: Any = None
     token = ""
+    gates = capability_gates()
+
+    def open_channel(kind: str) -> bool:
+        state = channel_state(gates, platform, kind)
+        if state is None:
+            return True
+        skipped.append({"action": kind, "channel": CHANNEL_OF[(platform, kind)], "state": state})
+        return False
+
+    dm_text = str(rule.get("dmText") or "")
+    dm_wanted = _bool(rule.get("dmEnabled")) and bool(dm_text) and not _bool(rule.get("pauseDms")) and open_channel("dm")
+    public_reply = str(rule.get("publicReply") or "")
+    public_wanted = bool(public_reply) and open_channel("public")
+    like_wanted = platform == "fb" and _bool(rule.get("likeComment")) and open_channel("like")
+    if not (dm_wanted or public_wanted or like_wanted):
+        return _ReplyOutcome.of(actions, errors, False, auth_codes, None, timed_out, skipped)  # nothing open: no Meta call
 
     def refused(code: Any) -> None:
         auth_codes.append(str(code or ""))
         if not auth_failed:
             auth_failed.append(datetime.now(timezone.utc))  # the first refusal's time (the token check's yardstick)
+
+    def sent(kind: str) -> None:
+        nonlocal sent_at
+        actions.append(kind)
+        sent_at = sent_at or _iso_now()  # when the person got the first answer (P4-02 latency)
+        _save_sent_actions(actions, sent_at)
 
     try:
         client = _meta.get_meta_ads_client()
@@ -1320,6 +1718,8 @@ def _execute_rule_actions(
         temporary += 1 if error.retryable else 0
         if error.code == "authorization":
             refused(error.provider_code)
+        if page_problem_reason(error):
+            page_reasons.append(page_problem_reason(error))
     dm_sent = False
     refreshed = False
 
@@ -1345,12 +1745,13 @@ def _execute_rule_actions(
             refused(getattr(error, "provider_code", ""))
         if getattr(error, "code", "") == "timeout":
             timed_out.append(kind)  # the send may have landed: never resent (parking's skipActions)
+        if page_problem_reason(error):
+            page_reasons.append(page_problem_reason(error))
         code = f" ({error.provider_code})" if getattr(error, "provider_code", "") else ""
         return f"{kind}: {error.public_message}{code}"
 
     if client is not None:
-        dm_text = str(rule.get("dmText") or "")
-        if _bool(rule.get("dmEnabled")) and dm_text and not _bool(rule.get("pauseDms")):
+        if dm_wanted:
             try:
                 # One private reply per comment, within 7 days of the comment, through the
                 # Page's (FB) or the Instagram account's (IG) messages endpoint. The old
@@ -1364,32 +1765,33 @@ def _execute_rule_actions(
                         "message": json.dumps({"text": dm_text}, separators=(",", ":"), ensure_ascii=False),
                     },
                 )
-                actions.append("dm")
+                sent("dm")
                 dm_sent = True
             except _meta.MetaAdsError as error:
                 errors.append(note("dm", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
-        public_reply = str(rule.get("publicReply") or "")
-        if public_reply and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
+        if public_wanted and not (_bool(rule.get("skipPublicAfterDm")) and dm_sent):
             try:
                 path = f"{comment_id}/comments" if platform == "fb" else f"{comment_id}/replies"
                 post(path, {"message": public_reply})
-                actions.append("public")
+                sent("public")
             except _meta.MetaAdsError as error:
                 errors.append(note("public", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
-        if platform == "fb" and _bool(rule.get("likeComment")):
+        if like_wanted:
             try:
                 post(f"{comment_id}/likes", {})
-                actions.append("like")
+                sent("like")
             except _meta.MetaAdsError as error:
                 errors.append(note("like", error))
                 failures += 1
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
+    _page_health_after_meta(page, page_reasons[0] if page_reasons else "", succeeded=bool(actions))
     retryable = not actions and failures > 0 and temporary == failures
-    return _ReplyOutcome.of(actions, errors, retryable, auth_codes, auth_failed[0] if auth_failed else None, timed_out)
+    return _ReplyOutcome.of(actions, errors, retryable, auth_codes, auth_failed[0] if auth_failed else None, timed_out,
+                            skipped, sent_at)
 
 
 def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
@@ -1531,11 +1933,14 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 # that did not time out before).
                 patch = _missed_patch() if parked else {"retryAfter": ""}
             else:
-                outcome = _execute_rule_actions(
-                    page_entity["data"], rule, str(data.get("platform") or ""), str(data.get("commentId") or "")
-                )
+                with _reply_row(str(row["id"]), owner_id):  # P4-02: each action lands on the row as it succeeds
+                    outcome = _execute_rule_actions(
+                        {**page_entity["data"], "id": str(page_entity["id"])}, rule,
+                        str(data.get("platform") or ""), str(data.get("commentId") or ""),
+                    )
                 actions, errors, retryable = outcome
                 patch = {"actions": actions, "error": "; ".join(errors)[:500], "attempts": attempts + 1}
+                patch.update(_outcome_patch(outcome))
                 if pending_since is not None:
                     patch["authCheckPendingSince"] = ""
                 # A new refusal is judged by the check just made: ok_fresh (the token was fine after
@@ -1596,7 +2001,8 @@ def process_comment(
     page_entity = _find_page(platform, entry_id)
     if not page_entity:
         return None
-    page = page_entity["data"]
+    page = {**page_entity["data"], "id": str(page_entity["id"])}
+    _note_comment_seen(page_entity, source)  # P4-03: comments reach Albayan on this page (health)
     if str(from_id or "") in {str(page.get("metaPageId") or ""), str(page.get("igUserId") or "")}:
         return None  # the page replying to itself is not a customer comment
     owner_id = str(page.get("ownerId") or "")
@@ -1638,11 +2044,13 @@ def process_comment(
             rule = evaluate_rules(
                 chosen, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
                 already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
+                page_id=str(page_entity["id"]),
             )
         if not rule:
             rule = evaluate_rules(
                 rules, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
                 already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
+                page_id=str(page_entity["id"]),
             )
         if not rule:
             return None
@@ -1661,6 +2069,8 @@ def process_comment(
             "processing": True,
             "at": claimed_at,
             "commentAt": written_at or claimed_at,
+            "receivedAt": claimed_at,  # P4-02: the webhook's arrival, or the poll's / check's read
+            "sentAt": "",
             "error": "",
             "source": source,
         }
@@ -1673,7 +2083,8 @@ def process_comment(
             raise
     _sent: list[str] = []
     try:
-        outcome = _execute_rule_actions(page, rule, platform, str(comment_id), _actions_holder=_sent)
+        with _reply_row(log_id, owner_id):  # P4-02: each action lands on the row as it succeeds
+            outcome = _execute_rule_actions(page, rule, platform, str(comment_id), _actions_holder=_sent)
         actions, errors, retryable = outcome
     except Exception:
         # A non-Meta failure (database hiccup, transport edge case, shutdown):
@@ -1692,6 +2103,8 @@ def process_comment(
     log_data["error"] = "; ".join(errors)[:500]
     log_data["processing"] = False
     patch: dict[str, Any] = {"actions": actions, "error": log_data["error"], "processing": False}
+    patch.update(_outcome_patch(outcome))  # P4-02 sentAt, P4-05 skipped actions and their reason
+    log_data.update(patch)
     kept = _parked_patch(outcome, log_data, rule, datetime.now(timezone.utc))
     if kept:
         # Albayan's Meta connection is down (P3-18b): parked for the retry pass, or missed when the
@@ -1755,6 +2168,508 @@ def handle_meta_webhook(payload: Any) -> int:
             except Exception as error:
                 print(f"[albayan] Social Studio comment handling failed ({type(error).__name__}).")
     return handled
+
+
+# ---------------------------------------------------------------------------
+# P4-03 page health: the one writer, the customer's view, the check, the daily pass
+# ---------------------------------------------------------------------------
+
+
+def page_health_state(data: dict[str, Any]) -> tuple[str, str]:
+    """(state, reason) of a page row: ``healthState`` when set, else derived from the classic
+    ``healthy`` flag (a row from before P4-03; its reason is unknown)."""
+    state = str(data.get("healthState") or "")
+    if state not in PAGE_HEALTH_STATES:
+        state = "attention" if data.get("healthy") is False else "ok"
+    reason = str(data.get("healthReason") or "") if state == "attention" else ""
+    return state, reason if reason in PAGE_HEALTH_REASONS else ""
+
+
+def page_health_view(data: dict[str, Any], *, connection_down: bool = False) -> dict[str, Any]:
+    """What a customer sees of a page's health (PLAN §5.5 J7): the state, the reason, a bilingual
+    label and fix step, whether the fix is the team's, and when it was checked. While Albayan's own
+    Meta connection is down the per-page reason gives way to the neutral text (state
+    ``connection``); the classic ``healthy`` flag keeps the stored truth."""
+    state, reason = page_health_state(data)
+    view: dict[str, Any] = {
+        "state": state, "reason": reason, "label": dict(PAGE_HEALTH_OK_LABEL), "fix": None, "teamAction": False,
+        "checkedAt": str(data.get("lastHealthCheckAt") or "") or None,
+        "since": str(data.get("healthChangedAt") or "") or None,
+    }
+    if state == "ok":
+        return view
+    if connection_down:
+        view.update({"state": "connection", "reason": "", "label": dict(PAGE_HEALTH_CONNECTION_LABEL), "teamAction": True})
+        return view
+    entry = PAGE_HEALTH_LABELS.get(reason) or PAGE_HEALTH_GENERIC_LABEL
+    view.update({"label": dict(entry["label"]), "fix": dict(entry["fix"]), "teamAction": reason in TEAM_ACTION_REASONS})
+    return view
+
+
+def _raise_page_alert(page_id: str, owner_id: str, platform: str, reason: str, now: datetime | None) -> None:
+    """One alert per page and Tripoli day when a page drops out of ``ok`` (studio_jobs.raise_alert):
+    ``instagram_comments_not_arriving`` for that heuristic, ``page_health_drop`` for every other reason.
+    Best effort: an alert that cannot be written never blocks the health write."""
+    from . import studio_jobs  # late: it imports this module
+
+    kind = "instagram_comments_not_arriving" if reason == "instagram_comments_not_arriving" else "page_health_drop"
+    try:
+        with db_conn() as conn:
+            studio_jobs.raise_alert(
+                conn, kind, related_type=PAGES_TYPE, related_id=page_id, owner_id=owner_id or None,
+                details={"reason": reason, "platform": platform}, now=now,
+            )
+    except Exception as error:
+        print(f"[albayan] Social Studio page alert failed ({type(error).__name__}).")
+
+
+def _set_page_health(
+    page_id: str, state: str, reason: str = "", *, actor_id: str = "", now: datetime | None = None, touch: bool = False,
+) -> dict[str, Any] | None:
+    """THE writer of a page's health (P4-03): ``healthState``, ``healthReason``, the derived classic
+    ``healthy`` flag, ``lastHealthCheckAt`` and, on a change, ``healthChangedAt``; a drop out of
+    ``ok`` raises the page's alert for the day. ``touch``: rewrite ``lastHealthCheckAt`` even when
+    nothing changed (a check ran). Returns the page data, or None for an unknown or unlinked page."""
+    if state not in PAGE_HEALTH_STATES:
+        raise ValueError(f"unknown page health state {str(state)[:20]!r}")
+    reason = str(reason or "") if state == "attention" else ""
+    if state == "attention" and reason not in PAGE_HEALTH_REASONS:
+        raise ValueError(f"unknown page health reason {reason[:40]!r}")
+    if not _SAFE_ID_RE.fullmatch(str(page_id or "")):
+        return None
+    ctx = _ctx()
+    entity = ctx["get_entity"](PAGES_TYPE, page_id)
+    if not entity or entity.get("deleted"):
+        return None
+    data = entity.get("data") or {}
+    owner_id = str(data.get("ownerId") or "")
+    changed = page_health_state(data) != (state, reason)
+    if not changed and not touch:
+        return data
+    moment = _iso_at(now) if now else _iso_now()
+    patch: dict[str, Any] = {
+        "healthState": state, "healthReason": reason, "healthy": state == "ok", "lastHealthCheckAt": moment, "updatedAt": moment,
+    }
+    if changed:
+        patch["healthChangedAt"] = moment
+    try:
+        saved = ctx["patch_entity"](PAGES_TYPE, page_id, patch, actor_id or owner_id or "system")
+    except HTTPException:
+        return None
+    if changed and state == "attention":
+        _raise_page_alert(page_id, owner_id, str(data.get("platform") or ""), reason, now)
+    return saved.get("data") or {**data, **patch}
+
+
+def _page_health_after_meta(page: dict[str, Any], reason: str, *, succeeded: bool) -> None:
+    """After a reply or a publish on ``page``: a per-page refusal marks the page with its reason; a
+    success clears a reason a reply can clear (never the staff-set or heuristic ones). A page dict
+    without its row ``id`` (a bare stand-in) is left alone."""
+    page_id = str(page.get("id") or "")
+    if not page_id:
+        return
+    try:
+        if reason:
+            _set_page_health(page_id, "attention", reason)
+        elif succeeded:
+            state, current = page_health_state(page)
+            if state == "attention" and (current in REPLY_CLEARED_REASONS or not current):
+                _set_page_health(page_id, "ok")
+    except Exception as error:  # a health write never fails a reply that Meta accepted
+        print(f"[albayan] Social Studio page health write failed ({type(error).__name__}).")
+
+
+def _note_comment_seen(page_entity: dict[str, Any], source: str) -> None:
+    """A comment reached Albayan on this page (webhook, poll or check): an Instagram account stamps
+    ``igLastCommentEventAt`` (at most every 10 minutes; the heuristic's proof) and sheds the
+    "comments not arriving" and staff-set "private" reasons; a Facebook feed webhook sheds
+    ``webhook_not_subscribed`` (the delivery proves the subscription). Best effort."""
+    data = page_entity.get("data") or {}
+    page_id = str(page_entity.get("id") or "")
+    if not page_id:
+        return
+    platform = str(data.get("platform") or "")
+    state, reason = page_health_state(data)
+    try:
+        if platform == "ig":
+            now = datetime.now(timezone.utc)
+            last = _parse_iso(data.get("igLastCommentEventAt"))
+            if last is None or now - last >= IG_EVENT_STAMP_EVERY:
+                _ctx()["patch_entity"](PAGES_TYPE, page_id, {"igLastCommentEventAt": _iso_at(now)}, str(data.get("ownerId") or "") or "system")
+            if state == "attention" and reason in IG_EVENT_CLEARED_REASONS:
+                _set_page_health(page_id, "ok")
+        elif source == "webhook" and state == "attention" and reason == "webhook_not_subscribed":
+            _set_page_health(page_id, "ok")
+    except Exception as error:
+        print(f"[albayan] Social Studio comment stamp failed ({type(error).__name__}).")
+
+
+def _ig_comment_total(client: Any, page: dict[str, Any]) -> int | None:
+    """The sum of ``comments_count`` over the account's recent media (counts only, on the page lane);
+    None when Meta did not answer. The Instagram "comments not arriving" heuristic compares two
+    such sums a day apart (PLAN §7.4)."""
+    ig_user_id = str(page.get("igUserId") or "")
+    if not ig_user_id:
+        return None
+    with _meta.meta_call_lane("page", subject=str(page.get("metaPageId") or "")):
+        payload = client._get(f"{ig_user_id}/media", {"fields": "id,comments_count", "limit": IG_MEDIA_COUNTED})
+    rows = [row for row in (payload.get("data") or []) if isinstance(row, dict)][:IG_MEDIA_COUNTED]
+    return sum(_meta._metric_int(row.get("comments_count")) for row in rows)
+
+
+def _subscribe_page(page_id: str, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
+    """P4-03: subscribe Albayan's app to the page's webhook (meta_ads.subscribe_page_webhook, the page
+    token on the page lane) when the platform's public replies are switched on; on link and as the
+    backfill of the check. Returns meta_ads' answer, or None when no subscribe was wanted. A definite
+    refusal marks the page (its reason, else webhook_not_subscribed: a team step); a temporary one
+    (a pause, an outage) leaves the next check to it."""
+    if not webhook_wanted(str(data.get("platform") or ""), capability_gates()):
+        return None
+    answer = _meta.subscribe_page_webhook(str(data.get("metaPageId") or ""))
+    moment = _iso_at(now) if now else _iso_now()
+    if answer.get("ok"):
+        try:
+            _ctx()["patch_entity"](PAGES_TYPE, page_id, {"webhookSubscribedAt": moment}, str(data.get("ownerId") or "") or "system")
+        except HTTPException:
+            pass
+    elif not answer.get("retryable"):
+        _set_page_health(page_id, "attention", answer.get("pageReason") or "webhook_not_subscribed", now=now)
+    return answer
+
+
+def check_page_health(page_entity: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    """One health check of a linked page (the admin's "check" and the daily pass; PLAN §7.4):
+
+    * the webhook subscription (``GET /{page-id}/subscribed_apps`` with the page token, page lane)
+      when the platform's public replies are ``on``; an unsubscribed page is subscribed again (the
+      backfill) and marked ``webhook_not_subscribed`` if that fails;
+    * a Meta refusal on the way maps to the page's reason (page_problem_reason); a global one
+      (Albayan's own token) is handed to the P3-18a token check and changes nothing here;
+    * Instagram, public replies ``on`` (webhook delivery): the "comments not arriving" heuristic.
+      The sum of ``comments_count`` over recent media is kept with its time; when a later sum, at
+      least 24 hours after, is higher and no comment event reached Albayan in between, the page is
+      marked ``instagram_comments_not_arriving`` (an event clears it, _note_comment_seen);
+    * a page whose reasons all cleared goes back to ``ok``; ``lastHealthCheckAt`` is stamped always.
+
+    Returns ``{pageId, checked, webhook, igCommentTotal, reason, health, errorCode, providerCode}``.
+    """
+    from . import studio_alerts_meta  # late: it imports this module
+
+    page_id = str(page_entity.get("id") or "")
+    data = dict(page_entity.get("data") or {})
+    platform = str(data.get("platform") or "")
+    moment = now or datetime.now(timezone.utc)
+    out: dict[str, Any] = {"pageId": page_id, "checked": False, "webhook": "", "igCommentTotal": None, "reason": "",
+                           "errorCode": "", "providerCode": ""}
+    gates = capability_gates()
+    if not _meta.load_meta_ads_config().configured:
+        out["errorCode"] = "not_configured"
+        out["health"] = page_health_view(_set_page_health(page_id, *page_health_state(data), now=moment, touch=True) or data)
+        return out
+    found: list[str] = []
+    global_refusal = False
+    if webhook_wanted(platform, gates):
+        answer = _meta.read_page_webhook_subscription(str(data.get("metaPageId") or ""))
+        out["webhook"] = answer["state"]
+        if answer["state"] == "not_subscribed":
+            backfill = _meta.subscribe_page_webhook(str(data.get("metaPageId") or ""))
+            if backfill.get("ok"):
+                out["webhook"] = "subscribed"
+                try:
+                    _ctx()["patch_entity"](PAGES_TYPE, page_id, {"webhookSubscribedAt": _iso_at(moment)}, str(data.get("ownerId") or "") or "system")
+                except HTTPException:
+                    pass
+            elif backfill.get("pageReason"):
+                found.append(backfill["pageReason"])
+            elif not backfill.get("retryable"):
+                found.append("webhook_not_subscribed")
+        elif answer["state"] == "error":
+            out["errorCode"], out["providerCode"] = answer["errorCode"], answer["providerCode"]
+            if answer.get("pageReason"):
+                found.append(answer["pageReason"])
+            elif answer["errorCode"] == "authorization":
+                global_refusal = True
+    if platform == "ig" and str(gates.get("igPublicReply") if gates else "") == "on" and not found and not global_refusal:
+        total: int | None = None
+        try:
+            client = _meta.get_meta_ads_client()
+            total = _ig_comment_total(client, data)
+        except _meta.MetaAdsError as error:
+            out["errorCode"], out["providerCode"] = out["errorCode"] or error.code, out["providerCode"] or error.provider_code
+            reason = page_problem_reason(error)
+            if reason:
+                found.append(reason)
+            elif error.code == "authorization":
+                global_refusal = True
+        out["igCommentTotal"] = total
+        if total is not None:
+            snapshot = data.get("igCommentCounts") if isinstance(data.get("igCommentCounts"), dict) else {}
+            earlier_total = snapshot.get("total")
+            earlier_at = _parse_iso(snapshot.get("at"))
+            last_event = _parse_iso(data.get("igLastCommentEventAt"))
+            if (
+                isinstance(earlier_total, int) and earlier_at is not None and moment - earlier_at >= IG_EVENT_SILENCE
+                and total > earlier_total and (last_event is None or last_event < earlier_at)
+            ):
+                found.append("instagram_comments_not_arriving")
+            # The snapshot moves on only after a full silence window, so a check every few hours
+            # still compares sums a day apart.
+            if earlier_at is None or moment - earlier_at >= IG_EVENT_SILENCE or not isinstance(earlier_total, int):
+                try:
+                    _ctx()["patch_entity"](PAGES_TYPE, page_id, {"igCommentCounts": {"total": total, "at": _iso_at(moment)}},
+                                           str(data.get("ownerId") or "") or "system")
+                except HTTPException:
+                    pass
+    if global_refusal:
+        try:
+            studio_alerts_meta.after_authorization_failure(moment)  # Albayan's own token: P3-18a decides
+        except Exception as error:
+            print(f"[albayan] Social Studio connection check failed ({type(error).__name__}).")
+    state, current = page_health_state(data)
+    if found:
+        reason = found[0]
+    elif state == "attention" and current in REPLY_CLEARED_REASONS | {"webhook_not_subscribed"} and not global_refusal and not out["errorCode"]:
+        reason = ""  # what the check watches is fine again
+    else:
+        reason = current  # a staff-set or heuristic reason stays until its own clearing
+    saved = _set_page_health(page_id, "attention" if reason else "ok", reason, now=moment, touch=True)
+    out.update({"checked": True, "reason": reason, "health": page_health_view(saved or data)})
+    return out
+
+
+def page_health_due(data: dict[str, Any], now: datetime) -> bool:
+    last = _parse_iso(data.get("lastHealthCheckAt"))
+    return last is None or now - last >= PAGE_HEALTH_EVERY or last > now + timedelta(minutes=5)
+
+
+def run_page_health_pass(now: datetime | None = None, limit: int = PAGE_HEALTH_PASS_LIMIT) -> dict[str, Any]:
+    """The daily page check, budgeted: up to ``limit`` linked pages whose last check is older than
+    24 hours (oldest first), only while the capability gates are armed and Meta is configured
+    (before that there is nothing to check and no call is made). Returns counts only."""
+    moment = now or datetime.now(timezone.utc)
+    out = {"due": 0, "checked": 0, "attention": 0, "errors": 0}
+    if capability_gates() is None or not _meta.load_meta_ads_config().configured:
+        return out
+    due = [row for row in _rows(PAGES_TYPE, None, limit=1000) if page_health_due(row.get("data") or {}, moment)]
+    due.sort(key=lambda row: (str((row.get("data") or {}).get("lastHealthCheckAt") or ""), str(row.get("id") or "")))
+    out["due"] = len(due)
+    for row in due[: max(0, int(limit))]:
+        try:
+            result = check_page_health(row, now=moment)
+        except Exception as error:  # the next pass tries again; the page keeps its state
+            out["errors"] += 1
+            print(f"[albayan] Social Studio page check failed ({type(error).__name__}).")
+            continue
+        out["checked"] += 1
+        out["attention"] += 1 if result.get("reason") else 0
+    return out
+
+
+# ---------------------------------------------------------------------------
+# P4-02 reply log: outcomes, the owner's page of rows, latency per source
+# ---------------------------------------------------------------------------
+
+
+def _outcome_patch(outcome: Any) -> dict[str, Any]:
+    """The reply-log fields a _ReplyOutcome adds: ``sentAt`` (P4-02), ``skipped`` (P4-05: the actions
+    a capability gate held, each with its channel and state) and, when nothing at all went out
+    because of the gates, ``problemCode`` = ``channel_<state>``. A plain tuple (a test's stand-in)
+    adds nothing."""
+    patch: dict[str, Any] = {}
+    sent_at = str(getattr(outcome, "sent_at", "") or "")
+    if sent_at:
+        patch["sentAt"] = sent_at
+    skipped = [dict(item) for item in (getattr(outcome, "skipped", ()) or ())]
+    if skipped:
+        patch["skipped"] = skipped
+        actions, errors = list(outcome[0] or []), list(outcome[1] or [])
+        if not actions and not errors:
+            patch["problemCode"] = f"channel_{skipped[0]['state']}"
+    return patch
+
+
+def reply_log_outcome(data: dict[str, Any]) -> str:
+    """One word for what happened to a reply-log row (LOG_OUTCOMES)."""
+    actions = [str(a) for a in (data.get("actions") or [])] if isinstance(data.get("actions"), list) else []
+    error = str(data.get("error") or "")
+    if _bool(data.get("processing")):
+        return "sending"
+    if str(data.get("retryAfter") or ""):
+        return "parked" if str(data.get("parkedReason") or "") == PARKED_REASON else "waiting"
+    if str(data.get("problemCode") or "") == MISSED_DURING_OUTAGE:
+        return "missed"
+    if actions:
+        return "partial" if error else "sent"
+    if error:
+        return "failed"
+    if data.get("skipped"):
+        return "skipped"
+    return "none"
+
+
+def _latency_seconds(data: dict[str, Any]) -> int | None:
+    received, sent = _parse_iso(data.get("receivedAt")), _parse_iso(data.get("sentAt"))
+    if received is None or sent is None:
+        return None
+    return max(0, int((sent - received).total_seconds()))
+
+
+def _percentile(values: list[int], share: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(share * len(ordered)) - 1))
+    return ordered[index]
+
+
+def _latency_summary(values: list[int]) -> dict[str, Any]:
+    return {"count": len(values), "p50Seconds": _percentile(values, 0.5), "p95Seconds": _percentile(values, 0.95)}
+
+
+def _log_rows_window(owner_id: str | None, since_ms: int, limit: int = LOG_WINDOW_ROWS_MAX) -> list[dict[str, Any]]:
+    """The reply-log rows of one window, newest first; owner-scoped by the indexed column."""
+    where = ["type = :type", "deleted = false", "created_at >= :since"]
+    params: dict[str, Any] = {"type": LOG_TYPE, "since": int(since_ms), "limit": max(1, min(int(limit), LOG_WINDOW_ROWS_MAX))}
+    if owner_id:
+        where.append("created_by = :owner")
+        params["owner"] = owner_id
+    with db_conn() as conn:
+        rows = conn.execute(
+            text(f"SELECT * FROM entities WHERE {' AND '.join(where)} ORDER BY created_at DESC, id DESC LIMIT :limit"),
+            params,
+        ).mappings().all()
+    entities = [_entity_from_row(r) for r in rows]
+    if owner_id:
+        entities = [e for e in entities if str(e["data"].get("ownerId") or "") == owner_id]
+    return entities
+
+
+def _log_row_view(entity: dict[str, Any], page_names: dict[str, str], rule_names: dict[str, str]) -> dict[str, Any]:
+    """One row as its owner sees it: no commenter id, no staff id (the row carries none)."""
+    data = entity.get("data") or {}
+    actions = [str(a) for a in (data.get("actions") or [])] if isinstance(data.get("actions"), list) else []
+    skipped = [dict(s) for s in (data.get("skipped") or []) if isinstance(s, dict)]
+    return {
+        "id": str(entity.get("id") or ""),
+        "at": str(data.get("at") or ""),
+        "commentAt": str(data.get("commentAt") or ""),
+        "platform": str(data.get("platform") or ""),
+        "pageId": str(data.get("pageId") or ""),
+        "pageName": page_names.get(str(data.get("pageId") or ""), ""),
+        "ruleId": str(data.get("ruleId") or ""),
+        "ruleName": rule_names.get(str(data.get("ruleId") or ""), ""),
+        "commentId": str(data.get("commentId") or ""),
+        "postId": str(data.get("postId") or ""),
+        "actions": actions,
+        "skipped": skipped,
+        "outcome": reply_log_outcome(data),
+        "problemCode": str(data.get("problemCode") or ""),
+        "error": str(data.get("error") or "")[:500],
+        "source": str(data.get("source") or "webhook"),
+        "receivedAt": str(data.get("receivedAt") or "") or None,
+        "sentAt": str(data.get("sentAt") or "") or None,
+        "latencySeconds": _latency_seconds(data),
+        "attempts": int(data.get("attempts") or 0),
+        "retryAfter": str(data.get("retryAfter") or "") or None,
+        "parkedReason": str(data.get("parkedReason") or "") or None,
+    }
+
+
+def reply_log_labels() -> dict[str, Any]:
+    """The bilingual words the log screen needs (outcomes, channel states, page/rule fallbacks)."""
+    return {
+        "outcome": {key: dict(value) for key, value in LOG_OUTCOME_LABELS.items()},
+        "channelState": {key: dict(value) for key, value in CHANNEL_STATE_LABELS.items()},
+        "problem": {f"channel_{state}": dict(label) for state, label in CHANNEL_STATE_LABELS.items() if state not in CHANNEL_OPEN_STATES},
+        "pageRemoved": dict(PAGE_REMOVED_LABEL),
+    }
+
+
+def reply_log_page(
+    owner_id: str | None, *, days: int = LOG_WINDOW_DAYS_DEFAULT, status: str = "", before: str = "", limit: int = LOG_PAGE_DEFAULT,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """P4-02: the owner's reply log, newest first, paged by ``before`` = ``<createdAt>:<id>`` of the
+    last row shown; ``status`` narrows the rows to one outcome. The counters (by action, by outcome,
+    latency per source) cover the whole window of ``days`` (at most LOG_WINDOW_ROWS_MAX rows), not
+    just the page. ``owner_id`` None (an admin without ?ownerId=) reads every owner's rows."""
+    moment = now or datetime.now(timezone.utc)
+    days = max(1, min(int(days), LOG_WINDOW_DAYS_MAX))
+    limit = max(1, min(int(limit), LOG_PAGE_MAX))
+    status = str(status or "").strip().lower()
+    if status and status not in LOG_OUTCOMES:
+        raise HTTPException(status_code=400, detail="Unknown log status")
+    cursor = _CURSOR_RE.fullmatch(str(before or "").strip()) if before else None
+    if before and not cursor:
+        raise HTTPException(status_code=400, detail="before must be <createdAt>:<id>")
+    since_ms = int((moment - timedelta(days=days)).timestamp() * 1000)
+    window = _log_rows_window(owner_id, since_ms)
+    by_action = {kind: 0 for kind in _REPLY_ACTIONS}
+    by_outcome = {kind: 0 for kind in LOG_OUTCOMES}
+    latency: dict[str, list[int]] = {source: [] for source in COMMENT_SOURCES}
+    for entity in window:
+        data = entity["data"]
+        for action in data.get("actions") or []:
+            if str(action) in by_action:
+                by_action[str(action)] += 1
+        by_outcome[reply_log_outcome(data)] += 1
+        seconds = _latency_seconds(data)
+        if seconds is not None:
+            latency.setdefault(str(data.get("source") or "webhook"), []).append(seconds)
+    rows = window
+    if status:
+        rows = [e for e in rows if reply_log_outcome(e["data"]) == status]
+    if cursor:
+        created, row_id = int(cursor.group(1)), cursor.group(2)
+        rows = [e for e in rows if (int(e["createdAt"]), str(e["id"])) < (created, row_id)]
+    page_rows = rows[:limit]
+    more = len(rows) > limit
+    owners = {str(e["data"].get("ownerId") or "") for e in page_rows}
+    page_names: dict[str, str] = {}
+    rule_names: dict[str, str] = {}
+    for owner in owners:
+        if not owner:
+            continue
+        page_names.update({r["id"]: str(r["data"].get("name") or "") for r in _rows(PAGES_TYPE, owner)})
+        rule_names.update({r["id"]: str(r["data"].get("name") or "") for r in _rows(RULES_TYPE, owner)})
+    last = page_rows[-1] if page_rows else None
+    return {
+        "rows": [_log_row_view(e, page_names, rule_names) for e in page_rows],
+        "nextBefore": f"{int(last['createdAt'])}:{last['id']}" if more and last else None,
+        "counters": {
+            "total": len(window),
+            "byAction": by_action,
+            "byOutcome": by_outcome,
+            "latency": {source: _latency_summary(values) for source, values in latency.items()},
+        },
+        "windowDays": days,
+        "windowTruncated": len(window) >= LOG_WINDOW_ROWS_MAX,
+        "labels": reply_log_labels(),
+    }
+
+
+def reply_latency_by_source(days: int = 7, owner_id: str | None = None, now: datetime | None = None) -> dict[str, dict[str, Any]]:
+    """P4-02, for diagnostics: per comment source (webhook / poll / manual_check) the count and the
+    p50 / p95 of ``sentAt`` minus ``receivedAt`` over the last ``days`` (counts and seconds only,
+    every owner unless one is named). The go/no-go targets (PLAN §12.8) are
+    ``thresholds.webhookReplyP95Seconds`` and ``pollReplyP95Seconds``."""
+    moment = now or datetime.now(timezone.utc)
+    since_ms = int((moment - timedelta(days=max(1, min(int(days), LOG_WINDOW_DAYS_MAX)))).timestamp() * 1000)
+    sql = json_fields_select_sql(("source", "receivedAt", "sentAt", "ownerId"), ("id",),
+                                 "type = :type AND deleted = false AND created_at >= :since" + (" AND created_by = :owner" if owner_id else ""))
+    params: dict[str, Any] = {"type": LOG_TYPE, "since": since_ms}
+    if owner_id:
+        params["owner"] = owner_id
+    with db_conn() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    values: dict[str, list[int]] = {source: [] for source in COMMENT_SOURCES}
+    for row in rows:
+        if owner_id and str(row.get("f_ownerid") or "") != owner_id:
+            continue
+        seconds = _latency_seconds({"receivedAt": row.get("f_receivedat"), "sentAt": row.get("f_sentat")})
+        if seconds is not None:
+            values.setdefault(str(row.get("f_source") or "webhook"), []).append(seconds)
+    return {source: _latency_summary(seconds) for source, seconds in values.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -1823,7 +2738,9 @@ def create_social_studio_router(
     def list_rules(ownerId: str = owner_query, user: dict[str, Any] = Depends(current_user_dependency)):
         scope = _scope(user, ctx, ownerId)
         rows = sorted(_rows(RULES_TYPE, scope.list_owner), key=lambda r: (int(r.get("createdAt") or 0), r["id"]))
-        return {"rules": [_public(r, user) for r in rows]}
+        live = {p["id"]: p for p in _rows(PAGES_TYPE, scope.list_owner)}  # P4-01: one read for every rule's pages
+        return {"rules": [_public(r, user, pages=live) for r in rows],
+                "channels": {"states": dict(capability_gates() or {}), "labels": {k: dict(v) for k, v in CHANNEL_STATE_LABELS.items()}}}
 
     @router.post("/rules")
     def create_rule(
@@ -1854,9 +2771,7 @@ def create_social_studio_router(
         merged = {**entity["data"], **(body or {})}
         clean = {**_clean_rule(ctx, owner_id, merged), "updatedAt": _iso_now()}
         old = entity["data"]
-        if (clean["enabled"] and not _bool(old.get("enabled"), True)) or any(
-            old.get(field) != clean[field] for field in RULE_MATCH_FIELDS
-        ):
+        if (clean["enabled"] and not _bool(old.get("enabled"), True)) or _match_fields_changed(old, clean):
             clean["activeSince"] = now_ms()  # switched on or pointed elsewhere: older comments are not its
         saved = ctx["patch_entity"](RULES_TYPE, entity["id"], clean, scope.uid)
         ctx["audit"](scope.uid, "update", RULES_TYPE, entity["id"], "Updated auto-reply rule", {"ownerId": owner_id})
@@ -1878,9 +2793,32 @@ def create_social_studio_router(
     # ---- pages ----------------------------------------------------------
     @router.get("/pages")
     def list_pages(ownerId: str = owner_query, user: dict[str, Any] = Depends(current_user_dependency)):
+        from . import studio_alerts_meta  # late: it imports this module
+
         scope = _scope(user, ctx, ownerId)
         rows = sorted(_rows(PAGES_TYPE, scope.list_owner), key=lambda r: (int(r.get("createdAt") or 0), r["id"]))
-        return {"pages": [_public(r, user) for r in rows]}
+        try:
+            down = studio_alerts_meta.connection_down()  # P3-18a: per-page reasons give way to the neutral banner
+        except Exception:
+            down = False
+        return {"pages": [_public(r, user, connection_down=down) for r in rows]}
+
+    # ---- reply log (P4-02) ------------------------------------------------
+    @router.get("/log")
+    def reply_log(
+        before: str = Query(default="", max_length=100),
+        status: str = Query(default="", max_length=20),
+        days: int = Query(default=LOG_WINDOW_DAYS_DEFAULT, ge=1, le=LOG_WINDOW_DAYS_MAX),
+        limit: int = Query(default=LOG_PAGE_DEFAULT, ge=1, le=LOG_PAGE_MAX),
+        ownerId: str = owner_query,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        scope = _scope(user, ctx, ownerId)  # owners see their rows only; an admin may name an owner
+        allowed, _left, retry_after_ms = check_rate_limit(f"social-studio:log:{scope.uid}", 60, 60_000)
+        if not allowed:
+            raise HTTPException(status_code=429, detail="Too many reply log reads. Please wait a minute.",
+                                headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))})
+        return reply_log_page(scope.list_owner, days=days, status=status, before=before, limit=limit)
 
     @router.get("/pages/available")
     def available_pages(user: dict[str, Any] = Depends(current_user_dependency)):
@@ -1958,14 +2896,27 @@ def create_social_studio_router(
             "platform": platform,
             "igUserId": ig_user_id,
             "healthy": True,
+            "healthState": "ok",
+            "healthReason": "",
             "linkedAt": now,
             "linkedBy": scope.uid,
             "createdAt": now,
             "updatedAt": now,
         }
-        page_id = new_id("spg")
-        saved = ctx["upsert_entity"](PAGES_TYPE, page_id, data, owner_id, reject_existing=True)
-        ctx["audit"](scope.uid, "link", PAGES_TYPE, page_id, f"Linked {platform} page {meta_page_id}", {"ownerId": owner_id})
+        # P4-01: the same Meta page linked again to the same owner gets its old row back (same id),
+        # so the owner's rules (pageRefs) and posts that name it fire again; another owner gets a new row.
+        saved = _revive_unlinked_page(ctx, owner_id, platform, meta_page_id, data)
+        action = "relink" if saved else "link"
+        if not saved:
+            page_id = new_id("spg")
+            saved = ctx["upsert_entity"](PAGES_TYPE, page_id, data, owner_id, reject_existing=True)
+        page_id = str(saved["id"])
+        ctx["audit"](scope.uid, action, PAGES_TYPE, page_id, f"Linked {platform} page {meta_page_id}", {"ownerId": owner_id})
+        subscribed = _subscribe_page(page_id, saved["data"])  # P4-03: only while the channel is switched on
+        if subscribed is not None:
+            ctx["audit"](scope.uid, "subscribe", PAGES_TYPE, page_id, "Subscribed the page to comment webhooks" if subscribed.get("ok") else "Page webhook subscribe failed",
+                         {"ok": bool(subscribed.get("ok")), "errorCode": subscribed.get("errorCode", ""), "providerCode": subscribed.get("providerCode", "")})
+            saved = ctx["get_entity"](PAGES_TYPE, page_id) or saved
         return _public(saved, user)
 
     @router.post("/pages/{page_id}/unlink")
@@ -1976,6 +2927,42 @@ def create_social_studio_router(
         ctx["soft_delete_entity"](PAGES_TYPE, entity["id"], scope.uid)
         ctx["audit"](scope.uid, "unlink", PAGES_TYPE, entity["id"], "Unlinked social page", {})
         return {"ok": True, "id": entity["id"]}
+
+    # ---- page health (P4-03) ----------------------------------------------
+    @router.post("/pages/{page_id}/health")
+    def set_page_health(page_id: str, body: dict[str, Any], request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
+        """Staff-set health: ``{"reason": "instagram_private"}`` after confirming the account is private
+        (PLAN §5.5 J7), or ``{"reason": ""}`` to clear what staff set. Admin only, audited."""
+        _require_admin(user)
+        scope = _mutation(request, user, ctx)
+        entity = _load_owned(ctx, PAGES_TYPE, page_id, scope)
+        reason = str((body or {}).get("reason") or "").strip().lower()
+        if reason and reason not in STAFF_SET_HEALTH_REASONS:
+            raise HTTPException(status_code=400, detail="reason must be instagram_private or empty")
+        if reason == "instagram_private" and str(entity["data"].get("platform") or "") != "ig":
+            raise HTTPException(status_code=409, detail="This linked page is not an Instagram account")
+        before = page_health_state(entity["data"])
+        saved = _set_page_health(entity["id"], "attention" if reason else "ok", reason, actor_id=scope.uid, touch=True)
+        ctx["audit"](scope.uid, "page_health", PAGES_TYPE, entity["id"],
+                     f"Staff set page health: {reason or 'ok'}", {"before": before[1] or before[0], "after": reason or "ok"})
+        return {"id": entity["id"], "health": page_health_view(saved or entity["data"])}
+
+    @router.post("/pages/{page_id}/check")
+    def check_page(page_id: str, request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
+        """Run the page's health check now (webhook subscription + backfill, the Instagram
+        heuristic; check_page_health). Admin only, once a minute per page, audited."""
+        _require_admin(user)
+        scope = _mutation(request, user, ctx)
+        entity = _load_owned(ctx, PAGES_TYPE, page_id, scope)
+        allowed, _left, retry_after_ms = check_rate_limit(f"social-studio:page-check:{entity['id']}", 1, 60_000)
+        if not allowed:
+            raise HTTPException(status_code=429, detail="This page was checked less than a minute ago. Please wait.",
+                                headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))})
+        result = check_page_health(entity)
+        ctx["audit"](scope.uid, "page_health_check", PAGES_TYPE, entity["id"],
+                     f"Page health check: {result.get('reason') or 'ok'}",
+                     {"checked": result["checked"], "webhook": result["webhook"], "reason": result["reason"], "errorCode": result["errorCode"]})
+        return result
 
     # ---- stats ----------------------------------------------------------
     @router.get("/stats")
