@@ -32,7 +32,8 @@ TEST_DATABASE_RE = re.compile(r"^(?:albayan_test|test_albayan)(?:_[a-z0-9_]+)?$"
 SCENARIOS = ("refund", "company_budget", "debt_growth", "concurrent_funding",
              "coverage_lifecycle", "coverage_lock_order", "coverage_overlaps", "period_lock_protocol",
              "legacy_compatibility", "legacy_backfills",
-             "campaign_submit_serialisation", "campaign_withdraw_vs_approve", "campaign_approval_self_release")
+             "campaign_submit_serialisation", "campaign_withdraw_vs_approve", "campaign_approval_self_release",
+             "studio_privacy_scrub")
 
 
 def _guarded_url(raw: str) -> URL:
@@ -528,6 +529,9 @@ def _run_scenario(scenario: str) -> None:
                 _campaign_withdraw_vs_approve(t)
             elif scenario == "campaign_approval_self_release":
                 _campaign_approval_self_release(t)
+            elif scenario == "studio_privacy_scrub":  # P1-16: anonymisation vs a reply-log write, both orders
+                from server import test_studio_privacy as privacy
+                privacy.postgres_scrub_race()
             else:
                 _concurrent_funding(t, actors)
             assert get_engine() is engine, "Financial scenario changed its database target"

@@ -559,6 +559,13 @@ def create_wallet_payments_router(
     def _is_admin(user: dict[str, Any]) -> bool:
         return str(user.get("role") or "").lower() == "admin"
 
+    def _for_viewer(entity: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+        """The request as this viewer may see it: main's entity projection, which leaves who
+        confirmed, cancelled or overrode a request (confirmedBy, canceledBy, receiptOverriddenBy)
+        to staff only (Albayan Studio P1-05, systems/ads_studio/studio_privacy.py)."""
+        project = ctx.get("project_entity_media_for_user")
+        return project(entity, user, True) if project else entity
+
     @router.post("")
     def create_payment_request(
         body: WalletPaymentRequestCreate,
@@ -600,7 +607,7 @@ def create_wallet_payments_router(
                     )
                     if not same:
                         raise HTTPException(status_code=409, detail="Idempotency key was already used for another operation")
-                    return prior
+                    return _for_viewer(prior, user)  # a replay may find it confirmed by now
                 open_count = 0
                 for row in conn.execute(
                     text(
@@ -646,7 +653,7 @@ def create_wallet_payments_router(
                     conn, WALLET_PAYMENT_COLLECTION, None, data, uid
                 )
             ctx["audit"](str(user.get("id") or ""), "create", WALLET_PAYMENT_COLLECTION, str(saved.get("id") or ""), f"charge {data['reference']}")
-            return saved
+            return _for_viewer(saved, user)
         finally:
             if guard is not None:
                 guard.release()
@@ -700,7 +707,7 @@ def create_wallet_payments_router(
             elif str(data.get("userId") or "") == uid:
                 results.append(_lean_payment_entity(entity))
         results.sort(key=lambda e: str((e.get("data") or {}).get("createdAt") or ""), reverse=True)
-        return {"requests": results[:200]}
+        return {"requests": [_for_viewer(entity, user) for entity in results[:200]]}
 
     @router.get("/{request_id}")
     def get_payment_request(
@@ -714,7 +721,7 @@ def create_wallet_payments_router(
         data = entity.get("data") or {}
         if str(data.get("userId") or "") != str(user.get("id") or "") and not _is_admin(user):
             raise HTTPException(status_code=404, detail="Payment request not found")
-        return entity
+        return _for_viewer(entity, user)
 
     @router.post("/{request_id}/receipt")
     def attach_payment_receipt(
@@ -756,7 +763,7 @@ def create_wallet_payments_router(
             )
             entity = _update_payment_row(conn, entity, data)
         ctx["audit"](uid, "attach_receipt", WALLET_PAYMENT_COLLECTION, rid, "")
-        return _lean_payment_entity(entity)
+        return _for_viewer(_lean_payment_entity(entity), user)
 
     @router.post("/{request_id}/confirm")
     def confirm_payment_request(
@@ -871,7 +878,7 @@ def create_wallet_payments_router(
                 raise HTTPException(status_code=404, detail="Payment request not found")
             status = str(data.get("status") or "")
             if status == "canceled":
-                return entity
+                return _for_viewer(entity, user)  # possibly cancelled by an admin
             if status != "pending":
                 raise HTTPException(status_code=409, detail=f"Payment request is {status or 'invalid'}")
             # A credit that already posted for this request means the money is
@@ -887,6 +894,6 @@ def create_wallet_payments_router(
             )
             entity = _update_payment_row(conn, entity, data)
         ctx["audit"](str(user.get("id") or ""), "cancel", WALLET_PAYMENT_COLLECTION, rid, "")
-        return entity
+        return _for_viewer(entity, user)
 
     return router

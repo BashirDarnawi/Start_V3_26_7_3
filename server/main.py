@@ -69,7 +69,7 @@ from .startup_support import read_env_int
 from . import delivery_workflow
 from .meta_ads import stop_meta_ads_worker
 from .systems.ads_studio.social_studio import stop_social_studio_worker
-from .rbac import VALID_USER_ROLES, _load_permissions, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
+from .rbac import VALID_USER_ROLES, _load_permissions, can_browse_user_directory, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
 from .backfills import (
     backfill_covered_settled_receipts,
     backfill_customer_names,
@@ -189,6 +189,7 @@ from .meta_ads import (
 from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
 from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from .systems.ads_studio.studio_api import create_studio_router
+from .systems.ads_studio.studio_privacy import redact_staff_identity, scrub_studio_personal_data_conn  # P1-05, P1-16
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from .schemas import (
@@ -1249,10 +1250,10 @@ def cleanup_old_audit_logs():
 def _project_entity_contacts_for_user(
     entity: dict[str, Any], user: dict[str, Any]
 ) -> dict[str, Any]:
-    return project_entity_contacts(
+    return redact_staff_identity(project_entity_contacts(  # P1-05: staff ids/names reach staff only
         project_financial_entity(entity),
         user_has_permission(user, "customers", "viewContacts"),
-    )
+    ), user)
 
 
 def _can_include_entity_media(
@@ -12908,25 +12909,8 @@ def list_users(user: dict[str, Any] = Depends(current_user)):
     return [user_row_to_public(r) for r in rows]
 
 
-# Permissions that grant the cross-user name directory (assignee/creator
-# dropdowns and creator-name resolution). Shared by /api/users/public and
-# /api/users/tombstones — own-only/customer accounts get no directory.
-USER_DIRECTORY_PERMISSIONS = (
-    ("users", "view"),
-    ("users", "managePermissions"),
-    ("ads", "view"),
-    ("ads", "assignDelivery"),
-    ("receipts", "view"),
-    ("deliveries", "view"),
-    ("deliveries", "assign"),
-    ("deliveries", "reassign"),
-    ("deliveries", "viewStats"),
-    ("auditLogs", "view"),
-    ("adCampaignRequests", "view"),
-    ("adCampaignRequests", "review"),
-)
-
-
+# The directory permissions (rbac.USER_DIRECTORY_PERMISSIONS) live in the rbac door, because
+# Albayan Studio's staff-identity redaction (P1-05) uses the same rule for who counts as staff.
 @app.get("/api/users/public")
 def list_users_public(user: dict[str, Any] = Depends(current_user)):
     # This endpoint feeds internal assignee/creator dropdowns, but it is also
@@ -12934,10 +12918,7 @@ def list_users_public(user: dict[str, Any] = Depends(current_user)):
     # Employee role, so role alone cannot distinguish them from staff.  Grant
     # the directory only to permissions that operate across users' records;
     # own-only/customer accounts receive a single self row instead.
-    can_browse_directory = any(
-        user_has_permission(user, module, action)
-        for module, action in USER_DIRECTORY_PERMISSIONS
-    )
+    can_browse_directory = can_browse_user_directory(user)
 
     with db_conn() as conn:
         if can_browse_directory:
@@ -12966,10 +12947,7 @@ def list_user_tombstones(user: dict[str, Any] = Depends(current_user)):
     with "Deleted user" — so this endpoint can never resurrect the identity
     of a privacy-anonymized account.
     """
-    if not any(
-        user_has_permission(user, module, action)
-        for module, action in USER_DIRECTORY_PERMISSIONS
-    ):
+    if not can_browse_user_directory(user):
         return []
     with db_conn() as conn:
         rows = conn.execute(
@@ -13131,6 +13109,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
                     "id": row["id"],
                 },
             )
+        scrub_studio_personal_data_conn(conn, user_id)  # P1-16: studio WhatsApp number, reply-log commenter data; never the ledger
 
         updated = conn.execute(
             text("SELECT * FROM users WHERE id=:id LIMIT 1"),

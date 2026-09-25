@@ -49,6 +49,27 @@ PERMISSION_ALLOWLIST: dict[str, frozenset[str]] = {
 
 VALID_USER_ROLES = frozenset({"Admin", "Employee", "Delivery"})
 
+# Permissions that grant the cross-user name directory (assignee/creator
+# dropdowns and creator-name resolution). Shared by /api/users/public and
+# /api/users/tombstones — own-only/customer accounts get no directory. The
+# same accounts count as staff for Albayan Studio's staff-identity redaction
+# (server/systems/ads_studio/studio_privacy.py, P1-05): they already see every
+# staff name here, so they also see staff ids on records; nobody else does.
+USER_DIRECTORY_PERMISSIONS = (
+    ("users", "view"),
+    ("users", "managePermissions"),
+    ("ads", "view"),
+    ("ads", "assignDelivery"),
+    ("receipts", "view"),
+    ("deliveries", "view"),
+    ("deliveries", "assign"),
+    ("deliveries", "reassign"),
+    ("deliveries", "viewStats"),
+    ("auditLogs", "view"),
+    ("adCampaignRequests", "view"),
+    ("adCampaignRequests", "review"),
+)
+
 
 def normalize_permissions(permissions: Any) -> dict[str, list[str]]:
     """Validate and deterministically normalize a permission payload.
@@ -136,6 +157,11 @@ def user_has_permission(user: dict[str, Any], module: str, action: str, *, recor
         return True
 
     return False
+
+
+def can_browse_user_directory(user: dict[str, Any]) -> bool:
+    """Admins and every account holding one of USER_DIRECTORY_PERMISSIONS."""
+    return any(user_has_permission(user, module, action) for module, action in USER_DIRECTORY_PERMISSIONS)
 
 
 def is_within_delivery_scope(user: dict[str, Any], data: dict[str, Any]) -> bool:

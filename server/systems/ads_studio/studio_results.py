@@ -20,8 +20,9 @@ built before any screen:
 * ``GET /api/studio/campaigns/summary`` (any signed-in user, lapsed customers too): the caller's
   OWN live requests (archived ones left out), ``{<campaign id>: {stage, stageKey, labels, ...,
   checkedAt, checkedAgo, metaUsedMinor, stopRequestedAt, dueAt, settleExpectedAt}}``. Staff ids
-  and names are never part of it, nor the staff-only Meta review text. ``dueAt`` stays null until
-  the service-hours helper exists (P3-16).
+  and names are never part of it (the route passes it through studio_privacy.redact_staff_identity,
+  P1-05), nor the staff-only Meta review text. ``dueAt`` stays null until the service-hours helper
+  exists (P3-16).
 
 Stage rules (PLAN.md §5.4). Status comes first: Draft 1 (also after a withdraw), Submitted 2,
 Changes Requested 3, Rejected 13, Stopped 11 (``closeReason`` completed; legacy rows without a
@@ -58,6 +59,7 @@ from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_diagnostics import libya_today, parse_day, parse_time
 from .studio_errors import studio_error
+from .studio_privacy import redact_staff_identity
 from .studio_types import created_by_or_none, derived_id
 
 RESULTS_TYPE = "adCampaignResults"
@@ -626,6 +628,7 @@ def create_studio_results_router(
     def get_campaigns_summary(user: dict[str, Any] = Depends(current_user_dependency)):
         summary_rate_limit(user, "campaigns-summary")
         with db_conn() as conn:
-            return campaigns_summary(conn, str(user.get("id") or ""), utc_now())
+            summary = campaigns_summary(conn, str(user.get("id") or ""), utc_now())
+        return redact_staff_identity(summary, user)  # P1-05: never a staff id, even from a future field
 
     return router

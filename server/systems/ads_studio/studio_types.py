@@ -20,9 +20,12 @@ from ...user_directory import user_exists
 
 # Record types this module family writes (all listed in the package OWNED_TYPES).
 STUDIO_SETTINGS_TYPE = "studioSettings"
+# One per owner (optional WhatsApp number with consent; PLAN.md §7.1). Its route arrives with
+# P2-07; the anonymisation scrub (studio_privacy.py, P1-16) already clears its personal fields.
+STUDIO_PROFILES_TYPE = "studioProfiles"
 # Types that only the /api/studio router may read or write: the generic /api/collections API
 # refuses them (joined into social_studio.SOCIAL_STUDIO_COLLECTIONS, which main.py blocks).
-STUDIO_ROUTER_ONLY_TYPES = frozenset({STUDIO_SETTINGS_TYPE})
+STUDIO_ROUTER_ONLY_TYPES = frozenset({STUDIO_SETTINGS_TYPE, STUDIO_PROFILES_TYPE})
 
 _PREFIX_RE = re.compile(r"[a-z][a-z0-9]{1,15}")
 _ID_HASH_CHARS = 40

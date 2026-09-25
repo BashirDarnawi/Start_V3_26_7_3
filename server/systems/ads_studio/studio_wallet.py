@@ -40,7 +40,8 @@ exactly once, and (tested, PLAN.md §7.8):
 ``chains`` shows each paid cycle as its money steps with the plain ledger labels (EN/AR);
 ``inAds`` lists the requests behind In your ads. ``pendingPayments`` lists charges waiting for
 confirmation (``dueAt`` stays null until the service-hours helper, P3-16). Nothing here names
-who confirmed, credited or reviewed anything.
+who confirmed, credited or reviewed anything, and the route passes its answer through
+studio_privacy.redact_staff_identity (P1-05) so a field added later cannot either.
 """
 
 from collections import defaultdict
@@ -60,6 +61,7 @@ from ...wallet_payments import (
     wallet_ledger_rows,
 )
 from . import studio_results
+from .studio_privacy import redact_staff_identity
 from .studio_results import (
     create_studio_results_router,
     derive_display_stage,
@@ -302,7 +304,8 @@ def create_studio_summaries_router(
     def get_wallet_summary(user: dict[str, Any] = Depends(current_user_dependency)):
         summary_rate_limit(user, "wallet-summary")
         with db_conn() as conn:
-            return wallet_summary(conn, str(user.get("id") or ""), studio_results.utc_now())
+            summary = wallet_summary(conn, str(user.get("id") or ""), studio_results.utc_now())
+        return redact_staff_identity(summary, user)  # P1-05: never a staff id, even from a future field
 
     router.include_router(create_studio_results_router(
         current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx,
