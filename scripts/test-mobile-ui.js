@@ -2614,7 +2614,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && unlinkSheet.includes('<textarea id="ads-studio-unlink-reason"') && unlinkSheet.includes('120555'),
     unlinkSheetAr.includes('تعود إلى مدير البيان نسخ هذه الحملة التي حذفها الربط.') && unlinkSheetAr.includes('إذا غيّر البيان اسم الحملة في ميتا فسيحاول إعادة اسمها السابق.')
       && unlinkSheetAr.includes('لا يمكن إلغاء ربط طلب موقوف.') && unlinkSheetAr.includes('السبب (مطلوب)'),
-    noReason[0] && noReason[0].kind === 'error' && noReason[0].text === 'Write the reason for the unlink.' && noReason[1] === 0,
+    noReason[0] && noReason[0].kind === 'error' && noReason[0].text === 'Write the reason for the unlink (at least 3 characters).' && noReason[1] === 0,
     refusedLastRender.includes('data-ads-studio-unlink-result="error"') && /data-ads-studio-unlink-submit="1" onclick="unlinkAdsStudioMetaCampaign\('p9-u', this\)"  class=/.test(refusedLastRender)
       && !refusedLastRender.includes('جارٍ إلغاء الربط…'),
     refusedUnlink[0].kind === 'error' && refusedUnlink[0].text === 'تغيّر السجل — حدّث الصفحة وحاول مرة أخرى' && text(refusedUnlinkHtml).includes('تغيّر السجل')

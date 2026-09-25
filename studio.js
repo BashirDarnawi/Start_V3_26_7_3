@@ -826,6 +826,10 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ["Albayan's Meta connection is not set up, so no comment was read", 'ربط البيان مع ميتا غير مُعدّ، لذلك لم يُقرأ أي تعليق'],
   ['Meta asked Albayan to wait, so no comment was read', 'طلبت ميتا من البيان الانتظار، لذلك لم يُقرأ أي تعليق. أعد المحاولة بعد بضع دقائق.'],
   ['This Instagram account was checked less than a minute ago', 'فُحص حساب إنستغرام هذا قبل أقل من دقيقة. أعد المحاولة بعد دقيقة.'],
+  // Staff unlink of a Meta link (ad_campaign_actions.py unlink-meta).
+  ['Write why the link is removed', 'اكتب سبب إلغاء الربط (من 3 إلى 300 حرف)'],
+  ['Only an Approved request can be unlinked from its Meta campaign', 'لا يمكن إلغاء ربط حملة ميتا إلا لطلب معتمد'],
+  ['This request is not linked to a Meta campaign', 'هذا الطلب غير مرتبط بحملة ميتا'],
 ];
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {
@@ -1431,7 +1435,7 @@ async function unlinkAdsStudioMetaCampaignOnce(campaignId) {
   if (reasonBox) sheet.reason = String(reasonBox.value || '').slice(0, ADS_STUDIO_UNLINK_REASON_MAX);
   const reason = String(sheet.reason || '').trim();
   let problem = '';
-  if (!reason) problem = adsStudioText('Write the reason for the unlink.', 'اكتب سبب إلغاء الربط.');
+  if (reason.length < 3) problem = adsStudioText('Write the reason for the unlink (at least 3 characters).', 'اكتب سبب إلغاء الربط (3 أحرف على الأقل).');
   else if (!isServerModeEnabled()) problem = adsStudioText('Unlinking needs the server connection.', 'إلغاء الربط يتطلب اتصال الخادم.');
   if (problem) {
     settle({ kind: 'error', text: problem });

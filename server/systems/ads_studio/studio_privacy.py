@@ -70,6 +70,8 @@ _TYPE_ACTOR_KEYS: dict[str, frozenset[str]] = {}
 _ACTOR_SUFFIXES = ("By", "ById", "ByUserId")
 _ACTOR_KEYS = frozenset({"creatorId", "actorId", "authorUserId", "reviewerId", "staffId", "staffUserId"})
 _NAME_SUFFIX = "ByName"
+# Staff-only link details: a mistaken link could otherwise show a customer another client's campaign name.
+_STAFF_ONLY_KEYS = frozenset({"previousMetaName", "collisionRepairId", "restoreProblem", "removedManagerCopies", "keptManagerCopies"})
 _NOT_A_PERSON = frozenset({"system", TEAM_ID})
 
 # ------------------------------------------------------------------ P1-05 redaction
@@ -133,7 +135,9 @@ def _redact(value: Any, viewer_id: str, extra: frozenset[str] = frozenset()) -> 
     changed = False
     for key, child in value.items():
         name = key if isinstance(key, str) else ""
-        if name.endswith(_NAME_SUFFIX):
+        if name in _STAFF_ONLY_KEYS:
+            changed = True  # left out for customers
+        elif name.endswith(_NAME_SUFFIX):
             own = bool(viewer_id) and str(value.get(name[: -len("Name")]) or "") == viewer_id
             if own or child is None or child == "":
                 out[key] = child

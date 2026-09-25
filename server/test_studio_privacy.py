@@ -803,3 +803,19 @@ def postgres_scrub_race() -> None:
         assert "fromId" not in log["data"] and "99887766554433" not in log["raw"], log
         assert "whatsappNumber" not in profile["data"] and "whatsappConsentAt" not in profile["data"], profile
         assert ledger() == money_before
+
+
+def test_staff_only_link_details_are_left_out_for_customers():
+    """A mistaken link must never show a customer another client's campaign name (stage 8 review)."""
+    from server.systems.ads_studio.studio_privacy import redact_staff_identity
+    row = {"id": "c1", "type": "adCampaignRequests", "createdBy": "cust_1",
+           "data": {"status": "Approved", "metaLinkResult": {"previousMetaName": "Agency client - summer", "collisionRepairId": "r1",
+                                                            "removedManagerCopies": 1, "keptManagerCopies": 0, "renamed": True},
+                    "metaUnlinkResult": {"previousMetaName": "Agency client - summer", "restoreProblem": ""}}}
+    customer = redact_staff_identity(row, {"id": "cust_1", "role": "customer"})
+    assert "previousMetaName" not in customer["data"]["metaLinkResult"]
+    assert "collisionRepairId" not in customer["data"]["metaLinkResult"]
+    assert customer["data"]["metaLinkResult"]["renamed"] is True
+    assert "previousMetaName" not in customer["data"]["metaUnlinkResult"]
+    admin = redact_staff_identity(row, {"id": "adm", "role": "admin"})
+    assert admin["data"]["metaLinkResult"]["previousMetaName"] == "Agency client - summer"
