@@ -51,6 +51,10 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P1-16 | Done | stage 7 | Anonymisation also scrubs the WhatsApp number (`studioProfiles`) and reply-log commenter data; ledger untouched |
 | P1-19 | Done | stage 7 | PostgreSQL scenarios: submit serialisation, withdraw vs approve, approval self-release, orphan sweep, system alert insert, privacy scrub race (run in every release) |
 | P1-21 | Done | stage 7 | Studio jobs loop (no Meta token needed): orphan sweep, overdue-review alert (`review_overdue`), daily money scan, heartbeat; `GET /api/studio/admin/alerts` |
+| P0-09b | Done | stage 8 | Link step renames the Meta campaign to `ALB-S-… · name` when the token has `ads_management`; otherwise staff get the name with a Copy button and link again after renaming. The link claims the campaign; untouched Manager copies are removed; billed/edited copies are kept and flagged (D26) |
+| P1-09 | Done | stage 8 | `studioRef` + `studioName` at approval (unique); `meta_review`; `metaAdAccountId`; one request per Meta campaign; bilingual publish labels; staff Unlink (restores removed copies, renames back) |
+| P1-23 | Done | stage 8 | Admin "Check recent comments now" per Instagram page: only comments newer than the cursor and the rule's active time; never answered twice |
+| P3-02 | Done | stage 8 | Link validation: allowlisted account, campaign in that account, not linked elsewhere, name code, `meta_budget_above_paid` warning |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
