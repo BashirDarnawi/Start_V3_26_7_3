@@ -37,6 +37,11 @@ Albayan Studio redesign (PLAN.md stage P4; DECISIONS D9, D24b, D34):
   ``capability_gates()``), the executor sends an action only on an ``on`` channel (``poll`` for
   Instagram public replies) and the log row records what was held and why; the rule editor
   refuses an action whose channel is ``off`` or ``unavailable``.
+* **Failed posts carry a class.** A post that could not be published keeps Meta's raw sentence
+  in ``lastError`` (for the team) and, next to it, ``errorClass`` (``post_error_class``:
+  authorization | rate_limited | temporary | invalid | unknown), so a screen shows a bilingual
+  text instead of raw English; ``_public`` fills ``unknown`` for a failed row stored before
+  the class existed and ``""`` for a post without a failure.
 """
 
 from __future__ import annotations
@@ -79,6 +84,28 @@ SOCIAL_STUDIO_COLLECTIONS = frozenset(
 
 PLATFORMS = ("fb", "ig")
 POST_EDITABLE_STATUSES = frozenset({"draft", "scheduled", "failed"})
+# The class of a publish failure, stored as ``errorClass`` next to the raw ``lastError`` sentence.
+# The screens map exactly these five to bilingual texts (15o): never add a sixth without them.
+POST_ERROR_CLASSES = ("authorization", "rate_limited", "temporary", "invalid", "unknown")
+_POST_ERROR_CLASS_OF_CODE = {
+    "authorization": "authorization",
+    "rate_limited": "rate_limited",
+    "temporary": "temporary", "timeout": "temporary", "network": "temporary",
+    "invalid_request": "invalid", "invalid_id": "invalid", "invalid_path": "invalid", "not_found": "invalid",
+    "ig_needs_image": "invalid", "request_failed": "invalid", "account_not_allowed": "invalid", "not_allowed": "invalid",
+}
+
+
+def post_error_class(error: Any) -> str:
+    """The bilingual class of a publish failure, from the MetaAdsError code: ``authorization``
+    (Albayan's token or a page role: the team reconnects; nothing to fix in the post),
+    ``rate_limited`` (Meta's limit or Albayan's pause: it is retried), ``temporary`` (an outage,
+    no answer in time, no connection: check the page, then retry), ``invalid`` (the post itself:
+    a missing photo, an unlinked page, content Meta refused: edit it), ``unknown`` (anything
+    else, Meta not configured included: the team reads ``lastError``)."""
+    return _POST_ERROR_CLASS_OF_CODE.get(str(getattr(error, "code", "") or ""), "unknown")
+
+
 MAX_POST_PAGES = 10
 MAX_POST_MEDIA = 4
 MAX_CAPTION_CHARS = 2200
@@ -481,6 +508,12 @@ def _public(
         data["pages"] = _rule_pages_view(refs, str(data.get("ownerId") or ""), pages)
         data["pageRemoved"] = any(p["removed"] for p in data["pages"])
         data["pageRemovedLabel"] = dict(PAGE_REMOVED_LABEL) if data["pageRemoved"] else None
+    elif entity_type == POSTS_TYPE:
+        # Always one of POST_ERROR_CLASSES while a failure is stored ("unknown" for a row written
+        # before the class existed), "" without one: the screen never guesses from raw English.
+        stored_class = str(data.get("errorClass") or "")
+        data["errorClass"] = "" if not str(data.get("lastError") or "") else (
+            stored_class if stored_class in POST_ERROR_CLASSES else "unknown")
     return redact_staff_identity(data, user)
 
 
@@ -1055,6 +1088,7 @@ def _clean_post(
         "publishAttempts": 0,
         "autoReplyRuleId": rule_id,
         "lastError": "",
+        "errorClass": "",
     }
 
 
@@ -1138,7 +1172,9 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
 
     Pages that already succeeded in an earlier attempt keep their metaPostId
     and are not posted twice. Status ends ``published`` only when every page
-    succeeded, otherwise ``failed`` with the first error in ``lastError``.
+    succeeded, otherwise ``failed`` with the first error in ``lastError`` and
+    its class in ``errorClass`` (post_error_class; each failed page result
+    carries its own ``errorClass`` too).
     """
     ctx = _ctx()
     entity = ctx["get_entity"](POSTS_TYPE, post_id)
@@ -1154,6 +1190,7 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
         return ctx["patch_entity"](POSTS_TYPE, post_id, {
             "status": "failed", "updatedAt": _iso_now(),
             "lastError": "Publishing paused: the owner's account needs active Social Studio access.",
+            "errorClass": "authorization",  # the owner's access, not the post: nothing to edit
         }, actor_id or owner_id)
     previous = {
         str(r.get("pageId") or ""): r
@@ -1162,14 +1199,17 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
     }
     client: Any = None
     client_error = ""
+    client_error_class = ""
     client_error_retryable = False
     try:
         client = _meta.get_meta_ads_client()
     except _meta.MetaAdsError as error:
         client_error = error.public_message
+        client_error_class = post_error_class(error)
         client_error_retryable = bool(error.retryable)
     results: list[dict[str, Any]] = _results_holder if _results_holder is not None else []  # visible to the wrapper on a crash
     errors: list[str] = []
+    classes: list[str] = []  # errors[i]'s class
     _current_ids = {str(p) for p in (data.get("pageIds") or [])}
     for _prev_id, _prev in previous.items():
         if _prev_id not in _current_ids:
@@ -1182,9 +1222,11 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
         page = ctx["get_entity"](PAGES_TYPE, page_id) if _SAFE_ID_RE.fullmatch(page_id) else None
         if client is None:
             result["error"] = client_error
+            result["errorClass"] = client_error_class
             result["retryable"] = client_error_retryable
         elif not page or page.get("deleted") or str(page["data"].get("ownerId") or "") != owner_id:
             result["error"] = "This page is no longer linked to the account."
+            result["errorClass"] = "invalid"  # the post names a page that is gone: edit it
         else:
             page_reason = ""
             try:
@@ -1194,14 +1236,17 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
                 # published; a blind retry duplicated posts. Ask a human.
                 ambiguous = error.code == "timeout"  # sent but unanswered; a connect failure ("network") is a normal retry
                 result["error"] = "Meta did not answer in time; it may have published. Check the page before retrying." if ambiguous else error.public_message
+                result["errorClass"] = post_error_class(error)
                 result["retryable"] = bool(error.retryable) and not ambiguous
                 page_reason = page_problem_reason(error)
             except Exception as error:  # never leak tokens/stack traces into rows
                 result["error"] = f"Publishing failed ({type(error).__name__})."
+                result["errorClass"] = "unknown"
             # The one health writer (P4-03): a per-page refusal marks the page, a success clears it.
             _page_health_after_meta({**page["data"], "id": page_id}, page_reason, succeeded=bool(result["metaPostId"]))
         if result["error"]:
             errors.append(result["error"])
+            classes.append(str(result.get("errorClass") or "unknown"))
         results.append(result)
         if result.get("metaPostId"):
             try:  # durable at once: a kill before the final write must not let a retry post this page twice
@@ -1222,6 +1267,7 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
             "scheduledAt": _iso_at(datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)),
             "publishAttempts": attempts,
             "lastError": errors[0],
+            "errorClass": classes[0],
             "updatedAt": now,
         }
     else:
@@ -1229,6 +1275,7 @@ def _publish_post_inner(post_id: str, *, actor_id: str = "", from_scheduler: boo
             "results": results,
             "status": "published" if not errors else "failed",
             "lastError": "" if not errors else errors[0],
+            "errorClass": "" if not errors else classes[0],
             "publishAttempts": attempts,
             "updatedAt": now,
         }
@@ -1301,9 +1348,10 @@ def _due_scheduled_posts(now: datetime, limit: int) -> list[dict[str, Any]]:
 def _mark_publish_interrupted(post_id: str, actor_id: str, message: str, results: list[dict[str, Any]] | None = None) -> None:
     """A post must never stay claimed as ``publishing`` forever (a redeploy or a
     server error mid-publish used to leave it without any button). Page ids
-    already obtained travel with it so a retry never posts them twice."""
+    already obtained travel with it so a retry never posts them twice. The class
+    is ``temporary``: nothing is wrong with the post; check the page, then retry."""
     try:
-        patch: dict[str, Any] = {"status": "failed", "lastError": message, "updatedAt": _iso_now()}
+        patch: dict[str, Any] = {"status": "failed", "lastError": message, "errorClass": "temporary", "updatedAt": _iso_now()}
         if results:
             patch["results"] = [dict(r) for r in results if isinstance(r, dict)]
         _ctx()["patch_entity"](POSTS_TYPE, post_id, patch, actor_id or "system")

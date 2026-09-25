@@ -45,13 +45,17 @@ row past its ``dueAt`` raises ``stop_request_overdue`` (one alert per ad and Tri
 through /stop resolves it at once (``on_campaign_stopped``).
 
 **Staff pulse (P3-17).** ``GET /api/studio/staff/pulse`` (staff: admins and reviewers; others 403
-STAFF_ONLY): counts only, ``{waitingReview, stopRequests, openTickets, paymentsWaiting, alerts,
-updatedAt}``. waitingReview = live Submitted requests (a reviewer's own left out: no self-review;
-PostgreSQL answers it from the status index); stopRequests = open queue rows; openTickets = tickets waiting for the team
-(status ``open``; reviewers count only tickets whose audience is not ``admin``); alerts = studio
-alerts of the last 24 hours nobody acknowledged; ``paymentsWaiting`` (charge requests waiting for
-confirmation, the platform door wallet_payments.pending_payment_requests_count) exists for admins
-only and is reused for up to a minute. Never an id, a name or an amount.
+STAFF_ONLY): counts only, ``{waitingReview, stopRequests, openTickets, stopTicketsOpen,
+paymentsWaiting, alerts, updatedAt}``. waitingReview = live Submitted requests (a reviewer's own
+left out: no self-review; PostgreSQL answers it from the status index); stopRequests = open queue
+rows; openTickets = tickets waiting for the team (status ``open``; reviewers count only tickets
+whose audience is not ``admin``), the stop requests' own urgent tickets INCLUDED;
+stopTicketsOpen = the overlap, the open tickets of kind ``stop_request`` (a stop request opens a
+queue row AND a ticket, so the desk badge adds ``openTickets + (stopRequests - stopTicketsOpen)``
+and counts one stop request once); alerts = studio alerts of the last 24 hours nobody
+acknowledged; ``paymentsWaiting`` (charge requests waiting for confirmation, the platform door
+wallet_payments.pending_payment_requests_count) exists for admins only and is reused for up to a
+minute. Never an id, a name or an amount.
 
 **Staff contact link (P3-11).** ``GET /api/studio/staff/customers/{id}/contact``
 ``[?relatedType=campaign|ticket&relatedId=...]`` (staff, from the Albayan site itself: the read is
@@ -63,9 +67,10 @@ and never an admin-only ticket (404 UNKNOWN_CUSTOMER, as for an unknown id); adm
 customer. Each number handed out is audited ``contact_link`` (kept forever) without the number.
 
 **Team desk in use (P3-20).** ``desk_counts(conn)`` is the ONE source of the desk's numbers: open
-queue rows (``stopRequests``), tickets waiting for the team (``openTickets``, status open) and
-unresolved tickets (``unresolvedTickets``: open, answered or waiting for the customer, the desk's
-``active`` list), through studio_support.staff_ticket_counts. The pulse and ``staff_desk_in_use(conn)``
+queue rows (``stopRequests``), tickets waiting for the team (``openTickets``, status open, with
+``stopTicketsOpen`` = the stop requests' own open tickets among them) and unresolved tickets
+(``unresolvedTickets``: open, answered or waiting for the customer, the desk's ``active`` list),
+through studio_support.staff_ticket_counts. The pulse and ``staff_desk_in_use(conn)``
 (unresolved tickets + open stop requests) read it, so studio_settings' refusal to hide ``staffDesk``
 while either is non-zero (409 STAFF_DESK_IN_USE) names only work the desk shows.
 
@@ -603,14 +608,17 @@ def check_stop_requests(now: datetime | None = None) -> dict[str, Any]:
 def desk_counts(conn: Any, *, admin: bool = True, now: datetime | None = None) -> dict[str, int]:
     """The ONE source of the desk's numbers, so the pulse, the STAFF_DESK_IN_USE guard and the desk
     lists always agree: ``stopRequests`` = open queue rows; ``openTickets`` = tickets waiting for the
-    team (status open); ``unresolvedTickets`` = open, answered or waiting for the customer (the desk's
-    ``active`` list). Both ticket counts come from studio_support.staff_ticket_counts (a reviewer's
-    counts leave out admin-audience tickets, as their list does)."""
+    team (status open), a stop request's own urgent ticket included; ``stopTicketsOpen`` = the
+    overlap (open tickets of kind ``stop_request``), so a caller adding tickets and stop requests
+    counts one stop request once; ``unresolvedTickets`` = open, answered or waiting for the
+    customer (the desk's ``active`` list). The ticket counts come from
+    studio_support.staff_ticket_counts (a reviewer's counts leave out admin-audience tickets, as
+    their list does)."""
     from . import studio_support  # late, see create_stop_ticket
 
     tickets = studio_support.staff_ticket_counts(conn, include_admin=admin, now=now)
-    return {"openTickets": tickets["open"], "unresolvedTickets": tickets["active"],
-            "stopRequests": len(open_stop_requests(conn))}
+    return {"openTickets": tickets["open"], "stopTicketsOpen": tickets["stopOpen"],
+            "unresolvedTickets": tickets["active"], "stopRequests": len(open_stop_requests(conn))}
 
 
 def staff_desk_in_use(conn: Any) -> dict[str, int]:
@@ -637,6 +645,9 @@ def reset_pulse_cache() -> None:
 
 
 def staff_pulse(conn: Any, viewer_id: str, *, admin: bool, now: datetime) -> dict[str, Any]:
+    """The desk's live counters (module docstring, "Staff pulse"): counts only. ``openTickets``
+    includes the stop requests' own tickets and ``stopTicketsOpen`` says how many, so the desk's
+    badge and tab title count a stop request once (``openTickets + stopRequests - stopTicketsOpen``)."""
     # A reviewer never reviews their own request (ad_campaign_actions review: 403); an admin may.
     not_own = "" if admin else " AND (created_by IS NULL OR created_by <> :uid)"
     waiting = conn.execute(
@@ -653,6 +664,7 @@ def staff_pulse(conn: Any, viewer_id: str, *, admin: bool, now: datetime) -> dic
         "waitingReview": int(waiting or 0),
         "stopRequests": counts["stopRequests"],
         "openTickets": counts["openTickets"],
+        "stopTicketsOpen": counts["stopTicketsOpen"],
         "alerts": sum(1 for row in alert_rows if not str(row.get("f_acknowledgedat") or "").strip()),
     }
     if admin:

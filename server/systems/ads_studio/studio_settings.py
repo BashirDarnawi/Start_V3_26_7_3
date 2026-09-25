@@ -52,6 +52,14 @@ D29), capabilities, limits, hours, targets and thresholds as in ``DEFAULTS`` bel
 details. A stored value is always read back through today's rules (``normalise_stored``), so a
 hand-edited row never reaches a customer.
 
+One exception on ``/api/studio/me``: its ``capabilities`` are the states the reply executor
+really applies (``effective_capabilities``). The gates ARM with the first admin save of the
+setting (P4-05, social_studio.capability_gates); until then the classic Social Studio sends
+every action a rule asks for, so /me reports every reply channel ``on`` and a screen never
+labels a reply "waiting for Meta" while it goes out. Once armed, /me reports the stored states.
+The admin form (``GET /admin/settings/capabilities``) always shows the stored value: the labels
+that apply from the first save on.
+
 Env kill switch ``ALBAYAN_STUDIO_V2`` (read on every request): ``off`` (also when unset or
 misspelt) forces the classic customer layout whatever the record says; ``pilot`` allows the new
 layout only for the allowlist; ``on`` follows the record. It never touches services or the
@@ -87,6 +95,9 @@ CAPABILITY_CHANNELS: dict[str, tuple[str, ...]] = {
     "igPrivateReply": CAPABILITY_STATES,
     "tiktokService": CAPABILITY_STATES,
 }
+# The channels the reply executor gates (social_studio.CHANNEL_OF): every one of them is sent while
+# the gates are not armed. tiktokService is a manual service of the team, never sent by the executor.
+REPLY_CHANNELS = ("fbPublicReply", "fbPrivateReply", "igPublicReply", "igPrivateReply")
 MAX_ALLOWLIST = 200
 MIN_SUBMISSIONS_PER_DAY = 1
 MAX_SUBMISSIONS_PER_DAY = 500
@@ -693,8 +704,8 @@ def read_setting(key: str) -> dict[str, Any]:
     return _record(key, _live_data(row))
 
 
-def read_all_settings() -> dict[str, dict[str, Any]]:
-    """Every key's current value (defaults for keys never saved), in one query."""
+def read_all_records() -> dict[str, dict[str, Any]]:
+    """Every key's current record (``read_setting`` shape; version 0 for keys never saved), in one query."""
     ids = {setting_id(key): key for key in SETTING_KEYS}
     with db_conn() as conn:
         rows = conn.execute(
@@ -702,7 +713,34 @@ def read_all_settings() -> dict[str, dict[str, Any]]:
             {"type": STUDIO_SETTINGS_TYPE},
         ).mappings().all()
     found = {ids[str(r["id"])]: json_loads(r["data_json"]) for r in rows if str(r["id"]) in ids}
-    return {key: _record(key, found.get(key))["value"] for key in SETTING_KEYS}
+    return {key: _record(key, found.get(key)) for key in SETTING_KEYS}
+
+
+def read_all_settings() -> dict[str, dict[str, Any]]:
+    """Every key's current value (defaults for keys never saved), in one query."""
+    return {key: record["value"] for key, record in read_all_records().items()}
+
+
+def capabilities_armed(record: dict[str, Any]) -> bool:
+    """P4-05: the reply gates arm with the first admin save of ``capabilities`` (version >= 1); the
+    same rule as social_studio.capability_gates, which reads the record itself."""
+    return int(record.get("version") or 0) >= 1
+
+
+def effective_capabilities(value: dict[str, Any], armed: bool) -> dict[str, Any]:
+    """The capability labels as the reply executor applies them today (what /api/studio/me shows).
+
+    Armed: the stored states. Not armed (no admin save yet): every reply channel ``on``, because
+    social_studio.channel_state(None, ...) sends every action a rule asks for until the first save,
+    exactly as the classic Social Studio does; a label must never contradict what goes out (a
+    "waiting for Meta" chip on a public reply that is posted at once, or a disabled Instagram
+    editor while the server accepts the rule). ``tiktokService`` is not a reply channel: as stored.
+    """
+    out = dict(value)
+    if not armed:
+        for channel in REPLY_CHANNELS:
+            out[channel] = "on"
+    return out
 
 
 _SAVED_FIRST = "This setting was saved by someone else just now. Reload it, then save again."
@@ -911,17 +949,20 @@ def service_access(rollout: dict[str, Any], user_id: str) -> dict[str, bool]:
 
 
 def me_view(
-    settings: dict[str, dict[str, Any]], user_id: str, is_admin: bool, is_staff: bool, now: datetime | None = None
+    settings: dict[str, dict[str, Any]], user_id: str, is_admin: bool, is_staff: bool, now: datetime | None = None,
+    *, capabilities_armed: bool,
 ) -> dict[str, Any]:
     """/api/studio/me: the switches for this user plus what any customer needs and nothing
     private (budget limits, the service calendar with "open now" in Tripoli time, the public
-    contact details). Staff-only settings (settlement, targets, thresholds) never appear here."""
+    contact details). Staff-only settings (settlement, targets, thresholds) never appear here.
+    ``capabilities`` are the EFFECTIVE labels (effective_capabilities): the caller says whether
+    the gates are armed (capabilities_armed(record)), so the labels match what the executor sends."""
     rollout = settings["rollout"]
     return {
         "ui": customer_layout(rollout, user_id),
         "services": service_access(rollout, user_id),
         "staffDesk": staff_desk_layout(rollout, user_id, is_staff),
-        "capabilities": dict(settings["capabilities"]),
+        "capabilities": effective_capabilities(settings["capabilities"], capabilities_armed),
         "intake": {"open": bool(settings["intake"].get("open"))},
         "adLimits": {field: settings["limits"][field] for field in PUBLIC_LIMIT_FIELDS},
         "serviceHours": public_service_hours(settings["hours"], settings["contact"], now or utc_now()),

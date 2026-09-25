@@ -33,6 +33,7 @@ from server.systems.ads_studio.studio_jobs import (
     run_tick,
     sweep_orphans,
 )
+from server.systems.ads_studio.studio_errors import STUDIO_ERROR_CODES
 from server.systems.ads_studio.studio_settings import DEFAULTS
 from server.systems.ads_studio.studio_wallet import wallet_summary
 from server.test_studio_wallet import (
@@ -751,14 +752,16 @@ def test_alert_ack(staff):
     assert not inserted and refreshed["count"] == 2 and refreshed["acknowledgedAt"] == acknowledged_at
     assert refreshed["acknowledgedBy"] == admin["id"] and owned["id"] not in _listed_ids(admin)
 
-    # Unknown ids: one nobody raised, malformed ones, and an archived alert.
+    # Unknown ids: one nobody raised, malformed ones, and an archived alert. The code is the alert's OWN
+    # (UNKNOWN_ALERT, 404), never the campaign request's, so the desk words it as an alert that left the list.
+    assert STUDIO_ERROR_CODES["UNKNOWN_ALERT"] == 404 and "UNKNOWN_ALERT" != "UNKNOWN_CAMPAIGN"
     for missing in (alert_id("review_overdue", _uid("never"), _day(now)), "not-an-id", "sal_" + "z" * 40, "sal_" + "a" * 39):
         refused = _ack(admin, missing)
-        assert refused.status_code == 404 and refused.json()["detail"]["code"] == "UNKNOWN_CAMPAIGN", (missing, refused.text)
+        assert refused.status_code == 404 and refused.json()["detail"]["code"] == "UNKNOWN_ALERT", (missing, refused.text)
     with db_conn() as conn:
         conn.execute(text("UPDATE entities SET deleted = true WHERE type = :t AND id = :id"), {"t": ALERTS_TYPE, "id": other["id"]})
     gone = _ack(admin, other["id"])
-    assert gone.status_code == 404 and gone.json()["detail"]["code"] == "UNKNOWN_CAMPAIGN", gone.text
+    assert gone.status_code == 404 and gone.json()["detail"]["code"] == "UNKNOWN_ALERT", gone.text
     assert _alert(other["id"])[0]["acknowledgedAt"] is None and _audits(studio_jobs.AUDIT_ALERT_ACK, other["id"]) == []
 
 

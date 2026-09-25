@@ -46,6 +46,7 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "TICKET_CLOSED": 409,        # help: resolved more than 7 days ago; it can no longer be reopened
     "PHONE_INVALID": 400,        # profile: the WhatsApp number is not a phone number (the shared phone rule)
     "CONSENT_REQUIRED": 400,     # profile: a WhatsApp number is kept only with the owner's consent
+    "UNKNOWN_ALERT": 404,        # alerts: no studio alert has this id (never raised, archived, or not an alert id; P3-23)
 }
 
 

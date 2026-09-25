@@ -555,7 +555,7 @@ def test_staff_pulse_counts_by_audience(people):
     assert client.get("/api/studio/staff/pulse").status_code == 401
     base_reviewer, base_admin = _pulse(reviewer).json(), _pulse(admin).json()
     assert "paymentsWaiting" not in base_reviewer and isinstance(base_admin["paymentsWaiting"], int)
-    assert set(base_admin) == {"waitingReview", "stopRequests", "openTickets", "paymentsWaiting", "alerts", "updatedAt"}
+    assert set(base_admin) == {"waitingReview", "stopRequests", "openTickets", "stopTicketsOpen", "paymentsWaiting", "alerts", "updatedAt"}
 
     _services_on()
     _campaign(owner["id"], "waiting1", status="Submitted")
@@ -583,6 +583,10 @@ def test_staff_pulse_counts_by_audience(people):
     assert as_reviewer["stopRequests"] - base_reviewer["stopRequests"] == 1
     assert as_reviewer["openTickets"] - base_reviewer["openTickets"] == 2  # the stop ticket + the team ticket
     assert as_admin["openTickets"] - base_admin["openTickets"] == 3  # + the admin-only payment ticket
+    # The overlap the desk subtracts so a stop request is counted once (the queue row AND its ticket).
+    assert as_reviewer["stopTicketsOpen"] - base_reviewer["stopTicketsOpen"] == 1
+    assert as_admin["stopTicketsOpen"] - base_admin["stopTicketsOpen"] == 1
+    assert as_admin["stopTicketsOpen"] <= as_admin["openTickets"] and as_admin["stopTicketsOpen"] <= as_admin["stopRequests"]
     assert as_admin["alerts"] - base_admin["alerts"] == 1
     assert as_admin["paymentsWaiting"] - base_admin["paymentsWaiting"] == 1
     assert all(isinstance(value, int) for key, value in as_admin.items() if key != "updatedAt")  # counts only
@@ -681,7 +685,7 @@ def test_staff_desk_cannot_go_off_while_in_use(people, monkeypatch):
     detail = _error(_put_rollout(admin, {"staffDesk": "off"}), 409, "STAFF_DESK_IN_USE")
     pulse = _pulse(admin).json()
     assert "1 unresolved ticket" in detail["message"] and "1 open stop" in detail["message"]
-    assert (pulse["stopRequests"], pulse["openTickets"]) == (1, 1)
+    assert (pulse["stopRequests"], pulse["openTickets"], pulse["stopTicketsOpen"]) == (1, 1, 1)  # one stop request, its ticket
     assert check_stop_requests()["resolved"] == [campaign_id]  # the jobs loop closes it and its ticket
     with db_conn() as conn:
         assert studio_stop.staff_desk_in_use(conn) == {"tickets": 0, "stopRequests": 0}
@@ -709,6 +713,46 @@ def test_staff_desk_cannot_go_off_while_in_use(people, monkeypatch):
     assert data["status"] == "Approved" and data["stopRequestedAt"]
     assert _pulse(admin).json()["stopRequests"] == 0
     assert _put_rollout(admin, {"staffDesk": "off"}).status_code == 200
+
+
+def test_pulse_counts_a_stop_request_once(people, monkeypatch):
+    """A stop request opens a queue row AND an urgent ticket (kind stop_request, status open), so
+    ``openTickets`` includes it; ``stopTicketsOpen`` is that overlap, and the desk's badge
+    (``openTickets + stopRequests - stopTicketsOpen``) says 1 for one stop request, not 2. Once the
+    team answers the ticket it leaves ``openTickets`` and the overlap, while the queue row (the ad
+    is not stopped yet) keeps the badge at 1; a plain question never enters the overlap."""
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
+    owner, admin, reviewer = people["owner"], people["admin"], people["reviewer"]
+    _services_on()
+    with db_conn() as conn:
+        assert studio_stop.desk_counts(conn) == {"openTickets": 0, "stopTicketsOpen": 0, "unresolvedTickets": 0, "stopRequests": 0}, \
+            "an earlier test left an open ticket or stop request"
+
+    def badge(user: dict) -> tuple[int, int, int, int]:
+        pulse = _pulse(user).json()
+        return (pulse["stopRequests"], pulse["openTickets"], pulse["stopTicketsOpen"],
+                pulse["openTickets"] + pulse["stopRequests"] - pulse["stopTicketsOpen"])
+
+    asked = _ask(owner, _campaign(owner["id"], "once"))
+    assert asked.status_code == 200, asked.text
+    ticket = asked.json()["ticket"]
+    assert badge(admin) == (1, 1, 1, 1) and badge(reviewer) == (1, 1, 1, 1)
+    with db_conn() as conn:
+        counts = studio_stop.desk_counts(conn)
+    assert counts["stopTicketsOpen"] == 1 and counts["openTickets"] == 1 and counts["stopRequests"] == 1
+    # A plain question is an open ticket outside the overlap.
+    question = _ticket_row(owner["id"], "question", "open", "staff")
+    assert badge(admin) == (1, 2, 1, 2)
+    # The team answers the stop ticket: it waits for the customer now, the queue row still counts (urgent).
+    answered = client.post(f"/api/studio/staff/tickets/{ticket['id']}/messages",
+                           json={"text": "We are stopping it now.", "operationId": f"ans-{secrets.token_hex(6)}"},
+                           cookies=admin["cookies"])
+    assert answered.status_code == 200, answered.text
+    assert badge(admin) == (1, 1, 0, 2)  # the question + the stop request whose ad is not stopped yet
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                     {"d": json_dumps({**_row(TICKETS_TYPE, question)["data"], "status": "resolved"}), "t": TICKETS_TYPE, "id": question})
+    assert badge(admin) == (1, 0, 0, 1)
 
 
 def test_rollout_off_keeps_services(people, monkeypatch):

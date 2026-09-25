@@ -882,10 +882,10 @@ def test_publish_now_instagram_single_and_carousel(actors, graph):
     assert all(d["is_carousel_item"] == "true" for _p, d in paths[:3])
     assert paths[3][1] == {"media_type": "CAROUSEL", "children": ",".join(["17800000000016_media_id"] * 3), "caption": "IG many"}
 
-    # Instagram without a photo fails cleanly.
+    # Instagram without a photo fails cleanly: the post itself is the problem (class invalid).
     text_only = _post(cookies, [page["id"]], caption="No photo").json()
     failed = client.post(f"{API}/posts/{text_only['id']}/publish", cookies=cookies).json()
-    assert failed["status"] == "failed" and "photo" in failed["lastError"]
+    assert failed["status"] == "failed" and "photo" in failed["lastError"] and failed["errorClass"] == "invalid"
 
 
 def test_publish_failure_sets_failed_and_retry_skips_succeeded_pages(actors, graph):
@@ -899,14 +899,17 @@ def test_publish_failure_sets_failed_and_retry_skips_succeeded_pages(actors, gra
     body = failed.json()
     assert body["status"] == "failed"
     assert body["lastError"] == "Meta is temporarily unavailable."
+    assert body["errorClass"] == "temporary"  # the bilingual class next to the raw sentence (the screen shows the class)
     assert body["results"][0]["metaPostId"] == "5100000000017_feed_id" and body["results"][0]["error"] == ""
+    assert "errorClass" not in body["results"][0]  # a page that succeeded carries no class
     assert body["results"][1]["metaPostId"] == "" and body["results"][1]["error"] == "Meta is temporarily unavailable."
+    assert body["results"][1]["errorClass"] == "temporary"
     assert body["publishedAt"] == ""
 
     graph.fail.clear()
     fb_calls_before = len([p for p, _d in graph.paths() if p.startswith("5100000000017/")])
     retried = client.post(f"{API}/posts/{post['id']}/publish", cookies=cookies).json()
-    assert retried["status"] == "published" and retried["lastError"] == ""
+    assert retried["status"] == "published" and retried["lastError"] == "" and retried["errorClass"] == ""
     assert retried["results"][0]["metaPostId"] == "5100000000017_feed_id"
     assert retried["results"][1]["metaPostId"] == "17800000000018_media_publish_id"
     assert len([p for p, _d in graph.paths() if p.startswith("5100000000017/")]) == fb_calls_before
@@ -919,6 +922,93 @@ def test_publish_failure_sets_failed_and_retry_skips_succeeded_pages(actors, gra
     graph.fail.clear()
     client.post(f"{API}/posts/{other['id']}/publish", cookies=cookies)
     assert client.get(f"{API}/pages", cookies=cookies).json()["pages"][0]["healthy"] is True
+
+
+@pytest.mark.parametrize("error, wanted", [
+    (meta_ads.MetaAdsError("authorization", "Meta authorization failed. Reconnect the access token.", provider_code="190"), "authorization"),
+    (meta_ads.MetaAdsError("rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True), "rate_limited"),
+    (meta_ads.MetaAdsError("temporary", "Meta is temporarily unavailable. Albayan will retry.", retryable=True), "temporary"),
+    (meta_ads.MetaAdsError("timeout", "Meta did not answer in time. Albayan will retry.", retryable=True), "temporary"),
+    (meta_ads.MetaAdsError("network", "Meta could not be reached. Albayan will retry.", retryable=True), "temporary"),
+    (meta_ads.MetaAdsError("request_failed", "Your post could not be shared.", provider_code="368"), "invalid"),
+    (meta_ads.MetaAdsError("not_found", "The selected Meta ad was not found or is no longer accessible."), "invalid"),
+    (meta_ads.MetaAdsError("invalid_response", "Meta did not return an id for the published content."), "unknown"),
+    (meta_ads.MetaAdsError("not_configured", "Meta Ads connection is not configured"), "unknown"),
+    (RuntimeError("boom"), "unknown"),
+])
+def test_failed_posts_carry_a_bilingual_error_class(actors, graph, error, wanted):
+    """A failed post keeps Meta's raw English in ``lastError`` (for the team) and says which of the five
+    classes it is in ``errorClass``, so the Arabic screen shows a translated class instead of raw text."""
+    assert set(studio.POST_ERROR_CLASSES) == {"authorization", "rate_limited", "temporary", "invalid", "unknown"}
+    cookies = actors["a"]["cookies"]
+    page = _link(actors, "a", "5100000000060")
+    post = _post(cookies, [page["id"]], caption="Classed").json()
+    assert post["errorClass"] == "" and post["lastError"] == ""  # a fresh post has no failure
+    graph.fail["/feed"] = error
+    failed = client.post(f"{API}/posts/{post['id']}/publish", cookies=cookies).json()
+    assert failed["status"] == "failed" and failed["lastError"]
+    assert failed["errorClass"] == wanted, failed["lastError"]
+    assert failed["results"][0]["errorClass"] == wanted
+    if isinstance(error, meta_ads.MetaAdsError) and error.code == "timeout":
+        assert failed["lastError"].startswith("Meta did not answer in time; it may have published.")
+    elif isinstance(error, meta_ads.MetaAdsError):
+        assert failed["lastError"] == error.public_message
+    else:
+        assert failed["lastError"] == "Publishing failed (RuntimeError)."
+    listed = [p for p in client.get(f"{API}/posts", params={"status": "failed"}, cookies=cookies).json()["posts"] if p["id"] == post["id"]]
+    assert listed and listed[0]["errorClass"] == wanted  # the list (the lean projection) carries it too
+    # An edit clears the failure and its class; the retry succeeds and clears both as well.
+    edited = client.patch(f"{API}/posts/{post['id']}", json={"caption": "Classed again"}, cookies=cookies).json()
+    assert edited["lastError"] == "" and edited["errorClass"] == ""
+    graph.fail.clear()
+    retried = client.post(f"{API}/posts/{post['id']}/publish", cookies=cookies).json()
+    assert retried["status"] == "published" and retried["errorClass"] == ""
+
+
+def test_post_error_class_covers_rows_without_one_and_the_non_meta_failures(actors, graph, monkeypatch):
+    """A failed row stored before the class existed reads as ``unknown`` (never a missing key, never raw
+    guessing); a stale class on a post without a failure reads as ``""``; the failures Albayan itself
+    writes have their class: the owner's access paused -> authorization (nothing to edit in the post),
+    a publish interrupted by a server error -> temporary (check the page, then retry), an unlinked page
+    -> invalid (edit the post)."""
+    owner = actors["a"]
+    cookies = owner["cookies"]
+    page = _link(actors, "a", "5100000000061")
+    post = _post(cookies, [page["id"]], caption="Old row").json()
+    patch = studio._ctx()["patch_entity"]
+    patch(studio.POSTS_TYPE, post["id"], {"status": "failed", "lastError": "Publishing failed (KeyError).", "errorClass": None}, owner["id"])
+    assert client.get(f"{API}/posts/{post['id']}", cookies=cookies).json()["errorClass"] == "unknown"
+    patch(studio.POSTS_TYPE, post["id"], {"lastError": "Something odd.", "errorClass": "not-a-class"}, owner["id"])
+    assert client.get(f"{API}/posts/{post['id']}", cookies=cookies).json()["errorClass"] == "unknown"
+    patch(studio.POSTS_TYPE, post["id"], {"status": "draft", "lastError": "", "errorClass": "temporary"}, owner["id"])
+    assert client.get(f"{API}/posts/{post['id']}", cookies=cookies).json()["errorClass"] == ""
+
+    # The owner's Social Studio access lapsed: the scheduler pauses the post (authorization).
+    monkeypatch.setattr(studio, "_owner_can_automate", lambda owner_id: False)
+    paused = client.post(f"{API}/posts/{post['id']}/publish", cookies=cookies).json()
+    assert paused["status"] == "failed" and paused["lastError"].startswith("Publishing paused") and paused["errorClass"] == "authorization"
+    monkeypatch.setattr(studio, "_owner_can_automate", lambda owner_id: True)
+
+    # A server error mid-publish (outside the per-page guard, e.g. the Meta client itself): the wrapper
+    # marks the post interrupted (temporary) and re-raises. (A crash inside one page's publish is
+    # caught per page as "Publishing failed (...)", class unknown: test_failed_posts_carry_a_bilingual_error_class.)
+    original_client = meta_ads.get_meta_ads_client
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda *args, **kwargs: (_ for _ in ()).throw(KeyError("mid-publish")))
+    entity = studio._ctx()["get_entity"](studio.POSTS_TYPE, post["id"])
+    assert studio._claim_post(studio._ctx(), entity, owner["id"])
+    with pytest.raises(KeyError):
+        studio.publish_post(post["id"], actor_id=owner["id"])
+    interrupted = client.get(f"{API}/posts/{post['id']}", cookies=cookies).json()
+    assert interrupted["status"] == "failed" and "interrupted" in interrupted["lastError"] and interrupted["errorClass"] == "temporary"
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", original_client)
+
+    # A page unlinked after the post was written: the post names a page that is gone (invalid).
+    gone = _post(cookies, [page["id"]], caption="Page gone").json()
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET deleted = true WHERE type = :type AND id = :id"), {"type": studio.PAGES_TYPE, "id": page["id"]})
+    unlinked = client.post(f"{API}/posts/{gone['id']}/publish", cookies=cookies).json()
+    assert unlinked["status"] == "failed" and unlinked["lastError"] == "This page is no longer linked to the account."
+    assert unlinked["errorClass"] == "invalid" and unlinked["results"][0]["errorClass"] == "invalid"
 
 
 def test_post_owner_scoping(actors):
@@ -1086,6 +1176,7 @@ def test_manual_publish_and_edits_reset_the_scheduler_retry_budget(actors, graph
     assert studio.run_scheduler_tick(now=datetime.now(timezone.utc) + timedelta(minutes=5)) == 1
     after = attempts()
     assert after["status"] == "scheduled" and after["publishAttempts"] == 1 and after["lastError"]
+    assert after["errorClass"] == "temporary"  # a retried temporary failure keeps its class beside the sentence
 
 
 @pytest.mark.parametrize("action", ["edit", "cancel", "delete"])

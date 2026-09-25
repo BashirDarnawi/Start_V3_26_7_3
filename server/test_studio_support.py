@@ -365,7 +365,48 @@ def test_payment_and_account_tickets_are_admin_only(staff):
     with db_conn() as conn:
         mine = studio_support.staff_ticket_counts(conn, include_admin=True)
         theirs = studio_support.staff_ticket_counts(conn, include_admin=False)
-    assert mine["active"] - theirs["active"] >= 2 and set(mine) == {"open", "overdue", "urgent", "active"}
+    assert mine["active"] - theirs["active"] >= 2 and set(mine) == {"open", "overdue", "urgent", "active", "stopOpen"}
+
+
+def test_staff_ticket_counts_tell_stop_request_tickets_apart(staff):
+    """``stopOpen`` = the open tickets a stop request opened (kind stop_request), the part of ``open``
+    the desk subtracts from the open stop requests so one stop request is counted once. A question
+    never counts there; an answered stop ticket leaves both ``open`` and ``stopOpen``; a reviewer's
+    counts leave out an admin-audience one like every other admin ticket."""
+    user = _customer("stopkind")
+    settings = _settings()
+
+    def counts(include_admin: bool) -> dict:
+        with db_conn() as conn:
+            return studio_support.staff_ticket_counts(conn, include_admin=include_admin)
+
+    before_admin, before_reviewer = counts(True), counts(False)
+    question = _opened(user, subject="A plain question")  # kind question
+    operation = _op("stop")
+    stop_ticket, _message, created = studio_support.open_ticket(  # the door the stop request uses (studio_stop.create_stop_ticket)
+        user["id"], settings=settings, operation_id=operation, subject="Urgent: stop request", category="ad",
+        message="Please stop my ad.", related_type="campaign", related_id="req_stopkind", priority="urgent",
+        kind="stop_request", enforce_open_limit=False,
+    )
+    stop_ticket = {**stop_ticket, "id": studio_support.ticket_id(user["id"], operation)}
+    assert created and question["kind"] == "question" and stop_ticket["kind"] == "stop_request" and stop_ticket["status"] == "open"
+    after_admin, after_reviewer = counts(True), counts(False)
+    assert after_admin["open"] - before_admin["open"] == 2 and after_admin["stopOpen"] - before_admin["stopOpen"] == 1
+    assert after_reviewer["open"] - before_reviewer["open"] == 2 and after_reviewer["stopOpen"] - before_reviewer["stopOpen"] == 1
+    assert after_admin["stopOpen"] <= after_admin["open"]
+    # The team answers the stop ticket: it waits for the customer, so it is neither open nor in the overlap.
+    answered = _say(staff["reviewer"], stop_ticket, "We are stopping it now.", staff_route=True)
+    assert answered.status_code == 200 and answered.json()["ticket"]["status"] == "answered"
+    answered_admin = counts(True)
+    assert answered_admin["open"] - before_admin["open"] == 1 and answered_admin["stopOpen"] == before_admin["stopOpen"]
+    assert answered_admin["active"] - before_admin["active"] == 2
+    # An admin-only stop ticket (audience admin) is the admin's overlap only.
+    with db_conn() as conn:
+        conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                     {"d": json_dumps({**_row(SUPPORT_TICKETS_TYPE, stop_ticket["id"])["data"], "status": "open", "audience": "admin"}),
+                      "t": SUPPORT_TICKETS_TYPE, "id": stop_ticket["id"]})
+    assert counts(True)["stopOpen"] - before_admin["stopOpen"] == 1
+    assert counts(False)["stopOpen"] == before_reviewer["stopOpen"]
 
 
 def test_generic_api_refuses_the_ticket_types(staff):

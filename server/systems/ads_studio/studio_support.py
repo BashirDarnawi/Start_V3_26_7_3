@@ -667,18 +667,21 @@ def count_tiktok_requests_today(conn: Any, owner_id: str, now: datetime) -> int:
 
 def staff_ticket_counts(conn: Any | None = None, *, include_admin: bool, now: datetime | None = None) -> dict[str, int]:
     """Counts for the staff pulse (P3-17), no texts: ``open`` (waiting for the team), ``overdue``
-    (waiting past dueAt), ``urgent`` (unresolved stop requests and other urgent tickets) and
-    ``active`` (not resolved). Reviewers' counts leave out admin-audience tickets."""
+    (waiting past dueAt), ``urgent`` (unresolved stop requests and other urgent tickets),
+    ``active`` (not resolved) and ``stopOpen`` (the part of ``open`` that is a stop request's own
+    ticket, kind ``stop_request``: the desk subtracts it from the open stop requests so one stop
+    request is counted once, not as a ticket AND a queue row). Reviewers' counts leave out
+    admin-audience tickets."""
     if conn is None:
         with db_conn() as own:
             return staff_ticket_counts(own, include_admin=include_admin, now=now)
     now = now or utc_now()
     unresolved = f"type = :type AND deleted = false AND COALESCE({json_field_sql('status')}, '') <> 'resolved'"  # resolved rows only grow
     rows = conn.execute(
-        text(json_fields_select_sql(("status", "audience", "priority", "dueAt"), ("id",), unresolved)),
+        text(json_fields_select_sql(("status", "audience", "priority", "dueAt", "kind"), ("id",), unresolved)),
         {"type": SUPPORT_TICKETS_TYPE},
     ).mappings().all()
-    counts = {"open": 0, "overdue": 0, "urgent": 0, "active": 0}
+    counts = {"open": 0, "overdue": 0, "urgent": 0, "active": 0, "stopOpen": 0}
     for row in rows:
         if not include_admin and row.get("f_audience") != AUDIENCE_STAFF:
             continue
@@ -689,6 +692,7 @@ def staff_ticket_counts(conn: Any | None = None, *, include_admin: bool, now: da
         counts["urgent"] += row.get("f_priority") == "urgent"
         if status in ("", "open"):
             counts["open"] += 1
+            counts["stopOpen"] += row.get("f_kind") == "stop_request"
             due = _parse(row.get("f_dueat"))
             counts["overdue"] += bool(due and due < now)
     return counts

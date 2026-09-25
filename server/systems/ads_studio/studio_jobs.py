@@ -86,7 +86,7 @@ customers) on one alert with a version check (the row's ``last_modified``), audi
 in the same transaction. An acknowledged alert leaves the open list, the staff pulse's ``alerts``
 count (studio_stop.staff_pulse) and the channel queue (studio_alert_out.send_pending); a repeat of
 the same finding that day refreshes its counts but keeps the acknowledgement. Acknowledging it
-again is a no-op 200 (``replay`` true, no second audit entry); an unknown id is 404.
+again is a no-op 200 (``replay`` true, no second audit entry); an unknown id is 404 UNKNOWN_ALERT.
 
 ``POST /api/studio/admin/integrity/scan`` (P3-24; admin only, from the site itself, one per 10
 minutes per admin, 429 with ``Retry-After`` otherwise): run_daily_money_check on the caller's
@@ -516,14 +516,16 @@ def acknowledge_alert(
     it): a refresh that lands between the read and the write costs a retry on a fresh read, never a
     lost acknowledgement or a lost refresh. An alert already acknowledged is answered as it is
     (``replay`` true; nothing written, nothing audited). The audit entry (``alert_ack``: the kind,
-    the day and the related item, never a customer's name) joins the same transaction.
+    the day and the related item, never a customer's name) joins the same transaction. An id no
+    live alert has (never raised, or archived) is 404 UNKNOWN_ALERT: the alert's own code, so the
+    screen never shows the words of a campaign request for a stale list entry.
     """
     now = _aware(now or utc_now())
     for _ in range(STATE_WRITE_ATTEMPTS):
         with db_conn() as conn:
             row = _alert_row(conn, row_id)
             if row is None or bool(row["deleted"]):
-                studio_error(404, "UNKNOWN_CAMPAIGN", "No studio alert has this id")
+                studio_error(404, "UNKNOWN_ALERT", "No studio alert has this id")
             current = json_loads(row["data_json"]) or {}
             if str(current.get("acknowledgedAt") or "").strip():
                 return _public_alert(row), True
@@ -1044,13 +1046,14 @@ def create_studio_jobs_router(
     def acknowledge_studio_alert(
         alert_row_id: str, request: Request, user: dict[str, Any] = Depends(current_user_dependency),
     ):
-        """P3-23: see acknowledge_alert. The id must look like alert_id() makes them; any other is unknown."""
+        """P3-23: see acknowledge_alert. The id must look like alert_id() makes them; any other is
+        404 UNKNOWN_ALERT, the same code as an alert nobody raised or one already archived."""
         same_origin(request)
         require_admin(user)
         rate_limit(f"studio:alert-ack:{user.get('id')}", ALERT_ACKS_PER_MINUTE, 60_000,
                    "Too many requests. Please wait a minute and try again.")
         if not _ALERT_ID_RE.fullmatch(str(alert_row_id or "")):
-            studio_error(404, "UNKNOWN_CAMPAIGN", "No studio alert has this id")
+            studio_error(404, "UNKNOWN_ALERT", "No studio alert has this id")
         alert, replay = acknowledge_alert(str(alert_row_id), str(user.get("id") or ""), ctx["audit"])
         return {"alert": alert, "replay": replay}
 

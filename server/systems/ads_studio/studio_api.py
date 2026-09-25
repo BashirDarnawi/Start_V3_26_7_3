@@ -38,7 +38,10 @@ from .studio_ig_poll import create_studio_ig_poll_router
 from .studio_jobs import create_studio_jobs_router, jobs_heartbeat
 from .studio_posts import create_studio_posts_router
 from .studio_profile import create_studio_profile_router
-from .studio_settings import env_switch, me_view, public_contact, read_all_settings, read_setting, require_known_key, save_setting
+from .studio_settings import (
+    capabilities_armed, env_switch, me_view, public_contact, read_all_records, read_all_settings, read_setting,
+    require_known_key, save_setting,
+)
 from .studio_support import create_studio_support_router
 from .studio_stop import create_studio_desk_router
 from .studio_types import STUDIO_SETTINGS_TYPE
@@ -113,7 +116,11 @@ def create_studio_router(
 
     @router.get("/me")
     def studio_me(user: dict[str, Any] = Depends(current_user_dependency)):
-        view = me_view(read_all_settings(), str(user.get("id") or ""), is_admin(user), is_staff(user))
+        records = read_all_records()  # one query: the values AND whether the reply gates are armed (P4-05)
+        view = me_view(
+            {key: record["value"] for key, record in records.items()}, str(user.get("id") or ""), is_admin(user), is_staff(user),
+            capabilities_armed=capabilities_armed(records["capabilities"]),
+        )
         view["metaConnection"] = meta_connection_flag()  # P3-18a: neutral banner flag (studio_alerts_meta.py)
         return view
 

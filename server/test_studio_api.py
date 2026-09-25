@@ -188,9 +188,11 @@ def test_me_reflects_safe_defaults(actors, monkeypatch):
         "ui": "classic",
         "services": {"help": False, "stopRequest": False, "tiktok": False},
         "staffDesk": "classic",
-        # PLAN.md §7.1 keys; defaults from §8.2 and D8a/D24b/D34 (see studio_settings.DEFAULTS)
-        "capabilities": {"fbPublicReply": "gated", "fbPrivateReply": "unavailable", "igPublicReply": "unavailable",
-                         "igPrivateReply": "unavailable", "tiktokService": "off"},
+        # PLAN.md §7.1 keys. The gates are NOT armed (no admin save yet, P4-05), so /me reports what the
+        # reply executor really does today: every reply channel is sent (test_me_capabilities_follow_the_gates);
+        # the stored defaults (§8.2, D8a/D24b/D34) are the admin form's and apply from the first save on.
+        "capabilities": {"fbPublicReply": "on", "fbPrivateReply": "on", "igPublicReply": "on",
+                         "igPrivateReply": "on", "tiktokService": "off"},
         "intake": {"open": True},
         # D4 + D5: $5 - $2,000; the $1 per-day floor too (client limits = server limits, P1-08b)
         "adLimits": {"minTotalMinorUSD": 500, "maxTotalMinorUSD": 200_000, "minPerDayMinorUSD": 100, "maxDays": 90},
@@ -214,6 +216,47 @@ def test_me_reflects_safe_defaults(actors, monkeypatch):
     assert studio_settings.DEFAULTS["intake"]["maxSubmissionsPerDay"] == studio_settings.MAX_SUBMISSIONS_PER_DAY
     rollout = client.get("/api/studio/admin/settings/rollout", cookies=actors["admin"]["cookies"]).json()
     assert rollout["value"]["services"] == {"help": "off", "stopRequest": "off", "tiktok": "off"}
+
+
+def test_me_capabilities_follow_the_gates(actors):
+    """P4-05: /me's capability labels are the states the reply executor applies. While the gates are not
+    armed (the setting was never saved) social_studio.channel_state sends every reply, so /me says every
+    reply channel is ``on`` and a screen never shows "waiting for Meta" on a public reply that goes out
+    (or disables the Instagram editor while the server accepts the rule). The admin form keeps the stored
+    defaults (the labels that apply from the first save on); after that save /me reports the stored states."""
+    from server.systems.ads_studio import social_studio
+
+    admin, customer = actors["admin"], actors["customer"]
+    stored = studio_settings.DEFAULTS["capabilities"]
+    assert stored["fbPublicReply"] == "gated" and stored["igPublicReply"] == "unavailable"  # the honest labels once armed
+    form = client.get("/api/studio/admin/settings/capabilities", cookies=admin["cookies"]).json()
+    assert form["version"] == 0 and form["value"] == stored  # the admin sees what the first save will apply
+    assert social_studio.capability_gates() is None  # the executor: not armed, everything is sent
+    every_channel_on = {"fbPublicReply": "on", "fbPrivateReply": "on", "igPublicReply": "on", "igPrivateReply": "on"}
+    for who in ("customer", "staff", "admin"):
+        assert _me(actors[who])["capabilities"] == {**every_channel_on, "tiktokService": "off"}, who
+    # The same rule as a plain function: the stored value goes through untouched once armed.
+    assert studio_settings.effective_capabilities(stored, False) == {**every_channel_on, "tiktokService": "off"}
+    assert studio_settings.effective_capabilities(stored, True) == stored
+    assert studio_settings.capabilities_armed({"version": 0}) is False and studio_settings.capabilities_armed({"version": 1}) is True
+    assert studio_settings.capabilities_armed(studio_settings.read_setting("capabilities")) is False
+    # The first save arms the gates: /me now reports the stored states, the executor holds the closed ones.
+    assert _put(admin, "capabilities", {"fbPublicReply": "gated"}).status_code == 200
+    assert studio_settings.capabilities_armed(studio_settings.read_setting("capabilities")) is True
+    assert social_studio.capability_gates() == {**stored, "fbPublicReply": "gated"}
+    assert _me(customer)["capabilities"] == {**stored, "fbPublicReply": "gated"}
+    assert social_studio.channel_state(social_studio.capability_gates(), "fb", "public") == "gated"
+    assert _put(admin, "capabilities", {"igPublicReply": "poll", "fbPrivateReply": "on"}, expected_version=1).status_code == 200
+    assert _me(customer)["capabilities"] == {**stored, "fbPublicReply": "gated", "igPublicReply": "poll", "fbPrivateReply": "on"}
+    # me_view itself needs to be told: the route reads the values and the version in one query (read_all_records).
+    records = studio_settings.read_all_records()
+    assert set(records) == set(studio_settings.SETTING_KEYS) and records["capabilities"]["version"] == 2
+    assert studio_settings.read_all_settings() == {key: record["value"] for key, record in records.items()}
+    values = studio_settings.read_all_settings()
+    assert studio_settings.me_view(values, customer["id"], False, False, capabilities_armed=False)["capabilities"] == {**every_channel_on, "tiktokService": "off"}
+    assert studio_settings.me_view(values, customer["id"], False, False, capabilities_armed=True)["capabilities"] == values["capabilities"]
+    with pytest.raises(TypeError):
+        studio_settings.me_view(values, customer["id"], False, False)  # never guessed: a caller must say
 
 
 def test_kill_switch_wins(actors, monkeypatch):
