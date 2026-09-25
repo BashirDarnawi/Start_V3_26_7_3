@@ -20,3 +20,16 @@ def _clear_shared_login_ceiling():
     for email in ("admin@test.com", "testadmin@tests.albayanhub.com"):  # fixed fixture emails reused across modules
         reset_rate_limit(f"login:email:{email}")
     yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _no_studio_daily_submission_cap():
+    """The Ads Studio daily submission cap (P1-22, studio intake setting, 5 a day by default)
+    counts every send of the whole run in the one shared database: a production staffing
+    guard, not a test budget. Each module sees no sends counted; the cap's own tests in
+    test_studio_budgets.py and test_ad_studio_backend.py put the real count back."""
+    from server.systems.ads_studio import ad_campaign_actions
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ad_campaign_actions, "count_submissions_today", lambda day: 0)
+        yield

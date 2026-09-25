@@ -4599,7 +4599,7 @@ AD_CAMPAIGN_ALLOWED_FIELDS = frozenset(
         "startDate",
         "endDate",
         "budgetMinorUSD",
-        "budgetType",
+        "budgetType", "durationDays",  # durationDays: P1-11 (days the ad runs; ad_campaign_fields.py)
         "notes",
         "creativeImages",
         "creativeAssetIds",

@@ -180,7 +180,7 @@ def _review(staff, campaign_id: str, decision: str):
     note = "" if decision == "Approved" else "Please fix the photo"
     return client.post(f"/api/ad-studio/campaigns/{campaign_id}/review", json={
         "expectedLastModified": _last_modified(campaign_id), "decision": decision, "note": note,
-        "operationId": _uid("review-op"),
+        "operationId": _uid("review-op"), "reviewReasonCode": "" if decision == "Approved" else "creative_quality",
     }, cookies=staff["reviewer"]["cookies"])
 
 

@@ -20,13 +20,15 @@ import base64
 import binascii
 import io
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import HTTPException
 from PIL import Image, UnidentifiedImageError
 
 from .ad_campaign_actions import (
+    REFUSE_DURATION,
+    REFUSE_MAX_DAYS,
     apply_boost_campaign_fields,
     enforce_boost_submission_rules,
     normalize_ad_campaign_destination,
@@ -265,6 +267,21 @@ def validate_ad_campaign_image_source(source: str) -> tuple[str, int, int]:
     return source, len(decoded), width * height
 
 
+def ad_campaign_duration_days(value: Any) -> int | None:
+    """``durationDays`` (P1-11): null (not chosen yet) or a whole number of days from 1 to the
+    studio ``limits.maxDays`` (T14 / T4). Read from the limits setting, never hard-coded."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise HTTPException(status_code=400, detail=f"{REFUSE_DURATION} (1 or more)")
+    from .studio_settings import read_setting  # late: studio_settings imports this module
+
+    max_days = int(read_setting("limits")["value"]["maxDays"])
+    if value > max_days:
+        raise HTTPException(status_code=400, detail=f"{REFUSE_MAX_DAYS}{max_days} days (this request: {value} days)")
+    return value
+
+
 def prepare_ad_campaign_fields(
     raw_data: Any,
     *,
@@ -424,8 +441,22 @@ def prepare_ad_campaign_fields(
             )
         clean["budgetMinorUSD"] = budget
 
+    if "durationDays" in data:
+        clean["durationDays"] = ad_campaign_duration_days(data.get("durationDays"))
+
     start = _date(data.get("startDate"), "startDate") if "startDate" in data else None
     end = _date(data.get("endDate"), "endDate") if "endDate" in data else None
+    if start and clean.get("durationDays"):
+        # P1-11: the days decide the end, both ends counted (the classic form's count): a
+        # 7-day ad from the 10th ends on the 16th. A different endDate sent with them loses.
+        try:
+            first_day = datetime.strptime(start[0][:10], "%Y-%m-%d").date()
+        except ValueError:
+            first_day = start[1].date()
+        last_day = first_day + timedelta(days=int(clean["durationDays"]) - 1)
+        end = (last_day.isoformat(), datetime(last_day.year, last_day.month, last_day.day, tzinfo=timezone.utc))
+        if end[1] < start[1]:  # a start with a time of day: the end day still counts whole
+            end = (end[0], start[1])
     if start:
         clean["startDate"] = start[0]
     elif "startDate" in data:

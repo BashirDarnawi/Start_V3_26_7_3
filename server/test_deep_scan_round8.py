@@ -181,15 +181,18 @@ def test_an_account_with_open_campaigns_cannot_be_soft_deleted_and_a_passed_star
     refused = client.patch(f"/api/users/{user['id']}", json={"deleted": True}, cookies=studio_actors["admin"])
     assert refused.status_code == 409, refused.text
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    with db_conn() as conn:  # the request waited past its start date
+    last_day = (datetime.now(timezone.utc) + timedelta(days=9)).strftime("%Y-%m-%d")
+    with db_conn() as conn:  # the request waited past its start date (still its 11 days, as sent)
         row = conn.execute(text("SELECT data_json FROM entities WHERE id=:id"), {"id": cid}).mappings().one()
-        data = json_loads(row["data_json"]); data["startDate"] = yesterday
+        data = json_loads(row["data_json"]); data["startDate"] = yesterday; data["endDate"] = last_day
         conn.execute(text("UPDATE entities SET data_json=:d WHERE id=:id"), {"d": json_dumps(data), "id": cid})
     latest = client.get(f"/api/collections/adCampaignRequests/{cid}", cookies=cookies).json()
     approved = _review_campaign(studio_actors, cid, latest["lastModified"], "Approved", f"r8-open-approve-{TAG}")
     assert approved.status_code == 200, approved.text
     from server.operations import _business_today
     assert approved.json()["data"]["startDate"] == _business_today().strftime("%Y-%m-%d")  # the Libya day, not the UTC day
+    # P1-11: it still runs all its days, so the end moves with the start
+    assert approved.json()["data"]["endDate"] == (_business_today() + timedelta(days=10)).strftime("%Y-%m-%d")
     with db_conn() as conn:  # staff marked it live on Meta
         row = conn.execute(text("SELECT data_json FROM entities WHERE id=:id"), {"id": cid}).mappings().one()
         data = json_loads(row["data_json"]); data["publishStatus"] = "live"

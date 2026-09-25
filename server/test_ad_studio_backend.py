@@ -619,6 +619,7 @@ class TestAdsStudioReviewerPrivacy:
                 "expectedLastModified": submitted.json()["lastModified"],
                 "decision": "Changes Requested",
                 "note": "Please update the offer.",
+                "reviewReasonCode": "text_policy",
                 "operationId": "review-private-changes-001",
             },
             cookies=actors["reviewer"],
@@ -645,6 +646,7 @@ class TestAdsStudioReviewerPrivacy:
                 "expectedLastModified": submitted.json()["lastModified"],
                 "decision": "Changes Requested",
                 "note": "Please update the offer.",
+                "reviewReasonCode": "text_policy",
                 "operationId": "review-private-changes-001",
             },
             cookies=actors["reviewer"],
@@ -837,6 +839,7 @@ class TestAdsStudioWorkflow:
                 "expectedLastModified": submitted.json()["lastModified"],
                 "decision": "Changes Requested",
                 "note": "Please clarify the offer.",
+                "reviewReasonCode": "text_policy",
                 "operationId": "review-lifecycle-changes-001",
             },
             cookies=actors["reviewer"],
@@ -852,6 +855,7 @@ class TestAdsStudioWorkflow:
                 "expectedLastModified": submitted.json()["lastModified"],
                 "decision": "Changes Requested",
                 "note": "Please clarify the offer.",
+                "reviewReasonCode": "text_policy",
                 "operationId": "review-lifecycle-changes-001",
             },
             cookies=actors["reviewer"],
@@ -980,17 +984,12 @@ def _submit_campaign(cookies, campaign_id: str, last_modified: int, op: str):
     )
 
 
-def _review_campaign(actors, campaign_id: str, last_modified: int, decision: str, op: str, note: str = ""):
-    return client.post(
-        f"/api/ad-studio/campaigns/{campaign_id}/review",
-        json={
-            "expectedLastModified": last_modified,
-            "decision": decision,
-            "note": note,
-            "operationId": op,
-        },
-        cookies=actors["reviewer"],
-    )
+def _review_campaign(actors, campaign_id: str, last_modified: int, decision: str, op: str, note: str = "",
+                     reason: str = "other"):
+    body = {"expectedLastModified": last_modified, "decision": decision, "note": note, "operationId": op}
+    if decision != "Approved":
+        body["reviewReasonCode"] = reason  # P1-12: a send-back or a reject names its reason
+    return client.post(f"/api/ad-studio/campaigns/{campaign_id}/review", json=body, cookies=actors["reviewer"])
 
 
 class TestStudioWalletPayments:
@@ -1642,7 +1641,7 @@ class TestStudioStopRefund:
         assert len(refunds) == 1, "refund=0 must not add a wallet row"
 
         # A campaign whose start date has arrived is no longer owner-stoppable.
-        approved3 = _approved_campaign(actors, cookies, "livestarted", 1000)
+        approved3 = _approved_campaign(actors, cookies, "livestarted", 1100)  # $1/day floor x 11 days (P1-15)
         with db_conn() as conn:
             row = conn.execute(
                 text(
@@ -2189,3 +2188,349 @@ class TestStudioCloseReason:
             }
             conn.execute(text("DELETE FROM audit_logs WHERE resource_id = 'p104_kept'"))
         assert left == {ids[action] for action in new_kept}, left
+
+
+# ------------------------------------------------------------------ P1-06 (owner), P1-11, P1-12, P1-15, P1-18(a), P1-22
+
+from datetime import date, timedelta  # noqa: E402 (the budget classes below only)
+
+from server.systems.ads_studio import ad_campaign_actions as _actions  # noqa: E402
+
+# The real count, taken before any test starts (conftest.py stands a zero count in for it).
+_REAL_SUBMISSIONS_TODAY = _actions.count_submissions_today
+
+
+@pytest.fixture
+def studio_setting():
+    """Change studio settings for one test; every settings row is put back exactly afterwards
+    (versions too), so the setting tests of test_studio_api.py still start from version 0."""
+    from server.systems.ads_studio import studio_settings
+
+    with db_conn() as conn:
+        saved = [dict(row) for row in conn.execute(
+            text("SELECT * FROM entities WHERE type = 'studioSettings'")
+        ).mappings().all()]
+
+    def change(key: str, **fields):
+        record = studio_settings.read_setting(key)
+        studio_settings.save_setting(key, fields, record["version"], "", "2026-09-25T00:00:00Z",
+                                     audit=lambda *args: None)
+
+    yield change
+    with db_conn() as conn:
+        conn.execute(text("DELETE FROM entities WHERE type = 'studioSettings'"))
+        for row in saved:
+            conn.execute(
+                text("INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                     "VALUES (:type,:id,:data_json,:deleted,:created_at,:created_by,:last_modified)"),
+                row,
+            )
+
+
+def _business_day() -> date:
+    from server.operations import _business_today
+
+    return _business_today()
+
+
+def _budget_request(tag: str, **fields) -> dict:
+    body = dict(_complete_campaign(f"Budget {tag}"))
+    body.update(fields)
+    return body
+
+
+def _draft_and_submit(cookies, tag: str, **fields):
+    """create -> submit; returns (create response, submit response)."""
+    created = _create_campaign(cookies, _budget_request(tag, **fields), f"budget_{tag}")
+    assert created.status_code == 200, created.text
+    submitted = _submit_campaign(cookies, f"budget_{tag}", created.json()["lastModified"], f"budget-submit-{tag}")
+    return created, submitted
+
+
+def _force_campaign_fields(campaign_id: str, **fields) -> int:
+    """Write fields straight into a request row (None removes one): a state the routes cannot
+    reach any more, such as a request sent before P1."""
+    with db_conn() as conn:
+        row = conn.execute(
+            text("SELECT data_json, last_modified FROM entities WHERE type='adCampaignRequests' AND id=:id"),
+            {"id": campaign_id},
+        ).mappings().first()
+        data = {**(json_loads(row["data_json"]) or {}), **fields}
+        for name, value in fields.items():
+            if value is None:
+                data.pop(name, None)
+        modified = int(row["last_modified"]) + 1
+        data["_lastModified"] = modified
+        conn.execute(
+            text("UPDATE entities SET data_json=:d, last_modified=:m WHERE type='adCampaignRequests' AND id=:id"),
+            {"d": json_dumps(data), "m": modified, "id": campaign_id},
+        )
+    return modified
+
+
+class TestStudioBudgetsLimitsIntake:
+    """Owner answers D4 + D5: daily or lifetime, hold and charge = the total, limits from the
+    studio 'limits' setting; P1-11 days; P1-12 reasons; P1-18(a) legacy rows; P1-22 intake."""
+
+    def test_new_daily_submit_holds_daily_times_days(self, actors):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "daily7", 6999)
+        created, short = _draft_and_submit(
+            cookies, "daily7", budgetType="daily", budgetMinorUSD=1000, durationDays=7, startDate="2027-01-10",
+        )
+        assert created.json()["data"]["endDate"] == "2027-01-16"  # 7 days, both ends counted
+        # The wallet check uses the TOTAL (7 x $10 = $70), not one day.
+        assert short.status_code == 409 and "Insufficient wallet balance" in short.text, short.text
+        topped = client.post(
+            "/api/wallet/top-ups",
+            json={"userId": user["id"], "amountMinor": 1, "currency": "USD", "idempotencyKey": "wallet-fund-daily7-b"},
+            cookies=actors["admin"],
+        )
+        assert topped.status_code == 200, topped.text
+        submitted = _submit_campaign(cookies, "budget_daily7", created.json()["lastModified"], "budget-submit-daily7-b")
+        assert submitted.status_code == 200, submitted.text
+        data = submitted.json()["data"]
+        assert data["totalBudgetMinorUSD"] == 7000 and data["schemaVersion"] == 2 and data["legacyRules"] is False
+        from server.wallet_payments import wallet_campaign_holds_minor
+
+        with db_conn() as conn:
+            assert wallet_campaign_holds_minor(conn, user["id"]) == 7000  # the one-day hold bug is gone
+        approved = _review_campaign(actors, "budget_daily7", submitted.json()["lastModified"], "Approved", "budget-approve-daily7")
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["data"]["paidMinorUSD"] == 7000
+        captures = [r for r in _wallet_rows_for(actors, user["id"]) if r.get("type") == "campaign_payment"]
+        assert [r["amountMinor"] for r in captures] == [7000]
+        assert _balance_minor(actors, user["id"]) == 0
+        # The owner's stop before the start returns what the ledger says was captured.
+        stopped = _stop_campaign(cookies, "budget_daily7", approved.json()["lastModified"], "budget-stop-daily7")
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["data"]["refundMinorUSD"] == 7000
+        assert _balance_minor(actors, user["id"]) == 7000
+
+    def test_patch_accepts_duration_days(self, actors, studio_setting):
+        _, cookies = _fresh_funded_customer(actors, "patchdays", 0)
+        created = _create_campaign(cookies, _budget_request("patchdays"), "budget_patchdays")
+        assert created.status_code == 200, created.text
+        state = {"lm": created.json()["lastModified"]}
+
+        def patch(data):
+            return client.patch(
+                "/api/collections/adCampaignRequests/budget_patchdays",
+                json={"data": data, "expectedLastModified": state["lm"]}, cookies=cookies,
+            )
+
+        saved = patch({"durationDays": 7, "startDate": "2027-02-01"})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["data"]["durationDays"] == 7 and saved.json()["data"]["endDate"] == "2027-02-07"
+        state["lm"] = saved.json()["lastModified"]
+        moved = patch({"startDate": "2027-03-30"})  # the end follows the start: still 7 days
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["data"]["endDate"] == "2027-04-05"
+        state["lm"] = moved.json()["lastModified"]
+        for bad in (0, -3, 2.5, True, "7"):
+            refused = patch({"durationDays": bad})
+            assert refused.status_code == 400, (bad, refused.text)
+            assert refused.json()["detail"].startswith("durationDays must be a whole number of days"), refused.text
+        too_long = patch({"durationDays": 91})
+        assert too_long.status_code == 400, too_long.text
+        assert too_long.json()["detail"].startswith("The ad can run for at most 90 days"), too_long.text
+        studio_setting("limits", maxDays=30)  # the limit comes from the setting, never a fixed number
+        assert patch({"durationDays": 31}).json()["detail"].startswith("The ad can run for at most 30 days")
+        fits = patch({"durationDays": 30})
+        assert fits.status_code == 200, fits.text
+        assert fits.json()["data"]["endDate"] == "2027-04-28"
+        state["lm"] = fits.json()["lastModified"]
+        cleared = patch({"durationDays": None})
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["data"]["durationDays"] is None
+        state["lm"] = cleared.json()["lastModified"]
+        # The server computes the total; a client can never write it.
+        forged = patch({"totalBudgetMinorUSD": 1})
+        assert forged.status_code in (400, 403), forged.text
+
+    def test_late_approval_keeps_duration(self, actors):
+        _reset_reviewer_limits(actors)
+        today = _business_day()
+        for tag, start_offset in (("late2", -2), ("latepast", -10)):
+            user, cookies = _fresh_funded_customer(actors, tag, 2500)
+            created, submitted = _draft_and_submit(cookies, tag, durationDays=7, startDate="2027-01-10")
+            assert submitted.status_code == 200, submitted.text
+            # The request waited: approved 2 days after its start (then long after its end).
+            start = today + timedelta(days=start_offset)
+            lm = _force_campaign_fields(
+                f"budget_{tag}", startDate=start.isoformat(), endDate=(start + timedelta(days=6)).isoformat(),
+            )
+            approved = _review_campaign(actors, f"budget_{tag}", lm, "Approved", f"budget-approve-{tag}")
+            assert approved.status_code == 200, approved.text
+            data = approved.json()["data"]
+            assert data["startDate"] == today.isoformat()
+            assert data["endDate"] == (today + timedelta(days=6)).isoformat()  # still 7 days
+            assert data["durationDays"] == 7 and data["paidMinorUSD"] == 2500
+
+    def test_budget_limits_enforced_for_new_rows(self, actors, studio_setting):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "limits", 1000)
+        cases = (
+            ("lowtotal", {"budgetMinorUSD": 499}, "The total budget must be at least $5.00"),
+            ("hightotal", {"budgetMinorUSD": 200_001}, "The total budget must be at most $2,000.00"),
+            ("dailyhigh", {"budgetType": "daily", "budgetMinorUSD": 30_000, "durationDays": 7},
+             "The total budget must be at most $2,000.00"),  # 7 x $300 = $2,100
+            ("thinlife", {"budgetMinorUSD": 500}, "Budget per day is below the minimum"),  # $5 over 11 days
+            ("thindaily", {"budgetType": "daily", "budgetMinorUSD": 99, "durationDays": 7},
+             "Budget per day is below the minimum"),
+            ("toolong", {"budgetMinorUSD": 50_000, "startDate": "2027-01-01", "endDate": "2027-04-01"},
+             "The ad can run for at most 90 days"),  # 91 days from the dates
+        )
+        for tag, fields, prefix in cases:
+            _, refused = _draft_and_submit(cookies, tag, **fields)
+            assert refused.status_code == 400, (tag, refused.text)
+            assert refused.json()["detail"].startswith(prefix), (tag, refused.text)
+            still = client.get(f"/api/collections/adCampaignRequests/budget_{tag}", cookies=cookies).json()
+            assert still["data"]["status"] == "Draft" and "totalBudgetMinorUSD" not in still["data"]
+        # Exactly at the limits passes: $5.00 over 5 days = $1.00 a day.
+        _, edge = _draft_and_submit(cookies, "edge", budgetMinorUSD=500, durationDays=5)
+        assert edge.status_code == 200, edge.text
+        # The numbers come from the setting (and /me shows the same ones to the form).
+        studio_setting("limits", minTotalMinorUSD=1000)
+        me = client.get("/api/studio/me", cookies=cookies)
+        assert me.status_code == 200, me.text
+        assert me.json()["adLimits"] == {
+            "minTotalMinorUSD": 1000, "maxTotalMinorUSD": 200_000, "minPerDayMinorUSD": 100, "maxDays": 90,
+        }
+        _, raised = _draft_and_submit(cookies, "raised", budgetMinorUSD=900, durationDays=3)
+        assert raised.status_code == 400, raised.text
+        assert raised.json()["detail"].startswith("The total budget must be at least $10.00"), raised.text
+        # Approval checks today's limits again for a new row: nothing is captured.
+        approval = _review_campaign(actors, "budget_edge", edge.json()["lastModified"], "Approved", "budget-approve-edge")
+        assert approval.status_code == 400, approval.text
+        assert approval.json()["detail"].startswith("The total budget must be at least $10.00"), approval.text
+        assert _balance_minor(actors, user["id"]) == 1000
+        assert not [r for r in _wallet_rows_for(actors, user["id"]) if r.get("type") == "campaign_payment"]
+        latest = client.get("/api/collections/adCampaignRequests/budget_edge", cookies=cookies).json()
+        assert latest["data"]["status"] == "Submitted"
+
+    def test_legacy_submitted_row_skips_new_limits(self, actors, studio_setting):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "legacy", 5000)
+        _, submitted = _draft_and_submit(cookies, "legacy")
+        assert submitted.status_code == 200, submitted.text
+        # As a daily request sent before P1 left it: $0.50 a day, one day held, no schemaVersion 2.
+        lm = _force_campaign_fields(
+            "budget_legacy", schemaVersion=1, budgetType="daily", budgetMinorUSD=50,
+            totalBudgetMinorUSD=None, legacyRules=None,
+        )
+        from server.wallet_payments import wallet_campaign_holds_minor
+
+        with db_conn() as conn:
+            assert wallet_campaign_holds_minor(conn, user["id"]) == 50  # the hold it was submitted with
+        studio_setting("limits", p1CutoverAt="2026-01-01T00:00:00Z")
+        approved = _review_campaign(actors, "budget_legacy", lm, "Approved", "budget-approve-legacy")
+        assert approved.status_code == 200, approved.text  # no per-day floor refusal
+        data = approved.json()["data"]
+        assert data["legacyRules"] is True and data["paidMinorUSD"] == 50
+        assert "totalBudgetMinorUSD" not in data
+        captures = [r["amountMinor"] for r in _wallet_rows_for(actors, user["id"]) if r.get("type") == "campaign_payment"]
+        assert captures == [50]  # the old capture amount
+        # A new daily request with the same numbers is refused.
+        _, fresh = _draft_and_submit(cookies, "legacynew", budgetType="daily", budgetMinorUSD=50, durationDays=11)
+        assert fresh.status_code == 400, fresh.text
+        assert fresh.json()["detail"].startswith("Budget per day is below the minimum"), fresh.text
+
+    def test_intake_paused_blocks_submit_not_drafts(self, actors, studio_setting):
+        _, cookies = _fresh_funded_customer(actors, "paused", 2500)
+        studio_setting("intake", open=False)
+        created, paused = _draft_and_submit(cookies, "paused")
+        assert paused.status_code == 409, paused.text
+        assert paused.json()["detail"].startswith("New ad requests are paused"), paused.text
+        assert client.get("/api/studio/me", cookies=cookies).json()["intake"] == {"open": False}
+        edited = client.patch(
+            "/api/collections/adCampaignRequests/budget_paused",
+            json={"data": {"headline": "Saved while paused"}, "expectedLastModified": created.json()["lastModified"]},
+            cookies=cookies,
+        )
+        assert edited.status_code == 200, edited.text  # drafts still save
+        assert edited.json()["data"]["status"] == "Draft"
+        studio_setting("intake", open=True)
+        sent = _submit_campaign(cookies, "budget_paused", edited.json()["lastModified"], "budget-submit-paused-2")
+        assert sent.status_code == 200, sent.text
+
+    def test_daily_cap_blocks_submit(self, actors, studio_setting, monkeypatch):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "cap", 10_000)
+        today = _business_day().isoformat()
+        base = _REAL_SUBMISSIONS_TODAY(today)  # sends of earlier tests today
+        monkeypatch.setattr(_actions, "count_submissions_today", lambda day: _REAL_SUBMISSIONS_TODAY(day) - base)
+        studio_setting("intake", maxSubmissionsPerDay=2)
+        _, first = _draft_and_submit(cookies, "capa")
+        _, second = _draft_and_submit(cookies, "capb")
+        assert first.status_code == 200 and second.status_code == 200, (first.text, second.text)
+        created, third = _draft_and_submit(cookies, "capc")
+        assert third.status_code == 409, third.text
+        assert third.json()["detail"].startswith("Today's limit of new ad requests is reached"), third.text
+        # A resubmit after Changes Requested counts too.
+        sent_back = _review_campaign(actors, "budget_capa", first.json()["lastModified"], "Changes Requested",
+                                     "budget-cap-back", note="New photo please", reason="creative_quality")
+        assert sent_back.status_code == 200, sent_back.text
+        again = _submit_campaign(cookies, "budget_capa", sent_back.json()["lastModified"], "budget-cap-resubmit")
+        assert again.status_code == 409 and "Today's limit" in again.text, again.text
+        studio_setting("intake", maxSubmissionsPerDay=3)
+        again = _submit_campaign(cookies, "budget_capa", sent_back.json()["lastModified"], "budget-cap-resubmit-2")
+        assert again.status_code == 200, again.text
+        assert again.json()["data"]["submitDayCount"] == 2  # this request was sent twice today
+        still = _submit_campaign(cookies, "budget_capc", created.json()["lastModified"], "budget-submit-capc-2")
+        assert still.status_code == 409, still.text
+        edited = client.patch(
+            "/api/collections/adCampaignRequests/budget_capc",
+            json={"data": {"headline": "Tomorrow"}, "expectedLastModified": created.json()["lastModified"]},
+            cookies=cookies,
+        )
+        assert edited.status_code == 200, edited.text  # the draft still saves
+
+    def test_review_reason_codes_required_and_stored(self, actors):
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "reasons", 2500)
+        _, submitted = _draft_and_submit(cookies, "reasons")
+        assert submitted.status_code == 200, submitted.text
+        state = {"lm": submitted.json()["lastModified"]}
+
+        def review(decision, op, **extra):
+            body = {"expectedLastModified": state["lm"], "decision": decision, "note": extra.pop("note", ""),
+                    "operationId": op, **extra}
+            return client.post("/api/ad-studio/campaigns/budget_reasons/review", json=body, cookies=actors["reviewer"])
+
+        for decision in ("Changes Requested", "Rejected"):
+            missing = review(decision, "budget-reason-missing", note="Please fix it")
+            assert missing.status_code == 400, missing.text
+            assert missing.json()["detail"].startswith("Choose a reason for this decision"), missing.text
+            for bad in ("nonsense", 7, "BUDGET_DATES"):
+                unknown = review(decision, "budget-reason-unknown", reviewReasonCode=bad)
+                assert unknown.status_code == 400, unknown.text
+                assert unknown.json()["detail"].startswith("Unknown reason code"), unknown.text
+        # D33: a request sent back for its budget and dates; the note is optional.
+        sent_back = review("Changes Requested", "budget-reason-back", reviewReasonCode="budget_dates")
+        assert sent_back.status_code == 200, sent_back.text
+        data = sent_back.json()["data"]
+        assert data["reviewReasonCode"] == "budget_dates" and data["reviewNote"] == ""
+        assert data["reviewHistory"][-1]["reasonCode"] == "budget_dates"
+        replay = review("Changes Requested", "budget-reason-back", reviewReasonCode="budget_dates")
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["lastModified"] == sent_back.json()["lastModified"]
+        remixed = review("Changes Requested", "budget-reason-back", reviewReasonCode="targeting")
+        assert remixed.status_code == 409, remixed.text
+        owner_view = client.get("/api/collections/adCampaignRequests/budget_reasons", cookies=cookies).json()
+        assert owner_view["data"]["reviewReasonCode"] == "budget_dates"  # returned to the owner
+        with db_conn() as conn:
+            meta = conn.execute(
+                text("SELECT metadata_json FROM audit_logs WHERE action = 'review' AND resource_id = 'budget_reasons'"),
+            ).scalar_one()
+        assert json_loads(meta)["reviewReasonCode"] == "budget_dates"
+        # Resubmitting clears the reason; an approval needs none (a code sent with it is ignored).
+        resubmitted = _submit_campaign(cookies, "budget_reasons", sent_back.json()["lastModified"], "budget-reason-resubmit")
+        assert resubmitted.status_code == 200, resubmitted.text
+        assert resubmitted.json()["data"]["reviewReasonCode"] == ""
+        state["lm"] = resubmitted.json()["lastModified"]
+        approved = review("Approved", "budget-reason-approve", reviewReasonCode="whatever")
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["data"]["reviewReasonCode"] == ""
+        assert "reasonCode" not in approved.json()["data"]["reviewHistory"][-1]
+        assert approved.json()["data"]["reviewHistory"][0]["reasonCode"] == "budget_dates"  # history keeps it

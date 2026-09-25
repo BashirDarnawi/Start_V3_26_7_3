@@ -25,18 +25,47 @@ stop, ``staff_stop`` or ``completed`` (a finished ad) chosen by staff only.
 Everything main-owned (permissions, rate limits, media projection, patching)
 is injected through ``ctx`` so no logic is duplicated and main.py stays under
 its architecture line cap.
+
+Budgets, limits, intake and review reasons (P1-06 as changed by the owner,
+P1-11, P1-12, P1-15, P1-18(a), P1-22; DECISIONS D4 + D5, D33):
+
+* The customer picks a DAILY or a LIFETIME budget. ``budgetMinorUSD`` is the
+  daily amount or the lifetime total; ``durationDays`` (1..limits.maxDays) is
+  how many days the ad runs, both ends included (end = start + days - 1).
+  Without it the days come from the dates, counted the same way.
+* Submit computes ``totalBudgetMinorUSD`` (lifetime = budgetMinorUSD; daily =
+  budgetMinorUSD x days), stamps ``schemaVersion`` 2, and the request HOLDS that
+  total (wallet_payments.campaign_hold_minor). Approval recomputes it and
+  captures exactly the held amount; stop reads the captured ledger row.
+* The studio ``limits`` setting (studio_settings) bounds NEW requests at submit
+  and again at approval: total within min..max, the per-day floor (the daily
+  amount, or total / days) and maxDays. Never hard-coded here.
+* Legacy rows (P1-18(a)): a request without ``schemaVersion`` >= 2, or submitted
+  before ``limits.p1CutoverAt``, keeps the rules it was submitted under: no new
+  limit refusal, the hold it was submitted with is what approval captures, and
+  a row from before P1 keeps the old date rule. It is flagged ``legacyRules``.
+  While p1CutoverAt is null (nobody stamped it), every row WITHOUT schemaVersion
+  >= 2 is legacy and every row submitted by this code is not.
+* Intake (P1-22): submit is refused while the ``intake`` setting is paused, or
+  once today's (Tripoli day) submits reach ``maxSubmissionsPerDay``. Every send
+  counts, a resubmit after Changes Requested too. Drafts still save. The count
+  is read before the write, so two sends racing at the last free place can both
+  pass (a staffing guard, not money).
+* Review (P1-12): Changes Requested and Rejected need a ``reviewReasonCode``
+  from REVIEW_REASON_LABELS (the note is optional); approval needs none. The
+  code is stored on the request and in its review history for the owner.
 """
 
 import re
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from ...db import db_conn, json_dumps, now_ms
+from ...db import db_conn, json_dumps, json_fields_select_sql, now_ms
 from ...schemas import (
     AdCampaignPublishStatusRequest,
     AdCampaignReviewRequest,
@@ -46,6 +75,7 @@ from ...schemas import (
 )
 from ...wallet_payments import (
     _campaign_payment_key,
+    campaign_hold_minor,
     capture_campaign_budget,
     refund_stopped_campaign_budget,
     release_orphan_campaign_payment,
@@ -68,6 +98,175 @@ class AdCampaignStopBody(AdCampaignStopRequest):
     owner's own stop is always ``customer_stop``; asking for anything else is 403."""
 
     closeReason: Optional[Literal["", "customer_stop", "staff_stop", "completed"]] = None
+
+
+class AdCampaignReviewBody(AdCampaignReviewRequest):
+    """The review request plus ``reviewReasonCode`` (P1-12), checked by the route
+    (T7 missing, T8 unknown) so a bad value gets its stable refusal, never a 422."""
+
+    reviewReasonCode: Optional[Any] = None
+
+
+# Refusal texts shared with the client's Arabic map: each ``detail`` STARTS with one of these
+# (a dynamic part may follow). Never reword one; add a new text instead.
+REFUSE_TOTAL_MIN = "The total budget must be at least "                   # T1
+REFUSE_TOTAL_MAX = "The total budget must be at most "                    # T2
+REFUSE_PER_DAY = "Budget per day is below the minimum"                    # T3
+REFUSE_MAX_DAYS = "The ad can run for at most "                           # T4
+REFUSE_INTAKE_PAUSED = "New ad requests are paused"                       # T5
+REFUSE_DAILY_CAP = "Today's limit of new ad requests is reached"          # T6
+REFUSE_REASON_MISSING = "Choose a reason for this decision"               # T7
+REFUSE_REASON_UNKNOWN = "Unknown reason code"                             # T8
+REFUSE_DURATION = "durationDays must be a whole number of days"           # T14
+
+# P1-12: why staff sent a request back or rejected it (stored as reviewReasonCode). The client
+# shows these labels verbatim; keep the codes stable (D33 sends legacy daily rows back with
+# budget_dates).
+REVIEW_REASON_LABELS: dict[str, dict[str, str]] = {
+    "budget_dates": {"en": "Budget or dates", "ar": "الميزانية أو التواريخ"},
+    "creative_quality": {"en": "Photo or video quality", "ar": "جودة الصورة أو الفيديو"},
+    "text_policy": {"en": "Text breaks ad rules", "ar": "النص يخالف قواعد الإعلانات"},
+    "targeting": {"en": "Audience or location", "ar": "الجمهور أو الموقع"},
+    "page_access": {"en": "Page access", "ar": "صلاحية الصفحة"},
+    "payment": {"en": "Payment", "ar": "الدفع"},
+    "other": {"en": "Other", "ar": "أخرى"},
+}
+BUDGET_SCHEMA_VERSION = 2  # stamped by submit from P1 on: the request holds its total
+# A Tripoli day began less than 26 hours ago, so a submit today touched its row within them.
+_SUBMIT_DAY_WINDOW_MS = 26 * 60 * 60 * 1000
+
+
+def _studio_setting(key: str) -> dict[str, Any]:
+    """The current value of one studio setting (defaults until an admin saves it)."""
+    from . import studio_settings  # late: studio_settings imports ad_campaign_fields, which imports this module
+
+    return studio_settings.read_setting(key)["value"]
+
+
+def _whole(value: Any) -> int:
+    try:
+        return max(int(float(value or 0)), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _usd(minor: int) -> str:
+    minor = int(minor)
+    return f"${minor // 100:,}.{minor % 100:02d}"
+
+
+def _iso_day(value: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(value or "").strip()[:10])
+    except ValueError:
+        return None
+
+
+def campaign_days(data: dict[str, Any]) -> int:
+    """Days the request runs, both ends included: ``durationDays`` when set, else endDate -
+    startDate + 1 (the classic form's count). 0 when neither tells."""
+    days = data.get("durationDays")
+    if isinstance(days, int) and not isinstance(days, bool) and days >= 1:
+        return days
+    start, end = _iso_day(data.get("startDate")), _iso_day(data.get("endDate"))
+    if start is None or end is None or end < start:
+        return 0
+    return (end - start).days + 1
+
+
+def campaign_total_minor(data: dict[str, Any], days: int) -> int:
+    """What the request costs in USD cents: the lifetime amount, or the daily amount x days."""
+    budget = _whole(data.get("budgetMinorUSD"))
+    return budget * max(int(days), 0) if str(data.get("budgetType") or "").lower() == "daily" else budget
+
+
+def enforce_budget_limits(days: int, total: int, limits: dict[str, Any]) -> None:
+    """P1-15 (D4 + D5): the studio ``limits`` for a NEW request, in the client's order: days
+    (T4), minimum total (T1), maximum total (T2), per-day floor (T3). The floor is the daily
+    amount, or total / days; compared as total < floor x days, so no rounding decides."""
+    max_days = int(limits["maxDays"])
+    if days > max_days:
+        raise HTTPException(status_code=400, detail=f"{REFUSE_MAX_DAYS}{max_days} days (this request: {days} days)")
+    low, high = int(limits["minTotalMinorUSD"]), int(limits["maxTotalMinorUSD"])
+    if total < low:
+        raise HTTPException(status_code=400, detail=f"{REFUSE_TOTAL_MIN}{_usd(low)} (this request: {_usd(total)})")
+    if total > high:
+        raise HTTPException(status_code=400, detail=f"{REFUSE_TOTAL_MAX}{_usd(high)} (this request: {_usd(total)})")
+    floor = int(limits["minPerDayMinorUSD"])
+    if total < floor * max(days, 1):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{REFUSE_PER_DAY} of {_usd(floor)} (this request: {_usd(total // max(days, 1))} per day)",
+        )
+
+
+def _schema_version(data: dict[str, Any]) -> int:
+    try:
+        return int(data.get("schemaVersion") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    try:
+        moment = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def legacy_budget_rules(data: dict[str, Any], limits: dict[str, Any]) -> bool:
+    """P1-18(a): True when the request keeps the rules it was submitted under: it has no
+    ``schemaVersion`` >= 2 (submitted before P1), or it was submitted before
+    ``limits.p1CutoverAt``. While p1CutoverAt is null only the schemaVersion decides. A
+    submitted time that cannot be read, with a cutover set, counts as legacy (never refuse
+    on a guess)."""
+    if _schema_version(data) < BUDGET_SCHEMA_VERSION:
+        return True
+    cutover = _instant(limits.get("p1CutoverAt")) if limits.get("p1CutoverAt") else None
+    if cutover is None:
+        return False
+    submitted = _instant(data.get("submittedAt"))
+    return submitted is None or submitted < cutover
+
+
+def count_submissions_today(day: str) -> int:
+    """How many sends (first submits and resubmits, all customers) the studio took on the
+    Tripoli day ``day`` (YYYY-MM-DD). Each submit stamps ``submitDay`` and ``submitDayCount``
+    on its row, so a request sent twice today counts twice; archived rows count too (the send
+    happened). Only rows touched in the last 26 hours are read, and only two fields (never
+    the images)."""
+    with db_conn() as conn:
+        rows = conn.execute(
+            text(json_fields_select_sql(("submitDay", "submitDayCount"), (), "type = :type AND last_modified >= :since")),
+            {"type": AD_CAMPAIGN_COLLECTION, "since": now_ms() - _SUBMIT_DAY_WINDOW_MS},
+        ).mappings().all()
+    return sum(max(_whole(row.get("f_submitdaycount")), 1) for row in rows if str(row.get("f_submitday") or "") == day)
+
+
+def _review_reason_code(ctx: dict[str, Any], decision: str, raw: Any) -> str:
+    """The reason code as sent ('' for an approval, which needs none): compared on replay,
+    checked by _require_review_reason once the request is known to be reviewable."""
+    if decision == "Approved" or raw is None:
+        return ""
+    return ctx["sanitize_str"](raw if isinstance(raw, str) else repr(raw), 60).strip()
+
+
+def _require_review_reason(decision: str, code: str) -> None:
+    if decision == "Approved":
+        return
+    if not code:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{REFUSE_REASON_MISSING} (reviewReasonCode: {', '.join(REVIEW_REASON_LABELS)})",
+        )
+    if code not in REVIEW_REASON_LABELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{REFUSE_REASON_UNKNOWN} '{code[:40]}'. Use one of: {', '.join(REVIEW_REASON_LABELS)}",
+        )
+
+
 # Suffix-matched: covers www./m./web. subdomains without accepting look-alike
 # registrable domains (evil-facebook.com fails, m.facebook.com passes).
 _BOOST_REF_HOSTS = ("facebook.com", "fb.watch", "instagram.com")
@@ -212,14 +411,16 @@ def _ad_campaign_review_history(ctx: dict[str, Any], value: Any) -> list[dict[st
         decision = ctx["sanitize_str"](str(raw.get("decision") or ""), 40)
         if decision not in AD_CAMPAIGN_REVIEW_DECISIONS:
             continue
-        history.append(
-            {
-                "decision": decision,
-                "note": ctx["sanitize_str"](str(raw.get("note") or ""), 2000),
-                "reviewedAt": ctx["sanitize_str"](str(raw.get("reviewedAt") or ""), 80),
-                "reviewedBy": ctx["sanitize_str"](str(raw.get("reviewedBy") or ""), 80),
-            }
-        )
+        entry = {
+            "decision": decision,
+            "note": ctx["sanitize_str"](str(raw.get("note") or ""), 2000),
+            "reviewedAt": ctx["sanitize_str"](str(raw.get("reviewedAt") or ""), 80),
+            "reviewedBy": ctx["sanitize_str"](str(raw.get("reviewedBy") or ""), 80),
+        }
+        reason = ctx["sanitize_str"](str(raw.get("reasonCode") or ""), 60)
+        if reason in REVIEW_REASON_LABELS:  # P1-12; entries from before it have none
+            entry["reasonCode"] = reason
+        history.append(entry)
     return history
 
 
@@ -290,21 +491,46 @@ def create_ad_campaign_actions_router(
                 status_code=409,
                 detail="Only Draft or Changes Requested campaigns can be submitted",
             )
+        submitted_at = ctx["iso_utc"]()
+        limits = _studio_setting("limits")
+        # From P1 every send is a new row (schemaVersion 2); only a p1CutoverAt still in the
+        # future keeps this send under the old limit rules (P1-18(a)).
+        legacy = legacy_budget_rules(
+            {**current, "schemaVersion": BUDGET_SCHEMA_VERSION, "submittedAt": submitted_at}, limits
+        )
         with ctx["media_validation_slot"](user):
-            ctx["prepare_ad_campaign_fields"](current, strict=True)
+            prepared = ctx["prepare_ad_campaign_fields"](
+                {k: v for k, v in current.items() if k != "durationDays"} if legacy else current, strict=True
+            )
 
-        # Money gate: the requested budget must be AVAILABLE in the owner's USD
-        # wallet — a Submitted campaign holds it, approval captures it. The
-        # capture re-checks under its own lock, so this is the UX gate and that
-        # one is the hard guarantee.
-        try:
-            _budget_minor = max(int(current.get("budgetMinorUSD") or 0), 0)
-        except (TypeError, ValueError, OverflowError):
-            _budget_minor = 0
-        if _budget_minor <= 0:
+        # P1-22: the intake switch and the daily cap, after validation (PLAN.md §7.8 order).
+        today = ctx["business_today"]().isoformat()
+        intake = _studio_setting("intake")
+        if not intake.get("open"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{REFUSE_INTAKE_PAUSED}. Your draft is saved; send it when requests open again.",
+            )
+        if count_submissions_today(today) >= int(intake.get("maxSubmissionsPerDay") or 0):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{REFUSE_DAILY_CAP}. Your draft is saved; send it tomorrow.",
+            )
+
+        # What the request costs and holds: the lifetime amount, or daily x days.
+        days = campaign_days(prepared)
+        total = campaign_total_minor(prepared, days)
+        if total <= 0:
             raise HTTPException(status_code=400, detail="A campaign needs a budget greater than zero before submission")
+        if not legacy:
+            enforce_budget_limits(days, total, limits)
+
+        # Money gate: the TOTAL must be AVAILABLE in the owner's USD wallet — a
+        # Submitted campaign holds it, approval captures it. The capture
+        # re-checks under its own lock, so this is the UX gate and that one is
+        # the hard guarantee.
         with db_conn() as conn:
-            if ctx["wallet_available_after_holds"](conn, str(creator or ""), "USD") < _budget_minor:
+            if ctx["wallet_available_after_holds"](conn, str(creator or ""), "USD") < total:
                 raise HTTPException(
                     status_code=409,
                     detail="Insufficient wallet balance for this budget — charge the wallet first",
@@ -324,13 +550,21 @@ def create_ad_campaign_actions_router(
                 campaign_id,
                 {
                     "status": "Submitted",
-                    "submittedAt": ctx["iso_utc"](),
+                    "submittedAt": submitted_at,
                     "submittedBy": actor_id,
                     "reviewedAt": None,
                     "reviewedBy": None,
                     "reviewNote": "",
                     "reviewDecision": "",
+                    "reviewReasonCode": "",
                     "lastSubmitOperationId": operation_id,
+                    "schemaVersion": BUDGET_SCHEMA_VERSION,
+                    "totalBudgetMinorUSD": total,
+                    "legacyRules": legacy,
+                    "submitDay": today,
+                    "submitDayCount": (
+                        _whole(current.get("submitDayCount")) + 1 if str(current.get("submitDay") or "") == today else 1
+                    ),
                 },
                 actor_id,
                 expected_last_modified=body.expectedLastModified,
@@ -359,14 +593,14 @@ def create_ad_campaign_actions_router(
                 AD_CAMPAIGN_COLLECTION,
                 campaign_id,
                 f"Submitted campaign request {campaign_id} for review",
-                {"operationId": operation_id},
+                {"operationId": operation_id, "totalBudgetMinorUSD": total, "legacyRules": legacy},
             )
         return EntityResponse(**ctx["project_entity_media_for_user"](saved, user, False))
 
     @router.post("/{campaign_id}/review", response_model=EntityResponse)
     def review_ad_campaign_request(
         campaign_id: str,
-        body: AdCampaignReviewRequest,
+        body: AdCampaignReviewBody,
         request: Request,
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
@@ -390,10 +624,12 @@ def create_ad_campaign_actions_router(
         if operation_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}", operation_id):
             raise HTTPException(status_code=400, detail="Invalid operationId")
         note = ctx["sanitize_str"](str(body.note or ""), 2000)
+        reason_code = _review_reason_code(ctx, decision, body.reviewReasonCode)
         if operation_id and str(current.get("lastReviewOperationId") or "") == operation_id:
             if (
                 str(current.get("reviewDecision") or "") != decision
                 or str(current.get("reviewNote") or "") != note
+                or str(current.get("reviewReasonCode") or "") != reason_code
             ):
                 raise HTTPException(status_code=409, detail="operationId was already used for another review")
             if str(current.get("reviewDecision") or "") in {"Rejected", "Changes Requested"}:
@@ -417,26 +653,46 @@ def create_ad_campaign_actions_router(
         current_status = str(current.get("status") or "Draft")
         if current_status != "Submitted":
             raise HTTPException(status_code=409, detail="Only Submitted campaigns can be reviewed")
-        bumped_start = ""
+        _require_review_reason(decision, reason_code)
+        limits = _studio_setting("limits")
+        # P1-18(a): a request keeps the rules it was submitted under. From P1 (schemaVersion
+        # 2) it holds its total and keeps its duration; before P1 it keeps the old date rule.
+        p1_row = _schema_version(current) >= BUDGET_SCHEMA_VERSION
+        legacy = legacy_budget_rules(current, limits)
+        held_minor = campaign_hold_minor(current)
+        bumped_dates: dict[str, str] = {}
         if decision == "Approved":
-            # A start date that passed while the request waited is not the
-            # customer's fault: it starts on approval day (written below).
-            _today_iso = ctx["business_today"]().strftime("%Y-%m-%d")  # the Libya day: approval at 00:30 local is already "today"
-            if str(current.get("startDate") or "")[:10] < _today_iso <= str(current.get("endDate") or "9999")[:10]:
-                bumped_start = _today_iso
-                current = {**current, "startDate": bumped_start}
+            today = ctx["business_today"]()  # the Libya day: approval at 00:30 local is already "today"
+            _today_iso = today.strftime("%Y-%m-%d")
+            if p1_row:
+                # P1-11: a start that passed while the request waited is not the customer's
+                # fault. It starts on approval day and still runs all its days.
+                days = campaign_days(current)
+                start = _iso_day(current.get("startDate"))
+                if start is not None and days > 0 and start < today:
+                    bumped_dates = {"startDate": _today_iso, "endDate": (today + timedelta(days=days - 1)).isoformat()}
+            elif str(current.get("startDate") or "")[:10] < _today_iso <= str(current.get("endDate") or "9999")[:10]:
+                bumped_dates = {"startDate": _today_iso}  # before P1: starts today, ends as asked
             elif str(current.get("endDate") or "9999")[:10] < _today_iso:
                 raise HTTPException(status_code=409, detail="The campaign dates have passed; request changes so the customer can re-date it")
+            current = {**current, **bumped_dates}
             # Approval means launch-ready. Revalidate server-side so older clients
-            # and legacy drafts cannot bypass today's targeting/link rules.
+            # and legacy drafts cannot bypass today's targeting/link rules (a legacy
+            # row is checked without today's day limit, as it was submitted).
             with ctx["media_validation_slot"](user):
-                ctx["prepare_ad_campaign_fields"](current, strict=True)
+                ctx["prepare_ad_campaign_fields"](
+                    {k: v for k, v in current.items() if k != "durationDays"} if legacy else current, strict=True
+                )
+            if p1_row:
+                # P1-06/P1-15: the total again, under today's limits for a new row; it
+                # must still be what the request holds (the capture takes the hold).
+                days = campaign_days(current)
+                total = campaign_total_minor(current, days)
+                if not legacy:
+                    enforce_budget_limits(days, total, limits)
+                if total != held_minor:
+                    raise HTTPException(status_code=409, detail="Conflict: record has changed")
         actor_id = str(user.get("id") or "system")
-        if decision in {"Changes Requested", "Rejected"} and not note:
-            raise HTTPException(
-                status_code=400,
-                detail="A review note is required when requesting changes or rejecting a campaign",
-            )
         # An approval CAPTURES the held budget before its status write, with a
         # fresh locked status check inside the capture (at most one payment per
         # submission cycle). Refunds of crashed-approval captures run only AFTER
@@ -460,14 +716,10 @@ def create_ad_campaign_actions_router(
 
         reviewed_at = ctx["iso_utc"]()
         history = _ad_campaign_review_history(ctx, current.get("reviewHistory"))
-        history.append(
-            {
-                "decision": decision,
-                "note": note,
-                "reviewedAt": reviewed_at,
-                "reviewedBy": actor_id,
-            }
-        )
+        entry = {"decision": decision, "note": note, "reviewedAt": reviewed_at, "reviewedBy": actor_id}
+        if reason_code:
+            entry["reasonCode"] = reason_code
+        history.append(entry)
         history = history[-MAX_AD_CAMPAIGN_REVIEW_HISTORY:]
         transition_fields: dict[str, Any] = {
             "status": decision,
@@ -475,23 +727,26 @@ def create_ad_campaign_actions_router(
             "reviewedAt": reviewed_at,
             "reviewedBy": actor_id,
             "reviewNote": note,
+            "reviewReasonCode": reason_code,
             "reviewHistory": history,
             "lastReviewOperationId": operation_id,
+            "legacyRules": legacy,
         }
         if decision == "Approved":
             transition_fields.update(
                 {
                     "approvedAt": reviewed_at,
                     "approvedBy": actor_id,
-                    "paidMinorUSD": int(current.get("budgetMinorUSD") or 0),
+                    "paidMinorUSD": held_minor,  # = the capture (the hold); stop reads the ledger row itself
                     "paymentTransactionId": wallet_payment_tx,
                     "paidAt": reviewed_at,
                 }
             )
+            if p1_row:
+                transition_fields["totalBudgetMinorUSD"] = held_minor
         elif decision == "Rejected":
             transition_fields.update({"rejectedAt": reviewed_at, "rejectedBy": actor_id})
-        if bumped_start:
-            transition_fields["startDate"] = bumped_start
+        transition_fields.update(bumped_dates)
         replayed_after_conflict = False
         try:
             saved = ctx["patch_entity"](
@@ -513,6 +768,7 @@ def create_ad_campaign_actions_router(
                 or str(latest_data.get("lastReviewOperationId") or "") != operation_id
                 or str(latest_data.get("reviewDecision") or "") != decision
                 or str(latest_data.get("reviewNote") or "") != note
+                or str(latest_data.get("reviewReasonCode") or "") != reason_code
             ):
                 raise
             saved = latest
@@ -533,7 +789,8 @@ def create_ad_campaign_actions_router(
                 campaign_id,
                 f"Reviewed campaign request {campaign_id}: {decision}",
                 {"decision": decision, "note": note, "operationId": operation_id, "walletPaymentTx": wallet_payment_tx,
-                 "budgetMinorUSD": int(current.get("budgetMinorUSD") or 0)},
+                 "budgetMinorUSD": int(current.get("budgetMinorUSD") or 0), "reviewReasonCode": reason_code,
+                 "heldMinorUSD": held_minor, "legacyRules": legacy},
             )
         if replayed_after_conflict and str((saved.get("data") or {}).get("status") or "Draft") not in {
             "Submitted", "Approved", "Rejected", "Stopped"

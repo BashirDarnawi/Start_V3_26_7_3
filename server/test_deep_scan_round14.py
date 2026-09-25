@@ -201,6 +201,10 @@ def test_approving_a_campaign_whose_dates_passed_is_a_clear_409(studio_actors):
         row = conn.execute(text("SELECT data_json FROM entities WHERE type='adCampaignRequests' AND id=:id"), {"id": cid}).mappings().first()
         data = json_loads(row["data_json"]) or {}
         data.update({"startDate": "2026-01-05", "endDate": "2026-01-09"})
+        # A request sent before P1 (no schemaVersion 2) keeps this old date rule (P1-18(a)); one
+        # sent from P1 on keeps its days and starts on approval day instead (P1-11).
+        data["schemaVersion"] = 1
+        data.pop("totalBudgetMinorUSD", None)
         conn.execute(text("UPDATE entities SET data_json=:d WHERE type='adCampaignRequests' AND id=:id"), {"d": json_dumps(data), "id": cid})
     decision = _review_campaign(studio_actors, cid, submitted.json()["lastModified"], "Approved", f"r14-late-approve-{TAG}")
     assert decision.status_code == 409 and "dates have passed" in decision.text, decision.text   # before: 400 "startDate cannot be in the past"

@@ -9,13 +9,14 @@ The customer charges a USD wallet and spends it on ad campaign requests:
   signed callback will call the same confirm path — the flow is designed so
   NOTHING else changes on that day.
 * A SUBMITTED campaign implicitly HOLDS its requested budget: available
-  balance = ledger balance − Σ budgets of the user's Submitted campaigns.
+  balance = ledger balance − Σ budgets of the user's Submitted campaigns
+  (from P1 on each holds its TOTAL, see ``campaign_hold_minor``).
   Every wallet debit (transfers, subscription purchases, new submissions)
   must respect that available number — one pot, counted once.
-* APPROVING a campaign captures the hold: one ``campaign_payment`` ledger
-  row (idempotency key ``cpay:{campaignId}`` — a campaign can never pay
-  twice) moves the budget to the system account inside the review
-  transaction.
+* APPROVING a campaign captures the hold (the same amount, never more): one
+  ``campaign_payment`` ledger row (idempotency key ``cpay:{campaignId}`` — a
+  campaign can never pay twice) moves the budget to the system account inside
+  the review transaction.
 
 This module never talks to Meta and never touches receipts money. All
 helpers that already guard the wallet ledger are injected from main via
@@ -86,6 +87,26 @@ def _new_payment_reference() -> str:
     return "PAY-" + "".join(secrets.choice(alphabet) for _ in range(8))
 
 
+def _whole_minor(value: Any) -> int:
+    try:
+        return max(int(float(value or 0)), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def campaign_hold_minor(campaign: dict[str, Any]) -> int:
+    """USD cents one Submitted request holds, and exactly what its approval captures.
+
+    ``totalBudgetMinorUSD`` when the submit stored it (requests submitted from P1 on,
+    ``schemaVersion`` 2: the lifetime amount, or the daily amount x the days); otherwise
+    ``budgetMinorUSD``, so a request submitted before P1 keeps the hold it was submitted
+    with (a daily request held one day then, PLAN.md P1-18). Hold and capture read the same
+    field, so a capture never takes more than the wallet kept aside for it.
+    """
+    total = _whole_minor(campaign.get("totalBudgetMinorUSD"))
+    return total if total > 0 else _whole_minor(campaign.get("budgetMinorUSD"))
+
+
 def wallet_campaign_holds_minor(conn: Any, user_id: str) -> int:
     """USD cents promised to the user's SUBMITTED (not yet decided) campaigns.
 
@@ -93,23 +114,24 @@ def wallet_campaign_holds_minor(conn: Any, user_id: str) -> int:
     wallet until the reviewer decides. Approval converts the hold into a
     ``campaign_payment`` ledger row in the same transaction, so there is
     never a moment where the budget is both 'available' and 'promised'.
+    Each request holds ``campaign_hold_minor`` (its total from P1 on).
     """
     total = 0
-    # Filter and project in SQL: this runs under the user's FOR UPDATE lock on
-    # every debit, and campaigns carry base64 creative images.
+    # Project in SQL, each row's JSON parsed once: this runs under the user's
+    # FOR UPDATE lock on every debit, and campaigns carry base64 creative images.
     rows = conn.execute(
-        text(
-            f"SELECT {json_field_sql('budgetMinorUSD')} AS budget FROM entities "
-            "WHERE type = 'adCampaignRequests' AND deleted = false AND created_by = :uid "
-            f"AND {json_field_sql('status')} = 'Submitted'"
-        ),
+        text(json_fields_select_sql(
+            ("status", "budgetMinorUSD", "totalBudgetMinorUSD"), (),
+            "type = 'adCampaignRequests' AND deleted = false AND created_by = :uid",
+        )),
         {"uid": str(user_id or "")},
     ).mappings().all()
     for row in rows:
-        try:
-            total += max(int(float(row.get("budget") or 0)), 0)
-        except (TypeError, ValueError, OverflowError):
+        if str(row.get("f_status") or "") != "Submitted":
             continue
+        total += campaign_hold_minor(
+            {"budgetMinorUSD": row.get("f_budgetminorusd"), "totalBudgetMinorUSD": row.get("f_totalbudgetminorusd")}
+        )
     return total
 
 
@@ -257,10 +279,7 @@ def capture_campaign_budget(
     """
     campaign_id = str(campaign.get("id") or "")
     owner_id = str(campaign.get("createdBy") or "")
-    try:
-        budget = max(int(campaign.get("budgetMinorUSD") or 0), 0)
-    except (TypeError, ValueError, OverflowError):
-        budget = 0
+    budget = campaign_hold_minor(campaign)
     if not campaign_id or not owner_id:
         raise HTTPException(status_code=409, detail="Campaign is missing its owner")
     if budget <= 0:
@@ -291,6 +310,11 @@ def capture_campaign_budget(
             status_code=409,
             detail="Campaign is no longer awaiting review — refresh and try again",
         )
+    # The capture takes what the LIVE row holds (the number the holds sum
+    # below counts), never a figure from the caller's snapshot.
+    budget = campaign_hold_minor(live)
+    if budget <= 0:
+        raise HTTPException(status_code=400, detail="An approved campaign needs a budget greater than zero")
     # The campaign is still Submitted here, so its own budget sits inside the
     # holds sum: the ledger must simply cover ALL holds for this capture.
     balance = ctx["wallet_balance_minor"](conn, owner_id, "USD")
