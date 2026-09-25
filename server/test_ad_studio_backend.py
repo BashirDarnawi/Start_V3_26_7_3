@@ -2916,6 +2916,34 @@ class TestStudioApprovalSelfRelease:
         usd = _assert_wallet_identity(cookies, user["id"])
         assert usd["inAdsMinor"] == 2500 and usd["beingReturnedMinor"] == 0
 
+    def test_stale_approval_after_withdraw_and_resend_captures_nothing(self, actors):
+        """The reviewer's page was loaded before the customer withdrew and sent the request again. Its
+        approval is refused BEFORE any capture: a capture here would be of the cycle the request still
+        waits in, kept by P1-03b ("approving"), and the customer's budget would be held twice."""
+        _reset_reviewer_limits(actors)
+        user, cookies = _fresh_funded_customer(actors, "staleresend", 5000)
+        sent = _sent_campaign(cookies, "stale_after_resend", "Stale approval after resend")
+        stale = sent["lastModified"]  # what the reviewer's page loaded
+        withdrawn = _withdraw_campaign(cookies, "stale_after_resend", stale, "stale-resend-withdraw")
+        assert withdrawn.status_code == 200, withdrawn.text
+        resent = _submit_campaign(cookies, "stale_after_resend", withdrawn.json()["lastModified"], "stale-resend-send-2")
+        assert resent.status_code == 200, resent.text
+        approval = _review_campaign(actors, "stale_after_resend", stale, "Approved", "stale-resend-approve")
+        assert approval.status_code == 409, approval.text
+        assert approval.json()["detail"] == "Conflict: record has changed"
+        empty = {"campaign_payment": [], "campaign_payment_release": [], "campaign_refund": []}
+        assert _campaign_money(actors, user["id"], "stale_after_resend") == empty  # nothing captured
+        latest = client.get("/api/collections/adCampaignRequests/stale_after_resend", cookies=cookies).json()
+        assert latest["data"]["status"] == "Submitted" and latest["lastModified"] == resent.json()["lastModified"]
+        usd = _assert_wallet_identity(cookies, user["id"])
+        assert (usd["reservedMinor"], usd["inAdsMinor"], usd["availableMinor"]) == (2500, 0, 2500)  # held once
+        # The reviewer reloads the page: the approval captures the budget once.
+        fresh = _review_campaign(actors, "stale_after_resend", latest["lastModified"], "Approved", "stale-resend-approve-2")
+        assert fresh.status_code == 200, fresh.text
+        assert _campaign_money(actors, user["id"], "stale_after_resend")["campaign_payment"] == [2500]
+        usd = _assert_wallet_identity(cookies, user["id"])
+        assert (usd["reservedMinor"], usd["inAdsMinor"], usd["availableMinor"]) == (0, 2500, 2500)
+
     def test_approval_that_loses_to_another_approval_keeps_the_capture(self, actors, monkeypatch):
         _reset_reviewer_limits(actors)
         user, cookies = _fresh_funded_customer(actors, "selfrelother", 2500)

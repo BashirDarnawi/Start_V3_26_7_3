@@ -1,7 +1,8 @@
 """Albayan Studio money integrity scan (plan task P1-07b; PLAN.md §7.8 "Integrity checks", §6 D26).
 
-``scan_studio_money(conn, now=None, *, owner_ids=None, stranded_minutes=None)`` reads the studio's
-money and returns a list of violations, one entry per kind found (an empty list = nothing wrong):
+``scan_studio_money(conn, now=None, *, owner_ids=None, stranded_minutes=None, balance_minor=None)``
+reads the studio's money and returns a list of violations, one entry per kind found (an empty list =
+nothing wrong):
 
     {"code", "count", "requestIds", "userIds", "moreIds", "labels": {"en", "ar"}}
 
@@ -11,16 +12,21 @@ amounts, e-mails or ledger memos. It is READ ONLY and never repairs anything (PL
 silently repair"): the studio jobs loop runs it daily and turns a finding into one
 ``integrity_violation`` admin alert (studio_jobs.py).
 
-The checks (``VIOLATION_LABELS`` lists them in output order):
+The checks (``VIOLATION_LABELS`` lists them in output order). Each one compares two INDEPENDENT
+sources, never a number with itself:
 
 * **wallet_identity_break** — per customer, the wallet summary (studio_wallet.compute_wallet_summary,
-  the same code as ``/api/studio/wallet/summary``) must satisfy
-  ``added + adjustments - in ads - being returned - spent = available + reserved``, and
-  ``available + reserved`` must equal the customer's USD ledger balance counted here row by row.
+  the same code as ``/api/studio/wallet/summary``, over the rows wallet_payments.wallet_ledger_rows
+  reads) against main.py's own SQL ledger balance, the number every debit gate reads
+  (``balance_minor``: ``ctx["wallet_balance_minor"]`` of the jobs ctx; None = resolved from it).
+  Both ``added + adjustments - in ads - being returned - spent`` (the summary's buckets) and
+  ``available + reserved`` must equal that balance.
 * **wallet_negative_available** — Available below zero.
-* **hold_without_submitted_request** — the money the platform holds for the customer
-  (wallet_payments.wallet_campaign_holds_minor) is not exactly what the customer's live Submitted
-  requests hold (campaign_hold_minor of each).
+* **hold_without_submitted_request** — what every debit gate holds back for the customer
+  (wallet_payments.wallet_campaign_holds_minor: an SQL projection of the live requests) is not
+  Reserved recomputed from those request rows themselves: each row's whole JSON (images left out)
+  parsed here, the way capture_campaign_budget reads the row it captures, and campaign_hold_minor of
+  the Submitted ones.
 * **submitted_request_without_hold** — a live Submitted request that holds nothing (budget <= 0) or
   has no ``submittedAt`` (its approval could never be tied to a payment cycle).
 * **capture_without_approval** — a paid cycle (``cpay:`` ledger row) not fully returned whose request
@@ -32,6 +38,12 @@ The checks (``VIOLATION_LABELS`` lists them in output order):
 * **duplicate_return** — more than one return for one paid cycle (``rel:``, ``stoprefund:`` and an
   old admin ``rev:`` are three doors; exactly one may ever be used, wallet_payments.py).
 * **return_above_paid** — the returns of one paid cycle add up to more than it paid.
+* **request_payment_mismatch** — an Approved or Stopped request (archived included) whose own
+  ``paidMinorUSD`` / ``paymentTransactionId`` are not the amount / id of its cycle's ``cpay:`` row,
+  or that claims a payment its cycle never made. A request from before the wallet (August 2026: no
+  ``schemaVersion`` 2, no payment field and no ``cpay:`` row) is not judged: it never paid.
+* **request_refund_mismatch** — a Stopped request whose ``refundMinorUSD`` / ``refundTransactionId``
+  are not the amount / id of its cycle's ``stoprefund:`` row (0 and '' when there is none).
 * **refund_above_unspent** — a Stopped request returned more than paid minus Meta's confirmed spend
   (its ``adCampaignResults`` row, when one exists for the same Meta campaign) without an admin
   ``settleOverrideReason``.
@@ -51,19 +63,19 @@ separation.
 ``owner_ids`` limits the scan to those customers (their wallets and requests, and only the core
 rows that claim one of their requests); the daily scan passes None (everyone). The customers are the
 owners of Ads Studio requests (``created_by``), archived requests included. The ledger is read only
-through the platform door wallet_payments (D36). Run it on a connection whose transaction reads one
-snapshot (studio_jobs sets REPEATABLE READ READ ONLY on PostgreSQL), or a commit between two reads
-can look like a violation.
+through the platform door wallet_payments and main's balance helper in the router ctx (D36: never an
+import of main.py). Run it on a connection whose transaction reads one snapshot (studio_jobs sets
+REPEATABLE READ READ ONLY on PostgreSQL), or a commit between two reads can look like a violation.
 """
 
 import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from sqlalchemy import bindparam, text
 
-from ...db import json_fields_select_sql, json_loads_or_raw
+from ...db import json_fields_select_sql, json_loads, json_loads_or_raw
 from ...meta_ads import is_studio_campaign_name
 from ...meta_collisions import collision_report
 from ...wallet_payments import (
@@ -72,16 +84,21 @@ from ...wallet_payments import (
     wallet_campaign_holds_minor,
     wallet_ledger_rows,
 )
-from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
+from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION, BUDGET_SCHEMA_VERSION
 from .studio_diagnostics import parse_time
-from .studio_results import REQUEST_FIELDS, load_owner_results
+from .studio_results import REQUEST_FIELDS, load_owner_results, minor
 from .studio_types import is_studio_ref
 from .studio_wallet import CAMPAIGN_PAYMENT, USD, compute_wallet_summary, cycle_state
 
 CAPTURE_GRACE_MINUTES = 15  # PLAN.md §7.4: an approval's capture older than this without its status write
 DEFAULT_STRANDED_MINUTES = 60  # studio_settings thresholds.strandedCaptureMaxMinutes default
 MAX_IDS = 50
-_EXTRA_FIELDS = ("studioRef", "settleOverrideReason", "metaCampaignName")
+_EXTRA_FIELDS = (
+    "studioRef", "settleOverrideReason", "metaCampaignName", "paymentTransactionId", "refundTransactionId",
+    "schemaVersion",
+)
+# main.py's SQL ledger balance, (conn, user id, currency) -> minor units (ctx["wallet_balance_minor"]).
+BalanceReader = Callable[[Any, str, str], int]
 
 # code -> labels (EN / AR); the order here is the order of the findings.
 VIOLATION_LABELS: dict[str, dict[str, str]] = {
@@ -97,6 +114,10 @@ VIOLATION_LABELS: dict[str, dict[str, str]] = {
         "en": "Money on its way back for more than an hour", "ar": "مبلغ في طريقه للعودة منذ أكثر من ساعة"},
     "duplicate_return": {"en": "More than one return for one payment", "ar": "أكثر من استرجاع لدفعة واحدة"},
     "return_above_paid": {"en": "More was returned than was paid", "ar": "استُرجع أكثر مما دُفع"},
+    "request_payment_mismatch": {
+        "en": "An ad's payment does not match the wallet ledger", "ar": "دفعة الإعلان لا تطابق سجل المحفظة"},
+    "request_refund_mismatch": {
+        "en": "A stopped ad's refund does not match the wallet ledger", "ar": "استرجاع الإعلان المتوقف لا يطابق سجل المحفظة"},
     "refund_above_unspent": {
         "en": "Refund above paid minus Meta spend", "ar": "استرجاع أكبر من المدفوع ناقص ما صرفته ميتا"},
     "studio_in_core_books": {
@@ -192,11 +213,6 @@ def open_captures(ledger: list[dict[str, Any]], owner_id: str) -> dict[str, dict
     }
 
 
-def _signed(row: dict[str, Any], uid: str) -> int:
-    amount = int(row["amountMinor"])
-    return (amount if row["toUserId"] == uid else 0) - (amount if row["fromUserId"] == uid else 0)
-
-
 def _meta_campaign_id(value: Any) -> str:
     raw = str(value or "").strip()
     return raw if raw.isascii() and raw.isdigit() and len(raw) <= 40 else ""
@@ -230,29 +246,59 @@ def _load_requests(conn: Any, owner_ids: list[str] | None) -> dict[str, list[dic
     return grouped
 
 
+def _rows_hold_minor(conn: Any, uid: str) -> int:
+    """Reserved recomputed from the owner's live request rows themselves: each row's whole JSON parsed
+    here (the database leaves the images out), the way capture_campaign_budget reads the row it
+    captures, then campaign_hold_minor of the Submitted ones. Never wallet_campaign_holds_minor's SQL
+    projection, so the holds check compares two readers of the same rows."""
+    if conn.dialect.name == "postgresql":
+        lean = "(data_json::jsonb - 'creativeImages')::text"
+    else:
+        lean = "json_remove(data_json, '$.creativeImages')"
+    total = 0
+    for raw in conn.execute(
+        text(f"SELECT {lean} AS doc FROM entities WHERE type = :type AND deleted = false AND created_by = :uid"),
+        {"type": AD_CAMPAIGN_COLLECTION, "uid": uid},
+    ).scalars():
+        data = json_loads(raw or "{}")
+        if isinstance(data, dict) and str(data.get("status") or "") == "Submitted":
+            total += campaign_hold_minor(data)
+    return total
+
+
+def _jobs_balance_reader() -> BalanceReader:
+    """main's SQL balance helper from the jobs ctx (studio_jobs.resolve_jobs_ctx; D36: never an import of main.py)."""
+    from .studio_jobs import resolve_jobs_ctx  # late: studio_jobs imports this module
+
+    return resolve_jobs_ctx(None)["wallet_balance_minor"]
+
+
 # ------------------------------------------------------------------ the checks
 
 def _check_owner(
     conn: Any, findings: _Findings, uid: str, requests: list[dict[str, Any]], now: datetime, stranded_minutes: int,
+    balance_of: BalanceReader | None,
 ) -> None:
     ledger = wallet_ledger_rows(conn, uid)
     results = load_owner_results(conn, uid, (request["id"] for request in requests))
     reserved = wallet_campaign_holds_minor(conn, uid)
     by_id = {request["id"]: request for request in requests}
 
-    # The identity, through the same code the customer's wallet screen uses.
+    # The identity: the customer's wallet screen (the same code) against main's own SQL balance, the
+    # number every debit gate reads (None: that helper could not be reached, already a check_failed).
     usd = compute_wallet_summary(uid, ledger, requests, results, reserved, [], now)["usd"]
-    left = usd["addedMinor"] + usd["adjustmentsMinor"] - usd["inAdsMinor"] - usd["beingReturnedMinor"] - usd["spentMinor"]
-    balance = sum(_signed(row, uid) for row in ledger if row["currency"] == USD)
-    if left != usd["availableMinor"] + usd["reservedMinor"] or usd["availableMinor"] + usd["reservedMinor"] != balance:
-        findings.add("wallet_identity_break", user_id=uid)
+    if balance_of is not None:
+        balance = int(balance_of(conn, uid, USD))
+        buckets = usd["addedMinor"] + usd["adjustmentsMinor"] - usd["inAdsMinor"] - usd["beingReturnedMinor"]
+        if buckets - usd["spentMinor"] != balance or usd["availableMinor"] + usd["reservedMinor"] != balance:
+            findings.add("wallet_identity_break", user_id=uid)
     if usd["availableMinor"] < 0:
         findings.add("wallet_negative_available", user_id=uid)
 
-    # Holds: what the platform holds = what the live Submitted requests hold.
-    waiting = [r for r in requests if not r["archived"] and str(r.get("status") or "") == "Submitted"]
-    if reserved != sum(campaign_hold_minor(r) for r in waiting):
+    # Holds: what the debit gates hold back = what the Submitted rows themselves hold (the capture's read).
+    if reserved != _rows_hold_minor(conn, uid):
         findings.add("hold_without_submitted_request", user_id=uid)
+    waiting = [r for r in requests if not r["archived"] and str(r.get("status") or "") == "Submitted"]
     for request in waiting:
         if campaign_hold_minor(request) <= 0 or not str(request.get("submittedAt") or "").strip():
             findings.add("submitted_request_without_hold", request_ids=[request["id"]], user_id=uid)
@@ -284,6 +330,32 @@ def _check_owner(
                 and row["spendConfirmedAt"] and not override and returned > max(paid - int(row["spendMinorUSD"]), 0)
             ):
                 findings.add("refund_above_unspent", request_ids=[request_id], user_id=uid)
+
+    # Each Approved or Stopped request (archived included) against its own cycle's ledger rows.
+    pays = {pay["idempotencyKey"]: pay for pay in campaign_payments(ledger, uid)}
+    refunds = {
+        row["idempotencyKey"]: row for row in ledger
+        if row["currency"] == USD and row["toUserId"] == uid and row["fromUserId"] != uid
+        and row["idempotencyKey"].startswith("stoprefund:")
+    }
+    for request in requests:
+        status = str(request.get("status") or "")
+        if status not in ("Approved", "Stopped"):
+            continue
+        key = _campaign_payment_key(request)
+        pay = pays.get(key)
+        paid, pay_tx = minor(request.get("paidMinorUSD")), str(request.get("paymentTransactionId") or "").strip()
+        if pay is not None:
+            wrong = paid != int(pay["amountMinor"]) or pay_tx != pay["id"]
+        else:  # only a request from before the wallet may have no payment, and then it claims none
+            wrong = bool(paid or pay_tx) or minor(request.get("schemaVersion")) >= BUDGET_SCHEMA_VERSION
+        if wrong:
+            findings.add("request_payment_mismatch", request_ids=[request["id"]], user_id=uid)
+        if status == "Stopped":
+            refund = refunds.get(f"stoprefund:{key}")
+            expected = (int(refund["amountMinor"]), refund["id"]) if refund else (0, "")
+            if (minor(request.get("refundMinorUSD")), str(request.get("refundTransactionId") or "").strip()) != expected:
+                findings.add("request_refund_mismatch", request_ids=[request["id"]], user_id=uid)
 
     # Linked requests carry the studio code in their Meta campaign name (D26).
     for request in requests:
@@ -321,6 +393,7 @@ def scan_studio_money_report(
     *,
     owner_ids: Iterable[str] | None = None,
     stranded_minutes: int | None = None,
+    balance_minor: BalanceReader | None = None,
 ) -> dict[str, Any]:
     """``{"violations": [...], "checked": {"customers", "requests"}}`` (see the module docstring)."""
     now = now or datetime.now(timezone.utc)
@@ -328,10 +401,16 @@ def scan_studio_money_report(
     stranded = int(stranded_minutes or DEFAULT_STRANDED_MINUTES)
     scoped = None if owner_ids is None else [str(uid) for uid in owner_ids if str(uid or "")]
     findings = _Findings()
+    balance_of = balance_minor
+    if balance_of is None:
+        try:
+            balance_of = _jobs_balance_reader()
+        except Exception as error:  # the other checks still run; this one is a finding, never silence
+            findings.add("check_failed", check=f"wallet_balance:{type(error).__name__}")
     grouped = _load_requests(conn, scoped)
     for uid in sorted(grouped):
         try:
-            _check_owner(conn, findings, uid, grouped[uid], now, stranded)
+            _check_owner(conn, findings, uid, grouped[uid], now, stranded, balance_of)
         except Exception as error:  # one customer's unreadable rows must not hide everyone else's
             findings.add("check_failed", user_id=uid, check=f"wallet:{type(error).__name__}")
     scanned = None if scoped is None else {request["id"] for items in grouped.values() for request in items}
@@ -351,6 +430,9 @@ def scan_studio_money(
     *,
     owner_ids: Iterable[str] | None = None,
     stranded_minutes: int | None = None,
+    balance_minor: BalanceReader | None = None,
 ) -> list[dict[str, Any]]:
     """The violations list of scan_studio_money_report (empty when nothing is wrong)."""
-    return scan_studio_money_report(conn, now, owner_ids=owner_ids, stranded_minutes=stranded_minutes)["violations"]
+    return scan_studio_money_report(
+        conn, now, owner_ids=owner_ids, stranded_minutes=stranded_minutes, balance_minor=balance_minor,
+    )["violations"]

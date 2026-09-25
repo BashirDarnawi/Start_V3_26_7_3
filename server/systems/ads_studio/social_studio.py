@@ -289,11 +289,15 @@ def _entity_from_row(row: Any) -> dict[str, Any]:
     }
 
 
-def _public(entity: dict[str, Any]) -> dict[str, Any]:
+def _public(entity: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    """One row as ``user`` may see it: through studio_privacy.redact_staff_identity (P1-05), so a
+    customer never gets a staff id (a page's ``linkedBy`` admin becomes 'team'); staff see it as is."""
+    from .studio_privacy import redact_staff_identity  # late: studio_privacy imports this module
+
     data = {k: v for k, v in (entity.get("data") or {}).items() if k not in _PRIVATE_KEYS}
     data["id"] = str(entity.get("id") or data.get("id") or "")
     data["lastModified"] = int(entity.get("lastModified") or 0)
-    return data
+    return redact_staff_identity(data, user)
 
 
 def _rows(entity_type: str, owner_id: str | None, *, limit: int = 1000) -> list[dict[str, Any]]:
@@ -1518,7 +1522,7 @@ def create_social_studio_router(
     @router.get("/settings")
     def get_settings(ownerId: str = owner_query, user: dict[str, Any] = Depends(current_user_dependency)):
         scope = _scope(user, ctx, ownerId)
-        return _public(_settings_entity(ctx, scope.owner))
+        return _public(_settings_entity(ctx, scope.owner), user)
 
     @router.put("/settings")
     def put_settings(
@@ -1531,14 +1535,14 @@ def create_social_studio_router(
         entity = _settings_entity(ctx, scope.owner)
         clean = _clean_settings(ctx, scope.owner, body or {}, entity["data"])
         saved = ctx["patch_entity"](SETTINGS_TYPE, entity["id"], clean, scope.uid)
-        return _public(saved)
+        return _public(saved, user)
 
     # ---- rules ----------------------------------------------------------
     @router.get("/rules")
     def list_rules(ownerId: str = owner_query, user: dict[str, Any] = Depends(current_user_dependency)):
         scope = _scope(user, ctx, ownerId)
         rows = sorted(_rows(RULES_TYPE, scope.list_owner), key=lambda r: (int(r.get("createdAt") or 0), r["id"]))
-        return {"rules": [_public(r) for r in rows]}
+        return {"rules": [_public(r, user) for r in rows]}
 
     @router.post("/rules")
     def create_rule(
@@ -1553,7 +1557,7 @@ def create_social_studio_router(
         rule_id = new_id("srule")
         saved = ctx["upsert_entity"](RULES_TYPE, rule_id, clean, scope.owner, reject_existing=True)
         ctx["audit"](scope.uid, "create", RULES_TYPE, rule_id, f"Created auto-reply rule {clean['name']}", {"ownerId": scope.owner})
-        return _public(saved)
+        return _public(saved, user)
 
     @router.patch("/rules/{rule_id}")
     def update_rule(
@@ -1570,7 +1574,7 @@ def create_social_studio_router(
         clean = {**_clean_rule(ctx, owner_id, merged), "updatedAt": _iso_now()}
         saved = ctx["patch_entity"](RULES_TYPE, entity["id"], clean, scope.uid)
         ctx["audit"](scope.uid, "update", RULES_TYPE, entity["id"], "Updated auto-reply rule", {"ownerId": owner_id})
-        return _public(saved)
+        return _public(saved, user)
 
     @router.delete("/rules/{rule_id}")
     def delete_rule(
@@ -1590,7 +1594,7 @@ def create_social_studio_router(
     def list_pages(ownerId: str = owner_query, user: dict[str, Any] = Depends(current_user_dependency)):
         scope = _scope(user, ctx, ownerId)
         rows = sorted(_rows(PAGES_TYPE, scope.list_owner), key=lambda r: (int(r.get("createdAt") or 0), r["id"]))
-        return {"pages": [_public(r) for r in rows]}
+        return {"pages": [_public(r, user) for r in rows]}
 
     @router.get("/pages/available")
     def available_pages(user: dict[str, Any] = Depends(current_user_dependency)):
@@ -1676,7 +1680,7 @@ def create_social_studio_router(
         page_id = new_id("spg")
         saved = ctx["upsert_entity"](PAGES_TYPE, page_id, data, owner_id, reject_existing=True)
         ctx["audit"](scope.uid, "link", PAGES_TYPE, page_id, f"Linked {platform} page {meta_page_id}", {"ownerId": owner_id})
-        return _public(saved)
+        return _public(saved, user)
 
     @router.post("/pages/{page_id}/unlink")
     def unlink_page(page_id: str, request: Request, user: dict[str, Any] = Depends(current_user_dependency)):
@@ -1743,12 +1747,12 @@ def create_social_studio_router(
         status = status.strip().lower()
         if status and status not in ("draft", "scheduled", "publishing", "published", "failed"):
             raise HTTPException(status_code=400, detail="Unknown post status")
-        return {"posts": [_public(r) for r in _lean_posts(scope.list_owner, status)]}
+        return {"posts": [_public(r, user) for r in _lean_posts(scope.list_owner, status)]}
 
     @router.get("/posts/{post_id}")
     def get_post(post_id: str, ownerId: str = owner_query, user: dict[str, Any] = Depends(current_user_dependency)):
         scope = _scope(user, ctx, ownerId)
-        return _public(_load_owned(ctx, POSTS_TYPE, post_id, scope))
+        return _public(_load_owned(ctx, POSTS_TYPE, post_id, scope), user)
 
     @router.post("/posts")
     def create_post(
@@ -1766,7 +1770,7 @@ def create_social_studio_router(
         post_id = new_id("spost")
         saved = ctx["upsert_entity"](POSTS_TYPE, post_id, clean, scope.owner, reject_existing=True)
         ctx["audit"](scope.uid, "create", POSTS_TYPE, post_id, f"Created social post ({clean['status']})", {"ownerId": scope.owner})
-        return _public(saved)
+        return _public(saved, user)
 
     def _editable(entity: dict[str, Any]) -> None:
         if str(entity["data"].get("status") or "") not in POST_EDITABLE_STATUSES:
@@ -1794,7 +1798,7 @@ def create_social_studio_router(
         saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], clean, scope.uid,
                                     expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "update", POSTS_TYPE, entity["id"], f"Updated social post ({clean['status']})", {})
-        return _public(saved)
+        return _public(saved, user)
 
     @router.delete("/posts/{post_id}")
     def delete_post(
@@ -1824,7 +1828,7 @@ def create_social_studio_router(
         _editable(entity)
         if not _claim_post(ctx, entity, scope.uid):
             raise HTTPException(status_code=409, detail="The post changed while publishing. Refresh and try again.")
-        return _public(publish_post(entity["id"], actor_id=scope.uid))
+        return _public(publish_post(entity["id"], actor_id=scope.uid), user)
 
     @router.post("/posts/{post_id}/cancel")
     def cancel_post(
@@ -1840,7 +1844,7 @@ def create_social_studio_router(
         saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], {"status": "draft", "updatedAt": _iso_now()}, scope.uid,
                                     expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "cancel", POSTS_TYPE, entity["id"], "Cancelled scheduled social post", {})
-        return _public(saved)
+        return _public(saved, user)
 
     # ---- public signed media (fetched by Meta) ---------------------------
     @router.get("/media/{post_id}/{index}")

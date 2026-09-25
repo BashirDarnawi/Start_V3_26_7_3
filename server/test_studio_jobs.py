@@ -11,11 +11,11 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 import server.main as main_module
 from server import meta_ads, wallet_payments
-from server.db import db_conn, init_db, json_loads, now_ms
+from server.db import db_conn, get_engine, init_db, json_loads, now_ms
 from server.rate_limiter import reset_rate_limit
 from server.systems.ads_studio import social_studio, studio_integrity, studio_jobs
 from server.systems.ads_studio.studio_jobs import (
@@ -296,6 +296,33 @@ def test_review_due_at_counts_working_days():
     assert review_due_at(sunday.isoformat(), 1, {"week": {}, "holidays": []}) is None  # never open: never due
 
 
+def test_waiting_check_reads_only_the_submitted_requests(staff):
+    """The 5-minute check filters the status in SQL: it never parses every live request (images included)."""
+    user = _customer("waiting-sql")
+    _credit(staff, user["id"], 5_000)
+    draft, waiting = _create(user, 1_200), _create(user, 1_300)
+    assert _submit(user, waiting).status_code == 200
+    with db_conn() as conn:
+        rows = conn.execute(text(studio_jobs.waiting_requests_sql())).mappings().all()
+    ids = {row["id"] for row in rows}
+    assert waiting in ids and draft not in ids and {row["f_status"] for row in rows} == {"Submitted"}
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        check_waiting_requests(_now())
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    reads = [statement for statement in statements if CAMPAIGNS in statement]
+    assert reads == [studio_jobs.waiting_requests_sql()], reads  # one read, the filtered one
+    # Literal type and status: the partial index idx_ad_campaign_requests_status (add_jsonb_indexes.py) matches it.
+    assert f"type = '{CAMPAIGNS}' AND deleted = false AND " in reads[0] and "= 'Submitted'" in reads[0]
+
+
 def test_review_overdue_alert(staff):
     user = _customer("overdue")
     _credit(staff, user["id"], 5_000)
@@ -440,10 +467,54 @@ def test_the_loop_is_off_under_pytest_and_by_its_switch(monkeypatch):
     assert studio_jobs.jobs_enabled() is True  # default on, Meta or not
 
 
-def test_the_studio_router_starts_and_stops_the_loop():
-    startup = [getattr(handler, "__name__", "") for handler in main_module.app.router.on_startup]
-    shutdown = [getattr(handler, "__name__", "") for handler in main_module.app.router.on_shutdown]
-    assert startup.count("_start_studio_jobs") == 1 and shutdown.count("_stop_studio_jobs") == 1
+class _RunningLoop:
+    """Stands for the loop's thread: alive, and it counts how often shutdown waits for it."""
+
+    def __init__(self):
+        self.joins: list[float | None] = []
+
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout=None) -> None:
+        self.joins.append(timeout)
+
+
+def test_the_studio_router_starts_and_stops_the_loop(monkeypatch):
+    """Counted under the real app's lifespan (TestClient(app)): FastAPI copies a nested router's hooks into
+    every router above it AND runs each router's own lifespan, so the studio jobs hooks run three times
+    (the app, the /api/studio router, the jobs router). Only the first stop waits for the loop, on the
+    event loop; the others just set the stop flag."""
+    from fastapi.testclient import TestClient
+
+    from server import operations
+
+    app = main_module.app
+    # Only the studio jobs hooks do anything here: the app's own startup/shutdown (database work, closing
+    # the engine the rest of the suite uses) and the other workers are left out of this lifespan.
+    monkeypatch.setattr(app.router, "on_startup", [h for h in app.router.on_startup if h.__name__ == "_start_studio_jobs"])
+    monkeypatch.setattr(app.router, "on_shutdown", [h for h in app.router.on_shutdown if h.__name__ == "_stop_studio_jobs"])
+    for module, names in ((operations, ("start_operations_worker", "stop_operations_worker")),
+                          (meta_ads, ("start_meta_ads_worker", "stop_meta_ads_worker")),
+                          (social_studio, ("start_social_studio_worker", "stop_social_studio_worker"))):
+        for name in names:
+            monkeypatch.setattr(module, name, lambda: None)
+    starts, stops = [], []
+    real_stop = studio_jobs.stop_studio_jobs
+    monkeypatch.setattr(studio_jobs, "start_studio_jobs", lambda provider: starts.append(provider) or False)
+    monkeypatch.setattr(studio_jobs, "stop_studio_jobs", lambda *args, **kwargs: stops.append(1) or real_stop(*args, **kwargs))
+    loop = _RunningLoop()
+    with TestClient(app):
+        assert len(starts) == 3 and stops == []
+        assert set(studio_jobs.WALLET_CTX_KEYS) <= set(starts[0]())  # the provider reaches main's helpers
+        monkeypatch.setattr(studio_jobs, "_THREAD", loop)  # as if the first start had started the loop
+        monkeypatch.setattr(studio_jobs, "_STOP", threading.Event())
+        monkeypatch.setattr(studio_jobs, "_STOP_JOINED", False)
+    assert len(stops) == 3, stops
+    assert loop.joins == [2.0]  # one wait of at most 2 s, not three
+    assert studio_jobs._STOP.is_set()
+    studio_jobs.stop_studio_jobs()  # a later stop never waits again until the next start
+    assert loop.joins == [2.0]
 
 
 # ------------------------------------------------------------------ records and the admin read
@@ -512,7 +583,8 @@ def test_admin_alerts_route(staff):
         if not cursor:
             break
     assert len(seen) == len(set(seen)) and seen[:3] == [ids[2], ids[1], ids[0]]
-    for params in ({"limit": 0}, {"limit": 51}, {"limit": "x"}, {"before": "nope"}, {"before": "12:"}):
+    for params in ({"limit": 0}, {"limit": 51}, {"limit": "x"}, {"limit": "²"}, {"limit": "١٠"}, {"before": "nope"},
+                   {"before": "12:"}):
         refused = client.get("/api/studio/admin/alerts", params=params, cookies=admin["cookies"])
         assert refused.status_code == 400 and refused.json()["detail"]["code"] == "INVALID_VALUE", params
 

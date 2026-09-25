@@ -391,6 +391,59 @@ def test_customer_never_sees_staff_ids(staff):
     assert stored["reviewedBy"] == reviewer["id"]
 
 
+def _add_stamp(entity_type: str, entity_id: str, **fields) -> None:
+    """Write fields straight into a stored row, as a later release could."""
+    with db_conn() as conn:
+        raw = conn.execute(text("SELECT data_json FROM entities WHERE type = :t AND id = :id"),
+                           {"t": entity_type, "id": entity_id}).scalar()
+        conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                     {"d": json_dumps({**json_loads(raw), **fields}), "t": entity_type, "id": entity_id})
+
+
+def test_social_studio_answers_never_name_the_admin(staff):
+    """GET /api/social-studio/pages gave the customer ``linkedBy`` = the admin's id. Every customer answer
+    of the Social Studio routes now passes through the same redaction (settings, rules, pages, posts)."""
+    admin = staff["admin"]
+    user = _customer(staff, "social")
+    api = "/api/social-studio"
+    linked = client.post(f"{api}/pages/link", json={
+        "ownerId": user["id"], "metaPageId": f"52{secrets.randbelow(10**11):011d}", "platform": "fb", "name": "Privacy page",
+    }, cookies=admin["cookies"])
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["linkedBy"] == admin["id"]  # the admin's own answer keeps the stamp
+    page_id = linked.json()["id"]
+    pages = _get(user, f"{api}/pages")
+    (page,) = pages.json()["pages"]
+    assert page["id"] == page_id and page["linkedBy"] == TEAM_ID and page["ownerId"] == user["id"]
+    assert admin["id"] not in pages.text
+    admin_pages = _get(admin, f"{api}/pages?ownerId={user['id']}").json()["pages"]
+    assert [item["linkedBy"] for item in admin_pages] == [admin["id"]]
+
+    # The other answers: a staff stamp a later release might add to a settings row, a rule or a post.
+    settings_id = _get(user, f"{api}/settings").json()["id"]
+    rule = client.post(f"{api}/rules", json={"name": "Thanks", "platform": "fb", "trigger": "every",
+                                             "publicReply": "Thanks!"}, cookies=user["cookies"])
+    post = client.post(f"{api}/posts", json={"pageIds": [page_id], "caption": "Hello Tripoli"}, cookies=user["cookies"])
+    assert rule.status_code == 200 and post.status_code == 200, (rule.text, post.text)
+    _add_stamp("socialStudioSettings", settings_id, checkedBy=admin["id"])
+    _add_stamp("socialReplyRules", rule.json()["id"], editedBy=admin["id"])
+    _add_stamp("socialPosts", post.json()["id"], approvedBy=admin["id"])
+    answers = {
+        "settings": _get(user, f"{api}/settings"),
+        "rules": _get(user, f"{api}/rules"),
+        "posts": _get(user, f"{api}/posts"),
+        "post": _get(user, f"{api}/posts/{post.json()['id']}"),
+        "pages": _get(user, f"{api}/pages"),
+    }
+    for label, response in answers.items():
+        assert admin["id"] not in response.text, label
+    assert answers["settings"].json()["checkedBy"] == TEAM_ID
+    assert answers["rules"].json()["rules"][0]["editedBy"] == TEAM_ID
+    assert answers["posts"].json()["posts"][0]["approvedBy"] == answers["post"].json()["approvedBy"] == TEAM_ID
+    admin_post = _get(admin, f"{api}/posts/{post.json()['id']}?ownerId={user['id']}").json()
+    assert admin_post["approvedBy"] == admin["id"]  # staff still see who did it
+
+
 def test_studio_summaries_pass_through_the_redaction(staff, monkeypatch):
     """The two summary routes redact their whole answer, so a staff stamp added later never leaks."""
     user = _customer(staff, "summaries")

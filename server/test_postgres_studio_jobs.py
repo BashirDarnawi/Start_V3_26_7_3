@@ -11,10 +11,10 @@ scenario runs the application in a child process inside its own random schema, d
 * ``campaign_orphan_sweep``: two sweeps racing over one orphan capture; the sweep against an
   archive (each holds the campaign row first, in turn); the sweep against a send-back's own return
   (each takes the ``rel:`` key first, in turn); two checks racing over an interrupted approval (one
-  alert, the capture never returned, the approval then reuses it); two ticks racing for the same
-  claims; the daily money check on one PostgreSQL snapshot. Every race finishes inside the 5 s
-  lock_timeout (no deadlock: PLAN.md §7.8 lock table), exactly one return per payment cycle, and the
-  wallet identity holds after each.
+  alert, the capture never returned, the approval then reuses it); the 5-minute check's read served by
+  its startup index; two ticks racing for the same claims; the daily money check on one PostgreSQL
+  snapshot. Every race finishes inside the 5 s lock_timeout (no deadlock: PLAN.md §7.8 lock table),
+  exactly one return per payment cycle, and the wallet identity holds after each.
 * ``studio_system_alert_insert``: a system alert with ``created_by`` NULL is stored; the same row with
   ``created_by = 'system'`` breaks the users.id foreign key (why the rule exists, PLAN.md §7.1); a
   made-up owner is stored as NULL; two processes raising the same alert at once make one row.
@@ -237,6 +237,20 @@ def _campaign_orphan_sweep(j, staff) -> None:
     assert (usd["inAdsMinor"], usd["availableMinor"]) == (2_000, 3_000)
     with db_conn() as conn:
         assert studio_integrity.scan_studio_money(conn, j._now(20)) == []  # everything above is consistent
+
+    # 4b. The 5-minute check reads only the Submitted rows through the startup index (add_jsonb_indexes.py).
+    import contextlib
+    import io
+
+    from server.add_jsonb_indexes import add_jsonb_indexes
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        add_jsonb_indexes()
+    with db_conn() as conn:
+        conn.execute(text("ANALYZE entities"))
+        conn.execute(text("SET LOCAL enable_seqscan = off"))
+        plan = "\n".join(conn.execute(text("EXPLAIN " + studio_jobs.waiting_requests_sql())).scalars())
+    assert "idx_ad_campaign_requests_status" in plan, plan
 
     # 5. Two ticks at the same moment claim each due job once (the version-checked state row).
     runs: list[str] = []

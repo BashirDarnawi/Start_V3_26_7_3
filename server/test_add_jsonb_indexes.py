@@ -68,6 +68,26 @@ def test_composite_delivery_person_index_is_created_in_its_own_connection(monkey
     assert "IF NOT EXISTS" in ddl
 
 
+def test_studio_waiting_requests_status_index(monkeypatch):
+    """The studio jobs loop reads the live Submitted requests every 5 minutes
+    (studio_jobs.waiting_requests_sql: literal type, deleted and status); this
+    partial expression index serves exactly that predicate."""
+    connections = []
+    monkeypatch.setattr(module, "get_engine", lambda: _Engine("postgresql"))
+    monkeypatch.setattr(module, "db_conn", _recording_db_conn(connections))
+
+    module.add_jsonb_indexes()
+
+    found = [statements for statements in connections if any("idx_ad_campaign_requests_status" in s for s in statements)]
+    assert len(found) == 1 and len(found[0]) == 3, connections  # its own connection: 2 SET LOCAL + the DDL
+    ddl = " ".join(found[0][-1].split())
+    assert ddl == (
+        "CREATE INDEX IF NOT EXISTS idx_ad_campaign_requests_status "
+        "ON entities (((data_json::jsonb->>'status'))) "
+        "WHERE type = 'adCampaignRequests' AND deleted = false"
+    )
+
+
 def test_index_pass_is_a_no_op_on_sqlite(monkeypatch):
     connections = []
     monkeypatch.setattr(module, "get_engine", lambda: _Engine("sqlite"))

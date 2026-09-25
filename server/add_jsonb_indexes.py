@@ -65,6 +65,10 @@ def add_jsonb_indexes():
         ("idx_wallet_to_user", "walletTransactions", "((data_json::jsonb->>'toUserId'))"),
         ("idx_wallet_from_user", "walletTransactions", "((data_json::jsonb->>'fromUserId'))"),
         ("idx_wallet_idempotency", "walletTransactions", "((data_json::jsonb->>'idempotencyKey'))"),
+
+        # Albayan Studio: the jobs loop reads the live Submitted requests every 5 minutes
+        # (studio_jobs.waiting_requests_sql); without this it parsed every request, images included.
+        ("idx_ad_campaign_requests_status", "adCampaignRequests", "((data_json::jsonb->>'status'))"),
     ]
     
     # FINANCIAL-INTEGRITY GUARANTEE: receipt numbers must be unique.

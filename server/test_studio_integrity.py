@@ -1,12 +1,14 @@
 """Albayan Studio money integrity scan (plan task P1-07b; PLAN.md §7.8 "Integrity checks").
 
 A clean lifecycle (charge, submit, approve, link, Meta spend, settle, send back after an interrupted
-approval, reject, a request still waiting) reports nothing; every check is then seeded with the
-violation it must find. The suite shares one database, so each scan is limited to this module's own
-customers (``owner_ids``) unless a test says otherwise.
+approval, reject, a request still waiting) reports nothing, and so does every point of random
+sequences of real route calls; every check is then seeded with the violation it must find, on each
+of the two independent sources it compares. The suite shares one database, so each scan is limited
+to this module's own customers (``owner_ids``) unless a test says otherwise.
 """
 
 import json
+import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -14,7 +16,8 @@ from sqlalchemy import text
 
 import server.main as main_module
 from server import wallet_payments
-from server.db import db_conn, init_db, json_dumps, now_ms
+from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
+from server.rate_limiter import reset_rate_limit
 from server.systems.ads_studio import studio_integrity
 from server.systems.ads_studio.studio_integrity import (
     MAX_IDS,
@@ -28,12 +31,14 @@ from server.systems.ads_studio.studio_results import write_results_row
 from server.test_studio_wallet import (
     _archive,
     _campaign_data,
+    _charge,
     _create,
     _crash_capture,
     _credit,
     _customer,
     _force,
     _insert_user,
+    _last_modified,
     _link,
     _meta_id,
     _review,
@@ -41,6 +46,7 @@ from server.test_studio_wallet import (
     _submit,
     _uid,
     CAMPAIGNS,
+    client,
 )
 from server.wallet_payments import _campaign_payment_key, wallet_ledger_rows
 
@@ -188,6 +194,215 @@ def test_studio_money_checks_duplicate_and_excess_returns(staff):
     assert found["duplicate_return"]["requestIds"] == [campaign_id]
 
 
+# ------------------------------------------------------------------ each request against its own ledger rows
+
+def _seed(campaign_id: str, **fields) -> None:
+    with main_module._SQLITE_ENTITY_PATCH_LOCK, db_conn() as conn:
+        _force(campaign_id, conn, **fields)
+
+
+def test_studio_money_checks_request_payment_mismatch(staff):
+    user = _customer("paid-fields")
+    _credit(staff, user["id"], 9_000)
+    approved = _approved(staff, user, 2_000)
+    stopped = _approved(staff, user, 1_300)
+    assert _stop(staff["reviewer"]["cookies"], stopped, refund=300).status_code == 200
+    assert _scan([user["id"]]) == []
+    for campaign_id in (approved, stopped):
+        pay, data = _cpay_row(user["id"], campaign_id), _campaign_data(campaign_id)
+        assert (data["paidMinorUSD"], data["paymentTransactionId"]) == (pay["amountMinor"], pay["id"])
+        for fields in ({"paidMinorUSD": pay["amountMinor"] + 100}, {"paymentTransactionId": _uid("tx_other")},
+                       {"paymentTransactionId": ""}):
+            _seed(campaign_id, **fields)
+            found = _codes(_scan([user["id"]]))
+            assert set(found) == {"request_payment_mismatch"}, (campaign_id, fields, found)
+            assert found["request_payment_mismatch"]["requestIds"] == [campaign_id]
+            assert found["request_payment_mismatch"]["labels"]["ar"]
+            _seed(campaign_id, paidMinorUSD=pay["amountMinor"], paymentTransactionId=pay["id"])
+    assert _scan([user["id"]]) == []
+
+    # A request approved before the wallet existed never paid and claims no payment: not judged.
+    legacy = _create(user, 1_500)
+    _seed(legacy, status="Approved", submittedAt="2026-07-01T10:00:00Z", schemaVersion=None, paidMinorUSD=None,
+          paymentTransactionId=None)
+    assert _scan([user["id"]]) == []
+    # One that says it paid, or one sent from P1 on (it paid on approval), must have its cycle's payment.
+    for fields in ({"paymentTransactionId": _uid("tx_never_written")}, {"paidMinorUSD": 1_500}, {"schemaVersion": 2}):
+        _seed(legacy, **fields)
+        found = _codes(_scan([user["id"]]))
+        assert set(found) == {"request_payment_mismatch"} and found["request_payment_mismatch"]["requestIds"] == [legacy]
+        _seed(legacy, schemaVersion=None, paidMinorUSD=None, paymentTransactionId=None)
+    assert _scan([user["id"]]) == []
+
+
+def test_studio_money_checks_request_refund_mismatch(staff):
+    user = _customer("refund-fields")
+    _credit(staff, user["id"], 9_000)
+    refunded, kept = _approved(staff, user, 2_000), _approved(staff, user, 1_200)
+    assert _stop(staff["reviewer"]["cookies"], refunded, refund=1_500).status_code == 200
+    assert _stop(staff["reviewer"]["cookies"], kept, refund=0).status_code == 200  # all spent: no refund row
+    assert _scan([user["id"]]) == []
+    key = f"stoprefund:{_campaign_payment_key(_campaign_data(refunded))}"
+    with db_conn() as conn:
+        row = next(r for r in wallet_ledger_rows(conn, user["id"]) if r["idempotencyKey"] == key)
+    assert (_campaign_data(refunded)["refundMinorUSD"], _campaign_data(refunded)["refundTransactionId"]) == (1_500, row["id"])
+    for campaign_id, fields, restore in (
+        (refunded, {"refundMinorUSD": 1_400}, {"refundMinorUSD": 1_500}),
+        (refunded, {"refundTransactionId": ""}, {"refundTransactionId": row["id"]}),
+        (kept, {"refundMinorUSD": 100}, {"refundMinorUSD": 0}),
+        (kept, {"refundTransactionId": _uid("tx_never_written")}, {"refundTransactionId": ""}),
+    ):
+        _seed(campaign_id, **fields)
+        found = _codes(_scan([user["id"]]))
+        assert set(found) == {"request_refund_mismatch"}, (campaign_id, fields, found)
+        assert found["request_refund_mismatch"]["requestIds"] == [campaign_id]
+        _seed(campaign_id, **restore)
+    assert _archive(user, refunded).status_code == 200  # archived requests are judged too
+    _seed(refunded, refundMinorUSD=900)
+    assert set(_codes(_scan([user["id"]]))) == {"request_refund_mismatch"}
+    _seed(refunded, refundMinorUSD=1_500)
+    assert _scan([user["id"]]) == []
+
+
+# ------------------------------------------------------------------ random clean sequences of real route calls
+
+def _review_at(staff, campaign_id: str, decision: str, expected: int):
+    return client.post(f"/api/ad-studio/campaigns/{campaign_id}/review", json={
+        "expectedLastModified": expected, "decision": decision, "note": "" if decision == "Approved" else "Fix the photo",
+        "operationId": _uid("review-op"), "reviewReasonCode": "" if decision == "Approved" else "creative_quality",
+    }, cookies=staff["reviewer"]["cookies"])
+
+
+def _reset_image_checks(*user_ids: str) -> None:
+    """Each submit and approval re-checks the images (24 a minute per account): a budget, not under test here."""
+    for user_id in user_ids:
+        reset_rate_limit(f"ad-studio:media:{user_id}")
+
+
+def _fuzz_step(rng: random.Random, staff, users: list[dict], campaigns: dict[str, dict]) -> str:
+    user = rng.choice(users)
+    _reset_image_checks(staff["reviewer"]["id"], user["id"])
+    mine =[c for c in campaigns.values() if c["owner"] == user["id"] and not c["archived"]]
+
+    def pick(*statuses, **flags):
+        found = [c for c in mine if c["status"] in statuses and all(c[k] == v for k, v in flags.items())]
+        return rng.choice(found) if found else None
+
+    weights = {"credit": 1, "charge": 1, "transfer": 1, "submit_new": 3}
+    if pick("Submitted"):
+        weights.update(approve=4, send_back=1, withdraw=1, stale_approve=1)
+    if pick("Draft", "Changes Requested"):
+        weights["resubmit"] = 2
+    if pick("Approved"):
+        weights["settle"] = 2
+    if pick("Approved", linked=False):
+        weights.update(link=2, self_stop=1)
+    if pick("Draft", "Changes Requested", "Rejected", "Stopped"):
+        weights["archive"] = 1
+    ops = sorted(weights)
+    op = rng.choices(ops, weights=[weights[name] for name in ops])[0]
+    if op == "credit":
+        _credit(staff, user["id"], rng.randint(500, 9_000))
+    elif op == "charge":
+        _charge(staff, user, rng.randint(100, 6_000))
+    elif op == "transfer":
+        other = rng.choice([u for u in users if u is not user])
+        response = client.post("/api/wallet/transfers", json={
+            "toUserId": other["id"], "amountMinor": rng.randint(100, 3_000), "currency": "USD", "idempotencyKey": _uid("fz-t"),
+        }, cookies=user["cookies"])
+        assert response.status_code in (200, 409), response.text
+    elif op == "submit_new":
+        budget = rng.randint(1_500, 5_000)
+        campaign_id = _create(user, budget)
+        campaigns[campaign_id] = {"id": campaign_id, "owner": user["id"], "budget": budget, "status": "Draft",
+                                  "archived": False, "linked": False, "spend": 0}
+        response = _submit(user, campaign_id)
+        assert response.status_code in (200, 409), response.text  # 409: not enough available
+        if response.status_code == 200:
+            campaigns[campaign_id]["status"] = "Submitted"
+    elif op == "resubmit":
+        campaign = pick("Draft", "Changes Requested")
+        response = _submit(user, campaign["id"])
+        assert response.status_code in (200, 409), response.text
+        if response.status_code == 200:
+            campaign["status"] = "Submitted"
+    elif op == "approve":
+        campaign = pick("Submitted")
+        response = _review(staff, campaign["id"], "Approved")
+        assert response.status_code == 200, response.text
+        campaign["status"] = "Approved"
+    elif op == "stale_approve":
+        # A reviewer's page loaded before the request's last change: refused before any capture.
+        campaign = pick("Submitted")
+        with db_conn() as conn:
+            before = sorted(row["id"] for row in wallet_ledger_rows(conn, user["id"]))
+        response = _review_at(staff, campaign["id"], "Approved", _last_modified(campaign["id"]) - 1)
+        assert response.status_code == 409 and response.json()["detail"] == "Conflict: record has changed", response.text
+        with db_conn() as conn:
+            assert sorted(row["id"] for row in wallet_ledger_rows(conn, user["id"])) == before  # nothing captured
+    elif op == "send_back":
+        campaign = pick("Submitted")
+        decision = rng.choice(["Changes Requested", "Rejected"])
+        assert _review(staff, campaign["id"], decision).status_code == 200
+        campaign["status"] = decision
+    elif op == "withdraw":
+        campaign = pick("Submitted")
+        response = client.post(f"/api/ad-studio/campaigns/{campaign['id']}/withdraw", json={
+            "expectedLastModified": _last_modified(campaign["id"]), "operationId": _uid("fz-w"),
+        }, cookies=user["cookies"])
+        assert response.status_code == 200, response.text
+        campaign["status"] = "Draft"
+    elif op == "link":
+        campaign = pick("Approved", linked=False)
+        meta_id = _meta_id()
+        assert _link(staff, campaign["id"], meta_id).status_code == 200
+        campaign.update(linked=True, spend=rng.randint(0, campaign["budget"]))
+        _results(campaign["id"], user["id"], meta_id, campaign["spend"])
+    elif op == "settle":
+        campaign = pick("Approved")
+        refund = rng.randint(0, campaign["budget"] - campaign["spend"])  # never above paid - Meta's confirmed spend
+        assert _stop(staff["reviewer"]["cookies"], campaign["id"], refund=refund).status_code == 200
+        campaign["status"] = "Stopped"
+    elif op == "self_stop":
+        campaign = pick("Approved", linked=False)
+        response = _stop(user["cookies"], campaign["id"])
+        assert response.status_code == 200, response.text  # not started yet: the whole budget comes back
+        campaign["status"] = "Stopped"
+    elif op == "archive":
+        campaign = pick("Draft", "Changes Requested", "Rejected", "Stopped")
+        assert _archive(user, campaign["id"]).status_code == 200
+        campaign["archived"] = True
+    return op
+
+
+FUZZ_SEEDS = (5, 17)
+FUZZ_STEPS = 40
+FUZZ_OPERATIONS = {
+    "credit", "charge", "transfer", "submit_new", "resubmit", "approve", "stale_approve", "send_back", "withdraw",
+    "link", "settle", "self_stop", "archive",
+}
+
+
+def test_random_clean_route_sequences_report_nothing(staff):
+    """Any sequence of real route calls leaves money the scan finds nothing wrong with, at every step, even
+    judged two hours later (an approval half done or a return on its way would be found by then)."""
+    ran: set[str] = set()
+    for seed in FUZZ_SEEDS:
+        rng = random.Random(seed)
+        users = [_customer(f"fuzz{seed}a"), _customer(f"fuzz{seed}b")]
+        for user in users:
+            _credit(staff, user["id"], rng.randint(6_000, 15_000))
+        campaigns: dict[str, dict] = {}
+        done: list[str] = []
+        for number in range(FUZZ_STEPS):
+            done.append(_fuzz_step(rng, staff, users, campaigns))
+            assert _scan([user["id"] for user in users], 120) == [], (seed, number, done[-5:])
+        ran.update(done)
+        assert any(c["status"] in ("Approved", "Stopped") for c in campaigns.values()), (seed, done)
+    _reset_image_checks(staff["reviewer"]["id"])
+    assert ran == FUZZ_OPERATIONS, sorted(FUZZ_OPERATIONS - ran)  # together the sequences used every operation
+
+
 # ------------------------------------------------------------------ refunds and Meta spend
 
 def test_studio_money_checks_refund_above_unspent(staff):
@@ -240,10 +455,42 @@ def test_studio_money_checks_hold_without_submitted_request(staff, monkeypatch):
     campaign_id = _create(user, 1_200)
     assert _submit(user, campaign_id).status_code == 200
     assert _scan([user["id"]]) == []
+    # The debit gates hold back more than the requests themselves hold.
     real = studio_integrity.wallet_campaign_holds_minor
-    monkeypatch.setattr(studio_integrity, "wallet_campaign_holds_minor", lambda conn, uid: real(conn, uid) + 700)
-    found = _codes(_scan([user["id"]]))
+    with monkeypatch.context() as patch:
+        patch.setattr(studio_integrity, "wallet_campaign_holds_minor", lambda conn, uid: real(conn, uid) + 700)
+        found = _codes(_scan([user["id"]]))
     assert "hold_without_submitted_request" in found and found["hold_without_submitted_request"]["userIds"] == [user["id"]]
+    assert _scan([user["id"]]) == []
+
+
+def test_hold_check_reads_the_rows_apart_from_the_gates(staff):
+    """The two sides really are two readers: a row whose JSON repeats "status" is Submitted to the gates'
+    SQL projection (SQLite json_extract takes the first key) and Draft to the capture's read of the row
+    (Python keeps the last key). The gates hold its budget; its approval could never capture it."""
+    user = _customer("hold-readers")
+    _credit(staff, user["id"], 5_000)
+    campaign_id = _create(user, 1_200)
+    assert _submit(user, campaign_id).status_code == 200
+    with db_conn() as conn:
+        if conn.dialect.name != "sqlite":
+            pytest.skip("PostgreSQL jsonb keeps one key per name: both readers agree there")
+        raw = conn.execute(text("SELECT data_json FROM entities WHERE type = :t AND id = :id"),
+                           {"t": CAMPAIGNS, "id": campaign_id}).scalar()
+        assert json_loads(raw)["status"] == "Submitted" and raw.rstrip().endswith("}")
+        conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                     {"d": raw.rstrip()[:-1] + ', "status": "Draft"}', "t": CAMPAIGNS, "id": campaign_id})
+    try:
+        with db_conn() as conn:
+            assert wallet_payments.wallet_campaign_holds_minor(conn, user["id"]) == 1_200  # the gates still hold it
+        found = _codes(_scan([user["id"]]))
+        assert set(found) == {"hold_without_submitted_request"}, found
+        assert found["hold_without_submitted_request"]["userIds"] == [user["id"]]
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("UPDATE entities SET data_json = :d WHERE type = :t AND id = :id"),
+                         {"d": raw, "t": CAMPAIGNS, "id": campaign_id})
+    assert _scan([user["id"]]) == []
 
 
 # ------------------------------------------------------------------ the wallet identity
@@ -261,19 +508,55 @@ def test_studio_money_checks_negative_available(staff):
 
 
 def test_studio_money_checks_identity_break(staff, monkeypatch):
+    """The wallet screen's numbers against main's own SQL balance (the debit gates' number): a fault on
+    either side is found."""
     user = _customer("identity")
     _credit(staff, user["id"], 4_000)
+    _charge(staff, user, 1_500)
     _approved(staff, user, 1_200)
     assert _scan([user["id"]]) == []
-    real = studio_integrity.compute_wallet_summary
+    with db_conn() as conn:
+        assert main_module._wallet_balance_minor(conn, user["id"], "USD") == 4_300  # the side the scan compares with
+    # 1. The summary puts one row in the wrong bucket.
+    real_summary = studio_integrity.compute_wallet_summary
 
     def broken(*args, **kwargs):
-        summary = real(*args, **kwargs)
+        summary = real_summary(*args, **kwargs)
         summary["usd"]["spentMinor"] += 1
         return summary
 
-    monkeypatch.setattr(studio_integrity, "compute_wallet_summary", broken)
-    assert set(_codes(_scan([user["id"]]))) == {"wallet_identity_break"}
+    with monkeypatch.context() as patch:
+        patch.setattr(studio_integrity, "compute_wallet_summary", broken)
+        assert set(_codes(_scan([user["id"]]))) == {"wallet_identity_break"}
+    # 2. The summary's ledger reader misses a row that the gates count (the charge's credit).
+    real_rows = studio_integrity.wallet_ledger_rows
+    with monkeypatch.context() as patch:
+        patch.setattr(studio_integrity, "wallet_ledger_rows",
+                      lambda conn, uid: [row for row in real_rows(conn, uid) if not row["idempotencyKey"].startswith("payreq:")])
+        found = _codes(_scan([user["id"]]))
+    assert set(found) == {"wallet_identity_break"} and found["wallet_identity_break"]["userIds"] == [user["id"]]
+    # 3. The gates' balance itself is off.
+    with db_conn() as conn:
+        off = scan_studio_money(conn, _now(), owner_ids=[user["id"]],
+                                balance_minor=lambda c, uid, cur: main_module._wallet_balance_minor(c, uid, cur) + 1)
+    assert set(_codes(off)) == {"wallet_identity_break"}
+    assert _scan([user["id"]]) == []
+
+
+def test_identity_check_that_cannot_reach_the_balance_is_a_finding(staff, monkeypatch):
+    user = _customer("identity-nobalance")
+    _credit(staff, user["id"], 5_000)
+    campaign_id = _create(user, 1_200)
+    assert _submit(user, campaign_id).status_code == 200
+    _crash_capture(staff, campaign_id)
+
+    def unreachable():
+        raise RuntimeError("the jobs ctx is not there")
+
+    monkeypatch.setattr(studio_integrity, "_jobs_balance_reader", unreachable)
+    found = _codes(_scan([user["id"]], 16))
+    assert set(found) == {"check_failed", "capture_without_approval"}  # the other checks still ran
+    assert found["check_failed"]["checks"] == ["wallet_balance:RuntimeError"]
 
 
 # ------------------------------------------------------------------ Studio / core separation (D26)

@@ -814,6 +814,15 @@ def create_ad_campaign_actions_router(
         )
         if decision == "Approved":
             with _wallet_guard, db_conn() as conn:
+                # A stale page (the request changed since the reviewer loaded it, e.g. withdrawn and sent
+                # again) never captures: its status write would lose after the capture, and a capture of
+                # the cycle the request still waits in is kept (P1-03b), holding the budget twice.
+                live_modified = conn.execute(
+                    text("SELECT last_modified FROM entities WHERE type = :type AND id = :id AND deleted = false LIMIT 1"),
+                    {"type": AD_CAMPAIGN_COLLECTION, "id": campaign_id},
+                ).scalar()
+                if live_modified is None or int(live_modified) != int(body.expectedLastModified):
+                    raise HTTPException(status_code=409, detail="Conflict: record has changed")
                 wallet_payment_tx = capture_campaign_budget(
                     conn,
                     ctx,

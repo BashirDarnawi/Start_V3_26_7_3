@@ -29,7 +29,8 @@ remembered in ``studioJobState.lastError`` and runs again at its next turn, and 
   request is STILL Submitted in that cycle (the approval's status write never happened) raises the
   alert and is NEVER returned by this loop: approving that cycle again reuses the capture
   (capture_campaign_budget replays its ``cpay:`` key), so returning it would give the ad away. Staff
-  approve it or send it back (the send-back returns it).
+  approve it or send it back (the send-back returns it). This check and the next read only the live
+  Submitted requests: the database filters them (waiting_requests_sql, an index on PostgreSQL).
 * **Overdue reviews** (every 5 minutes): a request Submitted longer than the review target
   (``targets.reviewBusinessDays``, counted on the working days of the ``hours`` setting, holidays
   skipped) raises ``review_overdue`` (a kind next to ``stop_request_overdue`` and
@@ -57,10 +58,10 @@ Records (router-only types: the generic /api/collections API refuses both):
 (20 by default), ``before`` = the ``nextBefore`` of the previous page; ``jobs`` = jobs_heartbeat().
 Diagnostics shows the same heartbeat; it is ``late`` after 5 minutes (§7.4).
 
-The wallet helpers (locks, idempotency lookups, the ledger insert, audit) come from main.py through
-a router ctx (D36: never an import of main.py): the /api/studio router's own ctx when it carries
-them, else the ctx main.py gives the Ads Studio routers (social_studio._ctx(), which spreads main's
-_WALLET_PAYMENTS_CTX).
+The wallet helpers (locks, idempotency lookups, the ledger insert, audit, the SQL balance the daily
+scan checks the wallet screen against) come from main.py through a router ctx (D36: never an import
+of main.py): the /api/studio router's own ctx when it carries them, else the ctx main.py gives the
+Ads Studio routers (social_studio._ctx(), which spreads main's _WALLET_PAYMENTS_CTX).
 """
 
 import math
@@ -75,7 +76,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 
-from ...db import db_conn, json_dumps, json_fields_select_sql, json_loads, now_ms
+from ...db import db_conn, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from ...rate_limiter import check_rate_limit
 from ...wallet_payments import (
     _campaign_payment_key,
@@ -139,12 +140,13 @@ LEFT_CYCLE_STATUSES = frozenset({"Draft", "Changes Requested", "Rejected"})
 # What the loop needs from main.py (through a router ctx).
 WALLET_CTX_KEYS = (
     "is_postgres", "sqlite_patch_lock", "sqlite_wallet_lock", "find_entity_by_idempotency", "lock_idempotency_key",
-    "insert_entity_in_transaction", "iso_utc", "audit",
+    "insert_entity_in_transaction", "iso_utc", "audit", "wallet_balance_minor",
 )
 _CURSOR_RE = re.compile(r"(\d{1,15}):([A-Za-z0-9][A-Za-z0-9._:-]{0,79})")
 
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
+_STOP_JOINED = False  # a stop already waited for the loop since the last start
 _LOCK = threading.Lock()
 
 
@@ -528,6 +530,15 @@ def sweep_orphans(ctx: dict[str, Any], now: datetime | None = None, *, full: boo
     return {"full": full, "examined": examined, "released": released}
 
 
+def waiting_requests_sql() -> str:
+    """The live Submitted requests (id, owner, status, submittedAt), filtered by the database: only the
+    waiting rows are parsed, never every request with its images. Type and status are literals, so
+    PostgreSQL can use the partial expression index idx_ad_campaign_requests_status (add_jsonb_indexes.py:
+    ``(data_json::jsonb->>'status') WHERE type = 'adCampaignRequests' AND deleted = false``)."""
+    where = f"type = '{AD_CAMPAIGN_COLLECTION}' AND deleted = false AND {json_field_sql('status')} = 'Submitted'"
+    return json_fields_select_sql(("status", "submittedAt"), ("id", "created_by"), where)
+
+
 def check_waiting_requests(now: datetime | None = None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Alerts for the live Submitted requests: an interrupted approval (a capture older than 15 minutes,
     never returned here) and a review past its target."""
@@ -539,10 +550,7 @@ def check_waiting_requests(now: datetime | None = None, settings: dict[str, Any]
     overdue: list[dict[str, Any]] = []
     waiting = 0
     with db_conn() as conn:
-        rows = conn.execute(
-            text(json_fields_select_sql(("status", "submittedAt"), ("id", "created_by"), "type = :type AND deleted = false")),
-            {"type": AD_CAMPAIGN_COLLECTION},
-        ).mappings().all()
+        rows = conn.execute(text(waiting_requests_sql())).mappings().all()
         by_owner: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for row in rows:
             if str(row.get("f_status") or "") == "Submitted" and row.get("created_by"):
@@ -576,11 +584,14 @@ def run_daily_money_check(
     now: datetime | None = None,
     settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The full sweep, then scan_studio_money() on one snapshot; a finding -> one integrity_violation alert."""
+    """The full sweep, then scan_studio_money() on one snapshot; a finding -> one integrity_violation alert.
+    The scan checks the wallet screen against main's own SQL balance, ``ctx["wallet_balance_minor"]``."""
     now = _aware(now or utc_now())
     settings = settings or read_all_settings()
+    jobs_ctx: dict[str, Any] = {}
     try:
-        swept: dict[str, Any] = sweep_orphans(ctx() if callable(ctx) else ctx, now, full=True)
+        jobs_ctx = ctx() if callable(ctx) else ctx
+        swept: dict[str, Any] = sweep_orphans(jobs_ctx, now, full=True)
     except Exception as error:  # the scan still runs: a failed sweep shows up as stranded money
         print(f"[albayan] Studio full orphan sweep failed ({type(error).__name__}).")
         swept = {"full": True, "error": type(error).__name__}
@@ -591,6 +602,7 @@ def run_daily_money_check(
                 conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
             violations = studio_integrity.scan_studio_money(
                 conn, now, stranded_minutes=settings["thresholds"]["strandedCaptureMaxMinutes"],
+                balance_minor=(jobs_ctx or {}).get("wallet_balance_minor"),
             )
     except Exception as error:
         print(f"[albayan] Studio money scan failed ({type(error).__name__}).")
@@ -675,13 +687,14 @@ def _loop(stop: threading.Event, ctx_provider: Callable[[], dict[str, Any]]) -> 
 
 def start_studio_jobs(ctx_provider: Callable[[], dict[str, Any]]) -> bool:
     """Start the one loop of this process (a second call while it runs does nothing). True if started."""
-    global _THREAD, _STOP
+    global _THREAD, _STOP, _STOP_JOINED
     if not jobs_enabled():
         return False
     with _LOCK:
         if _THREAD and _THREAD.is_alive():
             return False
         _STOP = threading.Event()
+        _STOP_JOINED = False
         _THREAD = threading.Thread(target=_loop, args=(_STOP, ctx_provider), name="albayan-studio-jobs", daemon=True)
         _THREAD.start()
     print("[albayan] Studio jobs loop started (orphan sweep, alerts, daily money check; no Meta needed).")
@@ -689,10 +702,18 @@ def start_studio_jobs(ctx_provider: Callable[[], dict[str, Any]]) -> bool:
 
 
 def stop_studio_jobs(timeout: float = 2.0) -> None:
-    global _THREAD
+    """Set the stop flag; only the first call since the last start waits (``timeout``) for the loop.
+
+    FastAPI copies a nested router's shutdown hook into every router above it and also runs each
+    router's own lifespan, so one shutdown of the app calls this three times, on the event loop:
+    the later calls only set the flag again instead of each waiting up to ``timeout`` more."""
+    global _THREAD, _STOP_JOINED
     with _LOCK:
         thread = _THREAD
         _STOP.set()
+        if _STOP_JOINED:
+            return
+        _STOP_JOINED = True
     if thread and thread.is_alive() and thread is not threading.current_thread():
         thread.join(timeout=timeout)
     with _LOCK:
@@ -706,7 +727,8 @@ def _parse_limit(raw: Any) -> int:
     if raw is None or raw == "":
         return ALERTS_PAGE_DEFAULT
     value = str(raw).strip()
-    if not value.isdigit() or not 1 <= int(value) <= ALERTS_PAGE_MAX:
+    # isascii first: "²" or "١٠" pass isdigit() but int() refuses the first one (a 500, not a 400).
+    if not (value.isascii() and value.isdigit()) or not 1 <= int(value) <= ALERTS_PAGE_MAX:
         studio_error(400, "INVALID_VALUE", f"limit must be a whole number from 1 to {ALERTS_PAGE_MAX}")
     return int(value)
 
