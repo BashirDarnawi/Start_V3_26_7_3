@@ -48,7 +48,7 @@ test('the v2 frame draws when /me says v2; nav drives ?tab= and Back follows the
 
   await page.getByTestId('studio-nav-wallet').click();
   await expect.poll(() => tab(page)).toBe('wallet');
-  await expect(page.getByTestId('studio-screen-wallet')).toContainText('Coming soon in the new studio');
+  await expect(page.getByTestId('studio-screen-wallet')).toBeVisible();  // the Wallet screen itself (15m, P2-06)
   await expect(page.getByTestId('studio-nav-wallet')).toHaveAttribute('aria-current', 'page');
   await expect(page.getByTestId('studio-nav-home')).not.toHaveAttribute('aria-current', 'page');
 

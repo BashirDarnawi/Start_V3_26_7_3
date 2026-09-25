@@ -4008,6 +4008,466 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P2-06 + P2-07 (Studio v2 wallet and account, 15m): the real 15c, 15g, 15h and 15m run in a sandbox
+  // with a fake history, a scripted apiJson and the platform's wallet helpers reduced to apiJson calls;
+  // the phone rule is checked against the server's own table (phone_cases.json), and static checks
+  // cover the bundle, the styles and the profile route. Promises settle before each run() returns.
+  const vm = require('vm');
+  const walletSrc = read('src/systems/ads_studio/15m-studio-wallet.js');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const phoneTable = JSON.parse(read('server/systems/ads_studio/phone_cases.json')).cases;
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+  };
+  const hist = {
+    entries: [], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) {
+      const next = this.index + delta;
+      if (!delta || next < 0 || next >= this.entries.length) return;
+      this.index = next; this.show();
+      for (const fn of [...win.listeners.popstate]) fn({ state: this.state });
+    },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let idSeq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'wallet-user', name: 'Sara <script>x</script>', email: 'sara@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++idSeq).padStart(12, '0')}`
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => false,
+    currentUserHasPermission: (collection, action) => action !== 'review',
+    hasSubscription: id => id === 'ad_maker',
+    updateUrlParams: () => {},
+    requestViewScrollReset: () => {},
+    IS_STUDIO_SHELL: true
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var __sheet = null;
+      var __plan = null;
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {}, getElementById: () => null, querySelectorAll: () => [] };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function apiJson(path, options) {
+        const method = String((options && options.method) || 'GET');
+        __calls.push({ path: String(path), method, body: options && options.body !== undefined ? JSON.parse(JSON.stringify(options.body)) : undefined });
+        const next = (__replies[method + ' ' + path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      // The platform's wallet helpers (09-api-auth.js), reduced to their calls.
+      function apiWalletPaymentRequestCreate(amountMinor, method, idempotencyKey, currency) {
+        return apiJson('/api/wallet/payment-requests', { method: 'POST', body: { amountMinor, currency, method, idempotencyKey } });
+      }
+      function apiWalletPaymentRequestDecide(requestId, action) {
+        return apiJson('/api/wallet/payment-requests/' + requestId + '/' + action, { method: 'POST', body: {} });
+      }
+      function showNotification(title, text, type) { __notes.push({ title: String(title), text: String(text), type }); }
+      function hubPlanForService() { return __plan; }
+      function refreshSubscriptionPlans() { return Promise.resolve([]); }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(walletSrc, box);
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
+    // The sheet needs a real page (e2e covers it); here its options are kept and confirmed by hand.
+    vm.runInContext('studioWalletSheet = function (options) { __sheet = options; };', box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (method, path, value) => run(`(__replies[${JSON.stringify(`${method} ${path}`)}] = __replies[${JSON.stringify(`${method} ${path}`)}] || []).push(${JSON.stringify({ value })});`);
+  const replyError = (method, path, error) => run(`(__replies[${JSON.stringify(`${method} ${path}`)}] = __replies[${JSON.stringify(`${method} ${path}`)}] || []).push(${JSON.stringify({ error })});`);
+  const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && c.path === path);
+  const openAt = url => { hist.reset(url); run('_studioV2.docRendered = false; render();'); };
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const between = (page, testid, end) => {
+    const at = page.indexOf(`data-testid="${testid}"`);
+    return at < 0 ? '' : page.slice(at, end ? page.indexOf(end, at) : undefined);
+  };
+  const textOf = (page, testid) => {
+    const at = page.indexOf(`data-testid="${testid}"`);
+    if (at < 0) return null;
+    const open = page.indexOf('>', at);
+    return page.slice(open + 1, page.indexOf('</', open)).replace(/<[^>]+>/g, '').trim() || page.slice(open + 1, page.indexOf('</p>', open)).replace(/<[^>]+>/g, '').trim();
+  };
+  const amountOf = (page, testid) => {
+    const at = page.indexOf(`data-testid="${testid}"`);
+    if (at < 0) return null;
+    return (page.slice(at).match(/<bdi dir="ltr">([^<]*)<\/bdi>/) || [])[1] || null;
+  };
+  const noDollarOnDinars = page => !/\$[^<\s]*\s*(?:LYD|د\.ل)/.test(page) && !/(?:LYD|د\.ل)\s*\$/.test(page);
+  const plain = page => String(page).replace(/<[^>]+>/g, '');
+
+  // A wallet as GET /api/studio/wallet/summary answers it (P1-07), the owner's payment requests
+  // and the methods catalog (payment_methods.py instructions, the exact server templates).
+  const iso = minutesAgo => new Date(Date.now() - minutesAgo * 60000).toISOString();
+  const step = (kind, ref, amountMinor, en, ar) => ({ kind, ref, transactionId: `t_${ref}_${amountMinor}`, amountMinor, at: '2026-09-22T10:00:00Z', labels: { en, ar } });
+  const summary = (overrides = {}) => ({
+    usd: { addedMinor: 10000, adjustmentsMinor: 0, reservedMinor: 1000, inAdsMinor: 2000, metaUsedInAdsMinor: null, metaCheckedAt: null,
+      beingReturnedMinor: 0, spentMinor: 500, availableMinor: 6500, ...(overrides.usd || {}) },
+    reserved: [{ campaignId: 'cmp_wait', name: 'Waiting ad', submittedAt: '2026-09-20T10:00:00Z', budgetMinor: 1000, dailyMinor: 200, days: 5 }],
+    inAds: [],
+    chains: overrides.chains || [
+      { campaignId: 'cmp_sale', name: 'Summer <b>sale</b>', archived: false, requestMissing: false, state: 'in_ads', bucket: 'inAds', paidMinor: 2000, returnedMinor: 0,
+        netMinor: 2000, paidAt: '2026-09-22T10:00:00Z', metaUsedMinor: null, checkedAt: null,
+        steps: [step('payment', 'cpay', 2000, 'Ad budget paid: Summer <b>sale</b>', 'دفع ميزانية إعلان: Summer <b>sale</b>')] },
+      { campaignId: 'cmp_old', name: 'Old ad', archived: true, requestMissing: false, state: 'spent', bucket: 'spent', paidMinor: 1000, returnedMinor: 500,
+        netMinor: 500, paidAt: '2026-09-10T10:00:00Z', metaUsedMinor: null, checkedAt: null,
+        steps: [step('payment', 'cpay', 1000, 'Ad budget paid: Old ad', 'دفع ميزانية إعلان: Old ad'), step('return', 'stoprefund', 500, 'Unused budget returned from: Old ad', 'استرجاع ما لم تصرفه ميتا من: Old ad')] },
+      { campaignId: 'cmp_old', name: 'Old ad', archived: true, requestMissing: false, state: 'returned', bucket: 'beingReturned', paidMinor: 700, returnedMinor: 700,
+        netMinor: 0, paidAt: '2026-09-01T10:00:00Z', metaUsedMinor: null, checkedAt: null,
+        steps: [step('payment', 'cpay', 700, 'Ad budget paid: Old ad', 'دفع ميزانية إعلان: Old ad'), step('return', 'rel', 700, 'Ad budget returned (not approved)', 'استرجاع ميزانية إعلان لم يُعتمد')] }
+    ],
+    lyd: { balanceMinor: 5000 },
+    pendingPayments: [
+      { reference: 'PAY-USDAAAA1', amountMinor: 2500, currency: 'USD', createdAt: '2026-09-25T08:00:00Z', dueAt: null },
+      { reference: 'PAY-LYDBBBB2', amountMinor: 15000, currency: 'LYD', createdAt: '2026-09-25T07:00:00Z', dueAt: null }
+    ]
+  });
+  const requests = { requests: [
+    { id: 'wpr_1', data: { reference: 'PAY-USDAAAA1', status: 'pending', currency: 'USD', amountMinor: 2500, amountMinorLYD: 17250, lydRate: 6.9, method: 'adfali', createdAt: '2026-09-25T08:00:00Z' } },
+    { id: 'wpr_2', data: { reference: 'PAY-LYDBBBB2', status: 'pending', currency: 'LYD', amountMinor: 15000, amountMinorLYD: 15000, method: 'bank_transfer', createdAt: '2026-09-25T07:00:00Z' } },
+    { id: 'wpr_3', data: { reference: 'PAY-DONECCC3', status: 'confirmed', currency: 'USD', amountMinor: 10000, method: 'adfali', createdAt: '2026-09-20T07:00:00Z', confirmedAt: '2026-09-20T09:00:00Z' } }
+  ] };
+  const methodsCatalog = { methods: [
+    { id: 'adfali', name: { en: 'Adfali', ar: 'ادفع لي' }, desc: { en: 'Pay from your phone balance', ar: 'ادفع من رصيد هاتفك' }, icon: 'smartphone', requiresReceiptPhoto: false,
+      instructions: { en: 'Pay {amountLYD} LYD via Adfali and keep the code {reference} in the payment note.', ar: 'ادفع {amountLYD} د.ل عبر ادفع لي واذكر الرمز {reference} في ملاحظة الدفع.' } },
+    { id: 'bank_transfer', name: { en: 'Bank transfer', ar: 'حوالة مصرفية' }, desc: { en: 'Transfer and attach the receipt photo', ar: 'حوّل وأرفق صورة الإيصال' }, icon: 'landmark', requiresReceiptPhoto: true,
+      instructions: { en: 'Transfer {amountLYD} LYD, write {reference} in the transfer note, then attach the receipt photo here.', ar: 'حوّل {amountLYD} د.ل واكتب {reference} في بيان الحوالة ثم أرفق صورة الإيصال هنا.' } }
+  ], rate: { usdToLyd: 6.9, date: '2026-09-25' } };
+  const SUMMARY = '/api/studio/wallet/summary';
+  const MINE = '/api/wallet/payment-requests';
+  const METHODS = '/api/wallet/payment-requests/methods';
+  const allHtml = [];
+
+  check('Studio v2 wallet (15m) ships in the lazy studio bundle after the shell, in both built copies, and studio.js stays under 1 MiB',
+    !loadError && bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15m-studio-wallet.js') > bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15h-studio-shell.js')
+      && !bundleManifestJson.files.some(file => /15m-studio/.test(file))
+      && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(walletSrc))
+      && fs.statSync(path.join(ROOT, 'studio.js')).size < 1024 * 1024
+      && walletSrc.includes('const _studioWalletShellScreen = typeof renderStudioV2CustomerScreen === \'function\' ? renderStudioV2CustomerScreen : null;'),
+    loadError || `studio.js ${fs.statSync(path.join(ROOT, 'studio.js')).size} bytes`);
+
+  // The phone rule: the screens and the server read every typed number the same way.
+  const phoneWrong = phoneTable.filter(([raw, want]) => run(`studioParsePhone(${JSON.stringify(raw)})`) !== want).map(([raw]) => JSON.stringify(raw));
+  check('Studio v2 phone rule: studioParsePhone gives the server table (phone_cases.json, also read by test_studio_profile.py)',
+    !loadError && phoneTable.length >= 30 && phoneWrong.length === 0, loadError || `wrong: ${phoneWrong.join(' ')}`);
+
+  // The wallet screen: the four numbers, pending payments with their code and instructions, the
+  // money of each ad grouped by ad, the dinar plan card, recent payments.
+  run("studioResetMe(); __replies['GET /api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', isStaff: false, contact: { whatsapp: '0912345678' } } }]; studioLoadMe();");
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  reply('GET', METHODS, methodsCatalog);
+  openAt('/studio?tab=wallet');
+  const en = html();
+  allHtml.push(en);
+  box.state.language = 'ar';
+  run('render();');
+  const ar = html();
+  box.state.language = 'en';
+  allHtml.push(ar);
+  const usdCard = between(en, 'studio-wallet-pending-item', '</article>');
+  const lydCardEn = en.slice(en.indexOf('data-currency="LYD"'), en.indexOf('</article>', en.indexOf('data-currency="LYD"')));
+  const lydCardAr = ar.slice(ar.indexOf('data-currency="LYD"'), ar.indexOf('</article>', ar.indexOf('data-currency="LYD"')));
+  const adCards = en.split('data-testid="studio-wallet-ad"').slice(1);
+  const walletCases = [
+    en.includes('data-testid="studio-screen-wallet"') && en.includes('data-testid="studio-wallet-numbers"') && en.includes('data-testid="studio-v2-frame"'),
+    amountOf(en, 'studio-wallet-available-amount') === '$65.00' && amountOf(en, 'studio-wallet-reserved-amount') === '$10.00'
+      && amountOf(en, 'studio-wallet-in-ads-amount') === '$20.00' && amountOf(en, 'studio-wallet-spent-amount') === '$5.00',
+    !en.includes('data-testid="studio-wallet-meta-used"') && !en.includes('data-testid="studio-wallet-ad-meta-used"') && !/Meta used/.test(en),
+    !en.includes('data-testid="studio-wallet-being-returned"'),
+    amountOf(en, 'studio-wallet-lyd-amount') === '50.00 LYD' && amountOf(ar, 'studio-wallet-lyd-amount') === '50.00 د.ل'
+      && !between(en, 'studio-wallet-lyd', '</section>').includes('$') && !between(ar, 'studio-wallet-lyd', '</section>').includes('$'),
+    usdCard.includes('PAY-USDAAAA1') && plain(usdCard).includes('Pay 172.50 LYD via Adfali and keep the code PAY-USDAAAA1 in the payment note.')
+      && usdCard.includes('<bdi dir="ltr" class="studio-v2-wallet-nowrap">PAY-USDAAAA1</bdi> in the payment note.')
+      && usdCard.includes('$25.00') && usdCard.includes('172.50 LYD') && usdCard.includes("studioWalletCopy('PAY-USDAAAA1')")
+      && usdCard.includes("studioWalletAskCancel('wpr_1')") && !usdCard.includes('studio-wallet-receipt'),
+    lydCardEn.includes('150.00 LYD') && !lydCardEn.includes('$') && lydCardEn.includes('data-testid="studio-wallet-receipt"')
+      && lydCardEn.includes("studioWalletAttachReceipt('wpr_2', this)") && lydCardAr.includes('150.00 د.ل') && !lydCardAr.includes('$')
+      && plain(lydCardAr).includes('حوّل 150.00 د.ل واكتب PAY-LYDBBBB2 في بيان الحوالة ثم أرفق صورة الإيصال هنا.'),
+    adCards.length === 2 && adCards[0].includes('data-campaign="cmp_sale"') && (adCards[1].match(/data-testid="studio-wallet-cycle"/g) || []).length === 2
+      && adCards[1].includes('Archived') && adCards[1].includes('Unused budget returned from: Old ad') && adCards[1].includes('Returned in full'),
+    !en.includes('<b>sale</b>') && en.includes('Summer &lt;b&gt;sale&lt;/b&gt;') && !ar.includes('<b>sale</b>'),
+    between(en, 'studio-wallet-reserved-list', '</section>').includes('$10.00') && between(en, 'studio-wallet-reserved-list', '</section>').includes('$2.00 a day for 5 days'),
+    (en.match(/data-testid="studio-wallet-history-item"/g) || []).length === 1 && between(en, 'studio-wallet-history', '</section>').includes('PAY-DONECCC3'),
+    ar.includes('dir="rtl"') && ar.includes('متاح') && ar.includes('في إعلاناتك') && ar.includes('رصيد الاشتراك (بالدينار)') && noDollarOnDinars(en) && noDollarOnDinars(ar),
+    /data-testid="studio-wallet-add"[^>]*onclick="studioWalletOpenAdd\(\)"/.test(en) && !/data-testid="studio-wallet-add"[^>]*disabled/.test(en),
+    calls('GET', SUMMARY).length === 1 && calls('GET', MINE).length === 1 && calls('GET', METHODS).length === 1,
+    ['numbers', 'available', 'reserved', 'in-ads', 'spent', 'where', 'add', 'refresh', 'pending', 'reserved-list', 'ads', 'lyd', 'history']
+      .every(id => [en, ar].every(page => (page.match(new RegExp(`data-testid="studio-wallet-${id}"`, 'g')) || []).length === 1))
+  ];
+  check('Studio v2 wallet: the four numbers equal the wallet summary, no "Meta used" before a link, dinars never with "$", pending codes with the method\'s own instructions, money grouped by ad, EN/AR',
+    !loadError && walletCases.every(Boolean), loadError || `cases ${failed(walletCases)}`);
+
+  // Meta used (once linked and checked) and "On its way back" appear only when the server says so.
+  const linked = summary({ usd: { metaUsedInAdsMinor: 340, metaCheckedAt: iso(5), beingReturnedMinor: 700 } });
+  linked.chains[0] = { ...linked.chains[0], metaUsedMinor: 340, checkedAt: iso(5) };
+  reply('GET', SUMMARY, linked);
+  reply('GET', MINE, requests);
+  run('studioWalletRefresh();');
+  const withMeta = html();
+  allHtml.push(withMeta);
+  box.state.language = 'ar';
+  run('render();');
+  const withMetaAr = html();
+  box.state.language = 'en';
+  const reloadCalls = calls('GET', SUMMARY).length;
+  run('render(); render();');
+  run('studioWalletWhereToggle({ open: true }); render();');
+  const whereOpen = html();
+  run('studioWalletWhereToggle({ open: false }); render();');
+  const whereClosed = html();
+  const metaCases = [
+    /data-testid="studio-wallet-where" ontoggle="studioWalletWhereToggle\(this\)" open>/.test(whereOpen) && /data-testid="studio-wallet-where" ontoggle="studioWalletWhereToggle\(this\)">/.test(whereClosed),
+    textOf(withMeta, 'studio-wallet-meta-used') === 'Meta used $3.40 so far · checked 5 min ago',
+    textOf(withMeta, 'studio-wallet-ad-meta-used') === 'Meta used $3.40 so far · checked 5 min ago',
+    textOf(withMetaAr, 'studio-wallet-meta-used') === 'استخدمت ميتا $3.40 حتى الآن · فُحص قبل 5 دقائق',
+    between(withMeta, 'studio-wallet-being-returned', 'usually within minutes').includes('$7.00'),
+    reloadCalls === 2 && calls('GET', SUMMARY).length === 2  // a fresh answer is reused by later draws
+  ];
+  check('Studio v2 wallet: "Meta used $Y · checked X ago" and "On its way back" only when the server sends them; a fresh answer is not read again',
+    !loadError && metaCases.every(Boolean), loadError || `cases ${failed(metaCases)}`);
+
+  // Add money (J2): purpose first, amount (Arabic digits), method, a confirm screen, then the code.
+  run("studioWalletOpenAdd();");
+  const purposeStep = html();
+  const addUrl = win.location.search;
+  run("studioWalletPickPurpose('ads');");
+  const amountStep = html();
+  run("studioWalletAmountInput({ value: '0.5' }); studioWalletFlowStep(1);");
+  const tooSmall = json('_studioWallet.add') || {};
+  run("studioWalletAmountInput({ value: 'abc' }); studioWalletFlowStep(1);");
+  const notNumber = json('_studioWallet.add') || {};
+  run("studioWalletAmountInput({ value: '٢٥' });");
+  const helpText = run('studioWalletAmountHelp(_studioWallet.add)');
+  run('studioWalletFlowStep(1);');
+  const methodStep = html();
+  run("studioWalletPickMethod('adfali');");
+  const confirmStep = html();
+  allHtml.push(purposeStep, amountStep, methodStep, confirmStep);
+  replyError('POST', MINE, { name: 'TypeError', message: 'Failed to fetch' });
+  run('studioWalletCreate(); studioWalletCreate();');
+  const afterFailure = { posts: calls('POST', MINE).length, error: (json('_studioWallet.add') || {}).error, screen: html() };
+  reply('POST', MINE, { id: 'wpr_new', data: { reference: 'PAY-NEWDDDD4', status: 'pending', currency: 'USD', amountMinor: 2500, amountMinorLYD: 17250, lydRate: 6.9, method: 'adfali', createdAt: '2026-09-25T10:00:00Z' } });
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  run('studioWalletCreate();');
+  const created = html();
+  allHtml.push(created);
+  const posts = calls('POST', MINE);
+  run("studioWalletOpenAdd('ads', 5000); studioWalletPickMethod('adfali');");
+  reply('POST', MINE, { id: 'wpr_new2', data: { reference: 'PAY-NEWEEEE5', status: 'pending', currency: 'USD', amountMinor: 5000, amountMinorLYD: 34500, method: 'adfali' } });
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  run('studioWalletCreate();');
+  const secondPost = calls('POST', MINE).slice(-1)[0] || {};
+  const addCases = [
+    addUrl === '?tab=wallet&id=add-money' && purposeStep.includes('data-testid="studio-wallet-purpose-ads"') && purposeStep.includes('data-testid="studio-wallet-purpose-plan"')
+      && purposeStep.includes('Step 1 of 4: Purpose') && purposeStep.includes('You pay in dinars either way'),
+    ['1000', '2500', '5000', '10000'].every(minor => amountStep.includes(`data-testid="studio-wallet-preset-${minor}"`)) && amountStep.includes('id="studio-wallet-amount"')
+      && amountStep.includes('$25.00') && amountStep.includes('$100.00'),
+    tooSmall.step === 2 && tooSmall.error === 'The smallest amount is $1.00.' && notNumber.step === 2 && notNumber.error === 'Type the amount in numbers, such as 25 or 25.50.',
+    helpText === "= $25.00 · about 172.50 LYD at today's rate (estimate)",
+    methodStep.includes('data-testid="studio-wallet-method-adfali"') && methodStep.includes('data-testid="studio-wallet-method-bank_transfer"') && methodStep.includes('You attach a photo of the transfer receipt.'),
+    textOf(confirmStep, 'studio-wallet-confirm-amount') === '$25.00' && textOf(confirmStep, 'studio-wallet-confirm-method') === 'Adfali'
+      && amountOf(confirmStep, 'studio-wallet-confirm-lyd') === '172.50 LYD' && confirmStep.includes('What happens next') && confirmStep.includes('data-testid="studio-wallet-create"'),
+    afterFailure.posts === 1 && afterFailure.error === run('STUDIO_ERROR_KIND_TEXTS.action.NETWORK[0]') && afterFailure.error.length > 20
+      && afterFailure.screen.includes(afterFailure.error),
+    posts.length === 2 && JSON.stringify(posts[0].body) === JSON.stringify(posts[1].body) && posts[1].body.amountMinor === 2500 && posts[1].body.currency === 'USD'
+      && posts[1].body.method === 'adfali' && /^studiopay_\d+_\d{12}$/.test(posts[1].body.idempotencyKey),
+    created.includes('data-testid="studio-wallet-created"') && amountOf(created, 'studio-wallet-created-reference') === 'PAY-NEWDDDD4'
+      && plain(created).includes('Pay 172.50 LYD via Adfali and keep the code PAY-NEWDDDD4 in the payment note.') && amountOf(created, 'studio-wallet-created-lyd') === '172.50 LYD'
+      && created.includes("studioWalletCopy('PAY-NEWDDDD4')") && created.includes('onclick="studioWalletFinishAdd()"'),
+    secondPost.body && secondPost.body.amountMinor === 5000 && secondPost.body.idempotencyKey !== posts[1].body.idempotencyKey
+  ];
+  check('Studio v2 Add money: purpose, amount ($10-$100 or typed, Arabic digits), method, confirm screen, one key per request replayed after a lost answer, single-flight, the PAY- code and how to pay',
+    !loadError && addCases.every(Boolean), loadError || `cases ${failed(addCases)}`);
+
+  // Dinars for the plan: LYD all the way (never "$"), the plan price as the ready amount.
+  run("__plan = { id: 'svc:ad_maker', priceMinor: 12000, currency: 'LYD' }; studioWalletOpenAdd('plan');");
+  const planAmount = html();
+  run('studioWalletPickAmount(12000); studioWalletFlowStep(1);');
+  run("studioWalletPickMethod('bank_transfer');");
+  const planConfirm = html();
+  box.state.language = 'ar';
+  run('render();');
+  const planConfirmAr = html();
+  box.state.language = 'en';
+  allHtml.push(planAmount, planConfirm, planConfirmAr);
+  reply('POST', MINE, { id: 'wpr_lyd', data: { reference: 'PAY-LYDFFFF6', status: 'pending', currency: 'LYD', amountMinor: 12000, amountMinorLYD: 12000, method: 'bank_transfer' } });
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  run('studioWalletCreate();');
+  const planCreated = html();
+  allHtml.push(planCreated);
+  const planPost = calls('POST', MINE).slice(-1)[0] || {};
+  // No dollar rate: a dollar request cannot say what to pay in dinars, so it is not created.
+  run("studioWalletOpenAdd('ads', 2500); studioWalletPickMethod('adfali'); _studioWallet.rate = 0; render();");
+  const noRate = html();
+  allHtml.push(noRate);
+  const postsBefore = calls('POST', MINE).length;
+  run('studioWalletCreate();');
+  run('_studioWallet.rate = 6.9;');
+  const planCases = [
+    planAmount.includes('data-testid="studio-wallet-preset-12000"') && planAmount.includes('Plan price') && planAmount.includes('120.00 LYD') && !between(planAmount, 'studio-wallet-add-flow').includes('$'),
+    textOf(planConfirm, 'studio-wallet-confirm-amount') === '120.00 LYD' && !planConfirm.includes('studio-wallet-confirm-lyd')
+      && !between(planConfirm, 'studio-wallet-confirm', '</dl>').includes('$') && planConfirm.includes('the dinars then appear on your plan balance'),
+    textOf(planConfirmAr, 'studio-wallet-confirm-amount') === '120.00 د.ل' && noDollarOnDinars(planConfirmAr),
+    planPost.body && planPost.body.currency === 'LYD' && planPost.body.amountMinor === 12000 && planPost.body.method === 'bank_transfer',
+    planCreated.includes('PAY-LYDFFFF6') && !between(planCreated, 'studio-wallet-created', '</dl>').includes('$') && planCreated.includes('data-testid="studio-wallet-receipt"'),
+    noRate.includes('data-testid="studio-wallet-no-rate"') && /data-testid="studio-wallet-create"[^>]*disabled/.test(noRate) && noRate.includes('+218912345678')
+      && calls('POST', MINE).length === postsBefore
+  ];
+  check('Studio v2 Add money for the plan: dinars all the way (never "$"), the plan price as the ready amount; no dollar request without today\'s rate',
+    !loadError && planCases.every(Boolean), loadError || `cases ${failed(planCases)}`);
+
+  // Cancel a waiting request: an in-page sheet first, one call however many taps.
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  run("studioWalletFinishAdd(); studioWalletRefresh();");
+  run("__sheet = null; studioWalletAskCancel('wpr_1');");
+  const sheet = json('__sheet ? { title: __sheet.title, text: __sheet.text, confirm: __sheet.confirm, cancel: __sheet.cancel, danger: __sheet.danger, testid: __sheet.testid } : null') || {};
+  reply('POST', '/api/wallet/payment-requests/wpr_1/cancel', { id: 'wpr_1', data: { status: 'canceled' } });
+  reply('GET', SUMMARY, summary());
+  reply('GET', MINE, requests);
+  run("__notes.length = 0; __sheet.onConfirm(); studioWalletCancel('wpr_1');");
+  const cancelCalls = calls('POST', '/api/wallet/payment-requests/wpr_1/cancel');
+  const cancelNote = json('__notes') || [];
+  run("__sheet = null; studioWalletAskCancel('wpr_3'); studioWalletAskCancel('nope');");
+  const noSheetForDone = run('__sheet');
+  const cancelCases = [
+    sheet.testid === 'studio-wallet-cancel-sheet' && sheet.danger === true && sheet.title === 'Cancel this payment request?' && sheet.text.includes('PAY-USDAAAA1') && sheet.cancel === 'Keep it',
+    cancelCalls.length === 1 && cancelNote.length === 1 && cancelNote[0].type === 'success' && cancelNote[0].title === 'Payment request cancelled',
+    noSheetForDone === null
+  ];
+  check('Studio v2 wallet: cancelling a payment request asks in an in-page sheet (never a native dialog) and calls the server once',
+    !loadError && cancelCases.every(Boolean), loadError || `cases ${failed(cancelCases)}`);
+
+  // Account (P2-07): name read only, language, theme, the optional WhatsApp number with consent, sign out.
+  const PROFILE = '/api/studio/profile';
+  reply('GET', PROFILE, { whatsappNumber: null, whatsappConsentAt: null, updatedAt: null });
+  openAt('/studio?tab=account');
+  const account = html();
+  run('studioAccountEdit(true);');
+  const editor = html();
+  run("studioAccountDraftNumber({ value: '٠٩١ ٢٣٤ ٥٦٧٨' }); studioAccountSave();");
+  const noConsent = { puts: calls('PUT', PROFILE).length, error: String(run('_studioAccount.formError')), screen: html() };
+  run("studioAccountDraftNumber({ value: '12345' }); studioAccountDraftConsent({ checked: true }); studioAccountSave();");
+  const badNumber = { puts: calls('PUT', PROFILE).length, error: String(run('_studioAccount.formError')) };
+  reply('PUT', PROFILE, { whatsappNumber: '+218912345678', whatsappConsentAt: '2026-09-25T10:00:00Z', updatedAt: '2026-09-25T10:00:00Z' });
+  run("studioAccountDraftNumber({ value: '٠٩١ ٢٣٤ ٥٦٧٨' }); studioAccountDraftConsent({ checked: true }); studioAccountSave(); studioAccountSave();");
+  const saved = html();
+  const savePuts = calls('PUT', PROFILE);
+  run('studioAccountEdit(true);');
+  const reConsent = run('_studioAccount.draftConsent');
+  run('studioAccountEdit(false);');
+  box.state.language = 'ar';
+  run('render();');
+  const accountAr = html();
+  box.state.language = 'en';
+  run("__sheet = null; studioAccountAskRemove();");
+  const removeSheet = json('__sheet ? { testid: __sheet.testid, danger: __sheet.danger } : null') || {};
+  reply('PUT', PROFILE, { whatsappNumber: null, whatsappConsentAt: null, updatedAt: '2026-09-25T11:00:00Z' });
+  run('__sheet.onConfirm();');
+  const removed = html();
+  const removePut = calls('PUT', PROFILE).slice(-1)[0] || {};
+  allHtml.push(account, editor, noConsent.screen, saved, accountAr, removed);
+  const accountCases = [
+    account.includes('data-testid="studio-screen-account"') && account.includes('Sara &lt;script&gt;x&lt;/script&gt;') && !account.includes('<script>x')
+      && account.includes('data-testid="studio-account-language"') && account.includes('onclick="toggleLanguage()"') && account.includes('onclick="toggleTheme()"')
+      && /data-testid="studio-account-logout"[^>]*onclick="handleLogout\(\)"/.test(account) && account.includes('href="/privacy"')
+      && account.includes('data-testid="studio-account-whatsapp-none"') && calls('GET', PROFILE).length === 1,
+    editor.includes('id="studio-account-whatsapp"') && editor.includes('type="tel"') && editor.includes('id="studio-account-whatsapp-consent"') && !editor.includes(' checked'),
+    noConsent.puts === 0 && noConsent.error === 'Tick the box to allow us to contact you on WhatsApp.' && noConsent.screen.includes(noConsent.error)
+      && noConsent.screen.includes('We will save it as +218912345678.'),
+    badNumber.puts === 0 && badNumber.error.startsWith('Type a WhatsApp number'),
+    savePuts.length === 1 && JSON.stringify(savePuts[0].body) === JSON.stringify({ whatsappNumber: '+218912345678', whatsappConsent: true })
+      && amountOf(saved, 'studio-account-whatsapp-number') === '+218912345678' && saved.includes('data-testid="studio-account-whatsapp-remove"'),
+    reConsent === false,
+    accountAr.includes('dir="rtl"') && accountAr.includes('واتساب (اختياري)') && accountAr.includes('تسجيل الخروج') && accountAr.includes('اللغة'),
+    removeSheet.testid === 'studio-account-remove-sheet' && removeSheet.danger === true
+      && JSON.stringify(removePut.body) === JSON.stringify({ whatsappNumber: null, whatsappConsent: false }) && removed.includes('data-testid="studio-account-whatsapp-none"')
+  ];
+  check('Studio v2 Account: name read only (escaped), language, theme, sign out; a WhatsApp number is sent only as E.164 with the consent box ticked; removal asks first',
+    !loadError && accountCases.every(Boolean), loadError || `cases ${failed(accountCases)}`);
+
+  // Another signed-in user starts empty; a failing screen falls back to the frame's own placeholder.
+  box.state.currentUser = { id: 'other-user', name: 'Other' };
+  const otherWallet = run('studioWalletScope(); _studioWallet.summary === null && _studioWallet.requests === null && _studioWallet.add === null');
+  const otherAccount = run('studioAccountScope(); _studioAccount.profile === null');
+  box.state.currentUser = { id: 'wallet-user', name: 'Sara' };
+  run("var __realWallet = renderStudioWalletScreen; renderStudioWalletScreen = function () { throw new Error('boom'); };");
+  run("studioResetMe(); __replies['GET /api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', isStaff: false } }]; studioLoadMe();");
+  openAt('/studio?tab=wallet');
+  const fallback = html();
+  run('renderStudioWalletScreen = __realWallet;');
+  const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
+  const safeHandler = /^\son(?:click|input|change|toggle)="(studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2(Back|CloseBuilder)\(\)|studioWallet(OpenAdd|Refresh|RetryMethods|FinishAdd|Create)\(\)|studioWalletWhereToggle\(this\)|studioWalletOpenAdd\('plan'\)|studioWalletPickPurpose\('(ads|plan)'\)|studioWalletPickAmount\(\d+\)|studioWalletPickMethod\('[a-z0-9_]+'\)|studioWalletFlowStep\(-?1\)|studioWalletCopy\('PAY-[A-Z0-9]+'\)|studioWalletAskCancel\('[A-Za-z0-9_.:-]+'\)|studioWalletAttachReceipt\('[A-Za-z0-9_.:-]+', this\)|studioWalletAmountInput\(this\)|studioAccount(Edit\((true|false)\)|Save\(\)|AskRemove\(\)|Retry\(\)|DraftNumber\(this\)|DraftConsent\(this\))|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/;
+  const staticCases = [
+    otherWallet === true && otherAccount === true,
+    fallback.includes('data-testid="studio-screen-wallet"') && fallback.includes('Coming soon in the new studio'),
+    onclicks.length > 40 && onclicks.every(attr => safeHandler.test(attr)),
+    !/\b(?:confirm|prompt|alert)\(/.test(walletSrc) && !/access_token|app_?secret|page_?token|Bearer /i.test(walletSrc),
+    json('STUDIO_WALLET_REFUSALS').every(([start, textEn, textAr]) => start && textEn && /[؀-ۿ]/.test(textAr) && !/[A-Za-z]{3}/.test(textAr.replace(/JPG|PNG/g, ''))),
+    run("studioWalletMoney(5000, 'LYD')") === '50.00 LYD' && inLanguage('ar', "studioWalletMoney(5000, 'LYD')") === '50.00 د.ل' && run("studioWalletMoney(5000, 'USD')") === '$50.00',
+    run('studioWalletLydEstimate(100, 4.9)') === 490 && run('studioWalletLydEstimate(2500, 6.9)') === 17250 && run('studioWalletLydEstimate(333, 4.8765)') === 1624
+  ];
+  check('Studio v2 wallet/account: per-user state, the frame placeholder if a screen fails, safe handlers only, no native dialogs or keys, refusals in EN/AR, the server\'s dinar rounding',
+    !loadError && staticCases.every(Boolean), loadError || `cases ${failed(staticCases)}`);
+
+  // Styles and the server contract.
+  const css = read('assets/ads-workspace.css');
+  const walletCss = css.slice(css.indexOf('/* Albayan Studio v2 wallet and account'));
+  const studioApiPy = read('server/systems/ads_studio/studio_api.py');
+  const profilePy = read('server/systems/ads_studio/studio_profile.py');
+  const errorsPy = read('server/systems/ads_studio/studio_errors.py');
+  const refusalCodes = ['PHONE_REFUSAL_CODE', 'CONSENT_REFUSAL_CODE'].map(name => (profilePy.match(new RegExp(`^${name} = "([A-Z_]+)"$`, 'm')) || [])[1]);
+  const routerBody = studioApiPy.slice(studioApiPy.indexOf('def create_studio_router('), studioApiPy.indexOf('    return router', studioApiPy.indexOf('def create_studio_router(')));
+  check('Studio v2 wallet/account styles (tokens, light and dark tones, 44px controls, no page overflow) and the /api/studio/profile route (owner only, known error codes)',
+    css.indexOf('/* Albayan Studio v2 wallet and account') > css.indexOf('/* Albayan Studio v2 frame') && read('www/assets/ads-workspace.css') === css
+      && ['html.dark .studio-v2-frame, html.dark .studio-v2-wsheet-overlay {', '.studio-v2-wallet-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));',
+        '.studio-v2-wallet-small { min-height: 44px;', '.studio-v2-wallet-choice { display: flex;', 'min-height: 64px;', '.studio-v2-wsheet-overlay { position: fixed;',
+        '.studio-v2-account-check > input { flex-shrink: 0; width: 24px; height: 24px;', 'overflow-wrap: anywhere'].every(rule => walletCss.includes(rule))
+      && !/background(-color)?:\s*#|[^-]color:\s*#/.test(walletCss)
+      && routerBody.includes('router.include_router(create_studio_profile_router(')
+      && refusalCodes.every(code => code && errorsPy.includes(`"${code}": 400`))
+      && profilePy.includes('BODY_FIELDS = ("whatsappNumber", "whatsappConsent")') && profilePy.includes('{"whatsapp": change}'),
+    `codes ${refusalCodes.join(',')}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');
