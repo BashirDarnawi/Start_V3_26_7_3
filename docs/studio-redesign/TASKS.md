@@ -44,6 +44,13 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P1-15 | Done | stage 6 | Total limits, per-day floor and max days from the `limits` setting, for new rows only |
 | P1-18 | Part done | stage 6 | (a) legacy rows keep their old rules (`legacyRules`, `schemaVersion` 2 for new sends). (b) not needed (daily kept, D4+D5). (c) staff send back waiting daily rows (D33) — manual, owner/staff |
 | P1-22 | Done | stage 6 | Intake pause switch + Tripoli-day cap (default effectively off until the owner decides D29; plan start value 5) |
+| P1-02 | Done | stage 7 | Submit serialised on the owner's row: two parallel sends above Available → exactly one 409 (PostgreSQL scenario) |
+| P1-03 + P1-03b | Done | stage 7 | `POST /api/ad-studio/campaigns/{id}/withdraw` (waiting request → Draft, hold released, a capture returned once); approval self-release; withdraw vs approve proven on PostgreSQL both orders |
+| P1-05 | Done | stages 7–8 | Customers never see staff ids or names ("Albayan team"); staff still do |
+| P1-07b | Done | stages 7–8 | `scan_studio_money()` daily: balance, per-request paid/refund vs ledger, holds, one return per cycle, studio rows in Manager books |
+| P1-16 | Done | stage 7 | Anonymisation also scrubs the WhatsApp number (`studioProfiles`) and reply-log commenter data; ledger untouched |
+| P1-19 | Done | stage 7 | PostgreSQL scenarios: submit serialisation, withdraw vs approve, approval self-release, orphan sweep, system alert insert, privacy scrub race (run in every release) |
+| P1-21 | Done | stage 7 | Studio jobs loop (no Meta token needed): orphan sweep, overdue-review alert (`review_overdue`), daily money scan, heartbeat; `GET /api/studio/admin/alerts` |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
