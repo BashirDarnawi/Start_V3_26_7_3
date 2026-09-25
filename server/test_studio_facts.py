@@ -911,9 +911,13 @@ def test_ig_reply_without_a_page_token_is_never_sent_and_given_back(actors, grap
 def test_health_screen_is_admin_only_bilingual_and_lazy():
     source = (ROOT / "src" / "systems" / "ads_studio" / "15i-studio-health.js").read_text(encoding="utf-8")
     manifest = json.loads((ROOT / "src" / "manifest.json").read_text(encoding="utf-8"))
-    studio_files = manifest["lazy"]["studio.js"]
-    assert studio_files.index("systems/ads_studio/15i-studio-health.js") > studio_files.index("systems/ads_studio/15f-social-studio.js")
+    # The admin health section ships in the staff-only bundle (studio-staff.js, loaded from studio.js by
+    # 15o0-studio-staff-loader.js), never in studio.js or the startup bundle.
+    staff_files = manifest["lazy"]["studio-staff.js"]
+    assert staff_files[0] == "systems/ads_studio/15i-studio-health.js"
+    assert "systems/ads_studio/15i-studio-health.js" not in manifest["lazy"]["studio.js"]
     assert "systems/ads_studio/15i-studio-health.js" not in manifest["files"]
+    assert "systems/ads_studio/15o0-studio-staff-loader.js" in manifest["lazy"]["studio.js"]
     assert "function renderStudioHealthSection()" in source and "if (!isCurrentUserAdmin()) return '';" in source
     assert "'/api/studio/admin/facts" in source and "'/api/meta-ads/token-health'" in source
     assert "/subscribe-test" in source and "/read-test" in source
@@ -922,7 +926,9 @@ def test_health_screen_is_admin_only_bilingual_and_lazy():
     assert not re.search(r"accessToken|access_token|appSecret|app_secret|password", source, re.IGNORECASE)
     assert len(re.findall(r"studioHealthText\(", source)) >= 40  # every label in English and Arabic
     review = (ROOT / "src" / "systems" / "ads_studio" / "15c-ads-studio.js").read_text(encoding="utf-8")
-    assert "typeof renderStudioHealthSection === 'function'" in review
+    assert "typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection('health')" in review
+    loader = (ROOT / "src" / "systems" / "ads_studio" / "15o0-studio-staff-loader.js").read_text(encoding="utf-8")
+    assert "typeof renderStudioHealthSection === 'function'" in loader and "renderStudioHealthSection()" in loader
     assert b"\r\n" not in (ROOT / "src" / "systems" / "ads_studio" / "15i-studio-health.js").read_bytes()
 
 

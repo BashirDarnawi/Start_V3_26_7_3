@@ -801,7 +801,7 @@ function renderStudioV2StaffFrame() {
         </nav>
         <div class="studio-v2-main">
           <section data-testid="studio-screen-review" data-section="${section[0]}" class="studio-v2-screen" aria-labelledby="studio-v2-title"${attrs}>
-            <div data-testid="studio-staff-screen-${section[0]}">${renderStudioV2Soon(adsStudioText(section[2], section[3]), section[1], true)}${section[0] === 'more' ? renderStudioV2Basics() : ''}
+            <div data-testid="studio-staff-screen-${section[0]}">${typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection(section[0], route) : renderStudioV2Soon(adsStudioText(section[2], section[3]), section[1], true) + (section[0] === 'more' ? renderStudioV2Basics() : '')}
             </div>
           </section>
         </div>

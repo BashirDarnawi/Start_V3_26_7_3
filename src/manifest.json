@@ -32,14 +32,19 @@
     "studio.js": [
       "systems/ads_studio/15c-ads-studio.js",
       "systems/ads_studio/15f-social-studio.js",
-      "systems/ads_studio/15i-studio-health.js",
       "systems/ads_studio/15g-studio-core.js",
       "systems/ads_studio/15h-studio-shell.js",
       "systems/ads_studio/15j-studio-home.js",
       "systems/ads_studio/15k-studio-ads.js",
       "systems/ads_studio/15l-studio-builder.js",
       "systems/ads_studio/15m-studio-wallet.js",
-      "systems/ads_studio/15n-studio-help.js"
+      "systems/ads_studio/15n-studio-help.js",
+      "systems/ads_studio/15o0-studio-staff-loader.js"
+    ],
+    "studio-staff.js": [
+      "systems/ads_studio/15i-studio-health.js",
+      "systems/ads_studio/15p-studio-desk.js",
+      "systems/ads_studio/15q-studio-admin.js"
     ],
     "clothes.js": [
       "15b-clothes.js"

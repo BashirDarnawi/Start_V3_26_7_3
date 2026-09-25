@@ -2813,7 +2813,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const v2Lazy = bundleManifestJson.lazy['studio.js'].slice(bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15g-studio-core.js'));
   check('Studio v2 files ship last in the lazy studio bundle (core before shell) and renderAdsStudioView delegates first',
     JSON.stringify(v2Lazy.slice(0, 2)) === JSON.stringify(['systems/ads_studio/15g-studio-core.js', 'systems/ads_studio/15h-studio-shell.js'])
-      && v2Lazy.every(file => /^systems\/ads_studio\/15[g-z]-studio-[a-z-]+\.js$/.test(file))
+      && v2Lazy.every(file => /^systems\/ads_studio\/15[g-z]0?-studio-[a-z-]+\.js$/.test(file))
       && bundleManifestJson.lazy['studio.js'][0] === 'systems/ads_studio/15c-ads-studio.js' && !bundleManifestJson.files.some(file => /15[gh]-studio/.test(file))
       && adsStudio.includes("function renderAdsStudioView() {\n  // Studio v2 (P2-02a, 15h-studio-shell.js): only when GET /api/studio/me says so; '' = the classic screens below.\n  const studioV2Html = typeof renderStudioV2View === 'function' ? renderStudioV2View() : '';\n  if (studioV2Html) return studioV2Html;\n  const isAr = adsStudioIsAr();"),
     loadError);
@@ -4990,9 +4990,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const allHtml = [];
 
   // Bundle, manifest and the shell registry.
-  check('Studio help desk (15n) ships last in the lazy studio bundle after 15m, in both built copies under 1 MiB, and registers the Help and Inbox screens with the shell',
-    !loadError && bundleManifestJson.lazy['studio.js'].slice(-1)[0] === 'systems/ads_studio/15n-studio-help.js'
-      && bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15n-studio-help.js') === bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15m-studio-wallet.js') + 1
+  check('Studio help desk (15n) ships right after 15m in the lazy studio bundle, in both built copies under 1 MiB, and registers the Help and Inbox screens with the shell',
+    !loadError && bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15n-studio-help.js') === bundleManifestJson.lazy['studio.js'].indexOf('systems/ads_studio/15m-studio-wallet.js') + 1
       && !bundleManifestJson.files.some(file => /15n-studio/.test(file))
       && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(helpSrc)) && !read('script.js').includes('renderStudioHelpBody')
       && fs.statSync(path.join(ROOT, 'studio.js')).size < 1024 * 1024
@@ -5231,6 +5230,371 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio help desk: every text pair has Arabic, only known handlers reach the page, the styles use the tokens with dark tones, times read in Tripoli time',
     !loadError && staticCases.every(Boolean), loadError || `cases ${failed(staticCases)} pairs ${textPairs.length} handlers ${onclicks.filter(attr => !safeHandler.test(attr)).slice(0, 3).join(' | ')}`);
+}
+
+{
+  // Team desk (P3-06b/c/d, P3-17, M12; 15o0 loader in studio.js, 15i + 15p + 15q in the staff-only bundle
+  // studio-staff.js): the bundle rule, the loader, the hooks in 15h and 15c, and the desk itself in a vm
+  // sandbox (the review queue and decisions, launch, the settle countdown and refusals, the pulse badges
+  // and title count, the admin settings forms with expectedVersion, the 409 reload flow and the
+  // server's validation message).
+  const vm = require('vm');
+  const loaderSrc = read('src/systems/ads_studio/15o0-studio-staff-loader.js');
+  const deskSrc = read('src/systems/ads_studio/15p-studio-desk.js');
+  const adminSrc = read('src/systems/ads_studio/15q-studio-admin.js');
+  const healthSrc = read('src/systems/ads_studio/15i-studio-health.js');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
+  const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
+  const helpSrc = read('src/systems/ads_studio/15n-studio-help.js');
+  const staffFiles = ['systems/ads_studio/15i-studio-health.js', 'systems/ads_studio/15p-studio-desk.js', 'systems/ads_studio/15q-studio-admin.js'];
+  const ADS_STUDIO_REASONS_LIST = ['budget_dates', 'creative_quality', 'text_policy', 'targeting', 'page_access', 'payment', 'other'];  // 15c ADS_STUDIO_REVIEW_REASONS (P1-12)
+  const STUDIO_ADMIN_KEYS_LIST = ['rollout', 'intake', 'capabilities', 'limits', 'settlement', 'hours', 'contact', 'targets', 'thresholds'];  // studio_settings.SETTING_KEYS
+  const studioLazy = bundleManifestJson.lazy['studio.js'];
+  const staffLazy = bundleManifestJson.lazy['studio-staff.js'];
+  const MiB = 1024 * 1024;
+  const builtStudio = read('studio.js');
+  const builtStaff = read('studio-staff.js');
+  check('BUNDLE RULE: studio-staff.js holds exactly 15i + 15p + 15q, studio.js holds none of them and the loader 15o0 right after 15n; both bundles ship in both copies under 1 MiB',
+    JSON.stringify(staffLazy) === JSON.stringify(staffFiles)
+      && staffFiles.every(file => !studioLazy.includes(file) && !bundleManifestJson.files.includes(file))
+      && studioLazy.indexOf('systems/ads_studio/15o0-studio-staff-loader.js') === studioLazy.indexOf('systems/ads_studio/15n-studio-help.js') + 1
+      && !bundleManifestJson.files.includes('systems/ads_studio/15o0-studio-staff-loader.js')
+      && builtStudio === read('www/studio.js') && builtStaff === read('www/studio-staff.js')
+      && builtStudio.includes(loaderSrc) && !builtStudio.includes('function renderStudioDeskSection(') && !builtStudio.includes('function renderStudioHealthSection(')
+      && [healthSrc, deskSrc, adminSrc].every(src => builtStaff.includes(src)) && !builtStaff.includes(loaderSrc)
+      && !read('script.js').includes('renderStudioDeskSection') && !read('script.js').includes('renderStudioStaffSection')
+      && fs.statSync(path.join(ROOT, 'studio.js')).size < MiB && fs.statSync(path.join(ROOT, 'studio-staff.js')).size < MiB,
+    `studio.js ${fs.statSync(path.join(ROOT, 'studio.js')).size} B, studio-staff.js ${fs.statSync(path.join(ROOT, 'studio-staff.js')).size} B`);
+  check('the staff bundle loader follows the 15c0 pattern (script-tag URL with ?v=, one promise, 30 s failure cooldown, typeof-guarded ready check, bilingual retry card) and both frames call it',
+    loaderSrc.includes("replace(/script(\\.min)?\\.js$/, 'studio-staff.js')") && loaderSrc.includes('const _STUDIO_STAFF_RETRY_COOLDOWN_MS = 30000;')
+      && loaderSrc.includes("_studioStaffBundleState === 'failed' && Date.now() - _studioStaffLastFailureAt < _STUDIO_STAFF_RETRY_COOLDOWN_MS) return Promise.resolve();")
+      && loaderSrc.includes("return typeof renderStudioDeskSection === 'function' && typeof renderStudioHealthSection === 'function';")
+      && loaderSrc.includes('onclick="retryStudioStaffLoad()"') && loaderSrc.includes('تعذر تحميل مكتب الفريق') && loaderSrc.includes('جارٍ تحميل مكتب الفريق')
+      && read('src/systems/ads_studio/15h-studio-shell.js').includes("typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection(section[0], route) :")
+      && adsStudio.includes("typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection('health')") && !adsStudio.includes('renderStudioHealthSection()')
+      && read('server/main.py').includes('"studio-staff.js"') && /^\s*COPY\s.*\bstudio-staff\.js\b/m.test(read('server/Dockerfile')));
+  const deskPairs = [...(deskSrc + adminSrc).matchAll(/adsStudioText\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)\s*,\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g)]
+    .map(m => m[4] ?? m[5] ?? m[6] ?? '');
+  const deskCss = workspaceCssFor => workspaceCssFor.slice(workspaceCssFor.indexOf('/* Albayan Studio v2 Team desk and admin tools'));
+  const deskCssText = deskCss(read('assets/ads-workspace.css'));
+  // An unclosed block swallows every rule after it (two @media blocks were left open before the desk
+  // shipped, so the wallet, help and desk styles applied only at 359 px or narrower): braces must balance.
+  const braceDepth = (() => {
+    const plain = read('assets/ads-workspace.css').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/'[^'\n]*'|"[^"\n]*"/g, '');
+    let depth = 0;
+    let lowest = 0;
+    for (const ch of plain) { if (ch === '{') depth++; else if (ch === '}') depth--; lowest = Math.min(lowest, depth); }
+    return { final: depth, lowest };
+  })();
+  check('ads-workspace.css closes every block it opens (an open block would hide every rule after it outside its media query)', braceDepth.final === 0 && braceDepth.lowest === 0, `final depth ${braceDepth.final}, lowest ${braceDepth.lowest}`);
+  check('Team desk files: no native dialogs, no token words, every text pair has Arabic, the styles use the tokens (no raw colours) and are synced to www',
+    ![loaderSrc, deskSrc, adminSrc].some(src => /\b(?:confirm|prompt|alert)\(/.test(src.replace(/\/\/.*$/gm, '')))
+      && !/accessToken|access_token|appSecret|app_secret|password/i.test(deskSrc + adminSrc)
+      && deskPairs.length >= 200 && deskPairs.every(ar => /[؀-ۿ]/.test(ar))
+      && deskCssText.length > 4000 && read('www/assets/ads-workspace.css') === read('assets/ads-workspace.css')
+      && ['.studio-desk-badge.is-urgent', '.studio-v2-nav.is-staff .studio-v2-nav-item { position: relative; }', '@media (max-width: 900px)', '@media (max-width: 359px)', 'overflow-wrap: anywhere', 'min-height: 44px'].every(rule => deskCssText.includes(rule))
+      && !/background(-color)?:\s*#|[^-]color:\s*#/.test(deskCssText),
+    `pairs ${deskPairs.length}, first without Arabic: ${deskPairs.find(ar => !/[؀-ۿ]/.test(ar)) || 'none'}`);
+
+  // ---- the desk in a vm sandbox
+  const who = { staff: true, admin: false };
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+  };
+  const hist = {
+    entries: [], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) { const next = this.index + delta; if (!delta || next < 0 || next >= this.entries.length) return; this.index = next; this.show(); for (const fn of [...win.listeners.popstate]) fn({ state: this.state }); },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let secureSeq = 0;
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'u1', name: 'Reviewer', email: 'rev@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [], walletTransactions: [], users: [{ id: 'c1', name: 'Customer One' }] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+      generateSecureId: prefix => `${prefix}-${++secureSeq}`,
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeInput: (value, options) => String(value ?? '').slice(0, (options && options.maxLength) || 10000)
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => who.admin,
+    currentUserHasPermission: (collection, action) => (who.staff ? true : action !== 'review' && action !== 'view'),
+    hasSubscription: () => false,
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+    getEntityPhotoCountHint: () => 2,
+    getAuthMeIdentity: () => 'session',
+    updateUrlParams: () => {}, requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 1000 }
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', title: 'Albayan Studio', addEventListener() {}, removeEventListener() {} };
+      var console = { warn() {}, log() {}, error() {} };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function __runTimers() { for (let round = 0; round < 5 && __timers.size; round++) { const due = Array.from(__timers.entries()); __timers.clear(); due.forEach(([, t]) => t.fn()); } }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function showNotification(title, message, type) { __notes.push({ title, message, type }); }
+      function getServerSessionIdentity() { return 'session'; }
+      function serverSessionIdentityChanged() { return false; }
+      function makeSessionChangedError() { return new Error('session changed'); }
+      function requestValidatedServerEntity(collection, context, loader) { return loader(); }
+      function validateServerEntityResponse() {}
+      function withRetry(fn) { return fn(); }
+      function markCollectionDirty() {}
+      function clearCollectionCorruption() {}
+      function saveState() {}
+      function studioBuilderStart() { return true; }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);
+    vm.runInContext(adsSrc, box);
+    vm.runInContext(helpSrc, box);
+    vm.runInContext(loaderSrc, box);
+    vm.runInContext(healthSrc, box);
+    vm.runInContext(deskSrc, box);
+    vm.runInContext(adminSrc, box);
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
+  const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
+  const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && c.path === path);
+  const openAt = url => { hist.reset(url); run('_studioV2.docRendered = false; render();'); };
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const arabicOnly = value => /[؀-ۿ]/.test(value) && !/[A-Za-z]{3}/.test(value.replace(/PAY|LYD|USD|T-|ALB-S|HH:MM|YYYY-MM-DD/g, ''));
+  const meReply = value => run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: ${JSON.stringify(value)} }]; studioLoadMe();`);
+  // The settled value of an action's promise (microtasks run after each evaluate).
+  const outcome = code => { run(`__out = null; (${code}).then(o => { __out = o; });`); return json('__out'); };
+  const hours = n => new Date(Date.now() + n * 3600000).toISOString();
+  const staffMe = { ui: 'classic', staffDesk: 'v2', isStaff: true, isAdmin: false, services: { help: true, stopRequest: true, tiktok: false }, serviceHours: {}, contact: {} };
+  const requestsRows = () => [
+    { id: 'r_sub', createdBy: 'c1', status: 'Submitted', name: 'Weekly <offer>', objective: 'messages', platforms: ['facebook'], pageName: 'Shop Page', primaryText: 'Message us today', headline: 'Offer', budgetMinorUSD: 1000, budgetType: 'daily', durationDays: 7, totalBudgetMinorUSD: 7000, schemaVersion: 2, startDate: '2099-01-10', endDate: '2099-01-16', submittedAt: hours(-3), boostType: 'boost_post', sourcePostRef: 'https://www.facebook.com/shop/posts/1', _created: 9, _lastModified: 19 },
+    { id: 'r_sub2', createdBy: 'c1', status: 'Submitted', name: 'Second waiting', objective: 'messages', platforms: ['facebook'], budgetMinorUSD: 2500, budgetType: 'lifetime', durationDays: 5, startDate: '2099-02-01', endDate: '2099-02-05', _created: 8, _lastModified: 18 },
+    { id: 'r_own', createdBy: 'u1', status: 'Submitted', name: 'My own request', budgetMinorUSD: 500, _created: 7, _lastModified: 17 },
+    { id: 'r_app', createdBy: 'c1', status: 'Approved', name: 'Approved, not linked', paidMinorUSD: 5000, budgetMinorUSD: 5000, budgetType: 'lifetime', durationDays: 7, studioRef: 'ALB-S-AB12CD34', studioName: 'ALB-S-AB12CD34 · Approved, not linked', startDate: '2099-01-10', endDate: '2099-01-16', _created: 6, _lastModified: 16 },
+    { id: 'r_lnk', createdBy: 'c1', status: 'Approved', name: 'Linked and ended', paidMinorUSD: 4000, budgetMinorUSD: 4000, budgetType: 'lifetime', durationDays: 3, studioRef: 'ALB-S-EF56GH78', studioName: 'ALB-S-EF56GH78 · Linked and ended', metaAdAccountId: '9876543210', metaCampaignId: '120200000000000001', startDate: '2026-01-01', endDate: '2026-01-03', _created: 5, _lastModified: 15 },
+    { id: 'r_old', createdBy: 'c1', status: 'Approved', name: 'Never linked, past its end', paidMinorUSD: 900, budgetMinorUSD: 900, budgetType: 'lifetime', durationDays: 2, startDate: '2025-01-01', endDate: '2025-01-02', _created: 4, _lastModified: 14 }
+  ];
+  const endedStage = { stage: 10, stageKey: 'ended_settling', labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' }, linked: true, checkedAt: hours(-1), checkedAgo: { en: 'checked 1 hour ago', ar: 'فُحص قبل ساعة' }, metaUsedMinor: 1234, actions: ['ask'], tracker: { step: 'ended', side: false } };
+  const endedResults = { campaignId: 'r_lnk', linked: true, stage: endedStage, results: { metaUsedMinor: 1234, paidMinor: 4000 }, staff: { syncState: 'ok', deliveryEndedAt: hours(-1), settleReadDueAt: hours(47), settleReadAt: null, spendConfirmedAt: hours(-1), neverDelivered: false } };
+  const pulse = { waitingReview: 2, stopRequests: 1, openTickets: 3, alerts: 0, updatedAt: hours(0) };
+  box.state.adCampaignRequests = requestsRows();
+  meReply(staffMe);
+  reply('/api/studio/staff/pulse', pulse);
+  openAt('/studio?tab=review&section=requests');
+  run('__runTimers()');
+  const queueHtml = html();
+  check('Team desk requests: the loader draws the real section (no loading card), the queue lists the customers\' waiting requests (budget as daily × days, page, sent when) and never the reviewer\'s own; paging shows 20 first',
+    !loadError && queueHtml.includes('data-testid="studio-desk" data-section="requests"') && !queueHtml.includes('studio-staff-bundle-loading') && !queueHtml.includes('studio-soon')
+      && queueHtml.includes('studio-desk-request-r_sub') && queueHtml.includes('studio-desk-request-r_sub2') && !queueHtml.includes('studio-desk-request-r_own')
+      && queueHtml.includes('Waiting for review (2)') && queueHtml.includes('$10.00/day × 7 days = $70.00') && queueHtml.includes('Shop Page') && queueHtml.includes('Weekly &lt;offer&gt;') && queueHtml.includes('Customer One')
+      && json("Object.keys(_studioDesk.pulse.value || {})").length === 5 && json('studioDeskBadgeCounts()').requests === 2 && json('studioDeskBadgeCounts()').tickets === 4
+      && run('document.title') === '(6) Albayan Studio' && calls('GET', '/api/studio/staff/pulse').length >= 1,
+    loadError || `title ${run('document.title')} html ${queueHtml.slice(0, 300)}`);
+  openAt('/studio?tab=review&section=requests&id=r_sub');
+  const detailHtml = html();
+  const noReason = outcome("studioDeskDecide('r_sub', 'Rejected')");
+  run("studioDeskPickReason('r_sub', 'text_policy'); studioDeskNoteInput('r_sub', { value: 'Please soften the claim.' });");
+  reply('/api/ad-studio/campaigns/r_sub/review', { id: 'r_sub', data: { ...requestsRows()[0], status: 'Rejected', reviewReasonCode: 'text_policy', reviewNote: 'Please soften the claim.', _lastModified: 20 }, lastModified: 20 });
+  run("studioDeskDecide('r_sub', 'Rejected'); studioDeskDecide('r_sub', 'Rejected');");
+  run('render()');
+  const rejectCall = calls('POST', '/api/ad-studio/campaigns/r_sub/review');
+  const afterReject = html();
+  check('Team desk decision: the detail shows the customer\'s texts, the post link and the photos button, the 7 reason codes; send back / reject need a reason and a note (no request), then ONE review call carries the reason code and an operationId; the outcome box replaces the form',
+    detailHtml.includes('data-testid="studio-desk-brief"') && detailHtml.includes('Message us today') && detailHtml.includes('studio-desk-post-link') && detailHtml.includes('View the photos (2)')
+      && ADS_STUDIO_REASONS_LIST.every(code => detailHtml.includes(`data-testid="studio-desk-reason-${code}"`))
+      && noReason && noReason.ok === false && /Choose a reason/.test(noReason.text)
+      && rejectCall.length === 1 && rejectCall[0].body.decision === 'Rejected' && rejectCall[0].body.reviewReasonCode === 'text_policy' && rejectCall[0].body.note === 'Please soften the claim.' && /^campaign-review-\d+$/.test(rejectCall[0].body.operationId) && rejectCall[0].body.expectedLastModified === 19
+      && afterReject.includes('data-testid="studio-desk-outcome" data-decision="Rejected"') && !afterReject.includes('data-testid="studio-desk-decision"'),
+    `calls ${rejectCall.length} noReason ${JSON.stringify(noReason)}`);
+  openAt('/studio?tab=review&section=requests&id=r_sub2');
+  const pending = outcome("studioDeskDecide('r_sub2', 'Approved')");
+  reply('/api/ad-studio/campaigns/r_sub2/review', { id: 'r_sub2', data: { ...requestsRows()[1], status: 'Approved', paidMinorUSD: 2500, studioRef: 'ALB-S-NEW11111', studioName: 'ALB-S-NEW11111 · Second waiting', _lastModified: 21 }, lastModified: 21 });
+  run("studioDeskDecide('r_sub2', 'Approved', null, true)");
+  run('render()');
+  const approveCall = calls('POST', '/api/ad-studio/campaigns/r_sub2/review');
+  const afterApprove = html();
+  check('Team desk approval: the first tap asks for the in-page confirmation (no request), the confirmed tap sends ONE review call without a reason code; the outcome shows the studio name with Copy and the way to Launch',
+    pending && pending.ok === true && pending.pending === true && approveCall.length === 1 && approveCall[0].body.decision === 'Approved' && !('reviewReasonCode' in approveCall[0].body)
+      && afterApprove.includes('data-decision="Approved"') && afterApprove.includes('ALB-S-NEW11111 · Second waiting') && afterApprove.includes('studio-desk-copy-r_sub2') && afterApprove.includes('studio-desk-to-launch'),
+    `pending ${JSON.stringify(pending)} calls ${approveCall.length}`);
+  reply('/api/studio/campaigns/r_lnk/results', endedResults);
+  openAt('/studio?tab=review&section=launch');
+  run('render()');
+  const launchHtml = html();
+  check('Team desk launch: Approved-not-linked requests show the studio name with Copy, the checklist (studio code, budget within paid) and the classic Link sheet button; linked ones sit under "In Meta" with Check Meta now and Unlink; an ended one is not there',
+    launchHtml.includes('data-testid="studio-desk-launch-r_app"') && launchHtml.includes('ALB-S-AB12CD34 · Approved, not linked') && launchHtml.includes('studio-desk-copy-r_app')
+      && launchHtml.includes("openAdsStudioLinkSheet('r_app')") && launchHtml.includes('within what was paid ($50.00)') && launchHtml.includes('data-testid="studio-desk-launch-r_sub2"')
+      && !launchHtml.includes('studio-desk-linked-r_lnk') && !launchHtml.includes('studio-desk-launch-r_lnk') && calls('GET', '/api/studio/campaigns/r_lnk/results').length === 1,
+    launchHtml.slice(0, 200));
+  openAt('/studio?tab=review&section=settle');
+  const settleHtml = html();
+  const settleAr = inLanguage('ar', 'render(); __html');
+  replyError('/api/ad-studio/campaigns/r_lnk/stop', { status: 409, payload: { detail: { code: 'SETTLE_NOT_READY', message: 'The final amount is not ready until ' + hours(47), messageAr: 'المبلغ النهائي غير جاهز قبل ' + hours(47), readyAt: hours(47) } } });
+  const notReady = outcome("studioDeskSettleRun('settle', 'r_lnk', 2766, '')");
+  const keptReadyAt = String(json("_studioDesk.settle.get('r_lnk').readyAt") || '');
+  reply('/api/ad-studio/campaigns/r_lnk/stop', { id: 'r_lnk', data: { ...requestsRows()[4], status: 'Stopped', closeReason: 'completed', refundMinorUSD: 2766, settleBasis: 'final_read', _lastModified: 30 }, lastModified: 30 });
+  const settled = outcome("studioDeskSettleRun('settle', 'r_lnk', 2766, ''), studioDeskSettleRun('settle', 'r_lnk', 2766, '')");
+  const stopCalls = calls('POST', '/api/ad-studio/campaigns/r_lnk/stop');
+  const settleCases = [
+    settleHtml.includes('data-testid="studio-desk-settle-r_lnk" data-ready="0"'), settleHtml.includes('Paid $40.00 · Meta used $12.34 · Return up to $27.66'), /Final Meta read in 4[67] h \d+ min/.test(settleHtml),
+    settleHtml.includes('data-testid="studio-desk-settle-r_old" data-ready="1"'), settleHtml.includes('Never linked to Meta: the full amount goes back now.'), settleHtml.includes('studio-desk-finish-r_lnk'), !settleHtml.includes('studio-desk-override-r_lnk'),
+    /قراءة ميتا النهائية بعد 4[67] س \d+ د/.test(String(settleAr)), String(settleAr).includes('مدفوع $40.00'),
+    !!notReady && notReady.ok === false && String(notReady.text).startsWith('The final amount is not ready until'), /^\d{4}-\d{2}-\d{2}T/.test(keptReadyAt),
+    !!settled && settled.ok === true, stopCalls.length === 2 && stopCalls.every(c => c.body.closeReason === 'completed' && c.body.refundMinorUSD === 2766 && c.body.expectedLastModified === 15), stopCalls.length === 2 && stopCalls[0].body.operationId === stopCalls[1].body.operationId,
+    json("state.adCampaignRequests.find(r => r.id === 'r_lnk').status") === 'Stopped'
+  ];
+  check('Team desk settle: the ended linked request shows paid, Meta used, the cap and the countdown to the final read (in Arabic too); the never-linked one is ready at once; a SETTLE_NOT_READY 409 is shown from its bilingual shape and keeps readyAt; the settle posts closeReason completed with the amount and one operationId per version',
+    settleCases.every(Boolean), `cases ${failed(settleCases)}; notReady ${JSON.stringify(notReady)} settled ${JSON.stringify(settled)} calls ${stopCalls.length}`);
+  check('Team desk refusals: every settle refusal prefix of the server has a bilingual entry here, the unknown fallback stays calm, and Arabic readers never see raw English',
+    (() => {
+      const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
+      const prefixes = [...actionsPy.matchAll(/^REFUSE_(?:SETTLE|REFUND|OVERRIDE)_[A-Z_]+ = "([^"]+)"/gm)].map(m => m[1]);
+      const map = json('STUDIO_DESK_REFUSALS') || [];
+      const covered = prefixes.every(prefix => map.some(([needle]) => prefix.startsWith(needle)));
+      const ar = inLanguage('ar', `studioDeskErrorInfo(Object.assign(new Error('x'), { status: 409, payload: { detail: ${JSON.stringify(prefixes[0])} } })).text`);
+      const unknown = inLanguage('ar', "studioDeskErrorInfo(Object.assign(new Error('Something odd'), { status: 400, payload: { detail: 'Something odd happened' } })).text");
+      return prefixes.length >= 12 && covered && arabicOnly(String(ar)) && arabicOnly(String(unknown));
+    })());
+  // The pulse: a new stop request rings (when the switch is on) and the title follows; leaving the desk stops the watch and restores the title.
+  run("studioDeskToggleSound()");
+  const soundOn = json('studioDeskSoundOn()');
+  run(`studioDeskOnPulse(${JSON.stringify({ ...pulse, stopRequests: 2, updatedAt: hours(0.01) })})`);
+  const title2 = run('document.title');
+  box.state.currentView = 'dashboard';
+  run(`studioDeskOnPulse(${JSON.stringify(pulse)})`);
+  const titleAway = run('document.title');
+  const watching = json('_studioDesk.pulse.watching');
+  box.state.currentView = 'ads-studio';
+  check('Team desk pulse: the sound switch is a per-browser choice, the title carries the count of items waiting for the team and drops it when the desk is left (the watch stops too)',
+    soundOn === true && title2 === '(7) Albayan Studio' && titleAway === 'Albayan Studio' && watching === false);
+  // Admin: More lists the tools and every setting; the intake form saves with expectedVersion; 409 reloads; the server's message shows.
+  who.admin = true;
+  meReply({ ...staffMe, isAdmin: true });
+  reply('/api/studio/staff/pulse', { ...pulse, paymentsWaiting: 4 });
+  openAt('/studio?tab=review&section=more');
+  run('__runTimers()');
+  const moreHtml = html();
+  reply('/api/studio/admin/settings/intake', { key: 'intake', value: { open: true, maxSubmissionsPerDay: 5 }, version: 3, updatedAt: hours(-24) });
+  openAt('/studio?tab=review&section=more&id=settings-intake');
+  run('render()');
+  const intakeHtml = html();
+  run("studioAdminInput('intake', 'maxSubmissionsPerDay', { value: 'seven' }); studioAdminSave('intake')");
+  const badNumber = json("_studioAdmin.settings.intake.error");
+  const noPut = calls('PUT', '/api/studio/admin/settings/intake').length;
+  replyError('/api/studio/admin/settings/intake', { status: 409, payload: { detail: { code: 'VERSION_CONFLICT', message: 'saved first' } } });
+  run("studioAdminInput('intake', 'maxSubmissionsPerDay', { value: '٧' }); studioAdminInput('intake', 'open', { type: 'checkbox', checked: false }); studioAdminSave('intake')");
+  run('render()');
+  const conflictHtml = html();
+  const putCall = calls('PUT', '/api/studio/admin/settings/intake')[0];
+  reply('/api/studio/admin/settings/intake', { key: 'intake', value: { open: true, maxSubmissionsPerDay: 9 }, version: 4, updatedAt: hours(0) });
+  run("studioAdminReload('intake')");
+  run('render()');
+  const reloadedHtml = html();
+  replyError('/api/studio/admin/settings/intake', { status: 400, payload: { detail: { code: 'INVALID_VALUE', message: 'maxSubmissionsPerDay must be a whole number from 1 to 500' } } });
+  run("studioAdminInput('intake', 'maxSubmissionsPerDay', { value: '400' }); studioAdminSave('intake')");
+  run('render()');
+  const refusedHtml = html();
+  reply('/api/studio/admin/settings/intake', { key: 'intake', value: { open: true, maxSubmissionsPerDay: 12 }, version: 5, updatedAt: hours(0) });
+  run("studioAdminInput('intake', 'maxSubmissionsPerDay', { value: '12' }); studioAdminSave('intake')");
+  run('render()');
+  const savedHtml = html();
+  check('Admin More: the menu lists the tools, every setting key and the payments count; the intake form shows the explanation, the version and stable ids; a bad number never reaches the server; the PUT carries expectedVersion and typed values (Arabic digits read); a 409 opens the reload flow that drops the edits; the server\'s validation message is shown; a save shows the new version',
+    moreHtml.includes('studio-admin-open-payments') && moreHtml.includes('studio-admin-open-collisions') && STUDIO_ADMIN_KEYS_LIST.every(key => moreHtml.includes(`studio-admin-open-settings-${key}`))
+      && moreHtml.includes('data-testid="studio-admin-count-payments">4<') && moreHtml.includes('studio-desk-sound-toggle') && moreHtml.includes('studio-basics') && moreHtml.includes('studio-admin-alert-test-button')
+      && intakeHtml.includes('data-testid="studio-admin-form-intake" data-version="3"') && intakeHtml.includes('id="studio-admin-intake-maxSubmissionsPerDay"') && intakeHtml.includes('id="studio-admin-intake-open"') && intakeHtml.includes('data-testid="studio-admin-about"')
+      && /enter a whole number/.test(String(badNumber)) && noPut === 0
+      && putCall && putCall.body.expectedVersion === 3 && putCall.body.value.maxSubmissionsPerDay === 7 && putCall.body.value.open === false
+      && conflictHtml.includes('data-testid="studio-admin-conflict" data-code="VERSION_CONFLICT"') && conflictHtml.includes('studio-admin-reload')
+      && reloadedHtml.includes('data-version="4"') && reloadedHtml.includes('value="9"') && !reloadedHtml.includes('studio-admin-conflict')
+      && refusedHtml.includes('data-testid="studio-admin-server-message"') && refusedHtml.includes('maxSubmissionsPerDay must be a whole number from 1 to 500')
+      && savedHtml.includes('data-testid="studio-admin-saved" data-version="5"'),
+    `badNumber ${badNumber} put ${JSON.stringify(putCall && putCall.body)}`);
+  reply('/api/studio/admin/settings/hours', { key: 'hours', value: { timezone: 'Africa/Tripoli', week: { sun: { open: '09:00', close: '17:00' }, mon: { open: '09:00', close: '17:00' }, tue: null, wed: null, thu: null, fri: null, sat: null }, holidays: [{ date: '2026-12-24', labelEn: 'Independence Day', labelAr: 'عيد الاستقلال' }], ramadan: null, onDutyUntil: '23:00' }, version: 1, updatedAt: hours(-5) });
+  openAt('/studio?tab=review&section=more&id=settings-hours');
+  run('render()');
+  const hoursHtml = html();
+  run("studioAdminHolidayAdd('hours'); studioAdminHolidayInput('hours', 1, 'date', { value: '2026-03-20' }); studioAdminHolidayInput('hours', 1, 'labelEn', { value: 'Eid' }); studioAdminHolidayInput('hours', 1, 'labelAr', { value: 'العيد' }); studioAdminInput('hours', 'week.tue.on', { type: 'checkbox', checked: true });");
+  const hoursValue = json("studioAdminBuildValue('hours', _studioAdmin.settings.hours)");
+  run("studioAdminInput('hours', 'week.sun.close', { value: '08:00' })");
+  const hoursBad = json("studioAdminBuildValue('hours', _studioAdmin.settings.hours)");
+  check('Admin hours form: the week with open/closed days and times, holidays (add, name in both languages) and the on-duty hour build the server\'s shape; a closing time before opening is refused in words',
+    hoursHtml.includes('data-testid="studio-admin-week"') && hoursHtml.includes('data-testid="studio-admin-hours-sun-open"') && hoursHtml.includes('data-day="tue" data-open="0"') && hoursHtml.includes('Independence Day') && hoursHtml.includes('studio-admin-holiday-add')
+      && hoursValue && hoursValue.value && hoursValue.value.week.tue && hoursValue.value.week.tue.open === '09:00' && hoursValue.value.week.wed === null && hoursValue.value.holidays.length === 2 && hoursValue.value.holidays[1].labelAr === 'العيد' && hoursValue.value.ramadan === null && hoursValue.value.onDutyUntil === '23:00'
+      && hoursBad && /closing later than opening/.test(hoursBad.error),
+    `value ${JSON.stringify(hoursValue)} bad ${JSON.stringify(hoursBad)}`);
+  reply('/api/studio/admin/alerts?limit=20', { alerts: [{ id: 'al1', kind: 'stop_request_overdue', labels: { en: 'A stop request has waited longer than the target: pause the ad in Meta now', ar: 'انتظر طلب إيقاف أكثر من الوقت المحدد: أوقف الإعلان في ميتا الآن' }, count: 2, lastAt: hours(-1), relatedType: 'adCampaignRequests', relatedId: 'r_lnk', acknowledgedAt: null, details: {} }], nextBefore: null, jobs: { enabled: true, late: true, lastTickAt: hours(-1) } });
+  openAt('/studio?tab=review&section=more&id=alerts');
+  run('render()');
+  const alertsHtml = html();
+  const alertsAr = inLanguage('ar', 'render(); __html');
+  reply('/api/meta-ads/collisions', { generatedAt: hours(0), counts: { total: 2, open: 1, kept: 1, byReason: { studio_name: 2, studio_campaign_id: 1 }, withMoney: 1, withCustomer: 0, removable: 1, untouched: 1 }, rows: [{ adId: 'ad_1', reasons: ['studio_name'], studioRequestIds: ['r_lnk'], kept: false, hasMoney: false, hasCustomer: false, removable: true, untouched: true, importState: 'imported', spend: { metaSpendMinor: 0, metaCurrency: 'USD' } }, { adId: 'ad_2', reasons: ['studio_campaign_id'], studioRequestIds: [], kept: true, hasMoney: true, hasCustomer: false, removable: false, untouched: false, importState: 'edited', spend: { metaSpendMinor: 1500, metaCurrency: 'USD' } }] });
+  openAt('/studio?tab=review&section=more&id=collisions');
+  run('render()');
+  const collisionsHtml = html();
+  reply('/api/studio/admin/diagnostics', { generatedAt: hours(0), jobs: { enabled: true, late: false, lastTickAt: hours(-0.02) }, baselines: { B1: { value: 20.5, unit: 'hours', sample: 4 }, B3: { value: 0, unit: 'count', sample: 2 } }, operations: { window: { queueDays: 7 }, queues: { reviews: { percent: 100, met: 3, sample: 3, waitingOverdue: 0, onTarget: true }, tickets: { percent: null, met: 0, sample: 0, waitingOverdue: 1, onTarget: null }, stopRequests: { percent: 50, met: 1, sample: 2, waitingOverdue: 1, onTarget: false }, payments: { percent: 100, met: 1, sample: 1, waitingOverdue: 0, onTarget: true } }, capacity: { intake: { open: true, maxSubmissionsPerDay: 5 }, submissionsToday: 2, usedPercent: 40, sendsPerDay: { average: 1.5, max: 3 }, waitingReview: 2 }, money: { owed: { owedMinorUSD: 123400, studioFundsMinorUSD: 500000, fundsMinusOwedMinorUSD: 376600 }, studioFunds: { fundsMinorUSD: 500000, allowlistConfigured: true }, absorbedOverspend: { totalMinorUSD: 0, thisMonthMinorUSD: 0 }, reconciliation: { month: '2026-09', differenceMinorUSD: 100, toleranceMinorUSD: 500, withinTolerance: true }, openIncidents: 0 }, goNoGo: { go: { reviewsOnTarget: { ok: true, value: 100 }, tokenValid: { ok: null, value: null } }, stop: { heartbeatLate: { fired: false, ageSeconds: 30 } }, allKnownOk: true, unknown: ['tokenValid'], goVerdict: null, stopVerdict: false, consecutiveWeeksNeeded: 2 }, meta: { connection: { state: 'up' }, token: { configured: true, checked: true, isValid: true, daysLeft: 41 } }, storage: { databaseBytes: 5000000, totalRows: 1200, backup: { at: hours(-2), bytes: 100000 } } } });
+  openAt('/studio?tab=review&section=more&id=diagnostics');
+  run('render()');
+  const diagHtml = html();
+  const adminCases = [
+    alertsHtml.includes('data-testid="studio-admin-alert" data-kind="stop_request_overdue"'), alertsHtml.includes('pause the ad in Meta now'), alertsHtml.includes('2 times'), alertsHtml.includes('data-testid="studio-admin-heartbeat" data-late="1"'),
+    String(alertsAr).includes('أوقف الإعلان في ميتا الآن'), String(alertsAr).includes('متأخر'),
+    collisionsHtml.includes('data-testid="studio-admin-collision-counts" data-total="2"'), collisionsHtml.includes('data-kept="0" data-removable="1"'), collisionsHtml.includes('an untouched imported copy: removable'), collisionsHtml.includes('kept by the owner&#39;s signed choice'), collisionsHtml.includes('studio_collision_repair.py'), !/apply|repair now/i.test(collisionsHtml.replace(/studio_collision_repair\.py/g, '')),
+    diagHtml.includes('data-tone="green" data-testid="studio-admin-queue-reviews"'), diagHtml.includes('100% met (3 of 3), 0 waiting past the target'), diagHtml.includes('data-tone="red" data-testid="studio-admin-queue-stopRequests"'),
+    diagHtml.includes('open, cap 5 a day'), diagHtml.includes('$1,234.00'), diagHtml.includes('$3,766.00'), diagHtml.includes('data-tone="green" data-testid="studio-admin-go-reviewsOnTarget"'), diagHtml.includes('data-tone="green" data-testid="studio-admin-stop-heartbeatLate"'), diagHtml.includes('data-testid="studio-admin-heartbeat" data-late="0"'), diagHtml.includes('41 days left')
+  ];
+  check('Admin alerts, collisions and diagnostics: the server\'s bilingual alert label (Arabic in Arabic) with the late heartbeat; the collision counts and rows with why each is kept or removable and no apply button; the queues met %, capacity, USD owed vs funds, the go/no-go rows and the heartbeat',
+    adminCases.every(Boolean), `cases ${failed(adminCases)}`);
+  who.admin = false;
+  meReply(staffMe);
+  openAt('/studio?tab=review&section=more&id=settings-rollout');
+  const reviewerMore = html();
+  openAt('/studio?tab=review&section=health');
+  const reviewerHealth = html();
+  const healthAr = inLanguage('ar', 'render(); __html');
+  check('A reviewer gets no admin tool (More shows the note, the sound switch and the basics; Health shows the pulse card and the note), in Arabic too',
+    reviewerMore.includes('studio-admin-reviewer') && !reviewerMore.includes('studio-admin-form') && !reviewerMore.includes('studio-admin-open-payments') && reviewerMore.includes('studio-basics')
+      && reviewerHealth.includes('data-testid="studio-desk-pulse"') && reviewerHealth.includes('studio-desk-health-reviewer') && !reviewerHealth.includes('Studio health')
+      && String(healthAr).includes('نبض المكتب') && String(healthAr).includes('بانتظار المراجعة'));
 }
 
 {

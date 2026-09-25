@@ -48,7 +48,7 @@ ENV ALBAYAN_RELEASE_SHA=${ALBAYAN_BUILD_SHA}
 
 # Copy application code
 COPY server /app/server
-COPY index.html script.js studio.js clothes.js admin-tools.js style.css privacy.html delete-account.html alembic.ini /app/
+COPY index.html script.js studio.js studio-staff.js clothes.js admin-tools.js style.css privacy.html delete-account.html alembic.ini /app/
 COPY assets /app/assets
 
 # Fail closed before publishing if build exclusions ever regress. Only inspect

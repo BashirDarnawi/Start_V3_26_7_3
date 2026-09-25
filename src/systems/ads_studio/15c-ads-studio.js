@@ -505,7 +505,7 @@ function renderAdsStudioView() {
   let content = '';
   if (_adsStudioActiveTab === 'campaigns') content = renderAdsStudioCampaigns();
   else if (_adsStudioActiveTab === 'builder') content = renderAdsStudioBuilder();
-  else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue() + renderAdsStudioLaunchQueue() + (typeof renderStudioStaffTicketsClassic === 'function' ? renderStudioStaffTicketsClassic() : '') + (isCurrentUserAdmin() && typeof renderStudioHealthSection === 'function' ? renderStudioHealthSection() : '');
+  else if (_adsStudioActiveTab === 'review') content = renderAdsStudioReviewQueue() + renderAdsStudioLaunchQueue() + (typeof renderStudioStaffTicketsClassic === 'function' ? renderStudioStaffTicketsClassic() : '') + (isCurrentUserAdmin() && typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection('health') : '');
   else if (_adsStudioActiveTab === 'posts') content = renderSocialStudioPostsTab();
   else if (_adsStudioActiveTab === 'replies') content = renderSocialStudioRepliesTab();
   else if (_adsStudioActiveTab === 'help' && typeof renderStudioHelpClassic === 'function') content = renderStudioHelpClassic();
