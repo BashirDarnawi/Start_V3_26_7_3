@@ -82,6 +82,9 @@ Each task lists its expected outcome, acceptance criteria and how it is verified
 | P3-21 | Done | stage 13 | Staff alert channel (`studio_alert_out` → operations webhook, one per stop request / violation / stale heartbeat, retried), heartbeat watch in the operations worker, admin test-alert route |
 | P3-14 + P3-19 | Done | stage 13 | Diagnostics operations block (queue targets met, staff times, capacity, storage, USD owed vs funds, reconciliation, go/no-go incl. comments lost to an outage, heartbeat, lanes); projected reads only (PostgreSQL EXPLAIN proof) |
 | P5-01 + P5-04 | Done (server) | stage 13 | TikTok service requests as tickets (≤3 open, states, bilingual notes, never "connected/automated"); anonymisation scrubs Social Studio rows and TikTok handles/notes |
+| P3-15 | Draft done (rehearsal = owner) | stage 15 | `docs/studio-redesign/RUNBOOK.md`: one page per incident (Meta key down, stop request overdue, Meta pause, integrity violation, stale jobs loop, wrong link, studio ad in Manager, low funds, page stopped replying, rollback rules, restore, layout switches) + the daily 5-minute check; two Docker Hub tags to fill in [owner] |
+| P3-22 | Draft done (lawyer = owner) | stage 15 | `DATA_INVENTORY.md` (every personal-data kind: purpose, record type, who sees it, retention, third parties) and `PILOT_CONSENT.md` (plain Arabic + English; blanks for dates, count, on-duty number) |
+| P5-06 | Draft done (lawyer = owner) | stage 15 | Draft customer terms section at the end of `privacy.html` (EN+AR, marked draft): advertiser responsibility, managed service, money rules and refund timing, support hours + urgent stop line, TikTok by hand, no guaranteed results. Still to do: link it from Account and the login help line |
 | Studio health screen | Done | stage 4 | Admin-only section in the studio review tab: facts, Meta key health, page subscription test, Instagram read test |
 | D36 door | Done | stage 3 | `server/user_directory.py`: systems read users only through this door; the guard refuses SQL on any table other than `entities` inside a system (incl. comma joins, USING, TRUNCATE and SQL kept in a variable; SQL built by `+`/`%`/`.format()` is not parsed) |
 
@@ -269,6 +272,17 @@ Every task is ≤ ~1 day and can ship on its own behind the switches.
 | P5-04 | Scrub TikTok requests and Social Studio rows [ASSUMPTION: not covered today] | Rows anonymised | UT |
 | P5-05 | Health section complete | Each item links to its fix | E2E |
 | **P5-06** | **Customer terms section in `privacy.html`** (advertiser responsibility, managed service, refund timing, support hours), text from the lawyer (D18); linked from Account and the login help line | Present in AR/EN; no new route | ST, MAN |
+
+### Added after the runbook review (stage 15, 2026-09-25)
+
+| ID | Task | Expected outcome / acceptance | Verify |
+|---|---|---|---|
+| P3-23 | Alert acknowledge: `POST /api/studio/admin/alerts/{id}/ack` (admin, audited) + a button in the desk's alerts list; `acknowledgedAt` is written; acknowledged alerts leave the open list | UT `test_studio_jobs.py::test_alert_ack` |
+| P3-24 | On-demand money scan for admins: `POST /api/studio/admin/integrity/scan` (1 per 10 min, audited) returning the same report as the daily scan | UT |
+| P3-25 | Alert-channel test button in the Studio health screen (calls the existing test route) and a bilingual result line | ST |
+| P6-06 | "Classic view" per-session link in the v2 header during preview/pilot and 30 days after (PLAN §12.2(e)); the choice lives in sessionStorage | ST, E2E |
+| P5-07 | Link the terms section from the v2 Account screen and the login help line (`/privacy#terms`) | ST |
+| D31 | Retention periods for the reply log (12 months), acknowledged alerts (6 months) and closed-ticket texts (24 months) — **owner decision**, then a jobs-loop cleanup | UT |
 
 ### Phase 6
 | ID | Task | Expected outcome / acceptance | Verify |
