@@ -339,6 +339,8 @@ test.describe('Albayan Studio extras: TikTok service, inbox badge, results card,
       await expect(page.getByTestId('studio-login-whatsapp')).toHaveAttribute('href', 'https://wa.me/218912345678');
       await expect(page.getByTestId('studio-login-phone')).toHaveAttribute('href', 'tel:+218213333333');
       expect(await help.innerText()).not.toContain('+218911111111');
+      await expect(page.getByTestId('studio-login-terms')).toHaveAttribute('href', '/privacy#terms');  // P5-07: the customer terms on the login help line
+      await expect(page.getByTestId('studio-login-terms')).toHaveText('Customer terms');
       await expectNoPageOverflow(page, 'login with the help line');
     } finally {
       try {

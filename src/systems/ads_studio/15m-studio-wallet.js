@@ -1290,6 +1290,10 @@ function renderStudioAccountScreen() {
                 ${studioWalletIcon('shield-check')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Privacy', 'الخصوصية'))}</span>
               </a>
+              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#terms" target="_blank" rel="noopener">
+                ${studioWalletIcon('scroll-text')}
+                <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
+              </a>
               ${row('handleLogout()', 'log-out', adsStudioText('Sign out', 'تسجيل الخروج'), '', 'studio-account-logout', ' is-danger')}
             </div>
           </div>`;

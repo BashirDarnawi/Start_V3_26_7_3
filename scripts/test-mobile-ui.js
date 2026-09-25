@@ -3227,7 +3227,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     JSON.stringify(restoredClassicMe) === '["posts","posts","posts","campaigns"]' && JSON.stringify(restoredPending) === '["posts","posts","posts","posts"]'
       && JSON.stringify(restoredFailed) === '["posts","posts"]' && JSON.stringify(restoredV2) === '["wallet","dashboard","campaigns"]',
     waiting.includes('data-testid="studio-v2-loading"') && notWaiting === '' && localMode === '',
-    onclicks.length > 20 && onclicks.every(attr => /^onclick="(studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2(Back|CloseBuilder)\(\)|studioV2BuilderStep\(1\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/.test(attr)),
+    onclicks.length > 20 && onclicks.every(attr => /^onclick="(studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2(Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|studioV2BuilderStep\(1\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/.test(attr)),
     !/\b(?:confirm|prompt|alert)\(/.test(coreSrc + shellSrc) && !/access_token|app_?secret|page_?token|Bearer /i.test(coreSrc + shellSrc)
   ];
   check('Studio v2 Team desk (no wallet items), classic when /me says classic or is unknown, pinned setter/restore in both layouts, safe handlers only', !loadError && staffCases.every(Boolean),
@@ -4018,7 +4018,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     __replies['/api/studio/wallet/summary'] = [{ value: { usd: { availableMinor: 1000, reservedMinor: 0 }, pendingPayments: [{ reference: 'PAY-LYD', amountMinor: 900, currency: 'LYD' }, { reference: 'PAY-AB12CD34', amountMinor: 2500, currency: 'USD' }] } }];`);
 
   // Drawing: every step of both kinds, from the shell's own route; ids on every input; safe handlers.
-  const handlerRe = /^(?:onclick|oninput|onchange)="(?:studioBuilder[A-Za-z]+\((?:\d+|'[a-z_]+'|this|\d+, this|'[A-Za-z]+', this)?\)|studioV2(?:Back|CloseBuilder)\(\)|studioV2Open\('[a-z]+'\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/;
+  const handlerRe = /^(?:onclick|oninput|onchange)="(?:studioBuilder[A-Za-z]+\((?:\d+|'[a-z_]+'|this|\d+, this|'[A-Za-z]+', this)?\)|studioV2(?:Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|studioV2Open\('[a-z]+'\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/;
   const pages = [];
   // An address never converts an open draft (only studioBuilderSwitchKind does): each kind starts its own.
   for (const [section, count] of [['full', 6], ['boost', 3]]) {
@@ -4855,7 +4855,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const fallback = html();
   run('renderStudioWalletScreen = __realWallet;');
   const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
-  const safeHandler = /^\son(?:click|input|change|toggle)="(studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2(Back|CloseBuilder)\(\)|studioWallet(OpenAdd|Refresh|RetryMethods|FinishAdd|Create)\(\)|studioWalletWhereToggle\(this\)|studioWalletOpenAdd\('plan'\)|studioWalletPickPurpose\('(ads|plan)'\)|studioWalletPickAmount\(\d+\)|studioWalletPickMethod\('[a-z0-9_]+'\)|studioWalletFlowStep\(-?1\)|studioWalletCopy\('PAY-[A-Z0-9]+'\)|studioWalletAskCancel\('[A-Za-z0-9_.:-]+'\)|studioWalletAttachReceipt\('[A-Za-z0-9_.:-]+', this\)|studioWalletAmountInput\(this\)|studioAccount(Edit\((true|false)\)|Save\(\)|AskRemove\(\)|Retry\(\)|DraftNumber\(this\)|DraftConsent\(this\))|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/;
+  const safeHandler = /^\son(?:click|input|change|toggle)="(studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2(Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|studioWallet(OpenAdd|Refresh|RetryMethods|FinishAdd|Create)\(\)|studioWalletWhereToggle\(this\)|studioWalletOpenAdd\('plan'\)|studioWalletPickPurpose\('(ads|plan)'\)|studioWalletPickAmount\(\d+\)|studioWalletPickMethod\('[a-z0-9_]+'\)|studioWalletFlowStep\(-?1\)|studioWalletCopy\('PAY-[A-Z0-9]+'\)|studioWalletAskCancel\('[A-Za-z0-9_.:-]+'\)|studioWalletAttachReceipt\('[A-Za-z0-9_.:-]+', this\)|studioWalletAmountInput\(this\)|studioAccount(Edit\((true|false)\)|Save\(\)|AskRemove\(\)|Retry\(\)|DraftNumber\(this\)|DraftConsent\(this\))|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/;
   const staticCases = [
     otherWallet === true && otherAccount === true,
     fallback.includes('data-testid="studio-screen-wallet"') && fallback.includes('Coming soon in the new studio'),
@@ -5301,7 +5301,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // Texts, handlers and styles.
   const textPairs = [...helpSrc.matchAll(/adsStudioText\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
   const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
-  const safeHandler = /^\son(?:click|input|change|submit)="(event\.preventDefault\(\); studioHelp(Send|ReplySend\('tkt_[0-9a-f]{40}'\))\(?\)?;?|studioHelp(Open|Filter|Retry|More|RetryThread|RefreshThread|New|CancelNew|Send|Status|DraftCategory|DraftSet|DraftRelated|ReplyInput|Go|AskAbout)\((?:'[A-Za-z0-9_.:-]+'(?:, (?:'[A-Za-z0-9_.:-]+'|this|this\.value))?|this\.value)?\)|studioInbox(Open|More|Retry|MarkSeen)\((?:'[A-Za-z0-9_.:-]+')?\)|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|setAdsStudioTab\('[a-z]+'\)|studioAdsSheet\('[a-z_]+', '[A-Za-z0-9_.:-]+', this\)|studioAdsEdit\('[A-Za-z0-9_.:-]+', this\)|studioAdsOpen\('[A-Za-z0-9_.:-]+'\)|studioAdsFilter\('[a-z]*'\)|studioAds(BackToList|CloseSheet|ConfirmSheet)\(\)|studioHomeGoal\('[a-z]+'\)|studioHome(OpenRequest|Edit)\('[A-Za-z0-9_.:-]+'(?:, this)?\)|studioDataRetry\(\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
+  const safeHandler = /^\son(?:click|input|change|submit)="(event\.preventDefault\(\); studioHelp(Send|ReplySend\('tkt_[0-9a-f]{40}'\))\(?\)?;?|studioHelp(Open|Filter|Retry|More|RetryThread|RefreshThread|New|CancelNew|Send|Status|DraftCategory|DraftSet|DraftRelated|ReplyInput|Go|AskAbout)\((?:'[A-Za-z0-9_.:-]+'(?:, (?:'[A-Za-z0-9_.:-]+'|this|this\.value))?|this\.value)?\)|studioInbox(Open|More|Retry|MarkSeen)\((?:'[A-Za-z0-9_.:-]+')?\)|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|setAdsStudioTab\('[a-z]+'\)|studioAdsSheet\('[a-z_]+', '[A-Za-z0-9_.:-]+', this\)|studioAdsEdit\('[A-Za-z0-9_.:-]+', this\)|studioAdsOpen\('[A-Za-z0-9_.:-]+'\)|studioAdsFilter\('[a-z]*'\)|studioAds(BackToList|CloseSheet|ConfirmSheet)\(\)|studioHomeGoal\('[a-z]+'\)|studioHome(OpenRequest|Edit)\('[A-Za-z0-9_.:-]+'(?:, this)?\)|studioDataRetry\(\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
   const workspaceCss = read('assets/ads-workspace.css');
   const helpCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio help desk'));
   const staticCases = [
@@ -6355,7 +6355,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // Texts, handlers, the classic map and the styles.
   const textPairs = [...pagesSrc.matchAll(/(?:adsStudioText|studioPgText)\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
   const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
-  const safeHandler = /^\son(?:click|input|change|submit|keydown)="(event\.preventDefault\(\); studioPg(LinkSend|RuleSave)\(\);|studioPg(Go|Retry|Refresh|LinkSend|LinkCancel|Master|KeywordAdd|RuleSave|DeleteConfirm|CloseSheet|LogMore)\((?:'[a-z]+'(?:, '(?:new|link|[A-Za-z0-9_.:-]+)')?)?\)|studioPg(Check|RuleDelete|RuleToggle|RulePage|LogFilter|PostsFilter|RuleFlip)\((?:'[A-Za-z0-9_.:-]*'(?:, this)?|this)?\)|studioPg(LinkSet|RuleSet)\('[A-Za-z]+', this\.value\)|studioPg(LinkPick|RulePick)\('[A-Za-z]+', '[a-z]+'\)|studioPgLinkShared\(this\.checked\)|studioPgKeywordRemove\(\d+\)|studioPgKeywordKey\(event\)|studioGuide(Open\('[a-z-]+', this\)|Close\(\))|studioHelp(AskAbout\('page', '[A-Za-z0-9_.:-]+'\)|Open\('tkt_[0-9a-f]{40}'\))|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|setAdsStudioTab\('[a-z]+'\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
+  const safeHandler = /^\son(?:click|input|change|submit|keydown)="(event\.preventDefault\(\); studioPg(LinkSend|RuleSave)\(\);|studioPg(Go|Retry|Refresh|LinkSend|LinkCancel|Master|KeywordAdd|RuleSave|DeleteConfirm|CloseSheet|LogMore)\((?:'[a-z]+'(?:, '(?:new|link|[A-Za-z0-9_.:-]+)')?)?\)|studioPg(Check|RuleDelete|RuleToggle|RulePage|LogFilter|PostsFilter|RuleFlip)\((?:'[A-Za-z0-9_.:-]*'(?:, this)?|this)?\)|studioPg(LinkSet|RuleSet)\('[A-Za-z]+', this\.value\)|studioPg(LinkPick|RulePick)\('[A-Za-z]+', '[a-z]+'\)|studioPgLinkShared\(this\.checked\)|studioPgKeywordRemove\(\d+\)|studioPgKeywordKey\(event\)|studioGuide(Open\('[a-z-]+', this\)|Close\(\))|studioHelp(AskAbout\('page', '[A-Za-z0-9_.:-]+'\)|Open\('tkt_[0-9a-f]{40}'\))|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|setAdsStudioTab\('[a-z]+'\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
   const workspaceCss = read('assets/ads-workspace.css');
   const pagesCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio v2 Pages & replies'));
   const refusalMap = json('_ADS_STUDIO_REFUSAL_AR') || [];
@@ -6859,6 +6859,366 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio error map completeness (P2-11): every plain-text 400/403/409/413 refusal of /api/ad-studio, /api/social-studio and /api/wallet in the server files has an Arabic entry in the classic map or the v2 patterns; the coded settle/rename refusals are in STUDIO_ERROR_TEXTS; Arabic readers never get raw English',
     !loadError && mapCases.every(Boolean), loadError || `cases ${failed(mapCases)} uncovered ${uncovered.slice(0, 5).map(r => `${r.file}:${r.line} ${JSON.stringify(r.template.replace(/\u0000/g, '{…}'))}`).join(' | ')}`);
+}
+
+{
+  // Stage 18 — P6-06 (Classic view), P5-07 (the terms links), P3-25 (Test alert channel) and P5-05 (a "What to do"
+  // line under every health item): the real 15c, 15g, 15h, 15j, 15k, 15m, 15n, 15r and 15i run in ONE sandbox (fake
+  // history, storage and timers, a scripted apiJson keyed by path, a fake studioDeskGo standing in for 15p) with /me
+  // answered like the server. Static checks cover the one guarded hook in 15c, the styles and both built copies.
+  const vm = require('vm');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
+  const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
+  const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
+  const walletSrc = read('src/systems/ads_studio/15m-studio-wallet.js');
+  const helpSrc = read('src/systems/ads_studio/15n-studio-help.js');
+  const extrasSrc = read('src/systems/ads_studio/15r-studio-extras.js');
+  const healthSrc = read('src/systems/ads_studio/15i-studio-health.js');
+  const adminSrc = read('src/systems/ads_studio/15q-studio-admin.js');
+  const deskSrc = read('src/systems/ads_studio/15p-studio-desk.js');
+  const workspaceCss = read('assets/ads-workspace.css');
+  const who = { staff: false, admin: false };
+  const memoryStorage = () => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; };
+  const win = {
+    location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
+    listeners: { popstate: [] },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
+    localStorage: memoryStorage(),
+    sessionStorage: memoryStorage()
+  };
+  const hist = {
+    entries: [{ url: '/studio', state: null }], index: 0,
+    get length() { return this.entries.length; },
+    get state() { return this.entries[this.index] ? this.entries[this.index].state : null; },
+    show() { const url = new URL(this.entries[this.index].url, 'http://localhost'); win.location.pathname = url.pathname; win.location.search = url.search; win.location.href = url.href; },
+    reset(url) { this.entries = [{ url, state: null }]; this.index = 0; this.show(); },
+    pushState(entryState, _title, url) { this.entries.splice(this.index + 1); this.entries.push({ url: String(url), state: JSON.parse(JSON.stringify(entryState)) }); this.index++; this.show(); },
+    replaceState(entryState, _title, url) { this.entries[this.index] = { url: String(url || this.entries[this.index].url), state: JSON.parse(JSON.stringify(entryState)) }; this.show(); },
+    go(delta) { const next = this.index + delta; if (!delta || next < 0 || next >= this.entries.length) return; this.index = next; this.show(); for (const fn of [...win.listeners.popstate]) fn({ state: this.state }); },
+    back() { this.go(-1); }
+  };
+  win.history = hist;
+  let secureSeq = 0;
+  const urlCalls = [];
+  const box = vm.createContext({
+    state: { language: 'en', theme: 'light', currentUser: { id: 'u1', name: 'Sara', email: 'sara@albayan.example' }, currentView: 'ads-studio', adCampaignRequests: [], walletTransactions: [] },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
+      generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++secureSeq).padStart(12, '0')}`,
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeInput: (value, options) => String(value ?? '').slice(0, (options && options.maxLength) || 10000)
+    },
+    window: win, history: hist, URLSearchParams, URL,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => who.admin,
+    currentUserHasPermission: (collection, action) => (who.staff ? true : action !== 'review' && action !== 'view'),
+    hasSubscription: id => id === 'ad_maker',
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list.filter(item => item && !item._deleted) : []),
+    getEntityPhotoCountHint: () => 0,
+    getAuthMeIdentity: () => 'session',
+    updateUrlParams: (params, replace) => { urlCalls.push({ params: JSON.parse(JSON.stringify(params)), replace: !!replace }); },
+    requestViewScrollReset: () => {}, IS_STUDIO_SHELL: true,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 1000 }
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __timers = new Map();
+      var __timerSeq = 0;
+      var __html = '';
+      var __notes = [];
+      var __dom = new Map();
+      var __desk = [];
+      var __scrolled = [];
+      var _lastRenderedView = null;
+      var performance = { now: () => 100, getEntriesByType: () => [{ type: 'navigate', name: '' }] };
+      var document = { visibilityState: 'visible', title: 'Albayan Studio', addEventListener() {}, removeEventListener() {}, getElementById(id) { return __dom.get(id) || null; }, querySelectorAll: () => [] };
+      var console = { warn() {}, log() {}, error() {} };
+      function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
+      function clearTimeout(id) { __timers.delete(id); }
+      function __runTimers() { for (let round = 0; round < 5 && __timers.size; round++) { const due = Array.from(__timers.entries()); __timers.clear(); due.forEach(([, t]) => t.fn()); } }
+      function getUrlParams() { return { tab: new URLSearchParams(window.location.search).get('tab') }; }
+      function getNavigationSignal() { return { aborted: false }; }
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), next.error));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function showNotification(title, message, type) { __notes.push({ title, message, type }); }
+      function getServerSessionIdentity() { return 'session'; }
+      function serverSessionIdentityChanged() { return false; }
+      function makeSessionChangedError() { return new Error('session changed'); }
+      function requestValidatedServerEntity(collection, context, loader) { return loader(); }
+      function withRetry(fn) { return fn(); }
+      function markCollectionDirty() {}
+      function saveState() {}
+      function studioBuilderStart() { return true; }
+      function hubPlanForService() { return null; }
+      function refreshSubscriptionPlans() { return Promise.resolve([]); }
+      // 15p is not loaded here: the desk's navigation is recorded instead of run.
+      function studioDeskGo(section, id) { __desk.push([String(section), String(id || '')]); return true; }
+      window.addEventListener('popstate', () => { restoreAdsStudioTabFromUrl(); render(); });
+    `, box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(coreSrc, box);
+    vm.runInContext(shellSrc, box);
+    vm.runInContext(homeSrc, box);
+    vm.runInContext(adsSrc, box);
+    vm.runInContext(walletSrc, box);
+    vm.runInContext(helpSrc, box);
+    vm.runInContext(extrasSrc, box);
+    vm.runInContext(healthSrc, box);
+    vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>' + renderAdsStudioHeader(); }", box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return undefined; } };
+  const html = () => String(run('__html'));
+  const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
+  const reply = (path, value) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ value: ${JSON.stringify(value)} });`);
+  const replyError = (path, error) => run(`(__replies[${JSON.stringify(path)}] = __replies[${JSON.stringify(path)}] || []).push({ error: ${JSON.stringify(error)} });`);
+  const calls = (method, path) => (json('__calls') || []).filter(c => c.method === method && (!path || c.path === path));
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const meReply = value => run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: ${JSON.stringify(value)} }]; studioLoadMe();`);
+  const openAt = url => { hist.reset(url); run('_studioV2.docRendered = false; _studioV2.layout = null; render();'); };
+  const classicKey = 'albayan.studio.v2.classic';
+  const customerMe = { ui: 'v2', staffDesk: 'classic', isStaff: false, isAdmin: false, services: { help: true, stopRequest: true, tiktok: false }, capabilities: {}, intake: { open: true }, serviceHours: {}, contact: {}, metaConnection: {} };
+  const staffMe = { ...customerMe, ui: 'classic', staffDesk: 'v2', isStaff: true, isAdmin: true };
+
+  // ---- P6-06: the Classic view link and the way back
+  meReply(customerMe);
+  openAt('/studio?tab=wallet');
+  const v2Page = html();
+  const v2PageAr = String(inLanguage('ar', 'render(); __html'));
+  run('__calls.length = 0;');
+  const chose = run('studioV2ChooseClassic(true)');
+  const classicPage = html();
+  const classicState = { key: win.sessionStorage.getItem(classicKey), tab: run('_adsStudioActiveTab'), frame: run('studioV2Frame()'), said: run('studioV2FrameOf(studioV2Layout())'), shown: run('_studioV2.shown'), chosen: run('studioV2ClassicChosen()') };
+  const classicSwitchAr = String(inLanguage('ar', 'renderStudioV2ClassicSwitch()'));
+  const writesWhileSwitching = calls().filter(c => c.method !== 'GET').length;
+  meReply(customerMe);  // the 5-minute /me re-read: the choice holds
+  const afterMe = html();
+  openAt('/studio?tab=campaigns');  // a reload of this tab: sessionStorage keeps the choice, no "Opening the studio…"
+  const afterReload = { page: html(), shown: run('_studioV2.shown') };
+  run('studioV2ChooseClassic(false)');
+  const backPage = html();
+  const backState = { key: win.sessionStorage.getItem(classicKey), frame: run('studioV2Frame()'), switchGone: run('renderStudioV2ClassicSwitch()') };
+  // staff: the same link in the Team desk header
+  who.staff = true; who.admin = true;
+  meReply(staffMe);
+  openAt('/studio?tab=review&section=health');
+  const staffPage = html();
+  run('studioV2ChooseClassic(true)');
+  const staffClassic = { page: html(), tab: run('_adsStudioActiveTab'), switchOn: String(run('renderStudioV2ClassicSwitch()')) };
+  run('studioV2ChooseClassic(false)');
+  const staffBack = html();
+  who.staff = false; who.admin = false;
+  // /me says classic: the stored choice means nothing and there is no "New studio" to offer
+  win.sessionStorage.setItem(classicKey, 'u1');
+  meReply({ ...customerMe, ui: 'classic' });
+  openAt('/studio');
+  const classicMeSwitch = String(run('renderStudioV2ClassicSwitch()'));
+  const classicMePage = html();
+  // another user in the same tab: the choice was the first user's
+  box.state.currentUser = { id: 'u2', name: 'Omar' };
+  meReply(customerMe);
+  openAt('/studio');
+  const otherUser = { page: html(), chosen: run('studioV2ClassicChosen()') };
+  box.state.currentUser = { id: 'u1', name: 'Sara', email: 'sara@albayan.example' };
+  win.sessionStorage.removeItem(classicKey);
+  // no storage at all (a private window): the choice lives in this page's memory, nothing throws
+  const realStorage = win.sessionStorage;
+  win.sessionStorage = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); }, removeItem() { throw new Error('blocked'); } };
+  meReply(customerMe);
+  openAt('/studio?tab=home');
+  const noStorageChoose = run('studioV2ChooseClassic(true)');
+  const noStoragePage = html();
+  const noStorageBack = run('studioV2ChooseClassic(false)');
+  const noStorageBackPage = html();
+  win.sessionStorage = realStorage;
+  const hookAt = adsStudio.indexOf("${typeof renderStudioV2ClassicSwitch === 'function' ? renderStudioV2ClassicSwitch() : ''}");
+  const chooseFn = shellSrc.slice(shellSrc.indexOf('function studioV2ChooseClassic('), shellSrc.indexOf('\n}\n', shellSrc.indexOf('function studioV2ChooseClassic(')));
+  const classicCases = [
+    !loadError,
+    v2Page.includes('data-testid="studio-v2-frame"') && v2Page.includes('<button type="button" data-testid="studio-classic-view" class="studio-v2-header-link" onclick="studioV2ChooseClassic(true)">Classic view</button>')
+      && v2PageAr.includes('data-testid="studio-classic-view"') && v2PageAr.includes('>العرض القديم<'),
+    chose === true && classicPage.startsWith('<classic>') && !classicPage.includes('studio-v2-frame') && classicState.key === 'u1' && classicState.chosen === true
+      && classicState.frame === '' && classicState.said === 'customer' && classicState.shown === 'classic' && classicState.tab === 'dashboard',  // wallet is not a classic tab
+    classicPage.includes('data-testid="studio-new-studio"') && classicPage.includes('onclick="studioV2ChooseClassic(false)"') && classicPage.includes('>New studio<')
+      && classicSwitchAr.includes('>الاستوديو الجديد<') && writesWhileSwitching === 0,
+    afterMe.startsWith('<classic>') && afterReload.page.startsWith('<classic>') && afterReload.shown === 'classic',
+    backPage.includes('data-testid="studio-v2-frame"') && backPage.includes('data-testid="studio-screen-campaigns"') && backState.key === null && backState.frame === 'customer' && backState.switchGone === '',
+    staffPage.includes('data-testid="studio-staff-frame"') && staffPage.includes('data-testid="studio-classic-view"') && staffClassic.page.startsWith('<classic>') && staffClassic.tab === 'review'
+      && staffClassic.switchOn.includes('data-testid="studio-new-studio"') && staffBack.includes('data-testid="studio-staff-frame"'),
+    classicMeSwitch === '' && classicMePage.startsWith('<classic>') && !classicMePage.includes('studio-new-studio'),
+    otherUser.chosen === false && otherUser.page.includes('data-testid="studio-v2-frame"'),
+    noStorageChoose === true && noStoragePage.startsWith('<classic>') && noStorageBack === false && noStorageBackPage.includes('data-testid="studio-v2-frame"'),
+    hookAt > 0 && hookAt < adsStudio.indexOf('onclick="toggleLanguage()"') && hookAt > adsStudio.indexOf('function renderAdsStudioHeader()'),
+    shellSrc.includes("const STUDIO_V2_CLASSIC_KEY = 'albayan.studio.v2.classic';") && chooseFn.includes('try {') && chooseFn.includes('window.sessionStorage.setItem(STUDIO_V2_CLASSIC_KEY, uid)')
+      && !/apiJson|fetch\(|studioApi/.test(chooseFn) && shellSrc.includes('if (studioV2ClassicChosen()) return \'\';'),
+    workspaceCss.includes('.studio-v2-header-link {') && /\.studio-v2-header-link \{[^}]*min-height: 44px/.test(workspaceCss) && workspaceCss.includes('.studio-v2-heading-meta {'),
+    ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-classic-view"') && built.includes('function renderStudioV2ClassicSwitch()'); })
+  ];
+  check('Classic view (P6-06): a "Classic view / العرض القديم" link in the v2 header of both frames keeps this tab classic (sessionStorage, memory when storage is blocked; the wallet address lands on the Overview) until "New studio / الاستوديو الجديد" in the classic header, drawn only while /me says v2; a /me re-read and a reload keep the choice, another user does not inherit it, nothing is written to the server',
+    !loadError && classicCases.every(Boolean), loadError || `cases ${failed(classicCases)} state ${JSON.stringify(classicState)} back ${JSON.stringify(backState)}`);
+
+  // ---- P5-07: the customer terms from Account, Help (v2 and classic) and the login help line
+  meReply(customerMe);
+  openAt('/studio?tab=account');
+  const accountEn = html();
+  const accountAr = String(inLanguage('ar', 'renderStudioAccountScreen()'));
+  const helpContact = String(run('renderStudioHelpContact()'));
+  const helpContactAr = String(inLanguage('ar', 'renderStudioHelpContact()'));
+  const helpClassic = String(run("_studioHelp.classic = { view: 'list', id: '', filter: 'active' }; renderStudioHelpClassic()"));
+  run("window.localStorage.removeItem('albayan.studio.public.contact'); _studioPublicContact.value = null; _studioPublicContact.at = 0; _studioPublicContact.failedAt = 0; __dom.set('studio-login-help', { innerHTML: '' });");
+  const loginHelp = String(run('renderStudioLoginHelp()'));
+  const loginHelpAr = String(inLanguage('ar', 'renderStudioLoginHelp()'));
+  const termsLink = 'href="/privacy#terms"';
+  const termsCases = [
+    accountEn.includes('data-testid="studio-screen-account"') && accountEn.includes(`<a class="studio-v2-row" data-testid="studio-account-terms" ${termsLink} target="_blank" rel="noopener">`)
+      && accountEn.includes('>Customer terms<') && accountAr.includes('data-testid="studio-account-terms"') && accountAr.includes('>شروط العملاء<')
+      && accountEn.indexOf('studio-account-terms') > accountEn.indexOf('studio-account-privacy') && accountEn.indexOf('studio-account-terms') < accountEn.indexOf('studio-account-logout'),
+    helpContact.includes('data-testid="studio-help-terms"') && helpContact.includes(`<a ${termsLink} target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">customer terms</a>`)
+      && helpContactAr.includes('>شروط العملاء</a>') && helpContactAr.includes('قواعد الخدمة في'),
+    helpClassic.includes('class="studio-help studio-help-classic"') && helpClassic.includes('data-testid="studio-help-terms-link"'),
+    loginHelp.includes('data-testid="studio-login-help"') && loginHelp.includes(`<a ${termsLink} data-testid="studio-login-terms" class="font-bold text-indigo-600 dark:text-indigo-300 hover:underline" target="_blank" rel="noopener noreferrer">Customer terms</a>`)
+      && loginHelpAr.includes('data-testid="studio-login-terms"') && loginHelpAr.includes('>شروط العملاء</a>'),
+    read('privacy.html').includes('<h2 id="terms">'),
+    // the login help line is drawn by 15r (lazy studio.js), so the link costs no startup bytes: the budget holds and 12-views only keeps its hook
+    fs.statSync(path.join(ROOT, 'script.js')).size <= 2516582 && !views.includes('/privacy#terms') && views.includes(`<div id="studio-login-help">\${typeof renderStudioLoginHelp === 'function' ? renderStudioLoginHelp() : ''}</div>`),
+    ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-account-terms"') && built.includes('data-testid="studio-login-terms"') && built.includes('data-testid="studio-help-terms-link"'); })
+  ];
+  check('Customer terms (P5-07): /privacy#terms is linked from the v2 Account screen (between Privacy and Sign out), from the Help contact card in the v2 screen and the classic help tab, and from the login help line (drawn by 15r: no startup bytes), in English and Arabic; the privacy page carries the anchor',
+    !loadError && termsCases.every(Boolean), loadError || `cases ${failed(termsCases)}`);
+
+  // ---- P3-25: Test alert channel
+  who.staff = true; who.admin = true;
+  meReply(staffMe);
+  openAt('/studio?tab=review&section=health');
+  const alertPath = '/api/studio/admin/alert-channel/test';
+  reply('/api/studio/admin/facts', { windowDays: 30, facts: {} });
+  reply('/api/meta-ads/token-health', { configured: true, checked: true, isValid: true, daysLeft: 41, missingScopes: [], webhookCounts: { countsByObjectField: { 'page.feed': 12 } } });
+  reply('/api/social-studio/pages', { pages: [{ id: 'spg_fb', name: 'Shop', platform: 'fb' }] });
+  reply('/api/studio/admin/diagnostics', { jobs: { enabled: true, runningHere: true, late: true, ageSeconds: 900, lastTickAt: new Date(Date.now() - 900000).toISOString(), lastError: { job: 'sweep', error: 'boom <x>', at: new Date().toISOString() } },
+    metaLanes: { appWide: { paused: true, retryAfterSeconds: 300, reason: 'usage_high' }, lanes: { admin: { paused: true, retryAfterSeconds: 300, reason: 'usage_high', usagePercent: 91, parkCount: 0, parks: [] }, studio_results: { paused: false, retryAfterSeconds: 0, reason: '', usagePercent: 40, parkCount: 2, parks: [] }, page: { paused: false, retryAfterSeconds: 0, reason: '', usagePercent: 10, parkCount: 0, parks: [] } } } });  // one ad account parked on an unpaused lane (runbook 3.4)
+  run("__calls.length = 0; resetStudioHealthState(); renderStudioHealthSection();");  // the first draw asks for everything
+  const diagReadsFirst = calls('GET', '/api/studio/admin/diagnostics').length;
+  const healthEn = String(run('renderStudioHealthSection()'));
+  const healthAr = String(inLanguage('ar', 'renderStudioHealthSection()'));
+  const alertNote = () => json("_studioHealth.results['alert']") || {};
+  run('__calls.length = 0;');
+  reply(alertPath, { sent: true, configured: true });
+  const alertInFlight = run('studioHealthTestAlertChannel(); studioHealthTestAlertChannel(); __calls.length');
+  const alertCalls = calls('POST', alertPath);
+  const alertSent = alertNote();
+  const alertSentHtml = String(run('renderStudioHealthSection()'));
+  reply(alertPath, { sent: false, configured: false });
+  run('studioHealthTestAlertChannel()');
+  const alertUnset = alertNote();
+  reply(alertPath, { sent: false, configured: false });
+  inLanguage('ar', 'studioHealthTestAlertChannel()');
+  const alertUnsetAr = alertNote();
+  reply(alertPath, { sent: false, configured: true });
+  run('studioHealthTestAlertChannel()');
+  const alertRefused = alertNote();
+  replyError(alertPath, { status: 429, retryAfter: 540, message: JSON.stringify({ code: 'RATE_LIMITED', message: 'One test alert every 10 minutes. Please wait and try again.' }) });
+  run('studioHealthTestAlertChannel()');
+  const alertWait = alertNote();
+  replyError(alertPath, { status: 429, retryAfter: 540, message: 'x' });
+  inLanguage('ar', 'studioHealthTestAlertChannel()');
+  const alertWaitAr = alertNote();
+  replyError(alertPath, { status: 403, message: 'x', payload: { detail: { code: 'ADMIN_ONLY', message: 'Only an admin can use this' } } });
+  run('studioHealthTestAlertChannel()');
+  const alertAdminOnly = alertNote();
+  who.admin = false;
+  run('__calls.length = 0; studioHealthTestAlertChannel();');
+  const reviewerPresses = calls('POST', alertPath).length;
+  who.admin = true;
+  const alertOutPy = read('server/systems/ads_studio/studio_alert_out.py');
+  const alertCases = [
+    healthEn.includes('data-testid="studio-health-alert-channel"') && healthEn.includes('<button type="button" data-testid="studio-health-alert-test" onclick="studioHealthTestAlertChannel()"') && healthEn.includes('Test alert channel</button>')
+      && healthEn.includes('ALBAYAN_ALERT_WEBHOOK_URL') && healthAr.includes('اختبار قناة التنبيهات</button>') && healthAr.includes('ضغطة واحدة كل 10 دقائق'),
+    alertInFlight === 1 && alertCalls.length === 1 && JSON.stringify(alertCalls[0].body) === '{}',
+    alertSent.tone === 'emerald' && String(alertSent.text).startsWith('The test alert was sent.') && alertSentHtml.includes('data-testid="studio-health-alert-result" data-tone="emerald"'),
+    alertUnset.tone === 'amber' && String(alertUnset.text).includes('ALBAYAN_ALERT_WEBHOOK_URL') && String(alertUnset.text).includes('nothing was sent') && alertUnsetAr.text === 'قناة تنبيهات الفريق غير مُعدّة (ALBAYAN_ALERT_WEBHOOK_URL)، لذلك لم يُرسل شيء. تبقى التنبيهات في قائمة التنبيهات فقط.',
+    alertRefused.tone === 'rose' && String(alertRefused.text).includes('did not accept the test alert') && String(alertRefused.text).includes('runbook 0.5'),
+    alertWait.tone === 'amber' && alertWait.text === 'One test alert every 10 minutes for the whole team. Try again in about 9 min.' && alertWaitAr.text === 'تنبيه تجريبي واحد كل 10 دقائق للفريق كله. أعد المحاولة بعد نحو 9 دقيقة.',
+    alertAdminOnly.text === 'Only an admin can use this.' && reviewerPresses === 0,
+    healthSrc.includes("studioHealthApi('/api/studio/admin/alert-channel/test', { method: 'POST', body: {} }") && !/\b(?:confirm|prompt|alert)\(/.test(healthSrc)
+      && alertOutPy.includes('@router.post("/admin/alert-channel/test")') && alertOutPy.includes('TEST_EVERY_MS = 10 * 60 * 1000') && alertOutPy.includes('return {"sent": sent, "configured": configured}'),
+    ['studio-staff.js', 'www/studio-staff.js'].every(file => read(file).includes('data-testid="studio-health-alert-test"'))
+  ];
+  check('Test alert channel (P3-25): an admin button in the Studio health screen POSTs the existing route once (single flight) and says {sent, configured} in words (sent; not set up: ALBAYAN_ALERT_WEBHOOK_URL; set up but refused), a 429 shows the wait in minutes, ADMIN_ONLY in words, a reviewer never presses; EN and AR',
+    !loadError && alertCases.every(Boolean), loadError || `cases ${failed(alertCases)} sent ${JSON.stringify(alertSent)} wait ${JSON.stringify(alertWait)}`);
+
+  // ---- P5-05: a "What to do" line under every item, linked into the desk (a pointer in words in classic)
+  const fixIds = ['token', 'webhooks', 'heartbeat', 'lanes', 'private-replies', 'public-replies', 'daily-requests', 'allowlist', 'min-budget', 'pages', 'funds', 'spend-drift'];
+  const fixLine = (page, id) => (page.match(new RegExp(`<p[^>]*data-testid="studio-health-fix-${id}"[^>]*>[\\s\\S]*?</p>`)) || [''])[0];
+  const linkedEn = fixIds.map(id => fixLine(healthEn, id));
+  const linkedAr = fixIds.map(id => fixLine(healthAr, id));
+  // The Arabic line is Arabic apart from the names it must keep (env variables, Jelastic, Meta's own screens, "off").
+  const arabicLine = line => { const text = line.replace(/<[^>]+>/g, '').replace(/ALBAYAN_[A-Z_]+|Jelastic|Meta Business Manager|Billing|Libyan Spider|\boff\b/g, ''); return /[؀-ۿ]/.test(text) && !/[A-Za-z]{3}/.test(text); };
+  const fixTargets = json('STUDIO_HEALTH_FIXES') || {};
+  run('__desk.length = 0;');
+  const goDiag = run("studioHealthGoFix('diagnostics')");
+  const goAlerts = run("studioHealthGoFix('alerts')");
+  const goIntake = run("studioHealthGoFix('intake')");
+  const goRequests = run("studioHealthGoFix('requests')");
+  const deskMoves = json('__desk');
+  run("__dom.set('studio-health-pages', { scrollIntoView(options) { __scrolled.push(options); } });");
+  const goPages = run("studioHealthGoFix('pages')");
+  const goUnknown = run("studioHealthGoFix('nope')");
+  const scrolled = json('__scrolled');
+  const healthReplies = () => { reply('/api/studio/admin/facts', { windowDays: 30, facts: {} }); reply('/api/meta-ads/token-health', { configured: true, checked: true, isValid: true, daysLeft: 41, missingScopes: [] }); reply('/api/social-studio/pages', { pages: [] }); };
+  healthReplies();
+  run('__calls.length = 0; _studioHealth.loadedAt = 0; renderStudioHealthSection();');  // the 60 s reload: no diagnostics read within 10 min
+  const diagReadsReload = calls('GET', '/api/studio/admin/diagnostics').length;
+  healthReplies();
+  reply('/api/studio/admin/diagnostics', { jobs: { enabled: true, late: false, ageSeconds: 20, lastTickAt: new Date().toISOString() }, metaLanes: { appWide: { paused: false }, lanes: {} } });
+  run('__calls.length = 0; _studioHealth.loadedAt = 0; _studioHealth.diagAt = Date.now() - 11 * 60000; renderStudioHealthSection();');
+  const diagReadsLater = calls('GET', '/api/studio/admin/diagnostics').length;
+  const healthFine = String(run('renderStudioHealthSection()'));
+  // classic (the desk off, or this tab on the classic view): the same lines point in words; the pages scroll keeps its button
+  run('studioV2ChooseClassic(true)');
+  const healthClassic = String(run('renderStudioHealthSection()'));
+  run('studioV2ChooseClassic(false)');
+  const classicLines = fixIds.map(id => fixLine(healthClassic, id));
+  const adminPageIds = [...adminSrc.matchAll(/^\s+\['([a-z-]+)', '[a-z-]+', '/gm)].map(m => m[1]);
+  const deskSections = (deskSrc.match(/const STUDIO_DESK_SECTIONS = Object\.freeze\(\[([^\]]*)\]\)/) || ['', ''])[1];
+  const fixCases = [
+    linkedEn.every(line => line && line.includes('data-linked="1"') && line.includes('<strong>What to do (runbook ') && /data-testid="studio-health-fix-link-[a-z-]+" onclick="studioHealthGoFix\('[a-z]+'\)"/.test(line)),
+    linkedAr.every(line => line && line.includes('<strong>ماذا تفعل (دليل التشغيل ') && arabicLine(line)),
+    fixLine(healthEn, 'token').includes("studioHealthGoFix('diagnostics')") && fixLine(healthEn, 'webhooks').includes("studioHealthGoFix('pages')") && fixLine(healthEn, 'heartbeat').includes("studioHealthGoFix('diagnostics')")
+      && fixLine(healthEn, 'lanes').includes("studioHealthGoFix('intake')") && fixLine(healthEn, 'funds').includes("studioHealthGoFix('alerts')") && fixLine(healthEn, 'pages').includes("studioHealthGoFix('pages')")
+      && fixLine(healthEn, 'private-replies').includes("studioHealthGoFix('capabilities')") && fixLine(healthEn, 'min-budget').includes("studioHealthGoFix('limits')") && fixLine(healthEn, 'spend-drift').includes("studioHealthGoFix('settlement')")
+      && fixLine(healthEn, 'daily-requests').includes("studioHealthGoFix('requests')") && fixLine(healthEn, 'allowlist').includes("studioHealthGoFix('diagnostics')"),
+    fixLine(healthEn, 'token').includes('runbook 3.1 / 3.2') && fixLine(healthEn, 'heartbeat').includes('runbook 3.6') && fixLine(healthEn, 'lanes').includes('runbook 3.4') && fixLine(healthEn, 'funds').includes('runbook 3.9') && fixLine(healthEn, 'pages').includes('runbook 3.10')
+      && healthEn.includes('data-testid="studio-health-fix-page-tests"') && healthEn.includes('<h3 id="studio-health-pages"'),
+    healthEn.includes('data-testid="studio-health-heartbeat" data-late="1"') && healthEn.includes('>LATE<') && healthEn.includes('sweep: boom &lt;x&gt;') && healthAr.includes('>متأخر<')
+      && healthEn.includes('data-testid="studio-health-lanes" data-paused="1"') && healthEn.includes('paused 5 min (usage_high)') && healthEn.includes('usage 40% · 2 parked') && healthEn.includes('usage 10%<') && healthAr.includes('متوقفة 5 دقيقة (usage_high)') && healthAr.includes('الاستخدام 40% · 2 موقوفة'),
+    goDiag === true && goAlerts === true && goIntake === true && goRequests === true && JSON.stringify(deskMoves) === JSON.stringify([['more', 'diagnostics'], ['more', 'alerts'], ['more', 'settings-intake'], ['requests', '']])
+      && goPages === true && goUnknown === false && Array.isArray(scrolled) && scrolled.length === 1 && scrolled[0].block === 'start',
+    diagReadsFirst === 1 && diagReadsReload === 0 && diagReadsLater === 1 && healthSrc.includes('const STUDIO_HEALTH_DIAG_MAX_AGE_MS = 10 * 60000;')
+      && healthFine.includes('data-testid="studio-health-heartbeat" data-late="0"') && healthFine.includes('>fine<') && healthFine.includes('data-testid="studio-health-lanes" data-paused="0"') && healthFine.includes('>running<'),
+    classicLines.every((line, i) => line && (fixIds[i] === 'webhooks' || fixIds[i] === 'pages' ? line.includes('data-linked="1"') && line.includes("studioHealthGoFix('pages')") : line.includes('data-linked="0"') && !line.includes('studioHealthGoFix') && line.includes('Team desk → More → ')))
+      && !healthClassic.includes('studio-health-fix-link-token'),
+    Object.entries(fixTargets).every(([key, [section, id]]) => key === 'pages' ? section === '' && id === 'studio-health-pages' : (section === 'more' ? adminPageIds.includes(id) : id === '' && deskSections.includes(`'${section}'`))),
+    // the runbook is not served (the API docs exist only in debug mode), which is why the lines link the desk and name the runbook page
+    read('server/main.py').includes('docs_url="/docs" if DEBUG_MODE else None') && !/StaticFiles\([^)]*docs/.test(read('server/main.py')),
+    ['studio-staff.js', 'www/studio-staff.js'].every(file => { const built = read(file); return built.includes('function studioHealthFix(id, key, runbook, en, ar)') && fixIds.every(id => built.includes(`studioHealthFix('${id}', '`)); })
+  ];
+  check('Health "What to do" (P5-05): every item (token, webhook counters, jobs heartbeat, Meta lanes, replies, daily requests, allowlist, minimum budget, page subscription, funds, spend drift, page tests) names its runbook page and links the desk section or settings form that fixes it (a real id of More, or the Requests queue; the pages link scrolls); the heartbeat and lanes come from /diagnostics at most every 10 min; in classic the lines point in words; EN and AR',
+    !loadError && fixCases.every(Boolean), loadError || `cases ${failed(fixCases)} moves ${JSON.stringify(deskMoves)} diag ${diagReadsFirst}/${diagReadsReload}/${diagReadsLater} missing ${fixIds.filter((id, i) => !linkedEn[i]).join(',')}`);
+  who.staff = false; who.admin = false;
 }
 
 {

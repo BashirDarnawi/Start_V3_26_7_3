@@ -414,7 +414,8 @@ test.describe('Team desk (v2 staff frame)', () => {
     const countBefore = Number((await page.title()).match(/^\((\d+)\+?\)/)[1]);
     // Other specs' open stop requests share this database: the proof is the rise the desk observes.
     const stopsBefore = await page.evaluate(() => Number((_studioDesk.pulse.value || {}).stopRequests) || 0);
-    const badgeBefore = Number(await page.getByTestId('studio-desk-badge-tickets').getAttribute('data-count').catch(() => null)) || 0;
+    // No badge is drawn while nothing waits (a fresh database, this spec alone): a short wait, not the test's whole budget.
+    const badgeBefore = Number(await page.getByTestId('studio-desk-badge-tickets').getAttribute('data-count', { timeout: 2000 }).catch(() => null)) || 0;
     const customerApi = await openUserApi(playwright, baseURL, seeded.customer);
     try {
       const reply = await jsonOrThrow(await customerApi.post(`/api/ad-studio/campaigns/${seeded.ids.approved}/stop-request`, { data: { operationId: `e2e-desk-stop-${seeded.tag}`, note: 'Please stop it, the offer ended.' } }), 'The stop request');
@@ -496,6 +497,58 @@ test.describe('Team desk (v2 staff frame)', () => {
     expect(nativeDialogs).toBe(0);
     // The browser logs the mocked 404 and the expected 429 as failed resources; nothing else may be logged.
     expect(errors.filter(line => !/(404 \(Not Found\).*\/api\/studio\/admin\/alerts\/alrt_e2e_2\/ack|429 \(Too Many Requests\).*\/api\/studio\/admin\/integrity\/scan)/.test(line))).toEqual([]);
+  });
+
+  test('admin: Health — Test alert channel answers in words from the real route (no channel here; a second press within 10 minutes shows the wait), the heartbeat and lanes come from the real diagnostics, and every item\'s "What to do" link opens the desk section that fixes it', async ({ page, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    test.setTimeout(120_000);
+    const seeded = await seedDesk(playwright, baseURL, testInfo, 'health', { withAdmin: true });
+    const errors = collectPageErrors(page);
+    await page.setViewportSize(PHONE);
+    await openDesk(page, seeded.deskAdmin, 'health');
+    const health = page.getByTestId('studio-health');
+    await expect(health).toBeVisible({ timeout: BOOT_TIMEOUT });
+    // P3-25: the e2e server has no ALBAYAN_ALERT_WEBHOOK_URL, so the honest line is "not set up" (or the wait, when
+    // another run pressed within the last 10 minutes: the limit is one press per channel, not per user).
+    const testButton = page.getByTestId('studio-health-alert-test');
+    await expect(testButton).toHaveText(/Test alert channel/);
+    await testButton.click();
+    const result = page.getByTestId('studio-health-alert-result');
+    await expect(result).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(result).toHaveText(/No staff alert channel is set up \(ALBAYAN_ALERT_WEBHOOK_URL\)|One test alert every 10 minutes/);
+    await expect(testButton).toBeEnabled();
+    await testButton.click();
+    await expect(result).toHaveText(/One test alert every 10 minutes for the whole team\. Try again in about \d+ min\./, { timeout: BOOT_TIMEOUT });
+    // P5-05: the heartbeat and the lanes from the real diagnostics, and a "What to do" line with a link on every item.
+    await expect(page.getByTestId('studio-health-heartbeat')).toHaveAttribute('data-late', /^[01]$/, { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-health-lanes')).toHaveAttribute('data-paused', /^[01]$/);
+    for (const id of ['token', 'webhooks', 'heartbeat', 'lanes', 'private-replies', 'public-replies', 'daily-requests', 'allowlist', 'min-budget', 'pages', 'funds', 'spend-drift']) {
+      await expect(page.getByTestId(`studio-health-fix-${id}`), `the ${id} item says what to do`).toContainText(/What to do \(runbook /);
+      await expect(page.getByTestId(`studio-health-fix-link-${id}`), `the ${id} item links its fix`).toBeVisible();
+    }
+    await expect(page.getByTestId('studio-health-fix-page-tests')).toContainText('What to do (runbook 3.10)');
+    await expectNoPageOverflow(page, 'health (admin)');
+    await page.getByTestId('studio-health-fix-link-heartbeat').click();  // Diagnostics: the heartbeat and the token line
+    await expect(page.getByTestId('studio-admin-heartbeat')).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-desk')).toHaveAttribute('data-section', 'more');
+    await page.getByTestId('studio-staffnav-health').click();
+    await expect(health).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-health-fix-link-funds').click();  // Alerts: acknowledge after the top-up
+    await expect(page.getByTestId('studio-admin-alerts').or(page.getByTestId('studio-admin-alerts-empty'))).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-staffnav-health').click();
+    await expect(health).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-health-fix-link-lanes').click();  // Intake: the pilot stop rule pauses new requests
+    await expect(page.getByTestId('studio-admin-form-intake')).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-staffnav-health').click();
+    await expect(health).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-health-fix-link-pages').click();  // the Meta tests of the linked pages, on this screen
+    await expect.poll(() => page.evaluate(() => { const el = document.getElementById('studio-health-pages'); return el ? el.getBoundingClientRect().top < innerHeight : null; })).toBe(true);
+    await setLanguage(page, 'ar');
+    await expect(page.getByTestId('studio-health-alert-test')).toHaveText(/اختبار قناة التنبيهات/);
+    await expect(page.getByTestId('studio-health-fix-token')).toContainText('ماذا تفعل (دليل التشغيل 3.1 / 3.2)');
+    await expectNoPageOverflow(page, 'health (admin, AR)');
+    // The browser logs the expected 429 of the second press as a failed resource; nothing else may be logged.
+    expect(errors.filter(line => !/429 \(Too Many Requests\).*\/api\/studio\/admin\/alert-channel\/test/.test(line))).toEqual([]);
   });
 
   test('smoke: a reviewer in the Team desk pilot sees the real queue, opens a request and gets the decision box', async ({ page, playwright, baseURL }, testInfo) => {

@@ -10,11 +10,19 @@
 //   Instagram account (each once per Tripoli day; the result shows inline, no dialogs);
 // - "Check recent comments now" per linked Instagram account (P1-23): the owner's rules answer the
 //   new comments as the webhook would; once a minute per account; counts only.
+// - the studio jobs heartbeat and the Meta lanes (P5-05) from GET /api/studio/admin/diagnostics,
+//   read at most every 10 minutes (a heavier read than the facts);
+// - "Test alert channel" (P3-25): POST /api/studio/admin/alert-channel/test, one press per 10 minutes
+//   for the whole team; the answer {sent, configured} in words, a 429 shows the wait;
+// - a "What to do" line under every item (P5-05): the runbook page it belongs to and a link to the
+//   desk section or settings form that fixes or verifies it (the runbook itself is not served).
 // The page list comes from /api/social-studio/pages (admins see every linked page). This file
 // never sees a Meta token: the server does every Meta call.
 
 const STUDIO_HEALTH_RELOAD_MS = 60000;
 const STUDIO_HEALTH_META_TIMEOUT_MS = 45000; // a Meta refresh or test makes several paced calls
+const STUDIO_HEALTH_DIAG_MAX_AGE_MS = 10 * 60000;  // the heartbeat and lanes come from /diagnostics: at most every 10 min
+const STUDIO_HEALTH_ALERT_KEY = 'alert';  // the busy / results slot of the alert-channel test
 let _studioHealthGeneration = 0;
 
 const _studioHealth = {
@@ -26,6 +34,9 @@ const _studioHealth = {
   token: null,
   tokenError: '',
   pages: [],
+  diag: null,       // the last /diagnostics answer (jobs, metaLanes)
+  diagAt: 0,        // when it was asked for (a failed read waits like a good one)
+  diagError: '',
   refreshing: false,
   refreshNote: null,
   busy: Object.create(null),
@@ -119,6 +130,9 @@ function resetStudioHealthState() {
   _studioHealth.token = null;
   _studioHealth.tokenError = '';
   _studioHealth.pages = [];
+  _studioHealth.diag = null;
+  _studioHealth.diagAt = 0;
+  _studioHealth.diagError = '';
   _studioHealth.refreshing = false;
   _studioHealth.refreshNote = null;
   for (const bag of [_studioHealth.busy, _studioHealth.results, _studioHealth.igForm]) {
@@ -184,11 +198,14 @@ async function studioHealthEnsureLoaded(force = false) {
   if (!force && _studioHealth.loadedAt && Date.now() - _studioHealth.loadedAt < STUDIO_HEALTH_RELOAD_MS) return;
   const context = captureStudioHealthContext();
   _studioHealth.loading = true;
+  // The heartbeat and the lanes (P5-05) ride along at most every 10 minutes; the 60 s reload skips them.
+  const wantDiag = !_studioHealth.diagAt || Date.now() - _studioHealth.diagAt >= STUDIO_HEALTH_DIAG_MAX_AGE_MS;
   try {
-    const [facts, token, pages] = await Promise.allSettled([
+    const [facts, token, pages, diag] = await Promise.allSettled([
       studioHealthApi('/api/studio/admin/facts'),
       studioHealthApi('/api/meta-ads/token-health'),
-      studioHealthApi('/api/social-studio/pages')
+      studioHealthApi('/api/social-studio/pages'),
+      wantDiag ? studioHealthApi('/api/studio/admin/diagnostics') : Promise.resolve(null)
     ]);
     if (!studioHealthContextIsCurrent(context)) return;
     _studioHealth.facts = facts.status === 'fulfilled' ? facts.value : _studioHealth.facts;
@@ -196,6 +213,11 @@ async function studioHealthEnsureLoaded(force = false) {
     _studioHealth.token = token.status === 'fulfilled' ? token.value : null;
     _studioHealth.tokenError = token.status === 'fulfilled' ? '' : studioHealthErrorText(token.reason);
     if (pages.status === 'fulfilled') _studioHealth.pages = Array.isArray(pages.value?.pages) ? pages.value.pages : [];
+    if (wantDiag) {
+      _studioHealth.diagAt = Date.now();
+      if (diag.status === 'fulfilled') { _studioHealth.diag = diag.value && typeof diag.value === 'object' ? diag.value : null; _studioHealth.diagError = ''; }
+      else _studioHealth.diagError = studioHealthErrorText(diag.reason);
+    }
   } finally {
     if (studioHealthGenerationIsCurrent(context)) {
       _studioHealth.loading = false;
@@ -366,6 +388,92 @@ async function studioHealthCheckComments(pageId) {
   }
 }
 
+// ---------- "Test alert channel" (P3-25) ----------
+
+// {sent, configured} from POST /api/studio/admin/alert-channel/test, in words.
+function studioHealthAlertResult(result) {
+  if (result?.configured === false) {
+    return { tone: 'amber', text: studioHealthText('No staff alert channel is set up (ALBAYAN_ALERT_WEBHOOK_URL), so nothing was sent. Alerts stay in the Alerts list only.', 'قناة تنبيهات الفريق غير مُعدّة (ALBAYAN_ALERT_WEBHOOK_URL)، لذلك لم يُرسل شيء. تبقى التنبيهات في قائمة التنبيهات فقط.') };
+  }
+  if (result?.sent === true) return { tone: 'emerald', text: studioHealthText('The test alert was sent. Check that it arrived in the staff channel.', 'أُرسل التنبيه التجريبي. تأكد من وصوله إلى قناة الفريق.') };
+  return { tone: 'rose', text: studioHealthText('The channel is set up but did not accept the test alert. Check the webhook address in Jelastic and the container log (runbook 0.5); until it works, the on-duty rule applies.', 'القناة مُعدّة لكنها لم تقبل التنبيه التجريبي. راجع عنوان الويب هوك في Jelastic وسجل الحاوية (دليل التشغيل 0.5)؛ وحتى تعمل، تسري قاعدة المناوبة.') };
+}
+
+// A refused test: the 429 shows the wait (Retry-After through apiJson's retryAfter; one press per
+// 10 minutes for the whole team), the other refusals through the studio map.
+function studioHealthAlertErrorText(error) {
+  if (Number(error?.status) === 429) {
+    const minutes = Math.max(1, Math.ceil((Number(error?.retryAfter) || 600) / 60));
+    return studioHealthText(`One test alert every 10 minutes for the whole team. Try again in about ${minutes} min.`, `تنبيه تجريبي واحد كل 10 دقائق للفريق كله. أعد المحاولة بعد نحو ${minutes} دقيقة.`);
+  }
+  return studioHealthErrorText(error);
+}
+
+async function studioHealthTestAlertChannel() {
+  const key = STUDIO_HEALTH_ALERT_KEY;
+  if (!isCurrentUserAdmin() || _studioHealth.busy[key]) return;
+  const context = captureStudioHealthContext();
+  _studioHealth.busy[key] = true;
+  delete _studioHealth.results[key];
+  studioHealthRerender();
+  try {
+    const result = await studioHealthApi('/api/studio/admin/alert-channel/test', { method: 'POST', body: {} }, { timeoutMs: STUDIO_HEALTH_META_TIMEOUT_MS });
+    if (!studioHealthContextIsCurrent(context)) return;
+    _studioHealth.results[key] = studioHealthAlertResult(result);
+  } catch (error) {
+    if (!studioHealthContextIsCurrent(context)) return;
+    _studioHealth.results[key] = { tone: 'amber', text: studioHealthAlertErrorText(error) };
+  } finally {
+    if (studioHealthGenerationIsCurrent(context)) { delete _studioHealth.busy[key]; studioHealthRerender(); }
+  }
+}
+
+// ---------- "What to do" (P5-05) ----------
+
+// The runbook (docs/studio-redesign/RUNBOOK.md) is not served by the site, so every item's line names
+// its runbook page and links the desk section or settings form that fixes or verifies it: a button
+// in the Team desk (studioDeskGo, 15p); the classic review tab has no desk, so it names the place in
+// words. 'pages' scrolls to the Meta tests of the linked pages below, in both layouts.
+// key: [desk section, id, English, Arabic]
+const STUDIO_HEALTH_FIXES = Object.freeze({
+  diagnostics: ['more', 'diagnostics', 'Diagnostics', 'التشخيص'],
+  alerts: ['more', 'alerts', 'Alerts', 'التنبيهات'],
+  requests: ['requests', '', 'Requests', 'الطلبات'],
+  capabilities: ['more', 'settings-capabilities', 'Reply channels', 'قنوات الردود'],
+  limits: ['more', 'settings-limits', 'Budget limits', 'حدود الميزانية'],
+  settlement: ['more', 'settings-settlement', 'Settlement', 'التسوية'],
+  intake: ['more', 'settings-intake', 'Intake', 'استقبال الطلبات'],
+  pages: ['', 'studio-health-pages', 'Linked pages: Meta tests', 'الصفحات المربوطة: اختبارات ميتا']
+});
+
+function studioHealthDeskOpen() {
+  return typeof studioDeskGo === 'function' && typeof studioV2Frame === 'function' && studioV2Frame() === 'staff';
+}
+
+function studioHealthGoFix(key) {
+  const fix = STUDIO_HEALTH_FIXES[String(key || '')];
+  if (!fix) return false;
+  if (key === 'pages') {
+    try {
+      const el = typeof document !== 'undefined' ? document.getElementById(fix[1]) : null;
+      if (el && typeof el.scrollIntoView === 'function') { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return true; }
+    } catch (_) { /* nothing to scroll to */ }
+    return false;
+  }
+  return studioHealthDeskOpen() ? studioDeskGo(fix[0], fix[1]) === true : false;
+}
+
+// One item's line: "What to do (runbook §x): <the steps> <the link>". id names the item in tests.
+function studioHealthFix(id, key, runbook, en, ar) {
+  const fix = STUDIO_HEALTH_FIXES[key];
+  const label = studioHealthText(fix[2], fix[3]);
+  const linked = key === 'pages' || studioHealthDeskOpen();
+  const where = linked
+    ? `<button type="button" data-testid="studio-health-fix-link-${id}" onclick="studioHealthGoFix('${key}')" class="touch-target min-h-11 inline-flex items-center gap-1 rounded-xl border border-blue-200 dark:border-blue-800 px-3 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 align-middle"><i data-lucide="${key === 'pages' ? 'arrow-down' : 'arrow-right'}" class="w-3.5 h-3.5" aria-hidden="true"></i>${label}</button>`
+    : `<span class="font-bold text-slate-800 dark:text-slate-100">${studioHealthText(`Team desk → More → ${fix[2]}`, `مكتب الفريق ← المزيد ← ${fix[3]}`)}</span>`;
+  return `<p class="mt-2 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-${id}" data-fix="${key}" data-linked="${linked ? '1' : '0'}"><strong>${studioHealthText(`What to do (runbook ${runbook})`, `ماذا تفعل (دليل التشغيل ${runbook})`)}:</strong> ${studioHealthText(en, ar)} ${where}</p>`;
+}
+
 // ---------- rendering ----------
 
 function studioHealthTone(tone) {
@@ -377,8 +485,8 @@ function studioHealthTone(tone) {
   return tones[tone] || tones.amber;
 }
 
-function studioHealthNote(note) {
-  return note ? `<p class="mt-2 rounded-xl ${studioHealthTone(note.tone)} p-3 text-sm" role="status">${note.text}</p>` : '';
+function studioHealthNote(note, testId = '') {
+  return note ? `<p class="mt-2 rounded-xl ${studioHealthTone(note.tone)} p-3 text-sm" role="status"${testId ? ` data-testid="${testId}" data-tone="${studioHealthEsc(note.tone)}"` : ''}>${note.text}</p>` : '';
 }
 
 function studioHealthCard(icon, title, body) {
@@ -425,9 +533,22 @@ function studioHealthYesNo(value) {
   return studioHealthText('unknown', 'غير معروف');
 }
 
+// The token's "what to do" (runbook 3.1 expiring, 3.2 invalid) and the webhook counters' (3.10).
+function studioHealthTokenFix() {
+  return studioHealthFix('token', 'diagnostics', '3.1 / 3.2',
+    'Few days left, or not valid: make a new system-user token in Meta Business Settings, put it in ALBAYAN_META_ACCESS_TOKEN in Jelastic and restart; then confirm "valid" in',
+    'أيام قليلة متبقية أو الرمز غير صالح: أنشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا، وضعه في ALBAYAN_META_ACCESS_TOKEN في Jelastic ثم أعد التشغيل؛ ثم تأكد من «صالح» في');
+}
+
+function studioHealthWebhooksFix() {
+  return studioHealthFix('webhooks', 'pages', '3.10',
+    'No deliveries while pages are linked: press Test subscription on each linked page in',
+    'لا تسليمات مع وجود صفحات مربوطة: اضغط اختبار الاشتراك لكل صفحة مربوطة في');
+}
+
 function renderStudioHealthToken() {
   const t = _studioHealth.token;
-  if (!t) return studioHealthCard('key-round', studioHealthText('Meta token', 'رمز ميتا'), studioHealthEsc(_studioHealth.tokenError || studioHealthText('Loading…', 'جارٍ التحميل…')));
+  if (!t) return studioHealthCard('key-round', studioHealthText('Meta token', 'رمز ميتا'), studioHealthEsc(_studioHealth.tokenError || studioHealthText('Loading…', 'جارٍ التحميل…')) + studioHealthTokenFix());
   const webhooks = Object.values(t.webhookCounts?.countsByObjectField || {}).reduce((sum, n) => sum + (Number(n) || 0), 0);
   let body;
   if (t.configured === false) body = `<p>${studioHealthText('The token check is not set up (ALBAYAN_META_APP_ID).', 'فحص الرمز غير مُعدّ (ALBAYAN_META_APP_ID).')}</p>`;
@@ -437,8 +558,66 @@ function renderStudioHealthToken() {
     studioHealthLine(studioHealthText('Days left', 'الأيام المتبقية'), t.expiresNever ? studioHealthText('never expires', 'لا ينتهي') : studioHealthEsc(t.daysLeft ?? '—')),
     studioHealthLine(studioHealthText('Missing permissions', 'صلاحيات ناقصة'), studioHealthEsc((t.missingScopes || []).length))
   ].join('');
+  body += studioHealthTokenFix();
   body += studioHealthLine(studioHealthText('Webhook deliveries counted', 'تسليمات الويب هوك المحسوبة'), studioHealthEsc(webhooks));
+  body += studioHealthWebhooksFix();
   return studioHealthCard('key-round', studioHealthText('Meta token', 'رمز ميتا'), body);
+}
+
+// The Meta lanes (runbook 3.4) as the diagnostics report them: the app-wide pause, then each lane.
+const STUDIO_HEALTH_LANES = Object.freeze([['admin', 'Manager sync', 'مزامنة المدير'], ['studio_results', 'Studio results', 'نتائج الاستوديو'], ['page', 'Page replies', 'ردود الصفحات']]);
+
+function studioHealthMinutes(seconds) {
+  return Math.max(1, Math.ceil((Number(seconds) || 0) / 60));
+}
+
+function studioHealthLaneValue(lane) {
+  if (!lane || typeof lane !== 'object') return studioHealthText('unknown', 'غير معروف');
+  if (lane.paused) return studioHealthText(`paused ${studioHealthMinutes(lane.retryAfterSeconds)} min`, `متوقف ${studioHealthMinutes(lane.retryAfterSeconds)} دقيقة`);
+  const parks = Number(lane.parkCount) || 0;
+  const usage = Number.isFinite(Number(lane.usagePercent)) ? `${Math.max(0, Math.min(100, Math.trunc(Number(lane.usagePercent))))}%` : '—';
+  return parks
+    ? studioHealthText(`usage ${usage} · ${parks} parked`, `الاستخدام ${usage} · ${parks} موقوفة`)
+    : studioHealthText(`usage ${usage}`, `الاستخدام ${usage}`);
+}
+
+// The studio jobs heartbeat (runbook 3.6) and the Meta lanes (3.4), from the last /diagnostics read.
+function renderStudioHealthJobsAndLanes() {
+  const report = _studioHealth.diag;
+  const readNote = _studioHealth.diagAt ? `<p class="text-[11px] text-slate-500">${studioHealthText('Read', 'قُرئ')} ${studioHealthAge((Date.now() - _studioHealth.diagAt) / 1000)} · ${studioHealthText('read again after 10 min', 'يُقرأ مجدداً بعد 10 دقائق')}</p>` : '';
+  const jobs = report && report.jobs && typeof report.jobs === 'object' ? report.jobs : null;
+  const lanesReport = report && report.metaLanes && typeof report.metaLanes === 'object' ? report.metaLanes : null;
+  let jobsBody;
+  if (!report) jobsBody = `<p>${studioHealthEsc(_studioHealth.diagError || studioHealthText('Loading…', 'جارٍ التحميل…'))}</p>`;
+  else if (!jobs) jobsBody = `<p>${studioHealthText('No heartbeat in the report.', 'لا نبض في التقرير.')}</p>`;
+  else {
+    const late = jobs.enabled === false || jobs.late === true;
+    const stateText = jobs.enabled === false
+      ? studioHealthText('switched off here (ALBAYAN_STUDIO_JOBS)', 'متوقفة هنا (ALBAYAN_STUDIO_JOBS)')
+      : jobs.late === true ? studioHealthText('LATE', 'متأخر') : studioHealthText('fine', 'سليم');
+    const tick = jobs.lastTickAt ? studioHealthAge(Number(jobs.ageSeconds)) : studioHealthText('never ticked', 'لم تنبض بعد');
+    const lastError = jobs.lastError && typeof jobs.lastError === 'object' && jobs.lastError.job ? studioHealthLine(studioHealthText('Last error', 'آخر خطأ'), `<span dir="ltr">${studioHealthEsc(String(jobs.lastError.job).slice(0, 40))}: ${studioHealthEsc(String(jobs.lastError.error || '').slice(0, 80))}</span>`) : '';
+    jobsBody = studioHealthLine(studioHealthText('Heartbeat', 'النبض'), `<span data-testid="studio-health-heartbeat" data-late="${late ? '1' : '0'}" class="${late ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'}">${stateText}</span>`)
+      + studioHealthLine(studioHealthText('Last tick', 'آخر نبضة'), tick) + lastError;
+  }
+  const jobsFix = studioHealthFix('heartbeat', 'diagnostics', '3.6',
+    'Late: restart the app container in Libyan Spider (redeploy only if the restart fails); "switched off" means ALBAYAN_STUDIO_JOBS is set to off in Jelastic. Follow it in',
+    'متأخر: أعد تشغيل حاوية التطبيق في Libyan Spider (أعد النشر فقط إن فشلت إعادة التشغيل)؛ «متوقفة» تعني أن ALBAYAN_STUDIO_JOBS مضبوط على off في Jelastic. تابعه في');
+  let lanesBody;
+  if (!report) lanesBody = `<p>${studioHealthEsc(_studioHealth.diagError || studioHealthText('Loading…', 'جارٍ التحميل…'))}</p>`;
+  else if (!lanesReport) lanesBody = `<p>${studioHealthText('No lane state in the report.', 'لا حالة مسارات في التقرير.')}</p>`;
+  else {
+    const app = lanesReport.appWide && typeof lanesReport.appWide === 'object' ? lanesReport.appWide : {};
+    const lanes = lanesReport.lanes && typeof lanesReport.lanes === 'object' ? lanesReport.lanes : {};
+    const anyPaused = app.paused === true || STUDIO_HEALTH_LANES.some(([key]) => lanes[key] && lanes[key].paused === true);
+    lanesBody = studioHealthLine(studioHealthText('All lanes', 'كل المسارات'), `<span data-testid="studio-health-lanes" data-paused="${anyPaused ? '1' : '0'}" class="${anyPaused ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}">${app.paused === true ? studioHealthText(`paused ${studioHealthMinutes(app.retryAfterSeconds)} min${app.reason ? ` (${studioHealthEsc(app.reason)})` : ''}`, `متوقفة ${studioHealthMinutes(app.retryAfterSeconds)} دقيقة${app.reason ? ` (${studioHealthEsc(app.reason)})` : ''}`) : studioHealthText('running', 'تعمل')}</span>`)
+      + STUDIO_HEALTH_LANES.map(([key, en, ar]) => studioHealthLine(studioHealthText(en, ar), studioHealthLaneValue(lanes[key]))).join('');
+  }
+  const lanesFix = studioHealthFix('lanes', 'intake', '3.4',
+    'Paused: wait, the pause ends by itself; do not keep pressing the Meta buttons. Page replies paused for more than 6 hours: the pilot stop rule, pause new requests in',
+    'متوقفة: انتظر، فالتوقف ينتهي وحده؛ ولا تكرر الضغط على أزرار ميتا. إن توقفت ردود الصفحات أكثر من 6 ساعات: قاعدة توقف التجربة، أوقف الطلبات الجديدة في');
+  return studioHealthCard('heart-pulse', studioHealthText('Studio jobs heartbeat', 'نبض مهام الاستوديو'), readNote + jobsBody + jobsFix)
+    + studioHealthCard('route', studioHealthText('Meta lanes', 'مسارات ميتا'), readNote + lanesBody + lanesFix);
 }
 
 function renderStudioHealthFacts() {
@@ -458,20 +637,35 @@ function renderStudioHealthFacts() {
     studioHealthCard('message-square-x', studioHealthText(`Facebook private replies (${days} days)`, `الردود الخاصة على فيسبوك (${days} يوماً)`),
       studioHealthLine(studioHealthText('Sent', 'أُرسلت'), studioHealthEsc(b.privateRepliesSent || 0))
       + studioHealthLine(studioHealthText('Failed', 'فشلت'), studioHealthEsc(b.failures || 0))
-      + studioHealthCounts(b.byClass, studioHealthCodeLabel) + studioHealthCounts(b.byCode, studioHealthProviderCodeLabel)),
+      + studioHealthCounts(b.byClass, studioHealthCodeLabel) + studioHealthCounts(b.byCode, studioHealthProviderCodeLabel)
+      + studioHealthFix('private-replies', 'capabilities', '3.10',
+        'Failures with a Meta code: open the page\'s reason in Pages & replies and follow its fix row. A channel shown as waiting for Meta or not available sends nothing by decision; its state is in',
+        'إخفاقات برمز من ميتا: افتح سبب الصفحة في الصفحات والردود واتبع صف الإصلاح. القناة التي تظهر «بانتظار ميتا» أو «غير متاحة» لا ترسل شيئاً بقرار؛ حالتها في')),
     studioHealthCard('message-circle-reply', studioHealthText(`Facebook public replies without error (${days} days)`, `الردود العامة على فيسبوك دون خطأ (${days} يوماً)`),
       studioHealthLine(studioHealthText('Replies', 'ردود'), studioHealthEsc(g.publicRepliesWithoutError || 0))
       + studioHealthLine(studioHealthText('Different commenters', 'معلّقون مختلفون'), studioHealthEsc(g.distinctCommenters || 0))
-      + `<p class="text-[11px] text-slate-500">${studioHealthText('Staff and test accounts cannot be told apart, so every commenter is counted.', 'لا يمكن تمييز حسابات الفريق أو الاختبار، لذلك يُحسب كل المعلّقين.')}</p>`),
+      + `<p class="text-[11px] text-slate-500">${studioHealthText('Staff and test accounts cannot be told apart, so every commenter is counted.', 'لا يمكن تمييز حسابات الفريق أو الاختبار، لذلك يُحسب كل المعلّقين.')}</p>`
+      + studioHealthFix('public-replies', 'capabilities', '3.10',
+        'Fewer than expected: check that the Facebook public reply channel is on, in',
+        'أقل من المتوقع: تأكد أن قناة الردود العامة على فيسبوك مفعّلة في')),
     studioHealthCard('calendar-days', studioHealthText('Requests with a daily budget', 'طلبات بميزانية يومية'),
       studioHealthLine(studioHealthText('Now', 'الآن'), studioHealthEsc(c.total || 0))
       + studioHealthCounts(c.byStatus, studioHealthStatusLabel)
-      + studioHealthLine(studioHealthText('Archived', 'مؤرشفة'), studioHealthEsc(c.archived || 0))),
+      + studioHealthLine(studioHealthText('Archived', 'مؤرشفة'), studioHealthEsc(c.archived || 0))
+      + studioHealthFix('daily-requests', 'requests', '§7.1',
+        'A daily budget holds its whole total (days × amount) from the send; review the waiting ones by their due time in',
+        'الميزانية اليومية تحجز مجموعها كاملاً (الأيام × المبلغ) منذ الإرسال؛ راجع الطلبات المنتظرة حسب موعدها في')),
     studioHealthCard('list-checks', studioHealthText('Ad-account allowlist', 'قائمة الحسابات الإعلانية المسموحة'),
-      studioHealthLine(studioHealthText('Configured', 'مُعدّة'), studioHealthYesNo(f.d?.allowlistConfigured === true))),
+      studioHealthLine(studioHealthText('Configured', 'مُعدّة'), studioHealthYesNo(f.d?.allowlistConfigured === true))
+      + studioHealthFix('allowlist', 'diagnostics', '0.3',
+        'Not configured: set ALBAYAN_STUDIO_AD_ACCOUNT_IDS in Jelastic and restart before any studio link (PLAN 12.2(f)); the Meta connection is checked in',
+        'غير مُعدّة: اضبط ALBAYAN_STUDIO_AD_ACCOUNT_IDS في Jelastic وأعد التشغيل قبل أي ربط في الاستوديو (الخطة 12.2(f))؛ اتصال ميتا يُفحص في')),
     studioHealthCard('wallet', studioHealthText('Meta minimum daily budget', 'الحد الأدنى اليومي لميزانية ميتا'),
       `<p class="text-[11px] text-slate-500">${budget.checked ? studioHealthAge(budget.ageSeconds) : studioHealthText('Not read yet: press Refresh from Meta.', 'لم تُقرأ بعد: اضغط تحديث من ميتا.')}${budget.stale && budget.checked ? ` · ${studioHealthText('older than 24 h', 'أقدم من 24 ساعة')}` : ''}</p>`
-      + (budget.accounts || []).filter(a => a && typeof a === 'object').map(studioHealthBudgetRow).join('')),
+      + (budget.accounts || []).filter(a => a && typeof a === 'object').map(studioHealthBudgetRow).join('')
+      + studioHealthFix('min-budget', 'limits', '§7.1',
+        'Keep the per-day floor of the budget limits at or above every account\'s minimum, in',
+        'أبقِ حد اليوم الأدنى في حدود الميزانية عند الحد الأدنى لكل حساب أو فوقه، في')),
     studioHealthCard('webhook', studioHealthText('Page webhook subscription', 'اشتراك الصفحات في الويب هوك'),
       `<p class="text-[11px] text-slate-500">${i.checked ? studioHealthAge(i.ageSeconds) : studioHealthText('Not read yet: press Refresh from Meta.', 'لم تُقرأ بعد: اضغط تحديث من ميتا.')}</p>`
       + studioHealthLine(studioHealthText('Linked pages', 'الصفحات المربوطة'), studioHealthEsc(i.linkedPages || 0))
@@ -480,20 +674,29 @@ function renderStudioHealthFacts() {
         + studioHealthLine(studioHealthText('Could not check', 'تعذّر الفحص'), studioHealthEsc((i.error || 0) + (i.notChecked || 0)))
         + (Number(i.kept) > 0 ? studioHealthLine(studioHealthText('Earlier value kept (the last try failed)', 'قيمة سابقة محفوظة (فشلت آخر محاولة)'), studioHealthEsc(i.kept)) : '') : '')
       + studioHealthCounts(i.errorCodes, studioHealthCodeLabel)
-      + (i.checked && !i.appIdConfigured ? `<p class="text-[11px] text-slate-500">${studioHealthText('ALBAYAN_META_APP_ID is not set: any app with the feed field counted.', 'ALBAYAN_META_APP_ID غير مُعدّ: احتُسب أي تطبيق يشترك في feed.')}</p>` : '')),
+      + (i.checked && !i.appIdConfigured ? `<p class="text-[11px] text-slate-500">${studioHealthText('ALBAYAN_META_APP_ID is not set: any app with the feed field counted.', 'ALBAYAN_META_APP_ID غير مُعدّ: احتُسب أي تطبيق يشترك في feed.')}</p>` : '')
+      + studioHealthFix('pages', 'pages', '3.10',
+        'A page not subscribed: press Test subscription on it (that subscribes it) in',
+        'صفحة غير مشتركة: اضغط اختبار الاشتراك عليها (فهو يشترك بها) في')),
     studioHealthCard('landmark', studioHealthText('Ad account funds (last reading)', 'أموال الحسابات الإعلانية (آخر قراءة)'),
-      (f.n1?.accounts || []).map(a => studioHealthLine(studioHealthEsc(a.account), a.readError
+      ((f.n1?.accounts || []).map(a => studioHealthLine(studioHealthEsc(a.account), a.readError
         ? studioHealthText('not readable', 'غير مقروء')
         : `${studioHealthEsc(a.currency)} · ${studioHealthText('prepaid', 'مسبق الدفع')}: ${studioHealthYesNo(a.isPrepay)} · ${studioHealthText('funds shown', 'الأموال ظاهرة')}: ${studioHealthYesNo(a.fundsHidden ? false : a.fundsTextPresent)}`)).join('')
-      || `<p>${studioHealthText('No reading stored yet.', 'لا توجد قراءة محفوظة بعد.')}</p>`),
+      || `<p>${studioHealthText('No reading stored yet.', 'لا توجد قراءة محفوظة بعد.')}</p>`)
+      + studioHealthFix('funds', 'alerts', '3.9',
+        'Low, hidden or not readable: top up or fix the payment method in Meta Business Manager → Billing, give the system user Full control on the account, press Refresh from Meta, then acknowledge the alert in',
+        'منخفضة أو مخفية أو غير مقروءة: اشحن الحساب أو أصلح وسيلة الدفع في Meta Business Manager ← Billing، وامنح المستخدم النظامي «تحكماً كاملاً» على الحساب، واضغط تحديث من ميتا، ثم أكّد الاطلاع على التنبيه في')),
     studioHealthCard('trending-up', studioHealthText('Meta spend after confirmation (Manager ads)', 'إنفاق ميتا بعد التأكيد (إعلانات المدير)'),
       studioHealthLine(studioHealthText('Confirmed ads', 'إعلانات مؤكدة'), studioHealthEsc(s.confirmed || 0))
       + studioHealthLine(studioHealthText('Compared later', 'قورنت لاحقاً'), studioHealthEsc(s.compared || 0))
       + studioHealthLine(studioHealthText('Higher / lower / same', 'أعلى / أقل / نفسه'), `${studioHealthEsc(s.higher || 0)} / ${studioHealthEsc(s.lower || 0)} / ${studioHealthEsc(s.unchanged || 0)}`)
       + `<p class="text-[11px] text-slate-500">${studioHealthText('Change (cents)', 'التغيّر (سنت)')}: ${studioHealthPercentiles(s.driftMinor, '')}</p>`
-      + `<p class="text-[11px] text-slate-500">${studioHealthText('Hours from planned end to confirmation', 'الساعات من النهاية المخططة حتى التأكيد')}: ${studioHealthPercentiles(s.hoursEndToConfirmation, studioHealthText('h', 'س'))}</p>`)
+      + `<p class="text-[11px] text-slate-500">${studioHealthText('Hours from planned end to confirmation', 'الساعات من النهاية المخططة حتى التأكيد')}: ${studioHealthPercentiles(s.hoursEndToConfirmation, studioHealthText('h', 'س'))}</p>`
+      + studioHealthFix('spend-drift', 'settlement', '3.3',
+        'Often higher after confirmation: lengthen the wait after delivery ends or the drift watch, in',
+        'أعلى غالباً بعد التأكيد: أطِل مدة الانتظار بعد انتهاء العرض أو مراقبة تغيّر الصرف، في'))
   ];
-  return `<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">${renderStudioHealthToken()}${cards.join('')}</div>`;
+  return `<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">${renderStudioHealthToken()}${renderStudioHealthJobsAndLanes()}${cards.join('')}</div>`;
 }
 
 function renderStudioHealthPage(page) {
@@ -527,21 +730,35 @@ function renderStudioHealthPage(page) {
     </div>`;
 }
 
+// The staff alert channel (P3-25): one test press, its answer in words.
+function renderStudioHealthAlertChannel() {
+  const busy = !!_studioHealth.busy[STUDIO_HEALTH_ALERT_KEY];
+  return `<div class="mt-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/70 p-4" data-testid="studio-health-alert-channel">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="min-w-0"><h4 class="text-sm font-black text-slate-900 dark:text-white"><i data-lucide="bell-ring" class="w-4 h-4 inline-block align-[-2px] text-blue-600" aria-hidden="true"></i> ${studioHealthText('Staff alert channel', 'قناة تنبيهات الفريق')}</h4><p class="text-[11px] text-slate-500">${studioHealthText('Sends one test message to the staff channel (ALBAYAN_ALERT_WEBHOOK_URL). One press per 10 minutes for the whole team; the press is audited.', 'يرسل رسالة تجريبية واحدة إلى قناة الفريق (ALBAYAN_ALERT_WEBHOOK_URL). ضغطة واحدة كل 10 دقائق للفريق كله؛ الضغطة مدقّقة.')}</p></div>
+        <button type="button" data-testid="studio-health-alert-test" onclick="studioHealthTestAlertChannel()" ${busy ? 'disabled aria-busy="true"' : ''} class="touch-target min-h-11 rounded-xl border border-blue-200 dark:border-blue-800 px-3 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-60 inline-flex items-center gap-1.5"><i data-lucide="send" class="w-3.5 h-3.5" aria-hidden="true"></i>${busy ? studioHealthText('Sending…', 'جارٍ الإرسال…') : studioHealthText('Test alert channel', 'اختبار قناة التنبيهات')}</button>
+      </div>
+      ${studioHealthNote(_studioHealth.results[STUDIO_HEALTH_ALERT_KEY], 'studio-health-alert-result')}
+    </div>`;
+}
+
 function renderStudioHealthSection() {
   if (!isCurrentUserAdmin()) return '';
   studioHealthEnsureLoaded();
   const report = _studioHealth.facts;
   const pages = (_studioHealth.pages || []).filter(p => p && p.id);
-  return `<section class="mt-6" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">
+  return `<section class="mt-6" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}" data-testid="studio-health">
     <div class="glass-panel rounded-3xl p-5 sm:p-7">
       <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
-        <div><h2 class="text-2xl font-black text-slate-900 dark:text-white">${studioHealthText('Studio health', 'صحة الاستوديو')}</h2><p class="text-sm text-slate-500">${studioHealthText('Admin checks for Meta and the studio. Counts only, no customer data.', 'فحوص المدير لميتا والاستوديو. أرقام فقط، دون بيانات العملاء.')}</p></div>
+        <div><h2 class="text-2xl font-black text-slate-900 dark:text-white">${studioHealthText('Studio health', 'صحة الاستوديو')}</h2><p class="text-sm text-slate-500">${studioHealthText('Admin checks for Meta and the studio. Counts only, no customer data. Every item says what to do and where (the runbook page is named).', 'فحوص المدير لميتا والاستوديو. أرقام فقط، دون بيانات العملاء. كل بند يقول ماذا تفعل وأين (مع رقم صفحة دليل التشغيل).')}</p></div>
         <button type="button" onclick="studioHealthRefreshFacts()" ${_studioHealth.refreshing ? 'disabled' : ''} class="touch-target min-h-11 rounded-xl bg-blue-600 px-4 text-sm font-black text-white hover:bg-blue-700 disabled:opacity-60 inline-flex items-center gap-2"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${_studioHealth.refreshing ? studioHealthText('Reading from Meta…', 'جارٍ القراءة من ميتا…') : studioHealthText('Refresh from Meta', 'تحديث من ميتا')}</button>
       </div>
       ${report ? `<p class="mb-3 text-[11px] text-slate-500">${studioHealthText('Meta readings are kept 24 h; refresh at most twice in 10 minutes.', 'تُحفظ قراءات ميتا 24 ساعة؛ التحديث مرتان كحد أقصى كل 10 دقائق.')}</p>` : ''}
       ${studioHealthNote(_studioHealth.refreshNote)}
+      ${renderStudioHealthAlertChannel()}
       <div class="mt-3">${renderStudioHealthFacts()}</div>
-      <h3 class="mt-6 mb-3 text-lg font-black text-slate-900 dark:text-white">${studioHealthText('Linked pages: Meta tests', 'الصفحات المربوطة: اختبارات ميتا')}</h3>
+      <h3 id="studio-health-pages" class="mt-6 mb-3 text-lg font-black text-slate-900 dark:text-white">${studioHealthText('Linked pages: Meta tests', 'الصفحات المربوطة: اختبارات ميتا')}</h3>
+      <p class="mb-3 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300" data-testid="studio-health-fix-page-tests"><strong>${studioHealthText('What to do (runbook 3.10)', 'ماذا تفعل (دليل التشغيل 3.10)')}:</strong> ${studioHealthText('Test subscription subscribes a page whose comments do not arrive; Read test and Check recent comments now prove an Instagram account. A page whose access stopped needs its owner to share it with Albayan again: the fix they see in Pages & replies is the one to send them.', 'اختبار الاشتراك يشترك بالصفحة التي لا تصل تعليقاتها؛ واختبار القراءة و«افحص التعليقات الأخيرة الآن» يثبتان حساب إنستغرام. الصفحة التي توقف وصولها تحتاج أن يشاركها مالكها مع البيان مرة أخرى: الإصلاح الذي يراه في الصفحات والردود هو ما ترسله له.')}</p>
       <div class="space-y-3">${pages.length ? pages.map(renderStudioHealthPage).join('') : `<p class="text-sm text-slate-500">${studioHealthText('No linked pages yet.', 'لا توجد صفحات مربوطة بعد.')}</p>`}</div>
     </div>
   </section>`;

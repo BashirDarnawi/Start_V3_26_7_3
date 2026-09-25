@@ -114,6 +114,76 @@ test('staff with the v2 desk get the Team desk frame with no wallet items', asyn
   await expect(page.getByTestId('studio-basics')).toBeVisible();
 });
 
+// P6-06: the per-session "Classic view" link (PLAN §12.2(e)). The choice lives in this tab's sessionStorage,
+// survives a reload of the tab, never reaches another tab and never writes to the server.
+test('Classic view: the v2 header link keeps this tab on the classic studio until "New studio"; a reload keeps it, another tab does not; nothing is written', async ({ page, context }) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const writes = [];
+  page.on('request', request => { if (request.method() !== 'GET' && /\/api\/studio\/admin\//.test(request.url())) writes.push(`${request.method()} ${request.url()}`); });
+  await signIn(page);
+  await answerMe(page);
+  await page.goto('/studio?tab=wallet');
+  await expect(page.getByTestId('studio-v2-frame')).toBeVisible();
+  const link = page.getByTestId('studio-classic-view');
+  await expect(link).toHaveText('Classic view');
+  await link.click();
+  await expect(page.getByTestId('studio-v2-frame')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+  await expect(page.locator('.studio-section-tabs')).toBeVisible();
+  await expect.poll(() => tab(page)).toBe('home');  // wallet is no classic tab: the Overview
+  await expect(page.getByTestId('studio-new-studio')).toHaveText('New studio');
+  expect(await page.evaluate(() => sessionStorage.getItem('albayan.studio.v2.classic'))).toBe(await page.evaluate(() => state.currentUser.id));
+  await page.reload();  // this tab keeps the choice, with no "Opening the studio…" wait
+  await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+  await expect(page.getByTestId('studio-new-studio')).toBeVisible();
+  await expect(page.getByTestId('studio-v2-frame')).toHaveCount(0);
+  await expect(page.getByTestId('studio-v2-loading')).toHaveCount(0);
+  const other = await context.newPage();  // another tab of the same browser: the new studio
+  await answerMe(other);
+  await other.goto('/studio?tab=home');
+  await expect(other.getByTestId('studio-v2-frame')).toBeVisible();
+  await expect(other.getByTestId('studio-classic-view')).toBeVisible();
+  await other.close();
+  await page.getByTestId('studio-new-studio').click();
+  await expect(page.getByTestId('studio-v2-frame')).toBeVisible();
+  await expect(page.getByTestId('studio-new-studio')).toHaveCount(0);
+  expect(await page.evaluate(() => sessionStorage.getItem('albayan.studio.v2.classic'))).toBe(null);
+  // Arabic: the same link in Arabic words.
+  await page.evaluate(() => { if (state.language !== 'ar') toggleLanguage(); });
+  await expect(page.getByTestId('studio-classic-view')).toHaveText('العرض القديم');
+  await page.getByTestId('studio-classic-view').click();
+  await expect(page.getByTestId('studio-new-studio')).toHaveText('الاستوديو الجديد');
+  await page.getByTestId('studio-new-studio').click();
+  await expect(page.getByTestId('studio-v2-frame')).toBeVisible();
+  await page.evaluate(() => { if (state.language !== 'en') toggleLanguage(); });
+  // /me says classic: the stored choice offers no "New studio" (there is nothing to go back to).
+  await page.evaluate(() => sessionStorage.setItem('albayan.studio.v2.classic', state.currentUser.id));
+  await answerMe(page, { ui: 'classic' });
+  await page.goto('/studio');
+  await expect(page.getByRole('heading', { name: 'Albayan Ads Studio', exact: true })).toBeVisible();
+  await page.waitForFunction(() => typeof studioMe === 'function' && !!studioMe());
+  await expect(page.getByTestId('studio-new-studio')).toHaveCount(0);
+  await page.evaluate(() => sessionStorage.removeItem('albayan.studio.v2.classic'));
+  expect(writes).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('Classic view in the Team desk header: staff land on the classic review tab and "New studio" brings the desk back', async ({ page }) => {
+  await signIn(page);
+  await answerMe(page, { ui: 'classic', staffDesk: 'v2', isStaff: true, isAdmin: true });
+  await page.goto('/studio?tab=review&section=launch');
+  await expect(page.getByTestId('studio-staff-frame')).toBeVisible();
+  await page.getByTestId('studio-classic-view').click();
+  await expect(page.getByTestId('studio-staff-frame')).toHaveCount(0);
+  await expect(page.locator('.studio-section-tabs')).toBeVisible();
+  await expect.poll(() => tab(page)).toBe('review');
+  await page.getByTestId('studio-new-studio').click();
+  await expect(page.getByTestId('studio-staff-frame')).toBeVisible();
+  await expect(page.getByTestId('studio-staffnav-launch')).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByTestId('studio-new-studio')).toHaveCount(0);
+});
+
 test('the classic studio stays when /me says classic', async ({ page }) => {
   await signIn(page);
   await answerMe(page, { ui: 'classic', staffDesk: 'classic', isStaff: true, isAdmin: true });

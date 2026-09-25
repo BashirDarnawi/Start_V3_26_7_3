@@ -353,6 +353,12 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
     await expect(page.getByTestId('studio-account-name')).toHaveText(userName);
     await expect(page.getByTestId('studio-account-name').locator('input')).toHaveCount(0);
     await expect(page.getByTestId('studio-account-whatsapp-none')).toBeVisible();
+    // P5-07: the customer terms (the terms section of the privacy page) next to Privacy.
+    await expect(page.getByTestId('studio-account-terms')).toHaveAttribute('href', '/privacy#terms');
+    await expect(page.getByTestId('studio-account-terms')).toHaveText(/Customer terms/);
+    const termsPage = await page.request.get('/privacy');
+    expect(termsPage.ok(), 'the privacy page answers on the studio site').toBe(true);
+    expect(await termsPage.text()).toContain('id="terms"');
 
     await page.getByTestId('studio-account-whatsapp-add').click();
     await page.locator('#studio-account-whatsapp').fill('091 234 5678');

@@ -1107,7 +1107,15 @@ function renderStudioHelpContact() {
             ${linkHtml ? `<h3 class="studio-help-h3">${studioEsc(adsStudioText('Other ways to reach us', 'طرق أخرى للتواصل معنا'))}</h3>
             <p class="studio-help-note">${studioEsc(adsStudioText('A ticket is the surest way: it is tracked and answered by its due time. You can also reach us here:', 'التذكرة هي الطريقة الأضمن: تُتابَع ويُرد عليها في موعدها. ويمكنك أيضاً التواصل معنا هنا:'))}</p>
             <div class="studio-help-contact">${linkHtml}</div>` : ''}
+            ${renderStudioHelpTerms()}
           </section>`;
+}
+
+// The customer terms (P5-07): the terms section of the privacy page, at the end of the contact card
+// in the v2 Help screen and the classic help tab alike.
+function renderStudioHelpTerms() {
+  return `
+            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#terms" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
 }
 
 function studioHelpRenderView(view) {

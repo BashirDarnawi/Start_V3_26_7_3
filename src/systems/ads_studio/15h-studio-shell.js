@@ -31,6 +31,12 @@
 // it and shows its card until the screen registers itself. Two guarded hooks reach 15n: the bell's
 // badge (studioInboxBadge) and the classic 'help' tab (studioHelpClassicTab, through
 // studioV2ClassicTabKnown).
+// Classic view (P6-06, PLAN.md §12.2(e)): a "Classic view" link in the v2 header (customers and staff)
+// keeps THIS TAB on the classic screens until "New studio" is chosen in the classic header (15c draws
+// renderStudioV2ClassicSwitch, guarded). The choice lives in sessionStorage (this tab, gone with it)
+// and in this page's memory; it never reaches the server, and it means nothing once /me stops saying
+// v2 for this user. studioV2Frame() is the effective frame ('' while classic is chosen);
+// studioV2FrameOf(studioV2Layout()) stays what /me says.
 
 const STUDIO_V2_TABS = Object.freeze([
   // [tab, icon, English, Arabic, place] place: 'nav' = bottom bar / side rail, 'head' = header button
@@ -69,6 +75,7 @@ const STUDIO_V2_SECTION_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const STUDIO_V2_WAIT_MS = 3000;  // at most this long a known v2 user sees "Opening the studio…" instead of classic
 const STUDIO_V2_LAYOUT_KEY = 'albayan.studio.v2.layout.';  // + user id: the layout /me gave last time (this browser only)
 const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (this tab): the chain and address of the last v2 draw
+const STUDIO_V2_CLASSIC_KEY = 'albayan.studio.v2.classic';  // sessionStorage (this tab): the user id that chose the classic view (P6-06)
 // shown: what the last draw was ('staff', 'customer', 'desk-classic', 'wait', 'classic'). layout: the
 // pinned layout (studioV2Layout). repin: entered the studio while /me was being read again. session:
 // the /me session the visit notes belong to. fromApp: this visit came from another screen of this app
@@ -77,10 +84,11 @@ const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (th
 // put back once after the platform's post-login rewrite (studioV2ReapplyOpeningAddress). enteredAt:
 // the studio's first draw of this session (Date.now(); the clock of studioV2RestoreOpeningAddress);
 // openedAt: the first v2 draw (the clock of the reapply). Both run from the studio's own moments,
-// never from the page's navigation start, so a slow sign-in keeps its deep link.
+// never from the page's navigation start, so a slow sign-in keeps its deep link. classicFor: the user
+// id that chose the classic view in this page (the memory copy of STUDIO_V2_CLASSIC_KEY).
 const _studioV2 = {
   shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false,
-  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false, enteredAt: 0, openedAt: 0
+  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false, enteredAt: 0, openedAt: 0, classicFor: ''
 };
 const STUDIO_V2_OPENING_WINDOW_MS = 15000;
 const _studioV2Screens = new Map();  // tab -> draw(route): the body of that tab's screen root (studioV2RegisterScreen)
@@ -112,9 +120,53 @@ function studioV2Layout() {
   return _studioV2.layout;
 }
 
-// 'staff' (the Team desk), 'customer' (the v2 customer layout) or '' (classic, or /me not known).
+// 'staff' (the Team desk), 'customer' (the v2 customer layout) or '' (classic, /me not known, or the
+// classic view chosen for this tab).
 function studioV2Frame() {
+  if (studioV2ClassicChosen()) return '';
   return studioV2FrameOf(studioV2Layout());
+}
+
+// ------------------------------------------------------------------ the classic view (P6-06)
+
+// True while the signed-in user chose the classic view in this tab (sessionStorage, or this page's
+// memory when the storage is not available). Another user in the same tab starts in the new studio.
+function studioV2ClassicChosen() {
+  const uid = studioMeUserId();
+  if (!uid) return false;
+  if (_studioV2.classicFor === uid) return true;
+  try { return window.sessionStorage.getItem(STUDIO_V2_CLASSIC_KEY) === uid; } catch (_) { return false; }
+}
+
+// "Classic view" (true) in the v2 header, "New studio" (false) in the classic header. Nothing is sent
+// to the server: the rollout record is untouched, and the choice ends with the tab.
+function studioV2ChooseClassic(classic) {
+  const uid = studioMeUserId();
+  const on = !!classic && !!uid;
+  _studioV2.classicFor = on ? uid : '';
+  try {
+    if (on) window.sessionStorage.setItem(STUDIO_V2_CLASSIC_KEY, uid);
+    else window.sessionStorage.removeItem(STUDIO_V2_CLASSIC_KEY);
+  } catch (_) { /* a private window: the memory copy holds the choice for this page */ }
+  studioV2Rerender();  // the draw that follows marks or rebuilds the history path as any v2 draw does
+  return on;
+}
+
+// The v2 header's link (customers and staff), '' outside the v2 layout.
+function renderStudioV2ClassicLink() {
+  if (!studioV2Frame()) return '';
+  const label = adsStudioText('Classic view', 'العرض القديم');
+  return `<button type="button" data-testid="studio-classic-view" class="studio-v2-header-link" onclick="studioV2ChooseClassic(true)">${studioEsc(label)}</button>`;
+}
+
+// The classic header's way back (15c draws it, guarded): only while this tab chose the classic view
+// and /me still says v2 for this user; '' for everyone else, so the classic header is unchanged.
+function renderStudioV2ClassicSwitch() {
+  try {
+    if (!studioV2ClassicChosen() || !studioV2FrameOf(studioV2Layout())) return '';
+    const label = adsStudioText('New studio', 'الاستوديو الجديد');
+    return `<button type="button" data-testid="studio-new-studio" onclick="studioV2ChooseClassic(false)" class="touch-target min-h-11 px-3 rounded-xl bg-white/70 dark:bg-slate-800/70 border border-white/60 dark:border-slate-700 inline-flex items-center gap-1.5 text-sm font-bold text-blue-600 dark:text-blue-300"><i data-lucide="sparkles" class="w-4 h-4" aria-hidden="true"></i><span>${studioEsc(label)}</span></button>`;
+  } catch (_) { return ''; }
 }
 
 function studioV2IsStaff() {
@@ -183,7 +235,7 @@ function studioV2Remember(uid, frame) {
 // "Opening the studio…" (never the v2 frame before /me says so); everyone else gets classic at once.
 function studioV2ShouldWait() {
   const uid = studioMeUserId();
-  if (!uid || !studioMeLoading()) return false;
+  if (!uid || !studioMeLoading() || studioV2ClassicChosen()) return false;
   const remembered = studioV2Remembered(uid);
   if (remembered !== 'customer' && remembered !== 'staff') return false;
   if (_studioV2.waitFor !== uid) {
@@ -708,11 +760,13 @@ function renderStudioV2Header(route, frame) {
     // Staff here have the Team desk off: its button opens their classic review tab.
     actions = (studioV2IsStaff() ? headButton('review') : '') + headButton('inbox') + headButton('account');
   }
+  // The "Classic view" link (P6-06) sits on the kicker line, in every screen of both frames.
+  const classicLink = renderStudioV2ClassicLink();
   return `
       <header class="studio-v2-header">
         ${back}
         <div class="studio-v2-heading">
-          ${kicker ? `<p class="studio-v2-kicker">${studioEsc(kicker)}</p>` : ''}
+          ${kicker || classicLink ? `<div class="studio-v2-heading-meta">${kicker ? `<p class="studio-v2-kicker">${studioEsc(kicker)}</p>` : ''}${classicLink}</div>` : ''}
           <h1 id="studio-v2-title" class="studio-v2-title">${studioEsc(title)}</h1>
         </div>
         ${actions ? `<div class="studio-v2-header-actions">${actions}</div>` : ''}
