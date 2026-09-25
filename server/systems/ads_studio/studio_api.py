@@ -27,6 +27,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
+from .studio_alert_out import create_studio_alert_out_router
 from .studio_alerts_meta import meta_connection_flag
 from .studio_diagnostics import read_diagnostics
 from .studio_e2e_seed import create_studio_e2e_seed_router
@@ -165,4 +166,5 @@ def create_studio_router(
     router.include_router(create_studio_profile_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # GET/PUT /profile: the owner's optional WhatsApp number (studio_profile.py, P2-07)
     router.include_router(create_studio_support_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /tickets + /staff/tickets: the help desk (studio_support.py, P3-07, P3-13)
     router.include_router(create_studio_desk_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /activity, /activity/seen, /staff/pulse, /staff/customers/{id}/contact (studio_activity.py, studio_stop.py; P3-05, P3-11, P3-17)
+    router.include_router(create_studio_alert_out_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # POST /admin/alert-channel/test: the staff alert channel (studio_alert_out.py, P3-21)
     return router

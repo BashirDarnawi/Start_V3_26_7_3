@@ -104,6 +104,24 @@ a staff stop add an item to the owner's inbox after their commit (studio_activit
 never failing the action). ``POST /{id}/stop-request`` is built in studio_stop.py and
 registered on this router; it sets ``stopRequestedAt`` (kept as history), and a stop
 through /stop resolves the ad's open stop request and its ticket.
+
+Settle gates and the admin override (P3-06a, P3-06d; PLAN.md §7.8 rule 5; D27, D28).
+The staff branch of /stop is the SETTLE step of a request linked by the desk, judged
+on Meta's numbers (its ``adCampaignResults`` row, read on the stop's own transaction,
+never locked): refused while Meta still delivers, while the sync has not seen delivery
+end, while the final read is pending (``settleReadAt`` missing and no spend confirmed
+after ``deliveryEndedAt`` + ``settlement.spendDelayHours``, 48 h by default) and when
+the ad account does not bill in USD; a never-delivered ad (0 impressions, $0 once
+delivery ended) returns the whole payment at once. The refund is capped at paid minus
+Meta's confirmed spend (the default when staff give no amount; above it 400). Every
+gate and the cap can be lifted only by an admin through ``POST /{id}/settle-override``
+with a written reason (10-300 characters), audited ``settle_override`` (kept forever)
+with the row before and after; what comes back above the cap, and Meta spend above the
+payment, is absorbed by Albayan (D27) and raises the ``meta_overspend`` alert. A settle
+stores ``settleBasis`` (final_read | never_delivered | override | never_linked),
+``metaSpendAtSettleMinorUSD`` (Meta's confirmed spend at that moment, or null),
+``settledSpendMinorUSD`` (what the drift watch compares Meta's later spend with) and
+``settledAt``; see settle_plan (pure, tested in test_studio_settle.py).
 """
 
 import math
@@ -195,6 +213,16 @@ class AdCampaignUnlinkBody(AdCampaignSubmitRequest):
     reason: Optional[Any] = None
 
 
+class AdCampaignSettleOverrideBody(AdCampaignSubmitRequest):
+    """settle-override (P3-06d, admin only): the version baseline, an ``operationId`` (a replay
+    answers the first result), ``refundMinorUSD`` (required; may exceed the cap, never the payment)
+    and ``reason`` (10-300 characters, audited), both checked by the route for stable refusals."""
+
+    refundMinorUSD: Optional[Any] = None
+    reason: Optional[Any] = None
+    closeReason: Optional[Literal["", "staff_stop", "completed"]] = None
+
+
 # Refusal texts shared with the client's Arabic map: each ``detail`` STARTS with one of these
 # (a dynamic part may follow). Never reword one; add a new text instead.
 REFUSE_TOTAL_MIN = "The total budget must be at least "                   # T1
@@ -237,6 +265,32 @@ REFUSE_UNLINK_NOT_APPROVED = "Only an Approved request can be unlinked from its 
 REFUSE_UNLINK_NOT_LINKED = "This request is not linked to a Meta campaign"
 UNLINK_REASON_CHARS = (3, 300)
 LAUNCHED_MARKERS = frozenset({"live", "paused"})  # a link keeps these (a legacy request marked by hand)
+# P3-06a settle gates of the staff stop (PLAN.md §7.8 rule 5; D28) and the P3-06d admin override.
+# Each ``detail`` starts with one of these; SETTLE_NOT_READY is a 409 with a dict detail
+# {code, message, messageAr, readyAt} (the NEEDS_MANUAL_RENAME shape), so the desk can show a countdown.
+REFUSE_SETTLE_DELIVERING = "Meta is still delivering this ad"
+REFUSE_SETTLE_NOT_ENDED = "Meta has not confirmed that this ad ended"
+REFUSE_SETTLE_NOT_READY = "The final amount is not ready"
+REFUSE_SETTLE_NOT_USD = "This ad account does not bill in USD"
+REFUSE_REFUND_ABOVE_CAP = "refundMinorUSD is above paid minus Meta spend"
+REFUSE_REFUND_ABOVE_PAID = "refundMinorUSD must be between 0 and the paid budget"
+REFUSE_REFUND_LAUNCHED = "refundMinorUSD is required for a launched campaign (0 closes it without a refund)"
+REFUSE_REFUND_RANGE = "refundMinorUSD must be between 0 and the unspent captured budget"
+REFUSE_OVERRIDE_ADMIN = "Only an admin can override the settlement rules"
+REFUSE_OVERRIDE_OWN = "Nobody can override the settlement of their own request"
+REFUSE_OVERRIDE_REASON = "Write why the settlement rules are lifted (10 to 300 characters)"
+REFUSE_OVERRIDE_REFUND = "refundMinorUSD is required for an override (0 closes the ad without a refund)"
+SETTLE_NOT_READY = "SETTLE_NOT_READY"
+SETTLE_NOT_READY_AR = "المبلغ النهائي غير جاهز"
+OVERRIDE_REASON_CHARS = (10, 300)
+SETTLE_BASES = ("final_read", "never_delivered", "override", "never_linked")
+AUDIT_SETTLE_OVERRIDE = "settle_override"  # in main's permanent keep list (P1-04)
+# The row before and after an override, in its audit entry (money and lifecycle fields only).
+_SETTLE_AUDIT_FIELDS = (
+    "status", "publishStatus", "closeReason", "refundMinorUSD", "spendMinorUSD", "settleBasis",
+    "settledSpendMinorUSD", "metaSpendAtSettleMinorUSD", "settleOverrideReason", "settledAt",
+)
+META_OVERSPEND_ALERT = "meta_overspend"  # studio_jobs.ALERT_KINDS (label: agent B / studio_jobs.ALERT_LABELS)
 _STUDIO_REF_ATTEMPTS = 8
 
 # P1-12: why staff sent a request back or rejected it (stored as reviewReasonCode). The client
@@ -577,6 +631,143 @@ def _campaign_start_is_in_future(data: dict[str, Any]) -> bool:
     except Exception:
         today = datetime.now(timezone.utc).date()
     return today <= start
+
+
+def utc_now() -> datetime:
+    """The settle gates' clock (looked up at call time, so tests can fix it)."""
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _settle_not_ready(now: datetime, ready_at: datetime) -> HTTPException:
+    """409 SETTLE_NOT_READY: the final Meta read is due at ``ready_at`` (bilingual, with the time)."""
+    when = _iso_utc(ready_at)
+    if now < ready_at:
+        message = f"{REFUSE_SETTLE_NOT_READY} until {when}"
+        message_ar = f"{SETTLE_NOT_READY_AR} قبل {when}"
+    else:
+        message = f"{REFUSE_SETTLE_NOT_READY}: Meta's final read is still pending (due {when})"
+        message_ar = f"{SETTLE_NOT_READY_AR}: قراءة ميتا النهائية لم تصل بعد (موعدها {when})"
+    return HTTPException(
+        status_code=409,
+        detail={"code": SETTLE_NOT_READY, "message": message, "messageAr": message_ar, "readyAt": when},
+    )
+
+
+def settle_plan(
+    data: dict[str, Any],
+    results: dict[str, Any] | None,
+    captured: int,
+    refund: Any,
+    now: datetime,
+    settlement: dict[str, Any] | None,
+    *,
+    override_reason: str = "",
+) -> dict[str, Any]:
+    """P3-06a: what the staff stop of one Approved request may return (PURE; PLAN.md §7.8 rule 5).
+
+    ``data``: the request's fields; ``results``: its adCampaignResults row (any shape) or None;
+    ``captured``: what its cycle's ``cpay:`` row paid; ``refund``: the amount staff asked for, or
+    None; ``settlement``: the settlement setting (``spendDelayHours``). Returns ``{"refund",
+    "capMinorUSD", "metaSpendMinorUSD", "settleBasis", "absorbedMinorUSD"}`` or raises the refusal.
+
+    A request LINKED by the desk (metaAdAccountId + metaCampaignId, studio_results.linked_meta_ids)
+    is judged on Meta's numbers:
+
+    * never delivered (the results row says so: 0 impressions and $0 once delivery ended, D28) ->
+      the whole payment may return at once, ``settleBasis`` never_delivered;
+    * else refused while Meta still delivers (409), while the sync has not seen delivery end
+      (409), while the final read is pending: ``settleReadAt`` missing and no spend confirmed at or
+      after ``deliveryEndedAt`` + ``spendDelayHours`` (409 SETTLE_NOT_READY with ``readyAt``), and
+      when the ad account does not bill in USD (409): each of these needs the admin override;
+    * else the refund is capped at paid minus Meta's confirmed spend (the default when no amount
+      is given; above it 400), ``settleBasis`` final_read.
+
+    The admin override (P3-06d, ``override_reason``) lifts every gate and the cap: the refund may
+    reach the whole payment, never more (400), ``settleBasis`` override. ``absorbedMinorUSD`` is
+    what Albayan pays out of its own pocket (D27): Meta's spend plus the refund above the payment.
+
+    A request never linked by the desk keeps the older rule: a launched one (a publish marker or a
+    Meta id set by hand) needs an explicit amount, bounded by what the request itself recorded as
+    spent; ``settleBasis`` is never_linked when it carries no launch marker at all, else '' (a
+    legacy hand-marked row: nothing is known about its Meta spend).
+    """
+    from .studio_diagnostics import parse_time  # late: the studio modules import this one
+    from .studio_results import linked_meta_ids, meta_delivery, normalize_results
+
+    captured = max(int(captured or 0), 0)
+    override = bool(str(override_reason or "").strip())
+    link = linked_meta_ids(data)
+    if link is None:
+        spent = min(_whole(data.get("spendMinorUSD")), captured)
+        launched = bool(str(data.get("publishStatus") or "").strip() or str(data.get("metaCampaignId") or "").strip())
+        if refund is None and launched and not override:
+            # A launched campaign has (almost surely) spent on Meta and nothing
+            # records that spend: defaulting to the whole budget refunded it.
+            raise HTTPException(status_code=400, detail=REFUSE_REFUND_LAUNCHED)
+        cap = captured - spent
+        amount = int(refund) if refund is not None else cap
+        if amount < 0 or amount > (captured if override else cap):
+            raise HTTPException(status_code=400, detail=REFUSE_REFUND_ABOVE_PAID if override else REFUSE_REFUND_RANGE)
+        return {
+            "refund": amount, "capMinorUSD": cap, "metaSpendMinorUSD": None,
+            "settleBasis": "override" if override else ("" if launched else "never_linked"),
+            "absorbedMinorUSD": max(amount - cap, 0),
+        }
+    row = normalize_results(results) if results else None
+    if row is not None and row["metaCampaignId"] != link[1]:
+        row = None  # the row of an earlier link: nothing is known about this campaign
+    meta_spend: int | None = None
+    if row is not None and row["currency"] == "USD" and row["spendConfirmedAt"]:
+        meta_spend = int(row["spendMinorUSD"])
+    never = bool(row is not None and row["neverDelivered"] and row["spendMinorUSD"] == 0 and not row["lifetimeImpressions"])
+    if override:
+        cap, basis = max(captured - (meta_spend or 0), 0), "override"
+    elif never:
+        cap, basis, meta_spend = captured, "never_delivered", 0
+    else:
+        if row is not None and meta_delivery(data, row, now)["delivering"]:
+            raise HTTPException(status_code=409, detail=REFUSE_SETTLE_DELIVERING)
+        if row is not None and row["currency"] and row["currency"] != "USD":
+            raise HTTPException(status_code=409, detail=REFUSE_SETTLE_NOT_USD)
+        ended = parse_time(row["deliveryEndedAt"]) if row is not None else None
+        if ended is None:
+            raise HTTPException(status_code=409, detail=REFUSE_SETTLE_NOT_ENDED)
+        hours = int((settlement or {}).get("spendDelayHours", 48))
+        ready_at = ended + timedelta(hours=hours)
+        confirmed = parse_time(row["spendConfirmedAt"])
+        final = row["settleReadAt"] is not None or (confirmed is not None and confirmed >= ready_at)
+        if not final or meta_spend is None:
+            raise _settle_not_ready(now, ready_at)
+        cap, basis = max(captured - meta_spend, 0), "final_read"
+    amount = int(refund) if refund is not None else cap
+    if amount < 0 or amount > (captured if override else cap):
+        raise HTTPException(status_code=400, detail=REFUSE_REFUND_ABOVE_PAID if override else REFUSE_REFUND_ABOVE_CAP)
+    return {
+        "refund": amount, "capMinorUSD": cap, "metaSpendMinorUSD": meta_spend, "settleBasis": basis,
+        "absorbedMinorUSD": max((meta_spend or 0) + amount - captured, 0),
+    }
+
+
+def _raise_overspend_alert(conn: Any, campaign_id: str, owner_id: str, plan: dict[str, Any], captured: int, now: datetime) -> None:
+    """D27: Albayan absorbs Meta spend above the payment (and an override above the cap): one
+    ``meta_overspend`` alert per request and day, on the settle's own transaction. An alert kind
+    the jobs module does not know yet is skipped, never a failed settle."""
+    from .studio_jobs import raise_alert  # late: studio_jobs imports this module
+
+    try:
+        raise_alert(
+            conn, META_OVERSPEND_ALERT, related_type=AD_CAMPAIGN_COLLECTION, related_id=campaign_id, owner_id=owner_id,
+            details={"campaignId": campaign_id, "paidMinorUSD": captured, "metaSpendMinorUSD": plan["metaSpendMinorUSD"],
+                     "refundMinorUSD": plan["refund"], "capMinorUSD": plan["capMinorUSD"],
+                     "absorbedMinorUSD": plan["absorbedMinorUSD"], "settleBasis": plan["settleBasis"]},
+            now=now,
+        )
+    except ValueError:
+        pass
 
 
 def _is_reviewer(ctx: dict[str, Any], user: dict[str, Any]) -> bool:
@@ -1637,23 +1828,31 @@ def create_ad_campaign_actions_router(
         )
         return EntityResponse(**ctx["project_entity_media_for_user"](entity, user, False))
 
-    @router.post("/{campaign_id}/stop")
-    def stop_ad_campaign_request(
+    def _stop_or_settle(
         campaign_id: str,
         body: AdCampaignStopBody,
-        request: Request,
-        user: dict[str, Any] = Depends(current_user_dependency),
-    ):
-        """Stop an Approved campaign; refund the unspent budget atomically."""
-        require_same_origin(request)
+        user: dict[str, Any],
+        *,
+        override_reason: str = "",
+    ) -> dict[str, Any]:
+        """The one locked transaction of /stop and /settle-override: the refund ledger row and the
+        Stopped status write commit or roll back together. Staff settle through settle_plan (the
+        P3-06a gates, lifted by ``override_reason`` for an admin, P3-06d); the owner's own stop
+        keeps the customer rules (see the module docstring)."""
+        from .studio_results import load_results_row  # late: studio_results imports this module
+
         campaign_id = ctx["validate_entity_id"](campaign_id)
         operation_id = _clean_operation_id(ctx, body.operationId)
         close_reason = str(body.closeReason or "")
         actor_id = str(user.get("id") or "system")
+        # The settlement rules are read before the transaction (like the stop request's settings).
+        settlement = _studio_setting("settlement") if _is_reviewer(ctx, user) else None
+        now = utc_now()
         postgres = ctx["is_postgres"]()
         patch_guard = nullcontext() if postgres else ctx["sqlite_patch_lock"]()
         wallet_guard = nullcontext() if postgres else ctx["sqlite_wallet_lock"]()
         refund = 0
+        plan: dict[str, Any] | None = None
         with patch_guard, wallet_guard:
             with db_conn() as conn:
                 suffix = " FOR UPDATE" if postgres else ""
@@ -1703,28 +1902,22 @@ def create_ad_campaign_actions_router(
                     _campaign_payment_key({**data, "id": campaign_id}),
                 )
                 captured = int(((paid_row or {}).get("data") or {}).get("amountMinor") or 0)
-                spent = min(max(int(data.get("spendMinorUSD") or 0), 0), max(captured, 0))
                 if staff:
-                    launched = bool(
-                        str(data.get("publishStatus") or "").strip() or str(data.get("metaCampaignId") or "").strip()
-                    )
-                    if body.refundMinorUSD is None and launched:
-                        # A launched campaign has (almost surely) spent on Meta and nothing
-                        # records that spend: defaulting to the whole budget refunded it.
-                        raise HTTPException(
-                            status_code=400,
-                            detail="refundMinorUSD is required for a launched campaign (0 closes it without a refund)",
-                        )
-                    refund = int(body.refundMinorUSD) if body.refundMinorUSD is not None else captured - spent
-                    if refund < 0 or refund > captured - spent:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="refundMinorUSD must be between 0 and the unspent captured budget",
-                        )
+                    # P3-06a: the settle gates and the cap (settle_plan); the results row is read on this
+                    # transaction, never locked (PLAN.md §7.8 lock table, "Stop / settle").
+                    results, _results_modified = load_results_row(conn, campaign_id)
+                    plan = settle_plan(data, results, captured, body.refundMinorUSD, now, settlement,
+                                       override_reason=override_reason)
+                    refund = plan["refund"]
                     # Staff may record a customer's ask-to-stop as customer_stop;
                     # a finished ad closes as completed (stage 11, PLAN §5.4).
                     close_reason = close_reason or "staff_stop"
+                    if plan["absorbedMinorUSD"] > 0:  # D27: Albayan absorbs; the alert rides this transaction
+                        _raise_overspend_alert(conn, campaign_id, creator, plan, captured, now)
                 else:
+                    if override_reason:
+                        # Nobody chooses their own refund, an admin included (the staff rule above).
+                        raise HTTPException(status_code=403, detail=REFUSE_OVERRIDE_OWN)
                     if body.refundMinorUSD is not None:
                         raise HTTPException(
                             status_code=403,
@@ -1737,6 +1930,7 @@ def create_ad_campaign_actions_router(
                             detail="Only staff can choose how a campaign closed",
                         )
                     close_reason = "customer_stop"
+                    spent = min(max(int(data.get("spendMinorUSD") or 0), 0), max(captured, 0))
                     started = (
                         str(data.get("publishStatus") or "").strip()
                         or str(data.get("metaCampaignId") or "").strip()
@@ -1756,6 +1950,7 @@ def create_ad_campaign_actions_router(
                     )
                 stopped_at = ctx["iso_utc"]()
                 modified = max(now_ms(), baseline + 1)
+                before = {key: data.get(key) for key in _SETTLE_AUDIT_FIELDS}
                 data.update(
                     {
                         "status": "Stopped",
@@ -1771,6 +1966,25 @@ def create_ad_campaign_actions_router(
                         "_lastModified": modified,
                     }
                 )
+                if plan is not None:  # P3-06a: what the settle was based on (studio_results, studio_results_sync read these)
+                    meta_spend = plan["metaSpendMinorUSD"]
+                    data.update({
+                        "settleBasis": plan["settleBasis"],
+                        "metaSpendAtSettleMinorUSD": meta_spend,
+                        "settledSpendMinorUSD": meta_spend if meta_spend is not None else max(captured - refund, 0),
+                        "settledAt": stopped_at,
+                        "settleOverrideReason": override_reason,
+                    })
+                    if override_reason:  # P3-06d: audited on the same transaction, kept forever
+                        ctx["audit"](
+                            actor_id, AUDIT_SETTLE_OVERRIDE, AD_CAMPAIGN_COLLECTION, campaign_id,
+                            f"Admin override settled campaign request {campaign_id}: refunded {refund} (cap {plan['capMinorUSD']})",
+                            {"operationId": operation_id, "reason": override_reason, "refundMinorUSD": refund,
+                             "capMinorUSD": plan["capMinorUSD"], "paidMinorUSD": captured,
+                             "metaSpendAtSettleMinorUSD": meta_spend, "absorbedMinorUSD": plan["absorbedMinorUSD"],
+                             "before": before, "after": {key: data.get(key) for key in _SETTLE_AUDIT_FIELDS}},
+                            conn=conn,
+                        )
                 result = conn.execute(
                     text(
                         "UPDATE entities SET data_json = :d, last_modified = :m "
@@ -1803,6 +2017,42 @@ def create_ad_campaign_actions_router(
 
         on_campaign_stopped(campaign_id)  # its stop request (if any) is handled now
         return ctx["project_entity_media_for_user"](entity, user, False)
+
+    @router.post("/{campaign_id}/stop")
+    def stop_ad_campaign_request(
+        campaign_id: str,
+        body: AdCampaignStopBody,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """Stop an Approved campaign; refund the unspent budget atomically (staff: the settle gates, P3-06a)."""
+        require_same_origin(request)
+        return _stop_or_settle(campaign_id, body, user)
+
+    @router.post("/{campaign_id}/settle-override")
+    def settle_override_ad_campaign_request(
+        campaign_id: str,
+        body: AdCampaignSettleOverrideBody,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """P3-06d: an admin settles past the gates and above the cap with a written reason (audited
+        ``settle_override``, kept forever; D27: Albayan absorbs what comes back above the cap).
+        Admin only (a reviewer gets 403); the refund is required and never above the payment."""
+        require_same_origin(request)
+        if str(user.get("role") or "").lower() != "admin":
+            raise HTTPException(status_code=403, detail=REFUSE_OVERRIDE_ADMIN)
+        reason = ctx["sanitize_str"](body.reason).strip() if isinstance(body.reason, str) else ""
+        if not OVERRIDE_REASON_CHARS[0] <= len(reason) <= OVERRIDE_REASON_CHARS[1]:
+            raise HTTPException(status_code=400, detail=REFUSE_OVERRIDE_REASON)
+        refund = body.refundMinorUSD
+        if isinstance(refund, bool) or not isinstance(refund, int) or refund < 0:
+            raise HTTPException(status_code=400, detail=REFUSE_OVERRIDE_REFUND)
+        stop_body = AdCampaignStopBody(
+            expectedLastModified=body.expectedLastModified, operationId=body.operationId, reason=None,
+            refundMinorUSD=refund, closeReason=body.closeReason or "staff_stop",
+        )
+        return _stop_or_settle(campaign_id, stop_body, user, override_reason=reason)
 
     @router.post("/{campaign_id}/publish-status")
     def set_ad_campaign_publish_status(

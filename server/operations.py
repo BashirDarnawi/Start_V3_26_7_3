@@ -781,21 +781,27 @@ def _upload_offsite(path: Path, config: dict[str, Any]) -> None:
     client.upload_file(str(path), config["offsiteBucket"], key)
 
 
-def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] | None = None) -> None:
+def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] | None = None, line: str | None = None) -> bool:
+    """POST one alert to ALBAYAN_ALERT_WEBHOOK_URL; True only when the endpoint accepted it.
+
+    ``line`` (additive, P3-21) fills the payload's ``text`` field, the one line a chat webhook shows
+    (Slack, Google Chat, Discord read ``text``); it defaults to ``message``. Not configured, inside
+    the per-kind cooldown, or refused: False, and the caller decides whether to try again later."""
     url = (os.getenv("ALBAYAN_ALERT_WEBHOOK_URL") or "").strip()
     if not url:
-        return
+        return False
     cooldown = _env_int("ALBAYAN_ALERT_COOLDOWN_SECONDS", 1800, 60, 86400)
     now = time.time()
     with _state_lock:
         if now - _last_alert_at.get(kind, 0) < cooldown:
-            return
+            return False
         _last_alert_at[kind] = now
     payload = json.dumps({
         "application": "Albayan",
         "kind": kind,
         "severity": severity,
         "message": message,
+        "text": line or message,
         "details": details or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }, separators=(",", ":")).encode("utf-8")
@@ -806,8 +812,25 @@ def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] 
                 raise RuntimeError("alert endpoint rejected the request")
         with _state_lock:
             _status["lastAlertAt"] = now_ms()
+        return True
     except Exception as exc:
         print(f"[albayan] Operations alert failed: {type(exc).__name__}")
+        return False
+
+
+def _watch_studio_jobs() -> None:
+    """P3-21: the Ads Studio jobs loop cannot report its own death, so this worker reads its
+    heartbeat (studio_jobs.jobs_heartbeat: late after 5 minutes without a tick) and hands it to
+    the studio's staff alert channel, which also sends the studio's pending notifications
+    (studio_alert_out.operations_watch). Imported late and guarded whole: the backups and the
+    server alerts never depend on a system module."""
+    try:
+        from .systems.ads_studio.studio_alert_out import operations_watch
+        from .systems.ads_studio.studio_jobs import jobs_heartbeat
+
+        operations_watch(jobs_heartbeat())
+    except Exception as exc:
+        print(f"[albayan] Studio jobs watch failed: {type(exc).__name__}")
 
 
 def _cleanup_old_backups(directory: Path, retention_days: int) -> None:
@@ -973,6 +996,7 @@ def _backup_worker() -> None:
                         "Albayan server responses are unusually slow",
                         metrics,
                     )
+            _watch_studio_jobs()  # P3-21: the studio heartbeat and its pending staff notifications
             _worker_stop.wait(300)
     finally:
         with _state_lock:
