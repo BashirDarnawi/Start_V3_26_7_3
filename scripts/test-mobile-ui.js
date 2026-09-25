@@ -1638,6 +1638,352 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P1 classic form (agent C): daily or lifetime budget with days and a live total (P1-06, D4 + D5),
+  // intake paused (P1-22), review reason codes (P1-12), Arabic refusals T1-T14 (P1-08c), the D19 post
+  // picker, and the review finding "a thousands separator typed one key at a time became a decimal
+  // point". The real studio code runs in a sandbox next to the startup bundle's own
+  // normalizeDigitsAscii and sanitizeMoneyInput; inline handlers are fired the way a browser does.
+  const vm = require('vm');
+  const notices = [];
+  const apiCalls = [];
+  const charges = [];
+  const nodes = Object.create(null);
+  const box = vm.createContext({
+    state: { language: 'en', currentUser: { id: 'p1-user' }, adCampaignRequests: [], currentView: 'ads-studio' },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      sanitizeInput: (value, options = {}) => String(value ?? '').slice(0, options.maxLength || 100000),
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      generateSecureId: prefix => `${prefix}-p1check0001`
+    },
+    document: { getElementById: id => nodes[id] || null, querySelector: selector => nodes[selector] || null, querySelectorAll: () => [] },
+    isSafeReceiptPhotoSource: () => true,
+    getEntityPhotoCountHint: () => 0,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => true,
+    currentUserHasPermission: () => true,
+    canActOnRecord: () => true,
+    getVisibleRecords: list => (Array.isArray(list) ? list : []).filter(item => item && !item._deleted),
+    showNotification: (title, message, kind) => { notices.push({ title: String(title), message: String(message), kind }); },
+    render: () => {},
+    apiJson: (path, options) => { apiCalls.push({ path, options }); return new Promise(() => {}); },
+    withRetry: fn => fn(),
+    requestValidatedServerEntity: (collection, action, loader) => loader(),
+    getServerSessionIdentity: () => 'p1-session',
+    serverSessionIdentityChanged: () => false,
+    makeSessionChangedError: () => new Error('session changed'),
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 20000 },
+    apiWalletPaymentRequestCreate: amountMinor => { charges.push(amountMinor); return new Promise(() => {}); },
+    WALLET: { getBalanceMinor: () => 8500 }
+  });
+  let loadError = '';
+  try {
+    for (const name of ['normalizeDigitsAscii', 'sanitizeMoneyInput']) {
+      const at = forms.indexOf(`function ${name}(`);
+      if (at < 0) throw new Error(`${name} is missing from src/14-forms.js`);
+      vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    }
+    vm.runInContext(adsStudio, box);
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return null; } };
+  const fn = name => { const at = adsStudio.indexOf(`function ${name}(`); return at < 0 ? '' : adsStudio.slice(at, adsStudio.indexOf('\n}\n', at)); };
+  const attr = (tag, name) => { const m = tag.match(new RegExp(`\\s${name}="([^"]*)"`)); return m ? m[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&') : ''; };
+  const fakeBox = value => ({ value, selectionStart: value.length, setSelectionRange(start) { this.selectionStart = start; } });
+  const fire = (code, element) => vm.runInContext(`(function () { ${code || 'throw new Error("no handler")'} })`, box).call(element);
+  // One key at a time (oninput after each), then the box loses focus (onchange).
+  const typeKeys = (tag, text, element, blur = true) => {
+    for (const key of Array.from(text)) { element.value += key; element.selectionStart = element.value.length; fire(attr(tag, 'oninput'), element); }
+    if (blur) fire(attr(tag, 'onchange'), element);
+    return element;
+  };
+
+  // Review finding: "1,500" typed key by key was 1.50 ("1," became "1."). Budget box and charge box.
+  run("beginAdsStudioCampaign(); _adsStudioDraft.budgetType = 'daily';");
+  const budgetTag = (String(run('renderAdsStudioBudgetStep()')).match(/<input[^>]*id="ads-studio-field-budgetMinorUSD"[^>]*>/) || [''])[0];
+  let typedProblem = '';
+  const typed = [];
+  try {
+    const latin = typeKeys(budgetTag, '1,500', fakeBox(''));
+    typed.push(run('_adsStudioDraft.budgetMinorUSD'), latin.value);
+    const arabic = typeKeys(budgetTag, '١،٥٠٠', fakeBox(''));
+    typed.push(run('_adsStudioDraft.budgetMinorUSD'), arabic.value);
+    typeKeys(budgetTag, '1,500', fakeBox(''), false);  // still focused: the raw text already counts
+    typed.push(run('_adsStudioDraft.budgetMinorUSD'));
+    const chargeTag = (adsStudio.match(/<input id="ads-studio-charge-amount"[^>]*>/) || [''])[0];
+    const chargeBox = fakeBox('');
+    nodes['ads-studio-charge-amount'] = chargeBox;
+    nodes['ads-studio-lyd-preview'] = { textContent: '' };
+    nodes['ads-studio-charge-currency'] = { value: 'USD' };
+    nodes['input[name="ads-studio-charge-method"]:checked'] = { value: 'bank_transfer' };
+    run("_adsStudioPayMethods = [{ id: 'bank_transfer' }]; _adsStudioPayRate = { usdToLyd: 5 };");
+    typeKeys(chargeTag, '1,500', chargeBox);
+    typed.push(chargeBox.value, nodes['ads-studio-lyd-preview'].textContent);
+    run('adsStudioCreateWalletCharge()');
+    run('_adsStudioChargeBusy = false;');
+    chargeBox.value = '';
+    typeKeys(chargeTag, '١،٥٠٠', chargeBox, false);  // "Create" tapped while the box still has focus
+    run('adsStudioCreateWalletCharge()');
+    run('_adsStudioChargeBusy = false;');
+    typed.push(attr(budgetTag, 'oninput'), attr(chargeTag, 'oninput'), attr(budgetTag, 'onchange'), attr(chargeTag, 'onchange'));
+  } catch (error) { typedProblem = String(error && error.message || error); }
+  check("'1,500' typed key by key -> 150000 minor (budget and charge boxes, Arabic comma too)", !loadError && !typedProblem
+    && typed[0] === 150000 && typed[1] === '1500' && typed[2] === 150000 && typed[3] === '1500' && typed[4] === 150000
+    && typed[5] === '1500' && String(typed[6]).includes('7500.00 LYD') && JSON.stringify(charges) === '[150000,150000]'
+    && !typed[7].includes('sanitizeMoneyInput') && !typed[8].includes('sanitizeMoneyInput')
+    && typed[9].includes('sanitizeMoneyInput(this)') && typed[10].includes('sanitizeMoneyInput(this)'),
+  loadError || typedProblem || JSON.stringify({ typed, charges }));
+
+  // P1-06 (D4 + D5): Daily or Lifetime plus the number of days, a live total, and the /me limits in
+  // the server's own refusal words (T1-T4), English and Arabic.
+  const draft = extra => JSON.stringify({ startDate: '2030-01-01', budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7, ...extra });
+  const problem = (extra, language = 'en') => String(inLanguage(language, `adsStudioBudgetLimitProblem(${draft(extra)})`));
+  run("resetAdsStudioLimits(); beginAdsStudioCampaign(); adsStudioSetDraftField('startDate', '2030-01-01'); adsStudioSetDraftField('durationDays', '١٤');");
+  const typedDays = json('[_adsStudioDraft.durationDays, _adsStudioDraft.endDate]');
+  run("adsStudioSetDraftField('durationDays', '7.5');");
+  const halfDays = json('[_adsStudioDraft.durationDays, adsStudioValidateStep(4, { ..._adsStudioDraft, name: "x", pageName: "p", primaryText: "t", destination: "+218900000000", creativeImages: ["data:image/png;base64,AAAA"], startDate: "2099-01-01", endDate: "2099-01-07" }).join("|")]');
+  const budgetStep = String(run("beginAdsStudioCampaign(); _adsStudioDraft.budgetType = 'daily'; renderAdsStudioBudgetStep()"));
+  const budgetCases = [
+    String(run(`adsStudioBudgetTotalText(${draft()})`)).startsWith('Total: $70.00 for 7 days'),
+    String(inLanguage('ar', `adsStudioBudgetTotalText(${draft()})`)).startsWith('الإجمالي: $70.00 لمدة 7 أيام'),
+    run(`adsStudioRequestTotalMinor(${draft()})`) === 7000,
+    run(`adsStudioRequestTotalMinor(${draft({ budgetType: 'lifetime', budgetMinorUSD: 7000 })})`) === 7000,
+    problem({}) === '',
+    problem({ budgetType: 'lifetime', budgetMinorUSD: 400 }).startsWith('The total budget must be at least $5.00'),
+    problem({ budgetType: 'lifetime', budgetMinorUSD: 400 }, 'ar').startsWith('يجب ألا يقل إجمالي الميزانية عن $5.00'),
+    problem({ budgetMinorUSD: 30000 }).startsWith('The total budget must be at most $2000.00'),  // $300 x 7 = $2,100
+    problem({ budgetMinorUSD: 30000 }, 'ar').startsWith('يجب ألا يزيد إجمالي الميزانية عن $2000.00'),
+    problem({ budgetMinorUSD: 50, durationDays: 20 }).startsWith('Budget per day is below the minimum'),  // $0.50 a day
+    problem({ budgetMinorUSD: 50, durationDays: 20 }, 'ar').startsWith('الميزانية اليومية أقل من الحد الأدنى'),
+    problem({ budgetType: 'lifetime', budgetMinorUSD: 900, durationDays: 10 }).startsWith('Budget per day is below the minimum'),
+    problem({ budgetType: 'lifetime', budgetMinorUSD: 10000, durationDays: 91 }).startsWith('The ad can run for at most 90 days'),
+    problem({ budgetType: 'lifetime', budgetMinorUSD: 10000, durationDays: 91 }, 'ar').startsWith('أقصى مدة لتشغيل الإعلان هي 90 يوماً'),
+    JSON.stringify(typedDays) === '[14,"2030-01-14"]',
+    Array.isArray(halfDays) && halfDays[0] === 0 && String(halfDays[1]).includes('whole number'),
+    /id="ads-studio-field-durationDays"[^>]*inputmode="numeric"|inputmode="numeric"[^>]*id="ads-studio-field-durationDays"/.test(budgetStep),
+    budgetStep.includes('Budget per day in USD') && budgetStep.includes('id="ads-studio-budget-total"') && budgetStep.includes('Total: $70.00 for 7 days'),
+    fn('adsStudioOnBudgetInput').includes('adsStudioRefreshBudgetSummary()') && fn('adsStudioOnDaysInput').includes('adsStudioRefreshBudgetSummary()')
+  ];
+  check('classic budget: Daily or Lifetime + days, live total, /me limits with the T1-T4 texts (EN/AR)', !loadError && budgetCases.every(Boolean),
+    loadError || `cases ${budgetCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // The wallet pre-check before submit and the held amount use the total, not one day's budget.
+  box.state.adCampaignRequests = [
+    { id: 'held-new', status: 'Submitted', createdBy: 'p1-user', budgetType: 'daily', budgetMinorUSD: 1000, durationDays: 7, totalBudgetMinorUSD: 7000 },
+    { id: 'held-legacy', status: 'Submitted', createdBy: 'p1-user', budgetType: 'daily', budgetMinorUSD: 500 },
+    { id: 'held-draft', status: 'Draft', createdBy: 'p1-user', budgetType: 'lifetime', budgetMinorUSD: 9900 },
+    { id: 'p1-submit', status: 'Draft', createdBy: 'p1-user', name: 'Daily check', objective: 'messages', platforms: ['facebook'], pageName: 'Page',
+      primaryText: 'Copy', destination: '+218900000000', creativeImages: ['data:image/png;base64,AAAA'], locations: ['Libya'], ageMin: 18, ageMax: 65,
+      startDate: '2099-01-01', endDate: '2099-01-07', durationDays: 7, budgetType: 'daily', budgetMinorUSD: 1000, _lastModified: 5 }
+  ];
+  notices.length = 0;
+  run("_adsStudioIntakeOpen = null; submitAdsStudioCampaignOnce('p1-submit');");  // available $85 - $75 held = $10: one day fits, the total does not
+  const walletNotice = notices[0] || {};
+  check('wallet pre-check and held amounts use the total (legacy rows keep their held budget)', !loadError
+    && run('adsStudioWalletHeldMinor()') === 7500 && walletNotice.title === 'Not enough wallet balance' && walletNotice.message.includes('$70.00')
+    && !apiCalls.some(call => String(call.path).endsWith('/submit'))
+    && fn('submitAdsStudioCampaignOnce').includes('adsStudioRequestTotalMinor(campaign)') && !fn('submitAdsStudioCampaignOnce').includes('parseInt(campaign.budgetMinorUSD'),
+  loadError || JSON.stringify(walletNotice));
+
+  // P1-22: intake paused (/me intake.open false) -> Send disabled with the T5 message; drafts still save.
+  run("_adsStudioIntakeOpen = false; beginAdsStudioCampaign(); _adsStudioWizardStep = 5;");
+  const pausedHtml = String(run('renderAdsStudioBuilder()'));
+  const pausedAr = String(inLanguage('ar', 'renderAdsStudioBuilder()'));
+  const sendButton = html => (html.match(/<button[^>]*id="ads-studio-submit-button"[^>]*>/) || [''])[0];
+  const saveButton = html => (html.match(/<button[^>]*onclick="saveAdsStudioDraft\(false, this\)"[^>]*>/) || [''])[0];
+  const isDisabled = tag => /\sdisabled(?=[\s>])/.test(tag);
+  const pausedCard = String(run("renderAdsStudioCampaignCard(state.adCampaignRequests.find(c => c.id === 'p1-submit'))"));
+  notices.length = 0;
+  run("submitAdsStudioCampaignOnce('p1-submit');");
+  const pausedNotice = (notices[0] || {}).message || '';
+  run('_adsStudioIntakeOpen = true;');
+  const openHtml = String(run('renderAdsStudioBuilder()'));
+  const openCard = String(run("renderAdsStudioCampaignCard(state.adCampaignRequests.find(c => c.id === 'p1-submit'))"));
+  run('_adsStudioIntakeOpen = null;');
+  check('intake paused: Send disabled with the T5 message, drafts still save', !loadError
+    && isDisabled(sendButton(pausedHtml)) && !isDisabled(saveButton(pausedHtml)) && saveButton(pausedHtml) !== ''
+    && /<p id="ads-studio-intake-note"[^>]*class="text-sm/.test(pausedHtml) && pausedHtml.includes('New ad requests are paused')
+    && pausedAr.includes('استقبال طلبات الإعلانات الجديدة متوقف مؤقتاً')
+    && /data-ads-studio-submit="1"[^>]*\sdisabled(?=[\s>])/.test(pausedCard) && pausedNotice.startsWith('New ad requests are paused')
+    && !isDisabled(sendButton(openHtml)) && sendButton(openHtml) !== '' && /<p id="ads-studio-intake-note"[^>]*class="hidden /.test(openHtml)
+    && !/data-ads-studio-submit="1"[^>]*\sdisabled(?=[\s>])/.test(openCard)
+    && fn('refreshAdsStudioLimits').includes('me.intake') && fn('refreshAdsStudioLimits').includes('_adsStudioIntakeOpen = intakeOpen')
+    && fn('saveAndSubmitAdsStudioDraftOnce').includes('saveAdsStudioDraft(false)'),
+  loadError || `paused button ${sendButton(pausedHtml)}; notice ${pausedNotice}`);
+
+  // P1-12: the 7 reason codes with the server list's labels; shown to the customer on a request sent
+  // back or rejected; required for changes/reject in the staff form (T7); no native dialogs.
+  const reasons = [
+    ['budget_dates', 'Budget or dates', 'الميزانية أو التواريخ'],
+    ['creative_quality', 'Photo or video quality', 'جودة الصورة أو الفيديو'],
+    ['text_policy', 'Text breaks ad rules', 'النص يخالف قواعد الإعلانات'],
+    ['targeting', 'Audience or location', 'الجمهور أو الموقع'],
+    ['page_access', 'Page access', 'صلاحية الصفحة'],
+    ['payment', 'Payment', 'الدفع'],
+    ['other', 'Other', 'أخرى']
+  ];
+  const feedback = (status, code, language = 'en') => String(inLanguage(language, `renderAdsStudioReviewFeedback(${JSON.stringify({ status, reviewReasonCode: code, reviewNote: 'Use a <b>brighter</b> photo' })})`));
+  box.state.adCampaignRequests = [
+    { id: 'p1-review', status: 'Submitted', createdBy: 'customer-9', name: 'Queued', budgetType: 'lifetime', budgetMinorUSD: 2500, totalBudgetMinorUSD: 2500, _lastModified: 11 },
+    { id: 'p1-legacy', status: 'Submitted', createdBy: 'customer-9', name: 'Old daily', budgetType: 'daily', budgetMinorUSD: 1000, _lastModified: 12 }
+  ];
+  const queue = String(run('renderAdsStudioReviewQueue()'));
+  const legacySelect = (queue.match(/<select id="ads-review-reason-p1-legacy"[\s\S]*?<\/select>/) || [''])[0];
+  notices.length = 0;
+  apiCalls.length = 0;
+  run("setAdsStudioReviewNote('p1-review', 'Please use a clearer photo'); reviewAdsStudioCampaignOnce('p1-review', 'Changes Requested');");
+  const noReason = [(notices[0] || {}).message, apiCalls.filter(call => String(call.path).endsWith('/review')).length];
+  notices.length = 0;
+  inLanguage('ar', "reviewAdsStudioCampaignOnce('p1-review', 'Rejected')");
+  const noReasonAr = (notices[0] || {}).message;
+  run("setAdsStudioReviewReason('p1-review', 'creative_quality'); reviewAdsStudioCampaignOnce('p1-review', 'Changes Requested');");
+  const sentBack = (apiCalls.find(call => call.path === '/api/ad-studio/campaigns/p1-review/review') || {}).options || {};
+  apiCalls.length = 0;
+  run("reviewAdsStudioCampaignOnce('p1-review', 'Approved');");
+  const approveFirstTap = [apiCalls.length, run('_adsStudioApproveConfirmId')];
+  const confirmRow = String(run('renderAdsStudioReviewQueue()'));
+  run("reviewAdsStudioCampaignOnce('p1-review', 'Approved', true);");
+  const approved = (apiCalls.find(call => call.path === '/api/ad-studio/campaigns/p1-review/review') || {}).options || {};
+  const reviewCode = ['renderAdsStudioReviewQueue', 'reviewAdsStudioCampaign', 'reviewAdsStudioCampaignOnce', 'adsStudioApiReview', 'cancelAdsStudioApproval'].map(fn).join('\n');
+  const reasonCases = [
+    JSON.stringify(json('ADS_STUDIO_REVIEW_REASONS')) === JSON.stringify(reasons),
+    reasons.every(([code, en, ar]) => feedback('Rejected', code).includes(en) && feedback('Changes Requested', code, 'ar').includes(ar)),
+    feedback('Changes Requested', 'targeting').includes('Reason:') && feedback('Changes Requested', 'targeting').includes('Use a &lt;b&gt;brighter')
+      && !feedback('Changes Requested', 'targeting').includes('<b>brighter'),
+    feedback('Rejected', 'text_policy', 'ar').includes('ملاحظة المراجع:'),
+    !feedback('Changes Requested', 'evil<script>').includes('evil') && !feedback('Changes Requested', 'evil<script>').includes('Reason:'),
+    !feedback('Approved', 'targeting').includes('Audience or location'),
+    fn('renderAdsStudioCampaignCard').includes('renderAdsStudioReviewFeedback(campaign)'),
+    reasons.every(([code]) => queue.includes(`<option value="${code}"`)) && queue.includes('id="ads-review-reason-p1-review"'),
+    legacySelect.includes('<option value="budget_dates" selected>') && queue.includes('Old daily request'),
+    noReason[0] === 'Choose a reason for this decision.' && noReason[1] === 0 && noReasonAr === 'اختر سبباً لهذا القرار.',
+    sentBack.method === 'POST' && sentBack.body && sentBack.body.reviewReasonCode === 'creative_quality' && sentBack.body.decision === 'Changes Requested'
+      && sentBack.body.note === 'Please use a clearer photo',
+    approveFirstTap[0] === 0 && approveFirstTap[1] === 'p1-review' && confirmRow.includes('Confirm approval') && confirmRow.includes('$25.00'),
+    approved.body && approved.body.decision === 'Approved' && !('reviewReasonCode' in approved.body),
+    !/\b(?:confirm|prompt|alert)\(/.test(reviewCode)
+  ];
+  check('review reason codes: 7 codes EN/AR, shown to the customer, required for changes/reject (T7), in-page approval', !loadError && reasonCases.every(Boolean),
+    loadError || `cases ${reasonCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // P1-08c: the Arabic map holds every shared refusal prefix T1-T14 exactly; the entries that were
+  // there before are unchanged (entries are only ever added).
+  const shared = [
+    ['The total budget must be at least ', 'يجب ألا يقل إجمالي الميزانية عن '],
+    ['The total budget must be at most ', 'يجب ألا يزيد إجمالي الميزانية عن '],
+    ['Budget per day is below the minimum', 'الميزانية اليومية أقل من الحد الأدنى'],
+    ['The ad can run for at most ', 'أقصى مدة لتشغيل الإعلان هي '],
+    ['New ad requests are paused', 'استقبال طلبات الإعلانات الجديدة متوقف مؤقتاً'],
+    ["Today's limit of new ad requests is reached", 'تم الوصول إلى الحد اليومي لطلبات الإعلانات الجديدة'],
+    ['Choose a reason for this decision', 'اختر سبباً لهذا القرار'],
+    ['Unknown reason code', 'رمز السبب غير معروف'],
+    ['The goal detail does not match the objective', 'تفاصيل الهدف لا تتوافق مع هدف الإعلان'],
+    ['Unknown location', 'موقع غير معروف'],
+    ['Choose a post or add your own photo and text', 'اختر منشوراً أو أضف صورتك ونصك'],
+    ['This page is not linked to your account', 'هذه الصفحة غير مرتبطة بحسابك'],
+    ['This post is not from your linked page', 'هذا المنشور ليس من صفحتك المرتبطة'],
+    ['durationDays must be a whole number of days', 'يجب أن تكون مدة الإعلان عدداً صحيحاً من الأيام']
+  ];
+  const before = [
+    ['Insufficient wallet balance', 'رصيد المحفظة لا يكفي لهذه الميزانية — اشحن المحفظة أولاً'],
+    ['already started', 'بدأ هذا الإعلان بالفعل — اطلب منا إيقافه واسترداد الجزء غير المصروف'],
+    ['Conflict: record has changed', 'تغيّر السجل — حدّث الصفحة وحاول مرة أخرى'],
+    ['Stop the campaign first', 'أوقف الحملة أولاً حتى تعود الميزانية غير المصروفة إلى المحفظة'],
+    ['ad_maker subscription is required', 'يلزم اشتراك نشط في استوديو الإعلانات'],
+    ['plan price changed', 'تغيّر سعر الباقة — أعد تحميل الباقات وحاول مرة أخرى'],
+    ['dates have passed', 'انتهت تواريخ الحملة — اطلب تعديلات ليضبط العميل التاريخ'],
+    ['startDate cannot be in the past', 'لا يمكن أن يكون تاريخ البدء في الماضي'],
+    ['storage quota reached', 'امتلأت مساحة استوديو الإعلانات — احذف صوراً أو أرشف حملة منتهية (اطلب منا إغلاق حملة تعمل أولاً)'],
+    ['refundMinorUSD is required', 'أدخل المبلغ غير المصروف المراد استرداده (0 للإغلاق دون استرداد)'],
+    ['Only Approved campaigns can be stopped', 'لا يمكن إيقاف إلا الحملات المعتمدة']
+  ];
+  const refusalMap = json('_ADS_STUDIO_REFUSAL_AR') || [];
+  const arabic = detail => String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(detail)})`));
+  const refusalCases = [
+    shared.every(([en, ar]) => refusalMap.filter(entry => entry[0] === en).length === 1 && refusalMap.some(entry => entry[0] === en && entry[1] === ar)),
+    JSON.stringify(refusalMap.slice(0, before.length).map(entry => entry.slice(0, 2))) === JSON.stringify(before),
+    arabic('The total budget must be at least $5.00 (this request: $3.00)') === 'يجب ألا يقل إجمالي الميزانية عن $5.00.',
+    arabic('The total budget must be at most $2,000.00 (you asked for $2,100.00)') === 'يجب ألا يزيد إجمالي الميزانية عن $2,000.00.',
+    arabic('Budget per day is below the minimum of $1.00 (this request: $0.50 per day)') === 'الميزانية اليومية أقل من الحد الأدنى ($1.00).',
+    arabic('The ad can run for at most 30 days (this request: 45 days)') === 'أقصى مدة لتشغيل الإعلان هي 30 يوماً.',
+    arabic('New ad requests are paused. Please try again later.') === 'استقبال طلبات الإعلانات الجديدة متوقف مؤقتاً',
+    arabic({ code: 'PAGE_NOT_LINKED', message: 'This page is not linked to your account' }) === 'هذه الصفحة غير مرتبطة بحسابك',
+    arabic('durationDays must be a whole number of days') === 'يجب أن تكون مدة الإعلان عدداً صحيحاً من الأيام',
+    String(run("adsStudioRefusalText('Unknown location: Mars')")) === 'Unknown location: Mars'
+  ];
+  check('Arabic refusal map covers T1-T14 exactly; the older entries are unchanged', !loadError && refusalCases.every(Boolean),
+    loadError || `cases ${refusalCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // D19: pick one of the linked page's recent posts, or a new ad without a post; the pasted link is
+  // the fallback when no page is linked. Server strings are escaped; only https thumbnails and Meta
+  // post links are used.
+  box.__pagesPayload = { pages: [
+    { id: 'spg_shop', name: '<b>Shop</b>', platform: 'fb', instagram: true },
+    { id: 'bad id', name: 'Not an id' },
+    { id: 'spg_shop', name: 'Duplicate' }
+  ] };
+  box.__postsPayload = { checkedAt: '2026-09-25T08:00:00Z', posts: [
+    { id: '123_456', platform: 'fb', excerpt: '<img src=x onerror=alert(1)> Summer   sale', imageUrl: 'https://scontent.example.net/p.jpg', permalink: 'https://www.facebook.com/123/posts/456', createdAt: '2026-09-20T10:00:00Z' },
+    { id: 'ig_789', platform: 'ig', excerpt: 'Reel', imageUrl: 'javascript:alert(1)', permalink: 'javascript:alert(1)', createdAt: 'not a date' },
+    { id: 'tt_1', platform: 'tiktok', excerpt: 'not a Meta post' }
+  ] };
+  const pages = json('adsStudioNormalizePostPages(__pagesPayload)') || [];
+  const posts = json('adsStudioNormalizeRecentPosts(__postsPayload)') || {};
+  run(`resetAdsStudioPostPicker(); beginAdsStudioBoost('boost_post');
+    _adsStudioPostPicker.forUser = 'p1-user'; _adsStudioPostPicker.pagesState = 'done';
+    _adsStudioPostPicker.pages = adsStudioNormalizePostPages(__pagesPayload); _adsStudioPostPicker.pageId = 'spg_shop';
+    _adsStudioPostPicker.posts.spg_shop = { state: 'done', error: '', at: Date.now(), ...adsStudioNormalizeRecentPosts(__postsPayload) };`);
+  const pickerHtml = String(run('renderAdsStudioBoostBasicsStep()'));
+  run("adsStudioChooseBoostPost(1, { getAttribute: () => 'a-post-that-moved' });");  // the list changed under the finger
+  const staleTap = run('_adsStudioDraft.sourcePostId');
+  run("adsStudioChooseBoostPost(1, { getAttribute: () => 'ig_789' });");
+  const igChoice = json('[_adsStudioDraft.sourcePostId, _adsStudioDraft.sourcePostPlatform, _adsStudioDraft.sourcePostRef]');
+  run("adsStudioChooseBoostPost(0, { getAttribute: () => '123_456' });");
+  const chosen = json('({ id: _adsStudioDraft.sourcePostId, platform: _adsStudioDraft.sourcePostPlatform, ref: _adsStudioDraft.sourcePostRef, page: _adsStudioDraft.connectedAssetId, pageName: _adsStudioDraft.pageName })') || {};
+  const chosenErrors = String(run("adsStudioValidateStep(3).join('|')"));
+  const payload = json('sanitizedAdsStudioDraft()') || {};
+  run("_adsStudioDraft.sourcePostId = ''; _adsStudioDraft.sourcePostRef = '';");
+  const noPost = [String(run('adsStudioValidateStep(3)[0]')), String(inLanguage('ar', 'adsStudioValidateStep(3)[0]'))];
+  run("adsStudioSetBoostKind('boost_page');");
+  const newAd = [run('_adsStudioDraft.boostType'), String(run("adsStudioValidateStep(3).join('|')"))];
+  run("adsStudioSetBoostKind('boost_post'); _adsStudioPostPicker.pages = [];");
+  const unlinkedHtml = String(run('renderAdsStudioBoostBasicsStep()'));
+  const unlinkedError = String(run('adsStudioValidateStep(3)[0]'));
+  // The page's posts could not be read (Meta busy): the coded refusal in Arabic, and the link fallback.
+  run(`_adsStudioPostPicker.pages = adsStudioNormalizePostPages(__pagesPayload);
+    _adsStudioPostPicker.posts.spg_shop = { state: 'failed', posts: [], checkedAt: '', at: Date.now(),
+      error: { code: 'META_PAUSED', message: 'Meta is busy right now, so your posts cannot be read. Try again in a minute.' } };`);
+  const failedAr = String(inLanguage('ar', 'renderAdsStudioBoostBasicsStep()'));
+  const pickerCases = [
+    JSON.stringify(pages) === JSON.stringify([{ id: 'spg_shop', name: '<b>Shop</b>', fb: true, ig: true }]),
+    Array.isArray(posts.posts) && posts.posts.length === 2 && posts.posts[0].excerpt === '<img src=x onerror=alert(1)> Summer sale'
+      && posts.posts[1].imageUrl === '' && posts.posts[1].permalink === '' && posts.checkedAt === '2026-09-25T08:00:00Z',
+    pickerHtml.includes('Boost a post') && pickerHtml.includes('New ad without a post'),
+    pickerHtml.includes('data-post-id="123_456"') && pickerHtml.includes('src="https://scontent.example.net/p.jpg"'),
+    !pickerHtml.includes('<img src=x') && pickerHtml.includes('&lt;img src=x') && !/javascript:/i.test(pickerHtml) && pickerHtml.includes('&lt;b&gt;Shop&lt;/b&gt;'),
+    /id="ads-studio-post-link" class="hidden"/.test(pickerHtml),
+    staleTap !== 'ig_789' && JSON.stringify(igChoice) === '["ig_789","ig",""]',
+    chosen.id === '123_456' && chosen.platform === 'fb' && chosen.ref === 'https://www.facebook.com/123/posts/456' && chosen.page === 'spg_shop' && chosen.pageName === '<b>Shop</b>',
+    chosenErrors === '',  // the post is the ad: no own text or photo needed
+    payload.sourcePostId === '123_456' && payload.sourcePostPlatform === 'fb' && payload.connectedAssetId === 'spg_shop'
+      && payload.destination === 'https://www.facebook.com/123/posts/456' && payload.durationDays === 7 && !('totalBudgetMinorUSD' in payload),
+    noPost[0].startsWith('Choose a post or add your own photo and text') && noPost[1].startsWith('اختر منشوراً أو أضف صورتك ونصك'),
+    newAd[0] === 'boost_page' && newAd[1].includes('Primary ad text is required.') && newAd[1].includes('PNG, JPEG or WebP'),
+    /id="ads-studio-post-link" class=""/.test(unlinkedHtml) && unlinkedHtml.includes('No page is linked to your account yet')
+      && unlinkedHtml.includes('id="ads-studio-field-sourcePostRef"') && unlinkedError.includes('paste the post link'),
+    /id="ads-studio-post-link" class=""/.test(failedAr) && failedAr.includes('ميتا مشغولة الآن') && !failedAr.includes('Meta is busy'),
+    fn('adsStudioLoadPostPages').includes("apiJson('/api/studio/pages', { method: 'GET' })")
+      && fn('adsStudioLoadPagePosts').includes('/api/studio/pages/${encodeURIComponent(id)}/recent-posts${force ? \'?refresh=1\' : \'\'}')
+  ];
+  check('D19 post picker: linked pages and recent posts, escaped, https only, new ad without a post, link fallback', !loadError && pickerCases.every(Boolean),
+    loadError || `cases ${pickerCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  const builtStudio = [read('studio.js'), read('www/studio.js')];
+  check('built studio bundles carry the P1 classic form', builtStudio.every(bundle => bundle.includes(adsStudio)));
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');

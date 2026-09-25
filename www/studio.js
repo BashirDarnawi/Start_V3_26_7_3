@@ -24,6 +24,8 @@ const _adsStudioReviewPromises = new Map();
 const _adsStudioDeletePromises = new Map();
 const _adsStudioStopPromises = new Map();
 const _adsStudioReviewNotes = Object.create(null);
+const _adsStudioReviewReasons = Object.create(null);  // campaign id -> the reason code picked in the review form (P1-12)
+let _adsStudioApproveConfirmId = '';  // the request whose in-page "Confirm approval" row is open
 const ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const ADS_STUDIO_MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
 const ADS_STUDIO_MAX_SELECTED_SOURCE_BYTES = 40 * 1024 * 1024;
@@ -52,8 +54,12 @@ function resetAdsStudioSessionState() {
   _adsStudioDeletePromises.clear();
   _adsStudioStopPromises.clear();
   for (const id of Object.keys(_adsStudioReviewNotes)) delete _adsStudioReviewNotes[id];
+  for (const id of Object.keys(_adsStudioReviewReasons)) delete _adsStudioReviewReasons[id];
+  _adsStudioApproveConfirmId = '';
+  _adsStudioBudgetTyped = '';
   if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
   resetAdsStudioLimits();
+  resetAdsStudioPostPicker();
 }
 
 // Wallet + Meta Connection live INSIDE the Overview (owner decision): no tabs.
@@ -83,6 +89,25 @@ const ADS_STUDIO_CTA = [
   ['Get Quote', 'اطلب عرض سعر'],
   ['Call Now', 'اتصل الآن']
 ];
+
+// Review reason codes (P1-12): the server's list, stored on the request as reviewReasonCode.
+// A request sent back or rejected shows the label, never the raw code; staff must pick one to
+// request changes or reject. Labels are the server list's own words, copied verbatim.
+const ADS_STUDIO_REVIEW_REASONS = [
+  ['budget_dates', 'Budget or dates', 'الميزانية أو التواريخ'],
+  ['creative_quality', 'Photo or video quality', 'جودة الصورة أو الفيديو'],
+  ['text_policy', 'Text breaks ad rules', 'النص يخالف قواعد الإعلانات'],
+  ['targeting', 'Audience or location', 'الجمهور أو الموقع'],
+  ['page_access', 'Page access', 'صلاحية الصفحة'],
+  ['payment', 'Payment', 'الدفع'],
+  ['other', 'Other', 'أخرى']
+];
+
+// '' for an unknown or missing code: a value the list does not know is never shown.
+function adsStudioReviewReasonLabel(code) {
+  const hit = ADS_STUDIO_REVIEW_REASONS.find(([id]) => id === String(code || ''));
+  return hit ? adsStudioText(hit[1], hit[2]) : '';
+}
 
 function adsStudioIsAr() {
   return state.language === 'ar';
@@ -187,7 +212,8 @@ function newAdsStudioDraft() {
     languages: ['Arabic'],
     interests: [],
     startDate: _adsStudioDateOffset(1),
-    endDate: _adsStudioDateOffset(8),
+    endDate: _adsStudioDateOffset(7),  // start + durationDays - 1: both ends count, as on the server
+    durationDays: 7,
     budgetMinorUSD: 1000,
     budgetType: 'lifetime',
     notes: '',
@@ -202,17 +228,40 @@ function newAdsStudioDraft() {
 }
 
 // Quick entries: same adCampaignRequests record, prefilled so a phone
-// customer only names the campaign, pastes the post, and sets a budget.
+// customer only names the campaign, picks the post, and sets a budget.
+// Per kind: the default button, then the default name in English and Arabic.
+const ADS_STUDIO_BOOST_DEFAULTS = {
+  boost_post: ['Send Message', 'Boost a post', 'تعزيز منشور'],
+  boost_page: ['Learn More', 'Boost my Page', 'تعزيز صفحتي']
+};
+
 function beginAdsStudioBoost(boostType) {
   const kind = boostType === 'boost_page' ? 'boost_page' : 'boost_post';
   beginAdsStudioCampaign();
   _adsStudioDraft.boostType = kind;
   _adsStudioDraft.objective = 'engagement';
-  _adsStudioDraft.callToAction = kind === 'boost_post' ? 'Send Message' : 'Learn More';
-  _adsStudioDraft.name = kind === 'boost_post'
-    ? adsStudioText('Boost a post', 'تعزيز منشور')
-    : adsStudioText('Boost my Page', 'تعزيز صفحتي');
+  _adsStudioDraft.callToAction = ADS_STUDIO_BOOST_DEFAULTS[kind][0];
+  _adsStudioDraft.name = adsStudioText(ADS_STUDIO_BOOST_DEFAULTS[kind][1], ADS_STUDIO_BOOST_DEFAULTS[kind][2]);
   setAdsStudioTab('builder');
+}
+
+// Owner decision D19: in the quick flow the customer either boosts one of the linked page's posts
+// or makes a new ad without a post (own photo + text, the quick "boost my Page" request).
+function adsStudioSetBoostKind(kind) {
+  const d = _adsStudioDraft;
+  if (!d || !d.boostType || !ADS_STUDIO_BOOST_DEFAULTS[kind] || d.boostType === kind) return;
+  const from = ADS_STUDIO_BOOST_DEFAULTS[d.boostType];
+  const to = ADS_STUDIO_BOOST_DEFAULTS[kind];
+  if (from && d.callToAction === from[0]) d.callToAction = to[0];
+  if (from && [from[1], from[2]].includes(String(d.name || ''))) d.name = adsStudioText(to[1], to[2]);
+  d.boostType = kind;
+  if (kind === 'boost_page') {
+    // No post any more: the post link was only ever the destination of a boosted post.
+    if (String(d.destination || '') === String(d.sourcePostRef || '')) d.destination = '';
+    d.sourcePostRef = '';
+    if (Object.prototype.hasOwnProperty.call(d, 'sourcePostId')) { d.sourcePostId = ''; d.sourcePostPlatform = ''; }
+  }
+  render();
 }
 
 function getVisibleAdsStudioCampaigns() {
@@ -556,7 +605,7 @@ function renderAdsStudioCampaignCard(campaign) {
           </div>
           <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
             <span class="inline-flex items-center gap-1"><i data-lucide="target" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioObjectiveLabel(campaign.objective))}</span>
-            <span class="inline-flex items-center gap-1"><i data-lucide="wallet-cards" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioMoneyWithLyd(campaign.budgetMinorUSD))}</span>
+            <span class="inline-flex items-center gap-1"><i data-lucide="wallet-cards" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioBudgetLine(campaign))}</span>
             <span class="inline-flex items-center gap-1"><i data-lucide="calendar-days" class="w-3.5 h-3.5"></i>${adsStudioFormatDate(campaign.startDate)} → ${adsStudioFormatDate(campaign.endDate)}</span>
             ${adsStudioCanReview() ? `<span class="inline-flex items-center gap-1"><i data-lucide="user" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioCreatorName(campaign))}</span>` : ''}
           </div>
@@ -564,7 +613,7 @@ function renderAdsStudioCampaignCard(campaign) {
         <div class="flex flex-wrap items-center gap-2 sm:justify-end">
           ${photoCount ? `<button type="button" onclick="openAdsStudioCreativeViewer('${safeId}', 0, this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-cyan-50 dark:bg-cyan-900/20 px-3 text-sm font-bold text-cyan-700 dark:text-cyan-300"><i data-lucide="images" class="w-4 h-4"></i><span>${isAr ? 'الصور' : 'Creative'} ${photoCount}</span></button>` : ''}
           ${canEdit ? `<button type="button" onclick="startAdsStudioCampaign('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-blue-50 dark:bg-blue-900/20 px-3 text-sm font-bold text-blue-700 dark:text-blue-300"><i data-lucide="pencil" class="w-4 h-4"></i>${isAr ? 'تعديل' : 'Edit'}</button>` : ''}
-          ${canSubmit ? `<button type="button" onclick="submitAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-3 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'إرسال' : 'Submit'}</button>` : ''}
+          ${canSubmit ? `<button type="button" data-ads-studio-submit="1" onclick="submitAdsStudioCampaign('${safeId}', this)"${_adsStudioIntakeOpen === false ? ` disabled title="${Security.escapeHtml(adsStudioIntakePausedText())}"` : ''} class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-3 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'إرسال' : 'Submit'}</button>` : ''}
           ${canStop ? `<button type="button" onclick="stopAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/30 px-3 text-sm font-bold text-rose-700 dark:text-rose-200 disabled:opacity-60"><i data-lucide="circle-stop" class="w-4 h-4"></i>${isLaunched ? (isAr ? 'إغلاق الحملة' : 'Close campaign') : (isAr ? 'إيقاف واسترداد' : 'Stop & refund')}</button>` : ''}
           ${showAskStop ? `<button type="button" onclick="showNotification('${isAr ? 'الإعلان بدأ بالفعل' : 'This ad already started'}', '${isAr ? 'راسلنا لنوقفه ونعيد الجزء غير المصروف إلى محفظتك.' : 'Message us — we stop it and refund the unspent part to your wallet.'}', 'info')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="circle-help" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask us to stop it'}</button>` : ''}
           ${statusValue === 'Approved' && adsStudioCanReview() && !isLaunched ? `<button type="button" onclick="markAdsStudioCampaignLaunched('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 px-3 text-sm font-bold text-emerald-700 dark:text-emerald-300 disabled:opacity-60"><i data-lucide="radio" class="w-4 h-4"></i>${isAr ? 'تم الإطلاق' : 'Mark launched'}</button>` : ''}
@@ -575,7 +624,7 @@ function renderAdsStudioCampaignCard(campaign) {
       </div>
       ${statusValue === 'Stopped' ? `<div class="mt-4 rounded-xl bg-rose-50 dark:bg-rose-900/20 p-3 text-sm text-rose-800 dark:text-rose-200"><span class="font-bold">${isAr ? 'الأموال:' : 'Money:'}</span> ${isAr ? 'مدفوع' : 'paid'} ${adsStudioMoney(paidMinor)} · ${isAr ? 'مسترد' : 'refunded'} ${adsStudioMoney(refundMinor)}${spendMinor ? ` · ${isAr ? 'مصروف' : 'spent'} ${adsStudioMoney(spendMinor)}` : ''}${campaign.stopReason ? `<div class="mt-1">${Security.escapeHtml(String(campaign.stopReason))}</div>` : ''}</div>` : ''}
       ${campaign.boostType === 'boost_post' && adsStudioIsValidBoostRef(campaign.sourcePostRef) ? `<div class="mt-3 text-xs"><a href="${Security.escapeHtml(String(campaign.sourcePostRef))}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 font-bold text-blue-600 hover:text-blue-700"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>${isAr ? 'فتح المنشور الأصلي' : 'Open the boosted post'}</a></div>` : ''}
-      ${campaign.reviewNote ? `<div class="mt-4 rounded-xl ${campaign.status === 'Rejected' ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200' : 'bg-orange-50 dark:bg-orange-900/20 text-orange-800 dark:text-orange-200'} p-3 text-sm"><span class="font-bold">${isAr ? 'ملاحظة المراجع:' : 'Reviewer note:'}</span> ${Security.escapeHtml(campaign.reviewNote)}</div>` : ''}
+      ${renderAdsStudioReviewFeedback(campaign)}
       <details class="mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">
         <summary class="touch-target min-h-11 cursor-pointer select-none text-sm font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="chevron-down" class="w-4 h-4"></i>${isAr ? 'عرض الملخص' : 'View brief'}</summary>
         <div class="grid gap-3 pt-3 sm:grid-cols-2 text-sm">
@@ -653,12 +702,40 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['storage quota reached', 'امتلأت مساحة استوديو الإعلانات — احذف صوراً أو أرشف حملة منتهية (اطلب منا إغلاق حملة تعمل أولاً)'],
   ['refundMinorUSD is required', 'أدخل المبلغ غير المصروف المراد استرداده (0 للإغلاق دون استرداد)'],
   ['Only Approved campaigns can be stopped', 'لا يمكن إيقاف إلا الحملات المعتمدة'],
+  // P1 refusals (P1-08c): the server's exact English prefixes. A third item keeps the dynamic part
+  // the server writes after the prefix: 'money' (an amount), 'days' (a number of days) or 'aside'
+  // (an optional amount in brackets). Entries are only ever added, so older bundles keep theirs.
+  ['The total budget must be at least ', 'يجب ألا يقل إجمالي الميزانية عن ', 'money'],
+  ['The total budget must be at most ', 'يجب ألا يزيد إجمالي الميزانية عن ', 'money'],
+  ['Budget per day is below the minimum', 'الميزانية اليومية أقل من الحد الأدنى', 'aside'],
+  ['The ad can run for at most ', 'أقصى مدة لتشغيل الإعلان هي ', 'days'],
+  ['New ad requests are paused', 'استقبال طلبات الإعلانات الجديدة متوقف مؤقتاً'],
+  ["Today's limit of new ad requests is reached", 'تم الوصول إلى الحد اليومي لطلبات الإعلانات الجديدة'],
+  ['Choose a reason for this decision', 'اختر سبباً لهذا القرار'],
+  ['Unknown reason code', 'رمز السبب غير معروف'],
+  ['The goal detail does not match the objective', 'تفاصيل الهدف لا تتوافق مع هدف الإعلان'],
+  ['Unknown location', 'موقع غير معروف'],
+  ['Choose a post or add your own photo and text', 'اختر منشوراً أو أضف صورتك ونصك'],
+  ['This page is not linked to your account', 'هذه الصفحة غير مرتبطة بحسابك'],
+  ['This post is not from your linked page', 'هذا المنشور ليس من صفحتك المرتبطة'],
+  ['durationDays must be a whole number of days', 'يجب أن تكون مدة الإعلان عدداً صحيحاً من الأيام'],
 ];
+// A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {
-  const text = String(detail || '');
+  const text = Array.isArray(detail) ? detail.map(item => String(typeof item === 'string' ? item : (item?.msg || ''))).filter(Boolean).join('; ')
+    : detail && typeof detail === 'object' ? String(detail.message || '') : String(detail || '');
   if (!adsStudioIsAr()) return text;
   const hit = _ADS_STUDIO_REFUSAL_AR.find(([needle]) => text.includes(needle));
-  return hit ? hit[1] : text;
+  if (!hit) return text;
+  if (!hit[2]) return hit[1];
+  const tail = text.slice(text.indexOf(hit[0]) + hit[0].length);
+  if (hit[2] === 'days') {
+    const days = tail.match(/\d+/);
+    return days ? `${hit[1]}${adsStudioDaysText(Number(days[0]))}.` : hit[1].trim();
+  }
+  const amount = tail.match(/\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?/);
+  if (hit[2] === 'aside') return amount ? `${hit[1]} (${amount[0]}).` : `${hit[1]}.`;
+  return amount ? `${hit[1]}${amount[0]}.` : hit[1].trim();
 }
 
 async function stopAdsStudioCampaignOnce(id) {
@@ -840,14 +917,9 @@ async function duplicateAdsStudioCampaign(id, button = null, extend = false) {
       return;
     }
     const src = Security.sanitizeObject(campaign);
-    const startBase = new Date(`${_adsStudioDateOffset(1)}T00:00:00`);
-    let durationDays = 7;
-    try {
-      const s = new Date(`${String(src.startDate || '')}T00:00:00`);
-      const e = new Date(`${String(src.endDate || '')}T00:00:00`);
-      const diff = Math.round((e.getTime() - s.getTime()) / 86400000);
-      if (Number.isFinite(diff) && diff >= 0 && diff <= 366) durationDays = diff;
-    } catch (_) {}
+    // The copy keeps the source's number of days (its durationDays, or its dates for an older request).
+    const sourceDays = adsStudioCampaignDays(src);
+    const durationDays = sourceDays >= 1 && sourceDays <= 366 ? sourceDays : 7;
     _adsStudioPhotoToken++;
     _adsStudioEditingId = '';
     _adsStudioEditingBaseline = 0;
@@ -871,7 +943,8 @@ async function duplicateAdsStudioCampaign(id, button = null, extend = false) {
       languages: Array.isArray(src.languages) ? src.languages.slice() : [],
       interests: Array.isArray(src.interests) ? src.interests.slice() : [],
       startDate: _adsStudioDateOffset(1),
-      endDate: _adsStudioDateOffset(1 + durationDays),
+      endDate: adsStudioEndDateFor(_adsStudioDateOffset(1), durationDays) || _adsStudioDateOffset(durationDays),
+      durationDays,
       budgetMinorUSD: Math.max(0, parseInt(src.budgetMinorUSD, 10) || 0),
       budgetType: src.budgetType === 'daily' ? 'daily' : 'lifetime',
       notes: String(src.notes || ''),
@@ -880,6 +953,8 @@ async function duplicateAdsStudioCampaign(id, button = null, extend = false) {
       specialAdCategories: Array.isArray(src.specialAdCategories) ? src.specialAdCategories.slice(0, 4) : [],
       boostType: ['boost_post', 'boost_page'].includes(String(src.boostType || '')) ? String(src.boostType) : '',
       sourcePostRef: String(src.sourcePostRef || ''),
+      ...(String(src.sourcePostId || '') ? { sourcePostId: String(src.sourcePostId), sourcePostPlatform: String(src.sourcePostPlatform || '') } : {}),
+      ...(String(src.connectedAssetId || '') ? { connectedAssetId: String(src.connectedAssetId) } : {}),
       autoReply: src.autoReply === true,
       extendsCampaignId: extend ? String(campaign.id || '') : ''
     };
@@ -899,8 +974,21 @@ function renderAdsStudioReviewHistory(campaign) {
     const meta = adsStudioStatusMeta(entry?.decision || entry?.status || 'Reviewed');
     const when = entry?.reviewedAt ? new Date(entry.reviewedAt) : null;
     const dateText = when && Number.isFinite(when.getTime()) ? when.toLocaleString(isAr ? 'ar-LY' : 'en-GB') : '';
-    return `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm"><div class="flex flex-wrap items-center justify-between gap-2"><span class="font-bold text-slate-800 dark:text-slate-100">${Security.escapeHtml(isAr ? meta.labelAr : meta.label)}</span>${dateText ? `<time class="text-xs text-slate-500">${Security.escapeHtml(dateText)}</time>` : ''}</div>${entry?.note ? `<p class="mt-1 whitespace-pre-wrap text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(entry.note))}</p>` : ''}</div>`;
+    const reason = adsStudioReviewReasonLabel(entry?.reasonCode || entry?.reviewReasonCode);
+    return `<div class="rounded-xl bg-slate-50 dark:bg-slate-800/60 p-3 text-sm"><div class="flex flex-wrap items-center justify-between gap-2"><span class="font-bold text-slate-800 dark:text-slate-100">${Security.escapeHtml(isAr ? meta.labelAr : meta.label)}${reason ? ` · ${Security.escapeHtml(reason)}` : ''}</span>${dateText ? `<time class="text-xs text-slate-500">${Security.escapeHtml(dateText)}</time>` : ''}</div>${entry?.note ? `<p class="mt-1 whitespace-pre-wrap text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(entry.note))}</p>` : ''}</div>`;
   }).join('')}</div></details>`;
+}
+
+// The reviewer's decision as the customer sees it (P1-12): a request sent back or rejected shows the
+// reason's label (never the raw code) and the staff note; any other status keeps the plain note.
+function renderAdsStudioReviewFeedback(campaign) {
+  const isAr = adsStudioIsAr();
+  const status = String(campaign?.status || '');
+  const reason = ['Changes Requested', 'Rejected'].includes(status) ? adsStudioReviewReasonLabel(campaign?.reviewReasonCode) : '';
+  const note = String(campaign?.reviewNote || '');
+  if (!reason && !note) return '';
+  const tone = status === 'Rejected' ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200' : 'bg-orange-50 dark:bg-orange-900/20 text-orange-800 dark:text-orange-200';
+  return `<div class="mt-4 rounded-xl ${tone} p-3 text-sm space-y-1">${reason ? `<div data-ads-studio-review-reason="1"><span class="font-bold">${isAr ? 'السبب:' : 'Reason:'}</span> ${Security.escapeHtml(reason)}</div>` : ''}${note ? `<div><span class="font-bold">${isAr ? 'ملاحظة المراجع:' : 'Reviewer note:'}</span> ${Security.escapeHtml(note)}</div>` : ''}</div>`;
 }
 
 function renderAdsStudioCampaigns() {
@@ -939,6 +1027,7 @@ function beginAdsStudioCampaign() {
   _adsStudioWizardStep = 1;
   _adsStudioDraft = newAdsStudioDraft();
   _adsStudioConfirmationChecked = false;
+  _adsStudioBudgetTyped = '';
 }
 
 async function startAdsStudioCampaign(id) {
@@ -972,6 +1061,11 @@ async function startAdsStudioCampaign(id) {
     specialAdCategories: Array.isArray(campaign.specialAdCategories) ? campaign.specialAdCategories.slice() : [],
     creativeImages: Array.isArray(campaign.creativeImages) ? campaign.creativeImages.slice(0, 3) : []
   };
+  // A request saved before durationDays existed: its dates give the days (both ends included).
+  if (!(Number.isSafeInteger(Number(campaign.durationDays)) && Number(campaign.durationDays) > 0)) {
+    _adsStudioDraft.durationDays = adsStudioCampaignDays({ startDate: campaign.startDate, endDate: campaign.endDate }) || 7;
+  }
+  _adsStudioBudgetTyped = '';
   _adsStudioActiveTab = 'builder';
   try { updateUrlParams({ tab: 'builder' }, true); } catch (_) {}
   render();
@@ -979,13 +1073,34 @@ async function startAdsStudioCampaign(id) {
 
 function adsStudioSetDraftField(field, value) {
   if (!_adsStudioDraft) _adsStudioDraft = newAdsStudioDraft();
-  const allowed = new Set(['name', 'objective', 'pageName', 'primaryText', 'headline', 'description', 'callToAction', 'destination', 'ageMin', 'ageMax', 'startDate', 'endDate', 'budgetType', 'budgetMinorUSD', 'notes', 'boostType', 'sourcePostRef', 'extendsCampaignId']);
+  const allowed = new Set(['name', 'objective', 'pageName', 'primaryText', 'headline', 'description', 'callToAction', 'destination', 'ageMin', 'ageMax', 'startDate', 'endDate', 'durationDays', 'budgetType', 'budgetMinorUSD', 'notes', 'boostType', 'sourcePostRef', 'extendsCampaignId']);
   if (!allowed.has(field)) return;
   if (field === 'budgetMinorUSD') {
     const minor = adsStudioParseMoneyMinor(value);  // '٥٠' typed on an Arabic keyboard is $50.00
     _adsStudioDraft[field] = Number.isFinite(minor) ? Math.max(0, minor) : 0;
-  } else if (field === 'ageMin' || field === 'ageMax') _adsStudioDraft[field] = Math.max(0, Math.trunc(Number(value) || 0));
+  } else if (field === 'durationDays') _adsStudioDraft[field] = adsStudioParseDays(value);  // 0 = not a whole number yet
+  else if (field === 'ageMin' || field === 'ageMax') _adsStudioDraft[field] = Math.max(0, Math.trunc(Number(value) || 0));
   else _adsStudioDraft[field] = String(value ?? '').slice(0, 4000);
+  // The end date follows the start and the number of days (the server recomputes it at approval).
+  if (field === 'durationDays' || field === 'startDate') {
+    const end = adsStudioEndDateFor(_adsStudioDraft.startDate, _adsStudioDraft.durationDays);
+    if (end) _adsStudioDraft.endDate = end;
+  }
+}
+
+// A typed number of days: a whole number (Arabic-Indic digits too), or 0 when it is not one.
+function adsStudioParseDays(raw) {
+  const text = normalizeDigitsAscii(String(raw ?? '')).trim();
+  if (!/^\d{1,4}$/.test(text)) return 0;
+  return parseInt(text, 10);
+}
+
+// The last day of an ad that starts on startDate and runs `days` days, both ends included; '' if unknown.
+function adsStudioEndDateFor(startDate, days) {
+  const start = Date.parse(`${String(startDate || '')}T00:00:00Z`);
+  const n = Number(days);
+  if (!Number.isFinite(start) || !Number.isSafeInteger(n) || n < 1 || n > 366) return '';
+  return new Date(start + (n - 1) * 86400000).toISOString().slice(0, 10);
 }
 
 function adsStudioToggleDraftFlag(field, checked) {
@@ -1060,6 +1175,10 @@ function renderAdsStudioBuilder() {
   if (!_adsStudioDraft) beginAdsStudioCampaign();
   const isAr = adsStudioIsAr();
   const isBoost = !!_adsStudioDraft.boostType;
+  const lastStep = _adsStudioWizardStep >= adsStudioWizardSteps().length;
+  // The intake switch can change while the customer fills the form: re-read /me at the last step.
+  if (lastStep) refreshAdsStudioLimits(60000);
+  const paused = _adsStudioIntakeOpen === false;
   const stepContent = isBoost
     ? (_adsStudioWizardStep === 1 ? renderAdsStudioBoostBasicsStep()
       : _adsStudioWizardStep === 2 ? renderAdsStudioBudgetStep()
@@ -1080,7 +1199,7 @@ function renderAdsStudioBuilder() {
             ${_adsStudioWizardStep > 1 ? `<button type="button" onclick="moveAdsStudioWizard(-1)" class="touch-target min-h-12 rounded-xl bg-slate-100 dark:bg-slate-800 px-5 font-bold text-slate-700 dark:text-slate-200"><span class="inline-flex items-center gap-2"><i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-4 h-4"></i>${isAr ? 'السابق' : 'Back'}</span></button>` : ''}
             <button type="button" onclick="saveAdsStudioDraft(false, this)" class="touch-target min-h-12 rounded-xl border border-blue-200 dark:border-blue-800 px-5 font-bold text-blue-700 dark:text-blue-300 disabled:opacity-60"><span class="inline-flex items-center gap-2"><i data-lucide="save" class="w-4 h-4"></i>${isAr ? 'حفظ المسودة' : 'Save draft'}</span></button>
           </div>
-          ${_adsStudioWizardStep < adsStudioWizardSteps().length ? `<button type="button" onclick="moveAdsStudioWizard(1)" class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 font-black text-white shadow-lg"><span class="inline-flex items-center gap-2">${isAr ? 'التالي' : 'Continue'}<i data-lucide="${isAr ? 'arrow-left' : 'arrow-right'}" class="w-4 h-4"></i></span></button>` : `<button type="button" onclick="saveAndSubmitAdsStudioDraft(this)" class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 font-black text-white shadow-lg disabled:opacity-60"><span class="inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'حفظ وإرسال للمراجعة' : 'Save & submit for review'}</span></button>`}
+          ${!lastStep ? `<button type="button" onclick="moveAdsStudioWizard(1)" class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 font-black text-white shadow-lg"><span class="inline-flex items-center gap-2">${isAr ? 'التالي' : 'Continue'}<i data-lucide="${isAr ? 'arrow-left' : 'arrow-right'}" class="w-4 h-4"></i></span></button>` : `<div class="flex flex-col gap-2"><p id="ads-studio-intake-note" role="status" class="${paused ? '' : 'hidden '}text-sm font-bold text-amber-700 dark:text-amber-300">${Security.escapeHtml(adsStudioIntakePausedText())}</p><button type="button" id="ads-studio-submit-button" onclick="saveAndSubmitAdsStudioDraft(this)"${paused ? ' disabled' : ''} class="touch-target min-h-12 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-6 font-black text-white shadow-lg disabled:opacity-60"><span class="inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4"></i>${isAr ? 'حفظ وإرسال للمراجعة' : 'Save & submit for review'}</span></button></div>`}
         </div>
       </div>
     </section>
@@ -1102,24 +1221,294 @@ function renderAdsStudioBoostBasicsStep() {
   const d = _adsStudioDraft;
   const isAr = adsStudioIsAr();
   const isPost = d.boostType === 'boost_post';
+  if (isPost) adsStudioLoadPostPages();  // once per session; the list fills in place
+  const kindButton = (kind, icon, en, ar) => `<button type="button" onclick="adsStudioSetBoostKind('${kind}')" aria-pressed="${d.boostType === kind}" class="touch-target min-h-12 inline-flex items-center justify-center gap-2 rounded-xl border-2 px-3 text-sm font-bold ${d.boostType === kind ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'}"><i data-lucide="${icon}" class="w-4 h-4"></i><span>${isAr ? ar : en}</span></button>`;
   return `<div class="space-y-5">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isPost ? (isAr ? 'أي منشور تريد تعزيزه؟' : 'Which post do you want to boost?') : (isAr ? 'عرّفنا بصفحتك' : 'Tell us about your Page')}</h3><p class="text-sm text-slate-500">${isAr ? 'ثلاث خطوات فقط — نتكفل نحن بالباقي.' : 'Just three steps — we handle the rest.'}</p></div>
       <button type="button" onclick="adsStudioSwitchToFullWizard()" class="touch-target min-h-11 px-3 text-sm font-bold text-blue-600">${isAr ? 'خيارات أكثر' : 'More options'}</button>
     </div>
+    <div class="grid grid-cols-2 gap-2" role="group" aria-label="${isAr ? 'ماذا تريد أن تعلن؟' : 'What do you want to advertise?'}">${kindButton('boost_post', 'rocket', 'Boost a post', 'تعزيز منشور')}${kindButton('boost_page', 'image-plus', 'New ad without a post', 'إعلان جديد بدون منشور')}</div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'اسم الحملة *' : 'Campaign name *'}</label><input type="text" maxlength="120" value="${Security.escapeHtml(d.name || '')}" id="ads-studio-field-name" oninput="adsStudioSetDraftField(\'name\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'اسم صفحتك أو حسابك *' : 'Your Page or account name *'}</label><input type="text" maxlength="160" value="${Security.escapeHtml(d.pageName || '')}" id="ads-studio-field-pageName" oninput="adsStudioSetDraftField(\'pageName\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div>
     ${isPost ? `
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'رابط المنشور *' : 'Link to your post *'}</label><input type="url" maxlength="500" value="${Security.escapeHtml(d.sourcePostRef || '')}" id="ads-studio-field-sourcePostRef" oninput="adsStudioSetDraftField(\'sourcePostRef\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://www.facebook.com/..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'افتح المنشور على فيسبوك أو إنستغرام وانسخ رابطه هنا.' : 'Open the post on Facebook or Instagram and copy its link here.'}</p></div>
+    <div id="ads-studio-post-picker" class="space-y-3" aria-live="polite">${renderAdsStudioPostPickerBody()}</div>
+    <div id="ads-studio-post-link" class="${adsStudioShowPostLinkField(d) ? '' : 'hidden'}"><label class="block text-sm font-bold mb-2">${isAr ? 'رابط المنشور' : 'Link to your post'}</label><input type="url" maxlength="500" value="${Security.escapeHtml(d.sourcePostRef || '')}" id="ads-studio-field-sourcePostRef" oninput="adsStudioSetDraftField(\'sourcePostRef\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://www.facebook.com/..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'افتح المنشور على فيسبوك أو إنستغرام وانسخ رابطه هنا.' : 'Open the post on Facebook or Instagram and copy its link here.'}</p></div>
     <label class="touch-target flex items-start gap-3 rounded-2xl border border-slate-200 dark:border-slate-700 p-4"><input type="checkbox" ${d.autoReply ? 'checked' : ''} onchange="adsStudioToggleDraftFlag('autoReply', this.checked)" class="mt-0.5 w-5 h-5 accent-blue-600" /><span><span class="block font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الرد التلقائي على الرسائل' : 'Auto-reply to messages'}</span><span class="block text-xs text-slate-500 mt-0.5">${isAr ? 'نرد تلقائياً على من يراسلك من الإعلان — اكتب نص الرد في الملاحظات.' : 'We reply automatically to people who message from this ad — put the reply text in the notes.'}</span></span></label>` : `
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'رابط صفحتك *' : 'Your Page link *'}</label><input type="url" maxlength="500" value="${Security.escapeHtml(d.destination || '')}" id="ads-studio-field-destination" oninput="adsStudioSetDraftField(\'destination\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://www.facebook.com/yourpage" /></div>`}
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'نص قصير للإعلان *' : 'Short ad text *'}</label><textarea rows="3" maxlength="2200" id="ads-studio-field-primaryText" oninput="adsStudioSetDraftField(\'primaryText\', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اكتب الرسالة التي سيقرأها العميل...' : 'Write the message customers will see...'}">${Security.escapeHtml(d.primaryText || '')}</textarea></div>
+    <div><label class="block text-sm font-bold mb-2">${isPost ? (isAr ? 'نص قصير للإعلان (اختياري)' : 'Short ad text (optional)') : (isAr ? 'نص قصير للإعلان *' : 'Short ad text *')}</label><textarea rows="3" maxlength="2200" id="ads-studio-field-primaryText" oninput="adsStudioSetDraftField(\'primaryText\', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اكتب الرسالة التي سيقرأها العميل...' : 'Write the message customers will see...'}">${Security.escapeHtml(d.primaryText || '')}</textarea></div>
     <div data-photo-paste-target="ads-studio" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-blue-500">
-      <div class="flex flex-wrap items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isPost ? (isAr ? 'صورة من المنشور (حتى 3) *' : 'A picture of the post (up to 3) *') : (isAr ? 'الصور (حتى 3) *' : 'Images (up to 3) *')}</label><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span></div>
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isPost ? (isAr ? 'صورة من المنشور (اختياري، حتى 3)' : 'A picture of the post (optional, up to 3)') : (isAr ? 'الصور (حتى 3) *' : 'Images (up to 3) *')}</label><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span></div>
       <div id="ads-studio-creative-preview">${renderAdsStudioCreativePreview()}</div>
       <input id="ads-studio-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" onchange="onAdsStudioCreativeSelected(this)" />
     </div>
   </div>`;
+}
+
+// ---- Post picker (owner decision D19) ----
+// "Boost a post" lists the customer's linked pages (GET /api/studio/pages) and a page's recent posts
+// (GET /api/studio/pages/{id}/recent-posts: thumbnail, excerpt, date); a tap chooses the post
+// (sourcePostId + sourcePostPlatform, the page as connectedAssetId, the post's link as sourcePostRef).
+// Pasting the post link stays as the fallback when no page is linked or the list cannot be read.
+// Every server string is escaped; a thumbnail is used only when it is https, a link only when it is
+// a Meta post link. Lists load once per session and refresh in place (the keyboard stays put).
+const _adsStudioPostPicker = { forUser: '', pagesState: '', pages: [], pagesError: null, pagesFailedAt: 0, pageId: '', posts: Object.create(null), generation: 0 };
+
+function resetAdsStudioPostPicker() {
+  _adsStudioPostPicker.generation++;  // a reply still in flight belongs to the old session: dropped
+  _adsStudioPostPicker.forUser = '';
+  _adsStudioPostPicker.pagesState = '';
+  _adsStudioPostPicker.pages = [];
+  _adsStudioPostPicker.pagesError = null;
+  _adsStudioPostPicker.pagesFailedAt = 0;
+  _adsStudioPostPicker.pageId = '';
+  _adsStudioPostPicker.posts = Object.create(null);
+}
+
+// A failed call as {code, message}: /api/studio sends {detail: {code, message}}, other routes a string.
+function adsStudioErrorInfo(error) {
+  const detail = error?.payload?.detail;
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) return { code: String(detail.code || ''), message: String(detail.message || '') };
+  return { code: '', message: typeof detail === 'string' ? detail : String(error?.message || '') };
+}
+
+// The list refusals that carry a code (studio_posts.py); anything else goes through the refusal map
+// (the unknown-page refusal is T12 there).
+const ADS_STUDIO_PICKER_ERRORS = {
+  META_PAUSED: ['Meta is busy right now. Try again in a minute.', 'ميتا مشغولة الآن. أعد المحاولة بعد دقيقة.'],
+  META_NOT_CONFIGURED: ["Albayan's Meta connection is not set up yet, so your posts cannot be listed.", 'ربط البيان مع ميتا غير مُعدّ بعد، لذلك لا يمكن عرض منشوراتك.'],
+  RATE_LIMITED: ['Too many requests. Please wait a minute and try again.', 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.']
+};
+
+function adsStudioPickerErrorText(info) {
+  const code = String(info?.code || '');
+  const known = Object.prototype.hasOwnProperty.call(ADS_STUDIO_PICKER_ERRORS, code) ? ADS_STUDIO_PICKER_ERRORS[code] : null;
+  return known ? adsStudioText(known[0], known[1]) : adsStudioRefusalText(String(info?.message || ''));
+}
+
+function adsStudioSafeHttpsUrl(value) {
+  const raw = String(value || '').trim();
+  return raw.length <= 2000 && /^https:\/\/[^\s"'<>\\`]+$/i.test(raw) ? raw : '';
+}
+
+function adsStudioPagePlatforms(raw) {
+  const flags = { fb: false, ig: false };
+  const mark = value => {
+    const v = String(value || '').toLowerCase();
+    if (v === 'fb' || v === 'facebook') flags.fb = true;
+    if (v === 'ig' || v === 'instagram') flags.ig = true;
+  };
+  mark(raw.platform);
+  if (Array.isArray(raw.platforms)) raw.platforms.slice(0, 5).forEach(mark);
+  if (raw.facebook === true || raw.hasFacebook === true || raw.fb === true) flags.fb = true;
+  if (raw.instagram === true || raw.hasInstagram === true || raw.ig === true) flags.ig = true;
+  return flags;
+}
+
+function adsStudioNormalizePostPages(payload) {
+  const list = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.pages) ? payload.pages : []);
+  const pages = [];
+  const seen = new Set();
+  for (const raw of list.slice(0, 50)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = String(raw.id ?? '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    pages.push({ id, name: String(raw.name ?? raw.pageName ?? '').trim().slice(0, 160), ...adsStudioPagePlatforms(raw) });
+  }
+  return pages;
+}
+
+function adsStudioNormalizeRecentPosts(payload) {
+  const list = payload && Array.isArray(payload.posts) ? payload.posts : [];
+  const posts = [];
+  for (const raw of list.slice(0, 25)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const id = String(raw.id ?? '').trim();
+    const kind = String(raw.platform || '').toLowerCase();
+    const platform = kind === 'fb' || kind === 'facebook' ? 'fb' : (kind === 'ig' || kind === 'instagram' ? 'ig' : '');
+    if (!id || id.length > 200 || /\s/.test(id) || !platform) continue;
+    posts.push({
+      id,
+      platform,
+      excerpt: String(raw.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 280),
+      imageUrl: adsStudioSafeHttpsUrl(raw.imageUrl),
+      permalink: adsStudioIsValidBoostRef(raw.permalink) ? String(raw.permalink).trim().slice(0, 500) : '',
+      createdAt: String(raw.createdAt ?? '').slice(0, 40)
+    });
+  }
+  return { posts, checkedAt: String(payload?.checkedAt ?? '').slice(0, 40) };
+}
+
+async function adsStudioLoadPostPages(force = false) {
+  const picker = _adsStudioPostPicker;
+  const uid = String(state.currentUser?.id || '');
+  if (!uid || !isServerModeEnabled()) return;
+  if (picker.forUser !== uid) { resetAdsStudioPostPicker(); picker.forUser = uid; }
+  if (picker.pagesState === 'loading') return;
+  if (!force && (picker.pagesState === 'done' || (picker.pagesState === 'failed' && Date.now() - picker.pagesFailedAt < 60000))) return;
+  const generation = picker.generation;
+  picker.pagesState = 'loading';
+  picker.pagesError = null;
+  adsStudioRefreshPostPicker();
+  let pages = null;
+  let error = null;
+  try {
+    pages = adsStudioNormalizePostPages(await apiJson('/api/studio/pages', { method: 'GET' }));
+  } catch (e) { error = adsStudioErrorInfo(e); }
+  if (generation !== picker.generation || uid !== String(state.currentUser?.id || '')) return;
+  if (pages) {
+    picker.pages = pages;
+    picker.pagesState = 'done';
+    if (!pages.some(page => page.id === picker.pageId)) {
+      const linked = pages.find(page => page.id === String(_adsStudioDraft?.connectedAssetId || ''));
+      picker.pageId = (linked || pages[0] || { id: '' }).id;
+    }
+  } else {
+    picker.pagesState = 'failed';
+    picker.pagesError = error;
+    picker.pagesFailedAt = Date.now();
+  }
+  adsStudioRefreshPostPicker();
+  if (picker.pageId) adsStudioLoadPagePosts(picker.pageId);
+}
+
+async function adsStudioLoadPagePosts(pageId, force = false) {
+  const picker = _adsStudioPostPicker;
+  const id = String(pageId || '');
+  if (!id || !isServerModeEnabled()) return;
+  const current = picker.posts[id];
+  if (current && current.state === 'loading') return;
+  if (!force && current && (current.state === 'done' || (current.state === 'failed' && Date.now() - current.at < 60000))) return;
+  const generation = picker.generation;
+  picker.posts[id] = { state: 'loading', posts: current?.posts || [], checkedAt: current?.checkedAt || '', error: null, at: Date.now() };
+  adsStudioRefreshPostPicker();
+  let result = null;
+  let error = null;
+  try {
+    // "Try again" asks the server to read Meta again (it does so when its list is over a minute old).
+    result = adsStudioNormalizeRecentPosts(await apiJson(`/api/studio/pages/${encodeURIComponent(id)}/recent-posts${force ? '?refresh=1' : ''}`, { method: 'GET' }));
+  } catch (e) { error = adsStudioErrorInfo(e); }
+  if (generation !== picker.generation) return;
+  picker.posts[id] = result
+    ? { state: 'done', posts: result.posts, checkedAt: result.checkedAt, error: null, at: Date.now() }
+    : { state: 'failed', posts: current?.posts || [], checkedAt: current?.checkedAt || '', error, at: Date.now() };
+  adsStudioRefreshPostPicker();
+}
+
+// The paste-a-link fallback: offline, no linked page, the pages or the page's posts could not be
+// read, or a draft that already holds a pasted link (so it stays editable).
+function adsStudioShowPostLinkField(draft) {
+  const picker = _adsStudioPostPicker;
+  if (!isServerModeEnabled() || picker.pagesState === 'failed') return true;
+  if (picker.pagesState === 'done' && !picker.pages.length) return true;
+  if (picker.pagesState === 'done' && picker.posts[picker.pageId]?.state === 'failed') return true;
+  return !String(draft?.sourcePostId || '').trim() && !!String(draft?.sourcePostRef || '').trim();
+}
+
+// True when a boost request names its post: one picked from the list, or a pasted Meta link.
+function adsStudioBoostHasPost(draft) {
+  return String(draft?.boostType || '') === 'boost_post'
+    && (!!String(draft?.sourcePostId || '').trim() || adsStudioIsValidBoostRef(draft?.sourcePostRef));
+}
+
+function adsStudioRefreshPostPicker() {
+  if (typeof document === 'undefined' || String(_adsStudioDraft?.boostType || '') !== 'boost_post') return;
+  const wrap = document.getElementById('ads-studio-post-picker');
+  if (wrap) {
+    wrap.innerHTML = renderAdsStudioPostPickerBody();
+    if (typeof IconQueue !== 'undefined') IconQueue.schedule(wrap);
+  }
+  const link = document.getElementById('ads-studio-post-link');
+  if (link) link.classList.toggle('hidden', !adsStudioShowPostLinkField(_adsStudioDraft));
+}
+
+function adsStudioPostDateText(value, withTime = false) {
+  const when = new Date(String(value || ''));
+  if (!Number.isFinite(when.getTime())) return '';
+  const options = withTime ? { timeZone: 'Africa/Tripoli', dateStyle: 'medium', timeStyle: 'short' } : { timeZone: 'Africa/Tripoli' };
+  try { return when[withTime ? 'toLocaleString' : 'toLocaleDateString'](adsStudioIsAr() ? 'ar-LY' : 'en-GB', options); } catch (_) { return ''; }
+}
+
+function renderAdsStudioPostPickerBody() {
+  const isAr = adsStudioIsAr();
+  const d = _adsStudioDraft || {};
+  const picker = _adsStudioPostPicker;
+  const esc = value => Security.escapeHtml(String(value ?? ''));
+  const note = (icon, text, tone = 'text-slate-500') => `<p class="flex items-start gap-2 text-sm ${tone}"><i data-lucide="${icon}" class="w-4 h-4 flex-shrink-0 mt-0.5"></i><span>${text}</span></p>`;
+  const retry = handler => `<button type="button" onclick="${handler}" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${isAr ? 'أعد المحاولة' : 'Try again'}</button>`;
+  const title = `<div class="text-sm font-bold">${isAr ? 'اختر المنشور من صفحتك' : 'Choose the post from your page'}</div>`;
+  if (!isServerModeEnabled()) return '';
+  if (picker.pagesState === '' || picker.pagesState === 'loading') {
+    return title + note('loader', isAr ? 'نحمّل صفحاتك المرتبطة...' : 'Loading your linked pages...');
+  }
+  if (picker.pagesState === 'failed') {
+    return title + note('triangle-alert', `${isAr ? 'تعذّر تحميل صفحاتك. يمكنك لصق رابط المنشور بالأسفل.' : 'Your pages could not be loaded. You can paste the post link below.'}${picker.pagesError ? ` (${esc(adsStudioPickerErrorText(picker.pagesError))})` : ''}`, 'text-amber-700 dark:text-amber-300') + retry('adsStudioLoadPostPages(true)');
+  }
+  if (!picker.pages.length) {
+    return title + note('info', isAr ? 'لا توجد صفحة مرتبطة بحسابك بعد. الصق رابط المنشور بالأسفل، أو اطلب منا ربط صفحتك لتختار منشوراتك من قائمة.' : 'No page is linked to your account yet. Paste the post link below, or ask us to link your page so you can pick posts from a list.');
+  }
+  const pageChips = `<div class="flex flex-wrap gap-2" role="group" aria-label="${isAr ? 'صفحاتك المرتبطة' : 'Your linked pages'}">${picker.pages.map((page, index) => {
+    const active = page.id === picker.pageId;
+    return `<button type="button" onclick="adsStudioPickPostPage(${index})" aria-pressed="${active}" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl border-2 px-3 text-sm font-bold ${active ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300' : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'}">${page.fb ? '<i data-lucide="facebook" class="w-4 h-4"></i>' : ''}${page.ig ? '<i data-lucide="instagram" class="w-4 h-4"></i>' : ''}<span>${esc(page.name || (isAr ? 'صفحة' : 'Page'))}</span></button>`;
+  }).join('')}</div>`;
+  const entry = picker.posts[picker.pageId];
+  let list = '';
+  if (!entry || (entry.state === 'loading' && !entry.posts.length)) {
+    list = note('loader', isAr ? 'نحمّل آخر المنشورات...' : 'Loading recent posts...');
+  } else {
+    const chosenId = String(d.sourcePostId || '');
+    const items = entry.posts.map((post, index) => {
+      const chosen = post.id === chosenId;
+      const date = adsStudioPostDateText(post.createdAt);
+      const excerpt = post.excerpt.length > 140 ? `${post.excerpt.slice(0, 140)}…` : post.excerpt;
+      return `<button type="button" data-post-id="${esc(post.id)}" onclick="adsStudioChooseBoostPost(${index}, this)" aria-pressed="${chosen}" class="touch-target w-full min-h-14 flex items-center gap-3 rounded-2xl border-2 p-2 ${isAr ? 'text-right' : 'text-left'} ${chosen ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}">
+        ${post.imageUrl ? `<img src="${esc(post.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" class="w-14 h-14 flex-shrink-0 rounded-xl object-cover bg-slate-100" />` : `<span class="w-14 h-14 flex-shrink-0 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400"><i data-lucide="image" class="w-6 h-6"></i></span>`}
+        <span class="min-w-0 flex-1"><span class="block text-sm font-bold text-slate-800 dark:text-slate-100 break-words">${esc(excerpt || (isAr ? 'منشور بدون نص' : 'Post without text'))}</span><span class="mt-1 flex items-center gap-1 text-xs text-slate-500"><i data-lucide="${post.platform === 'ig' ? 'instagram' : 'facebook'}" class="w-3.5 h-3.5"></i>${esc(date)}</span></span>
+        ${chosen ? `<span class="flex-shrink-0 text-blue-600" aria-label="${isAr ? 'تم الاختيار' : 'Chosen'}"><i data-lucide="circle-check" class="w-5 h-5"></i></span>` : ''}
+      </button>`;
+    }).join('');
+    const problem = entry.state === 'failed'
+      ? note('triangle-alert', `${isAr ? 'تعذّر تحميل المنشورات. يمكنك لصق رابط المنشور بالأسفل.' : 'The posts could not be loaded. You can paste the post link below.'}${entry.error ? ` (${esc(adsStudioPickerErrorText(entry.error))})` : ''}`, 'text-amber-700 dark:text-amber-300') + retry('adsStudioRetryPagePosts()')
+      : '';
+    const empty = entry.state === 'done' && !entry.posts.length
+      ? note('info', isAr ? 'لا توجد منشورات حديثة على هذه الصفحة. انشر شيئاً ثم أعد المحاولة، أو اختر «إعلان جديد بدون منشور».' : 'No recent posts on this page. Post something and try again, or choose "New ad without a post".') + retry('adsStudioRetryPagePosts()')
+      : '';
+    const checkedText = adsStudioPostDateText(entry.checkedAt, true);
+    const checked = checkedText ? `<p class="text-xs text-slate-400">${isAr ? 'آخر فحص:' : 'Checked:'} ${esc(checkedText)}</p>` : '';
+    list = `${problem}${empty}${items ? `<div class="grid gap-2 sm:grid-cols-2">${items}</div>` : ''}${checked}`;
+  }
+  return `${title}${pageChips}${list}`;
+}
+
+function adsStudioPickPostPage(index) {
+  const page = _adsStudioPostPicker.pages[Number(index)];
+  if (!page) return;
+  _adsStudioPostPicker.pageId = page.id;
+  adsStudioRefreshPostPicker();
+  adsStudioLoadPagePosts(page.id);
+}
+
+function adsStudioRetryPagePosts() {
+  adsStudioLoadPagePosts(_adsStudioPostPicker.pageId, true);
+}
+
+function adsStudioChooseBoostPost(index, button = null) {
+  const d = _adsStudioDraft;
+  if (!d || String(d.boostType || '') !== 'boost_post') return;
+  const picker = _adsStudioPostPicker;
+  const page = picker.pages.find(item => item.id === picker.pageId);
+  const post = page ? (picker.posts[page.id]?.posts || [])[Number(index)] : null;
+  if (!post) return;
+  // The list may have refreshed under the finger: only the post that was on the button counts.
+  if (button && typeof button.getAttribute === 'function' && button.getAttribute('data-post-id') !== post.id) return;
+  if (String(d.destination || '') === String(d.sourcePostRef || '')) d.destination = '';  // re-derived from the new post
+  d.sourcePostId = post.id;
+  d.sourcePostPlatform = post.platform;
+  d.sourcePostRef = post.permalink;
+  d.connectedAssetId = page.id;
+  if (!String(d.pageName || '').trim() && page.name) d.pageName = page.name;
+  render();
 }
 
 function renderAdsStudioCreativeStep() {
@@ -1281,7 +1670,11 @@ let _adsStudioLimits = null;
 let _adsStudioLimitsFor = '';
 let _adsStudioLimitsState = '';  // '' | 'loading' | 'done' | 'failed'
 let _adsStudioLimitsFailedAt = 0;
+let _adsStudioLimitsLoadedAt = 0;
 let _adsStudioLimitsGeneration = 0;
+// The intake switch from the same /me reply (P1-22): null until known (the server decides), then
+// true/false. While it is false the Send buttons are disabled; drafts still save.
+let _adsStudioIntakeOpen = null;
 
 function resetAdsStudioLimits() {
   _adsStudioLimitsGeneration++;  // a reply still in flight belongs to the old session: dropped
@@ -1289,6 +1682,31 @@ function resetAdsStudioLimits() {
   _adsStudioLimitsFor = '';
   _adsStudioLimitsState = '';
   _adsStudioLimitsFailedAt = 0;
+  _adsStudioLimitsLoadedAt = 0;
+  _adsStudioIntakeOpen = null;
+}
+
+function adsStudioIntakePausedText() {
+  return adsStudioText(
+    'New ad requests are paused — you can still save your draft and send it later.',
+    'استقبال طلبات الإعلانات الجديدة متوقف مؤقتاً — يمكنك حفظ المسودة وإرسالها لاحقاً.'
+  );
+}
+
+// In place (no full render): the builder's Send button and note, and the list's Submit buttons.
+function adsStudioRefreshIntakeState() {
+  if (typeof document === 'undefined') return;
+  const paused = _adsStudioIntakeOpen === false;
+  const note = document.getElementById('ads-studio-intake-note');
+  if (note) note.classList.toggle('hidden', !paused);
+  const buttons = [document.getElementById('ads-studio-submit-button')]
+    .concat(Array.from(document.querySelectorAll('[data-ads-studio-submit]') || []));
+  buttons.forEach(button => {
+    if (!button || button.getAttribute('aria-busy') === 'true') return;
+    button.disabled = paused;
+    if (paused) button.setAttribute('title', adsStudioIntakePausedText());
+    else button.removeAttribute('title');
+  });
 }
 
 function adsStudioCleanLimits(raw) {
@@ -1309,26 +1727,36 @@ function adsStudioLimits() {
 }
 
 // Once per session; a failed read is retried at most once a minute (the defaults hold meanwhile).
-async function refreshAdsStudioLimits() {
+// maxAgeMs > 0 also re-reads a good answer older than that (the intake switch can change meanwhile);
+// a failed re-read keeps the last good limits.
+async function refreshAdsStudioLimits(maxAgeMs = 0) {
   try {
     const uid = String(state.currentUser?.id || '');
     if (!uid || !isServerModeEnabled()) return;
-    if (_adsStudioLimitsFor === uid && _adsStudioLimitsState !== '' && (_adsStudioLimitsState !== 'failed' || Date.now() - _adsStudioLimitsFailedAt < 60000)) return;
+    if (_adsStudioLimitsFor === uid && _adsStudioLimitsState !== '' && (_adsStudioLimitsState !== 'failed' || Date.now() - _adsStudioLimitsFailedAt < 60000)
+        && !(maxAgeMs > 0 && _adsStudioLimitsState === 'done' && Date.now() - _adsStudioLimitsLoadedAt > maxAgeMs)) return;
+    if (_adsStudioLimitsFor && _adsStudioLimitsFor !== uid) { _adsStudioLimits = null; _adsStudioIntakeOpen = null; }  // another user's reading
     const generation = ++_adsStudioLimitsGeneration;
     _adsStudioLimitsFor = uid;
     _adsStudioLimitsState = 'loading';
     let limits = null;
+    let intakeOpen = null;
     try {
       const me = await apiJson('/api/studio/me', { method: 'GET' });
       if (me && me.adLimits && typeof me.adLimits === 'object') limits = adsStudioCleanLimits(me.adLimits);
+      if (me && me.intake && typeof me.intake.open === 'boolean') intakeOpen = me.intake.open;
     } catch (_) { /* the plan defaults stay */ }
     if (generation !== _adsStudioLimitsGeneration || uid !== String(state.currentUser?.id || '')) return;
-    _adsStudioLimits = limits;
-    _adsStudioLimitsState = limits ? 'done' : 'failed';
-    if (!limits) _adsStudioLimitsFailedAt = Date.now();
+    if (limits) _adsStudioLimits = limits;
+    _adsStudioLimitsState = _adsStudioLimits ? 'done' : 'failed';
+    if (_adsStudioLimits) _adsStudioLimitsLoadedAt = Date.now();
+    else _adsStudioLimitsFailedAt = Date.now();
+    if (intakeOpen !== null) _adsStudioIntakeOpen = intakeOpen;
     // Update the hint in place: a full render could take the keyboard away mid-typing.
     const hint = typeof document !== 'undefined' ? document.getElementById('ads-studio-budget-limits') : null;
     if (hint) hint.textContent = adsStudioBudgetLimitsText(_adsStudioDraft?.budgetType);
+    adsStudioRefreshBudgetSummary();
+    adsStudioRefreshIntakeState();
   } catch (_) { /* never breaks the screen */ }
 }
 
@@ -1340,12 +1768,53 @@ function adsStudioDaysText(days) {
   return n >= 3 && n <= 10 ? `${n} أيام` : `${n} يوماً`;
 }
 
-// Days the request runs, both ends included (the server's end = start + durationDays - 1).
+// Days the request runs: its durationDays (P1-11; 0 while the box does not hold a whole number), or
+// for an older request without one its dates, both ends included (the server's end = start + days - 1).
 function adsStudioCampaignDays(draft) {
+  const raw = draft?.durationDays;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n > 0 ? n : 0;
+  }
   const start = Date.parse(`${String(draft?.startDate || '')}T00:00:00Z`);
   const end = Date.parse(`${String(draft?.endDate || '')}T00:00:00Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
   return Math.round((end - start) / 86400000) + 1;
+}
+
+// What one request costs, and what submitting it holds (owner decisions D4 + D5): the lifetime
+// amount, or the daily amount x days.
+function adsStudioRequestTotalMinor(draft) {
+  const budget = Math.max(0, Math.trunc(Number(draft?.budgetMinorUSD) || 0));
+  return String(draft?.budgetType || '') === 'daily' ? budget * adsStudioCampaignDays(draft) : budget;
+}
+
+// What a Submitted request holds now: the total the server stamped (totalBudgetMinorUSD); a request
+// submitted under the old rules holds its budget field (one day's budget for a legacy daily one).
+function adsStudioHeldMinorFor(campaign) {
+  const total = Number(campaign?.totalBudgetMinorUSD);
+  if (Number.isSafeInteger(total) && total > 0) return total;
+  return Math.max(parseInt(campaign?.budgetMinorUSD, 10) || 0, 0);
+}
+
+// A daily request sent under the old rules (it held one day's budget): staff send it back with the
+// reason "budget_dates" so the customer re-sends it under the total rule (owner decision D33).
+function adsStudioIsLegacyDailyRequest(campaign) {
+  if (String(campaign?.budgetType || '') !== 'daily') return false;
+  const total = Number(campaign?.totalBudgetMinorUSD);
+  return campaign?.legacyRules === true || !(Number.isSafeInteger(total) && total > 0);
+}
+
+// The card's budget: "$10.00/day × 7 days = $70.00" for a daily request, the amount otherwise.
+function adsStudioBudgetLine(campaign) {
+  const budget = Math.max(0, Math.trunc(Number(campaign?.budgetMinorUSD) || 0));
+  const days = Number(campaign?.durationDays);
+  if (String(campaign?.budgetType || '') !== 'daily') return adsStudioMoneyWithLyd(budget);
+  if (!(Number.isSafeInteger(days) && days > 0)) return adsStudioText(`${adsStudioMoneyWithLyd(budget)} / day`, `${adsStudioMoneyWithLyd(budget)} يومياً`);
+  return adsStudioText(
+    `${adsStudioMoney(budget)}/day × ${adsStudioDaysText(days)} = ${adsStudioMoneyWithLyd(budget * days)}`,
+    `${adsStudioMoney(budget)} يومياً × ${adsStudioDaysText(days)} = ${adsStudioMoneyWithLyd(budget * days)}`
+  );
 }
 
 function adsStudioBudgetLimitsText(budgetType) {
@@ -1363,14 +1832,18 @@ function adsStudioBudgetLimitsText(budgetType) {
     : adsStudioText(`Total for the whole campaign: ${range}`, `إجمالي الحملة كلها: ${range}`) + tail;
 }
 
-// '' when the request fits the limits, else the first problem in the customer's language.
+// '' when the request fits the limits, else the first problem in the customer's language. The
+// sentences start with the server's own refusal prefixes (T1-T4), so both sides read the same.
 function adsStudioBudgetLimitProblem(draft) {
   const limits = adsStudioLimits();
   const budget = Math.max(0, Math.trunc(Number(draft?.budgetMinorUSD) || 0));
   const days = adsStudioCampaignDays(draft);
   if (!budget || !days) return '';
   if (days > limits.maxDays) {
-    return adsStudioText(`A campaign can run for at most ${adsStudioDaysText(limits.maxDays)}. Pick an earlier end date.`, `لا تتجاوز مدة الحملة ${adsStudioDaysText(limits.maxDays)}. اختر تاريخ انتهاء أقرب.`);
+    return adsStudioText(
+      `The ad can run for at most ${adsStudioDaysText(limits.maxDays)}. Choose fewer days.`,
+      `أقصى مدة لتشغيل الإعلان هي ${adsStudioDaysText(limits.maxDays)}. اختر عدداً أقل من الأيام.`
+    );
   }
   const daily = String(draft?.budgetType || '') === 'daily';
   const total = daily ? budget * days : budget;
@@ -1379,29 +1852,125 @@ function adsStudioBudgetLimitProblem(draft) {
     return adsStudioText(`The total budget must be at least ${adsStudioMoney(limits.minTotalMinorUSD)}${sum}.`, `يجب ألا يقل إجمالي الميزانية عن ${adsStudioMoney(limits.minTotalMinorUSD)}${sum}.`);
   }
   if (total > limits.maxTotalMinorUSD) {
-    return adsStudioText(`The total budget cannot be more than ${adsStudioMoney(limits.maxTotalMinorUSD)}${sum}.`, `لا يمكن أن يزيد إجمالي الميزانية على ${adsStudioMoney(limits.maxTotalMinorUSD)}${sum}.`);
+    return adsStudioText(`The total budget must be at most ${adsStudioMoney(limits.maxTotalMinorUSD)}${sum}.`, `يجب ألا يزيد إجمالي الميزانية عن ${adsStudioMoney(limits.maxTotalMinorUSD)}${sum}.`);
   }
   if (total < limits.minPerDayMinorUSD * days) {
     return daily
-      ? adsStudioText(`The daily budget must be at least ${adsStudioMoney(limits.minPerDayMinorUSD)}.`, `يجب ألا تقل الميزانية اليومية عن ${adsStudioMoney(limits.minPerDayMinorUSD)}.`)
+      ? adsStudioText(`Budget per day is below the minimum (${adsStudioMoney(limits.minPerDayMinorUSD)} a day).`, `الميزانية اليومية أقل من الحد الأدنى (${adsStudioMoney(limits.minPerDayMinorUSD)} يومياً).`)
       : adsStudioText(
-        `The budget per day must be at least ${adsStudioMoney(limits.minPerDayMinorUSD)} (${adsStudioMoney(total)} for ${adsStudioDaysText(days)}). Raise the budget or shorten the campaign.`,
-        `يجب ألا تقل الميزانية لكل يوم عن ${adsStudioMoney(limits.minPerDayMinorUSD)} (${adsStudioMoney(total)} لمدة ${adsStudioDaysText(days)}). ارفع الميزانية أو قصّر مدة الحملة.`
+        `Budget per day is below the minimum (${adsStudioMoney(limits.minPerDayMinorUSD)} a day): ${adsStudioMoney(total)} for ${adsStudioDaysText(days)}. Raise the budget or choose fewer days.`,
+        `الميزانية اليومية أقل من الحد الأدنى (${adsStudioMoney(limits.minPerDayMinorUSD)} يومياً): ${adsStudioMoney(total)} لمدة ${adsStudioDaysText(days)}. ارفع الميزانية أو اختر عدداً أقل من الأيام.`
       );
   }
   return '';
 }
 
+// The live total under the budget boxes: "Total: $70.00 for 7 days ($10.00 a day)".
+function adsStudioBudgetTotalText(draft) {
+  const days = adsStudioCampaignDays(draft);
+  const total = adsStudioRequestTotalMinor(draft);
+  if (!days || !total) return adsStudioText('Enter the budget and the number of days to see the total.', 'أدخل الميزانية وعدد الأيام لترى الإجمالي.');
+  const daily = String(draft?.budgetType || '') === 'daily';
+  const perDay = adsStudioMoney(daily ? Math.max(0, Math.trunc(Number(draft?.budgetMinorUSD) || 0)) : Math.floor(total / days));
+  return adsStudioText(
+    `Total: ${adsStudioMoney(total)} for ${adsStudioDaysText(days)} (${daily ? '' : 'about '}${perDay} a day)`,
+    `الإجمالي: ${adsStudioMoney(total)} لمدة ${adsStudioDaysText(days)} (${daily ? '' : 'نحو '}${perDay} يومياً)`
+  );
+}
+
+function adsStudioBudgetLydText(draft) {
+  const total = adsStudioRequestTotalMinor(draft);
+  if (!total || !(typeof _adsStudioUsdToLydRate === 'function' && _adsStudioUsdToLydRate() > 1)) return '';
+  return `${adsStudioMoneyWithLyd(total)} — ${adsStudioText('estimate', 'تقديري')}`;
+}
+
+// The wallet line: submitting holds the total, so say now whether the wallet covers it.
+function adsStudioBudgetWalletText(draft) {
+  if (typeof WALLET === 'undefined' || !isServerModeEnabled()) return '';
+  const total = adsStudioRequestTotalMinor(draft);
+  if (!total) return '';
+  const available = adsStudioWalletAvailableMinor();
+  return available >= total
+    ? adsStudioText(`Available in your wallet: ${adsStudioMoney(available)} — enough.`, `المتاح في محفظتك: ${adsStudioMoney(available)} — يكفي.`)
+    : adsStudioText(
+      `Available in your wallet: ${adsStudioMoney(Math.max(0, available))} — short by ${adsStudioMoney(total - Math.max(0, available))}. Add money before you send.`,
+      `المتاح في محفظتك: ${adsStudioMoney(Math.max(0, available))} — ينقصك ${adsStudioMoney(total - Math.max(0, available))}. أضف رصيداً قبل الإرسال.`
+    );
+}
+
+// Review finding: the startup box cleaner (sanitizeMoneyInput) turns a lone comma into a decimal
+// point, so "1,500" typed one key at a time ended as 1.50 ("1," became "1."). The budget and charge
+// boxes read the raw text on every key (adsStudioParseMoneyMinor knows "1,500" from "12,5") and run
+// sanitizeMoneyInput only on change. The typed text is kept so a background redraw shows it as typed.
+let _adsStudioBudgetTyped = '';
+
+function adsStudioTypedBudgetText(draft) {
+  const minor = Math.max(0, Number(draft?.budgetMinorUSD) || 0);
+  return _adsStudioBudgetTyped && adsStudioParseMoneyMinor(_adsStudioBudgetTyped) === minor ? _adsStudioBudgetTyped : (minor / 100).toFixed(2);
+}
+
+function adsStudioOnBudgetInput(input) {
+  _adsStudioBudgetTyped = String(input?.value ?? '').slice(0, 40);
+  adsStudioSetDraftField('budgetMinorUSD', _adsStudioBudgetTyped);
+  adsStudioRefreshBudgetSummary();
+}
+
+function adsStudioOnDaysInput(input) {
+  adsStudioSetDraftField('durationDays', input?.value);
+  adsStudioRefreshBudgetSummary();
+}
+
+// In place, so the keyboard stays open while the customer types.
+function adsStudioRefreshBudgetSummary() {
+  if (typeof document === 'undefined' || !_adsStudioDraft) return;
+  const d = _adsStudioDraft;
+  const set = (id, text) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = text;
+    return node;
+  };
+  set('ads-studio-budget-total', adsStudioBudgetTotalText(d));
+  set('ads-studio-budget-lyd', adsStudioBudgetLydText(d));
+  set('ads-studio-budget-wallet', adsStudioBudgetWalletText(d));
+  set('ads-studio-budget-end', adsStudioFormatDate(d.endDate));
+  const problem = adsStudioBudgetLimitProblem(d);
+  const node = set('ads-studio-budget-problem', problem);
+  if (node) node.classList.toggle('hidden', !problem);
+}
+
 function renderAdsStudioBudgetStep() {
   const d = _adsStudioDraft;
   const isAr = adsStudioIsAr();
-  return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'الميزانية والمدة' : 'Budget and schedule'}</h3><p class="text-sm text-slate-500">${isAr ? 'هذه ميزانية مقترحة للمراجعة وليست عملية دفع.' : 'This is a requested planning budget, not a payment.'}</p></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'نوع الميزانية' : 'Budget type'}</label><div class="grid grid-cols-2 gap-3"><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'lifetime' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="lifetime" ${d.budgetType === 'lifetime' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="calendar-range" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'إجمالي الحملة' : 'Lifetime'}</span></label><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'daily' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="daily" ${d.budgetType === 'daily' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="sun" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'يومي' : 'Daily'}</span></label></div></div>
-    <div><label class="block text-sm font-bold mb-2">${d.budgetType === 'daily' ? (isAr ? 'الميزانية اليومية بالدولار *' : 'Daily budget in USD *') : (isAr ? 'إجمالي الميزانية بالدولار *' : 'Total budget in USD *')}</label><div class="relative"><span class="absolute ${isAr ? 'right-4' : 'left-4'} top-1/2 -translate-y-1/2 font-black text-blue-600">$</span><input type="text" inputmode="decimal" autocomplete="off" value="${(Math.max(0, Number(d.budgetMinorUSD) || 0) / 100).toFixed(2)}" id="ads-studio-field-budgetMinorUSD" oninput="sanitizeMoneyInput(this); adsStudioSetDraftField(\'budgetMinorUSD\', this.value)" class="glass-input min-h-14 w-full rounded-xl ${isAr ? 'pr-9 pl-4' : 'pl-9 pr-4'} text-xl font-black" /></div><p id="ads-studio-budget-limits" class="mt-2 text-xs text-slate-500">${Security.escapeHtml(adsStudioBudgetLimitsText(d.budgetType))}</p>${(typeof _adsStudioUsdToLydRate === 'function' && _adsStudioUsdToLydRate() > 1) ? `<p class="mt-2 text-xs font-bold text-blue-700 dark:text-blue-300">${Security.escapeHtml(adsStudioMoneyWithLyd(d.budgetMinorUSD))} — ${isAr ? 'تقديري' : 'estimate'}</p>` : ''}</div>
-    <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ البدء *' : 'Start date *'}</label><input type="date" value="${Security.escapeHtml(d.startDate || '')}" onchange="adsStudioSetDraftField('startDate',this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ الانتهاء *' : 'End date *'}</label><input type="date" value="${Security.escapeHtml(d.endDate || '')}" onchange="adsStudioSetDraftField('endDate',this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div></div>
+  const daily = d.budgetType === 'daily';
+  const days = adsStudioCampaignDays(d);
+  const problem = adsStudioBudgetLimitProblem(d);
+  return `<div class="space-y-5"><div><h3 class="text-lg font-black text-slate-900 dark:text-white">${isAr ? 'الميزانية والمدة' : 'Budget and schedule'}</h3><p class="text-sm text-slate-500">${isAr ? 'اختر ميزانية يومية أو إجمالية وعدد الأيام. عند الإرسال نحجز الإجمالي من محفظتك، وتُخصم عند الموافقة.' : 'Choose a daily or a total budget and the number of days. Sending holds the total in your wallet; approval charges it.'}</p></div>
+    <div><label class="block text-sm font-bold mb-2">${isAr ? 'نوع الميزانية' : 'Budget type'}</label><div class="grid grid-cols-2 gap-3"><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${d.budgetType === 'lifetime' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="lifetime" ${d.budgetType === 'lifetime' ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="calendar-range" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'إجمالي الحملة' : 'Lifetime'}</span></label><label class="touch-target min-h-14 rounded-xl border-2 px-4 flex items-center gap-3 ${daily ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-200 dark:border-slate-700'}"><input type="radio" name="budget-type" value="daily" ${daily ? 'checked' : ''} onchange="adsStudioSetDraftField('budgetType',this.value);render()" class="sr-only" /><i data-lucide="sun" class="w-5 h-5 text-blue-600"></i><span class="font-bold">${isAr ? 'يومي' : 'Daily'}</span></label></div></div>
+    <div class="grid gap-4 sm:grid-cols-2">
+      <div><label for="ads-studio-field-budgetMinorUSD" class="block text-sm font-bold mb-2">${daily ? (isAr ? 'الميزانية اليومية بالدولار *' : 'Budget per day in USD *') : (isAr ? 'إجمالي الميزانية بالدولار *' : 'Total budget in USD *')}</label><div class="relative"><span class="absolute ${isAr ? 'right-4' : 'left-4'} top-1/2 -translate-y-1/2 font-black text-blue-600">$</span><input type="text" inputmode="decimal" autocomplete="off" value="${Security.escapeHtml(adsStudioTypedBudgetText(d))}" id="ads-studio-field-budgetMinorUSD" oninput="adsStudioOnBudgetInput(this)" onchange="sanitizeMoneyInput(this); adsStudioOnBudgetInput(this)" class="glass-input min-h-14 w-full rounded-xl ${isAr ? 'pr-9 pl-4' : 'pl-9 pr-4'} text-xl font-black" /></div></div>
+      <div><label for="ads-studio-field-durationDays" class="block text-sm font-bold mb-2">${isAr ? 'عدد الأيام *' : 'Number of days *'}</label><input type="text" inputmode="numeric" autocomplete="off" maxlength="4" value="${days || ''}" id="ads-studio-field-durationDays" oninput="adsStudioOnDaysInput(this)" class="glass-input min-h-14 w-full rounded-xl px-4 text-xl font-black" /></div>
+    </div>
+    <div class="rounded-2xl bg-blue-50 dark:bg-blue-900/20 p-4 space-y-1">
+      <p id="ads-studio-budget-total" class="font-black text-blue-900 dark:text-blue-100">${Security.escapeHtml(adsStudioBudgetTotalText(d))}</p>
+      <p id="ads-studio-budget-lyd" class="text-xs font-bold text-blue-700 dark:text-blue-300">${Security.escapeHtml(adsStudioBudgetLydText(d))}</p>
+      <p id="ads-studio-budget-wallet" class="text-xs font-bold text-slate-600 dark:text-slate-300">${Security.escapeHtml(adsStudioBudgetWalletText(d))}</p>
+      <p id="ads-studio-budget-problem" role="alert" class="${problem ? '' : 'hidden '}text-sm font-bold text-rose-700 dark:text-rose-300">${Security.escapeHtml(problem)}</p>
+      <p id="ads-studio-budget-limits" class="text-xs text-slate-500">${Security.escapeHtml(adsStudioBudgetLimitsText(d.budgetType))}</p>
+    </div>
+    <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'تاريخ البدء *' : 'Start date *'}</label><input type="date" value="${Security.escapeHtml(d.startDate || '')}" onchange="adsStudioSetDraftField('startDate',this.value); adsStudioRefreshBudgetSummary()" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><div class="block text-sm font-bold mb-2">${isAr ? 'آخر يوم' : 'Last day'}</div><p id="ads-studio-budget-end" class="min-h-12 flex items-center font-bold text-slate-800 dark:text-slate-100">${Security.escapeHtml(adsStudioFormatDate(d.endDate))}</p></div></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظات لفريق المراجعة' : 'Notes for the review team'}</label><textarea rows="3" maxlength="1000" id="ads-studio-field-notes" oninput="adsStudioSetDraftField(\'notes\', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'وقت مفضل، عرض خاص، تفاصيل إضافية...' : 'Preferred time, special offer, extra context...'}">${Security.escapeHtml(d.notes || '')}</textarea></div>
     <div class="rounded-2xl bg-emerald-50 dark:bg-emerald-900/20 p-4 text-sm text-emerald-800 dark:text-emerald-200 flex items-start gap-3"><i data-lucide="shield-check" class="w-5 h-5 flex-shrink-0"></i><span>${isAr ? 'لن نرفع الميزانية أو نطلق الإعلان دون تأكيد وموافقة. عند إضافة الربط المباشر، سيتم إنشاء إعلانات ميتا في وضع الإيقاف المؤقت أولاً.' : 'We will not increase the budget or launch without confirmation. Future Meta publishing will create campaigns paused first.'}</span></div>
   </div>`;
+}
+
+function adsStudioBudgetReviewText(draft) {
+  const budget = Math.max(0, Math.trunc(Number(draft?.budgetMinorUSD) || 0));
+  const days = adsStudioCampaignDays(draft);
+  const total = adsStudioRequestTotalMinor(draft);
+  if (String(draft?.budgetType || '') === 'daily') {
+    return adsStudioText(`${adsStudioMoney(budget)} a day × ${adsStudioDaysText(days)} = ${adsStudioMoney(total)}`, `${adsStudioMoney(budget)} يومياً × ${adsStudioDaysText(days)} = ${adsStudioMoney(total)}`);
+  }
+  return adsStudioText(`${adsStudioMoney(total)} in total for ${adsStudioDaysText(days)}`, `${adsStudioMoney(total)} إجمالاً لمدة ${adsStudioDaysText(days)}`);
 }
 
 function renderAdsStudioReviewStep() {
@@ -1414,9 +1983,12 @@ function renderAdsStudioReviewStep() {
     [isAr ? 'الهدف' : 'Objective', objective],
     [isAr ? 'المنصات' : 'Platforms', (d.platforms || []).join(' + ') || '—'],
     [isAr ? 'الصفحة' : 'Page', d.pageName || '—'],
+    ...(String(d.boostType || '') === 'boost_post'
+      ? [[isAr ? 'المنشور' : 'Post', d.sourcePostRef || (String(d.sourcePostId || '') ? (isAr ? 'منشور من صفحتك' : 'A post from your page') : '—')]]
+      : []),
     [isAr ? 'الوجهة' : 'Destination', d.destination || '—'],
     [isAr ? 'الجمهور' : 'Audience', `${(d.locations || []).join(', ') || '—'} · ${d.ageMin || 18}–${d.ageMax || 65}`],
-    [isAr ? 'الميزانية' : 'Budget', `${adsStudioMoney(d.budgetMinorUSD)} ${d.budgetType === 'daily' ? (isAr ? 'يومياً' : 'daily') : (isAr ? 'إجمالي' : 'lifetime')}`],
+    [isAr ? 'الميزانية' : 'Budget', adsStudioBudgetReviewText(d)],
     [isAr ? 'المدة' : 'Schedule', `${adsStudioFormatDate(d.startDate)} → ${adsStudioFormatDate(d.endDate)}`],
     [isAr ? 'الفئة الخاصة' : 'Special category', special]
   ];
@@ -1433,7 +2005,10 @@ function adsStudioValidateStep(step, draft = _adsStudioDraft) {
     if (!String(d.pageName || '').trim()) errors.push(adsStudioText('Page or account name is required.', 'اسم الصفحة أو الحساب مطلوب.'));
   }
   if (step >= 2) {
-    if (!String(d.primaryText || '').trim()) errors.push(adsStudioText('Primary ad text is required.', 'النص الأساسي للإعلان مطلوب.'));
+    // Boosting an existing post (picked from the list or a pasted link) needs no text or photo of its
+    // own: the post is the ad (D19; the server's link-only boost rule, P1-13).
+    const boostsPost = adsStudioBoostHasPost(d);
+    if (!boostsPost && !String(d.primaryText || '').trim()) errors.push(adsStudioText('Primary ad text is required.', 'النص الأساسي للإعلان مطلوب.'));
     if (!String(d.destination || '').trim()) {
       // A boosted post's destination is derived from the post link at save
       // time — the boost-ref check below covers it; no invisible field error.
@@ -1441,7 +2016,7 @@ function adsStudioValidateStep(step, draft = _adsStudioDraft) {
     } else if (!adsStudioIsValidDestination(d.destination)) errors.push(adsStudioText('Use an HTTPS website/link or an international phone number.', 'استخدم رابط HTTPS أو رقم هاتف دولي صحيح.'));
     const hasSafeCreative = (Array.isArray(d.creativeImages) && d.creativeImages.some(isSafeAdsStudioCreativeSource)) ||
       (d._mediaOmitted === true && getEntityPhotoCountHint('adCampaignRequests', d) > 0);
-    if (!hasSafeCreative) errors.push(adsStudioText('Add at least one PNG, JPEG or WebP creative image.', 'أضف صورة إعلانية واحدة على الأقل بصيغة PNG أو JPEG أو WebP.'));
+    if (!boostsPost && !hasSafeCreative) errors.push(adsStudioText('Add at least one PNG, JPEG or WebP creative image.', 'أضف صورة إعلانية واحدة على الأقل بصيغة PNG أو JPEG أو WebP.'));
   }
   if (step >= 3) {
     if (!Array.isArray(d.locations) || !d.locations.length) errors.push(adsStudioText('Add at least one location.', 'أضف موقعاً واحداً على الأقل.'));
@@ -1451,14 +2026,19 @@ function adsStudioValidateStep(step, draft = _adsStudioDraft) {
   if (step >= 4) {
     const budgetSet = Number(d.budgetMinorUSD) > 0;
     if (!budgetSet) errors.push(adsStudioText('Budget must be greater than zero.', 'يجب أن تكون الميزانية أكبر من صفر.'));
+    const hasDays = d.durationDays !== undefined && d.durationDays !== null && d.durationDays !== '';
+    const daysBad = hasDays && !adsStudioCampaignDays(d);
+    if (daysBad) errors.push(adsStudioText('Enter the number of days as a whole number (1 or more).', 'أدخل عدد الأيام رقماً صحيحاً (1 أو أكثر).'));
     const datesBad = !String(d.startDate || '') || !String(d.endDate || '') || String(d.startDate) < _adsStudioDateOffset(0) || String(d.endDate) < String(d.startDate);
     if (datesBad) errors.push(adsStudioText('Choose a start date from today onward and a valid end date.', 'اختر تاريخ بداية من اليوم فصاعداً وتاريخ نهاية صحيحاً.'));
-    // The server's limits (GET /api/studio/me adLimits): total, per-day floor and days (P1-08b).
-    const limitProblem = budgetSet && !datesBad ? adsStudioBudgetLimitProblem(d) : '';
+    // The server's limits (GET /api/studio/me adLimits): total, per-day floor and days (P1-08b), in
+    // the server's own refusal words (T1-T4).
+    const limitProblem = budgetSet && !datesBad && !daysBad ? adsStudioBudgetLimitProblem(d) : '';
     if (limitProblem) errors.push(limitProblem);
   }
-  if (String(d.boostType || '') === 'boost_post' && !adsStudioIsValidBoostRef(d.sourcePostRef)) {
-    errors.unshift(adsStudioText('Paste the Facebook or Instagram link of the post you want to boost.', 'الصق رابط المنشور من فيسبوك أو إنستغرام.'));
+  if (String(d.boostType || '') === 'boost_post' && !adsStudioBoostHasPost(d)) {
+    errors.unshift(adsStudioText('Choose a post or add your own photo and text.', 'اختر منشوراً أو أضف صورتك ونصك.')
+      + (adsStudioShowPostLinkField(d) ? adsStudioText(' You can also paste the post link.', ' يمكنك أيضاً لصق رابط المنشور.') : ''));
   }
   return errors;
 }
@@ -1490,7 +2070,21 @@ function sanitizedAdsStudioDraft() {
   let destination = text(d.destination, 500);
   // Boosted posts open the post itself unless a destination was typed.
   if (!destination && boostType === 'boost_post' && sourcePostRef) destination = sourcePostRef;
+  // durationDays (P1-11) only when it is a whole number within the limits: a half-typed box never
+  // bricks "Save draft" (the step check names the problem). totalBudgetMinorUSD is the server's.
+  const days = Number(d.durationDays);
+  const durationDays = Number.isSafeInteger(days) && days >= 1 && days <= adsStudioLimits().maxDays ? { durationDays: days } : {};
+  // The picked post (D19). Sent once the draft has the fields (so switching away clears them); a
+  // draft that never had a picked post does not send them at all.
+  const postId = boostType === 'boost_post' ? text(d.sourcePostId, 200) : '';
+  const pickedPost = Object.prototype.hasOwnProperty.call(d, 'sourcePostId')
+    ? { sourcePostId: postId, sourcePostPlatform: postId && ['fb', 'ig'].includes(String(d.sourcePostPlatform || '')) ? String(d.sourcePostPlatform) : '' }
+    : {};
+  const connectedAssetId = text(d.connectedAssetId, 80);
   return {
+    ...durationDays,
+    ...pickedPost,
+    ...(connectedAssetId ? { connectedAssetId } : {}),
     name: text(d.name, 120),
     objective: text(d.objective, 40),
     platforms: list(d.platforms, 3),
@@ -1648,13 +2242,21 @@ async function submitAdsStudioCampaignOnce(id) {
     await startAdsStudioCampaign(id);
     return false;
   }
-  // Client mirror of the server money gate.
-  const _budgetMinor = Math.max(parseInt(campaign.budgetMinorUSD, 10) || 0, 0);
+  // Intake paused (P1-22): the draft stays saved; the server refuses the submit anyway.
+  if (_adsStudioIntakeOpen === false) {
+    showNotification(adsStudioText('Not sent', 'لم يُرسل'), adsStudioIntakePausedText(), 'warning');
+    return false;
+  }
+  // Client mirror of the server money gate: the hold is the TOTAL (lifetime amount, or daily x days).
+  const _budgetMinor = adsStudioRequestTotalMinor(campaign);
   if (String(campaign.createdBy || '') === String(state.currentUser?.id || '')
       && adsStudioWalletAvailableMinor() < _budgetMinor) {
     showNotification(
       adsStudioText('Not enough wallet balance', 'رصيد المحفظة غير كافٍ'),
-      adsStudioText('Charge your wallet first — the budget is held from it when you submit.', 'اشحن محفظتك أولاً — الميزانية تُحجز منها عند الإرسال.'),
+      adsStudioText(
+        `Charge your wallet first — the total budget (${adsStudioMoney(_budgetMinor)}) is held from it when you submit.`,
+        `اشحن محفظتك أولاً — إجمالي الميزانية (${adsStudioMoney(_budgetMinor)}) يُحجز منها عند الإرسال.`
+      ),
       'error'
     );
     _adsStudioActiveTab = 'dashboard';
@@ -1693,7 +2295,12 @@ async function submitAdsStudioCampaignOnce(id) {
     render();
     return true;
   } catch (error) {
-    showNotification(adsStudioText('Could not submit', 'تعذر الإرسال'), adsStudioRefusalText(error?.payload?.detail || error?.message) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
+    const detail = error?.payload?.detail || error?.message;
+    if (String(detail?.message || detail || '').includes('New ad requests are paused')) {
+      _adsStudioIntakeOpen = false;  // the switch changed since /me was read: redraw the Send buttons disabled
+      render();
+    }
+    showNotification(adsStudioText('Could not submit', 'تعذر الإرسال'), adsStudioRefusalText(detail) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
     return false;
   }
 }
@@ -1747,14 +2354,41 @@ function adsStudioReviewQueue() {  // the server refuses self-review: a reviewer
     && (isCurrentUserAdmin() || String(item.createdBy || '') !== String(state.currentUser?.id || '')));
 }
 
+// The prepared note for a legacy daily request sent back under owner decision D33.
+function adsStudioLegacyDailyNote() {
+  return adsStudioText(
+    'Our budgets changed: choose Daily or Total again and set the number of days, then send the request again. The amount held for it goes back to your available balance.',
+    'تغيّر نظام الميزانيات: اختر «يومي» أو «إجمالي» من جديد وحدّد عدد الأيام، ثم أرسل الطلب مرة أخرى. المبلغ المحجوز له يعود إلى رصيدك المتاح.'
+  );
+}
+
+// The reason picked for a request: the staff's choice, else "budget_dates" for a legacy daily
+// request (D33), else none (changes and reject then ask for one, T7).
+function adsStudioReviewReasonFor(campaign) {
+  const id = String(campaign?.id || '');
+  if (Object.prototype.hasOwnProperty.call(_adsStudioReviewReasons, id)) return _adsStudioReviewReasons[id];
+  return adsStudioIsLegacyDailyRequest(campaign) ? 'budget_dates' : '';
+}
+
 function renderAdsStudioReviewQueue() {
   const isAr = adsStudioIsAr();
   if (!adsStudioCanReview()) return renderAdsStudioEmptyState();
   const queue = adsStudioReviewQueue();
   return `<section><div class="mb-5"><h2 class="text-2xl font-black text-slate-900 dark:text-white">${isAr ? 'طلبات تحتاج المراجعة' : 'Campaign review queue'}</h2><p class="text-sm text-slate-500">${isAr ? 'الموافقة تخصم الميزانية المحجوزة من محفظة العميل؛ النشر على ميتا خطوة منفصلة.' : 'Approval charges the held budget of the customer; publishing on Meta is a separate step.'}</p></div><div class="space-y-5">${queue.length ? queue.map(campaign => {
-    const safeId = Security.escapeHtml(String(campaign.id || ''));
+    const campaignId = String(campaign.id || '');
+    const safeId = Security.escapeHtml(campaignId);
     const note = Security.escapeHtml(String(_adsStudioReviewNotes[String(campaign.id || '')] || ''));
-    return `${renderAdsStudioCampaignCard(campaign)}<div class="-mt-3 rounded-b-2xl border border-t-0 border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-900/10 p-4"><label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظة القرار' : 'Decision note'}</label><textarea id="ads-review-note-${safeId}" rows="2" maxlength="1000" oninput="setAdsStudioReviewNote('${safeId}', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اشرح أي تعديل مطلوب...' : 'Explain any requested change...'}">${note}</textarea><div class="mt-3 grid gap-2 sm:grid-cols-3"><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Changes Requested', this)" class="touch-target min-h-12 rounded-xl bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200 font-bold disabled:opacity-60">${isAr ? 'طلب تعديلات' : 'Request changes'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Rejected', this)" class="touch-target min-h-12 rounded-xl bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200 font-bold disabled:opacity-60">${isAr ? 'رفض' : 'Reject'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Approved', this)" class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${isAr ? 'موافقة' : 'Approve'}</button></div></div>`;
+    const reason = adsStudioReviewReasonFor(campaign);
+    const legacyDaily = adsStudioIsLegacyDailyRequest(campaign);
+    const confirming = _adsStudioApproveConfirmId === campaignId;
+    const held = adsStudioHeldMinorFor(campaign);
+    return `${renderAdsStudioCampaignCard(campaign)}<div class="-mt-3 rounded-b-2xl border border-t-0 border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-900/10 p-4">
+      ${legacyDaily ? `<div class="mb-3 flex items-start gap-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-800 dark:text-amber-200"><i data-lucide="triangle-alert" class="w-4 h-4 flex-shrink-0 mt-0.5"></i><span>${isAr ? 'طلب يومي قديم: يحجز ميزانية يوم واحد فقط. أعده للعميل بسبب «الميزانية أو التواريخ» ليعيد إرساله بالإجمالي.' : 'Old daily request: it holds one day\'s budget only. Send it back with the reason "Budget or dates" so the customer re-sends it with the total.'} <button type="button" onclick="adsStudioUseLegacyDailyNote('${safeId}')" class="font-bold underline">${isAr ? 'استخدم الملاحظة الجاهزة' : 'Use the prepared note'}</button></span></div>` : ''}
+      <label for="ads-review-reason-${safeId}" class="block text-sm font-bold mb-2">${isAr ? 'سبب القرار' : 'Reason'}</label>
+      <select id="ads-review-reason-${safeId}" onchange="setAdsStudioReviewReason('${safeId}', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4 mb-3"><option value="" ${reason ? '' : 'selected'}>${isAr ? 'اختر سبباً (مطلوب لطلب التعديل أو الرفض)' : 'Choose a reason (needed to send back or reject)'}</option>${ADS_STUDIO_REVIEW_REASONS.map(([code, en, ar]) => `<option value="${code}" ${reason === code ? 'selected' : ''}>${isAr ? ar : en}</option>`).join('')}</select>
+      <label class="block text-sm font-bold mb-2">${isAr ? 'ملاحظة القرار' : 'Decision note'}</label><textarea id="ads-review-note-${safeId}" rows="2" maxlength="1000" oninput="setAdsStudioReviewNote('${safeId}', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اشرح أي تعديل مطلوب...' : 'Explain any requested change...'}">${note}</textarea>
+      ${confirming ? `<div class="mt-3 rounded-xl border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/20 p-3 text-sm text-emerald-900 dark:text-emerald-100" role="alert"><p class="font-bold">${isAr ? `الموافقة على هذا الطلب؟ تخصم ${Security.escapeHtml(adsStudioMoney(held))} المحجوزة من محفظة العميل؛ النشر على ميتا خطوة منفصلة.` : `Approve this request? It charges the held ${Security.escapeHtml(adsStudioMoney(held))} from the customer's wallet; publishing on Meta is a separate step.`}</p><div class="mt-3 grid gap-2 sm:grid-cols-2"><button type="button" onclick="cancelAdsStudioApproval()" class="touch-target min-h-12 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold">${isAr ? 'إلغاء' : 'Cancel'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Approved', this, true)" class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${isAr ? 'تأكيد الموافقة' : 'Confirm approval'}</button></div></div>` : ''}
+      <div class="mt-3 grid gap-2 sm:grid-cols-3"><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Changes Requested', this)" class="touch-target min-h-12 rounded-xl bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200 font-bold disabled:opacity-60">${isAr ? 'طلب تعديلات' : 'Request changes'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Rejected', this)" class="touch-target min-h-12 rounded-xl bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200 font-bold disabled:opacity-60">${isAr ? 'رفض' : 'Reject'}</button><button type="button" onclick="reviewAdsStudioCampaign('${safeId}','Approved', this)" class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${isAr ? 'موافقة' : 'Approve'}</button></div></div>`;
   }).join('') : `<div class="glass-panel rounded-2xl p-10 text-center"><i data-lucide="badge-check" class="w-12 h-12 mx-auto text-emerald-400 mb-3"></i><h3 class="font-black text-lg text-slate-900 dark:text-white">${isAr ? 'تمت مراجعة كل الطلبات' : 'Review queue is clear'}</h3><p class="text-sm text-slate-500 mt-1">${isAr ? 'ستظهر الحملات الجديدة هنا بعد الإرسال.' : 'New submitted campaigns will appear here.'}</p></div>`}</div></section>`;
 }
 
@@ -1764,11 +2398,49 @@ function setAdsStudioReviewNote(id, value) {
   _adsStudioReviewNotes[campaignId] = String(value || '').slice(0, 1000);
 }
 
-function reviewAdsStudioCampaign(id, decision, button = null) {
+function setAdsStudioReviewReason(id, value) {
+  const campaignId = String(id || '');
+  if (!campaignId) return;
+  const code = String(value || '');
+  _adsStudioReviewReasons[campaignId] = ADS_STUDIO_REVIEW_REASONS.some(([known]) => known === code) ? code : '';
+}
+
+function adsStudioUseLegacyDailyNote(id) {
+  const campaignId = String(id || '');
+  if (!campaignId) return;
+  setAdsStudioReviewNote(campaignId, adsStudioLegacyDailyNote());
+  setAdsStudioReviewReason(campaignId, 'budget_dates');
+  const field = typeof document !== 'undefined' ? document.getElementById(`ads-review-note-${campaignId}`) : null;
+  if (field) field.value = _adsStudioReviewNotes[campaignId];
+  const select = typeof document !== 'undefined' ? document.getElementById(`ads-review-reason-${campaignId}`) : null;
+  if (select) select.value = 'budget_dates';
+}
+
+function cancelAdsStudioApproval() {
+  _adsStudioApproveConfirmId = '';
+  render();
+}
+
+// POST /review with the reason code (P1-12). Same request as apiReviewAdCampaignRequest (startup
+// bundle, left unchanged) plus reviewReasonCode, the field the server stores on the request.
+async function adsStudioApiReview(campaignId, expectedLastModified, decision, note, operationId, reasonCode) {
+  const identity = getServerSessionIdentity();
+  const body = { expectedLastModified, decision, note, operationId };
+  if (reasonCode) body.reviewReasonCode = reasonCode;
+  const entity = await requestValidatedServerEntity('adCampaignRequests', 'review', () =>
+    withRetry(() => apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/review`, {
+      method: 'POST', body
+    }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 2, 500)
+  );
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  return entity;
+}
+
+function reviewAdsStudioCampaign(id, decision, button = null, confirmed = false) {
   const campaignId = String(id || '');
   if (_adsStudioReviewPromises.has(campaignId)) return _adsStudioReviewPromises.get(campaignId);
   setAdsStudioActionButtonBusy(button, true);
-  const operation = reviewAdsStudioCampaignOnce(campaignId, decision);
+  const operation = reviewAdsStudioCampaignOnce(campaignId, decision, confirmed === true);
   _adsStudioReviewPromises.set(campaignId, operation);
   const cleanup = () => {
     if (_adsStudioReviewPromises.get(campaignId) === operation) _adsStudioReviewPromises.delete(campaignId);
@@ -1778,24 +2450,37 @@ function reviewAdsStudioCampaign(id, decision, button = null) {
   return operation;
 }
 
-async function reviewAdsStudioCampaignOnce(id, decision) {
+async function reviewAdsStudioCampaignOnce(id, decision, confirmed = false) {
   if (!adsStudioCanReview() || !['Approved', 'Changes Requested', 'Rejected'].includes(decision)) return;
   const campaign = findVisibleAdsStudioCampaign(id);
   if (!campaign || campaign.status !== 'Submitted') return;
-  const inputValue = document.getElementById(`ads-review-note-${id}`)?.value;
+  const inputValue = typeof document !== 'undefined' ? document.getElementById(`ads-review-note-${id}`)?.value : undefined;
   if (inputValue !== undefined) setAdsStudioReviewNote(id, inputValue);
+  const reasonValue = typeof document !== 'undefined' ? document.getElementById(`ads-review-reason-${id}`)?.value : undefined;
+  if (reasonValue !== undefined) setAdsStudioReviewReason(id, reasonValue);
   const note = Security.sanitizeInput(String(_adsStudioReviewNotes[id] || ''), { maxLength: 1000 }).trim();
+  const reasonCode = decision === 'Approved' ? '' : adsStudioReviewReasonFor(campaign);
+  if (decision !== 'Approved' && !reasonCode) {
+    showNotification(adsStudioText('Choose a reason', 'اختر سبباً'), adsStudioText('Choose a reason for this decision.', 'اختر سبباً لهذا القرار.'), 'warning');
+    return;
+  }
   if (decision !== 'Approved' && !note) {
     showNotification(adsStudioText('Add a note', 'أضف ملاحظة'), adsStudioText('Explain what the customer should change.', 'اشرح للعميل ما الذي يجب تعديله.'), 'warning');
     return;
   }
-  if (decision === 'Approved' && !confirm(adsStudioText('Approve this request? Approval charges the held budget from the customer wallet; publishing on Meta is a separate step.', 'الموافقة على هذا الطلب؟ الموافقة تخصم الميزانية المحجوزة من محفظة العميل؛ النشر على ميتا خطوة منفصلة.'))) return;
+  // Approval moves the customer's money: an in-page confirmation row, never a native dialog.
+  if (decision === 'Approved' && !confirmed) {
+    _adsStudioApproveConfirmId = String(id);
+    render();
+    return;
+  }
+  _adsStudioApproveConfirmId = '';
   try {
     if (isServerModeEnabled()) {
       const attempt = adsStudioActionAttempt('review', campaign.id, Number(campaign._lastModified));
       let entity;
       try {
-        entity = await apiReviewAdCampaignRequest(campaign.id, attempt.expectedLastModified, decision, note, attempt.operationId);
+        entity = await adsStudioApiReview(campaign.id, attempt.expectedLastModified, decision, note, attempt.operationId, reasonCode);
       } catch (e) {
         const fresh = e?.status === 409 ? await adsStudioReloadCampaign(campaign.id) : null;
         if (!fresh || String(fresh.data?.status || '') !== decision) throw e;
@@ -1803,11 +2488,12 @@ async function reviewAdsStudioCampaignOnce(id, decision) {
       }
       upsertAdsStudioEntity(entity);
     } else {
-      const saved = await updateRecord(state.adCampaignRequests, campaign.id, { status: decision, reviewNote: note, reviewedAt: new Date().toISOString(), reviewedBy: state.currentUser?.id }, campaign._lastModified);
+      const saved = await updateRecord(state.adCampaignRequests, campaign.id, { status: decision, reviewNote: note, reviewReasonCode: reasonCode, reviewedAt: new Date().toISOString(), reviewedBy: state.currentUser?.id }, campaign._lastModified);
       if (!saved) return;
     }
     delete _adsStudioReviewNotes[id];
-    showNotification(adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`Campaign marked ${decision}.`, `تم تحديث حالة الحملة: ${decision}.`), 'success');
+    delete _adsStudioReviewReasons[id];
+    showNotification(adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`Campaign marked ${decision}.`, `تم تحديث حالة الحملة: ${adsStudioStatusMeta(decision).labelAr}.`), 'success');
     render();
   } catch (error) {
     showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), adsStudioRefusalText(error?.payload?.detail || error?.message) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.'), 'error');
@@ -1845,6 +2531,8 @@ function _adsStudioUsdToLydRate() {
   return Number(state.defaultExchangeRate) > 0 ? Number(state.defaultExchangeRate) : 0;
 }
 
+// Runs on every key with the raw text; the charge box is cleaned (sanitizeMoneyInput) only on change,
+// so "1,500" typed key by key stays fifteen hundred (see adsStudioOnBudgetInput).
 function adsStudioUpdateLydPreview() {
   const el = document.getElementById('ads-studio-lyd-preview');
   if (!el) return;
@@ -1860,7 +2548,7 @@ function adsStudioWalletHeldMinor() {
   const uid = String(state.currentUser?.id || '');
   return (Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [])
     .filter(c => c && !c._deleted && String(c.createdBy || '') === uid && String(c.status || '') === 'Submitted')
-    .reduce((sum, c) => sum + Math.max(parseInt(c.budgetMinorUSD, 10) || 0, 0), 0);
+    .reduce((sum, c) => sum + adsStudioHeldMinorFor(c), 0);  // the total, or a legacy row's budget field
 }
 
 function adsStudioWalletBalanceMinor() {
@@ -2106,7 +2794,7 @@ function renderAdsStudioWallet() {
             <select id="ads-studio-charge-currency" onchange="adsStudioUpdateLydPreview()" class="ml-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200"><option value="USD">${adsStudioText('USD (campaigns)', 'دولار (الحملات)')}</option><option value="LYD">${adsStudioText('LYD (subscription plans)', 'دينار (باقات الاشتراك)')}</option></select>
           </label>
           <div class="studio-wallet-charge-preview flex flex-wrap items-center gap-3">
-            <input id="ads-studio-charge-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="50.00" oninput="sanitizeMoneyInput(this); adsStudioUpdateLydPreview()"
+            <input id="ads-studio-charge-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="50.00" oninput="adsStudioUpdateLydPreview()" onchange="sanitizeMoneyInput(this); adsStudioUpdateLydPreview()"
               class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
             <span id="ads-studio-lyd-preview" class="text-sm font-bold text-blue-700 dark:text-blue-300"></span>
           </div>
