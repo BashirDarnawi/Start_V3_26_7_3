@@ -1317,14 +1317,35 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     return attempted
 
 
+COMMENT_SOURCES = ("webhook", "poll", "manual_check")  # socialReplyLog.source (PLAN §7.1)
+
+
 def process_comment(
-    *, platform: str, entry_id: str, comment_id: str, post_ref: str, from_id: str, text: str
+    *, platform: str, entry_id: str, comment_id: str, post_ref: str, from_id: str, text: str,
+    source: str = "webhook", comment_at: Any = None,
 ) -> dict[str, Any] | None:
     """Answer one new comment according to the page owner's rules.
 
     Returns the reply-log data when a rule acted, else None. Never raises:
-    the webhook path must always acknowledge Meta.
+    the webhook path must always acknowledge Meta. (An unknown ``source`` is
+    a programming mistake: ValueError before anything runs.)
+
+    ``source`` is kept on the log row: ``webhook`` (Meta delivered the comment)
+    or ``poll`` / ``manual_check`` (Albayan read it itself, studio_ig_poll.py,
+    so it may be old). A comment Albayan read needs its time ``comment_at``
+    (unknown: never answered), and only rules created before it (the same
+    second counts) may answer it. The log row id depends on owner, platform
+    and comment only, never on the source, so a comment is answered once
+    however many times a check, a poll or the webhook hands it over.
     """
+    if source not in COMMENT_SOURCES:
+        raise ValueError(f"Unknown comment source {str(source)[:40]!r}")
+    written_second: int | None = None
+    if source != "webhook":
+        written = _parse_iso(comment_at)
+        if written is None:
+            return None  # a comment read without its time may be old: never answered
+        written_second = int(written.timestamp())
     ctx = _ctx()
     page_entity = _find_page(platform, entry_id)
     if not page_entity:
@@ -1341,6 +1362,9 @@ def process_comment(
             (r["data"] for r in _rows(RULES_TYPE, owner_id) if _bool(r["data"].get("enabled"), True)),
             key=lambda r: (int(r.get("_created") or 0), str(r.get("id") or "")),
         )
+        if written_second is not None:
+            # A rule never answers a comment written before the rule existed (unknown creation: never).
+            rules = [r for r in rules if 0 < int(r.get("_created") or 0) // 1000 <= written_second]
         if not rules:
             return None
         replied_rules = (
@@ -1389,6 +1413,7 @@ def process_comment(
             "processing": True,
             "at": _iso_now(),
             "error": "",
+            "source": source,
         }
         try:
             # The row IS the idempotency claim: a duplicate delivery hits 409.

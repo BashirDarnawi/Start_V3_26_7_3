@@ -62,6 +62,7 @@ from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .social_studio import LOG_TYPE, PAGES_TYPE, normalize_text
 from .studio_diagnostics import CAMPAIGN_STATUSES, libya_today
 from .studio_errors import studio_error
+from .studio_ig_poll import read_recent_ig_comments  # the Instagram reader lives with the comment check (P1-23)
 from .studio_types import derived_id
 
 FACT_WINDOW_DAYS = 30
@@ -69,9 +70,6 @@ FACT_READS_PER_MINUTE = 20
 FACT_REFRESHES = 2
 FACT_REFRESH_WINDOW_MS = 10 * 60_000
 TEST_PRESSES_PER_MINUTE = 10
-IG_MEDIA_READ = 10           # recent media asked for
-IG_MEDIA_WITH_COMMENTS = 5   # media whose comments are read (newest first)
-IG_COMMENTS_PER_MEDIA = 50
 REPLY_TEXT_MAX = 300
 MATCH_TEXT_MIN, MATCH_TEXT_MAX = 6, 40  # a distinctive code: 6-40 characters with at least one digit
 # Reply errors that prove Meta applied nothing (the claim is given back) and Meta's own refusals
@@ -322,37 +320,6 @@ def release(section: str, key: str, today: str, *, state: str) -> None:
 # ---------------------------------------------------------------------------
 # Instagram read test (P0-05e)
 # ---------------------------------------------------------------------------
-
-
-def read_recent_ig_comments(client: Any, ig_user_id: str, *, with_text: bool) -> dict[str, Any]:
-    """Recent media of the account, then the comments of the newest media that have any.
-
-    Returns counts, and the comments (id, time, text when asked) for this request only.
-    A Meta refusal stops the read: ``errorCode``/``providerCode`` say why (``pausedLocally``:
-    Albayan's own Meta pause refused the call, so it never reached Meta).
-    """
-    out: dict[str, Any] = {"mediaRead": 0, "mediaWithComments": 0, "commentsRead": 0, "comments": [],
-                           "errorCode": "", "providerCode": "", "pausedLocally": False}
-    try:
-        media = client._get(f"{ig_user_id}/media", {"fields": "id,comments_count,timestamp", "limit": IG_MEDIA_READ})
-        rows = [row for row in (media.get("data") or []) if isinstance(row, dict)][:IG_MEDIA_READ]
-        out["mediaRead"] = len(rows)
-        commented = [row for row in rows if _meta._metric_int(row.get("comments_count")) > 0
-                     and _META_ID_RE.fullmatch(str(row.get("id") or ""))]
-        out["mediaWithComments"] = len(commented)
-        fields = "id,timestamp,text" if with_text else "id,timestamp"
-        for row in commented[:IG_MEDIA_WITH_COMMENTS]:
-            payload = client._get(f"{row['id']}/comments", {"fields": fields, "limit": IG_COMMENTS_PER_MEDIA})
-            for item in payload.get("data") or []:
-                comment_id = str(item.get("id") or "") if isinstance(item, dict) else ""
-                if _META_ID_RE.fullmatch(comment_id):
-                    out["comments"].append({"id": comment_id, "at": str(item.get("timestamp") or ""),
-                                            "text": str(item.get("text") or "") if with_text else ""})
-    except _meta.MetaAdsError as error:
-        out["errorCode"], out["providerCode"] = error.code, error.provider_code
-        out["pausedLocally"] = _meta.is_meta_pause_refusal(error)
-    out["commentsRead"] = len(out["comments"])
-    return out
 
 
 def reply_target(comments: list[dict[str, Any]], comment_id: str, containing: str) -> tuple[str, int]:
