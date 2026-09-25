@@ -4,19 +4,25 @@
 // The v2 frame, drawn only when GET /api/studio/me says so: ui 'v2' for the customer layout,
 // staffDesk 'v2' for the Team desk (staff only). renderAdsStudioView (15c) asks renderStudioV2View()
 // first and draws the classic screens, unchanged, whenever the answer is '' (classic, local mode,
-// /me unknown or failed, or any error here).
+// /me unknown or failed, or any error here). The layout is fixed by the first /me answer of a visit
+// to the studio; a later answer changes it only at the next page load or the next entry.
 //
 // Addresses stay on ?tab= (one view, no new paths), with &section=, &id= and &step=:
 //   customer: home (the pinned 'dashboard' too), campaigns, replies, wallet, help, inbox, account,
-//             builder (&section=boost|full &step=N, also any tab with section=builder), posts and,
-//             for staff only, review;
+//             builder (&section=boost|full &step=N, also any tab with section=builder) and posts.
+//             A staff member in this layout while the Team desk is still off (rollout stage 2) keeps
+//             the CLASSIC staff screens: review (review and launch queues, health) and, for an admin,
+//             wallet (the classic Overview with the payment confirmations); a "Team desk" header
+//             button opens the classic review;
 //   Team desk: tab=review&section=requests|launch|settle|tickets|health|more.
 // Back (PLAN.md §5.1): builder step N -> N-1; a detail (&id=) -> its list; any other tab -> Home
-// (the desk: its Requests); Home -> leaves the studio. The browser history mirrors that chain: every
-// studio entry carries history.state.studioV2.chain (the keys from Home to itself). Leaving Home
-// pushes, moving between tabs replaces, going up walks back through history, so the in-app Back
-// button and the browser's Back always agree. A screen opened straight from a link gets its parents
-// put under it. The builder hides the section bar (focus mode).
+// (the desk: its Requests); Home -> leaves the studio: back to the app's screen it was opened from,
+// else to the studio's way out (adsStudioBackTarget), else no button. The browser history mirrors
+// that chain: every studio entry carries history.state.studioV2.chain (the keys from Home to itself).
+// Leaving Home pushes, moving between tabs replaces, going up walks back through history, so the
+// in-app Back button and the browser's Back always agree. A screen opened straight from a link (or
+// after a reload this tab has no proof of) gets its parents put under it. The builder hides the
+// section bar (focus mode).
 // Screens not built yet show "Coming soon in the new studio" inside their own root.
 
 const STUDIO_V2_TABS = Object.freeze([
@@ -53,22 +59,93 @@ const STUDIO_V2_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/;
 const STUDIO_V2_SECTION_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const STUDIO_V2_WAIT_MS = 3000;  // at most this long a known v2 user sees "Opening the studio…" instead of classic
 const STUDIO_V2_LAYOUT_KEY = 'albayan.studio.v2.layout.';  // + user id: the layout /me gave last time (this browser only)
-const _studioV2 = { shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false };
+const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (this tab): the chain and address of the last v2 draw
+// shown: what the last draw was ('staff', 'customer', 'desk-classic', 'wait', 'classic'). layout: the
+// pinned layout (studioV2Layout). repin: entered the studio while /me was being read again. session:
+// the /me session the visit notes belong to. fromApp: this visit came from another screen of this app
+// in this document (so Home's Back is the browser's Back). popping: a Back/Forward move is running.
+const _studioV2 = {
+  shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false,
+  layout: null, repin: false, session: -1, fromApp: false, popping: false
+};
 
 // ------------------------------------------------------------------ which layout
 
+// A /me answer's layout: 'staff' (the Team desk), 'customer' (the v2 customer layout) or '' (classic).
+function studioV2FrameOf(layout) {
+  if (!layout) return '';
+  if (layout.staffDesk === 'v2' && layout.isStaff) return 'staff';
+  return layout.ui === 'v2' ? 'customer' : '';
+}
+
+// The layout part of /me (ui, staffDesk, isStaff, isAdmin), pinned at the first answer this visit
+// sees: a later answer (the re-read every few minutes) changes only what the screens read from
+// studioMe() themselves (services, intake, limits, contact). A layout change applies at the next page
+// load or the next entry into the studio (studioV2NoteVisit), never under the reader's hands.
+// null while /me is not known.
+function studioV2Layout() {
+  const uid = studioMeUserId();
+  if (!uid) return null;
+  const session = studioMeSession();
+  const pin = _studioV2.layout;
+  if (pin && pin.uid === uid && pin.session === session) return pin;
+  const me = studioMe();
+  if (!me) return null;
+  _studioV2.layout = Object.freeze({ uid, session, ui: me.ui, staffDesk: me.staffDesk, isStaff: me.isStaff, isAdmin: me.isAdmin });
+  return _studioV2.layout;
+}
+
 // 'staff' (the Team desk), 'customer' (the v2 customer layout) or '' (classic, or /me not known).
 function studioV2Frame() {
-  const me = studioMe();
-  if (!me) return '';
-  if (me.staffDesk === 'v2' && me.isStaff) return 'staff';
-  return me.ui === 'v2' ? 'customer' : '';
+  return studioV2FrameOf(studioV2Layout());
 }
 
 function studioV2IsStaff() {
-  const me = studioMe();
-  return !!(me && me.isStaff);
+  const layout = studioV2Layout();
+  return !!(layout && layout.isStaff);
 }
+
+// Rollout stage 2: a staff member in the customer allowlist while the Team desk is still off gets the
+// customer layout, but the staff screens stay CLASSIC until the desk is switched on (none of them is
+// in the customer layout): the review tab (review queue, launch queue, health) and, for an admin, the
+// wallet tab (the classic Overview, where the payment confirmations of all customers are).
+// 'review' / 'wallet' = the classic tab to draw for this route, '' = the v2 screen.
+function studioV2DeskClassicTab(route) {
+  const layout = studioV2Layout();
+  if (!route || !layout || !layout.isStaff || studioV2FrameOf(layout) !== 'customer') return '';
+  if (route.tab === 'review') return 'review';
+  return route.tab === 'wallet' && layout.isAdmin ? 'wallet' : '';
+}
+
+// Entering the studio (after another screen of this app was drawn). The newest /me layout applies from
+// here: at once, or when the read on its way answers. "Leave the studio" learns whether the entry under
+// the studio's first one is this app's own screen in this document: yes when the studio was opened
+// from that screen; not for a return through Back/Forward (the entry carries a studio mark, or a
+// history move is running), nor for a sign-in, a reload or the /studio site (nothing drawn before).
+function studioV2NoteVisit() {
+  const session = studioMeSession();
+  if (_studioV2.session !== session) {  // signed out and in again, or another user: the notes are gone
+    _studioV2.session = session;
+    _studioV2.fromApp = false;
+    _studioV2.repin = false;
+  }
+  const previous = typeof _lastRenderedView !== 'undefined' ? _lastRenderedView : null;
+  if (!previous || previous === 'ads-studio') return;
+  _studioV2.fromApp = !IS_STUDIO_SHELL && !_studioV2.popping && !studioV2HistoryChain();
+  if (studioMeLoading()) _studioV2.repin = true;
+  else _studioV2.layout = null;
+}
+
+// Back/Forward: the capture listener runs before the router's own (registered at start-up), so the
+// draw it causes knows it is a return. The flag clears once the move has been handled.
+function studioV2OnPopstate() {
+  _studioV2.popping = true;
+  setTimeout(() => { _studioV2.popping = false; }, 0);
+}
+
+try {
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') window.addEventListener('popstate', studioV2OnPopstate, true);
+} catch (_) { /* only the studio mark on the entry tells a return then */ }
 
 function studioV2Remembered(uid) {
   try { return String(window.localStorage.getItem(STUDIO_V2_LAYOUT_KEY + uid) || ''); } catch (_) { return ''; }
@@ -106,16 +183,26 @@ function studioV2Rerender() {
   } catch (_) { /* the next render shows the right layout */ }
 }
 
+// What renderStudioV2View draws for the pinned layout and the address (the 'wait' state aside).
+function studioV2Wanted() {
+  const frame = studioV2Frame();
+  if (frame === 'customer' && studioV2DeskClassicTab(studioV2Route(studioV2ReadAddress(), 'customer'))) return 'desk-classic';
+  return frame || 'classic';
+}
+
 // A /me answer arrived (or failed): draw again only when the layout on screen is no longer right.
 function studioV2OnMe(me) {
   const uid = studioMeUserId();
   if (!uid) return;
-  const frame = studioV2Frame();
-  if (me) studioV2Remember(uid, frame);
+  if (me) studioV2Remember(uid, studioV2FrameOf(me));  // the next page's first guess follows the newest answer
+  if (_studioV2.repin) {  // the studio was entered while this answer was on its way: its layout applies
+    _studioV2.repin = false;
+    if (me) _studioV2.layout = null;
+  }
   if (!_studioV2.shown) return;
-  const want = frame || 'classic';
+  const want = studioV2Wanted();
   if (want !== _studioV2.shown) studioV2Rerender();
-  else if (want === 'classic' && me && !STUDIO_V2_CLASSIC_TABS.includes(String(_adsStudioActiveTab || ''))) studioV2Rerender();
+  else if (want === 'classic' && studioV2Layout() && !STUDIO_V2_CLASSIC_TABS.includes(String(_adsStudioActiveTab || ''))) studioV2Rerender();
 }
 
 studioMeSubscribe(studioV2OnMe);
@@ -124,12 +211,24 @@ studioMeSubscribe(studioV2OnMe);
 function renderStudioV2View() {
   try {
     studioLoadMe();  // reuses a fresh answer, joins a read on its way, re-reads an old one
+    studioV2NoteVisit();
     const frame = studioV2Frame();
+    if (frame) studioV2RestoreOpeningAddress();
     if (frame === 'staff') { _studioV2.shown = 'staff'; return renderStudioV2StaffFrame(); }
-    if (frame === 'customer') { _studioV2.shown = 'customer'; return renderStudioV2CustomerFrame(); }
+    if (frame === 'customer') {
+      const route = studioV2Route(studioV2ReadAddress(), 'customer');
+      const deskTab = studioV2DeskClassicTab(route);
+      if (deskTab) {  // the classic staff screen, drawn by 15c for this tab
+        _studioV2.shown = 'desk-classic';
+        _adsStudioActiveTab = deskTab;
+        return '';
+      }
+      _studioV2.shown = 'customer';
+      return renderStudioV2CustomerFrame(route);
+    }
     if (!studioMe() && studioV2ShouldWait()) { _studioV2.shown = 'wait'; return renderStudioV2Waiting(); }
     _studioV2.shown = 'classic';
-    if (studioMe()) studioV2ClassicTabFix();
+    if (studioV2Layout()) studioV2ClassicTabFix();
     return '';
   } catch (error) {
     if (!_studioV2.warned) {
@@ -261,9 +360,33 @@ function studioV2NavigationType() {
   } catch (_) { return 'navigate'; }
 }
 
+function studioV2Here() {
+  return `${window.location.pathname || '/'}${window.location.search || ''}`;
+}
+
+// This tab's proof of its last v2 draw: the chain and the address (sessionStorage lives as long as the
+// tab and survives a reload, never shared with another tab).
+function studioV2SaveProof() {
+  try {
+    const chain = studioV2HistoryChain();
+    if (chain) window.sessionStorage.setItem(STUDIO_V2_PROOF_KEY, JSON.stringify({ chain, url: studioV2Here() }));
+  } catch (_) { /* no storage (a private window): a reload rebuilds the path instead */ }
+}
+
+// True when the last v2 draw of this tab was this very screen with this very chain.
+function studioV2Proven(keys) {
+  try {
+    const proof = JSON.parse(window.sessionStorage.getItem(STUDIO_V2_PROOF_KEY) || 'null');
+    return !!proof && typeof proof === 'object' && proof.url === studioV2Here()
+      && Array.isArray(proof.chain) && JSON.stringify(proof.chain) === JSON.stringify(keys);
+  } catch (_) { return false; }
+}
+
 // On every v2 draw: the entry on screen carries its chain. A screen opened straight from a link (or
-// from another page of the app) gets Home and its other parents put under it; after a reload or a
-// return through history the entries under it are the studio's own and only the mark is renewed.
+// from another page of the app) gets Home and its other parents put under it. After a reload or a
+// return through history the entries under it are trusted to be the studio's own (only the mark is
+// renewed) when this tab kept proof that it drew this screen with this chain before; without that
+// proof (another page was there, or the layout was classic then) the path is rebuilt the same way.
 function studioV2EnsureHistory(route, frame) {
   try {
     const current = window.history.state;
@@ -273,18 +396,21 @@ function studioV2EnsureHistory(route, frame) {
     const chain = studioV2HistoryChain();
     const firstDraw = !_studioV2.docRendered;
     _studioV2.docRendered = true;
-    if (chain && chain[chain.length - 1] === keys[keys.length - 1]) return;
-    if (path.length === 1 || (firstDraw && studioV2NavigationType() !== 'navigate')) {
+    if (chain && chain[chain.length - 1] === keys[keys.length - 1]) {
+      // already marked: nothing to write
+    } else if (path.length === 1 || (firstDraw && studioV2NavigationType() !== 'navigate' && studioV2Proven(keys))) {
       window.history.replaceState(Object.assign({}, current || {}, { view: 'ads-studio', studioV2: { chain: keys } }), '', window.location.href);
-      return;
+    } else {
+      path.forEach((step, index) => studioV2WriteEntry(step, keys.slice(0, index + 1), index === 0));
     }
-    path.forEach((step, index) => studioV2WriteEntry(step, keys.slice(0, index + 1), index === 0));
+    studioV2SaveProof();
   } catch (_) { /* the address stays as it is */ }
 }
 
 // The start-up address rewrite keeps only ?tab= (and loses even that when this bundle arrives after
-// it). On the first v2 draw of a page opened moments ago, the address it was opened with comes back
-// (only tab, section, id and step), unless the reader has already moved somewhere else.
+// it). On the first v2 draw of a page opened moments ago (a classic staff screen of the v2 layout
+// included: it is chosen by the address), the address it was opened with comes back (only tab,
+// section, id and step), unless the reader has already moved somewhere else.
 function studioV2RestoreOpeningAddress() {
   if (_studioV2.docRendered) return;
   try {
@@ -385,16 +511,20 @@ function studioV2CloseBuilder() {
   return studioV2Go(studioV2Home('customer'));
 }
 
+// "Leave the studio" (Back on Home). The number of history entries says nothing about whose entries
+// lie below (another site, or nothing at all), so: the browser's Back only when this visit came from
+// another screen of this app in this document (studioV2NoteVisit); otherwise the studio's own way
+// out (adsStudioBackTarget: Smart Systems for an admin, the user's landing screen), and no button
+// when there is none (the /studio site, a customer whose only screen is the studio).
 function studioV2CanLeave() {
-  try { if (window.history.length > 1) return true; } catch (_) {}
-  return !IS_STUDIO_SHELL && !!adsStudioBackTarget();
+  return _studioV2.fromApp || !!adsStudioBackTarget();
 }
 
 function studioV2Leave() {
-  try {
-    if (window.history.length > 1) { window.history.back(); return true; }
-  } catch (_) {}
-  const target = IS_STUDIO_SHELL ? '' : adsStudioBackTarget();
+  if (_studioV2.fromApp) {
+    try { window.history.back(); return true; } catch (_) {}
+  }
+  const target = adsStudioBackTarget();
   if (target && typeof navigateTo === 'function') { navigateTo(target); return true; }
   return false;
 }
@@ -417,22 +547,40 @@ function studioHandleBack() {
 }
 
 // The pinned tab setter and the address restore keep working in both layouts: in v2 the setter
-// drives the v2 address (same ?tab=, the Back model's history); the restore also keeps the v2-only
-// tabs, so a reload or a link to ?tab=wallet survives the start-up address rewrite (which keeps ?tab=).
+// drives the v2 address (same ?tab=, the Back model's history); in the v2 layout the restore also
+// keeps the v2-only tabs, so a return through history to ?tab=wallet keeps the classic tab variable
+// (and the whole-view address it feeds) on the same screen. The v2 frame itself reads the address.
 const _studioV2ClassicSetTab = typeof setAdsStudioTab === 'function' ? setAdsStudioTab : null;
 const _studioV2ClassicRestoreTab = typeof restoreAdsStudioTabFromUrl === 'function' ? restoreAdsStudioTabFromUrl : null;
 
 setAdsStudioTab = function setAdsStudioTabForLayout(tabId) {
   if (studioV2Frame() && typeof state !== 'undefined' && state.currentView === 'ads-studio') {
     const tab = String(tabId || '');
+    // The classic review tab of a staff member while the Team desk is off: the classic setter draws it.
+    if (tab === 'review' && studioV2DeskClassicTab({ tab })) { studioV2ClassicDeskSetTab(tabId); return; }
     if (tab === 'dashboard' || STUDIO_V2_TABS.some(item => item[0] === tab)) studioV2Go({ tab });
     return;
   }
   if (_studioV2ClassicSetTab) _studioV2ClassicSetTab(tabId);
 };
 
+// The classic setter replaces the entry on screen (?tab=review) with its own state: the entry keeps
+// its place in the Back model (Home under it), so the in-app and the browser's Back still agree.
+function studioV2ClassicDeskSetTab(tabId) {
+  const before = studioV2HistoryChain();
+  if (_studioV2ClassicSetTab) _studioV2ClassicSetTab(tabId);
+  try {
+    const keys = studioV2Path(studioV2Route(studioV2ReadAddress(), 'customer'), 'customer').map(studioV2Key);
+    if (!before || before.length !== keys.length || before.slice(0, -1).join('\n') !== keys.slice(0, -1).join('\n')) return;
+    window.history.replaceState(Object.assign({}, window.history.state || {}, { view: 'ads-studio', studioV2: { chain: keys } }), '', window.location.href);
+  } catch (_) { /* the entry stays unmarked: the next v2 move replaces it */ }
+}
+
 restoreAdsStudioTabFromUrl = function restoreAdsStudioTabFromUrlForLayout() {
   if (_studioV2ClassicRestoreTab) _studioV2ClassicRestoreTab();
+  // The v2-only addresses mean something only in the v2 layout: while /me is on its way, failed or
+  // says classic, the classic rule alone applies (an address it does not know keeps the tab on screen).
+  if (!studioV2Frame()) return;
   try {
     const tab = String(new URLSearchParams(window.location.search || '').get('tab') || '');
     if (tab === 'home') _adsStudioActiveTab = 'dashboard';
@@ -491,7 +639,8 @@ function renderStudioV2Header(route, frame) {
     const close = adsStudioText('Close', 'إغلاق');
     actions = `<button type="button" data-testid="studio-close" class="studio-v2-icon-btn" onclick="studioV2CloseBuilder()" aria-label="${studioEsc(close)}" title="${studioEsc(close)}">${studioV2Icon('x')}</button>`;
   } else if (!staff) {
-    actions = headButton('inbox') + headButton('account');
+    // Staff here have the Team desk off: its button opens their classic review tab.
+    actions = (studioV2IsStaff() ? headButton('review') : '') + headButton('inbox') + headButton('account');
   }
   return `
       <header class="studio-v2-header">
@@ -571,9 +720,8 @@ function renderStudioV2CustomerScreen(route) {
         </section>`;
 }
 
-function renderStudioV2CustomerFrame() {
-  studioV2RestoreOpeningAddress();
-  const route = studioV2Route(studioV2ReadAddress(), 'customer');
+// route: the address as studioV2Route reads it for this frame (renderStudioV2View).
+function renderStudioV2CustomerFrame(route) {
   studioV2EnsureHistory(route, 'customer');
   studioV2SyncClassicTab(route);
   const focus = route.tab === 'builder';
@@ -594,7 +742,6 @@ function renderStudioV2CustomerFrame() {
 // The Team desk frame (P2-02d): its own sections, no wallet or payment items (admin-only items live
 // under More once they are built). Sections are filled in Phase 3.
 function renderStudioV2StaffFrame() {
-  studioV2RestoreOpeningAddress();
   const route = studioV2Route(studioV2ReadAddress(), 'staff');
   studioV2EnsureHistory(route, 'staff');
   studioV2SyncClassicTab(route);

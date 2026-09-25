@@ -16,7 +16,8 @@
 //   stage keys, looks and flag labels are checked against server/systems/ads_studio/stage_cases.json.
 // - studioUsd() / studioLyd(): money in its own currency (LYD never wears "$").
 // - studioParseAmount() / studioParsePhone(): typed amounts (Arabic digits, ٫ and , decimals,
-//   thousands separators) and phone numbers (E.164; the Libyan 09x / 218 / 00218 forms).
+//   thousands separators; a mix that could mean two amounts is refused) and phone numbers (E.164;
+//   the Libyan 09x / 218 / 00218 forms, a mobile with all nine digits).
 
 function studioEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
@@ -149,7 +150,7 @@ async function studioApi(path, options = {}, timeout = {}) {
 
 const STUDIO_ME_MAX_AGE_MS = 5 * 60 * 1000;  // the switches can change; a reply this old is read again
 const STUDIO_ME_RETRY_MS = 60 * 1000;        // a failed first read is tried again at most once a minute
-const _studioMe = { forUser: '', value: null, loadedAt: 0, failedAt: 0, promise: null, generation: 0, listeners: new Set() };
+const _studioMe = { forUser: '', value: null, loadedAt: 0, failedAt: 0, promise: null, generation: 0, session: 0, listeners: new Set() };
 
 function studioMeUserId() {
   return typeof state !== 'undefined' && state && state.currentUser ? String(state.currentUser.id || '') : '';
@@ -205,11 +206,18 @@ function studioMeLoading() {
 
 function studioResetMe() {
   _studioMe.generation++;  // a reply still on its way belongs to the old session: dropped
+  _studioMe.session++;     // what a screen kept from the old session (the 15h layout) is dropped too
   _studioMe.forUser = '';
   _studioMe.value = null;
   _studioMe.loadedAt = 0;
   _studioMe.failedAt = 0;
   _studioMe.promise = null;
+}
+
+// Changes at every reset (sign-out, session end, another user): a screen compares it with the one it
+// kept to know that its copy belongs to an older session.
+function studioMeSession() {
+  return _studioMe.session;
 }
 
 // fn() runs after every settled read (a new reply, or a failure that kept the last good one).
@@ -246,7 +254,13 @@ function studioLoadMe(maxAgeMs = STUDIO_ME_MAX_AGE_MS) {
       // Leaving a page cancels its reads: that is no failure, the next screen asks again.
       aborted = !!(error && error.name === 'AbortError');
     }
-    if (generation !== _studioMe.generation || uid !== studioMeUserId()) return null;
+    if (generation !== _studioMe.generation || uid !== studioMeUserId()) {
+      // The session moved on (signed out, expired, another user). While no reset or newer read came
+      // after this one, the waiting slot is still this read's: free it, or the same user signing in
+      // again would join this dead read and never ask the server again.
+      if (generation === _studioMe.generation) _studioMe.promise = null;
+      return null;
+    }
     _studioMe.promise = null;
     if (value) {
       _studioMe.value = value;
@@ -468,8 +482,10 @@ const STUDIO_MAX_AMOUNT_MINOR = 1e12;
 
 // A typed amount in minor units (cents), or NaN. Built on the classic parser (adsStudioParseMoneyMinor,
 // 15c: Arabic-Indic digits, ٫ and ، , "1,250" is a thousand, "12,5" is twelve and a half), plus the
-// Arabic thousands sign ٬, a "$" and bidi marks around the number. More than two decimals, a sign or
-// any other character is refused rather than guessed.
+// Arabic thousands sign ٬, a "$" and bidi marks around the number. What could mean two amounts is
+// refused rather than guessed: more than two decimals, a sign, any other character, and a comma
+// beside a point unless the commas group thousands before the decimals ("1,250.50" yes; "1.250,00",
+// "1.234,56", "12,5.5" and "1,5.25" no: which one is the decimal sign?).
 function studioParseAmount(raw) {
   if (raw === null || raw === undefined || typeof raw === 'object') return NaN;
   const text = normalizeDigitsAscii(String(raw))
@@ -477,17 +493,30 @@ function studioParseAmount(raw) {
     .replace(/٬/g, ',')
     .replace(/^\$|\$$/g, '');
   if (!text || text.length > 24) return NaN;
-  const marks = text.replace(/،/g, ',').replace(/٫/g, '.');
-  if (/\.\d{3,}$/.test(marks)) return NaN;
-  if (!marks.includes('.') && /,\d{3,}$/.test(marks) && !/^\d{1,3}(,\d{3})+$/.test(marks)) return NaN;
+  // The number as the classic parser reads it: each comma either groups thousands or is the decimal sign.
+  let plain = text.replace(/،/g, ',').replace(/٫/g, '.');
+  if (plain.includes(',')) {
+    if (plain.includes('.')) {
+      if (!/^\d{1,3}(,\d{3})+\.\d{0,2}$/.test(plain)) return NaN;  // no comma after the point either
+      plain = plain.replace(/,/g, '');
+    } else if (/^\d{1,3}(,\d{3})+$/.test(plain)) {
+      plain = plain.replace(/,/g, '');
+    } else if (/^\d*,\d*$/.test(plain)) {
+      plain = plain.replace(',', '.');
+    } else {
+      return NaN;
+    }
+  }
+  if (/\.\d{3,}$/.test(plain)) return NaN;  // more than two decimals
   const minor = adsStudioParseMoneyMinor(text);
   return Number.isSafeInteger(minor) && minor >= 0 && minor <= STUDIO_MAX_AMOUNT_MINOR ? minor : NaN;
 }
 
 // A typed phone number as E.164 ("+218912345678"), or '' when it is not one. Arabic digits, spaces,
 // dots, dashes and brackets are allowed; 00 means +. Libyan numbers may be typed as 091 234 5678,
-// 91 234 5678, 218 91 234 5678 or +218 091… (the local 0 dropped). Any other country needs its +code.
-// The server keeps the same rule (studio_settings._phone: +, then 8-15 digits).
+// 91 234 5678, 218 91 234 5678 or +218 091… (the local 0 dropped). After +218 a mobile (9…) has
+// exactly 9 digits and a landline (1…-8…) 8 or 9. Any other country needs its +code. The server's
+// rule is wider (studio_settings._phone: +, then 8-15 digits), so whatever passes here passes there.
 function studioParsePhone(raw) {
   if (raw === null || raw === undefined || typeof raw === 'object') return '';
   let text = normalizeDigitsAscii(String(raw)).trim();
@@ -502,6 +531,9 @@ function studioParsePhone(raw) {
   else if (/^9\d{8}$/.test(text)) number = `+218${text}`;
   else return '';
   if (number.startsWith('+2180')) number = `+218${number.slice(5)}`;
-  if (number.startsWith('+218')) return /^\+218[1-9]\d{7,8}$/.test(number) ? number : '';
+  if (number.startsWith('+218')) {
+    const national = number.slice(4);
+    return /^9\d{8}$/.test(national) || /^[1-8]\d{7,8}$/.test(national) ? number : '';
+  }
   return /^\+[1-9]\d{7,14}$/.test(number) ? number : '';
 }

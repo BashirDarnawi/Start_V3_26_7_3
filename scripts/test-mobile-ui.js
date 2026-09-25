@@ -2717,12 +2717,15 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const errorsPy = read('server/systems/ads_studio/studio_errors.py');
   const who = { admin: false, staff: false, plan: true };
   const urlCalls = [];
+  const navCalls = [];
+  const memoryStorage = () => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; };
   const win = {
     location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
     listeners: { popstate: [] },
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
     removeEventListener(type, fn) { const list = this.listeners[type] || []; const at = list.indexOf(fn); if (at >= 0) list.splice(at, 1); },
-    localStorage: (() => { const m = new Map(); return { getItem: k => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k) }; })()
+    localStorage: memoryStorage(),
+    sessionStorage: memoryStorage()  // this tab's
   };
   const hist = {
     entries: [], index: 0,
@@ -2751,6 +2754,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     hasSubscription: id => who.plan && id === 'ad_maker',
     updateUrlParams: (params, replace) => { urlCalls.push({ params: JSON.parse(JSON.stringify(params)), replace: !!replace }); },
     requestViewScrollReset: () => {},
+    navigateTo: view => { navCalls.push(String(view)); },
     IS_STUDIO_SHELL: true
   }, { microtaskMode: 'afterEvaluate' });
   let loadError = '';
@@ -2765,6 +2769,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       var __html = '';
       var __navType = 'navigate';
       var __navName = '';
+      var _lastRenderedView = null;  // 12-views.js: the view the last full draw showed (never set by this sandbox's render)
       var performance = { now: () => 100, getEntriesByType: () => [{ type: __navType, name: __navName }] };
       var document = { visibilityState: 'visible', __listeners: [], addEventListener(type, fn) { if (type === 'visibilitychange') this.__listeners.push(fn); }, removeEventListener() {} };
       function setTimeout(fn, ms) { const id = ++__timerSeq; __timers.set(id, { fn, ms: Number(ms) || 0 }); return id; }
@@ -2795,9 +2800,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const search = () => win.location.search;
   const meReply = value => run(`studioResetMe(); __replies['/api/studio/me'] = [{ value: ${JSON.stringify(value)} }]; studioLoadMe();`);
   // A freshly opened page: `url` is the address after the start-up rewrite, `opened` the one it was opened with.
+  // The tab's sessionStorage stays (a reload keeps it); the page's own memory starts empty.
   const openAt = (url, navType = 'navigate', entryState = null, opened = '') => {
     hist.reset(url, entryState);
-    run(`_studioV2.docRendered = false; __navType = ${JSON.stringify(navType)}; __navName = ${JSON.stringify(opened ? `http://localhost${opened}` : '')}; render();`);
+    run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.fromApp = false; _studioV2.popping = false; _studioV2.repin = false;
+      __navType = ${JSON.stringify(navType)}; __navName = ${JSON.stringify(opened ? `http://localhost${opened}` : '')}; render();`);
   };
   const chainOf = entry => (entry && entry.state && entry.state.studioV2 && entry.state.studioV2.chain) || null;
   const failed = cases => cases.map((ok, i) => ok ? '' : i).filter(String).join(',');
@@ -3048,8 +3055,23 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const lateral = { index: hist.index, search: search(), below: hist.entries[0].url };
   const handledOnWallet = run('studioHandleBack()');
   const afterHandled = search();
+  // A reload (or a return through history) trusts the entries under the screen only with this tab's
+  // proof of the same screen and chain (sessionStorage); without it the path is rebuilt like a link.
+  const proofKey = 'albayan.studio.v2.history';
+  const lastProof = win.sessionStorage.getItem(proofKey);
+  openAt('/studio?tab=wallet', 'reload', { view: 'ads-studio' });  // the tab last drew Home
+  const reloadedUnproven = { length: hist.length, index: hist.index, chains: hist.entries.map(chainOf), search: search() };
+  win.sessionStorage.removeItem(proofKey);
+  openAt('/studio?tab=help', 'back_forward', { view: 'ads-studio' });  // no proof at all
+  const returnedUnproven = { length: hist.length, chains: hist.entries.map(chainOf) };
+  openAt('/studio?tab=home');
+  run("studioV2Open('wallet');");  // the tab draws Wallet over Home: its proof
+  const proofWallet = win.sessionStorage.getItem(proofKey);
   openAt('/studio?tab=wallet', 'reload', { view: 'ads-studio' });
   const reloaded = { length: hist.length, chain: chainOf(hist.entries[0]) };
+  win.sessionStorage.setItem(proofKey, JSON.stringify({ chain: ['home|||', 'wallet|||'], url: '/studio?tab=help' }));
+  openAt('/studio?tab=wallet', 'back_forward', { view: 'ads-studio' });  // proof of another address
+  const otherAddress = hist.length;
   openAt('/studio?tab=builder', 'navigate', null, '/studio?tab=builder&step=3');
   const openedStep = { search: search(), length: hist.length };
   openAt('/studio', 'navigate', null, '/studio?tab=campaigns&id=req_9');
@@ -3078,7 +3100,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     deep.length === 3 && deep.index === 2 && deep.detail && JSON.stringify(deep.chains) === JSON.stringify([['home|||'], ['home|||', 'campaigns|||'], ['home|||', 'campaigns|||', 'campaigns||req_1|']]),
     lateral.index === 1 && lateral.search === '?tab=wallet' && lateral.below === '/studio?tab=home',
     handledOnWallet === true && afterHandled === '?tab=home',
-    reloaded.length === 1 && JSON.stringify(reloaded.chain) === '["home|||","wallet|||"]',
+    reloaded.length === 1 && JSON.stringify(reloaded.chain) === '["home|||","wallet|||"]'
+      && proofWallet === JSON.stringify({ chain: ['home|||', 'wallet|||'], url: '/studio?tab=wallet' }) && lastProof === JSON.stringify({ chain: ['home|||'], url: '/studio?tab=home' })
+      && reloadedUnproven.length === 2 && reloadedUnproven.index === 1 && reloadedUnproven.search === '?tab=wallet'
+      && JSON.stringify(reloadedUnproven.chains) === JSON.stringify([['home|||'], ['home|||', 'wallet|||']])
+      && returnedUnproven.length === 2 && JSON.stringify(returnedUnproven.chains) === JSON.stringify([['home|||'], ['home|||', 'help|||']]) && otherAddress === 2,
     openedStep.search === '?tab=builder&step=3' && openedStep.length === 4 && openedLost === '?tab=campaigns&id=req_9'
       && openedMoved === '?tab=wallet' && notTwice === '?tab=home',
     setterV2.search === '?tab=campaigns' && setterV2.length === 2 && setterIgnored === '?tab=campaigns' && setterHome.search === '?tab=home' && setterHome.index === 0
@@ -3112,15 +3138,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   urlCalls.length = 0;
   run("setAdsStudioTab('campaigns');");
   const classicSetter = JSON.stringify(urlCalls);
-  hist.reset('/studio?tab=wallet');
-  run('restoreAdsStudioTabFromUrl();');
-  const restoredWallet = run('_adsStudioActiveTab');
-  hist.reset('/studio?tab=home');
-  run('restoreAdsStudioTabFromUrl();');
-  const restoredHome = run('_adsStudioActiveTab');
-  hist.reset('/studio?tab=campaigns');
-  run('restoreAdsStudioTabFromUrl();');
-  const restoredClassic = run('_adsStudioActiveTab');
+  // The address restore maps the v2-only tabs (wallet, help, inbox, account, home) only in the v2
+  // layout; with /me classic, on its way or failed, classic keeps its own rule (the tab on screen stays).
+  const restoreAt = url => { hist.reset(url); run("_adsStudioActiveTab = 'posts'; restoreAdsStudioTabFromUrl();"); return run('_adsStudioActiveTab'); };
+  const restoredClassicMe = ['wallet', 'home', 'account', 'campaigns'].map(tab => restoreAt(`/studio?tab=${tab}`));
+  run("studioResetMe(); __replies['/api/studio/me'] = []; studioLoadMe();");
+  const restoredPending = ['wallet', 'help', 'inbox', 'home'].map(tab => restoreAt(`/studio?tab=${tab}`));
+  run("studioResetMe(); __replies['/api/studio/me'] = [{ error: { status: 503, message: 'down' } }]; studioLoadMe();");
+  const restoredFailed = ['wallet', 'home'].map(tab => restoreAt(`/studio?tab=${tab}`));
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false });
+  const restoredV2 = ['wallet', 'home', 'campaigns'].map(tab => restoreAt(`/studio?tab=${tab}`));
+  meReply({ ui: 'classic', staffDesk: 'classic', isStaff: false });
   run("studioResetMe(); __replies['/api/studio/me'] = []; window.localStorage.setItem('albayan.studio.v2.layout.v2-user', 'customer'); _studioV2.waitFor = '';");
   const waiting = String(run('renderStudioV2View()'));
   run("window.localStorage.removeItem('albayan.studio.v2.layout.v2-user'); _studioV2.waitFor = '';");
@@ -3143,13 +3171,179 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     notStaff === 'customer',
     classicAnswer === '' && classicFix.tab === 'dashboard' && classicFix.url === JSON.stringify([{ params: { tab: 'dashboard', section: null, id: null, step: null }, replace: true }]),
     classicSetter === JSON.stringify([{ params: { tab: 'campaigns' }, replace: true }]),
-    restoredWallet === 'wallet' && restoredHome === 'dashboard' && restoredClassic === 'campaigns',
+    JSON.stringify(restoredClassicMe) === '["posts","posts","posts","campaigns"]' && JSON.stringify(restoredPending) === '["posts","posts","posts","posts"]'
+      && JSON.stringify(restoredFailed) === '["posts","posts"]' && JSON.stringify(restoredV2) === '["wallet","dashboard","campaigns"]',
     waiting.includes('data-testid="studio-v2-loading"') && notWaiting === '' && localMode === '',
     onclicks.length > 20 && onclicks.every(attr => /^onclick="(studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2(Back|CloseBuilder)\(\)|studioV2BuilderStep\(1\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\)|showSubscriptionModal\('ad_maker', 'ad_maker'\))"$/.test(attr)),
     !/\b(?:confirm|prompt|alert)\(/.test(coreSrc + shellSrc) && !/access_token|app_?secret|page_?token|Bearer /i.test(coreSrc + shellSrc)
   ];
   check('Studio v2 Team desk (no wallet items), classic when /me says classic or is unknown, pinned setter/restore in both layouts, safe handlers only', !loadError && staffCases.every(Boolean),
     loadError || `cases ${failed(staffCases)}`);
+
+  // Rollout stage 2: a staff member whose /me says ui 'v2' but staffDesk 'classic' (the owner in the
+  // customer allowlist while the Team desk is off) keeps the classic review tab (review and launch
+  // queues, health) and, as an admin, the classic wallet (payment confirmations); the other tabs are v2.
+  who.staff = true;
+  const realUpdateUrlParams = box.updateUrlParams;
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: true, isAdmin: false });
+  openAt('/studio?tab=review');
+  const deskReview = { html: html(), tab: run('_adsStudioActiveTab'), shown: run('_studioV2.shown'), search: search() };
+  openAt('/studio?tab=home');
+  const deskHome = html();
+  box.state.language = 'ar';
+  run('render();');
+  const deskHomeAr = html();
+  box.state.language = 'en';
+  run("studioV2Open('review');");  // the header's "Team desk" button
+  const deskOpened = { html: html(), length: hist.length, index: hist.index, chain: chainOf(hist.entries[hist.index]), search: search() };
+  // The classic tab bar's "Review Queue": the classic setter (it replaces the entry, which keeps its
+  // place in the Back model); a later /me answer does not redraw; "Overview" goes back to v2 Home.
+  box.updateUrlParams = (params, replace) => {
+    urlCalls.push({ params: JSON.parse(JSON.stringify(params)), replace: !!replace });
+    const query = new URLSearchParams(win.location.search);
+    Object.entries(params).forEach(([key, value]) => (value === null || value === undefined || value === '' ? query.delete(key) : query.set(key, String(value))));
+    const entry = { view: 'ads-studio', params, albayanModal: false };
+    if (replace) hist.replaceState(entry, '', `${win.location.pathname}?${query}`); else hist.pushState(entry, '', `${win.location.pathname}?${query}`);
+  };
+  urlCalls.length = 0;
+  run("setAdsStudioTab('review');");
+  const deskSetter = { calls: JSON.stringify(urlCalls), chain: chainOf(hist.entries[hist.index]), html: html(), length: hist.length };
+  run("__html = 'not drawn again'; studioMeNotify();");
+  const deskOnMe = html();
+  run("setAdsStudioTab('dashboard');");
+  const deskToHome = { index: hist.index, search: search(), home: html().includes('data-testid="studio-screen-home"') };
+  box.updateUrlParams = realUpdateUrlParams;
+  openAt('/studio?tab=wallet');
+  const deskReviewerWallet = html();
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: true, isAdmin: true });
+  openAt('/studio?tab=wallet');
+  const deskAdminWallet = { html: html(), tab: run('_adsStudioActiveTab'), wanted: run('studioV2Wanted()') };
+  openAt('/studio?tab=campaigns');
+  const deskAdminCampaigns = html();
+  who.staff = false;
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false, isAdmin: false });
+  openAt('/studio?tab=review');
+  const customerReview = html();
+  const deskCases = [
+    deskReview.html === '<classic>' && deskReview.tab === 'review' && deskReview.shown === 'desk-classic' && deskReview.search === '?tab=review',
+    deskHome.includes('data-testid="studio-v2-frame"') && deskHome.includes('data-testid="studio-screen-home"')
+      && /<button type="button" data-testid="studio-nav-review" class="studio-v2-icon-btn" onclick="studioV2Open\('review'\)" aria-label="Team desk"/.test(deskHome)
+      && deskHomeAr.includes('aria-label="مكتب الفريق"'),
+    deskOpened.html === '<classic>' && deskOpened.length === 2 && deskOpened.index === 1 && deskOpened.search === '?tab=review'
+      && JSON.stringify(deskOpened.chain) === '["home|||","review|||"]',
+    deskSetter.calls === JSON.stringify([{ params: { tab: 'review' }, replace: true }]) && JSON.stringify(deskSetter.chain) === '["home|||","review|||"]'
+      && deskSetter.html === '<classic>' && deskSetter.length === 2,
+    deskOnMe === 'not drawn again',
+    deskToHome.index === 0 && deskToHome.search === '?tab=home' && deskToHome.home,
+    deskReviewerWallet.includes('data-testid="studio-screen-wallet"'),
+    deskAdminWallet.html === '<classic>' && deskAdminWallet.tab === 'wallet' && deskAdminWallet.wanted === 'desk-classic'
+      && deskAdminCampaigns.includes('data-testid="studio-screen-campaigns"') && deskAdminCampaigns.includes('data-testid="studio-nav-review"'),
+    customerReview.includes('data-testid="studio-screen-home"') && !customerReview.includes('studio-nav-review')
+  ];
+  check('Studio v2 staff with the Team desk off: classic review (queues, health) and admin payments, v2 elsewhere, a "Team desk" header button', !loadError && deskCases.every(Boolean),
+    loadError || `cases ${failed(deskCases)}`);
+
+  // /me after sign-out: a read that settles for a session that is gone frees its slot, and the
+  // studio's session reset (15c) forgets /me, so the same user signing in again asks the server.
+  run("studioResetMe(); __calls.length = 0; __replies['/api/studio/me'] = [{ value: { ui: 'v2' } }]; studioLoadMe(); state.currentUser = null;");
+  box.state.currentUser = { id: 'v2-user' };
+  const staleLoading = run('studioMeLoading()');
+  run("__replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic' } }]; studioLoadMe();");
+  const relogin = { reads: json("__calls.filter(c => c.path === '/api/studio/me').length"), me: json('studioMe()') };
+  run("__replies['/api/studio/me'] = []; studioLoadMe(0);");  // a read on its way (it never answers)
+  const beforeReset = json('[!!studioMe(), studioMeLoading(), studioMeSession()]') || [];
+  run('resetAdsStudioSessionState();');
+  const afterReset = json('[studioMe(), studioMeLoading(), studioMeSession()]') || [];
+  const meSessionCases = [
+    staleLoading === false,
+    relogin.reads === 2 && relogin.me && relogin.me.ui === 'v2',
+    beforeReset[0] === true && beforeReset[1] === true && afterReset[0] === null && afterReset[1] === false && afterReset[2] === beforeReset[2] + 1,
+    adsStudio.includes("  if (typeof studioResetMe === 'function') studioResetMe();")
+  ];
+  check('Studio v2 /me after sign-out or expiry: a stale read frees its slot and the session reset forgets /me, so signing in again reads it', !loadError && meSessionCases.every(Boolean),
+    loadError || `cases ${failed(meSessionCases)}`);
+
+  // "Leave the studio" never trusts history.length: the browser's Back only when this visit came from
+  // another screen of this app in this document; otherwise the studio's way out, or no button.
+  // Home on an entry with `below` under it; `entered`: the draw before was another screen of the app
+  // (12-views.js _lastRenderedView); `popping`: that draw is a Back/Forward return.
+  const openBehind = (below, { entered = false, popping = false, entryState = { view: 'ads-studio' } } = {}) => {
+    hist.entries = [{ url: below.url, state: below.state || null }, { url: '/studio?tab=home', state: entryState }];
+    hist.index = 1;
+    hist.show();
+    run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.fromApp = false; _studioV2.popping = ${popping}; __navType = 'navigate';
+      _lastRenderedView = ${entered ? "'smart-systems'" : 'null'}; render(); _lastRenderedView = null; _studioV2.popping = false;`);
+    return { button: html().includes('data-testid="studio-back"'), fromApp: run('_studioV2.fromApp') };
+  };
+  const leave = () => { navCalls.length = 0; const left = run('studioV2Back()'); return { left, index: hist.index, nav: navCalls.slice() }; };
+  const appScreen = { url: '/smart-systems', state: { view: 'smart-systems' } };
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false });
+  const shellOpen = openBehind({ url: 'https://elsewhere.example/' });  // the /studio site opened after another site
+  const shellLeave = leave();
+  box.IS_STUDIO_SHELL = false;
+  who.admin = true;
+  const directOpen = openBehind({ url: 'https://elsewhere.example/' });  // the app opened on the studio: the way out is Smart Systems
+  const directLeave = leave();
+  const appOpen = openBehind(appScreen, { entered: true });  // opened from another screen of the app (a push)
+  const appLeave = leave();
+  const returnOpen = openBehind(appScreen, { entered: true, popping: true });  // back into the studio through Forward
+  const returnLeave = leave();
+  const markedOpen = openBehind(appScreen, { entered: true, entryState: { view: 'ads-studio', studioV2: { chain: ['home|||'] } } });  // a studio entry again
+  const markedLeave = leave();
+  box.IS_STUDIO_SHELL = true;
+  who.admin = false;
+  const leaveCases = [
+    shellOpen.button === false && shellLeave.left === false && shellLeave.index === 1 && shellLeave.nav.length === 0,
+    directOpen.button === true && directOpen.fromApp === false && directLeave.left === true && directLeave.index === 1 && JSON.stringify(directLeave.nav) === '["smart-systems"]',
+    appOpen.button === true && appOpen.fromApp === true && appLeave.left === true && appLeave.index === 0 && appLeave.nav.length === 0,
+    returnOpen.fromApp === false && returnLeave.index === 1 && JSON.stringify(returnLeave.nav) === '["smart-systems"]',
+    markedOpen.fromApp === false && markedLeave.index === 1 && JSON.stringify(markedLeave.nav) === '["smart-systems"]',
+    !/history\.length/.test(shellSrc)
+  ];
+  check('Studio v2 "Leave the studio": Back only after an entry from this app in this document, else the way out or no button (never history.length)', !loadError && leaveCases.every(Boolean),
+    loadError || `cases ${failed(leaveCases)}`);
+
+  // The layout is fixed by the first /me answer of a visit; a later answer updates only the rest
+  // (services, intake, limits, contact) until the next page load or the next entry into the studio.
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false, services: { help: false } });
+  openAt('/studio?tab=wallet');
+  run("__html = 'not drawn again'; __replies['/api/studio/me'] = [{ value: { ui: 'classic', staffDesk: 'classic', isStaff: false, services: { help: true }, intake: { open: false } } }]; studioLoadMe(0);");
+  const pinned = { frame: run('studioV2Frame()'), html: html(), help: json('studioMe().services.help'), intake: json('studioMe().intakeOpen'),
+    remembered: win.localStorage.getItem('albayan.studio.v2.layout.v2-user') };
+  run('render();');
+  const pinnedDraw = html();
+  run("_lastRenderedView = 'smart-systems'; render(); _lastRenderedView = 'ads-studio';");  // the next entry into the studio
+  const reentered = { frame: run('studioV2Frame()'), html: html() };
+  // An entry while /me is being read again keeps the old layout until that answer arrives.
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false });
+  openAt('/studio?tab=home');
+  run(`var __release = null; var __realApiJson = apiJson;
+    apiJson = function (path, options) { if (path !== '/api/studio/me') return __realApiJson(path, options); __calls.push({ path, method: 'GET' }); return new Promise(resolve => { __release = resolve; }); };
+    _studioMe.loadedAt = 1; _lastRenderedView = 'smart-systems'; render(); _lastRenderedView = 'ads-studio';`);
+  const whileReading = { frame: run('studioV2Frame()'), repin: run('_studioV2.repin'), home: html().includes('data-testid="studio-screen-home"') };
+  run("__release({ ui: 'classic', staffDesk: 'classic', isStaff: false }); apiJson = __realApiJson;");
+  const afterAnswer = { frame: run('studioV2Frame()'), html: html() };
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false });
+  openAt('/studio?tab=home');
+  const pinCases = [
+    pinned.frame === 'customer' && pinned.html === 'not drawn again' && pinned.help === true && pinned.intake === false && pinned.remembered === null,
+    pinnedDraw.includes('data-testid="studio-screen-wallet"'),
+    reentered.frame === '' && reentered.html === '<classic>',
+    whileReading.frame === 'customer' && whileReading.repin === true && whileReading.home,
+    afterAnswer.frame === '' && afterAnswer.html === '<classic>'
+  ];
+  check('Studio v2 layout pinned per visit: later /me answers update services/intake/limits/contact only; a layout change waits for the next load or entry', !loadError && pinCases.every(Boolean),
+    loadError || `cases ${failed(pinCases)}`);
+
+  // Typed input: an amount with a comma and a point is read only as grouped thousands with decimals;
+  // a Libyan mobile after +218 needs all nine digits.
+  const strictAmounts = [['1,250.50', 125050], ['١٬٢٥٠٫٥٠', 125050], ['12,345.6', 1234560], ['1,250.', 125000], ['٥٠٫٢٥', 5025]].map(([raw, want]) => amount(raw) === want);
+  const ambiguousAmounts = ['1.250,00', '1.234,56', '12,5.5', '1,5.25', '1,250.5,0', '1,25.00', '1,2,5', '12,5555', '1,250.505'].map(raw => Number.isNaN(amount(raw)));
+  const strictPhones = [['+218 91 234 5678', '+218912345678'], ['+218 21 333 3333', '+218213333333'], ['+218 61 222 3344', '+218612223344'], ['0612223344', '+218612223344']].map(([raw, want]) => phone(raw) === want);
+  const shortMobiles = ['+218 91 234 567', '091 234 567', '218 91 234 567', '+218 9123 45678 9'].map(raw => phone(raw) === '');
+  check('Studio v2 parsers refuse what could mean two amounts ("1.250,00", "12,5.5") and a Libyan mobile without all nine digits', !loadError
+    && strictAmounts.every(Boolean) && ambiguousAmounts.every(Boolean) && strictPhones.every(Boolean) && shortMobiles.every(Boolean),
+  loadError || `amounts ${failed(strictAmounts)} ambiguous ${failed(ambiguousAmounts)} phones ${failed(strictPhones)} short ${failed(shortMobiles)}`);
 
   // Built bundles and the P2-08 styles.
   const workspaceCss = read('assets/ads-workspace.css');
