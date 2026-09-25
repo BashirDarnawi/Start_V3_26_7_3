@@ -31,6 +31,7 @@ const ADS_STUDIO_MAX_TOTAL_CREATIVE_BYTES = 5 * 1024 * 1024;
 
 function resetAdsStudioSessionState() {
   if (typeof resetSocialStudioState === 'function') resetSocialStudioState();
+  if (typeof resetStudioHealthState === 'function') resetStudioHealthState();
   // Invalidate image compression still running for the previous draft/session.
   _adsStudioPhotoToken++;
   if (typeof window !== 'undefined' && window._adsStudioSearchTimer) {

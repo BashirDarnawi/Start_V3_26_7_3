@@ -31,6 +31,7 @@ const ADS_STUDIO_MAX_TOTAL_CREATIVE_BYTES = 5 * 1024 * 1024;
 
 function resetAdsStudioSessionState() {
   if (typeof resetSocialStudioState === 'function') resetSocialStudioState();
+  if (typeof resetStudioHealthState === 'function') resetStudioHealthState();
   // Invalidate image compression still running for the previous draft/session.
   _adsStudioPhotoToken++;
   if (typeof window !== 'undefined' && window._adsStudioSearchTimer) {
@@ -3226,7 +3227,8 @@ function renderSocialStudioUnavailable() {
 // ==========================================
 // An admin-only section under the Ads Studio review queue:
 // - the P0-01 facts from GET /api/studio/admin/facts (counts and flags only; the two Meta
-//   readings are kept 24 h on the server, "Refresh from Meta" re-reads them: 2 per 10 min);
+//   readings are kept 24 h on the server, "Refresh from Meta" re-reads them: 2 per 10 min;
+//   while Meta is paused, or for a row Meta did not answer, the last good reading is shown);
 // - the Meta token summary from GET /api/meta-ads/token-health;
 // - a "Test subscription" button per linked page and an Instagram "Read test" per linked
 //   Instagram account (each once per Tripoli day; the result shows inline, no dialogs).
@@ -3253,7 +3255,8 @@ const _studioHealth = {
   igForm: Object.create(null)
 };
 
-// Meta error codes the server reports (MetaAdsError codes and the check's own).
+// Meta error codes the server reports (MetaAdsError codes, which are also the (b) error
+// classes, and the check's own). Any other code shows the generic label with the code (LTR).
 const STUDIO_HEALTH_META_CODES = {
   authorization: ['Meta refused access (token or page role)', 'رفضت ميتا الوصول (الرمز أو صلاحية الصفحة)'],
   not_found: ['Meta could not find it', 'لم تجده ميتا'],
@@ -3264,9 +3267,17 @@ const STUDIO_HEALTH_META_CODES = {
   request_failed: ['Meta refused the request', 'رفضت ميتا الطلب'],
   invalid_response: ['Meta sent an unreadable answer', 'أرسلت ميتا رداً غير مقروء'],
   invalid_request: ['The request was not valid', 'الطلب غير صالح'],
+  invalid_path: ['Albayan refused an unsafe Meta request', 'رفض البيان طلباً غير آمن إلى ميتا'],
+  invalid_id: ['The Meta id is not valid', 'معرّف ميتا غير صالح'],
+  response_too_large: ['Meta sent more data than Albayan accepts', 'أرسلت ميتا بيانات أكثر مما يقبله البيان'],
+  not_configured: ["Albayan's Meta connection is not set up", 'ربط البيان مع ميتا غير مُعدّ'],
+  account_not_allowed: ["This ad account is not on Albayan's allowed list", 'هذا الحساب الإعلاني ليس ضمن القائمة المسموحة'],
+  meta_error: ['Meta returned an error', 'أعادت ميتا خطأ'],
+  unexpected: ['Meta sent an unexpected answer', 'أرسلت ميتا رداً غير متوقع'],
   not_confirmed: ['Meta did not confirm it', 'لم تؤكد ميتا ذلك'],
   comment_not_found: ['That comment is not among the recent comments read', 'هذا التعليق ليس ضمن التعليقات الأخيرة المقروءة'],
   comments_not_read: ['The comments could not be read', 'تعذّرت قراءة التعليقات'],
+  ambiguous_match: ['More than one recent comment holds this code, so nothing was sent. Use a more distinctive code or the comment id', 'أكثر من تعليق حديث يحتوي هذا الرمز، لذلك لم يُرسل شيء. استخدم رمزاً أوضح أو رقم التعليق'],
   unreadable: ['Meta sent an unreadable answer', 'أرسلت ميتا رداً غير مقروء']
 };
 
@@ -3274,12 +3285,13 @@ const STUDIO_HEALTH_META_CODES = {
 const STUDIO_HEALTH_REFUSALS = {
   ALREADY_TESTED_TODAY: ['Already tested today. Try again tomorrow (Tripoli time).', 'تم الاختبار اليوم. أعد المحاولة غداً (بتوقيت طرابلس).'],
   META_NOT_CONFIGURED: ["Albayan's Meta connection is not set up, so nothing was tested.", 'ربط البيان مع ميتا غير مُعدّ، لذلك لم يُختبر شيء.'],
+  META_PAUSED: ["Meta is paused, so nothing was tested and today's test is still free. Try again in a few minutes.", 'ميتا متوقفة مؤقتاً، لذلك لم يُختبر شيء وما زال اختبار اليوم متاحاً. أعد المحاولة بعد بضع دقائق.'],
   NOT_INSTAGRAM: ['This linked page is not an Instagram account.', 'هذه الصفحة المربوطة ليست حساب إنستغرام.'],
   UNKNOWN_PAGE: ['This page is no longer linked.', 'هذه الصفحة لم تعد مربوطة.'],
   ADMIN_ONLY: ['Only an admin can use this.', 'هذه الأداة للمدير فقط.'],
   CROSS_SITE: ['Open Albayan directly and try again.', 'افتح البيان مباشرة ثم أعد المحاولة.'],
   INVALID_REQUEST: ['Name the comment and write the reply, or leave both empty.', 'حدّد التعليق واكتب الرد، أو اترك الحقلين فارغين.'],
-  INVALID_VALUE: ['Check the comment and the reply (reply up to 300 characters, code 3-40).', 'راجع التعليق والرد (الرد حتى 300 حرف، والرمز من 3 إلى 40).'],
+  INVALID_VALUE: ['Check the comment and the reply: the reply up to 300 characters; a code of 6-40 characters with at least one digit, or a comment id of 15+ digits.', 'راجع التعليق والرد: الرد حتى 300 حرف؛ والرمز من 6 إلى 40 حرفاً وفيه رقم واحد على الأقل، أو رقم تعليق من 15 خانة أو أكثر.'],
   UNKNOWN_FIELD: ['The request was not valid.', 'الطلب غير صالح.']
 };
 
@@ -3297,6 +3309,13 @@ function captureStudioHealthContext() {
 
 function studioHealthContextIsCurrent(context) {
   return context.generation === _studioHealthGeneration && context.identity === getAuthMeIdentity();
+}
+
+// The flags (loading, refreshing, busy) belong to the request generation that set them: a
+// reset starts a new generation and clears them; a request of the same generation always
+// clears its own, even when the session changed under it (its result is then dropped).
+function studioHealthGenerationIsCurrent(context) {
+  return context.generation === _studioHealthGeneration;
 }
 
 async function studioHealthApi(path, options = {}, extra = {}) {
@@ -3340,9 +3359,31 @@ function studioHealthErrorText(error) {
   return studioHealthText('The check did not finish. Try again.', 'لم يكتمل الفحص. أعد المحاولة.');
 }
 
+function studioHealthCodeLabel(code) {
+  const key = String(code || '');
+  if (Object.prototype.hasOwnProperty.call(STUDIO_HEALTH_META_CODES, key)) return studioHealthText(...STUDIO_HEALTH_META_CODES[key]);
+  return `${studioHealthText('Meta error', 'خطأ من ميتا')} <span dir="ltr">${studioHealthEsc(key || '—')}</span>`;
+}
+
 function studioHealthMetaCode(code, providerCode) {
-  const label = STUDIO_HEALTH_META_CODES[code] ? studioHealthText(...STUDIO_HEALTH_META_CODES[code]) : studioHealthEsc(code);
+  const label = studioHealthCodeLabel(code);
   return providerCode ? `${label} (${studioHealthText('Meta code', 'رمز ميتا')} <span dir="ltr">${studioHealthEsc(providerCode)}</span>)` : label;
+}
+
+// Meta's own numeric codes (fact b): "none" when the failure carried no code.
+function studioHealthProviderCodeLabel(code) {
+  if (String(code) === 'none') return studioHealthText('No Meta code', 'دون رمز ميتا');
+  return `${studioHealthText('Meta code', 'رمز ميتا')} <span dir="ltr">${studioHealthEsc(code)}</span>`;
+}
+
+// Ad request statuses (fact c): the Ads Studio labels, "other" for anything else.
+function studioHealthStatusLabel(status) {
+  if (String(status) === 'other') return studioHealthText('Other status', 'حالة أخرى');
+  if (typeof adsStudioStatusMeta === 'function') {
+    const meta = adsStudioStatusMeta(status);
+    return studioHealthEsc(studioHealthText(meta.label, meta.labelAr));
+  }
+  return `<span dir="ltr">${studioHealthEsc(status)}</span>`;
 }
 
 function studioHealthAge(seconds) {
@@ -3377,12 +3418,31 @@ async function studioHealthEnsureLoaded(force = false) {
     _studioHealth.tokenError = token.status === 'fulfilled' ? '' : studioHealthErrorText(token.reason);
     if (pages.status === 'fulfilled') _studioHealth.pages = Array.isArray(pages.value?.pages) ? pages.value.pages : [];
   } finally {
-    if (studioHealthContextIsCurrent(context)) {
+    if (studioHealthGenerationIsCurrent(context)) {
       _studioHealth.loading = false;
-      _studioHealth.loadedAt = Date.now(); // a failed load waits like a good one: no request loop
+      // a failed load waits like a good one (no request loop); a load dropped by a session change does not
+      if (studioHealthContextIsCurrent(context)) _studioHealth.loadedAt = Date.now();
       studioHealthRerender();
     }
   }
+}
+
+function studioHealthRefreshNote(report) {
+  const meta = report?.meta || {};
+  const facts = report?.facts || {};
+  const kept = (facts.f?.accounts || []).filter(row => row && row.kept).length + (Number(facts.i?.kept) || 0);
+  if (meta.refreshed) {
+    return kept
+      ? { tone: 'amber', text: studioHealthText(`Read from Meta just now. ${kept} rows could not be read again: their last good values are shown with the error.`, `قُرئت من ميتا الآن. تعذّرت إعادة قراءة ${kept} من الصفوف: تظهر آخر قيم سليمة لها مع الخطأ.`) }
+      : { tone: 'emerald', text: studioHealthText('Read from Meta just now.', 'قُرئت من ميتا الآن.') };
+  }
+  if (meta.paused) {
+    const minutes = Math.max(1, Math.ceil((Number(meta.retryAfterSeconds) || 0) / 60));
+    return { tone: 'amber', text: studioHealthText(`Meta is paused; showing the last reading. Try again in about ${minutes} min.`, `ميتا متوقفة مؤقتاً؛ تظهر آخر قراءة. أعد المحاولة بعد نحو ${minutes} دقيقة.`) };
+  }
+  if (meta.busy) return { tone: 'amber', text: studioHealthText('Another admin is refreshing. The saved reading is shown.', 'مدير آخر يحدّث الآن. تظهر القراءة المحفوظة.') };
+  if (meta.configured === false) return { tone: 'amber', text: studioHealthText('Meta is not connected, so nothing was read.', 'ميتا غير مربوطة، لذلك لم يُقرأ شيء.') };
+  return { tone: 'amber', text: studioHealthText('Nothing new was read from Meta. The last good values are kept and the errors are shown beside them.', 'لم يُقرأ شيء جديد من ميتا. بقيت آخر قيم سليمة وتظهر الأخطاء بجانبها.') };
 }
 
 async function studioHealthRefreshFacts() {
@@ -3395,17 +3455,12 @@ async function studioHealthRefreshFacts() {
     const facts = await studioHealthApi('/api/studio/admin/facts?refresh=1', {}, { timeoutMs: STUDIO_HEALTH_META_TIMEOUT_MS });
     if (!studioHealthContextIsCurrent(context)) return;
     _studioHealth.facts = facts;
-    const meta = facts?.meta || {};
-    _studioHealth.refreshNote = meta.refreshed
-      ? { tone: 'emerald', text: studioHealthText('Read from Meta just now.', 'قُرئت من ميتا الآن.') }
-      : meta.busy
-        ? { tone: 'amber', text: studioHealthText('Another admin is refreshing. The saved reading is shown.', 'مدير آخر يحدّث الآن. تظهر القراءة المحفوظة.') }
-        : { tone: 'amber', text: studioHealthText('Meta is not connected, so nothing was read.', 'ميتا غير مربوطة، لذلك لم يُقرأ شيء.') };
+    _studioHealth.refreshNote = studioHealthRefreshNote(facts);
   } catch (error) {
     if (!studioHealthContextIsCurrent(context)) return;
     _studioHealth.refreshNote = { tone: 'rose', text: studioHealthErrorText(error) };
   } finally {
-    if (studioHealthContextIsCurrent(context)) { _studioHealth.refreshing = false; studioHealthRerender(); }
+    if (studioHealthGenerationIsCurrent(context)) { _studioHealth.refreshing = false; studioHealthRerender(); }
   }
 }
 
@@ -3428,7 +3483,7 @@ async function studioHealthSubscribeTest(pageId) {
     if (!studioHealthContextIsCurrent(context)) return;
     _studioHealth.results[key] = { tone: 'amber', text: studioHealthErrorText(error) };
   } finally {
-    if (studioHealthContextIsCurrent(context)) { delete _studioHealth.busy[key]; studioHealthRerender(); }
+    if (studioHealthGenerationIsCurrent(context)) { delete _studioHealth.busy[key]; studioHealthRerender(); }
   }
 }
 
@@ -3443,7 +3498,8 @@ function studioHealthIgBody(pageId) {
   const text = String(form.text || '').trim();
   if (!target && !text) return undefined;
   const body = { text };
-  if (/^\d{5,40}$/.test(target)) body.replyToCommentId = target;
+  // Only a 15+ digit number is an Instagram comment id; anything else is a code written in it.
+  if (/^\d{15,40}$/.test(target)) body.replyToCommentId = target;
   else body.replyToCommentContaining = target;
   return body;
 }
@@ -3457,7 +3513,12 @@ function studioHealthIgResultText(result) {
   let reply;
   if (result.replySent) reply = studioHealthText('The reply was sent.', 'أُرسل الرد.');
   else if (result.alreadyReplied) reply = studioHealthText('This comment was already answered by a test; nothing was sent again.', 'سبق الرد على هذا التعليق في اختبار؛ لم يُرسل شيء مرة أخرى.');
-  else reply = `${studioHealthText('No reply sent', 'لم يُرسل رد')}: ${studioHealthMetaCode(result.replyErrorCode || 'not_confirmed', '')}`;
+  else if (result.replyState === 'unknown') reply = studioHealthText('The reply may have been sent. Check the comment on Instagram; it will not be sent again.', 'ربما أُرسل الرد. تحقّق من التعليق على إنستغرام؛ لن يُرسل مرة أخرى.');
+  else {
+    const matches = Number(result.replyMatchCount) || 0;
+    const count = result.replyErrorCode === 'ambiguous_match' ? ` (${studioHealthText(`${matches} comments match`, `${matches} تعليقات مطابقة`)})` : '';
+    reply = `${studioHealthText('No reply sent', 'لم يُرسل رد')}: ${studioHealthMetaCode(result.replyErrorCode || 'not_confirmed', '')}${count}`;
+  }
   return `${read} ${reply}`;
 }
 
@@ -3478,7 +3539,7 @@ async function studioHealthIgReadTest(pageId) {
     if (!studioHealthContextIsCurrent(context)) return;
     _studioHealth.results[key] = { tone: 'amber', text: studioHealthErrorText(error) };
   } finally {
-    if (studioHealthContextIsCurrent(context)) { delete _studioHealth.busy[key]; studioHealthRerender(); }
+    if (studioHealthGenerationIsCurrent(context)) { delete _studioHealth.busy[key]; studioHealthRerender(); }
   }
 }
 
@@ -3505,9 +3566,28 @@ function studioHealthLine(label, value) {
   return `<div class="flex items-center justify-between gap-3"><span>${label}</span><span class="font-bold text-slate-900 dark:text-white" dir="ltr">${value}</span></div>`;
 }
 
-function studioHealthCounts(map) {
+// A {key: count} map as lines; ``label`` turns each key into bilingual HTML (never the raw key).
+function studioHealthCounts(map, label) {
   const entries = Object.entries(map || {}).filter(([, n]) => Number(n) > 0);
-  return entries.length ? entries.map(([name, n]) => studioHealthLine(studioHealthEsc(name), studioHealthEsc(n))).join('') : '';
+  return entries.map(([name, n]) => studioHealthLine(label(name), studioHealthEsc(n))).join('');
+}
+
+function studioHealthSecondsSince(stamp) {
+  const at = Date.parse(String(stamp || ''));
+  return Number.isFinite(at) ? Math.max(0, (Date.now() - at) / 1000) : NaN;
+}
+
+// One ad account's minimum daily budget: its values, and beside them the error of a later
+// read that failed (the server keeps the last good values of a row Meta did not answer).
+function studioHealthBudgetRow(row) {
+  const hasValues = row.readAt ? true : !row.errorCode;
+  const error = row.errorCode ? studioHealthMetaCode(row.errorCode, row.providerCode) : '';
+  if (!hasValues) return studioHealthLine(studioHealthEsc(row.account), error);
+  const values = `${studioHealthEsc(row.currency)} ${studioHealthEsc(row.minDailyBudget ?? '—')} <span class="text-[11px] text-slate-500">${studioHealthText('(smallest unit, e.g. cents)', '(أصغر وحدة، مثل السنت)')}</span>`;
+  if (!error) return studioHealthLine(studioHealthEsc(row.account), values);
+  const age = studioHealthSecondsSince(row.readAt);
+  const earlier = Number.isFinite(age) ? ` (${studioHealthAge(age)})` : '';
+  return studioHealthLine(studioHealthEsc(row.account), `${values} <span class="block text-[11px] font-normal text-amber-700 dark:text-amber-300">${studioHealthText('Earlier reading', 'قراءة سابقة')}${earlier} · ${studioHealthText('last try', 'آخر محاولة')}: ${error}</span>`);
 }
 
 function studioHealthPercentiles(values, unit) {
@@ -3555,27 +3635,28 @@ function renderStudioHealthFacts() {
     studioHealthCard('message-square-x', studioHealthText(`Facebook private replies (${days} days)`, `الردود الخاصة على فيسبوك (${days} يوماً)`),
       studioHealthLine(studioHealthText('Sent', 'أُرسلت'), studioHealthEsc(b.privateRepliesSent || 0))
       + studioHealthLine(studioHealthText('Failed', 'فشلت'), studioHealthEsc(b.failures || 0))
-      + studioHealthCounts(b.byClass) + studioHealthCounts(b.byCode)),
+      + studioHealthCounts(b.byClass, studioHealthCodeLabel) + studioHealthCounts(b.byCode, studioHealthProviderCodeLabel)),
     studioHealthCard('message-circle-reply', studioHealthText(`Facebook public replies without error (${days} days)`, `الردود العامة على فيسبوك دون خطأ (${days} يوماً)`),
       studioHealthLine(studioHealthText('Replies', 'ردود'), studioHealthEsc(g.publicRepliesWithoutError || 0))
       + studioHealthLine(studioHealthText('Different commenters', 'معلّقون مختلفون'), studioHealthEsc(g.distinctCommenters || 0))
       + `<p class="text-[11px] text-slate-500">${studioHealthText('Staff and test accounts cannot be told apart, so every commenter is counted.', 'لا يمكن تمييز حسابات الفريق أو الاختبار، لذلك يُحسب كل المعلّقين.')}</p>`),
     studioHealthCard('calendar-days', studioHealthText('Requests with a daily budget', 'طلبات بميزانية يومية'),
       studioHealthLine(studioHealthText('Now', 'الآن'), studioHealthEsc(c.total || 0))
-      + studioHealthCounts(c.byStatus)
+      + studioHealthCounts(c.byStatus, studioHealthStatusLabel)
       + studioHealthLine(studioHealthText('Archived', 'مؤرشفة'), studioHealthEsc(c.archived || 0))),
     studioHealthCard('list-checks', studioHealthText('Ad-account allowlist', 'قائمة الحسابات الإعلانية المسموحة'),
       studioHealthLine(studioHealthText('Configured', 'مُعدّة'), studioHealthYesNo(f.d?.allowlistConfigured === true))),
     studioHealthCard('wallet', studioHealthText('Meta minimum daily budget', 'الحد الأدنى اليومي لميزانية ميتا'),
       `<p class="text-[11px] text-slate-500">${budget.checked ? studioHealthAge(budget.ageSeconds) : studioHealthText('Not read yet: press Refresh from Meta.', 'لم تُقرأ بعد: اضغط تحديث من ميتا.')}${budget.stale && budget.checked ? ` · ${studioHealthText('older than 24 h', 'أقدم من 24 ساعة')}` : ''}</p>`
-      + (budget.accounts || []).map(a => studioHealthLine(studioHealthEsc(a.account),
-        a.errorCode ? studioHealthMetaCode(a.errorCode, a.providerCode) : `${studioHealthEsc(a.currency)} ${studioHealthEsc(a.minDailyBudget ?? '—')} <span class="text-[11px] text-slate-500">${studioHealthText('(smallest unit, e.g. cents)', '(أصغر وحدة، مثل السنت)')}</span>`)).join('')),
+      + (budget.accounts || []).filter(a => a && typeof a === 'object').map(studioHealthBudgetRow).join('')),
     studioHealthCard('webhook', studioHealthText('Page webhook subscription', 'اشتراك الصفحات في الويب هوك'),
       `<p class="text-[11px] text-slate-500">${i.checked ? studioHealthAge(i.ageSeconds) : studioHealthText('Not read yet: press Refresh from Meta.', 'لم تُقرأ بعد: اضغط تحديث من ميتا.')}</p>`
       + studioHealthLine(studioHealthText('Linked pages', 'الصفحات المربوطة'), studioHealthEsc(i.linkedPages || 0))
       + (i.checked ? studioHealthLine(studioHealthText('Subscribed', 'مشتركة'), studioHealthEsc(i.subscribed || 0))
         + studioHealthLine(studioHealthText('Not subscribed', 'غير مشتركة'), studioHealthEsc(i.notSubscribed || 0))
-        + studioHealthLine(studioHealthText('Could not check', 'تعذّر الفحص'), studioHealthEsc((i.error || 0) + (i.notChecked || 0))) : '')
+        + studioHealthLine(studioHealthText('Could not check', 'تعذّر الفحص'), studioHealthEsc((i.error || 0) + (i.notChecked || 0)))
+        + (Number(i.kept) > 0 ? studioHealthLine(studioHealthText('Earlier value kept (the last try failed)', 'قيمة سابقة محفوظة (فشلت آخر محاولة)'), studioHealthEsc(i.kept)) : '') : '')
+      + studioHealthCounts(i.errorCodes, studioHealthCodeLabel)
       + (i.checked && !i.appIdConfigured ? `<p class="text-[11px] text-slate-500">${studioHealthText('ALBAYAN_META_APP_ID is not set: any app with the feed field counted.', 'ALBAYAN_META_APP_ID غير مُعدّ: احتُسب أي تطبيق يشترك في feed.')}</p>` : '')),
     studioHealthCard('landmark', studioHealthText('Ad account funds (last reading)', 'أموال الحسابات الإعلانية (آخر قراءة)'),
       (f.n1?.accounts || []).map(a => studioHealthLine(studioHealthEsc(a.account), a.readError

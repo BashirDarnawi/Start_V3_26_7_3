@@ -6,7 +6,9 @@ Routes (admin only; mounted under /api/studio by studio_api.create_studio_router
   currencies, Meta error codes and ad-account LAST 4 DIGITS; never an id, a name or a text.
   (f) and (i) are Meta reads kept 24 hours (metaHealthState/"studioFacts", platform code in
   meta_ads.py): a plain GET shows the kept values with their age; ``?refresh=1`` (same-origin,
-  2 per 10 minutes per admin, audited ``studio_facts_refresh``) asks Meta again. (m), the
+  2 per 10 minutes per admin, audited ``studio_facts_refresh``) asks Meta again, unless Albayan's
+  Meta pause runs (``meta.paused``: the stored reading is shown). An account or page Meta did not
+  answer keeps its last good values with the new error beside them. (m), the
   core/studio collision report, is built elsewhere. (s) reads Albayan Manager's ``ads`` rows,
   so it is computed by the platform helper meta_ads.core_spend_drift_facts (D36).
 * ``POST /api/studio/admin/pages/{page_id}/subscribe-test`` (P0-05d): subscribes Albayan's app
@@ -18,15 +20,21 @@ Routes (admin only; mounted under /api/studio by studio_api.create_studio_router
   of the Instagram professional account linked as that studio page, with Albayan's system
   token (P0-01 w). Once per Instagram account per Tripoli day; audited ``ig_read_test``;
   answers counts / error codes only. An optional body ``{replyToCommentId, text}`` (or
-  ``{replyToCommentContaining, text}``: the newest comment read that contains a short code the
-  helper wrote) sends ONE public reply with the page's token, like the auto-replies do. The
-  reply is keyed by a derived id of account + comment and claimed before it is sent, so a
-  second call never sends it again, not even on another day.
+  ``{replyToCommentContaining, text}``: the ONE comment read that contains a distinctive code
+  the helper wrote, 6+ characters with a digit; two or more matches send nothing,
+  ``ambiguous_match``) sends ONE public reply with the page's token, like the auto-replies do.
+  The reply is keyed by a derived id of account + comment and claimed before it is sent, so a
+  second call never sends it again, not even on another day. ``replyState`` says what happened:
+  ``sent``, ``unknown`` (a timeout, network error, 5xx or unreadable answer: it may have landed,
+  so it is never sent again) or ``failed``. A failure that proves Meta applied nothing (the
+  pause, authorization, a Meta limit, no page token) gives the reply claim back.
 
 The once-a-day claims and the reply claims live in metaHealthState/"studioFactTests" (through
 the platform door meta_ads.save_meta_health_state, one transaction with a version check, so
 two presses at the same moment cannot both win). Their keys are derived ids (hashes), never
-Meta ids. A claim is taken before Meta is called: a test that failed at Meta still used the day.
+Meta ids. While Albayan's Meta pause runs a test is refused (409 ``META_PAUSED``) before the
+day is claimed, and a test the pause stopped before anything reached Meta gives the day back.
+Otherwise a claim is taken before Meta is called: a test that failed at Meta still used the day.
 
 Facts (b) and (g) read socialReplyLog rows of the last 30 days (by the row's created_at):
 
@@ -41,7 +49,7 @@ Facts (b) and (g) read socialReplyLog rows of the last 30 days (by the row's cre
 import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import text
@@ -65,7 +73,11 @@ IG_MEDIA_READ = 10           # recent media asked for
 IG_MEDIA_WITH_COMMENTS = 5   # media whose comments are read (newest first)
 IG_COMMENTS_PER_MEDIA = 50
 REPLY_TEXT_MAX = 300
-MATCH_TEXT_MIN, MATCH_TEXT_MAX = 3, 40
+MATCH_TEXT_MIN, MATCH_TEXT_MAX = 6, 40  # a distinctive code: 6-40 characters with at least one digit
+# Reply errors that prove Meta applied nothing (the claim is given back) and Meta's own refusals
+# (kept as "failed"); any other error (timeout, network, 5xx, unreadable answer) may have landed.
+_REPLY_NOT_APPLIED = frozenset({"authorization", "rate_limited", "invalid_path"})
+_REPLY_REFUSED = frozenset({"not_found", "request_failed"})
 _TESTS_STATE_ID = "studioFactTests"
 _TEST_DAYS_KEPT = 3
 _REPLIES_KEPT = 500
@@ -213,7 +225,8 @@ def read_facts(*, refresh: bool = False, now: datetime | None = None) -> dict[st
         "generatedAt": _iso(now),
         "windowDays": FACT_WINDOW_DAYS,
         "meta": {"configured": meta["configured"], "refreshed": meta["refreshed"], "busy": meta["busy"],
-                 "maxAgeSeconds": _meta.STUDIO_FACTS_MAX_AGE_SECONDS},
+                 "paused": meta["paused"], "retryAfterSeconds": meta["retryAfterSeconds"],
+                 "valuesRead": meta["valuesRead"], "maxAgeSeconds": _meta.STUDIO_FACTS_MAX_AGE_SECONDS},
         "facts": {
             "b": b,
             "c": daily,
@@ -290,6 +303,22 @@ def record(section: str, key: str, result: dict[str, Any], today: str) -> None:
         pass
 
 
+def release(section: str, key: str, today: str, *, state: str) -> None:
+    """Give a claim back while it still holds ``state`` (nothing reached Meta, so it may run again).
+
+    Best effort: a claim that cannot be given back stays taken, which never sends anything twice.
+    """
+    def change(current: dict[str, Any]) -> None:
+        existing = current[section].get(key)
+        if isinstance(existing, dict) and existing.get("state") == state:
+            del current[section][key]
+
+    try:
+        _write_claims(change, today)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Instagram read test (P0-05e)
 # ---------------------------------------------------------------------------
@@ -299,10 +328,11 @@ def read_recent_ig_comments(client: Any, ig_user_id: str, *, with_text: bool) ->
     """Recent media of the account, then the comments of the newest media that have any.
 
     Returns counts, and the comments (id, time, text when asked) for this request only.
-    A Meta refusal stops the read: ``errorCode``/``providerCode`` say why.
+    A Meta refusal stops the read: ``errorCode``/``providerCode`` say why (``pausedLocally``:
+    Albayan's own Meta pause refused the call, so it never reached Meta).
     """
     out: dict[str, Any] = {"mediaRead": 0, "mediaWithComments": 0, "commentsRead": 0, "comments": [],
-                           "errorCode": "", "providerCode": ""}
+                           "errorCode": "", "providerCode": "", "pausedLocally": False}
     try:
         media = client._get(f"{ig_user_id}/media", {"fields": "id,comments_count,timestamp", "limit": IG_MEDIA_READ})
         rows = [row for row in (media.get("data") or []) if isinstance(row, dict)][:IG_MEDIA_READ]
@@ -320,17 +350,28 @@ def read_recent_ig_comments(client: Any, ig_user_id: str, *, with_text: bool) ->
                                             "text": str(item.get("text") or "") if with_text else ""})
     except _meta.MetaAdsError as error:
         out["errorCode"], out["providerCode"] = error.code, error.provider_code
+        out["pausedLocally"] = _meta.is_meta_pause_refusal(error)
     out["commentsRead"] = len(out["comments"])
     return out
 
 
-def reply_target(comments: list[dict[str, Any]], comment_id: str, containing: str) -> str:
-    """The comment to answer: the given id if it was read, else the newest one holding the code."""
+def reply_target(comments: list[dict[str, Any]], comment_id: str, containing: str) -> tuple[str, int]:
+    """(the comment to answer, how many read comments matched).
+
+    The given id when it was read; else the comment holding the code, only when EXACTLY one
+    read comment holds it (two or more: no target, the count says how many).
+    """
     if comment_id:
-        return comment_id if any(c["id"] == comment_id for c in comments) else ""
+        found = sum(1 for c in comments if c["id"] == comment_id)
+        return (comment_id if found else ""), min(found, 1)
     wanted = normalize_text(containing)
-    matches = [c for c in comments if wanted and wanted in normalize_text(c["text"])]
-    return max(matches, key=lambda c: c["at"])["id"] if matches else ""
+    matches = {c["id"] for c in comments if wanted and wanted in normalize_text(c["text"])}
+    return (next(iter(matches)) if len(matches) == 1 else ""), len(matches)
+
+
+def is_distinctive_code(code: str) -> bool:
+    """A code to find a comment by: 6-40 characters (after normalizing) with at least one digit."""
+    return MATCH_TEXT_MIN <= len(normalize_text(code)) <= MATCH_TEXT_MAX and any(ch.isdigit() for ch in code)
 
 
 def _reply_request(body: Any) -> tuple[str, str, str]:
@@ -351,11 +392,38 @@ def _reply_request(body: Any) -> tuple[str, str, str]:
         studio_error(400, "INVALID_REQUEST", "Name the comment by replyToCommentId or by replyToCommentContaining (one of them)")
     if comment_id and not _META_ID_RE.fullmatch(comment_id):
         studio_error(400, "INVALID_VALUE", "replyToCommentId must be the numeric Instagram comment id")
-    if containing and not MATCH_TEXT_MIN <= len(containing) <= MATCH_TEXT_MAX:
-        studio_error(400, "INVALID_VALUE", f"replyToCommentContaining must be {MATCH_TEXT_MIN}-{MATCH_TEXT_MAX} characters")
+    if containing and not is_distinctive_code(containing):
+        studio_error(400, "INVALID_VALUE",
+                     f"replyToCommentContaining must be {MATCH_TEXT_MIN}-{MATCH_TEXT_MAX} characters with at least one digit")
     if not reply or len(reply) > REPLY_TEXT_MAX:
         studio_error(400, "INVALID_VALUE", f"text (the reply, 1-{REPLY_TEXT_MAX} characters) is required with a comment")
     return comment_id, containing, reply
+
+
+def send_test_reply(client: Any, meta_page_id: str, comment_id: str, message: str, reply_key: str,
+                    today: str) -> tuple[str, str]:
+    """Send the one test reply whose claim is taken: (replyState, error code).
+
+    ``sent``; ``unknown`` when the answer cannot prove Meta did nothing (the claim stays, so it
+    is never sent again); ``failed`` for Meta's own refusal (kept) or for an error that proves
+    Meta applied nothing (no page token, the pause, authorization, a Meta limit: given back).
+    """
+    try:
+        token = client.page_access_token(meta_page_id)
+    except _meta.MetaAdsError as error:
+        release("igReplies", reply_key, today, state="sending")  # no page token: the reply was never sent
+        return "failed", error.code
+    try:
+        client._post(f"{comment_id}/replies", {"message": message}, access_token=token)
+    except _meta.MetaAdsError as error:
+        if error.code in _REPLY_NOT_APPLIED:
+            release("igReplies", reply_key, today, state="sending")
+            return "failed", error.code
+        state = "failed" if error.code in _REPLY_REFUSED else "unknown"  # a timed-out send may have landed
+        record("igReplies", reply_key, {"state": state, "errorCode": error.code}, today)
+        return state, error.code
+    record("igReplies", reply_key, {"state": "sent", "errorCode": ""}, today)
+    return "sent", ""
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +475,17 @@ def create_studio_checks_router(
         except _meta.MetaAdsError:
             studio_error(409, "META_NOT_CONFIGURED", "Albayan's Meta connection is not set up, so nothing was tested")
 
+    def meta_paused(seconds: int = 0) -> NoReturn:
+        wait = max(1, int(seconds or _meta.studio_meta_pause_seconds() or 60))
+        studio_error(409, "META_PAUSED", "Meta asked Albayan to wait, so nothing was tested and the day is still free",
+                     headers={"Retry-After": str(wait)})
+
+    def refuse_while_paused() -> None:
+        """Before the day is claimed: a test the Meta pause would refuse must not use it up."""
+        seconds = _meta.studio_meta_pause_seconds()
+        if seconds:
+            meta_paused(seconds)
+
     def claim_today(section: str, key: str, today: str, now: datetime) -> None:
         try:
             claim(section, key, {"day": today, "state": "running", "at": _iso(now)}, today, per_day=True)
@@ -431,6 +510,7 @@ def create_studio_checks_router(
                 str(user.get("id") or "") or None, "studio_facts_refresh", "studioFacts", "meta",
                 "Admin re-read the studio Meta facts",
                 {"configured": report["meta"]["configured"], "refreshed": report["meta"]["refreshed"],
+                 "paused": report["meta"]["paused"], "valuesRead": report["meta"]["valuesRead"],
                  "accountsRead": len(facts["f"].get("accounts") or []), "pagesChecked": facts["i"].get("pagesChecked", 0)},
             )
         return report
@@ -442,6 +522,7 @@ def create_studio_checks_router(
         rate_limit(user, "fact-tests", TEST_PRESSES_PER_MINUTE)
         page = load_page(page_id)
         client = require_meta()
+        refuse_while_paused()
         now = _now()
         today = tripoli_day(now)
         key = derived_id("sft", "subscribe", page["metaPageId"])
@@ -454,6 +535,9 @@ def create_studio_checks_router(
             ok = answer.get("success") is True
             code = "" if ok else "not_confirmed"
         except _meta.MetaAdsError as error:
+            if _meta.is_meta_pause_refusal(error):  # the pause began just now: the subscribe was never sent
+                release("subscribe", key, today, state="running")
+                meta_paused()
             code, provider = error.code, error.provider_code
         record("subscribe", key, {"state": "done", "ok": ok, "errorCode": code}, today)
         ctx["audit"](
@@ -478,22 +562,29 @@ def create_studio_checks_router(
             studio_error(409, "NOT_INSTAGRAM", "This linked page is not an Instagram account")
         comment_id, containing, reply = _reply_request(body)
         client = require_meta()
+        refuse_while_paused()
         now = _now()
         today = tripoli_day(now)
         key = derived_id("sft", "igread", page["igUserId"])
         claim_today("igRead", key, today, now)
         read = read_recent_ig_comments(client, page["igUserId"], with_text=bool(containing))
+        if read["pausedLocally"] and not read["mediaRead"]:  # the pause began just now: nothing reached Meta
+            release("igRead", key, today, state="running")
+            meta_paused()
         result: dict[str, Any] = {
             "testedOn": today, "mediaRead": read["mediaRead"], "mediaWithComments": read["mediaWithComments"],
             "commentsRead": read["commentsRead"], "errorCode": read["errorCode"], "providerCode": read["providerCode"],
-            "replyRequested": bool(reply), "replyTargetFound": None, "replySent": False, "alreadyReplied": False,
-            "replyErrorCode": "",
+            "replyRequested": bool(reply), "replyTargetFound": None, "replyMatchCount": None, "replySent": False,
+            "alreadyReplied": False, "replyState": "", "replyErrorCode": "",
         }
         if reply:
-            target = reply_target(read["comments"], comment_id, containing)
-            result["replyTargetFound"] = bool(target)
+            target, matches = reply_target(read["comments"], comment_id, containing)
+            if containing and read["errorCode"]:
+                target = ""  # a code must match one comment of a complete read: the unread ones may hold it too
+            result["replyTargetFound"], result["replyMatchCount"] = bool(target), matches
             if not target:
-                result["replyErrorCode"] = "comment_not_found" if not read["errorCode"] else "comments_not_read"
+                result["replyErrorCode"] = ("ambiguous_match" if matches > 1
+                                            else "comments_not_read" if read["errorCode"] else "comment_not_found")
             else:
                 reply_key = derived_id("sfr", page["igUserId"], target)
                 try:
@@ -501,15 +592,9 @@ def create_studio_checks_router(
                 except _Taken:
                     result["alreadyReplied"] = True
                 else:
-                    state = "failed"
-                    try:
-                        token = client.page_access_token(page["metaPageId"])
-                        client._post(f"{target}/replies", {"message": reply}, access_token=token)
-                        state, result["replySent"] = "sent", True
-                    except _meta.MetaAdsError as error:
-                        result["replyErrorCode"] = error.code
-                        state = "unknown" if error.code == "timeout" else "failed"  # a timed-out send may have landed
-                    record("igReplies", reply_key, {"state": state, "errorCode": result["replyErrorCode"]}, today)
+                    result["replyState"], result["replyErrorCode"] = send_test_reply(
+                        client, page["metaPageId"], target, reply, reply_key, today)
+                    result["replySent"] = result["replyState"] == "sent"
         record("igRead", key, {"state": "done", "errorCode": read["errorCode"], "commentsRead": read["commentsRead"]}, today)
         read["comments"].clear()  # ids and texts never leave this request
         ctx["audit"](
@@ -517,7 +602,8 @@ def create_studio_checks_router(
             f"Instagram read test: {read['commentsRead']} comments read" + (", reply sent" if result["replySent"] else ""),
             {key_name: result[key_name] for key_name in (
                 "testedOn", "mediaRead", "mediaWithComments", "commentsRead", "errorCode", "providerCode",
-                "replyRequested", "replyTargetFound", "replySent", "alreadyReplied", "replyErrorCode")},
+                "replyRequested", "replyTargetFound", "replyMatchCount", "replySent", "alreadyReplied", "replyState",
+                "replyErrorCode")},
         )
         return result
 

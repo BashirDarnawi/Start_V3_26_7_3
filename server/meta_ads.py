@@ -3809,13 +3809,45 @@ def _iso_age_seconds(value: Any) -> int | None:
     return max(0, int((datetime.now(timezone.utc) - moment).total_seconds()))
 
 
-def _read_min_daily_budgets(client: "MetaAdsClient", account_ids: tuple[str, ...]) -> list[dict[str, Any]]:
-    """P0-01 (f): Meta's min_daily_budget and currency of each allowed ad account (one paced GET each)."""
-    rows: list[dict[str, Any]] = []
+def studio_meta_pause_seconds() -> int:
+    """Seconds left on Albayan's shared Meta pause (0: Meta may be asked).
+
+    Restores a pause another process stored first, as every Meta request does, so a studio
+    check can refuse before it spends anything (a refresh, a once-a-day claim).
+    """
+    config = load_meta_ads_config()
+    if config.configured and _server_token_matches(config):
+        _refresh_meta_provider_state()
+    return _meta_remote_backoff_remaining()
+
+
+def is_meta_pause_refusal(error: Any) -> bool:
+    """True for the refusal Albayan raises itself while the Meta pause runs: nothing reached Meta.
+
+    Meta's own limits (HTTP 429, codes 4/17/32/613/80xxx) always carry Meta's code.
+    """
+    return isinstance(error, MetaAdsError) and error.code == "rate_limited" and not error.provider_code
+
+
+def _fact_row_key(kind: str, meta_id: str) -> str:
+    """The stored match key of one account/page row: a hash, never the Meta id (never shown)."""
+    return hashlib.sha256(f"studioFacts|{kind}|{meta_id}".encode("utf-8")).hexdigest()[:24]
+
+
+def _read_min_daily_budgets(
+    client: "MetaAdsClient", account_ids: tuple[str, ...], now_iso: str
+) -> list[tuple[dict[str, Any], bool]]:
+    """P0-01 (f): Meta's min_daily_budget and currency of each allowed ad account (one paced GET each).
+
+    (row, unanswered) pairs: ``unanswered`` marks a retryable error (a pause, a limit, a timeout),
+    after which the other accounts are not read now either.
+    """
+    rows: list[tuple[dict[str, Any], bool]] = []
     pause: MetaAdsError | None = None
     for account_id in account_ids[:_META_FUNDS_MAX_ACCOUNTS]:
-        row: dict[str, Any] = {"account": account_tail(account_id), "currency": "", "minDailyBudget": None,
-                               "unit": "minor", "errorCode": "", "providerCode": ""}
+        row: dict[str, Any] = {"key": _fact_row_key("account", account_id), "account": account_tail(account_id),
+                               "currency": "", "minDailyBudget": None, "unit": "minor", "errorCode": "",
+                               "providerCode": "", "readAt": "", "kept": False}
         error = pause
         if error is None:
             try:
@@ -3823,19 +3855,20 @@ def _read_min_daily_budgets(client: "MetaAdsClient", account_ids: tuple[str, ...
                 raw = payload.get("min_daily_budget")
                 row["currency"] = _clean_text(payload.get("currency"), 12).upper()
                 row["minDailyBudget"] = _metric_int(raw) if raw not in (None, "") else None
-                rows.append(row)
+                row["readAt"] = now_iso
+                rows.append((row, False))
                 continue
             except MetaAdsError as caught:
                 error = caught
                 if caught.retryable:
                     pause = caught  # Meta asked Albayan to wait: the other accounts are not read now
         row.update({"errorCode": error.code, "providerCode": error.provider_code})
-        rows.append(row)
+        rows.append((row, error.retryable))
     return rows
 
 
-def _page_subscription_state(client: "MetaAdsClient", page_id: str, app_id: str) -> tuple[str, str]:
-    """P0-01 (i): ("subscribed" | "not_subscribed" | "error", error code) for one page.
+def _page_subscription_state(client: "MetaAdsClient", page_id: str, app_id: str) -> tuple[str, MetaAdsError | None]:
+    """P0-01 (i): ("subscribed" | "not_subscribed" | "error", the error) for one page.
 
     Read with the page's own token. Subscribed = Albayan's app (ALBAYAN_META_APP_ID; any app
     when it is not set) lists every field in STUDIO_PAGE_WEBHOOK_FIELDS.
@@ -3844,33 +3877,84 @@ def _page_subscription_state(client: "MetaAdsClient", page_id: str, app_id: str)
         token = client.page_access_token(page_id)
         payload = client._request("GET", f"{page_id}/subscribed_apps", params={}, access_token=token)
     except MetaAdsError as error:
-        return "error", error.code
+        return "error", error
     for app in payload.get("data") if isinstance(payload.get("data"), list) else []:
         if not isinstance(app, dict) or (app_id and str(app.get("id") or "") != app_id):
             continue
         fields = app.get("subscribed_fields") if isinstance(app.get("subscribed_fields"), list) else []
         if all(field in fields for field in STUDIO_PAGE_WEBHOOK_FIELDS):
-            return "subscribed", ""
-    return "not_subscribed", ""
+            return "subscribed", None
+    return "not_subscribed", None
 
 
-def _read_page_subscriptions(client: "MetaAdsClient", page_ids: list[str]) -> dict[str, Any]:
-    app_id = (os.getenv("ALBAYAN_META_APP_ID") or "").strip()
-    app_id = app_id if _META_ID_RE.fullmatch(app_id) else ""
+def _read_page_subscriptions(
+    client: "MetaAdsClient", page_ids: list[str], app_id: str, now_iso: str
+) -> list[tuple[dict[str, Any], bool]]:
+    """(row, unanswered) per page, like _read_min_daily_budgets (a retryable error stops the rest)."""
+    rows: list[tuple[dict[str, Any], bool]] = []
+    pause: MetaAdsError | None = None
+    for page_id in page_ids[:_STUDIO_FACTS_MAX_PAGES]:
+        row: dict[str, Any] = {"key": _fact_row_key("page", page_id), "state": "error", "errorCode": "",
+                               "readAt": "", "kept": False}
+        state, error = ("error", pause) if pause else _page_subscription_state(client, page_id, app_id)
+        if error is None:
+            row.update({"state": state, "readAt": now_iso})
+        else:
+            row["errorCode"] = error.code
+            pause = error if error.retryable else pause
+        rows.append((row, bool(error and error.retryable)))
+    return rows
+
+
+def _merge_fact_rows(fresh: list[tuple[dict[str, Any], bool]], stored_rows: Any) -> list[dict[str, Any]]:
+    """Per row: a read Meta did not answer keeps the row's last good values (and their readAt),
+    marked ``kept``, with the new error beside them. Any other answer replaces the row."""
+    earlier = {row["key"]: row for row in (stored_rows if isinstance(stored_rows, list) else [])
+               if isinstance(row, dict) and row.get("key") and row.get("readAt")}
+    merged: list[dict[str, Any]] = []
+    for row, unanswered in fresh:
+        good = earlier.get(row["key"]) if unanswered else None
+        if good:
+            row = {**good, **{name: row[name] for name in ("errorCode", "providerCode") if name in row}, "kept": True}
+        merged.append(row)
+    return merged
+
+
+def _fact_block_checked_at(fresh: list[tuple[dict[str, Any], bool]], stored: dict[str, Any], now_iso: str) -> str:
+    """Now when Meta answered at least one row of the block (or it has none); else the earlier time."""
+    return now_iso if not fresh or any(not unanswered for _row, unanswered in fresh) else _clean_time(stored.get("checkedAt"))
+
+
+def _budget_block(fresh: list[tuple[dict[str, Any], bool]], stored: Any, now_iso: str) -> dict[str, Any]:
+    stored = stored if isinstance(stored, dict) else {}
+    return {"checkedAt": _fact_block_checked_at(fresh, stored, now_iso), "triedAt": now_iso,
+            "accounts": _merge_fact_rows(fresh, stored.get("accounts"))}
+
+
+def _subscription_block(
+    fresh: list[tuple[dict[str, Any], bool]], stored: Any, now_iso: str, page_count: int, app_id: str
+) -> dict[str, Any]:
+    stored = stored if isinstance(stored, dict) else {}
+    pages = _merge_fact_rows(fresh, stored.get("pages"))
     counts = {"subscribed": 0, "notSubscribed": 0, "error": 0}
     codes: dict[str, int] = {}
-    for page_id in page_ids[:_STUDIO_FACTS_MAX_PAGES]:
-        state, code = _page_subscription_state(client, page_id, app_id)
-        key = {"subscribed": "subscribed", "not_subscribed": "notSubscribed"}.get(state, "error")
-        counts[key] += 1
-        if code:
-            codes[code] = codes.get(code, 0) + 1
-    return {**counts, "errorCodes": codes, "pagesChecked": min(len(page_ids), _STUDIO_FACTS_MAX_PAGES),
-            "notChecked": max(len(page_ids) - _STUDIO_FACTS_MAX_PAGES, 0), "appIdConfigured": bool(app_id)}
+    for row in pages:
+        counts[{"subscribed": "subscribed", "not_subscribed": "notSubscribed"}.get(row.get("state"), "error")] += 1
+        if row.get("errorCode"):
+            codes[row["errorCode"]] = codes.get(row["errorCode"], 0) + 1
+    return {"checkedAt": _fact_block_checked_at(fresh, stored, now_iso), "triedAt": now_iso, **counts,
+            "kept": sum(1 for row in pages if row.get("kept")), "errorCodes": codes,
+            "pagesChecked": min(page_count, _STUDIO_FACTS_MAX_PAGES),
+            "notChecked": max(page_count - _STUDIO_FACTS_MAX_PAGES, 0), "appIdConfigured": bool(app_id),
+            "pages": pages}
 
 
 def _public_fact_block(block: Any) -> dict[str, Any]:
-    clean = dict(block) if isinstance(block, dict) else {}
+    """A stored block as the screen gets it: without the per-page rows and the row keys."""
+    clean = {name: value for name, value in (block.items() if isinstance(block, dict) else ()) if name != "pages"}
+    if isinstance(clean.get("accounts"), list):
+        clean["accounts"] = [{name: value for name, value in row.items() if name != "key"}
+                             for row in clean["accounts"] if isinstance(row, dict)]
     checked_at = _clean_time(clean.get("checkedAt"))
     age = _iso_age_seconds(checked_at)
     clean.update({"checked": bool(checked_at), "checkedAt": checked_at, "ageSeconds": age,
@@ -3878,38 +3962,61 @@ def _public_fact_block(block: Any) -> dict[str, Any]:
     return clean
 
 
+def _refresh_studio_meta_facts(config: MetaAdsConfig, page_ids: Any, stored: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Read (f) and (i) from Meta and merge them into the stored reading: (the new state, values read)."""
+    pages = [p for p in dict.fromkeys(re.sub(r"\D", "", str(p or "")) for p in (page_ids or ())) if p]
+    app_id = (os.getenv("ALBAYAN_META_APP_ID") or "").strip()
+    app_id = app_id if _META_ID_RE.fullmatch(app_id) else ""
+    client = get_meta_ads_client()
+    now_iso = _iso_now()
+    accounts = _read_min_daily_budgets(client, config.allowed_account_ids, now_iso)
+    subscriptions = _read_page_subscriptions(client, pages, app_id, now_iso)
+    values_read = sum(1 for row, _unanswered in accounts + subscriptions if row["readAt"])
+
+    def merged(current: dict[str, Any]) -> dict[str, Any]:
+        return {"minDailyBudget": _budget_block(accounts, current.get("minDailyBudget"), now_iso),
+                "pageSubscriptions": _subscription_block(subscriptions, current.get("pageSubscriptions"), now_iso,
+                                                         len(pages), app_id)}
+
+    try:
+        return save_meta_health_state(_STUDIO_FACTS_STATE_ID, merged), values_read
+    except Exception:
+        return merged(stored), values_read  # shown now, stored next time (best effort)
+
+
 def studio_meta_facts(page_ids: Any = (), *, refresh: bool = False) -> dict[str, Any]:
     """P0-01 (f) and (i): the stored 24-hour reading, or a fresh one when ``refresh`` is set.
 
-    ``page_ids`` are the Meta page ids the studio has linked (used in memory only; the
-    stored reading keeps counts). A refresh while another one runs returns the stored
-    reading with ``busy`` set. Without a Meta connection nothing is read.
+    ``page_ids`` are the Meta page ids the studio has linked (used in memory; the stored
+    reading keeps counts and a hashed key per page). A refresh reads nothing while Albayan's
+    Meta pause runs (``paused``, ``retryAfterSeconds``) or another refresh runs (``busy``):
+    the stored reading is shown. Rows merge: an account or page Meta did not answer this time
+    keeps its last good values, marked ``kept``, with the new error beside them. ``refreshed``
+    is true only when at least one value was read from Meta now. Without a Meta connection
+    nothing is read.
     """
     config = load_meta_ads_config()
     state = load_meta_health_state(_STUDIO_FACTS_STATE_ID)
-    refreshed = busy = False
+    busy = False
+    values_read = pause_seconds = 0
     if refresh and config.configured:
-        if _STUDIO_FACTS_LOCK.acquire(blocking=False):
+        pause_seconds = studio_meta_pause_seconds()
+        if not pause_seconds and _STUDIO_FACTS_LOCK.acquire(blocking=False):
             try:
-                pages = list(dict.fromkeys(re.sub(r"\D", "", str(p or "")) for p in (page_ids or ())))
-                client = get_meta_ads_client()
-                reading = {
-                    "minDailyBudget": {"checkedAt": _iso_now(), "accounts": _read_min_daily_budgets(client, config.allowed_account_ids)},
-                    "pageSubscriptions": {"checkedAt": _iso_now(), **_read_page_subscriptions(client, [p for p in pages if p])},
-                }
-                try:
-                    state = save_meta_health_state(_STUDIO_FACTS_STATE_ID, lambda _current: reading)
-                except Exception:
-                    state = reading  # shown now, stored next time (best effort)
-                refreshed = True
+                state, values_read = _refresh_studio_meta_facts(config, page_ids, state)
             finally:
                 _STUDIO_FACTS_LOCK.release()
-        else:
+            if not values_read:
+                pause_seconds = studio_meta_pause_seconds()  # a pause that began during this reading
+        elif not pause_seconds:
             busy = True
     return {
         "configured": config.configured,
-        "refreshed": refreshed,
+        "refreshed": values_read > 0,
         "busy": busy,
+        "paused": pause_seconds > 0,
+        "retryAfterSeconds": pause_seconds,
+        "valuesRead": values_read,
         "minDailyBudget": _public_fact_block(state.get("minDailyBudget")),
         "pageSubscriptions": _public_fact_block(state.get("pageSubscriptions")),
     }

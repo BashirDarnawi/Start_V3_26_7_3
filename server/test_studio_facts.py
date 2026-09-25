@@ -35,8 +35,9 @@ PASSWORD = "StudioFactsPassword123!"
 client = TestClient(app, headers={"Origin": "http://testserver"})
 API = "/api/studio/admin"
 CAMPAIGNS = "adCampaignRequests"
-# Record types these tests count or write: emptied before each test, restored after it.
-TYPES = ("socialPages", "socialReplyLog", CAMPAIGNS, "ads", "metaHealthState", "metaFundsState")
+# Record types these tests count or write: emptied before each test, restored after it
+# (metaProviderState: a Meta pause stored by another process).
+TYPES = ("socialPages", "socialReplyLog", CAMPAIGNS, "ads", "metaHealthState", "metaFundsState", "metaProviderState")
 ACCOUNT_A, ACCOUNT_B = "111111111234", "222222225678"
 APP_ID = "999000111"
 FB_PAGE, FB_PAGE_2, FB_PAGE_3, IG_PAGE_FB = "5100000000001", "5100000000002", "5100000000003", "5100000000004"
@@ -146,6 +147,9 @@ def _clean(actors, monkeypatch):
     monkeypatch.setenv("ALBAYAN_META_AD_ACCOUNT_IDS", f"{ACCOUNT_A},{ACCOUNT_B}")
     monkeypatch.setenv("ALBAYAN_META_APP_ID", APP_ID)
     monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    for name in ("_META_REMOTE_BACKOFF_REASON", "_META_REMOTE_USAGE_PERCENT"):
+        monkeypatch.setattr(meta_ads, name, getattr(meta_ads, name))  # put back after the test
+    monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", 0.0)
     monkeypatch.setattr(studio_facts, "_now", lambda: DAY_1)
     meta_ads._PAGE_TOKEN_CACHE.clear()
     for user in actors.values():
@@ -344,7 +348,8 @@ def test_allowlist_flag_and_unconfigured_meta(actors, graph, monkeypatch):
     monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", "")
     payload = _facts(actors, refresh=True).json()
     assert payload["facts"]["d"] == {"allowlistConfigured": False}
-    assert payload["meta"] == {"configured": False, "refreshed": False, "busy": False, "maxAgeSeconds": 86400}
+    assert payload["meta"] == {"configured": False, "refreshed": False, "busy": False, "paused": False,
+                               "retryAfterSeconds": 0, "valuesRead": 0, "maxAgeSeconds": 86400}
     assert graph.calls == []  # no Meta connection: nothing is read, and nothing fails
 
 
@@ -367,15 +372,21 @@ def test_meta_facts_cache_vs_refresh(actors, graph):
     refreshed = _facts(actors, refresh=True)
     assert refreshed.status_code == 200, refreshed.text
     payload = refreshed.json()
-    assert payload["meta"]["refreshed"] is True
+    assert payload["meta"]["refreshed"] is True and payload["meta"]["paused"] is False
+    assert payload["meta"]["valuesRead"] == 3  # account A and two pages; B and page 3 were refused
     f, i = payload["facts"]["f"], payload["facts"]["i"]
     assert f["checked"] is True and f["stale"] is False and f["ageSeconds"] <= 5
+    read_at = f["accounts"][0]["readAt"]
+    assert read_at == f["checkedAt"] and f["triedAt"] == f["checkedAt"]
     assert f["accounts"] == [
-        {"account": "…1234", "currency": "USD", "minDailyBudget": 100, "unit": "minor", "errorCode": "", "providerCode": ""},
-        {"account": "…5678", "currency": "", "minDailyBudget": None, "unit": "minor", "errorCode": "request_failed", "providerCode": "200"},
+        {"account": "…1234", "currency": "USD", "minDailyBudget": 100, "unit": "minor", "errorCode": "", "providerCode": "",
+         "readAt": read_at, "kept": False},
+        {"account": "…5678", "currency": "", "minDailyBudget": None, "unit": "minor", "errorCode": "request_failed",
+         "providerCode": "200", "readAt": "", "kept": False},
     ]
-    assert (i["subscribed"], i["notSubscribed"], i["error"], i["errorCodes"]) == (1, 1, 1, {"authorization": 1})
+    assert (i["subscribed"], i["notSubscribed"], i["error"], i["errorCodes"], i["kept"]) == (1, 1, 1, {"authorization": 1}, 0)
     assert i["pagesChecked"] == 3 and i["notChecked"] == 0 and i["appIdConfigured"] is True and i["linkedPages"] == 3
+    assert "pages" not in i  # the per-page rows (hashed keys) stay on the server
     # The subscribed_apps reads used each page's own token.
     tokens = {path: token for method, path, _body, token in graph.calls if path.endswith("/subscribed_apps")}
     assert tokens == {f"{page}/subscribed_apps": f"PAGE-TOKEN-{page}" for page in (FB_PAGE, FB_PAGE_2, FB_PAGE_3)}
@@ -410,6 +421,111 @@ def test_page_subscription_read_uses_page_tokens(actors, graph):
     assert payload["i"]["error"] == 1 and payload["i"]["errorCodes"] == {"authorization": 1}
     assert f"{FB_PAGE_3}/subscribed_apps" not in graph.paths()  # no page token, no read with the system token
     assert payload["f"]["accounts"][1]["errorCode"] == "rate_limited"
+
+
+LOCAL_PAUSE_TEXT = "Meta synchronization is paused safely and will resume automatically."
+
+
+def _local_pause():
+    """The refusal MetaAdsClient._request raises itself while the Meta pause runs (no Meta code)."""
+    return meta_ads.MetaAdsError("rate_limited", LOCAL_PAUSE_TEXT, retryable=True)
+
+
+def _seed_good_reading(actors, graph) -> dict:
+    """A first refresh: A 100 USD, B 200 EUR; page 1 subscribed, page 2 not, page 3 refused (no page token)."""
+    _page(actors, "spg_fb_1", FB_PAGE)
+    _page(actors, "spg_fb_2", FB_PAGE_2)
+    _page(actors, "spg_fb_3", FB_PAGE_3)
+    graph.routes[("GET", f"act_{ACCOUNT_A}")] = {"currency": "USD", "min_daily_budget": 100}
+    graph.routes[("GET", f"act_{ACCOUNT_B}")] = {"currency": "EUR", "min_daily_budget": 200}
+    graph.routes[("GET", f"{FB_PAGE}/subscribed_apps")] = {"data": [{"id": APP_ID, "subscribed_fields": ["feed"]}]}
+    graph.routes[("GET", f"{FB_PAGE_2}/subscribed_apps")] = {"data": []}
+    graph.routes[("GET", FB_PAGE_3)] = meta_ads.MetaAdsError("authorization", "x", provider_code="190")
+    first = _facts(actors, refresh=True).json()
+    assert first["meta"]["refreshed"] is True and first["meta"]["valuesRead"] == 4
+    assert (first["facts"]["i"]["subscribed"], first["facts"]["i"]["notSubscribed"], first["facts"]["i"]["error"]) == (1, 1, 1)
+    return first
+
+
+def _refresh_again(actors) -> dict:
+    reset_rate_limit(f"studio:facts-refresh:{actors['admin']['id']}")  # 2 refreshes per 10 minutes
+    response = _facts(actors, refresh=True)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_refresh_while_meta_is_paused_keeps_the_stored_reading(actors, graph, monkeypatch):
+    started = now_ms()
+    first = _seed_good_reading(actors, graph)
+    stored = meta_ads.load_meta_health_state("studioFacts")
+    calls = len(graph.calls)
+    meta_ads._set_meta_remote_backoff(600, reason="meta_80004")
+    paused = _refresh_again(actors)
+    assert len(graph.calls) == calls  # Meta was not asked at all
+    meta = paused["meta"]
+    assert meta["paused"] is True and meta["refreshed"] is False and meta["busy"] is False and meta["valuesRead"] == 0
+    assert 500 < meta["retryAfterSeconds"] <= 600
+    # The saved 24-hour reading is shown as it was: no error rows, not marked as read now.
+    assert paused["facts"]["f"] == {**first["facts"]["f"], "ageSeconds": paused["facts"]["f"]["ageSeconds"]}
+    assert paused["facts"]["i"]["checkedAt"] == first["facts"]["i"]["checkedAt"]
+    assert meta_ads.load_meta_health_state("studioFacts") == stored
+    audit = _audit_rows(actors["admin"]["id"], "studio_facts_refresh", started)[-1]["metadata"]
+    assert audit["paused"] is True and audit["refreshed"] is False and audit["valuesRead"] == 0
+    # A pause another process stored (metaProviderState) counts too.
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    _insert("metaProviderState", "global", {"recordType": "metaProviderState", "backoffUntilMs": now_ms() + 300_000,
+                                            "backoffReason": "meta_4"})
+    monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", 0.0)
+    other = _refresh_again(actors)["meta"]
+    assert other["paused"] is True and 200 < other["retryAfterSeconds"] <= 300 and len(graph.calls) == calls
+
+
+def test_refresh_keeps_the_last_good_values_per_row(actors, graph):
+    first = _seed_good_reading(actors, graph)
+    first_f, first_i = first["facts"]["f"], first["facts"]["i"]
+    # Second refresh: A is read again; B times out; page 1 gets a 5xx, so pages 2 and 3 wait.
+    calls = len(graph.calls)
+    graph.routes[("GET", f"act_{ACCOUNT_A}")] = {"currency": "USD", "min_daily_budget": 150}
+    graph.routes[("GET", f"act_{ACCOUNT_B}")] = meta_ads.MetaAdsError("timeout", "late", retryable=True)
+    graph.routes[("GET", f"{FB_PAGE}/subscribed_apps")] = meta_ads.MetaAdsError("temporary", "x", retryable=True, provider_code="2")
+    second = _refresh_again(actors)
+    meta, f, i = second["meta"], second["facts"]["f"], second["facts"]["i"]
+    assert meta["refreshed"] is True and meta["valuesRead"] == 1 and meta["paused"] is False
+    a, b = f["accounts"]
+    assert (a["currency"], a["minDailyBudget"], a["errorCode"], a["kept"]) == ("USD", 150, "", False)
+    assert a["readAt"] == f["checkedAt"] and f["checkedAt"] >= first_f["checkedAt"]
+    # B keeps its earlier values (and their time), with the new error beside them.
+    assert b == {**first_f["accounts"][1], "errorCode": "timeout", "providerCode": "", "kept": True}
+    assert b["currency"] == "EUR" and b["minDailyBudget"] == 200
+    # Pages: 1 and 2 keep their last good state; 3 never had one, so it stays an error.
+    assert (i["subscribed"], i["notSubscribed"], i["error"], i["kept"]) == (1, 1, 1, 2)
+    assert i["errorCodes"] == {"temporary": 3}
+    assert i["checkedAt"] == first_i["checkedAt"]  # no page answered: the block's time did not move
+    assert f"{FB_PAGE_2}/subscribed_apps" not in graph.paths()[calls:]  # after a retryable error the rest wait
+    assert all("key" not in row for row in f["accounts"]) and "pages" not in i
+    _assert_no_personal_data(second, actors)
+    stored = json.dumps(meta_ads.load_meta_health_state("studioFacts"))
+    assert not any(value in stored for value in (ACCOUNT_A, ACCOUNT_B, FB_PAGE, FB_PAGE_2, FB_PAGE_3))  # keys are hashes
+
+    # Third refresh: nothing answers (Meta limit on A, so B waits; a local pause on the pages).
+    graph.routes[("GET", f"act_{ACCOUNT_A}")] = meta_ads.MetaAdsError("rate_limited", "x", retryable=True, provider_code="80004")
+    graph.routes[("GET", f"{FB_PAGE}/subscribed_apps")] = _local_pause()  # (the page token is cached)
+    third = _refresh_again(actors)
+    assert third["meta"]["refreshed"] is False and third["meta"]["valuesRead"] == 0
+    a3, b3 = third["facts"]["f"]["accounts"]
+    assert (a3["minDailyBudget"], a3["errorCode"], a3["providerCode"], a3["kept"]) == (150, "rate_limited", "80004", True)
+    assert (b3["minDailyBudget"], b3["errorCode"], b3["kept"]) == (200, "rate_limited", True)
+    assert third["facts"]["f"]["checkedAt"] == f["checkedAt"]
+    assert (third["facts"]["i"]["subscribed"], third["facts"]["i"]["notSubscribed"]) == (1, 1)
+    assert third["facts"]["i"]["errorCodes"] == {"rate_limited": 3}
+
+    # Fourth refresh: an answer that is not retryable replaces the row (the old values are gone).
+    graph.routes[("GET", f"act_{ACCOUNT_A}")] = meta_ads.MetaAdsError("authorization", "x", provider_code="190")
+    graph.routes[("GET", f"act_{ACCOUNT_B}")] = {"currency": "EUR", "min_daily_budget": 250}
+    fourth = _refresh_again(actors)["facts"]["f"]["accounts"]
+    assert fourth[0] == {"account": "…1234", "currency": "", "minDailyBudget": None, "unit": "minor",
+                         "errorCode": "authorization", "providerCode": "190", "readAt": "", "kept": False}
+    assert (fourth[1]["minDailyBudget"], fourth[1]["errorCode"], fourth[1]["kept"]) == (250, "", False)
 
 
 def test_private_reply_failure_parsing():
@@ -516,6 +632,52 @@ def test_two_presses_at_once_claim_once(actors):
     later = (DAY_1 + timedelta(days=5)).date().isoformat()
     studio_facts.claim("subscribe", "sft_new", {"day": later, "state": "running"}, later, per_day=True)
     assert set(meta_ads.load_meta_health_state("studioFactTests")["subscribe"]) == {"sft_new"}
+    # A claim is given back only while it still holds the named state.
+    studio_facts.release("subscribe", "sft_new", later, state="done")
+    assert set(meta_ads.load_meta_health_state("studioFactTests")["subscribe"]) == {"sft_new"}
+    studio_facts.release("subscribe", "sft_new", later, state="running")
+    assert meta_ads.load_meta_health_state("studioFactTests")["subscribe"] == {}
+
+
+def test_checks_refused_while_meta_is_paused_keep_the_day(actors, graph, monkeypatch):
+    _page(actors, "spg_fb_1", FB_PAGE)
+    _page(actors, "spg_ig_1", IG_PAGE_FB, "ig", IG_USER)
+    _ig_graph(graph)
+    graph.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = {"success": True}
+    admin = actors["admin"]["cookies"]
+    subscribe_url, ig_url = f"{API}/pages/spg_fb_1/subscribe-test", f"{API}/instagram/spg_ig_1/read-test"
+    meta_ads._set_meta_remote_backoff(120, reason="meta_4")
+    for url in (subscribe_url, ig_url):
+        refused = client.post(url, cookies=admin)
+        _error(refused, 409, "META_PAUSED")
+        assert 60 < int(refused.headers["Retry-After"]) <= 120
+    assert graph.calls == [] and meta_ads.load_meta_health_state("studioFactTests") == {}  # no claim was taken
+    # The pause ends: both tests run the same Tripoli day.
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    assert client.post(subscribe_url, cookies=admin).json()["ok"] is True
+    assert client.post(ig_url, cookies=admin).json()["commentsRead"] == 3
+
+
+def test_a_pause_that_begins_during_a_test_gives_the_day_back(actors, graph):
+    _page(actors, "spg_fb_1", FB_PAGE)
+    _page(actors, "spg_ig_1", IG_PAGE_FB, "ig", IG_USER)
+    admin = actors["admin"]["cookies"]
+    subscribe_url, ig_url = f"{API}/pages/spg_fb_1/subscribe-test", f"{API}/instagram/spg_ig_1/read-test"
+    graph.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = _local_pause()
+    graph.routes[("GET", f"{IG_USER}/media")] = _local_pause()
+    _error(client.post(subscribe_url, cookies=admin), 409, "META_PAUSED")
+    _error(client.post(ig_url, cookies=admin), 409, "META_PAUSED")
+    claims = meta_ads.load_meta_health_state("studioFactTests")
+    assert claims["subscribe"] == {} and claims["igRead"] == {}
+    # Meta's own limit carries Meta's code: the call reached Meta, so that test used the day.
+    graph.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = meta_ads.MetaAdsError(
+        "rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True, provider_code="80004")
+    limited = client.post(subscribe_url, cookies=admin).json()
+    assert limited["ok"] is False and limited["errorCode"] == "rate_limited" and limited["providerCode"] == "80004"
+    _error(client.post(subscribe_url, cookies=admin), 409, "ALREADY_TESTED_TODAY")
+    # The pause is over: the Instagram test runs the same day.
+    _ig_graph(graph)
+    assert client.post(ig_url, cookies=admin).json()["commentsRead"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +689,7 @@ def _ig_graph(graph, comments_by_media=None):
     comments_by_media = comments_by_media or {
         "9001": [{"id": "18000000000000001", "timestamp": "2026-09-24T08:00:00+0000", "text": f"hello {SECRET_TEXT}"},
                  {"id": "18000000000000002", "timestamp": "2026-09-24T09:00:00+0000", "text": "test ALB-7731 please"}],
-        "9002": [{"id": "18000000000000003", "timestamp": "2026-09-23T09:00:00+0000", "text": "old ALB-7731"}],
+        "9002": [{"id": "18000000000000003", "timestamp": "2026-09-23T09:00:00+0000", "text": "old ALB-5500"}],
     }
     graph.routes[("GET", f"{IG_USER}/media")] = {"data": [
         {"id": "9001", "comments_count": 2, "timestamp": "2026-09-24T07:00:00+0000"},
@@ -553,8 +715,8 @@ def test_ig_read_test_admin_audited_once(actors, graph, monkeypatch):
     result = response.json()
     assert result == {
         "testedOn": tripoli_day(DAY_1), "mediaRead": 3, "mediaWithComments": 2, "commentsRead": 3, "errorCode": "",
-        "providerCode": "", "replyRequested": False, "replyTargetFound": None, "replySent": False, "alreadyReplied": False,
-        "replyErrorCode": "",
+        "providerCode": "", "replyRequested": False, "replyTargetFound": None, "replyMatchCount": None, "replySent": False,
+        "alreadyReplied": False, "replyState": "", "replyErrorCode": "",
     }
     # Read with the system token; texts were not even asked for without a code to match.
     reads = [(path, body, token) for method, path, body, token in graph.calls if method == "GET"]
@@ -583,6 +745,7 @@ def test_ig_reply_is_sent_at_most_once(actors, graph, monkeypatch):
     body = {"replyToCommentId": "18000000000000002", "text": "Thank you from Albayan"}
     first = client.post(f"{API}/instagram/spg_ig_1/read-test", json=body, cookies=admin).json()
     assert first["replyRequested"] is True and first["replyTargetFound"] is True and first["replySent"] is True
+    assert first["replyState"] == "sent" and first["replyMatchCount"] == 1
     posts = [(path, b, token) for method, path, b, token in graph.calls if method == "POST"]
     assert posts == [("18000000000000002/replies", {"message": "Thank you from Albayan"}, f"PAGE-TOKEN-{IG_PAGE_FB}")]
     _assert_no_personal_data(first, actors, "18000000000000002", "Thank you from Albayan")
@@ -593,8 +756,9 @@ def test_ig_reply_is_sent_at_most_once(actors, graph, monkeypatch):
     again = client.post(f"{API}/instagram/spg_ig_1/read-test", json={"replyToCommentContaining": "alb-7731", "text": "Again"},
                         cookies=admin).json()
     assert again["replyTargetFound"] is True and again["alreadyReplied"] is True and again["replySent"] is False
+    assert again["replyMatchCount"] == 1 and again["replyState"] == ""
     assert len([m for m, *_ in graph.calls if m == "POST"]) == 1
-    # The code search asked Meta for the texts, and picked the newest matching comment.
+    # The code search asked Meta for the texts and found the one comment holding the code.
     assert any("text" in b.get("fields", "") for m, path, b, _t in graph.calls if path.endswith("/comments"))
 
 
@@ -609,13 +773,17 @@ def test_ig_reply_target_and_body_checks(actors, graph, monkeypatch):
         ({"replyToCommentId": "abc", "text": "x"}, "INVALID_VALUE"),
         ({"replyToCommentId": "1", "replyToCommentContaining": "abc", "text": "x"}, "INVALID_REQUEST"),
         ({"replyToCommentContaining": "ab", "text": "x"}, "INVALID_VALUE"),
+        ({"replyToCommentContaining": "7731", "text": "x"}, "INVALID_VALUE"),       # shorter than 6
+        ({"replyToCommentContaining": "thanks!", "text": "x"}, "INVALID_VALUE"),    # no digit: not distinctive
+        ({"replyToCommentContaining": "a" * 40 + "1", "text": "x"}, "INVALID_VALUE"),  # longer than 40
         ({"replyToCommentId": "1", "text": "x" * 301}, "INVALID_VALUE"),
         ({"replyToCommentId": "1", "text": "x", "extra": 1}, "UNKNOWN_FIELD"),
         ([1, 2], "INVALID_REQUEST"),
     ):
+        reset_rate_limit(f"studio:fact-tests:{actors['admin']['id']}")  # 10 presses a minute, refused ones included
         _error(client.post(url, json=bad, cookies=admin), 400, code)
     assert graph.calls == []  # refused before the day was used or Meta was asked
-    reset_rate_limit(f"studio:fact-tests:{actors['admin']['id']}")  # 10 presses a minute, refused ones included
+    reset_rate_limit(f"studio:fact-tests:{actors['admin']['id']}")
     # A comment that is not among the ones read is never answered (only this account's recent comments).
     missing = client.post(url, json={"replyToCommentId": "18000000000000777", "text": "Hi"}, cookies=admin).json()
     assert missing["replyTargetFound"] is False and missing["replySent"] is False and missing["replyErrorCode"] == "comment_not_found"
@@ -625,12 +793,84 @@ def test_ig_reply_target_and_body_checks(actors, graph, monkeypatch):
     graph.routes[("POST", "18000000000000001/replies")] = meta_ads.MetaAdsError("timeout", "late", retryable=True)
     timed_out = client.post(url, json={"replyToCommentId": "18000000000000001", "text": "Hi"}, cookies=admin).json()
     assert timed_out["replySent"] is False and timed_out["replyErrorCode"] == "timeout"
+    assert timed_out["replyState"] == "unknown"  # the screen says it may have been sent
     replies = meta_ads.load_meta_health_state("studioFactTests")["igReplies"]
     assert [entry["state"] for entry in replies.values()] == ["unknown"]
     assert not any(IG_USER in key or "18000000000000001" in key for key in replies)  # keys are hashes
     monkeypatch.setattr(studio_facts, "_now", lambda: DAY_2 + timedelta(days=1))
     third = client.post(url, json={"replyToCommentId": "18000000000000001", "text": "Hi"}, cookies=admin).json()
     assert third["alreadyReplied"] is True and len([m for m, *_ in graph.calls if m == "POST"]) == 1
+
+
+def test_ig_reply_needs_exactly_one_matching_comment(actors, graph, monkeypatch):
+    _page(actors, "spg_ig_1", IG_PAGE_FB, "ig", IG_USER)
+    _ig_graph(graph, {
+        "9001": [{"id": "18000000000000001", "timestamp": "2026-09-24T08:00:00+0000", "text": "first ALB-8842"},
+                 {"id": "18000000000000002", "timestamp": "2026-09-24T09:00:00+0000", "text": "second alb-8842 too"}],
+        "9002": [{"id": "18000000000000003", "timestamp": "2026-09-23T09:00:00+0000", "text": "ALB-9911 here"}],
+    })
+    for comment in ("18000000000000001", "18000000000000002", "18000000000000003"):
+        graph.routes[("POST", f"{comment}/replies")] = {"id": "18000000000000099"}
+    admin = actors["admin"]["cookies"]
+    url = f"{API}/instagram/spg_ig_1/read-test"
+    # Two recent comments hold the code: nothing is sent, and the count says why.
+    ambiguous = client.post(url, json={"replyToCommentContaining": "ALB-8842", "text": "Hi"}, cookies=admin).json()
+    assert ambiguous["replyTargetFound"] is False and ambiguous["replySent"] is False and ambiguous["replyState"] == ""
+    assert ambiguous["replyErrorCode"] == "ambiguous_match" and ambiguous["replyMatchCount"] == 2
+    assert graph.paths("POST") == [] and meta_ads.load_meta_health_state("studioFactTests")["igReplies"] == {}
+    # One match, but a read that stopped early: the unread comments may hold the code too.
+    monkeypatch.setattr(studio_facts, "_now", lambda: DAY_2)
+    graph.routes[("GET", "9002/comments")] = meta_ads.MetaAdsError("temporary", "x", retryable=True, provider_code="2")
+    partial = client.post(url, json={"replyToCommentContaining": "first alb-8842", "text": "Hi"}, cookies=admin).json()
+    assert partial["errorCode"] == "temporary" and partial["replyMatchCount"] == 1
+    assert partial["replyTargetFound"] is False and partial["replyErrorCode"] == "comments_not_read"
+    assert graph.paths("POST") == []
+    # Exactly one match in a complete read: that comment is answered.
+    monkeypatch.setattr(studio_facts, "_now", lambda: DAY_2 + timedelta(days=1))
+    _ig_graph(graph, {"9001": [{"id": "18000000000000001", "timestamp": "2026-09-24T08:00:00+0000", "text": "x"}],
+                      "9002": [{"id": "18000000000000003", "timestamp": "2026-09-23T09:00:00+0000", "text": "ALB-9911 here"}]})
+    one = client.post(url, json={"replyToCommentContaining": "alb-9911", "text": "Hi"}, cookies=admin).json()
+    assert one["replySent"] is True and one["replyState"] == "sent" and one["replyMatchCount"] == 1
+    assert graph.paths("POST") == ["18000000000000003/replies"]
+
+
+@pytest.mark.parametrize("error, state, given_back", [
+    (meta_ads.MetaAdsError("authorization", "x", provider_code="190"), "failed", True),
+    (meta_ads.MetaAdsError("rate_limited", "x", retryable=True, provider_code="80004"), "failed", True),
+    (meta_ads.MetaAdsError("rate_limited", LOCAL_PAUSE_TEXT, retryable=True), "failed", True),
+    (meta_ads.MetaAdsError("timeout", "x", retryable=True), "unknown", False),
+    (meta_ads.MetaAdsError("network", "x", retryable=True), "unknown", False),
+    (meta_ads.MetaAdsError("temporary", "x", retryable=True, provider_code="500"), "unknown", False),
+    (meta_ads.MetaAdsError("invalid_response", "x"), "unknown", False),
+    (meta_ads.MetaAdsError("request_failed", "x", provider_code="100"), "failed", False),
+])
+def test_ig_reply_claim_is_given_back_only_when_meta_applied_nothing(actors, graph, monkeypatch, error, state, given_back):
+    _page(actors, "spg_ig_1", IG_PAGE_FB, "ig", IG_USER)
+    _ig_graph(graph)
+    graph.routes[("POST", "18000000000000002/replies")] = error
+    admin = actors["admin"]["cookies"]
+    url = f"{API}/instagram/spg_ig_1/read-test"
+    body = {"replyToCommentId": "18000000000000002", "text": "Hi"}
+    first = client.post(url, json=body, cookies=admin).json()
+    assert first["replySent"] is False and first["replyState"] == state and first["replyErrorCode"] == error.code
+    replies = meta_ads.load_meta_health_state("studioFactTests")["igReplies"]
+    assert [entry["state"] for entry in replies.values()] == ([] if given_back else [state])
+    # Another day, the same comment: answered only when the claim was given back.
+    monkeypatch.setattr(studio_facts, "_now", lambda: DAY_2)
+    graph.routes[("POST", "18000000000000002/replies")] = {"id": "18000000000000099"}
+    second = client.post(url, json=body, cookies=admin).json()
+    assert second["replySent"] is given_back and second["alreadyReplied"] is (not given_back)
+    assert len(graph.paths("POST")) == (2 if given_back else 1)
+
+
+def test_ig_reply_without_a_page_token_is_never_sent_and_given_back(actors, graph):
+    _page(actors, "spg_ig_1", IG_PAGE_FB, "ig", IG_USER)
+    _ig_graph(graph)
+    graph.routes[("GET", IG_PAGE_FB)] = meta_ads.MetaAdsError("timeout", "late", retryable=True)
+    result = client.post(f"{API}/instagram/spg_ig_1/read-test", json={"replyToCommentId": "18000000000000002", "text": "Hi"},
+                         cookies=actors["admin"]["cookies"]).json()
+    assert result["replySent"] is False and result["replyState"] == "failed" and result["replyErrorCode"] == "timeout"
+    assert graph.paths("POST") == [] and meta_ads.load_meta_health_state("studioFactTests")["igReplies"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -654,3 +894,52 @@ def test_health_screen_is_admin_only_bilingual_and_lazy():
     review = (ROOT / "src" / "systems" / "ads_studio" / "15c-ads-studio.js").read_text(encoding="utf-8")
     assert "typeof renderStudioHealthSection === 'function'" in review
     assert b"\r\n" not in (ROOT / "src" / "systems" / "ads_studio" / "15i-studio-health.js").read_bytes()
+
+
+def _js_function(source: str, name: str) -> str:
+    start = source.index(f"function {name}(")
+    return source[start:source.index("\n}\n", start)]
+
+
+def test_health_screen_session_reset_pause_reply_states_and_labels():
+    source = (ROOT / "src" / "systems" / "ads_studio" / "15i-studio-health.js").read_text(encoding="utf-8")
+    review = (ROOT / "src" / "systems" / "ads_studio" / "15c-ads-studio.js").read_text(encoding="utf-8")
+    # A session change for the same admin resets the health screen (like Social Studio's reset) ...
+    reset = _js_function(review, "resetAdsStudioSessionState")
+    assert "if (typeof resetStudioHealthState === 'function') resetStudioHealthState();" in reset
+    # ... and every request clears its own flags whenever its generation is still current.
+    for name in ("studioHealthEnsureLoaded", "studioHealthRefreshFacts", "studioHealthSubscribeTest", "studioHealthIgReadTest"):
+        after_finally = _js_function(source, name).split("} finally {", 1)[1]
+        assert after_finally.lstrip().startswith("if (studioHealthGenerationIsCurrent(context))"), name
+    # The refresh note: paused, nothing new read, rows kept from an earlier reading.
+    note = _js_function(source, "studioHealthRefreshNote")
+    assert "meta.paused" in note and "showing the last reading" in note and "Nothing new was read from Meta" in note
+    assert "META_PAUSED:" in source
+    # The reply target: only a 15+ digit number is a comment id; a timed-out reply "may have been sent".
+    assert "/^\\d{15,40}$/.test(target)" in source and "\\d{5," not in source
+    result = _js_function(source, "studioHealthIgResultText")
+    assert "result.replyState === 'unknown'" in result and "The reply may have been sent." in result
+    assert "ambiguous_match" in result and "replyMatchCount" in result
+    # Arabic view: classes, statuses and codes go through bilingual tables, never the raw key.
+    assert "studioHealthCounts(b.byClass, studioHealthCodeLabel)" in source
+    assert "studioHealthCounts(b.byCode, studioHealthProviderCodeLabel)" in source
+    assert "studioHealthCounts(c.byStatus, studioHealthStatusLabel)" in source
+    assert "studioHealthCounts(i.errorCodes, studioHealthCodeLabel)" in source
+    assert "typeof adsStudioStatusMeta === 'function'" in _js_function(source, "studioHealthStatusLabel")
+    fallback = _js_function(source, "studioHealthCodeLabel")
+    assert "Object.prototype.hasOwnProperty.call(STUDIO_HEALTH_META_CODES" in fallback and '<span dir="ltr">' in fallback
+    table = source.split("const STUDIO_HEALTH_META_CODES = {", 1)[1].split("\n};", 1)[0]
+    labelled = set(re.findall(r"^  ([a-z_]+): \[", table, re.MULTILINE))
+    assert all(re.search(r"[؀-ۿ]", line) for line in table.strip().splitlines())  # every label has Arabic
+    meta_source = (ROOT / "server" / "meta_ads.py").read_text(encoding="utf-8")
+    client_codes = set(re.findall(r'MetaAdsError\(\s*"([a-z_]+)"', meta_source))
+    class_map = meta_source.split("_PUBLIC_MESSAGE_CLASSES = {", 1)[1].split("}", 1)[0]
+    classes = set(re.findall(r'": "([a-z_]+)",$', class_map, re.MULTILINE))
+    own = {"not_confirmed", "comment_not_found", "comments_not_read", "ambiguous_match"}
+    # Albayan Manager's import/link flows, never a studio check (the generic label covers them anyway).
+    manager_only = {"campaign_name_unknown", "discovery_failed", "duplicate_link", "no_accounts", "pending_enrichment",
+                    "studio_campaign"}
+    assert client_codes and classes
+    assert not (client_codes - manager_only) - labelled and not classes - labelled and not own - labelled
+    assert {"invalid_path", "response_too_large", "not_configured", "account_not_allowed"} <= labelled
+    assert b"\r\n" not in (ROOT / "src" / "systems" / "ads_studio" / "15c-ads-studio.js").read_bytes()

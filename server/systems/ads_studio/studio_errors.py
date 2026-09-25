@@ -30,6 +30,7 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "NOT_INSTAGRAM": 409,        # admin checks: the Instagram read test needs a linked Instagram account
     "ALREADY_TESTED_TODAY": 409,  # admin checks: one test per page/account per Tripoli day
     "META_NOT_CONFIGURED": 409,  # admin checks: Albayan's Meta connection is not set up, so nothing ran
+    "META_PAUSED": 409,          # admin checks: Albayan's Meta pause runs, so nothing ran and the day is still free
 }
 
 
