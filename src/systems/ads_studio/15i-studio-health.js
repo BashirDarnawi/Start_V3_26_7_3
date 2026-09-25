@@ -536,8 +536,8 @@ function studioHealthYesNo(value) {
 // The token's "what to do" (runbook 3.1 expiring, 3.2 invalid) and the webhook counters' (3.10).
 function studioHealthTokenFix() {
   return studioHealthFix('token', 'diagnostics', '3.1 / 3.2',
-    'Few days left, or not valid: make a new system-user token in Meta Business Settings, put it in ALBAYAN_META_ACCESS_TOKEN in Jelastic and restart; then confirm "valid" in',
-    'أيام قليلة متبقية أو الرمز غير صالح: أنشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا، وضعه في ALBAYAN_META_ACCESS_TOKEN في Jelastic ثم أعد التشغيل؛ ثم تأكد من «صالح» في');
+    'Few days left, or not valid: make a new system-user token in Meta Business Settings, put it in the Meta key variable in Jelastic (runbook 3.1) and restart; then confirm "valid" in',
+    'أيام قليلة متبقية أو الرمز غير صالح: أنشئ رمزاً جديداً للمستخدم النظامي في إعدادات أعمال ميتا، وضعه في متغيّر مفتاح ميتا في Jelastic (دليل التشغيل 3.1) ثم أعد التشغيل؛ ثم تأكد من «صالح» في');
 }
 
 function studioHealthWebhooksFix() {
