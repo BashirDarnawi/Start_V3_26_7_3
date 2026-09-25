@@ -2240,35 +2240,91 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('publishStatus has an English and Arabic label for every value on staff and customer cards; no raw value is rendered', !loadError && labelCases.every(Boolean),
     loadError || `cases ${labelCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
 
-  // Arabic entries for the new server texts (added at the end; the earlier entries keep their place).
+  // Arabic entries for the new server texts (the stage 8 block, in its place; later entries follow it).
+  // The account and not-found keys are the server's exact texts (REFUSE_LINK_ACCOUNT, REFUSE_LINK_NOT_FOUND).
   const added = [
     ['Only Submitted campaigns can be withdrawn', 'يمكن سحب الطلبات التي تنتظر المراجعة فقط'],
     ['This request was already approved', 'تمت الموافقة على هذا الطلب بالفعل — اطلب إيقافه بدلاً من سحبه'],
     ['Campaign is missing its owner', 'هذا الطلب غير مرتبط بحساب صاحبه — تواصل مع فريق البيان'],
     ['This Meta campaign is already linked to another request', 'حملة ميتا هذه مرتبطة بطلب آخر'],
     ['Rename the campaign in Meta to the name shown, then link again', 'غيّر اسم الحملة في ميتا إلى الاسم الظاهر ثم اربطها مرة أخرى'],
-    ['This Meta ad account is not allowed', 'حساب إعلانات ميتا هذا غير مسموح'],
-    ['Meta campaign not found', 'لم يتم العثور على حملة ميتا']
+    ["This Meta ad account is not one of Albayan's ad accounts", 'حساب الإعلانات هذا ليس من حسابات البيان الإعلانية'],
+    ['The Meta campaign was not found', 'لم يتم العثور على حملة ميتا']
   ];
   const refusalMap = json('_ADS_STUDIO_REFUSAL_AR') || [];
   const arabic = detail => String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(detail)})`));
   const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
+  const metaPy = read('server/meta_ads.py');
+  const pollPy = read('server/systems/ads_studio/studio_ig_poll.py');
+  const addedAt = refusalMap.findIndex(entry => entry[0] === added[0][0]);
   const refusalCases = [
     added.every(([en, ar]) => refusalMap.filter(entry => entry[0] === en).length === 1 && refusalMap.some(entry => entry[0] === en && entry[1] === ar && !entry[2])),
-    JSON.stringify(refusalMap.slice(-added.length).map(entry => entry.slice(0, 2))) === JSON.stringify(added),
+    addedAt > 0 && refusalMap[addedAt - 1][0] === 'Meta is busy right now, so the chosen post could not be checked'
+      && JSON.stringify(refusalMap.slice(addedAt, addedAt + added.length).map(entry => entry.slice(0, 2))) === JSON.stringify(added),
     arabic('This request was already approved — ask to stop it instead') === added[1][1],
     arabic('Only Submitted campaigns can be withdrawn') === added[0][1] && arabic('Campaign is missing its owner') === added[2][1],
     arabic('This Meta campaign is already linked to another request (ALB-S-ABCDEFGH)') === added[3][1],
     arabic({ code: 'NEEDS_MANUAL_RENAME', message: 'Rename the campaign in Meta to the name shown, then link again', studioName: 'ALB-S-ABCDEFGH · x' }) === added[4][1],
-    arabic('This Meta ad account is not allowed') === added[5][1] && arabic('Meta campaign not found in this ad account') === added[6][1],
+    arabic("This Meta ad account is not one of Albayan's ad accounts") === added[5][1] && arabic('The Meta campaign was not found') === added[6][1],
+    !refusalMap.some(entry => ['This Meta ad account is not allowed', 'Meta campaign not found'].includes(entry[0])),
     String(run("adsStudioRefusalText('This Meta campaign is already linked to another request')")) === 'This Meta campaign is already linked to another request',
     actionsPy.includes('REFUSE_WITHDRAW_NOT_SUBMITTED = "Only Submitted campaigns can be withdrawn"')
       && actionsPy.includes('REFUSE_WITHDRAW_APPROVED = "This request was already approved')
       && actionsPy.includes('detail="Campaign is missing its owner"')
-      && read('server/meta_ads.py').includes('"This Meta ad account is not allowed"')
+      && actionsPy.includes(`REFUSE_LINK_ACCOUNT = "${added[5][0]}"`) && actionsPy.includes(`REFUSE_LINK_NOT_FOUND = "${added[6][0]}"`)
+      && actionsPy.includes(`REFUSE_LINK_TAKEN = "${added[3][0]}"`) && actionsPy.includes(`REFUSE_NEEDS_MANUAL_RENAME = "${added[4][0]}"`)
   ];
   check('Arabic refusal map: withdraw texts and the Meta link texts (already linked, rename, account not allowed, campaign not found)', !loadError && refusalCases.every(Boolean),
     loadError || `cases ${refusalCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // EVERY REFUSE_LINK_* constant (read from the server file), the manual-rename message, the studio
+  // code, the approval and publish-status texts, the Manager link's studio refusals (meta_ads.py) and
+  // the Instagram check's texts (studio_ig_poll.py) reach Arabic through the map: never the English
+  // fallback, and the entry that answers is the one written for that text (never a shorter one).
+  const linkConstants = [...actionsPy.matchAll(/^(REFUSE_LINK_[A-Z_]+) = "([^"]+)"/gm)].map(match => [match[1], match[2]]);
+  const pyText = (source, name) => (source.match(new RegExp(`^${name} = "([^"]+)"`, 'm')) || [])[1] || '';
+  const managerStudio = 'This Meta ad belongs to Albayan Studio (a studio request linked its campaign). It cannot be linked to an Albayan Manager ad.';
+  const managerCode = 'This Meta ad belongs to Albayan Studio (its campaign name carries the studio code ALB-S-). It cannot be linked to an Albayan Manager ad.';
+  const managerUnread = "Albayan could not read this ad's Meta campaign name to confirm it is not an Albayan Studio ad. Try again in a minute.";
+  const pollTexts = [...pollPy.matchAll(/studio_error\(\s*\d+,\s*"[A-Z_]+",\s*"([^"]+)"/g)].map(match => match[1])
+    .concat([...pollPy.matchAll(/CHECK(?:S_PER_ACCOUNT_MINUTE|_PRESSES_PER_MINUTE),\s*"([^"]+)"\)/g)].map(match => match[1]));
+  const serverTexts = [
+    ...linkConstants.map(([, value]) => value),
+    `${pyText(actionsPy, 'REFUSE_LINK_META_BUSY')}. Try again in a minute.`, `${pyText(actionsPy, 'REFUSE_LINK_META_FAILED')} (Meta code 100.33)`,
+    `${pyText(actionsPy, 'REFUSE_LINK_RATE')}. Please wait a minute.`, `${pyText(actionsPy, 'REFUSE_STUDIO_REF')}. Try again.`,
+    pyText(actionsPy, 'REFUSE_NEEDS_MANUAL_RENAME'),
+    'Only Submitted campaigns can be reviewed', 'You cannot review your own campaign', 'Invalid review decision',
+    'operationId was already used for another review', 'Only Approved campaigns can be marked launched',
+    'operationId was already used for another update', 'expectedVersion is required', 'Campaign request not found',
+    'A link sets publishStatus meta_review; leave publishStatus out',
+    'publishStatus is required (or metaAdAccountId and metaCampaignId to link a Meta campaign)',
+    'meta_review is set by linking a Meta campaign (metaAdAccountId and metaCampaignId)',
+    managerStudio, managerCode, managerUnread,
+    ...pollTexts
+  ];
+  const firstHit = value => refusalMap.find(([needle]) => value.includes(needle)) || [];
+  const englishLeft = serverTexts.filter(value => {
+    const ar = arabic(value);
+    return !value || ar === value || !/[؀-ۿ]/.test(ar) || /[A-Za-z]{4,}/.test(ar.replace(/ALB-S-/g, '')) || !value.startsWith(firstHit(value)[0] || '\u0000');
+  });
+  const everyCases = [
+    linkConstants.length >= 13 && linkConstants.some(([name]) => name === 'REFUSE_LINK_ACCOUNT') && linkConstants.some(([name]) => name === 'REFUSE_LINK_NOT_FOUND'),
+    englishLeft.length === 0,
+    pollTexts.length >= 7 && pollTexts.includes('This Instagram account was checked less than a minute ago. Try again in a minute.')
+      && pollTexts.includes('Too many requests. Please wait and try again.') && pollTexts.includes('Meta asked Albayan to wait, so no comment was read. Try again in a few minutes.'),
+    ['Only Submitted campaigns can be reviewed', 'You cannot review your own campaign', 'Invalid review decision', 'operationId was already used for another review',
+      'Only Approved campaigns can be marked launched', 'operationId was already used for another update', 'expectedVersion is required',
+      'A link sets publishStatus meta_review; leave publishStatus out', 'publishStatus is required (or metaAdAccountId and metaCampaignId to link a Meta campaign)',
+      'meta_review is set by linking a Meta campaign (metaAdAccountId and metaCampaignId)'].every(value => actionsPy.includes(`"${value}"`)),
+    [managerStudio, managerCode, managerUnread].every(value => metaPy.replace(/"\s*\n\s*"/g, '').includes(`"${value}"`)),
+    arabic(`${pyText(actionsPy, 'REFUSE_LINK_META_BUSY')}. Try again in a minute.`) === 'ميتا مشغولة الآن، لذلك تعذر ربط الحملة. حاول مرة أخرى بعد دقيقة.'
+      && arabic({ code: 'RATE_LIMITED', message: 'This Instagram account was checked less than a minute ago. Try again in a minute.' }) === 'فُحص حساب إنستغرام هذا قبل أقل من دقيقة. أعد المحاولة بعد دقيقة.'
+      && arabic(managerStudio) === 'إعلان ميتا هذا تابع لاستوديو البيان (ربط طلبٌ في الاستوديو حملته)، ولا يمكن ربطه بإعلان في مدير البيان',
+    // The new entries come after the stage 8 block (append-only), each English key once.
+    refusalMap.length >= addedAt + added.length + 30 && new Set(refusalMap.map(entry => entry[0])).size === refusalMap.length
+  ];
+  check('Arabic refusal map: EVERY REFUSE_LINK_* constant, the approval texts, the Manager link\'s studio refusals and the Instagram check texts reach Arabic (no English fallback)',
+    !loadError && everyCases.every(Boolean), loadError || `cases ${everyCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}; English left: ${JSON.stringify(englishLeft)}`);
 
   // Staff launch area: the studio name with one-tap Copy, then the link sheet from the allowlisted accounts.
   as('admin', 'p9-staff');
@@ -2304,10 +2360,14 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     { error: { status: 409, message: 'x', payload: { detail: { code: 'NEEDS_MANUAL_RENAME', message: 'Rename the campaign in Meta to the name shown, then link again', studioName } } } },
     { error: { status: 409, message: 'This Meta campaign is already linked to another request', payload: { detail: 'This Meta campaign is already linked to another request' } } },
     { value: { id: 'p9-a', data: { ...approved, publishStatus: 'meta_review', metaCampaignId: '120200555', metaAdAccountId: '222', linkedAt: '2026-09-25T10:00:00Z', _lastModified: 22 },
-      lastModified: 22, renamed: true, removedManagerCopies: 2, warnings: ['meta_budget_above_paid', { code: 'odd_code<b>' }] } }
+      lastModified: 22, renamed: true, removedManagerCopies: 2, keptManagerCopies: 3, warnings: ['meta_budget_above_paid', { code: 'odd_code<b>' }] } }
   ]);
   reply(getPath, [{ value: { id: 'p9-a', data: approved, lastModified: 21 } }]);
+  // The last render after a refusal already offers Link again (never a button stuck on "Linking…").
+  run("var __lastSheets = ''; render = () => { __lastSheets = renderAdsStudioSheets(); };");
   run('linkAdsStudioMetaCampaign()');
+  const renameLastRender = String(run('__lastSheets'));
+  run('render = () => {};');
   const renameCall = calls().find(call => call.path === publishPath) || {};
   const renameOutcome = json('_adsStudioLinkSheet.outcome') || {};
   const renameHtml = String(run('renderAdsStudioSheets()'));
@@ -2328,15 +2388,30 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   box.state.adCampaignRequests.push({ ...JSON.parse(JSON.stringify(approved)), id: 'p9-d', studioName: 'ALB-S-QRSTUVWX · Lost', _lastModified: 40 });
   run("openAdsStudioLinkSheet('p9-d'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '777';");
   reply('/api/ad-studio/campaigns/p9-d/publish-status', [{ error: { status: 409, message: 'Conflict: record has changed', payload: { detail: 'Conflict: record has changed' } } }]);
-  reply('/api/collections/adCampaignRequests/p9-d', [{ value: { id: 'p9-d', data: { ...approved, id: 'p9-d', metaCampaignId: '777', publishStatus: 'meta_review', _lastModified: 41 }, lastModified: 41 } }]);
+  // The request read back carries the result the link stored: its warnings and kept copies are shown too.
+  reply('/api/collections/adCampaignRequests/p9-d', [{ value: { id: 'p9-d', data: { ...approved, id: 'p9-d', metaCampaignId: '777', publishStatus: 'meta_review', _lastModified: 41,
+    metaLinkResult: { renamed: true, removedManagerCopies: 1, keptManagerCopies: 1, warnings: ['meta_budget_above_paid'], metaBudgetMinor: 9000 } }, lastModified: 41 } }]);
   run('linkAdsStudioMetaCampaign()');
   const lostReply = json('_adsStudioLinkSheet.outcome') || {};
+  const lostHtml = String(run('renderAdsStudioSheets()'));
+  const lostAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
   // Double tap: one request in flight.
   box.state.adCampaignRequests.push({ ...JSON.parse(JSON.stringify(approved)), id: 'p9-e', _lastModified: 50 });
   run("openAdsStudioLinkSheet('p9-e'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '888'; __calls.length = 0;");
   const sameFlight = run('linkAdsStudioMetaCampaign() === linkAdsStudioMetaCampaign()');
   const flightCalls = calls().filter(call => call.path === '/api/ad-studio/campaigns/p9-e/publish-status').length;
-  run('_adsStudioLinkPromise = null; closeAdsStudioLinkSheet();');
+  // Single flight PER REQUEST: while p9-e waits, another request's sheet links on its own; p9-e's
+  // sheet opened again shows its link still running and a press joins it (no second call).
+  run('var __eFlight = linkAdsStudioMetaCampaign(); closeAdsStudioLinkSheet();');
+  box.state.adCampaignRequests.push({ ...JSON.parse(JSON.stringify(approved)), id: 'p9-f', _lastModified: 60 });
+  run("openAdsStudioLinkSheet('p9-f'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '999';");
+  const otherFlight = run('(() => { const f = linkAdsStudioMetaCampaign(); return f !== __eFlight && f === linkAdsStudioMetaCampaign(); })()');
+  const otherCalls = calls().filter(call => call.path === '/api/ad-studio/campaigns/p9-f/publish-status').length;
+  run("closeAdsStudioLinkSheet(); openAdsStudioLinkSheet('p9-e');");
+  const reopenedBusy = String(run('renderAdsStudioSheets()'));
+  const rejoined = run('linkAdsStudioMetaCampaign() === __eFlight');
+  const flightsAfter = [calls().filter(call => call.path === '/api/ad-studio/campaigns/p9-e/publish-status').length, run('_adsStudioLinkPromises.size')];
+  run('_adsStudioLinkPromises.clear(); closeAdsStudioLinkSheet();');
   // A reviewer (not an admin) cannot read the account list: the account id is typed, digits only.
   as('reviewer', 'p9-reviewer');
   run("_adsStudioMetaAccounts.forUser = ''; __calls.length = 0; openAdsStudioLinkSheet('p9-e');");
@@ -2360,13 +2435,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     renameCall.method === 'POST' && renameCall.body && renameCall.body.metaAdAccountId === '222' && renameCall.body.metaCampaignId === '120200555'
       && renameCall.body.expectedVersion === 21 && renameCall.body.expectedLastModified === 21 && renameCall.body.publishStatus === 'meta_review'
       && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(String(renameCall.body.operationId || '')),
+    renameLastRender.includes('data-ads-studio-link-result="rename"') && /data-ads-studio-link-submit="1" onclick="linkAdsStudioMetaCampaign\(this\)"  class=/.test(renameLastRender)
+      && !renameLastRender.includes('Linking…'),
     renameOutcome.kind === 'rename' && renameOutcome.studioName === studioName
       && renameHtml.includes('Rename it in Meta, then press Link again.') && renameHtml.includes('data-ads-studio-link-result="rename"')
       && (renameHtml.match(/data-ads-studio-copy="1"/g) || []).length === 2 && renameAr.includes('غيّر اسمها في ميتا، ثم اضغط «ربط» مرة أخرى.'),
     linkedElsewhere[0] && linkedElsewhere[0].kind === 'error' && linkedElsewhere[0].text === 'حملة ميتا هذه مرتبطة بطلب آخر'
       && linkedElsewhere[1] && linkedElsewhere[1].operationId === renameCall.body.operationId && linkedElsewhere[2] === true,
-    linkedOutcome.kind === 'linked' && linkedOutcome.renamed === true && linkedOutcome.removed === 2
+    linkedOutcome.kind === 'linked' && linkedOutcome.renamed === true && linkedOutcome.removed === 2 && linkedOutcome.kept === 3
       && JSON.stringify(linkedOutcome.warnings) === '["meta_budget_above_paid","odd_code<b>"]',
+    text(linkedHtml).includes('3 copies in Albayan Manager have money or edits and were kept — check them.') && linkedHtml.includes('data-ads-studio-link-kept="3"')
+      && linkedAr.includes('3 نسخ في مدير البيان عليها أموال أو تعديلات فبقيت كما هي — راجعها.'),
     text(linkedHtml).includes('Linked. Meta is reviewing the ad now.') && text(linkedHtml).includes('Renamed in Meta to the name shown.')
       && text(linkedHtml).includes('2 copies removed from Albayan Manager.') && text(linkedHtml).includes('The campaign budget in Meta is above what the customer paid')
       && text(linkedHtml).includes('Meta flagged something on this campaign') && !linkedHtml.includes('meta_budget_above_paid') && !linkedHtml.includes('odd_code')
@@ -2375,16 +2454,23 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     afterLink.metaCampaignId === '120200555' && afterLink.publishStatus === 'meta_review' && !launchAfter.includes('data-ads-studio-campaign="p9-a"')
       && linkNotice.title === 'Meta campaign linked' && linkNotice.kind === 'success',
     lostReply.kind === 'linked' && (json("state.adCampaignRequests.find(c => c.id === 'p9-d').metaCampaignId") === '777'),
+    lostReply.renamed === true && lostReply.removed === 1 && lostReply.kept === 1 && JSON.stringify(lostReply.warnings) === '["meta_budget_above_paid"]'
+      && text(lostHtml).includes('The campaign budget in Meta is above what the customer paid') && text(lostHtml).includes('1 copy in Albayan Manager has money or edits and was kept — check it.')
+      && text(lostHtml).includes('1 copy removed from Albayan Manager.') && lostAr.includes('نسخة واحدة في مدير البيان عليها أموال أو تعديلات فبقيت كما هي — راجعها.'),
+    !String(run("renderAdsStudioLinkOutcome({ id: 'x' }, adsStudioLinkOutcomeFrom({ keptManagerCopies: 0 }, ''))")).includes('data-ads-studio-link-kept'),
     sameFlight === true && flightCalls === 1,
+    otherFlight === true && otherCalls === 1 && rejoined === true && flightsAfter[0] === 1 && flightsAfter[1] === 2
+      && reopenedBusy.includes('data-ads-studio-link-submit="1"') && reopenedBusy.includes('disabled aria-busy="true"') && text(reopenedBusy).includes('Linking…'),
     reviewerCalls === 0 && reviewerSheet.includes('<input id="ads-studio-link-account" type="text" inputmode="numeric"') && reviewerSheet.includes('digits only'),
     JSON.stringify(json("[adsStudioDigitsOnly('act_٣٤٥'), adsStudioDigitsOnly(' 12 34 '), adsStudioDigitsOnly('abc')]")) === '["345","1234",""]',
     JSON.stringify(json(`[adsStudioNeedsManualRename({ code: 'NEEDS_MANUAL_RENAME', message: '' }), adsStudioNeedsManualRename('Rename the campaign in Meta to the name shown, then link again'),
       adsStudioNeedsManualRename({ code: 'OTHER', message: 'Meta campaign not found' }), adsStudioNeedsManualRename('Conflict: record has changed')]`)) === '[true,true,false,false]',
     fn('adsStudioSetLinkField').includes('adsStudioDigitsOnly(input?.value)') && fn('adsStudioDigitsOnly').includes('normalizeDigitsAscii('),
     linkCode.every(Boolean) && !linkCode.some(code => /\b(?:confirm|prompt|alert)\(/.test(code)) && !adsStudio.includes('markAdsStudioCampaignLaunched'),
-    fn('linkAdsStudioMetaCampaignOnce').includes("adsStudioActionAttempt('publish', campaign.id, Number(campaign._lastModified))")
+    fn('linkAdsStudioMetaCampaignOnce').includes("adsStudioActionAttempt('publish', campaign.id, Number(campaign._lastModified))"),
+    !/_adsStudioLinkPromise\b/.test(adsStudio) && fn('linkAdsStudioMetaCampaign').includes('_adsStudioLinkPromises.has(campaignId)')
   ];
-  check('staff link sheet: studio name + Copy, allowlisted accounts, digits-only id, linked / rename in Meta / already linked / budget warning, single flight', !loadError && linkCases.every(Boolean),
+  check('staff link sheet: studio name + Copy, allowlisted accounts, digits-only id, linked / rename in Meta / already linked / budget warning, kept Manager copies, single flight per request', !loadError && linkCases.every(Boolean),
     loadError || `cases ${linkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
 
   // Customer Withdraw: an in-page sheet on a waiting request, one request per (action, version).
@@ -2441,6 +2527,182 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('customer Withdraw: in-page sheet with the held amount (EN/AR), single flight per version, list and wallet refreshed, a 409 in Arabic', !loadError && withdrawCases.every(Boolean),
     loadError || `cases ${withdrawCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Staff "Unlink Meta campaign" (D26): an in-page sheet with a required reason on a linked Approved
+  // card; POST unlink-meta {operationId, expectedLastModified, reason}; the copies that came back and
+  // the rename back are shown; single flight per request; a lost reply is read back from the server.
+  as('admin', 'p9-staff');
+  const linkedReq = { id: 'p9-u', status: 'Approved', createdBy: 'c-1', name: 'Linked <one>', studioRef: 'ALB-S-UNLINKME', studioName: 'ALB-S-UNLINKME · Linked',
+    metaCampaignId: '120555', metaAdAccountId: 'act_111', publishStatus: 'meta_review', linkedAt: '2026-09-25T10:00:00Z',
+    metaLinkResult: { renamed: true, removedManagerCopies: 2, keptManagerCopies: 0, warnings: [] }, paidMinorUSD: 5000, _lastModified: 70 };
+  const copyOf = (id, extra) => ({ ...JSON.parse(JSON.stringify(linkedReq)), id, ...extra });
+  box.state.adCampaignRequests = [
+    copyOf('p9-u', {}),
+    { id: 'p9-s', status: 'Stopped', createdBy: 'c-1', name: 'Stopped linked', metaCampaignId: '120556', _lastModified: 71 },
+    { id: 'p9-n', status: 'Approved', createdBy: 'c-1', name: 'Not linked', _lastModified: 72 },
+    copyOf('p9-v', { metaCampaignId: '120557', _lastModified: 73 }),
+    copyOf('p9-x', { metaCampaignId: '120558', _lastModified: 74 }),
+    copyOf('p9-y2', { metaCampaignId: '120559', metaLinkResult: { renamed: false }, _lastModified: 77 })
+  ];
+  const linkedCard = card(box.state.adCampaignRequests[0]);
+  const linkedCardAr = card(box.state.adCampaignRequests[0], 'ar');
+  const stoppedLinkedCard = card(box.state.adCampaignRequests[1]);
+  const notLinkedCard = card(box.state.adCampaignRequests[2]);
+  as('customer', 'c-1');
+  const customerLinkedCard = card(box.state.adCampaignRequests[0]);
+  run("openAdsStudioUnlinkSheet('p9-u')");
+  const customerUnlinkSheet = String(run('renderAdsStudioSheets()'));
+  as('admin', 'p9-staff');
+  run("openAdsStudioLinkSheet('p9-n'); openAdsStudioUnlinkSheet('p9-u');");
+  const oneSheet = [json('_adsStudioLinkSheet'), json('_adsStudioUnlinkSheet.campaignId')];
+  const unlinkSheet = String(run('renderAdsStudioSheets()'));
+  const unlinkSheetAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
+  run('__calls.length = 0;');
+  run("unlinkAdsStudioMetaCampaign('p9-u')");
+  const noReason = [json('_adsStudioUnlinkSheet.outcome'), calls().length];
+  run("adsStudioSetUnlinkReason({ value: '  The wrong campaign was linked  ' })");
+  const unlinkPath = '/api/ad-studio/campaigns/p9-u/unlink-meta';
+  reply(unlinkPath, [
+    { error: { status: 409, message: 'Conflict: record has changed', payload: { detail: 'Conflict: record has changed' } } },
+    { value: { id: 'p9-u', data: { ...linkedReq, metaCampaignId: '', metaAdAccountId: '', publishStatus: '', linkedAt: null, _lastModified: 75 }, lastModified: 75, restoredCopies: 2, renamedBack: true } }
+  ]);
+  reply('/api/collections/adCampaignRequests/p9-u', [{ value: { id: 'p9-u', data: linkedReq, lastModified: 70 } }]);  // still linked: the 409 was a refusal
+  run("var __lastUnlinkSheets = ''; render = () => { __lastUnlinkSheets = renderAdsStudioSheets(); };");
+  inLanguage('ar', "unlinkAdsStudioMetaCampaign('p9-u')");
+  const refusedLastRender = String(run('__lastUnlinkSheets'));
+  run('render = () => {};');
+  const refusedUnlink = [json('_adsStudioUnlinkSheet.outcome') || {}, (calls().find(call => call.path === unlinkPath) || {}).body || {}];
+  const refusedUnlinkHtml = String(run('renderAdsStudioSheets()'));
+  notices.length = 0;
+  run('__calls.length = 0;');
+  const unlinkFlight = run("unlinkAdsStudioMetaCampaign('p9-u') === unlinkAdsStudioMetaCampaign('p9-u')");
+  const unlinkCalls = calls().filter(call => call.path === unlinkPath);
+  const unlinkedOutcome = json('_adsStudioUnlinkSheet.outcome') || {};
+  const unlinkedHtml = String(run('renderAdsStudioSheets()'));
+  const unlinkedAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
+  const afterUnlink = json("state.adCampaignRequests.find(c => c.id === 'p9-u')") || {};
+  const queueAfterUnlink = String(run('renderAdsStudioLaunchQueue()'));
+  const unlinkNotice = notices[0] || {};
+  // A reply lost on the way (no answer at all): the request, read back, holds no Meta campaign any more.
+  run("openAdsStudioUnlinkSheet('p9-v'); _adsStudioUnlinkSheet.reason = 'Duplicate';");
+  reply('/api/ad-studio/campaigns/p9-v/unlink-meta', [{ error: { message: 'Network request failed' } }]);
+  reply('/api/collections/adCampaignRequests/p9-v', [{ value: { id: 'p9-v', data: { ...linkedReq, id: 'p9-v', metaCampaignId: '', publishStatus: '', _lastModified: 76 }, lastModified: 76 } }]);
+  run("unlinkAdsStudioMetaCampaign('p9-v')");
+  const lostUnlink = json('_adsStudioUnlinkSheet.outcome') || {};
+  const lostUnlinkHtml = String(run('renderAdsStudioSheets()'));
+  // Albayan renamed the campaign but the answer says it was not renamed back: staff are told to check.
+  run("openAdsStudioUnlinkSheet('p9-x'); _adsStudioUnlinkSheet.reason = 'Wrong one';");
+  reply('/api/ad-studio/campaigns/p9-x/unlink-meta', [{ value: { id: 'p9-x', data: { ...linkedReq, id: 'p9-x', metaCampaignId: '', _lastModified: 78 }, lastModified: 78, restoredCopies: 0, renamedBack: false } }]);
+  run("unlinkAdsStudioMetaCampaign('p9-x')");
+  const notBackHtml = String(run('renderAdsStudioSheets()'));
+  run("openAdsStudioUnlinkSheet('p9-y2'); _adsStudioUnlinkSheet.reason = 'Wrong one';");
+  reply('/api/ad-studio/campaigns/p9-y2/unlink-meta', [{ value: { id: 'p9-y2', data: { ...linkedReq, id: 'p9-y2', metaCampaignId: '', _lastModified: 79 }, lastModified: 79, restoredCopies: 0, renamedBack: false } }]);
+  run("unlinkAdsStudioMetaCampaign('p9-y2')");
+  const neverRenamedHtml = String(run('renderAdsStudioSheets()'));
+  run('closeAdsStudioUnlinkSheet();');
+  const unlinkCode = ['openAdsStudioUnlinkSheet', 'closeAdsStudioUnlinkSheet', 'renderAdsStudioUnlinkSheet', 'renderAdsStudioUnlinkOutcome', 'unlinkAdsStudioMetaCampaign',
+    'unlinkAdsStudioMetaCampaignOnce', 'adsStudioApiUnlinkMetaCampaign'].map(fn);
+  const unlinkCases = [
+    linkedCard.includes('data-ads-studio-unlink="1"') && linkedCard.includes("openAdsStudioUnlinkSheet('p9-u')") && text(linkedCard).includes('Unlink Meta campaign')
+      && linkedCardAr.includes('إلغاء ربط حملة ميتا') && !linkedCard.includes('data-ads-studio-link="1"'),
+    !stoppedLinkedCard.includes('data-ads-studio-unlink') && !notLinkedCard.includes('data-ads-studio-unlink') && !customerLinkedCard.includes('data-ads-studio-unlink') && customerUnlinkSheet === '',
+    oneSheet[0] === null && oneSheet[1] === 'p9-u',
+    unlinkSheet.includes('role="dialog"') && unlinkSheet.includes('data-ads-studio-unlink-sheet="p9-u"') && unlinkSheet.includes('Linked &lt;one&gt;') && !unlinkSheet.includes('Linked <one>')
+      && text(unlinkSheet).includes('The Albayan Manager copies of this campaign that the link removed come back.')
+      && text(unlinkSheet).includes('If Albayan renamed the campaign in Meta, it tries to rename it back.')
+      && text(unlinkSheet).includes('A stopped request cannot be unlinked.') && text(unlinkSheet).includes('Reason (required)')
+      && unlinkSheet.includes('<textarea id="ads-studio-unlink-reason"') && unlinkSheet.includes('120555'),
+    unlinkSheetAr.includes('تعود إلى مدير البيان نسخ هذه الحملة التي حذفها الربط.') && unlinkSheetAr.includes('إذا غيّر البيان اسم الحملة في ميتا فسيحاول إعادة اسمها السابق.')
+      && unlinkSheetAr.includes('لا يمكن إلغاء ربط طلب موقوف.') && unlinkSheetAr.includes('السبب (مطلوب)'),
+    noReason[0] && noReason[0].kind === 'error' && noReason[0].text === 'Write the reason for the unlink.' && noReason[1] === 0,
+    refusedLastRender.includes('data-ads-studio-unlink-result="error"') && /data-ads-studio-unlink-submit="1" onclick="unlinkAdsStudioMetaCampaign\('p9-u', this\)"  class=/.test(refusedLastRender)
+      && !refusedLastRender.includes('جارٍ إلغاء الربط…'),
+    refusedUnlink[0].kind === 'error' && refusedUnlink[0].text === 'تغيّر السجل — حدّث الصفحة وحاول مرة أخرى' && text(refusedUnlinkHtml).includes('تغيّر السجل')
+      && JSON.stringify(Object.keys(refusedUnlink[1]).sort()) === '["expectedLastModified","operationId","reason"]' && refusedUnlink[1].expectedLastModified === 70
+      && refusedUnlink[1].reason === 'The wrong campaign was linked' && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(String(refusedUnlink[1].operationId || '')),
+    unlinkFlight === true && unlinkCalls.length === 1 && unlinkCalls[0].method === 'POST' && unlinkCalls[0].body.operationId === refusedUnlink[1].operationId,
+    unlinkedOutcome.kind === 'unlinked' && unlinkedOutcome.known === true && unlinkedOutcome.restored === 2 && unlinkedOutcome.renamedBack === true,
+    text(unlinkedHtml).includes('Unlinked. The request waits for a Meta campaign link again.') && text(unlinkedHtml).includes('2 copies came back to Albayan Manager.')
+      && text(unlinkedHtml).includes('Renamed back in Meta.') && !unlinkedHtml.includes('data-ads-studio-unlink-submit') && text(unlinkedHtml).includes('Done')
+      && !unlinkedHtml.includes('data-ads-studio-unlink-not-renamed') && !unlinkedHtml.includes('data-ads-studio-unlink-lost'),
+    unlinkedAr.includes('تم إلغاء الربط.') && unlinkedAr.includes('عادت نسختان إلى مدير البيان.') && unlinkedAr.includes('أعاد البيان اسم الحملة السابق في ميتا.'),
+    afterUnlink.metaCampaignId === '' && queueAfterUnlink.includes('data-ads-studio-campaign="p9-u"') && unlinkNotice.title === 'Meta campaign unlinked' && unlinkNotice.kind === 'success',
+    lostUnlink.kind === 'unlinked' && lostUnlink.known === false && lostUnlinkHtml.includes('data-ads-studio-unlink-lost="1"') && text(lostUnlinkHtml).includes('The server reply was lost')
+      && json("state.adCampaignRequests.find(c => c.id === 'p9-v').metaCampaignId") === '',
+    notBackHtml.includes('data-ads-studio-unlink-not-renamed="1"') && text(notBackHtml).includes('The campaign name in Meta was not changed back — check it in Meta.')
+      && !neverRenamedHtml.includes('data-ads-studio-unlink-not-renamed') && !notBackHtml.includes('data-ads-studio-unlink-restored'),
+    unlinkCode.every(Boolean) && !unlinkCode.some(code => /\b(?:confirm|prompt|alert)\(/.test(code))
+      && fn('unlinkAdsStudioMetaCampaignOnce').includes("adsStudioActionAttempt('unlink', campaign.id, Number(campaign._lastModified))")
+      && fn('adsStudioApiUnlinkMetaCampaign').includes('/unlink-meta`') && !fn('adsStudioApiUnlinkMetaCampaign').includes('withRetry')
+      && fn('unlinkAdsStudioMetaCampaign').includes('_adsStudioUnlinkPromises.has(campaignId)')
+      && fn('resetAdsStudioSessionState').includes('_adsStudioUnlinkPromises.clear();') && fn('resetAdsStudioSessionState').includes('_adsStudioLinkPromises.clear();')
+  ];
+  check('staff Unlink Meta campaign: in-page sheet with a required reason (EN/AR), single flight per request, copies back / renamed back shown, lost reply read back, refusals in Arabic', !loadError && unlinkCases.every(Boolean),
+    loadError || `cases ${unlinkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Admin "Check recent comments now" per linked Instagram account (15i, P1-23): {read, new, replied,
+  // skipped} (+ errorCode) in English and Arabic; the 429 and 409 texts through the Arabic map.
+  const health = read('src/systems/ads_studio/15i-studio-health.js');
+  const healthFn = name => { const at = health.indexOf(`function ${name}(`); return at < 0 ? '' : health.slice(at, health.indexOf('\n}\n', at)); };
+  box.getAuthMeIdentity = () => 'p9-session';
+  let healthError = '';
+  try { vm.runInContext(health, box); } catch (error) { healthError = String(error && error.message || error); }
+  as('admin', 'p9-staff');
+  const igPage = "{ id: 'spg_ig', name: 'Shop <ig>', platform: 'ig' }";
+  const igRow = String(run(`renderStudioHealthPage(${igPage})`));
+  const igRowAr = String(inLanguage('ar', `renderStudioHealthPage(${igPage})`));
+  const fbRow = String(run("renderStudioHealthPage({ id: 'spg_fb', name: 'Shop', platform: 'fb' })"));
+  const checkPath = '/api/studio/admin/pages/spg_ig/check-comments';
+  reply(checkPath, [
+    { value: { read: 12, new: 3, replied: 2, skipped: 9, errorCode: '' } },
+    { value: { read: 4, new: 1, replied: 0, skipped: 3, errorCode: 'rate_limited' } },
+    { error: { status: 429, message: JSON.stringify({ code: 'RATE_LIMITED', message: 'This Instagram account was checked less than a minute ago. Try again in a minute.' }) } },
+    { error: { status: 429, message: JSON.stringify({ code: 'RATE_LIMITED', message: 'This Instagram account was checked less than a minute ago. Try again in a minute.' }) } },
+    { error: { status: 409, message: 'x', payload: { detail: { code: 'META_PAUSED', message: 'Meta asked Albayan to wait, so no comment was read. Try again in a few minutes.' } } } },
+    { error: { status: 409, message: 'x', payload: { detail: { code: 'NOT_INSTAGRAM', message: 'This linked page is not an Instagram account' } } } },
+    { error: { status: 404, message: 'x', payload: { detail: { code: 'UNKNOWN_PAGE', message: 'No linked page has this id' } } } }
+  ]);
+  run('__calls.length = 0;');
+  const checkInFlight = run("studioHealthCheckComments('spg_ig'); studioHealthCheckComments('spg_ig'); __calls.length");
+  const checkCalls = calls().filter(call => call.path === checkPath);
+  const checkNote = () => json("_studioHealth.results['chk:spg_ig']") || {};
+  const checkGood = checkNote();
+  const checkGoodRow = String(run(`renderStudioHealthPage(${igPage})`));
+  inLanguage('ar', "studioHealthCheckComments('spg_ig')");
+  const checkStoppedAr = checkNote();
+  run("studioHealthCheckComments('spg_ig')");
+  const check429 = checkNote();
+  inLanguage('ar', "studioHealthCheckComments('spg_ig')");
+  const check429Ar = checkNote();
+  inLanguage('ar', "studioHealthCheckComments('spg_ig')");
+  const check409Ar = checkNote();
+  run("studioHealthCheckComments('spg_ig')");
+  const check409 = checkNote();
+  run("studioHealthCheckComments('spg_ig')");
+  const check404 = checkNote();
+  as('reviewer', 'p9-reviewer');
+  run('__calls.length = 0;');
+  run("studioHealthCheckComments('spg_ig')");
+  const reviewerChecks = calls().length;
+  as('admin', 'p9-staff');
+  const checkCases = [
+    !healthError,
+    igRow.includes("studioHealthCheckComments('spg_ig')") && text(igRow).includes('Check recent comments now') && igRowAr.includes('افحص التعليقات الأخيرة الآن')
+      && text(igRow).includes('Once a minute per account') && !fbRow.includes('studioHealthCheckComments'),
+    checkInFlight === 1 && checkCalls.length === 1 && checkCalls[0].method === 'POST' && JSON.stringify(checkCalls[0].body) === '{}',
+    checkGood.tone === 'emerald' && String(checkGood.text).startsWith('Read 12 comments: 3 new, 2 answered, 9 skipped') && text(checkGoodRow).includes('Read 12 comments: 3 new, 2 answered, 9 skipped'),
+    checkStoppedAr.tone === 'amber' && String(checkStoppedAr.text).includes('قُرئ 4 تعليقاً: 1 جديدة، و0 رُدّ عليها، و3 تُخطّيت') && String(checkStoppedAr.text).includes('توقفت القراءة مبكراً')
+      && String(checkStoppedAr.text).includes('طلبت ميتا من البيان الانتظار') && !String(checkStoppedAr.text).includes('rate_limited'),
+    check429.text === 'This Instagram account was checked less than a minute ago. Try again in a minute.' && check429.tone === 'amber',
+    check429Ar.text === 'فُحص حساب إنستغرام هذا قبل أقل من دقيقة. أعد المحاولة بعد دقيقة.',
+    check409Ar.text === 'طلبت ميتا من البيان الانتظار، لذلك لم يُقرأ أي تعليق. أعد المحاولة بعد بضع دقائق.' && check409.text === 'This linked page is not an Instagram account',
+    check404.text === 'This page is no longer linked.' && reviewerChecks === 0,
+    healthFn('studioHealthCheckComments').split('} finally {', 2)[1].trimStart().startsWith('if (studioHealthGenerationIsCurrent(context))')
+      && healthFn('studioHealthCheckComments').includes('/check-comments`') && !/\b(?:confirm|prompt|alert)\(/.test(health)
+      && healthFn('studioHealthCheckErrorText').includes('adsStudioRefusalText(detail)') && healthFn('studioHealthCheckErrorText').includes('studioHealthEsc(text)')
+  ];
+  check('Studio health: admin "Check recent comments now" per Instagram account, counts and Meta error in EN/AR, 429/409 through the Arabic map', !loadError && checkCases.every(Boolean),
+    loadError || healthError || `cases ${checkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
 }
 
 {

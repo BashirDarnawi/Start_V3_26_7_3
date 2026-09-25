@@ -30,7 +30,10 @@ const _adsStudioWithdrawPromises = new Map();
 let _adsStudioWithdrawConfirmId = '';  // the customer's waiting request whose in-page "Withdraw" sheet is open
 // Staff "Link Meta campaign" sheet (P1-09, D26): { campaignId, accountId, metaCampaignId, busy, outcome }.
 let _adsStudioLinkSheet = null;
-let _adsStudioLinkPromise = null;
+const _adsStudioLinkPromises = new Map();  // campaign id -> its link in flight (single flight per campaign)
+// Staff "Unlink Meta campaign" sheet: { campaignId, reason, busy, outcome }; one unlink in flight per campaign.
+let _adsStudioUnlinkSheet = null;
+const _adsStudioUnlinkPromises = new Map();
 const _adsStudioMetaAccounts = { forUser: '', state: '', list: [] };  // the allowlisted ad accounts (admin read)
 const ADS_STUDIO_ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const ADS_STUDIO_MAX_SOURCE_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -65,7 +68,9 @@ function resetAdsStudioSessionState() {
   _adsStudioWithdrawPromises.clear();
   _adsStudioWithdrawConfirmId = '';
   _adsStudioLinkSheet = null;
-  _adsStudioLinkPromise = null;
+  _adsStudioLinkPromises.clear();
+  _adsStudioUnlinkSheet = null;
+  _adsStudioUnlinkPromises.clear();
   _adsStudioMetaAccounts.forUser = '';
   _adsStudioMetaAccounts.state = '';
   _adsStudioMetaAccounts.list = [];
@@ -505,10 +510,11 @@ function renderAdsStudioView() {
   `;
 }
 
-// The in-page sheets (never a native dialog): the staff "Link Meta campaign" sheet and the
-// customer's "Withdraw" confirmation. Each draws nothing unless it is open and still applies.
+// The in-page sheets (never a native dialog): the staff "Link Meta campaign" and "Unlink Meta
+// campaign" sheets and the customer's "Withdraw" confirmation. Each draws nothing unless it is open
+// and still applies.
 function renderAdsStudioSheets() {
-  return renderAdsStudioLinkSheet() + renderAdsStudioWithdrawSheet();
+  return renderAdsStudioLinkSheet() + renderAdsStudioUnlinkSheet() + renderAdsStudioWithdrawSheet();
 }
 
 function renderAdsStudioDashboard() {
@@ -624,6 +630,7 @@ function renderAdsStudioCampaignCard(campaign) {
   const canWithdraw = statusValue === 'Submitted' && String(campaign.createdBy || '') === String(state.currentUser?.id || '')
     && canActOnRecord('adCampaignRequests', 'submit', campaign.createdBy);
   const canLink = statusValue === 'Approved' && adsStudioCanReview() && !String(campaign.metaCampaignId || '').trim();
+  const canUnlink = statusValue === 'Approved' && adsStudioCanReview() && !!String(campaign.metaCampaignId || '').trim();  // a stopped request stays linked (server)
   // Archiving an Approved campaign with captured money would forfeit it —
   // the server refuses; do not offer the dead-end button.
   const canDelete = ['Draft', 'Changes Requested', 'Approved', 'Rejected', 'Stopped'].includes(statusValue)
@@ -670,6 +677,7 @@ function renderAdsStudioCampaignCard(campaign) {
           ${canStop ? `<button type="button" onclick="stopAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/30 px-3 text-sm font-bold text-rose-700 dark:text-rose-200 disabled:opacity-60"><i data-lucide="circle-stop" class="w-4 h-4"></i>${isLaunched ? (isAr ? 'إغلاق الحملة' : 'Close campaign') : (isAr ? 'إيقاف واسترداد' : 'Stop & refund')}</button>` : ''}
           ${showAskStop ? `<button type="button" onclick="showNotification('${isAr ? 'الإعلان بدأ بالفعل' : 'This ad already started'}', '${isAr ? 'راسلنا لنوقفه ونعيد الجزء غير المصروف إلى محفظتك.' : 'Message us — we stop it and refund the unspent part to your wallet.'}', 'info')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="circle-help" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask us to stop it'}</button>` : ''}
           ${canLink ? `<button type="button" data-ads-studio-link="1" onclick="openAdsStudioLinkSheet('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 px-3 text-sm font-bold text-emerald-700 dark:text-emerald-300 disabled:opacity-60"><i data-lucide="link-2" class="w-4 h-4"></i>${isAr ? 'ربط حملة ميتا' : 'Link Meta campaign'}</button>` : ''}
+          ${canUnlink ? `<button type="button" data-ads-studio-unlink="1" onclick="openAdsStudioUnlinkSheet('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-rose-700 dark:text-rose-300 disabled:opacity-60"><i data-lucide="unlink" class="w-4 h-4"></i>${isAr ? 'إلغاء ربط حملة ميتا' : 'Unlink Meta campaign'}</button>` : ''}
           ${canDuplicate && ['Approved', 'Stopped'].includes(statusValue) ? `<button type="button" onclick="duplicateAdsStudioCampaign('${safeId}', this, true)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-900/20 px-3 text-sm font-bold text-indigo-700 dark:text-indigo-300 disabled:opacity-60"><i data-lucide="calendar-plus" class="w-4 h-4"></i>${isAr ? 'تمديد' : 'Extend'}</button>` : ''}
           ${canDuplicate ? `<button type="button" onclick="duplicateAdsStudioCampaign('${safeId}', this, false)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-700 dark:text-slate-200 disabled:opacity-60"><i data-lucide="copy" class="w-4 h-4"></i>${isAr ? 'نسخ' : 'Duplicate'}</button>` : ''}
           ${canDelete ? `<button type="button" onclick="deleteAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-50 dark:bg-rose-900/20 px-3 text-sm font-bold text-rose-700 dark:text-rose-300 disabled:opacity-60"><i data-lucide="${editableStatus ? 'trash-2' : 'archive'}" class="w-4 h-4"></i>${editableStatus ? (isAr ? 'حذف' : 'Delete') : (isAr ? 'أرشفة' : 'Archive')}</button>` : ''}
@@ -780,8 +788,44 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['Campaign is missing its owner', 'هذا الطلب غير مرتبط بحساب صاحبه — تواصل مع فريق البيان'],
   ['This Meta campaign is already linked to another request', 'حملة ميتا هذه مرتبطة بطلب آخر'],
   ['Rename the campaign in Meta to the name shown, then link again', 'غيّر اسم الحملة في ميتا إلى الاسم الظاهر ثم اربطها مرة أخرى'],
-  ['This Meta ad account is not allowed', 'حساب إعلانات ميتا هذا غير مسموح'],
-  ['Meta campaign not found', 'لم يتم العثور على حملة ميتا'],
+  ["This Meta ad account is not one of Albayan's ad accounts", 'حساب الإعلانات هذا ليس من حسابات البيان الإعلانية'],
+  ['The Meta campaign was not found', 'لم يتم العثور على حملة ميتا'],
+  // The rest of the link step (REFUSE_LINK_*, the studio code; ad_campaign_actions.py), the approval and
+  // publish-status texts, and the Manager link's refusals of a studio ad (meta_ads.py): exact server texts.
+  ['Only Approved requests can be linked to a Meta campaign', 'يمكن ربط الطلبات المعتمدة فقط بحملة ميتا'],
+  ['Invalid Meta ad account id', 'رقم حساب إعلانات ميتا غير صالح — أرقام فقط'],
+  ['Invalid Meta campaign id', 'رقم حملة ميتا غير صالح — أرقام فقط'],
+  ['This Meta campaign is not in the chosen ad account', 'حملة ميتا هذه ليست في حساب الإعلانات المختار'],
+  ["This Meta campaign carries another request's studio code", 'اسم حملة ميتا هذه يحمل رمز الاستوديو لطلب آخر'],
+  ['This request is already linked to another Meta campaign', 'هذا الطلب مرتبط بالفعل بحملة ميتا أخرى'],
+  ['Meta is busy right now, so the campaign could not be linked', 'ميتا مشغولة الآن، لذلك تعذر ربط الحملة. حاول مرة أخرى بعد دقيقة.'],
+  ['Meta could not return this campaign', 'لم تُرجع ميتا بيانات هذه الحملة — حاول مرة أخرى بعد قليل'],
+  ['The Meta connection is not configured', 'ربط البيان مع ميتا غير مُعدّ'],
+  ['Too many Meta links', 'محاولات ربط كثيرة مع ميتا — انتظر دقيقة ثم حاول مرة أخرى'],
+  ['Could not assign a studio code', 'تعذر تخصيص رمز الاستوديو لهذا الطلب — حاول مرة أخرى'],
+  ['Only Submitted campaigns can be reviewed', 'يمكن مراجعة الطلبات التي تنتظر المراجعة فقط'],
+  ['You cannot review your own campaign', 'لا يمكنك مراجعة حملتك أنت'],
+  ['Invalid review decision', 'قرار المراجعة غير صالح'],
+  ['operationId was already used for another review', 'هذه العملية استُخدمت لمراجعة أخرى — حدّث الصفحة وحاول مرة أخرى'],
+  ['Only Approved campaigns can be marked launched', 'يمكن تحديث حالة النشر للحملات المعتمدة فقط'],
+  ['operationId was already used for another update', 'هذه العملية استُخدمت لتحديث آخر — حدّث الصفحة وحاول مرة أخرى'],
+  ['expectedVersion is required', 'نسخة الطلب غير معروفة — حدّث الصفحة وحاول مرة أخرى'],
+  ['A link sets publishStatus meta_review; leave publishStatus out', 'الربط يضبط حالة النشر بنفسه — حدّث الصفحة وحاول مرة أخرى'],
+  ['publishStatus is required (or metaAdAccountId and metaCampaignId to link a Meta campaign)', 'اختر حالة النشر، أو حساب الإعلانات ورقم الحملة لربط حملة ميتا'],
+  ['meta_review is set by linking a Meta campaign', 'حالة «ميتا تراجع الإعلان» تُضبط بربط حملة ميتا'],
+  ['Campaign request not found', 'لم يتم العثور على طلب الحملة'],
+  ['This Meta ad belongs to Albayan Studio (a studio request linked its campaign). It cannot be linked to an Albayan Manager ad', 'إعلان ميتا هذا تابع لاستوديو البيان (ربط طلبٌ في الاستوديو حملته)، ولا يمكن ربطه بإعلان في مدير البيان'],
+  ['This Meta ad belongs to Albayan Studio (its campaign name carries the studio code ALB-S-). It cannot be linked to an Albayan Manager ad', 'إعلان ميتا هذا تابع لاستوديو البيان (اسم حملته يحمل رمز الاستوديو ALB-S-)، ولا يمكن ربطه بإعلان في مدير البيان'],
+  ["Albayan could not read this ad's Meta campaign name to confirm it is not an Albayan Studio ad", 'تعذر على البيان قراءة اسم حملة هذا الإعلان في ميتا للتأكد من أنه ليس من إعلانات استوديو البيان. حاول مرة أخرى بعد دقيقة.'],
+  // Instagram "Check recent comments now" (studio_ig_poll.py, {code, message}).
+  ['No linked page has this id', 'لا توجد صفحة مربوطة بهذا الرقم'],
+  ['This linked page is not an Instagram account', 'هذه الصفحة المربوطة ليست حساب إنستغرام'],
+  ['Only an admin can use this', 'هذه الأداة للمدير فقط'],
+  ['This change must come from the Albayan site itself', 'يجب أن يأتي هذا التغيير من موقع البيان نفسه — افتح البيان مباشرة ثم أعد المحاولة'],
+  ['Too many requests. Please wait and try again.', 'طلبات كثيرة. انتظر قليلاً ثم أعد المحاولة.'],
+  ["Albayan's Meta connection is not set up, so no comment was read", 'ربط البيان مع ميتا غير مُعدّ، لذلك لم يُقرأ أي تعليق'],
+  ['Meta asked Albayan to wait, so no comment was read', 'طلبت ميتا من البيان الانتظار، لذلك لم يُقرأ أي تعليق. أعد المحاولة بعد بضع دقائق.'],
+  ['This Instagram account was checked less than a minute ago', 'فُحص حساب إنستغرام هذا قبل أقل من دقيقة. أعد المحاولة بعد دقيقة.'],
 ];
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
 function adsStudioRefusalText(detail) {
@@ -996,8 +1040,10 @@ function openAdsStudioLinkSheet(id) {
   if (!campaign || String(campaign.status || '') !== 'Approved') return;
   const campaignId = String(campaign.id || '');
   if (!_adsStudioLinkSheet || _adsStudioLinkSheet.campaignId !== campaignId) {
-    _adsStudioLinkSheet = { campaignId, accountId: '', metaCampaignId: '', busy: false, outcome: null };
+    // Opened again while this request's link still runs: busy until that link settles.
+    _adsStudioLinkSheet = { campaignId, accountId: '', metaCampaignId: '', busy: _adsStudioLinkPromises.has(campaignId), outcome: null };
   }
+  _adsStudioUnlinkSheet = null;  // one sheet at a time
   adsStudioLoadMetaAccounts();
   render();
 }
@@ -1076,15 +1122,43 @@ function adsStudioRemovedCopiesText(count) {
   return n >= 3 && n <= 10 ? `حُذفت ${n} نسخ من مدير البيان.` : `حُذفت ${n} نسخة من مدير البيان.`;
 }
 
+// D26: Manager copies that carry money or edits are never removed by a link; they are flagged for staff.
+function adsStudioKeptCopiesText(count) {
+  const n = Math.max(0, Math.trunc(Number(count) || 0));
+  if (!adsStudioIsAr()) {
+    return n === 1 ? '1 copy in Albayan Manager has money or edits and was kept — check it.'
+      : `${n} copies in Albayan Manager have money or edits and were kept — check them.`;
+  }
+  if (n === 1) return 'نسخة واحدة في مدير البيان عليها أموال أو تعديلات فبقيت كما هي — راجعها.';
+  if (n === 2) return 'نسختان في مدير البيان عليهما أموال أو تعديلات فبقيتا كما هما — راجعهما.';
+  return n >= 3 && n <= 10 ? `${n} نسخ في مدير البيان عليها أموال أو تعديلات فبقيت كما هي — راجعها.`
+    : `${n} نسخة في مدير البيان عليها أموال أو تعديلات فبقيت كما هي — راجعها.`;
+}
+
+// A link's result from its answer, or from the result the link stored on the request (a reply lost
+// after the link committed is read back from the request: its warnings are kept too).
+function adsStudioLinkOutcomeFrom(reply, studioName) {
+  const whole = value => Math.max(0, parseInt(value, 10) || 0);
+  return {
+    kind: 'linked',
+    renamed: reply?.renamed === true,
+    removed: whole(reply?.removedManagerCopies),
+    kept: whole(reply?.keptManagerCopies),
+    warnings: adsStudioLinkWarningCodes(reply?.warnings),
+    studioName
+  };
+}
+
 function renderAdsStudioLinkOutcome(campaign, outcome) {
   const isAr = adsStudioIsAr();
   if (!outcome) return '';
   if (outcome.kind === 'linked') {
+    const amber = 'mt-2 flex items-start gap-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-800 dark:text-amber-200';
     return `<div role="status" data-ads-studio-link-result="linked" class="mt-4 space-y-1 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 p-3 text-sm text-emerald-900 dark:text-emerald-100">
       <p class="font-bold">${isAr ? 'تم الربط. ميتا تراجع الإعلان الآن.' : 'Linked. Meta is reviewing the ad now.'}</p>
       ${outcome.renamed ? `<p>${isAr ? 'غيّر البيان اسم الحملة في ميتا إلى الاسم الظاهر.' : 'Renamed in Meta to the name shown.'}</p>` : ''}
       ${outcome.removed > 0 ? `<p data-ads-studio-link-removed="${outcome.removed}">${Security.escapeHtml(adsStudioRemovedCopiesText(outcome.removed))}</p>` : ''}
-    </div>${outcome.warnings.map(code => `<p data-ads-studio-link-warning="1" class="mt-2 flex items-start gap-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-800 dark:text-amber-200"><i data-lucide="triangle-alert" class="w-4 h-4 flex-shrink-0 mt-0.5"></i><span>${Security.escapeHtml(adsStudioLinkWarningText(code))}</span></p>`).join('')}`;
+    </div>${outcome.kept > 0 ? `<p data-ads-studio-link-kept="${outcome.kept}" class="${amber} font-bold"><i data-lucide="triangle-alert" class="w-4 h-4 flex-shrink-0 mt-0.5"></i><span>${Security.escapeHtml(adsStudioKeptCopiesText(outcome.kept))}</span></p>` : ''}${outcome.warnings.map(code => `<p data-ads-studio-link-warning="1" class="${amber}"><i data-lucide="triangle-alert" class="w-4 h-4 flex-shrink-0 mt-0.5"></i><span>${Security.escapeHtml(adsStudioLinkWarningText(code))}</span></p>`).join('')}`;
   }
   if (outcome.kind === 'rename') {
     return `<div role="alert" data-ads-studio-link-result="rename" class="mt-4 space-y-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-900 dark:text-amber-100">
@@ -1103,6 +1177,7 @@ function renderAdsStudioLinkSheet() {
   const linked = sheet.outcome?.kind === 'linked';
   if (!campaign || (!linked && String(campaign.status || '') !== 'Approved')) return '';
   const isAr = adsStudioIsAr();
+  const busy = sheet.busy;
   const cache = _adsStudioMetaAccounts;
   const choice = adsStudioLinkAccountChoice(sheet);
   const paid = Math.max(0, parseInt(campaign.paidMinorUSD, 10) || 0);
@@ -1132,7 +1207,7 @@ function renderAdsStudioLinkSheet() {
         ${renderAdsStudioLinkOutcome(campaign, sheet.outcome)}
         <div class="mt-5 grid gap-2 ${linked ? '' : 'sm:grid-cols-2'}">
           <button type="button" onclick="closeAdsStudioLinkSheet()" class="touch-target min-h-12 rounded-xl ${linked ? 'bg-emerald-600 text-white font-black' : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold'}">${linked ? (isAr ? 'تم' : 'Done') : (isAr ? 'إلغاء' : 'Cancel')}</button>
-          ${linked ? '' : `<button type="button" data-ads-studio-link-submit="1" onclick="linkAdsStudioMetaCampaign(this)" ${sheet.busy ? 'disabled aria-busy="true"' : ''} class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${sheet.busy ? (isAr ? 'جارٍ الربط…' : 'Linking…') : (isAr ? 'ربط' : 'Link')}</button>`}
+          ${linked ? '' : `<button type="button" data-ads-studio-link-submit="1" onclick="linkAdsStudioMetaCampaign(this)" ${busy ? 'disabled aria-busy="true"' : ''} class="touch-target min-h-12 rounded-xl bg-emerald-600 text-white font-black disabled:opacity-60">${busy ? (isAr ? 'جارٍ الربط…' : 'Linking…') : (isAr ? 'ربط' : 'Link')}</button>`}
         </div>
       </div>
     </div>`;
@@ -1141,7 +1216,8 @@ function renderAdsStudioLinkSheet() {
 // POST /publish-status, the LINK step: the ad account and the campaign id with this version's
 // operationId (one per action and version, so a retry after a lost reply replays it). The route's
 // version field is expectedLastModified; expectedVersion carries the same number. The reply is the
-// request plus {renamed, removedManagerCopies, warnings}. Never retried here: a retry reaches Meta.
+// request plus {renamed, removedManagerCopies, keptManagerCopies, warnings}. Never retried here: a
+// retry reaches Meta.
 async function adsStudioApiLinkMetaCampaign(campaignId, attempt, metaAdAccountId, metaCampaignId) {
   const identity = getServerSessionIdentity();
   const version = attempt.expectedLastModified;
@@ -1154,24 +1230,31 @@ async function adsStudioApiLinkMetaCampaign(campaignId, attempt, metaAdAccountId
   return reply;
 }
 
+// Single flight PER REQUEST: a second press on the same request joins its link in flight; a link of
+// another request (its sheet opened meanwhile) runs on its own.
 function linkAdsStudioMetaCampaign(button = null) {
-  if (_adsStudioLinkPromise) return _adsStudioLinkPromise;
+  const campaignId = String(_adsStudioLinkSheet?.campaignId || '');
+  if (!campaignId) return Promise.resolve(false);
+  if (_adsStudioLinkPromises.has(campaignId)) return _adsStudioLinkPromises.get(campaignId);
   setAdsStudioActionButtonBusy(button, true);
-  const operation = linkAdsStudioMetaCampaignOnce();
-  _adsStudioLinkPromise = operation;
+  const operation = linkAdsStudioMetaCampaignOnce(campaignId);
+  _adsStudioLinkPromises.set(campaignId, operation);
   const cleanup = () => {
-    if (_adsStudioLinkPromise === operation) _adsStudioLinkPromise = null;
+    if (_adsStudioLinkPromises.get(campaignId) === operation) _adsStudioLinkPromises.delete(campaignId);
     setAdsStudioActionButtonBusy(button, false);
   };
   operation.then(cleanup, cleanup);
   return operation;
 }
 
-async function linkAdsStudioMetaCampaignOnce() {
+async function linkAdsStudioMetaCampaignOnce(campaignId) {
   const sheet = _adsStudioLinkSheet;
-  if (!sheet || !adsStudioCanReview()) return false;
-  const campaign = findVisibleAdsStudioCampaign(sheet.campaignId);
+  if (!sheet || sheet.campaignId !== campaignId || !adsStudioCanReview()) return false;
+  const campaign = findVisibleAdsStudioCampaign(campaignId);
   if (!campaign || String(campaign.status || '') !== 'Approved') return false;
+  // The result reaches this sheet, and the request's sheet opened again while the link ran.
+  const sheets = () => [sheet, _adsStudioLinkSheet].filter(item => item && item.campaignId === campaignId);
+  const settle = outcome => { for (const item of sheets()) item.outcome = outcome; };
   const box = id => (typeof document !== 'undefined' ? document.getElementById(id) : null);
   const accountBox = box('ads-studio-link-account');
   const campaignBox = box('ads-studio-link-campaign');
@@ -1197,32 +1280,200 @@ async function linkAdsStudioMetaCampaignOnce() {
     try {
       reply = await adsStudioApiLinkMetaCampaign(campaign.id, attempt, accountId, metaCampaignId);
     } catch (e) {
-      // A reply lost after the link committed: the request now holds this Meta campaign.
+      // A reply lost after the link committed: the request now holds this Meta campaign, and the
+      // result the link stored on it (copies removed and kept, warnings) is shown as the answer.
       if (e?.status !== 409 || adsStudioNeedsManualRename(e?.payload?.detail)) throw e;
       const fresh = await adsStudioReloadCampaign(campaign.id);
       if (!fresh || String(fresh.data?.metaCampaignId || '') !== metaCampaignId) throw e;
-      reply = fresh;
+      const stored = fresh.data?.metaLinkResult && typeof fresh.data.metaLinkResult === 'object' ? fresh.data.metaLinkResult : {};
+      reply = { ...fresh, renamed: stored.renamed, removedManagerCopies: stored.removedManagerCopies, keptManagerCopies: stored.keptManagerCopies, warnings: stored.warnings };
     }
     _adsStudioActionAttempts.delete(attempt.key);
     const saved = upsertAdsStudioEntity(reply?.entity?.data ? reply.entity : reply);
-    sheet.outcome = {
-      kind: 'linked',
-      renamed: reply?.renamed === true,
-      removed: Math.max(0, parseInt(reply?.removedManagerCopies, 10) || 0),
-      warnings: adsStudioLinkWarningCodes(reply?.warnings),
-      studioName: adsStudioStudioName(saved) || adsStudioStudioName(campaign)
-    };
+    settle(adsStudioLinkOutcomeFrom(reply, adsStudioStudioName(saved) || adsStudioStudioName(campaign)));
     showNotification(adsStudioText('Meta campaign linked', 'تم ربط حملة ميتا'), adsStudioText('Meta is reviewing the ad now.', 'ميتا تراجع الإعلان الآن.'), 'success');
     return true;
   } catch (e) {
     const detail = e?.payload?.detail || e?.message || '';
     const offered = detail && typeof detail === 'object' && !Array.isArray(detail) ? String(detail.studioName || '').trim() : '';
-    sheet.outcome = adsStudioNeedsManualRename(detail)
+    settle(adsStudioNeedsManualRename(detail)
       ? { kind: 'rename', studioName: offered || adsStudioStudioName(campaign) }
-      : { kind: 'error', text: adsStudioRefusalText(detail) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.') };
+      : { kind: 'error', text: adsStudioRefusalText(detail) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.') });
     return false;
   } finally {
-    sheet.busy = false;
+    for (const item of sheets()) item.busy = false;
+    render();
+  }
+}
+
+// ---- Staff: unlink the Meta campaign (D26) ----
+// POST /api/ad-studio/campaigns/{id}/unlink-meta {operationId, expectedLastModified, reason}: the
+// request lets go of its Meta campaign and goes back to the link list. The Manager copies the link
+// removed come back; a campaign Albayan renamed is renamed back when Meta allows it. A Stopped
+// request keeps its link (the server refuses). The answer is the request plus {restoredCopies,
+// renamedBack}. In-page sheet with a required reason; never a native dialog.
+const ADS_STUDIO_UNLINK_REASON_MAX = 300;
+
+function openAdsStudioUnlinkSheet(id) {
+  if (!adsStudioCanReview()) return;
+  const campaign = findVisibleAdsStudioCampaign(id);
+  if (!campaign || String(campaign.status || '') !== 'Approved' || !String(campaign.metaCampaignId || '').trim()) return;
+  const campaignId = String(campaign.id || '');
+  if (!_adsStudioUnlinkSheet || _adsStudioUnlinkSheet.campaignId !== campaignId) {
+    _adsStudioUnlinkSheet = { campaignId, reason: '', busy: _adsStudioUnlinkPromises.has(campaignId), outcome: null };
+  }
+  _adsStudioLinkSheet = null;  // one sheet at a time
+  render();
+}
+
+function closeAdsStudioUnlinkSheet() {
+  _adsStudioUnlinkSheet = null;
+  render();
+}
+
+function adsStudioSetUnlinkReason(input) {
+  if (_adsStudioUnlinkSheet) _adsStudioUnlinkSheet.reason = String(input?.value || '').slice(0, ADS_STUDIO_UNLINK_REASON_MAX);
+}
+
+function adsStudioRestoredCopiesText(count) {
+  const n = Math.max(0, Math.trunc(Number(count) || 0));
+  if (!adsStudioIsAr()) return n === 1 ? '1 copy came back to Albayan Manager.' : `${n} copies came back to Albayan Manager.`;
+  if (n === 1) return 'عادت نسخة واحدة إلى مدير البيان.';
+  if (n === 2) return 'عادت نسختان إلى مدير البيان.';
+  return n >= 3 && n <= 10 ? `عادت ${n} نسخ إلى مدير البيان.` : `عادت ${n} نسخة إلى مدير البيان.`;
+}
+
+function renderAdsStudioUnlinkOutcome(outcome) {
+  const isAr = adsStudioIsAr();
+  if (!outcome) return '';
+  if (outcome.kind !== 'unlinked') {
+    return `<div role="alert" data-ads-studio-unlink-result="error" class="mt-4 rounded-xl bg-red-50 dark:bg-red-900/20 p-3 text-sm text-red-800 dark:text-red-200">${Security.escapeHtml(outcome.text || '')}</div>`;
+  }
+  const amber = 'mt-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-800 dark:text-amber-200';
+  const notRenamedBack = outcome.known && outcome.wasRenamed && !outcome.renamedBack;
+  return `<div role="status" data-ads-studio-unlink-result="unlinked" class="mt-4 space-y-1 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 p-3 text-sm text-emerald-900 dark:text-emerald-100">
+      <p class="font-bold">${isAr ? 'تم إلغاء الربط. الطلب ينتظر ربط حملة ميتا من جديد.' : 'Unlinked. The request waits for a Meta campaign link again.'}</p>
+      ${outcome.restored > 0 ? `<p data-ads-studio-unlink-restored="${outcome.restored}">${Security.escapeHtml(adsStudioRestoredCopiesText(outcome.restored))}</p>` : ''}
+      ${outcome.renamedBack ? `<p data-ads-studio-unlink-renamed-back="1">${isAr ? 'أعاد البيان اسم الحملة السابق في ميتا.' : 'Renamed back in Meta.'}</p>` : ''}
+    </div>${notRenamedBack ? `<p data-ads-studio-unlink-not-renamed="1" class="${amber}">${isAr ? 'لم يُعَد اسم الحملة في ميتا إلى ما كان عليه — راجعه في ميتا.' : 'The campaign name in Meta was not changed back — check it in Meta.'}</p>` : ''}${outcome.known ? '' : `<p data-ads-studio-unlink-lost="1" class="${amber}">${isAr ? 'ضاع رد الخادم، لذلك لا تظهر النسخ العائدة ولا الاسم — راجع مدير البيان واسم الحملة في ميتا.' : 'The server reply was lost, so the copies that came back and the name are not shown — check Albayan Manager and the campaign name in Meta.'}</p>`}`;
+}
+
+function renderAdsStudioUnlinkSheet() {
+  const sheet = _adsStudioUnlinkSheet;
+  if (!sheet || !adsStudioCanReview()) return '';
+  const campaign = findVisibleAdsStudioCampaign(sheet.campaignId);
+  const linkedId = String(campaign?.metaCampaignId || '').trim();
+  const open = !!campaign && String(campaign.status || '') === 'Approved' && !!linkedId && sheet.outcome?.kind !== 'unlinked';
+  if (!campaign || (!open && !sheet.outcome)) return '';
+  const isAr = adsStudioIsAr();
+  const busy = sheet.busy;
+  const safeId = Security.escapeHtml(String(campaign.id || ''));
+  const done = sheet.outcome?.kind === 'unlinked';
+  const form = open ? `
+        ${linkedId ? `<p class="mt-2 text-sm text-slate-600 dark:text-slate-300">${isAr ? 'حملة ميتا المرتبطة:' : 'Linked Meta campaign:'} <span dir="ltr" class="font-mono font-bold">${Security.escapeHtml(linkedId)}</span></p>` : ''}
+        <ul class="mt-3 list-disc space-y-1 ps-5 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm text-amber-900 dark:text-amber-100">
+          <li>${isAr ? 'تعود إلى مدير البيان نسخ هذه الحملة التي حذفها الربط.' : 'The Albayan Manager copies of this campaign that the link removed come back.'}</li>
+          <li>${isAr ? 'إذا غيّر البيان اسم الحملة في ميتا فسيحاول إعادة اسمها السابق.' : 'If Albayan renamed the campaign in Meta, it tries to rename it back.'}</li>
+          <li>${isAr ? 'لا يمكن إلغاء ربط طلب موقوف.' : 'A stopped request cannot be unlinked.'}</li>
+        </ul>
+        <label for="ads-studio-unlink-reason" class="mt-4 block text-sm font-bold mb-2">${isAr ? 'السبب (مطلوب)' : 'Reason (required)'}</label>
+        <textarea id="ads-studio-unlink-reason" rows="3" maxlength="${ADS_STUDIO_UNLINK_REASON_MAX}" oninput="adsStudioSetUnlinkReason(this)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'مثلاً: رُبطت حملة خاطئة' : 'For example: the wrong campaign was linked'}">${Security.escapeHtml(sheet.reason)}</textarea>` : '';
+  return `
+    <div class="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 backdrop-blur-sm p-0 sm:items-center sm:p-4" onclick="closeAdsStudioUnlinkSheet()">
+      <div data-ads-studio-unlink-sheet="${safeId}" class="w-full max-w-lg rounded-t-3xl sm:rounded-2xl bg-white dark:bg-slate-900 p-5 max-h-[90dvh] overflow-y-auto custom-scrollbar" onclick="event.stopPropagation()" role="dialog" aria-modal="true" aria-labelledby="ads-studio-unlink-title" dir="${isAr ? 'rtl' : 'ltr'}">
+        <div class="flex items-center justify-between gap-3 mb-3"><h3 id="ads-studio-unlink-title" class="text-lg font-extrabold text-slate-900 dark:text-white">${isAr ? 'إلغاء ربط حملة ميتا' : 'Unlink Meta campaign'}</h3><button type="button" onclick="closeAdsStudioUnlinkSheet()" class="touch-target flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800" aria-label="${isAr ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="w-4 h-4"></i></button></div>
+        <p class="text-sm font-bold text-slate-600 dark:text-slate-300 break-words">${Security.escapeHtml(campaign.name || (isAr ? 'حملة بدون اسم' : 'Untitled campaign'))}</p>
+        ${form}
+        ${renderAdsStudioUnlinkOutcome(sheet.outcome)}
+        <div class="mt-5 grid gap-2 ${open ? 'sm:grid-cols-2' : ''}">
+          <button type="button" onclick="closeAdsStudioUnlinkSheet()" class="touch-target min-h-12 rounded-xl ${done ? 'bg-emerald-600 text-white font-black' : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold'}">${done ? (isAr ? 'تم' : 'Done') : open ? (isAr ? 'إلغاء' : 'Cancel') : (isAr ? 'إغلاق' : 'Close')}</button>
+          ${open ? `<button type="button" data-ads-studio-unlink-submit="1" onclick="unlinkAdsStudioMetaCampaign('${safeId}', this)" ${busy ? 'disabled aria-busy="true"' : ''} class="touch-target min-h-12 rounded-xl bg-rose-600 text-white font-black disabled:opacity-60">${busy ? (isAr ? 'جارٍ إلغاء الربط…' : 'Unlinking…') : (isAr ? 'إلغاء الربط' : 'Unlink')}</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+// Never retried here: the unlink may rename the campaign in Meta. A retry after a lost reply uses
+// the same operationId (one per action and version), so the server answers it with the first result.
+async function adsStudioApiUnlinkMetaCampaign(campaignId, attempt, reason) {
+  const identity = getServerSessionIdentity();
+  const reply = await apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/unlink-meta`, {
+    method: 'POST', body: { operationId: attempt.operationId, expectedLastModified: attempt.expectedLastModified, reason }
+  }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
+  if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
+  validateServerEntityResponse('adCampaignRequests', reply?.entity?.data ? reply.entity : reply, 'unlink-meta');
+  return reply;
+}
+
+function unlinkAdsStudioMetaCampaign(id, button = null) {
+  const campaignId = String(id || '');
+  if (_adsStudioUnlinkPromises.has(campaignId)) return _adsStudioUnlinkPromises.get(campaignId);
+  setAdsStudioActionButtonBusy(button, true);
+  const operation = unlinkAdsStudioMetaCampaignOnce(campaignId);
+  _adsStudioUnlinkPromises.set(campaignId, operation);
+  const cleanup = () => {
+    if (_adsStudioUnlinkPromises.get(campaignId) === operation) _adsStudioUnlinkPromises.delete(campaignId);
+    setAdsStudioActionButtonBusy(button, false);
+  };
+  operation.then(cleanup, cleanup);
+  return operation;
+}
+
+async function unlinkAdsStudioMetaCampaignOnce(campaignId) {
+  const sheet = _adsStudioUnlinkSheet;
+  if (!sheet || sheet.campaignId !== campaignId || !adsStudioCanReview()) return false;
+  const campaign = findVisibleAdsStudioCampaign(campaignId);
+  if (!campaign || String(campaign.status || '') !== 'Approved' || !String(campaign.metaCampaignId || '').trim()) return false;
+  // The result reaches this sheet, and the request's sheet opened again while the unlink ran.
+  const sheets = () => [sheet, _adsStudioUnlinkSheet].filter(item => item && item.campaignId === campaignId);
+  const settle = outcome => { for (const item of sheets()) item.outcome = outcome; };
+  const reasonBox = typeof document !== 'undefined' ? document.getElementById('ads-studio-unlink-reason') : null;
+  if (reasonBox) sheet.reason = String(reasonBox.value || '').slice(0, ADS_STUDIO_UNLINK_REASON_MAX);
+  const reason = String(sheet.reason || '').trim();
+  let problem = '';
+  if (!reason) problem = adsStudioText('Write the reason for the unlink.', 'اكتب سبب إلغاء الربط.');
+  else if (!isServerModeEnabled()) problem = adsStudioText('Unlinking needs the server connection.', 'إلغاء الربط يتطلب اتصال الخادم.');
+  if (problem) {
+    settle({ kind: 'error', text: problem });
+    render();
+    return false;
+  }
+  const attempt = adsStudioActionAttempt('unlink', campaign.id, Number(campaign._lastModified));
+  const wasRenamed = campaign.metaLinkResult?.renamed === true;
+  sheet.busy = true;
+  sheet.outcome = null;
+  render();
+  try {
+    let reply;
+    let known = true;
+    try {
+      reply = await adsStudioApiUnlinkMetaCampaign(campaign.id, attempt, reason);
+    } catch (e) {
+      // A reply lost after the unlink committed (a 409 on the replay, or no answer at all): the
+      // request, read again, no longer holds a Meta campaign.
+      if ((e?.status && e.status !== 409) || e?.code === 'SERVER_SESSION_CHANGED') throw e;
+      const fresh = await adsStudioReloadCampaign(campaign.id);
+      if (!fresh || String(fresh.data?.metaCampaignId || '').trim()) throw e;
+      reply = fresh;
+      known = false;
+    }
+    _adsStudioActionAttempts.delete(attempt.key);
+    upsertAdsStudioEntity(reply?.entity?.data ? reply.entity : reply);
+    settle({
+      kind: 'unlinked',
+      known,
+      wasRenamed,
+      restored: known ? Math.max(0, parseInt(reply?.restoredCopies, 10) || 0) : 0,
+      renamedBack: known && reply?.renamedBack === true
+    });
+    showNotification(adsStudioText('Meta campaign unlinked', 'تم إلغاء ربط حملة ميتا'), adsStudioText('The request is back in the list to link.', 'عاد الطلب إلى قائمة الربط.'), 'success');
+    return true;
+  } catch (e) {
+    const detail = e?.payload?.detail || e?.message || '';
+    settle({ kind: 'error', text: adsStudioRefusalText(detail) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.') });
+    return false;
+  } finally {
+    for (const item of sheets()) item.busy = false;
     render();
   }
 }

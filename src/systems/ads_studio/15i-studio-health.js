@@ -7,7 +7,9 @@
 //   while Meta is paused, or for a row Meta did not answer, the last good reading is shown);
 // - the Meta token summary from GET /api/meta-ads/token-health;
 // - a "Test subscription" button per linked page and an Instagram "Read test" per linked
-//   Instagram account (each once per Tripoli day; the result shows inline, no dialogs).
+//   Instagram account (each once per Tripoli day; the result shows inline, no dialogs);
+// - "Check recent comments now" per linked Instagram account (P1-23): the owner's rules answer the
+//   new comments as the webhook would; once a minute per account; counts only.
 // The page list comes from /api/social-studio/pages (admins see every linked page). This file
 // never sees a Meta token: the server does every Meta call.
 
@@ -319,6 +321,50 @@ async function studioHealthIgReadTest(pageId) {
   }
 }
 
+// ---------- "Check recent comments now" (P1-23) ----------
+
+// {read, new, replied, skipped} (+ errorCode: Meta's error class when the read stopped early).
+function studioHealthCheckResultText(result) {
+  const n = key => Math.max(0, Math.trunc(Number(result?.[key]) || 0));
+  const counts = studioHealthText(
+    `Read ${n('read')} comments: ${n('new')} new, ${n('replied')} answered, ${n('skipped')} skipped (already seen, too old or the account's own).`,
+    `قُرئ ${n('read')} تعليقاً: ${n('new')} جديدة، و${n('replied')} رُدّ عليها، و${n('skipped')} تُخطّيت (سبقت قراءتها أو قديمة أو من الحساب نفسه).`);
+  if (!result?.errorCode) return counts;
+  return `${counts} ${studioHealthText('Reading stopped early', 'توقفت القراءة مبكراً')}: ${studioHealthMetaCode(result.errorCode, '')}`;
+}
+
+// A refused check: a 429 or 409 {code, message} in the viewer's language through the studio's
+// Arabic map (a 429 carries no payload: apiJson puts the detail, as JSON, in the message).
+function studioHealthCheckErrorText(error) {
+  const status = Number(error?.status);
+  if (status === 429 || status === 409) {
+    let detail = error?.payload?.detail || String(error?.message || '');
+    if (typeof detail === 'string' && detail.startsWith('{')) { try { detail = JSON.parse(detail); } catch (_) {} }
+    const text = adsStudioRefusalText(detail);
+    if (text && !text.startsWith('{')) return studioHealthEsc(text);
+  }
+  return studioHealthErrorText(error);
+}
+
+async function studioHealthCheckComments(pageId) {
+  const key = `chk:${pageId}`;
+  if (!isCurrentUserAdmin() || _studioHealth.busy[key]) return;
+  const context = captureStudioHealthContext();
+  _studioHealth.busy[key] = true;
+  delete _studioHealth.results[key];
+  studioHealthRerender();
+  try {
+    const result = await studioHealthApi(`/api/studio/admin/pages/${encodeURIComponent(pageId)}/check-comments`, { method: 'POST', body: {} }, { timeoutMs: STUDIO_HEALTH_META_TIMEOUT_MS });
+    if (!studioHealthContextIsCurrent(context)) return;
+    _studioHealth.results[key] = { tone: result?.errorCode ? 'amber' : 'emerald', text: studioHealthCheckResultText(result) };
+  } catch (error) {
+    if (!studioHealthContextIsCurrent(context)) return;
+    _studioHealth.results[key] = { tone: 'amber', text: studioHealthCheckErrorText(error) };
+  } finally {
+    if (studioHealthGenerationIsCurrent(context)) { delete _studioHealth.busy[key]; studioHealthRerender(); }
+  }
+}
+
 // ---------- rendering ----------
 
 function studioHealthTone(tone) {
@@ -456,6 +502,7 @@ function renderStudioHealthPage(page) {
   const ig = String(page.platform || '') === 'ig';
   const subKey = `sub:${id}`;
   const igKey = `ig:${id}`;
+  const checkKey = `chk:${id}`;
   const form = _studioHealth.igForm[id] || { target: '', text: '' };
   const button = (key, onclick, icon, label) => `<button type="button" onclick="${onclick}" ${_studioHealth.busy[key] ? 'disabled' : ''} class="touch-target min-h-11 rounded-xl border border-blue-200 dark:border-blue-800 px-3 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-60 inline-flex items-center gap-1.5"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>${_studioHealth.busy[key] ? studioHealthText('Checking…', 'جارٍ الفحص…') : label}</button>`;
   return `<div class="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/70 dark:bg-slate-800/70 p-3">
@@ -464,15 +511,18 @@ function renderStudioHealthPage(page) {
         <div class="flex flex-wrap items-center gap-2">
           ${button(subKey, `studioHealthSubscribeTest('${safeId}')`, 'webhook', studioHealthText('Test subscription', 'اختبار الاشتراك'))}
           ${ig ? button(igKey, `studioHealthIgReadTest('${safeId}')`, 'scan-search', studioHealthText('Read test', 'اختبار القراءة')) : ''}
+          ${ig ? button(checkKey, `studioHealthCheckComments('${safeId}')`, 'message-circle-reply', studioHealthText('Check recent comments now', 'افحص التعليقات الأخيرة الآن')) : ''}
         </div>
       </div>
       ${ig ? `<div class="mt-3 grid gap-2 sm:grid-cols-2">
         <input id="studio-health-ig-target-${safeId}" type="text" maxlength="40" value="${studioHealthEsc(form.target)}" oninput="studioHealthSetIgField('${safeId}', 'target', this.value)" class="glass-input min-h-11 w-full rounded-xl px-3 text-sm" placeholder="${studioHealthText('Optional: comment id, or a code written in it', 'اختياري: رقم التعليق أو رمز مكتوب فيه')}" />
         <input id="studio-health-ig-text-${safeId}" type="text" maxlength="300" value="${studioHealthEsc(form.text)}" oninput="studioHealthSetIgField('${safeId}', 'text', this.value)" class="glass-input min-h-11 w-full rounded-xl px-3 text-sm" placeholder="${studioHealthText('Optional: one public reply to send', 'اختياري: رد عام واحد للإرسال')}" />
       </div>
-      <p class="mt-1 text-[11px] text-slate-500">${studioHealthText('One read test per account per day. Fill both fields before pressing to also send one reply; the same comment is never answered twice.', 'اختبار قراءة واحد لكل حساب يومياً. املأ الحقلين قبل الضغط لإرسال رد واحد أيضاً؛ لا يُرد على التعليق نفسه مرتين.')}</p>` : ''}
+      <p class="mt-1 text-[11px] text-slate-500">${studioHealthText('One read test per account per day. Fill both fields before pressing to also send one reply; the same comment is never answered twice.', 'اختبار قراءة واحد لكل حساب يومياً. املأ الحقلين قبل الضغط لإرسال رد واحد أيضاً؛ لا يُرد على التعليق نفسه مرتين.')}</p>
+      <p class="mt-1 text-[11px] text-slate-500">${studioHealthText('Check recent comments now: the owner\'s rules answer the new comments as the webhook would. Once a minute per account; old comments are never answered.', 'افحص التعليقات الأخيرة الآن: تردّ قواعد المالك على التعليقات الجديدة كما يفعل الويب هوك. مرة كل دقيقة لكل حساب؛ لا يُرد على التعليقات القديمة أبداً.')}</p>` : ''}
       ${studioHealthNote(_studioHealth.results[subKey])}
       ${studioHealthNote(_studioHealth.results[igKey])}
+      ${studioHealthNote(_studioHealth.results[checkKey])}
     </div>`;
 }
 
