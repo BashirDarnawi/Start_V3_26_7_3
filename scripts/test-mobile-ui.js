@@ -2128,6 +2128,322 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P1-09 + D26 (agent C): the staff "Link Meta campaign" sheet (studio name with one-tap Copy, the
+  // allowlisted ad account, digits-only campaign id, linked / NEEDS_MANUAL_RENAME / already linked /
+  // budget warning), bilingual publishStatus labels (never a raw value), the customer's Withdraw sheet
+  // (P1-03) and the Arabic entries for their refusals. The real studio code runs in a sandbox whose
+  // promises settle before each run() returns (microtaskMode 'afterEvaluate'), so every flow is
+  // followed to its end; the stubs that return promises are declared inside the sandbox for that.
+  const vm = require('vm');
+  const notices = [];
+  const copied = [];
+  const nodes = Object.create(null);
+  const who = { admin: true, staff: true, uid: 'p9-staff' };
+  const box = vm.createContext({
+    state: { language: 'en', currentUser: { id: 'p9-staff' }, adCampaignRequests: [], users: [], currentView: 'ads-studio' },
+    Security: {
+      escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
+      sanitizeInput: (value, options = {}) => String(value ?? '').slice(0, options.maxLength || 100000),
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      generateSecureId: prefix => `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 14)}`
+    },
+    document: { getElementById: id => nodes[id] || null, querySelector: () => null, querySelectorAll: () => [] },
+    isSafeReceiptPhotoSource: () => true,
+    getEntityPhotoCountHint: () => 0,
+    isServerModeEnabled: () => true,
+    isCurrentUserAdmin: () => who.admin,
+    currentUserHasPermission: (collection, action) => who.staff || !['review', 'view'].includes(action),
+    canActOnRecord: (collection, action, creator) => who.staff || String(creator || '') === who.uid,
+    getVisibleRecords: list => (Array.isArray(list) ? list : []).filter(item => item && !item._deleted),
+    showNotification: (title, message, kind) => { notices.push({ title: String(title), message: String(message), kind }); },
+    render: () => {},
+    withRetry: fn => fn(),
+    requestValidatedServerEntity: (collection, action, loader) => loader(),
+    validateServerEntityResponse: (collection, entity) => {
+      if (!entity || typeof entity.id !== 'string' || !entity.data || entity.data.id !== entity.id) throw new Error('invalid entity');
+      return entity;
+    },
+    getServerSessionIdentity: () => 'p9-session',
+    serverSessionIdentityChanged: () => false,
+    makeSessionChangedError: () => new Error('session changed'),
+    clearCollectionCorruption: () => {},
+    markCollectionDirty: () => {},
+    saveState: () => {},
+    setTimeout: () => 0,
+    TIME_CONSTANTS: { API_TIMEOUT_LONG_MS: 20000 },
+    WALLET: { getBalanceMinor: () => 10000 },
+    IS_STUDIO_SHELL: false
+  }, { microtaskMode: 'afterEvaluate' });
+  let loadError = '';
+  try {
+    const at = forms.indexOf('function normalizeDigitsAscii(');
+    vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(adsStudio, box);
+    vm.runInContext(`
+      var __calls = [];
+      var __replies = Object.create(null);
+      var __syncTicks = 0;
+      function apiJson(path, options) {
+        __calls.push({ path: String(path), method: String((options && options.method) || 'GET'), body: options && options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+        const next = (__replies[path] || []).shift();
+        if (!next) return new Promise(() => {});
+        if (next.error) return Promise.reject(Object.assign(new Error(next.error.message || 'Request failed'), { status: next.error.status, payload: next.error.payload }));
+        return Promise.resolve(JSON.parse(JSON.stringify(next.value)));
+      }
+      function apiMetaAdsAccounts() { __calls.push({ path: '/api/meta-ads/accounts', method: 'GET', body: null }); return Promise.resolve([{ id: 'act_111', name: 'Main <acct>' }, { id: '222', name: 'Second' }, { id: '111', name: 'Duplicate' }, { id: 'x', name: 'Not an id' }]); }
+      async function copyTextToClipboard(text) { __copied.push(String(text)); return true; }
+      function apiWalletPaymentMethods() { return Promise.resolve({ methods: [], rate: null }); }
+      function apiWalletPaymentRequestList() { __calls.push({ path: 'wallet-list', method: 'GET', body: null }); return Promise.resolve({ requests: [] }); }
+      function serverLiveSyncTick() { __syncTicks += 1; return Promise.resolve(); }
+    `, box);
+    box.__copied = copied;
+  } catch (error) { loadError = String(error && error.message || error); }
+  const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  const inLanguage = (language, code) => { box.state.language = language; const out = run(code); box.state.language = 'en'; return out; };
+  const json = code => { try { return JSON.parse(String(run(`JSON.stringify(${code})`))); } catch (_) { return null; } };
+  const fn = name => { const at = adsStudio.indexOf(`function ${name}(`); return at < 0 ? '' : adsStudio.slice(at, adsStudio.indexOf('\n}\n', at)); };
+  const reply = (path, items) => run(`__replies[${JSON.stringify(path)}] = ${JSON.stringify(items)};`);
+  const calls = () => json('__calls') || [];
+  const as = (role, uid) => { who.admin = role === 'admin'; who.staff = role !== 'customer'; who.uid = uid; box.state.currentUser = { id: uid }; };
+  const card = (campaign, language = 'en') => String(inLanguage(language, `renderAdsStudioCampaignCard(${JSON.stringify(campaign)})`));
+  const text = html => String(html).replace(/<[^>]*>/g, ' ');
+
+  // Bilingual publishStatus labels on staff and customer cards; no raw value is ever rendered.
+  as('admin', 'p9-staff');
+  const labelOf = (campaign, language) => String(inLanguage(language, `(m => ${language === 'ar' ? 'm.labelAr' : 'm.label'})(adsStudioPublishStatusMeta(${JSON.stringify(campaign)}))`));
+  const values = ['', 'meta_review', 'live', 'paused', 'mystery<b>'];
+  const staffReview = card({ id: 'p9-l1', status: 'Approved', createdBy: 'c-1', publishStatus: 'meta_review', metaCampaignId: '120', name: 'Linked' });
+  const staffReviewAr = card({ id: 'p9-l1', status: 'Approved', createdBy: 'c-1', publishStatus: 'meta_review', metaCampaignId: '120', name: 'Linked' }, 'ar');
+  const staffOdd = card({ id: 'p9-l2', status: 'Approved', createdBy: 'c-1', publishStatus: 'mystery<b>', name: 'Odd' });
+  const staffStopped = card({ id: 'p9-l3', status: 'Stopped', createdBy: 'c-1', publishStatus: '', metaCampaignId: '121', name: 'Stopped' });
+  as('customer', 'p9-customer');
+  const customerSetup = card({ id: 'p9-l4', status: 'Approved', createdBy: 'p9-customer', publishStatus: '', name: 'Mine' });
+  const customerSetupAr = card({ id: 'p9-l4', status: 'Approved', createdBy: 'p9-customer', publishStatus: '', name: 'Mine' }, 'ar');
+  const customerLive = card({ id: 'p9-l5', status: 'Approved', createdBy: 'p9-customer', publishStatus: 'live', metaCampaignId: '122', name: 'Mine live' });
+  const customerDraft = card({ id: 'p9-l6', status: 'Draft', createdBy: 'p9-customer', name: 'Draft' });
+  const labelCases = [
+    JSON.stringify(json('ADS_STUDIO_PUBLISH_STATUS.map(row => row[0])')) === '["meta_review","live","paused"]',
+    values.every(value => [true, false].every(linked => {
+      const c = { publishStatus: value, metaCampaignId: linked ? '9' : '' };
+      const en = labelOf(c, 'en');
+      const ar = labelOf(c, 'ar');
+      return en && ar && en !== ar && en !== value && ar !== value && !en.includes('mystery') && /[؀-ۿ]/.test(ar);
+    })),
+    text(staffReview).includes('Meta is reviewing the ad') && !text(staffReview).includes('meta_review') && text(staffReviewAr).includes('ميتا تراجع الإعلان'),
+    text(staffOdd).includes('Meta status unknown') && !staffOdd.includes('mystery'),
+    text(staffStopped).includes('Not live on Meta'),
+    text(customerSetup).includes('Being set up in Meta') && text(customerSetupAr).includes('نجهّزه في ميتا'),
+    text(customerLive).includes('Live on Meta') && !/>\s*live\s*</.test(customerLive),
+    !customerDraft.includes('data-ads-studio-publish-status'),
+    !adsStudio.includes('Security.escapeHtml(String(campaign.publishStatus))') && fn('renderAdsStudioCampaignCard').includes('renderAdsStudioPublishChip(campaign)')
+  ];
+  check('publishStatus has an English and Arabic label for every value on staff and customer cards; no raw value is rendered', !loadError && labelCases.every(Boolean),
+    loadError || `cases ${labelCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Arabic entries for the new server texts (added at the end; the earlier entries keep their place).
+  const added = [
+    ['Only Submitted campaigns can be withdrawn', 'يمكن سحب الطلبات التي تنتظر المراجعة فقط'],
+    ['This request was already approved', 'تمت الموافقة على هذا الطلب بالفعل — اطلب إيقافه بدلاً من سحبه'],
+    ['Campaign is missing its owner', 'هذا الطلب غير مرتبط بحساب صاحبه — تواصل مع فريق البيان'],
+    ['This Meta campaign is already linked to another request', 'حملة ميتا هذه مرتبطة بطلب آخر'],
+    ['Rename the campaign in Meta to the name shown, then link again', 'غيّر اسم الحملة في ميتا إلى الاسم الظاهر ثم اربطها مرة أخرى'],
+    ['This Meta ad account is not allowed', 'حساب إعلانات ميتا هذا غير مسموح'],
+    ['Meta campaign not found', 'لم يتم العثور على حملة ميتا']
+  ];
+  const refusalMap = json('_ADS_STUDIO_REFUSAL_AR') || [];
+  const arabic = detail => String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(detail)})`));
+  const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
+  const refusalCases = [
+    added.every(([en, ar]) => refusalMap.filter(entry => entry[0] === en).length === 1 && refusalMap.some(entry => entry[0] === en && entry[1] === ar && !entry[2])),
+    JSON.stringify(refusalMap.slice(-added.length).map(entry => entry.slice(0, 2))) === JSON.stringify(added),
+    arabic('This request was already approved — ask to stop it instead') === added[1][1],
+    arabic('Only Submitted campaigns can be withdrawn') === added[0][1] && arabic('Campaign is missing its owner') === added[2][1],
+    arabic('This Meta campaign is already linked to another request (ALB-S-ABCDEFGH)') === added[3][1],
+    arabic({ code: 'NEEDS_MANUAL_RENAME', message: 'Rename the campaign in Meta to the name shown, then link again', studioName: 'ALB-S-ABCDEFGH · x' }) === added[4][1],
+    arabic('This Meta ad account is not allowed') === added[5][1] && arabic('Meta campaign not found in this ad account') === added[6][1],
+    String(run("adsStudioRefusalText('This Meta campaign is already linked to another request')")) === 'This Meta campaign is already linked to another request',
+    actionsPy.includes('REFUSE_WITHDRAW_NOT_SUBMITTED = "Only Submitted campaigns can be withdrawn"')
+      && actionsPy.includes('REFUSE_WITHDRAW_APPROVED = "This request was already approved')
+      && actionsPy.includes('detail="Campaign is missing its owner"')
+      && read('server/meta_ads.py').includes('"This Meta ad account is not allowed"')
+  ];
+  check('Arabic refusal map: withdraw texts and the Meta link texts (already linked, rename, account not allowed, campaign not found)', !loadError && refusalCases.every(Boolean),
+    loadError || `cases ${refusalCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Staff launch area: the studio name with one-tap Copy, then the link sheet from the allowlisted accounts.
+  as('admin', 'p9-staff');
+  const studioName = 'ALB-S-ABCDEFGH · Summer <sale>';
+  const approved = { id: 'p9-a', status: 'Approved', createdBy: 'c-1', name: 'Summer <sale>', studioRef: 'ALB-S-ABCDEFGH', studioName,
+    paidMinorUSD: 5000, budgetMinorUSD: 5000, budgetType: 'lifetime', startDate: '2099-01-01', endDate: '2099-01-07', _lastModified: 21 };
+  box.state.adCampaignRequests = [
+    JSON.parse(JSON.stringify(approved)),
+    { id: 'p9-b', status: 'Approved', createdBy: 'c-1', name: 'Already linked', metaCampaignId: '999', publishStatus: 'live', _lastModified: 5 },
+    { id: 'p9-c', status: 'Submitted', createdBy: 'c-1', name: 'Waiting', _lastModified: 6 }
+  ];
+  const launch = String(run('renderAdsStudioLaunchQueue()'));
+  const label = { textContent: 'Copy' };
+  box.__label = label;
+  run("adsStudioCopyStudioName('p9-a', { querySelector: () => __label })");
+  const copiedLabel = label.textContent;
+  box.__labelAr = { textContent: 'نسخ' };
+  inLanguage('ar', "adsStudioCopyStudioName('p9-a', { querySelector: () => __labelAr })");
+  run("openAdsStudioLinkSheet('p9-a')");
+  const sheetHtml = String(run('renderAdsStudioSheets()'));
+  const sheetAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
+  const campaignInput = { value: '١٢٠ 200-555' };
+  box.__campaignInput = campaignInput;
+  run("adsStudioSetLinkField('metaCampaignId', __campaignInput)");
+  run('__calls.length = 0;');
+  run('linkAdsStudioMetaCampaign()');
+  const noAccount = [json('_adsStudioLinkSheet.outcome'), calls().length];
+  box.__accountInput = { value: 'act_222' };
+  run("adsStudioSetLinkField('accountId', __accountInput)");
+  const publishPath = '/api/ad-studio/campaigns/p9-a/publish-status';
+  const getPath = '/api/collections/adCampaignRequests/p9-a';
+  reply(publishPath, [
+    { error: { status: 409, message: 'x', payload: { detail: { code: 'NEEDS_MANUAL_RENAME', message: 'Rename the campaign in Meta to the name shown, then link again', studioName } } } },
+    { error: { status: 409, message: 'This Meta campaign is already linked to another request', payload: { detail: 'This Meta campaign is already linked to another request' } } },
+    { value: { id: 'p9-a', data: { ...approved, publishStatus: 'meta_review', metaCampaignId: '120200555', metaAdAccountId: '222', linkedAt: '2026-09-25T10:00:00Z', _lastModified: 22 },
+      lastModified: 22, renamed: true, removedManagerCopies: 2, warnings: ['meta_budget_above_paid', { code: 'odd_code<b>' }] } }
+  ]);
+  reply(getPath, [{ value: { id: 'p9-a', data: approved, lastModified: 21 } }]);
+  run('linkAdsStudioMetaCampaign()');
+  const renameCall = calls().find(call => call.path === publishPath) || {};
+  const renameOutcome = json('_adsStudioLinkSheet.outcome') || {};
+  const renameHtml = String(run('renderAdsStudioSheets()'));
+  const renameAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
+  run('__calls.length = 0;');
+  inLanguage('ar', 'linkAdsStudioMetaCampaign()');
+  const linkedElsewhere = [json('_adsStudioLinkSheet.outcome'), (calls().find(call => call.path === publishPath) || {}).body, calls().some(call => call.path === getPath)];
+  run('__calls.length = 0;');
+  notices.length = 0;
+  run('linkAdsStudioMetaCampaign()');
+  const linkedOutcome = json('_adsStudioLinkSheet.outcome') || {};
+  const linkedHtml = String(run('renderAdsStudioSheets()'));
+  const linkedAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
+  const afterLink = json("state.adCampaignRequests.find(c => c.id === 'p9-a')") || {};
+  const launchAfter = String(run('renderAdsStudioLaunchQueue()'));
+  const linkNotice = notices[0] || {};
+  // A reply lost after the link committed: the 409 on the replay is checked against the server.
+  box.state.adCampaignRequests.push({ ...JSON.parse(JSON.stringify(approved)), id: 'p9-d', studioName: 'ALB-S-QRSTUVWX · Lost', _lastModified: 40 });
+  run("openAdsStudioLinkSheet('p9-d'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '777';");
+  reply('/api/ad-studio/campaigns/p9-d/publish-status', [{ error: { status: 409, message: 'Conflict: record has changed', payload: { detail: 'Conflict: record has changed' } } }]);
+  reply('/api/collections/adCampaignRequests/p9-d', [{ value: { id: 'p9-d', data: { ...approved, id: 'p9-d', metaCampaignId: '777', publishStatus: 'meta_review', _lastModified: 41 }, lastModified: 41 } }]);
+  run('linkAdsStudioMetaCampaign()');
+  const lostReply = json('_adsStudioLinkSheet.outcome') || {};
+  // Double tap: one request in flight.
+  box.state.adCampaignRequests.push({ ...JSON.parse(JSON.stringify(approved)), id: 'p9-e', _lastModified: 50 });
+  run("openAdsStudioLinkSheet('p9-e'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '888'; __calls.length = 0;");
+  const sameFlight = run('linkAdsStudioMetaCampaign() === linkAdsStudioMetaCampaign()');
+  const flightCalls = calls().filter(call => call.path === '/api/ad-studio/campaigns/p9-e/publish-status').length;
+  run('_adsStudioLinkPromise = null; closeAdsStudioLinkSheet();');
+  // A reviewer (not an admin) cannot read the account list: the account id is typed, digits only.
+  as('reviewer', 'p9-reviewer');
+  run("_adsStudioMetaAccounts.forUser = ''; __calls.length = 0; openAdsStudioLinkSheet('p9-e');");
+  const reviewerSheet = String(run('renderAdsStudioSheets()'));
+  const reviewerCalls = calls().filter(call => call.path === '/api/meta-ads/accounts').length;
+  run('closeAdsStudioLinkSheet();');
+  const linkCode = ['openAdsStudioLinkSheet', 'closeAdsStudioLinkSheet', 'renderAdsStudioLinkSheet', 'renderAdsStudioLinkOutcome', 'linkAdsStudioMetaCampaign',
+    'linkAdsStudioMetaCampaignOnce', 'adsStudioApiLinkMetaCampaign', 'adsStudioCopyStudioName', 'renderAdsStudioLaunchQueue', 'renderAdsStudioStudioNameRow'].map(fn);
+  const copyHelper = read('src/04-permissions.js');
+  const linkCases = [
+    launch.includes('data-ads-studio-campaign="p9-a"') && !launch.includes('data-ads-studio-campaign="p9-b"') && !launch.includes('data-ads-studio-campaign="p9-c"'),
+    launch.includes('ALB-S-ABCDEFGH · Summer &lt;sale&gt;') && !launch.includes('Summer <sale>') && launch.includes('data-ads-studio-copy="1"') && launch.includes("openAdsStudioLinkSheet('p9-a')"),
+    copied.length === 2 && copied.every(value => value === studioName) && copiedLabel === 'Copied' && box.__labelAr.textContent === 'تم النسخ',
+    fn('adsStudioCopyStudioName').includes('copyTextToClipboard(name)') && /async function copyTextToClipboard[\s\S]*navigator\.clipboard\.writeText[\s\S]*createElement\('textarea'\)/.test(copyHelper),
+    sheetHtml.includes('<select id="ads-studio-link-account"') && sheetHtml.includes('<option value="111"') && sheetHtml.includes('<option value="222"')
+      && (sheetHtml.match(/<option value="111"/g) || []).length === 1 && !sheetHtml.includes('value="x"') && sheetHtml.includes('Main &lt;acct&gt;')
+      && sheetHtml.includes('ALB-S-ABCDEFGH · Summer &lt;sale&gt;') && sheetHtml.includes('Link Meta campaign') && sheetHtml.includes('$50.00')
+      && sheetAr.includes('ربط حملة ميتا') && sheetAr.includes('اختر حساب الإعلانات'),
+    campaignInput.value === '120200555' && box.__accountInput.value === '222',
+    noAccount[0] && noAccount[0].kind === 'error' && noAccount[0].text === 'Choose the ad account.' && noAccount[1] === 0,
+    renameCall.method === 'POST' && renameCall.body && renameCall.body.metaAdAccountId === '222' && renameCall.body.metaCampaignId === '120200555'
+      && renameCall.body.expectedVersion === 21 && renameCall.body.expectedLastModified === 21 && renameCall.body.publishStatus === 'meta_review'
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(String(renameCall.body.operationId || '')),
+    renameOutcome.kind === 'rename' && renameOutcome.studioName === studioName
+      && renameHtml.includes('Rename it in Meta, then press Link again.') && renameHtml.includes('data-ads-studio-link-result="rename"')
+      && (renameHtml.match(/data-ads-studio-copy="1"/g) || []).length === 2 && renameAr.includes('غيّر اسمها في ميتا، ثم اضغط «ربط» مرة أخرى.'),
+    linkedElsewhere[0] && linkedElsewhere[0].kind === 'error' && linkedElsewhere[0].text === 'حملة ميتا هذه مرتبطة بطلب آخر'
+      && linkedElsewhere[1] && linkedElsewhere[1].operationId === renameCall.body.operationId && linkedElsewhere[2] === true,
+    linkedOutcome.kind === 'linked' && linkedOutcome.renamed === true && linkedOutcome.removed === 2
+      && JSON.stringify(linkedOutcome.warnings) === '["meta_budget_above_paid","odd_code<b>"]',
+    text(linkedHtml).includes('Linked. Meta is reviewing the ad now.') && text(linkedHtml).includes('Renamed in Meta to the name shown.')
+      && text(linkedHtml).includes('2 copies removed from Albayan Manager.') && text(linkedHtml).includes('The campaign budget in Meta is above what the customer paid')
+      && text(linkedHtml).includes('Meta flagged something on this campaign') && !linkedHtml.includes('meta_budget_above_paid') && !linkedHtml.includes('odd_code')
+      && !linkedHtml.includes('data-ads-studio-link-submit') && text(linkedHtml).includes('Done'),
+    linkedAr.includes('حُذفت نسختان من مدير البيان.') && linkedAr.includes('ميزانية الحملة في ميتا أعلى مما دفعه العميل') && linkedAr.includes('تم الربط. ميتا تراجع الإعلان الآن.'),
+    afterLink.metaCampaignId === '120200555' && afterLink.publishStatus === 'meta_review' && !launchAfter.includes('data-ads-studio-campaign="p9-a"')
+      && linkNotice.title === 'Meta campaign linked' && linkNotice.kind === 'success',
+    lostReply.kind === 'linked' && (json("state.adCampaignRequests.find(c => c.id === 'p9-d').metaCampaignId") === '777'),
+    sameFlight === true && flightCalls === 1,
+    reviewerCalls === 0 && reviewerSheet.includes('<input id="ads-studio-link-account" type="text" inputmode="numeric"') && reviewerSheet.includes('digits only'),
+    JSON.stringify(json("[adsStudioDigitsOnly('act_٣٤٥'), adsStudioDigitsOnly(' 12 34 '), adsStudioDigitsOnly('abc')]")) === '["345","1234",""]',
+    JSON.stringify(json(`[adsStudioNeedsManualRename({ code: 'NEEDS_MANUAL_RENAME', message: '' }), adsStudioNeedsManualRename('Rename the campaign in Meta to the name shown, then link again'),
+      adsStudioNeedsManualRename({ code: 'OTHER', message: 'Meta campaign not found' }), adsStudioNeedsManualRename('Conflict: record has changed')]`)) === '[true,true,false,false]',
+    fn('adsStudioSetLinkField').includes('adsStudioDigitsOnly(input?.value)') && fn('adsStudioDigitsOnly').includes('normalizeDigitsAscii('),
+    linkCode.every(Boolean) && !linkCode.some(code => /\b(?:confirm|prompt|alert)\(/.test(code)) && !adsStudio.includes('markAdsStudioCampaignLaunched'),
+    fn('linkAdsStudioMetaCampaignOnce').includes("adsStudioActionAttempt('publish', campaign.id, Number(campaign._lastModified))")
+  ];
+  check('staff link sheet: studio name + Copy, allowlisted accounts, digits-only id, linked / rename in Meta / already linked / budget warning, single flight', !loadError && linkCases.every(Boolean),
+    loadError || `cases ${linkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Customer Withdraw: an in-page sheet on a waiting request, one request per (action, version).
+  as('customer', 'p9-customer');
+  box.state.adCampaignRequests = [
+    { id: 'p9-w', status: 'Submitted', createdBy: 'p9-customer', name: 'Waiting <one>', budgetType: 'daily', budgetMinorUSD: 500, durationDays: 5, totalBudgetMinorUSD: 2500, _lastModified: 31 },
+    { id: 'p9-y', status: 'Approved', createdBy: 'p9-customer', name: 'Approved one', _lastModified: 32 },
+    { id: 'p9-z', status: 'Submitted', createdBy: 'p9-customer', name: 'Racing', totalBudgetMinorUSD: 1000, _lastModified: 33 }
+  ];
+  const waitingCard = card(box.state.adCampaignRequests[0]);
+  const approvedCard = card(box.state.adCampaignRequests[1]);
+  run('__calls.length = 0;');
+  run("openAdsStudioWithdraw('p9-w')");
+  const withdrawSheet = String(run('renderAdsStudioSheets()'));
+  const withdrawSheetAr = String(inLanguage('ar', 'renderAdsStudioSheets()'));
+  const beforeTap = calls().length;
+  reply('/api/ad-studio/campaigns/p9-w/withdraw', [{ value: { id: 'p9-w', data: { ...box.state.adCampaignRequests[0], status: 'Draft', withdrawnAt: '2026-09-25T10:00:00Z', _lastModified: 34 }, lastModified: 34 } }]);
+  notices.length = 0;
+  const oneFlight = run("withdrawAdsStudioCampaign('p9-w') === withdrawAdsStudioCampaign('p9-w')");
+  const withdrawCalls = calls().filter(call => call.path === '/api/ad-studio/campaigns/p9-w/withdraw');
+  const withdrawn = json("state.adCampaignRequests.find(c => c.id === 'p9-w').status");
+  const withdrawNotice = notices[0] || {};
+  const afterSheet = String(run('renderAdsStudioSheets()'));
+  const walletRefreshed = calls().some(call => call.path === 'wallet-list') && run('__syncTicks') >= 1;
+  // The approval won the race: the 409 text in Arabic, the card is reloaded and the sheet closes itself.
+  run("openAdsStudioWithdraw('p9-z')");
+  reply('/api/ad-studio/campaigns/p9-z/withdraw', [
+    { error: { status: 503, message: 'Service unavailable' } },
+    { error: { status: 409, message: 'This request was already approved — ask to stop it instead', payload: { detail: 'This request was already approved — ask to stop it instead' } } }
+  ]);
+  reply('/api/collections/adCampaignRequests/p9-z', [{ value: { id: 'p9-z', data: { ...box.state.adCampaignRequests[2], status: 'Approved', _lastModified: 35 }, lastModified: 35 } }]);
+  run('__calls.length = 0;');
+  notices.length = 0;
+  run("withdrawAdsStudioCampaign('p9-z')");
+  inLanguage('ar', "withdrawAdsStudioCampaign('p9-z')");
+  const raceBodies = calls().filter(call => call.path === '/api/ad-studio/campaigns/p9-z/withdraw').map(call => call.body);
+  const raceNotice = notices[1] || {};
+  const raceSheet = String(run('renderAdsStudioSheets()'));
+  const withdrawCode = ['openAdsStudioWithdraw', 'cancelAdsStudioWithdraw', 'renderAdsStudioWithdrawSheet', 'withdrawAdsStudioCampaign', 'withdrawAdsStudioCampaignOnce', 'adsStudioApiWithdraw'].map(fn);
+  const withdrawCases = [
+    waitingCard.includes('data-ads-studio-withdraw="1"') && waitingCard.includes("openAdsStudioWithdraw('p9-w')") && !approvedCard.includes('data-ads-studio-withdraw'),
+    withdrawSheet.includes('Your $25.00 reservation ends now. The request goes back to Draft.') && withdrawSheet.includes('role="dialog"')
+      && withdrawSheet.includes('Waiting &lt;one&gt;') && !withdrawSheet.includes('Waiting <one>')
+      && withdrawSheetAr.includes('ينتهي حجز $25.00 الآن، ويعود الطلب إلى المسودة.') && beforeTap === 0,
+    oneFlight === true && withdrawCalls.length === 1 && withdrawCalls[0].method === 'POST' && withdrawCalls[0].body.expectedLastModified === 31
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/.test(String(withdrawCalls[0].body.operationId || '')),
+    withdrawn === 'Draft' && withdrawNotice.title === 'Request withdrawn' && withdrawNotice.message.includes('$25.00') && afterSheet === '' && walletRefreshed,
+    raceBodies.length === 2 && raceBodies[0].operationId === raceBodies[1].operationId && raceBodies[0].expectedLastModified === 33,
+    raceNotice.message === 'تمت الموافقة على هذا الطلب بالفعل — اطلب إيقافه بدلاً من سحبه'
+      && json("state.adCampaignRequests.find(c => c.id === 'p9-z').status") === 'Approved' && raceSheet === '',
+    withdrawCode.every(Boolean) && !withdrawCode.some(code => /\b(?:confirm|prompt|alert)\(/.test(code)),
+    fn('withdrawAdsStudioCampaignOnce').includes("adsStudioActionAttempt('withdraw', campaign.id, Number(campaign._lastModified))")
+      && fn('withdrawAdsStudioCampaignOnce').includes('resetAdsStudioWalletCache();') && fn('withdrawAdsStudioCampaignOnce').includes('refreshAdsStudioWallet();')
+  ];
+  check('customer Withdraw: in-page sheet with the held amount (EN/AR), single flight per version, list and wallet refreshed, a 409 in Arabic', !loadError && withdrawCases.every(Boolean),
+    loadError || `cases ${withdrawCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');
