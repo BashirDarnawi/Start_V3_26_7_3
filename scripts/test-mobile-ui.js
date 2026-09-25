@@ -4468,6 +4468,28 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 }
 
 {
+  // P3-07 / P3-13 help desk (server/systems/ads_studio/studio_support.py): the ticket refusals are studio codes with the
+  // HTTP status the screens expect and plain EN/AR words (the "Help is off" one promises no WhatsApp line: D16 is only a
+  // recommendation); the router is mounted; every customer answer passes through the staff-identity redaction.
+  const errorsPy = read('server/systems/ads_studio/studio_errors.py');
+  const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
+  const supportPy = read('server/systems/ads_studio/studio_support.py');
+  const studioApiPy = read('server/systems/ads_studio/studio_api.py');
+  const helpCodes = { SERVICE_OFF: 403, UNKNOWN_TICKET: 404, UNKNOWN_PAYMENT: 404, IDEMPOTENCY_MISMATCH: 409, TICKET_OPEN_LIMIT: 409, TICKET_MESSAGE_LIMIT: 409, TICKET_CLOSED: 409 };
+  const texts = Object.fromEntries(Object.keys(helpCodes).map(code => [code, (coreSrc.match(new RegExp(`\\n  ${code}: \\['([^']+)', '([^']+)'\\],`)) || []).slice(1)]));
+  const missing = Object.entries(helpCodes).filter(([code, status]) => !errorsPy.includes(`"${code}": ${status},`) || texts[code].length !== 2
+    || !/[؀-ۿ]/.test(texts[code][1]) || /[A-Za-z]/.test(texts[code][1]) || !supportPy.includes(`studio_error(${status}, "${code}"`)).map(([code]) => code);
+  const customerRoutes = supportPy.slice(supportPy.indexOf('    # ---- customer'.replace('----', '-'.repeat(62))), supportPy.indexOf('    # ---- staff (P3-13)'.replace('----', '-'.repeat(62))));
+  const customerReturns = customerRoutes.split('\n').filter(line => /^\s+return /.test(line) && !/^\s+return (customer_status|redact_staff_identity)\(/.test(line));
+  check('Studio help desk (P3-07, P3-13): ticket refusals are studio codes with EN/AR words, the router is mounted, customer answers pass the staff-identity redaction',
+    missing.length === 0 && !/whatsapp|واتساب/i.test(texts.SERVICE_OFF.join(' '))
+      && studioApiPy.includes('router.include_router(create_studio_support_router(')
+      && customerRoutes.length > 1000 && customerReturns.length === 5 && customerReturns.every(line => line.includes('for_customer('))
+      && supportPy.includes('return redact_staff_identity(value, user)'),
+    `missing ${missing.join(',')} returns ${customerReturns.length}`);
+}
+
+{
   // P0-12: the public privacy page must state the server's real audit retention (main.py default).
   const mainPy = read('server/main.py');
   const privacy = read('privacy.html');

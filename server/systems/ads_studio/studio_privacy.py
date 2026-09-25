@@ -38,7 +38,10 @@ creator names, on the same connection. It removes the account's optional WhatsAp
 consent time from the studio profile (``studioProfiles``, PLAN.md §7.1; the profile route itself
 arrives with P2-07) and the commenters' identifiers and texts from the account's comment-reply log
 (``socialReplyLog``: today only ``fromId`` is stored; comment texts and names are removed too if a
-later release stores them). Support tickets do not exist yet (P3-07); see the TODO below. It never
+later release stores them) and, since P3-12, the texts of the account's help-desk tickets: every
+ticket subject (``supportTickets``) and every message text of those tickets, the team's answers
+included (``supportTicketMessages``, which carry the ticket owner's created_by), keeping the ids,
+the T- numbers, the status and every time (studio_support.py). It never
 reads or writes the wallet ledger, payment requests or ad requests (money history stays exact),
 and it only ever touches this system's own record types. It is idempotent: a second run changes
 nothing. On PostgreSQL it locks the rows it rewrites (ORDER BY id, FOR UPDATE); main.py's creator-
@@ -53,7 +56,7 @@ from sqlalchemy import text
 from ...db import json_dumps, json_loads, now_ms
 from ...rbac import can_browse_user_directory
 from .social_studio import LOG_TYPE as REPLY_LOG_TYPE
-from .studio_types import STUDIO_PROFILES_TYPE, derived_id
+from .studio_types import STUDIO_PROFILES_TYPE, SUPPORT_TICKET_MESSAGES_TYPE, SUPPORT_TICKETS_TYPE, derived_id
 
 TEAM_ID = "team"
 TEAM_LABELS = {"en": "Albayan team", "ar": "فريق البيان"}
@@ -186,6 +189,10 @@ PROFILE_PERSONAL_FIELDS = ("whatsappNumber", "whatsappConsentAt")
 REPLY_LOG_COMMENTER_FIELDS = (
     "fromId", "fromName", "fromUsername", "from", "commenterId", "commenterName", "commentText", "text", "message",
 )
+# Help-desk texts (P3-12): the subject (and the hash of the first send's content, which only served
+# replays) of a ticket, and the text of each message; ids, numbers, status and times stay.
+TICKET_PERSONAL_FIELDS = ("subject", "createFingerprint")
+TICKET_MESSAGE_PERSONAL_FIELDS = ("text",)
 _SCRUB_BATCH = 500
 
 
@@ -220,8 +227,9 @@ def _scrub_fields(conn: Any, rows_sql: str, params: dict[str, Any], fields: tupl
 
 
 def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
-    """Remove the studio's personal data of an account being anonymised (P1-16), on the caller's
-    transaction. Returns how many rows changed per kind. Never touches the ledger."""
+    """Remove the studio's personal data of an account being anonymised (P1-16, P3-12), on the
+    caller's transaction. Returns how many rows changed per kind (``tickets`` counts ticket rows and
+    message rows together). Never touches the ledger."""
     uid = str(user_id or "")
     if not uid:
         return {"profiles": 0, "replyLog": 0, "tickets": 0}
@@ -240,8 +248,20 @@ def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
         REPLY_LOG_COMMENTER_FIELDS,
         stamp,
     )
-    # TODO(P3-07): support tickets do not exist yet. When supportTickets and supportTicketMessages
-    # land, scrub here the account's ticket subjects and every message text (customer and team
-    # messages alike), keeping ids, T- numbers, status and times; the ticket tests then extend
-    # test_studio_privacy.py::test_anonymise_scrubs_studio_personal_data.
-    return {"profiles": profiles, "replyLog": reply_log, "tickets": 0}
+    # P3-12: the account's ticket subjects and every message text of its tickets (customer and team
+    # messages alike carry the owner's created_by); main.py already holds these rows locked.
+    tickets = _scrub_fields(
+        conn,
+        "SELECT id, data_json, last_modified FROM entities WHERE type = :type AND created_by = :uid",
+        {"type": SUPPORT_TICKET_MESSAGES_TYPE, "uid": uid},
+        TICKET_MESSAGE_PERSONAL_FIELDS,
+        stamp,
+    )
+    tickets += _scrub_fields(
+        conn,
+        "SELECT id, data_json, last_modified FROM entities WHERE type = :type AND created_by = :uid",
+        {"type": SUPPORT_TICKETS_TYPE, "uid": uid},
+        TICKET_PERSONAL_FIELDS,
+        stamp,
+    )
+    return {"profiles": profiles, "replyLog": reply_log, "tickets": tickets}

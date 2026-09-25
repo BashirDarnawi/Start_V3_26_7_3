@@ -19,5 +19,8 @@ OWNED_TYPES = frozenset(
         "studioAlerts",  # staff/admin alerts raised by the studio jobs loop (studio_jobs.py)
         "studioJobState",  # the jobs loop's one heartbeat and claims row (studio_jobs.py)
         "studioProfiles",  # optional WhatsApp number (route P2-07; scrubbed on anonymisation, studio_privacy.py)
+        "supportTickets",  # help desk tickets (studio_support.py, P3-07; texts scrubbed on anonymisation)
+        "supportTicketMessages",  # their append-only messages (studio_support.py, P3-07)
+        "studioCounters",  # the ticket number counter row (studio_support.py, P3-07)
     }
 )

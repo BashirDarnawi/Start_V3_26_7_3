@@ -34,6 +34,13 @@ STUDIO_ERROR_CODES: dict[str, int] = {
     "UNKNOWN_CAMPAIGN": 404,     # results: no such request for this user (another owner's, a private draft, archived)
     "STAFF_ONLY": 403,           # results: "Check Meta now" is for the Albayan team only
     "NOT_LINKED": 409,           # results: the request has no Meta campaign linked yet
+    "SERVICE_OFF": 403,          # help: the Help service (rollout.services.help) is not open for this account yet
+    "UNKNOWN_TICKET": 404,       # help: no such ticket for this user (another owner's, or an admin-only one for a reviewer)
+    "UNKNOWN_PAYMENT": 404,      # help: the payment a ticket is about is not one of this user's
+    "IDEMPOTENCY_MISMATCH": 409,  # an operationId already used for a different request
+    "TICKET_OPEN_LIMIT": 409,    # help: too many tickets still open; resolve one first
+    "TICKET_MESSAGE_LIMIT": 409,  # help: the ticket holds the most messages it may; open a new one
+    "TICKET_CLOSED": 409,        # help: resolved more than 7 days ago; it can no longer be reopened
 }
 
 

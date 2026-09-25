@@ -26,9 +26,17 @@ STUDIO_SETTINGS_TYPE = "studioSettings"
 # One per owner (optional WhatsApp number with consent; PLAN.md §7.1). Its route arrives with
 # P2-07; the anonymisation scrub (studio_privacy.py, P1-16) already clears its personal fields.
 STUDIO_PROFILES_TYPE = "studioProfiles"
+# Help desk (studio_support.py, P3-07): a customer's ticket, its append-only messages (both with
+# created_by = the ticket's owner, so the anonymisation scrub finds them) and the one counter row
+# that hands out the T-000123 numbers (created_by NULL, a system row).
+SUPPORT_TICKETS_TYPE = "supportTickets"
+SUPPORT_TICKET_MESSAGES_TYPE = "supportTicketMessages"
+STUDIO_COUNTERS_TYPE = "studioCounters"
 # Types that only the /api/studio router may read or write: the generic /api/collections API
 # refuses them (joined into social_studio.SOCIAL_STUDIO_COLLECTIONS, which main.py blocks).
-STUDIO_ROUTER_ONLY_TYPES = frozenset({STUDIO_SETTINGS_TYPE, STUDIO_PROFILES_TYPE})
+STUDIO_ROUTER_ONLY_TYPES = frozenset({
+    STUDIO_SETTINGS_TYPE, STUDIO_PROFILES_TYPE, SUPPORT_TICKETS_TYPE, SUPPORT_TICKET_MESSAGES_TYPE, STUDIO_COUNTERS_TYPE,
+})
 
 _PREFIX_RE = re.compile(r"[a-z][a-z0-9]{1,15}")
 _ID_HASH_CHARS = 40

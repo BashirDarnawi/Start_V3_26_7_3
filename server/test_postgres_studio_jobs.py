@@ -18,6 +18,9 @@ scenario runs the application in a child process inside its own random schema, d
 * ``studio_system_alert_insert``: a system alert with ``created_by`` NULL is stored; the same row with
   ``created_by = 'system'`` breaks the users.id foreign key (why the rule exists, PLAN.md §7.1); a
   made-up owner is stored as NULL; two processes raising the same alert at once make one row.
+* ``studio_ticket_numbers`` (P3-07, test_studio_support.postgres_ticket_numbers): 50 parallel ticket
+  opens by 5 customers get 50 different T- numbers without gaps; 10 parallel sends of one operationId
+  make one ticket; 25 parallel opens by one customer stop exactly at the 20-open cap.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ from server.test_postgres_financial_review import (  # noqa: E402, F401  (postgr
     postgres_scenario_target,
 )
 
-SCENARIOS = ("campaign_orphan_sweep", "studio_system_alert_insert")
+SCENARIOS = ("campaign_orphan_sweep", "studio_system_alert_insert", "studio_ticket_numbers")
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
@@ -362,6 +365,10 @@ def _run_scenario(scenario: str) -> None:
                 patch.setattr(main_module, "_enforce_ad_campaign_mutation_rate", lambda user: None)
                 if scenario == "campaign_orphan_sweep":
                     _campaign_orphan_sweep(j, staff)
+                elif scenario == "studio_ticket_numbers":
+                    from server import test_studio_support
+
+                    test_studio_support.postgres_ticket_numbers()
                 else:
                     _studio_system_alert_insert(j, staff)
             assert get_engine() is engine, "The studio scenario changed its database target"
