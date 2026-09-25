@@ -130,20 +130,16 @@ async function seed(playwright, baseURL, testInfo, label, { services = {}, reque
   }
 }
 
-// The TikTok section lives in Help at ?tab=help&section=tiktok, drawn by 15n through a one-line hook
-// (renderStudioTikTokSection). Until that hook lands in 15n, this spec installs the identical hook in
-// the page (test only; nothing in the product is changed): the Help screen keeps drawing everything
-// else itself.
+// The TikTok section lives in Help at ?tab=help&section=tiktok, drawn by 15n's own hook
+// (renderStudioHelpBody -> renderStudioTikTokSection, stage 15). The Help list's row and Home's
+// "TikTok help" goal (shown only while /me says the service is on) lead there; the goal is the way in.
 async function openTikTok(page) {
-  await page.evaluate(() => {
-    if (window.__e2eTikTokHook) return;
-    const draw = _studioV2Screens.get('help');
-    studioV2RegisterScreen('help', route => (route && route.section === 'tiktok' && typeof renderStudioTikTokSection === 'function' ? renderStudioTikTokSection(route) : draw(route)));
-    window.__e2eTikTokHook = true;
-  });
-  await page.evaluate(() => studioTikTokOpen());
+  await expectCustomerTab(page, 'home');
+  await expect(page.getByTestId('studio-goal-tiktok')).toBeVisible();
+  await page.getByTestId('studio-goal-tiktok').click();
   await expect.poll(() => new URL(page.url()).searchParams.get('section')).toBe('tiktok');
   await expect(page.getByTestId('studio-tiktok')).toBeVisible();
+  await expect(page.getByTestId('studio-help')).toHaveCount(0);  // the section stands alone, not inside the ticket list
 }
 
 async function expectNoForbiddenWords(page, label) {
@@ -228,6 +224,21 @@ test.describe('Albayan Studio extras: TikTok service, inbox badge, results card,
     await expectNoForbiddenWords(page, 'Arabic');
     await expectNoPageOverflow(page, 'TikTok section (AR)');
     await setLanguage(page, 'en');
+
+    // The Help list (15n hooks, stage 15): the guides card (studio-pages.js, fetched for it) and the TikTok row after the contact card.
+    await page.getByTestId('studio-nav-help').click();
+    await expectCustomerTab(page, 'help');
+    await expect(page.getByTestId('studio-guides')).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-tiktok-entry')).toBeVisible();
+    expect(await page.evaluate(() => {
+      const contact = document.querySelector('[data-testid="studio-help-contact"]');
+      const guides = document.querySelector('[data-testid="studio-guides"]');
+      const entry = document.querySelector('[data-testid="studio-tiktok-entry"]');
+      return !!contact && !!guides && !!entry && !!(contact.compareDocumentPosition(guides) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(guides.compareDocumentPosition(entry) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }), 'contact card, then the guides, then the TikTok row').toBe(true);
+    await page.getByTestId('studio-tiktok-entry').click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('section')).toBe('tiktok');
+    await expect(page.getByTestId('studio-tiktok')).toBeVisible();
 
     // The team: the request is in the staff list; the desk rows draw it (the same function studio-staff.js
     // calls) with the server's words; a step with a bilingual note moves it on.
@@ -345,6 +356,8 @@ test.describe('Albayan Studio extras: TikTok service, inbox badge, results card,
     await expect.poll(() => page.evaluate(id => typeof studioDataRequest === 'function' && !!studioDataRequest(id), seeded.requestId), { timeout: BOOT_TIMEOUT }).toBe(true);
     await page.evaluate(id => studioV2Go({ tab: 'campaigns', id }), seeded.requestId);
     await expect(page.getByTestId('studio-ad-detail')).toBeVisible();
+    // The detail draws the results through renderStudioResultsCard (15k hook, stage 15): no card before a link.
+    await expect(page.getByTestId('studio-results-card')).toHaveCount(0);
     await expect(page.getByTestId('studio-ad-results')).toHaveCount(0);
     expect(await page.evaluate(id => renderStudioResultsCard(id), seeded.requestId)).toBe('');
 
@@ -364,7 +377,13 @@ test.describe('Albayan Studio extras: TikTok service, inbox badge, results card,
     }
     await page.reload();
     await expect(page.getByTestId('studio-ad-detail')).toBeVisible({ timeout: BOOT_TIMEOUT });
-    await expect(page.getByTestId('studio-ad-results-used')).toHaveText('Meta used $3.40 of $25.00', { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-results-card')).toHaveAttribute('data-state', 'ready', { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-results-used')).toHaveText('Meta used $3.40 of $25.00', { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-ad-guides')).toBeVisible();  // the guide links under the tracker (15k hook)
+    await page.getByTestId('studio-guide-link-stages').click();
+    await expect(page.getByTestId('studio-guide-sheet')).toHaveAttribute('data-guide', 'stages');
+    await page.getByTestId('studio-guide-close').click();
+    await expect(page.getByTestId('studio-guide-sheet')).toHaveCount(0);
     await expect.poll(async () => page.evaluate(id => renderStudioResultsCard(id), seeded.requestId), { timeout: BOOT_TIMEOUT }).toContain('data-state="ready"');
     const card = await page.evaluate(id => renderStudioResultsCard(id), seeded.requestId);
     expect(card).toContain('data-testid="studio-results-used">Meta used $3.40 of $25.00<');

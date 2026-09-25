@@ -454,6 +454,7 @@ function renderStudioWalletNumbers(usd) {
             <h2 class="studio-v2-wallet-visually-hidden">${studioEsc(adsStudioText('Your ad money in dollars', 'أموال إعلاناتك بالدولار'))}</h2>
             <div class="studio-v2-wallet-strip" data-testid="studio-wallet-numbers">${tiles.map(tile).join('')}
             </div>${returning}
+            ${typeof studioGuideLinks === 'function' ? studioGuideLinks(['money', 'settle'], 'studio-wallet-guides') : ''}
             <details class="studio-v2-wallet-card studio-v2-wallet-where" data-testid="studio-wallet-where" ontoggle="studioWalletWhereToggle(this)"${_studioWallet.whereOpen ? ' open' : ''}>
               <summary>${studioWalletIcon('info')}<span>${studioEsc(adsStudioText('Where is every dollar?', 'أين كل دولار؟'))}</span></summary>
               <dl class="studio-v2-wallet-kv">

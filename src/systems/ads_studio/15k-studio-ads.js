@@ -359,6 +359,7 @@ function renderStudioAdsDetail(route) {
             ${renderStudioStageChip(stage)}
             ${stage.variant ? `<p class="studio-ads-variant">${studioEsc(stage.variant)}</p>` : ''}
             ${renderStudioAdsTracker(stage)}
+            ${typeof studioGuideLinks === 'function' ? studioGuideLinks(['stages', 'settle'], 'studio-ad-guides') : ''}
             <p class="studio-ads-next">
               ${next ? `<span data-testid="studio-ad-next">${studioEsc(next)}</span>` : ''}
               ${stage.checkedAgo ? `<span class="studio-checked${stage.stale ? ' is-stale' : ''}">${studioEsc(stage.checkedAgo)}</span>` : ''}
@@ -368,7 +369,7 @@ function renderStudioAdsDetail(route) {
           </header>
           ${renderStudioAdsReason(request, stage)}
           ${renderStudioAdsMoney(request, stage)}
-          ${renderStudioAdsResults(request)}
+          ${typeof renderStudioResultsCard === 'function' ? renderStudioResultsCard(request.id) : renderStudioAdsResults(request)}
           ${renderStudioAdsBrief(request)}
         </article>`;
 }

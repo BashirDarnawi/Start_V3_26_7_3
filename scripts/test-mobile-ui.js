@@ -2803,7 +2803,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // The tab's sessionStorage stays (a reload keeps it); the page's own memory starts empty.
   const openAt = (url, navType = 'navigate', entryState = null, opened = '') => {
     hist.reset(url, entryState);
-    run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.fromApp = false; _studioV2.popping = false; _studioV2.repin = false;
+    run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.fromApp = false; _studioV2.popping = false; _studioV2.repin = false; _studioV2.opening = null; _studioV2.reapplied = false;
       __navType = ${JSON.stringify(navType)}; __navName = ${JSON.stringify(opened ? `http://localhost${opened}` : '')}; render();`);
   };
   const chainOf = entry => (entry && entry.state && entry.state.studioV2 && entry.state.studioV2.chain) || null;
@@ -3355,6 +3355,69 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 "Leave the studio": Back only after an entry from this app in this document, else the way out or no button (never history.length)', !loadError && leaveCases.every(Boolean),
     loadError || `cases ${failed(leaveCases)}`);
+
+  // Logging in AT a deep link: the platform's post-login route restore (12-views restoreRequestedViewAfterLogin ->
+  // updateUrlForView) puts an unmarked entry with the bare ?tab= over the first v2 draw's marked one. The address
+  // of that draw comes back once (studioV2ReapplyOpeningAddress): a bare same-tab address on an unmarked entry
+  // within 15 s; the reader's own moves (marked), another tab, a bare opening and a late entry are left alone.
+  const platformRestore = tab => { hist.pushState({ view: 'ads-studio' }, '', `/studio?tab=${tab}`); run('render();'); return { search: search(), html: html(), chain: chainOf(hist.entries[hist.index]) }; };
+  who.staff = true;
+  meReply({ ui: 'v2', staffDesk: 'v2', isStaff: true, isAdmin: false });
+  openAt('/studio?tab=review&section=tickets');
+  const deskFirst = { search: search(), html: html(), entries: hist.entries.length };
+  const deskRestored = platformRestore('review');
+  const deskAgain = platformRestore('review');  // a second platform entry: only once
+  who.staff = false;
+  meReply({ ui: 'v2', staffDesk: 'classic', isStaff: false });
+  openAt('/studio?tab=campaigns&id=req_77');
+  const adRestored = platformRestore('campaigns');
+  openAt('/studio?tab=campaigns&id=req_78');
+  const otherTab = platformRestore('wallet');  // the app went somewhere else
+  openAt('/studio?tab=wallet');
+  const bareOpening = platformRestore('wallet');  // nothing beyond the tab to bring back
+  openAt('/studio?tab=campaigns&id=req_79');
+  run("studioV2Go({ tab: 'campaigns' });");  // the reader's own move up: a marked entry
+  const ownMove = { search: search(), chain: chainOf(hist.entries[hist.index]) };
+  openAt('/studio?tab=campaigns&id=req_80');
+  run('performance.now = () => 20000;');
+  const late = platformRestore('campaigns');
+  run('performance.now = () => 100;');
+  const deepLinkCases = [
+    deskFirst.search === '?tab=review&section=tickets' && deskFirst.html.includes('data-section="tickets"') && deskFirst.entries === 2,
+    deskRestored.search === '?tab=review&section=tickets' && deskRestored.html.includes('data-section="tickets"') && JSON.stringify(deskRestored.chain) === JSON.stringify(['review|requests||', 'review|tickets||']),
+    deskAgain.search === '?tab=review' && deskAgain.html.includes('data-section="requests"'),
+    adRestored.search === '?tab=campaigns&id=req_77' && adRestored.html.includes('data-id="req_77"'),
+    otherTab.search === '?tab=wallet' && bareOpening.search === '?tab=wallet',
+    ownMove.search === '?tab=campaigns' && Array.isArray(ownMove.chain),
+    late.search === '?tab=campaigns' && !late.html.includes('data-id="req_80"'),
+    shellSrc.includes('function studioV2ReapplyOpeningAddress()') && shellSrc.includes('if (frame) { studioV2RestoreOpeningAddress(); studioV2ReapplyOpeningAddress(); }')
+      && shellSrc.includes('if (!_studioV2.opening) _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };')
+  ];
+  check('Studio v2 deep link through the login form: the platform\'s bare ?tab= entry after the first draw gets the opening section / id back once (same tab, unmarked entry, within 15 s); never the reader\'s own moves, another tab, a bare opening or a late entry',
+    !loadError && deepLinkCases.every(Boolean), loadError || `cases ${failed(deepLinkCases)}`);
+
+  // The replies and posts screens live in the lazy bundle studio-pages.js: without a registered screen the shell
+  // asks the loader (studioBundleScreen, stubbed here) and shows what it returns inside the tab's own root; '' from
+  // it (the bundle is here but its draw failed) keeps the placeholder.
+  run("function studioBundleScreen(name) { return '<card ' + name + '>'; }");
+  openAt('/studio?tab=replies');
+  const lazyReplies = html();
+  openAt('/studio?tab=posts');
+  const lazyPosts = html();
+  run("studioBundleScreen = function () { return ''; };");
+  openAt('/studio?tab=replies');
+  const lazyEmpty = html();
+  run('studioBundleScreen = undefined;');
+  openAt('/studio?tab=replies');
+  const lazyNone = html();
+  const lazyCases = [
+    lazyReplies.includes('data-testid="studio-screen-replies"') && lazyReplies.includes('<card studio-pages.js>') && !lazyReplies.includes('data-testid="studio-soon"'),
+    lazyPosts.includes('data-testid="studio-screen-posts"') && lazyPosts.includes('<card studio-pages.js>'),
+    lazyEmpty.includes('data-testid="studio-soon"') && !lazyEmpty.includes('<card'),
+    lazyNone.includes('data-testid="studio-soon"') && !lazyNone.includes('<card')
+  ];
+  check('Studio v2 shell: the replies and posts tabs ask the loader for studio-pages.js and show its card in the screen root until the screen registers; the placeholder stays when the loader has nothing to show',
+    !loadError && lazyCases.every(Boolean), loadError || `cases ${failed(lazyCases)}`);
 
   // The layout is fixed by the first /me answer of a visit; a later answer updates only the rest
   // (services, intake, limits, contact) until the next page load or the next entry into the studio.
@@ -5253,28 +5316,92 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const STUDIO_ADMIN_KEYS_LIST = ['rollout', 'intake', 'capabilities', 'limits', 'settlement', 'hours', 'contact', 'targets', 'thresholds'];  // studio_settings.SETTING_KEYS
   const studioLazy = bundleManifestJson.lazy['studio.js'];
   const staffLazy = bundleManifestJson.lazy['studio-staff.js'];
+  const pagesLazy = bundleManifestJson.lazy['studio-pages.js'];
   const MiB = 1024 * 1024;
   const builtStudio = read('studio.js');
   const builtStaff = read('studio-staff.js');
-  check('BUNDLE RULE: studio-staff.js holds exactly 15i + 15p + 15q, studio.js holds none of them and the loader 15o0 right after 15n; both bundles ship in both copies under 1 MiB',
-    JSON.stringify(staffLazy) === JSON.stringify(staffFiles)
-      && staffFiles.every(file => !studioLazy.includes(file) && !bundleManifestJson.files.includes(file))
+  const builtPages = read('studio-pages.js');
+  const pagesSrcForRule = read('src/systems/ads_studio/15o-studio-pages.js');
+  const socialSrcForRule = read('src/systems/ads_studio/15f-social-studio.js');
+  const bundleSizes = ['studio.js', 'studio-staff.js', 'studio-pages.js'].map(name => `${name} ${fs.statSync(path.join(ROOT, name)).size} B`).join(', ');
+  check('BUNDLE RULE: studio-staff.js holds exactly 15i + 15p + 15q, studio-pages.js exactly 15o, studio.js holds none of them and the loader 15o0 right after 15n; the three bundles ship in both copies, each under 1 MiB, none of them in script.js',
+    JSON.stringify(staffLazy) === JSON.stringify(staffFiles) && JSON.stringify(pagesLazy) === JSON.stringify(['systems/ads_studio/15o-studio-pages.js'])
+      && staffFiles.concat(pagesLazy).every(file => !studioLazy.includes(file) && !bundleManifestJson.files.includes(file))
       && studioLazy.indexOf('systems/ads_studio/15o0-studio-staff-loader.js') === studioLazy.indexOf('systems/ads_studio/15n-studio-help.js') + 1
       && !bundleManifestJson.files.includes('systems/ads_studio/15o0-studio-staff-loader.js')
-      && builtStudio === read('www/studio.js') && builtStaff === read('www/studio-staff.js')
-      && builtStudio.includes(loaderSrc) && !builtStudio.includes('function renderStudioDeskSection(') && !builtStudio.includes('function renderStudioHealthSection(')
-      && [healthSrc, deskSrc, adminSrc].every(src => builtStaff.includes(src)) && !builtStaff.includes(loaderSrc)
-      && !read('script.js').includes('renderStudioDeskSection') && !read('script.js').includes('renderStudioStaffSection')
-      && fs.statSync(path.join(ROOT, 'studio.js')).size < MiB && fs.statSync(path.join(ROOT, 'studio-staff.js')).size < MiB,
-    `studio.js ${fs.statSync(path.join(ROOT, 'studio.js')).size} B, studio-staff.js ${fs.statSync(path.join(ROOT, 'studio-staff.js')).size} B`);
-  check('the staff bundle loader follows the 15c0 pattern (script-tag URL with ?v=, one promise, 30 s failure cooldown, typeof-guarded ready check, bilingual retry card) and both frames call it',
-    loaderSrc.includes("replace(/script(\\.min)?\\.js$/, 'studio-staff.js')") && loaderSrc.includes('const _STUDIO_STAFF_RETRY_COOLDOWN_MS = 30000;')
-      && loaderSrc.includes("_studioStaffBundleState === 'failed' && Date.now() - _studioStaffLastFailureAt < _STUDIO_STAFF_RETRY_COOLDOWN_MS) return Promise.resolve();")
-      && loaderSrc.includes("return typeof renderStudioDeskSection === 'function' && typeof renderStudioHealthSection === 'function';")
-      && loaderSrc.includes('onclick="retryStudioStaffLoad()"') && loaderSrc.includes('تعذر تحميل مكتب الفريق') && loaderSrc.includes('جارٍ تحميل مكتب الفريق')
-      && read('src/systems/ads_studio/15h-studio-shell.js').includes("typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection(section[0], route) :")
+      && builtStudio === read('www/studio.js') && builtStaff === read('www/studio-staff.js') && builtPages === read('www/studio-pages.js')
+      && builtStudio.includes(loaderSrc) && !builtStudio.includes('function renderStudioDeskSection(') && !builtStudio.includes('function renderStudioHealthSection(') && !builtStudio.includes('function renderStudioPagesBody(')
+      && [healthSrc, deskSrc, adminSrc].every(src => builtStaff.includes(src)) && !builtStaff.includes(loaderSrc) && builtPages === pagesSrcForRule
+      && ['renderStudioDeskSection', 'renderStudioStaffSection', 'renderStudioPagesBody', 'ensureStudioBundle'].every(name => !read('script.js').includes(name))
+      && ['studio.js', 'studio-staff.js', 'studio-pages.js'].every(name => fs.statSync(path.join(ROOT, name)).size < MiB),
+    bundleSizes);
+  check('the lazy bundle loader (15o0) is ONE named loader for studio-staff.js and studio-pages.js (script-tag URL with the same ?v=, one promise per bundle, 30 s failure cooldown, typeof-guarded ready checks, bilingual retry cards) and every frame calls it: the desk (15h, 15c), the replies/posts tabs (15h), the guide links (15k, 15m), the Help list (15n), the classic handover (15f); both bundles are served and shipped',
+    loaderSrc.includes("const base = parts[0].replace(/script(\\.min)?\\.js$/, name);") && loaderSrc.includes('const _STUDIO_BUNDLE_RETRY_COOLDOWN_MS = 30000;')
+      && loaderSrc.includes("if (slot.state === 'failed' && Date.now() - slot.failedAt < _STUDIO_BUNDLE_RETRY_COOLDOWN_MS) return Promise.resolve();")
+      && loaderSrc.includes("ready: () => typeof renderStudioDeskSection === 'function' && typeof renderStudioHealthSection === 'function',")
+      && loaderSrc.includes("ready: () => typeof renderStudioPagesBody === 'function' && typeof studioGuideOpen === 'function',")
+      && loaderSrc.includes('onclick="retryStudioBundle(\'${name}\')"') && ['تعذر تحميل مكتب الفريق', 'جارٍ تحميل مكتب الفريق', 'تعذر تحميل الصفحات والأدلة', 'جارٍ تحميل الصفحات والأدلة'].every(words => loaderSrc.includes(words))
+      && ['function ensureStudioBundle(name, readyCheck = null)', 'function studioBundleScreen(name)', 'function renderStudioStaffSection(section, route = null)', "function studioGuideLinks(keys, testId = 'studio-guide-links')", 'function studioPagesClassicHandover(tab)'].every(sig => loaderSrc.includes(sig))
+      && shellSrc.includes("typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection(section[0], route) :")
+      && shellSrc.includes("const STUDIO_V2_LAZY_SCREENS = Object.freeze({ replies: 'studio-pages.js', posts: 'studio-pages.js' });") && shellSrc.includes('body = studioBundleScreen(STUDIO_V2_LAZY_SCREENS[route.tab]) || null;')
       && adsStudio.includes("typeof renderStudioStaffSection === 'function' ? renderStudioStaffSection('health')") && !adsStudio.includes('renderStudioHealthSection()')
-      && read('server/main.py').includes('"studio-staff.js"') && /^\s*COPY\s.*\bstudio-staff\.js\b/m.test(read('server/Dockerfile')));
+      && adsSrc.includes("typeof studioGuideLinks === 'function' ? studioGuideLinks(['stages', 'settle'], 'studio-ad-guides') : ''")
+      && read('src/systems/ads_studio/15m-studio-wallet.js').includes("typeof studioGuideLinks === 'function' ? studioGuideLinks(['money', 'settle'], 'studio-wallet-guides') : ''")
+      && helpSrc.includes("else if (typeof studioBundleScreen === 'function') guides = studioBundleScreen('studio-pages.js');")
+      && socialSrcForRule.includes("typeof studioPagesClassicHandover === 'function' ? studioPagesClassicHandover('replies') : ''") && socialSrcForRule.includes("studioPagesClassicHandover('posts')") && !socialSrcForRule.includes('studioPagesClassicDelegate(')
+      && read('server/main.py').includes('return _serve_lazy_bundle(request, "studio-staff.js")') && read('server/main.py').includes('return _serve_lazy_bundle(request, "studio-pages.js")')
+      && /^\s*COPY\s.*\bstudio-staff\.js\b/m.test(read('server/Dockerfile')) && /^\s*COPY\s.*\bstudio-pages\.js\b/m.test(read('server/Dockerfile')));
+  // ---- the loader alone in a vm sandbox: one request per bundle with the main bundle's ?v=, the card meanwhile,
+  // a failure's cooldown and Retry, the screen once the bundle's functions are here, the handover and the guide links.
+  const loaderDoc = { tags: [], createElement: () => ({ removed: false, remove() { this.removed = true; } }), querySelectorAll: () => [{ src: 'https://albayan.example/studio/script.js?v=abc123' }] };
+  loaderDoc.head = { appendChild: tag => loaderDoc.tags.push(tag) };
+  const loaderMe = { value: { ui: 'v2' } };
+  const loaderBox = vm.createContext({ state: { language: 'en', currentView: 'ads-studio' }, document: loaderDoc, __now: 1000, studioMe: () => loaderMe.value, adsStudioIsAr: () => false }, { microtaskMode: 'afterEvaluate' });
+  let loaderError = '';
+  try {
+    vm.runInContext('var __renders = 0; function render() { __renders++; } var Date = { now: () => __now };', loaderBox);
+    vm.runInContext(loaderSrc, loaderBox);
+  } catch (error) { loaderError = String(error && error.message || error); }
+  const lrun = code => { try { return vm.runInContext(code, loaderBox); } catch (error) { return `THREW ${error && error.message}`; } };
+  const pagesCard = String(lrun("studioBundleScreen('studio-pages.js')"));
+  lrun("studioBundleScreen('studio-pages.js')");  // a second draw: no second request
+  const staffCard = String(lrun("renderStudioStaffSection('requests', { tab: 'review' })"));
+  const requested = Array.from(lrun('document.tags.map(tag => tag.src)') || []);
+  lrun('document.tags[0].onerror()');  // the pages request failed
+  const failedCard = String(lrun("studioBundleScreen('studio-pages.js')"));
+  const tagsInCooldown = lrun('document.tags.length');
+  lrun('__now += 30001;');
+  const afterCooldown = String(lrun("studioBundleScreen('studio-pages.js')"));
+  const tagsAfterCooldown = lrun('document.tags.length');
+  lrun('document.tags[2].onerror(); __now += 1;');
+  const rendersBeforeRetry = lrun('__renders');
+  lrun("retryStudioBundle('studio-pages.js')");  // the Retry button: a new request at once
+  const tagsAfterRetry = lrun('document.tags.length');
+  const rendersAfterRetry = lrun('__renders');
+  const handoverCard = String(lrun("studioPagesClassicHandover('replies')"));
+  const guideLinksMeanwhile = String(lrun("studioGuideLinks(['money'])"));
+  loaderMe.value = { ui: 'classic' };
+  const handoverClassic = String(lrun("studioPagesClassicHandover('posts')"));
+  loaderMe.value = { ui: 'v2' };
+  lrun("function renderStudioDeskSection(section, route) { return '<desk ' + section + '>'; } function renderStudioHealthSection() { return '<health>'; } document.tags[1].onload();");
+  const staffDrawn = String(lrun("renderStudioStaffSection('requests', { tab: 'review' })"));
+  const healthDrawn = String(lrun("renderStudioStaffSection('health')"));
+  lrun("function renderStudioPagesBody() { return '<pages>'; } function studioGuideOpen() { return true; } function studioPagesClassicDelegate(tab) { return '<delegate ' + tab + '>'; } function renderStudioGuideLinks(keys, testId) { return '<links ' + keys.join(',') + ' ' + testId + '>'; } document.tags[3].onload();");
+  const pagesReady = String(lrun("studioBundleScreen('studio-pages.js')"));
+  const handoverReady = String(lrun("studioPagesClassicHandover('replies')"));
+  const guideLinksReady = String(lrun("studioGuideLinks(['money', 'settle'], 'studio-wallet-guides')"));
+  const loaderCases = [
+    pagesCard.includes('data-testid="studio-pages-bundle-loading"') && pagesCard.includes('Loading pages and guides…') && staffCard.includes('data-testid="studio-staff-bundle-loading"') && staffCard.includes('Loading the Team desk…'),
+    JSON.stringify(requested) === JSON.stringify(['https://albayan.example/studio/studio-pages.js?v=abc123', 'https://albayan.example/studio/studio-staff.js?v=abc123']),
+    failedCard.includes('data-testid="studio-pages-bundle-failed"') && failedCard.includes('onclick="retryStudioBundle(\'studio-pages.js\')"') && failedCard.includes("Couldn't load pages and guides") && tagsInCooldown === 2,
+    afterCooldown.includes('data-testid="studio-pages-bundle-loading"') && tagsAfterCooldown === 3,
+    tagsAfterRetry === 4 && rendersAfterRetry === rendersBeforeRetry + 1,
+    handoverCard.includes('data-testid="studio-pg-classic"') && handoverCard.includes('data-testid="studio-pages-bundle-loading"') && guideLinksMeanwhile === '' && handoverClassic === '',
+    staffDrawn === '<desk requests>' && healthDrawn === '<health>',
+    pagesReady === '' && handoverReady === '<delegate replies>' && guideLinksReady === '<links money,settle studio-wallet-guides>'
+  ];
+  check('the lazy bundle loader in a sandbox: one script request per bundle with the main bundle\'s ?v=, the bilingual card meanwhile, a failed request backs off 30 s (Retry asks again at once and redraws), the desk section and the pages screen draw once their functions are here, the classic handover shows the card only while /me says v2, guide links wait for the bundle',
+    !loaderError && loaderCases.every(Boolean), loaderError || `cases ${loaderCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
   const deskPairs = [...(deskSrc + adminSrc).matchAll(/adsStudioText\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)\s*,\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g)]
     .map(m => m[4] ?? m[5] ?? m[6] ?? '');
   const deskCss = workspaceCssFor => workspaceCssFor.slice(workspaceCssFor.indexOf('/* Albayan Studio v2 Team desk and admin tools'));
@@ -5485,15 +5612,18 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Team desk settle: the ended linked request shows paid, Meta used, the cap and the countdown to the final read (in Arabic too); the never-linked one is ready at once; a SETTLE_NOT_READY 409 is shown from its bilingual shape and keeps readyAt; the settle posts closeReason completed with the amount and one operationId per version',
     settleCases.every(Boolean), `cases ${failed(settleCases)}; notReady ${JSON.stringify(notReady)} settled ${JSON.stringify(settled)} calls ${stopCalls.length}`);
-  check('Team desk refusals: every settle refusal prefix of the server has a bilingual entry here, the unknown fallback stays calm, and Arabic readers never see raw English',
+  check('Team desk refusals: every settle refusal prefix of the server is read through the ONE Arabic map (15c; the desk keeps no list of its own, the classic lookup gives the same words), the unknown fallback stays calm, and Arabic readers never see raw English',
     (() => {
       const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
       const prefixes = [...actionsPy.matchAll(/^REFUSE_(?:SETTLE|REFUND|OVERRIDE)_[A-Z_]+ = "([^"]+)"/gm)].map(m => m[1]);
-      const map = json('STUDIO_DESK_REFUSALS') || [];
-      const covered = prefixes.every(prefix => map.some(([needle]) => prefix.startsWith(needle)));
-      const ar = inLanguage('ar', `studioDeskErrorInfo(Object.assign(new Error('x'), { status: 409, payload: { detail: ${JSON.stringify(prefixes[0])} } })).text`);
+      const deskText = prefix => String(inLanguage('ar', `studioDeskErrorInfo(Object.assign(new Error('x'), { status: 409, payload: { detail: ${JSON.stringify(`${prefix} ($1.00)`)} } })).text`));
+      const classicText = prefix => String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(`${prefix} ($1.00)`)})`));
+      const covered = prefixes.every(prefix => arabicOnly(deskText(prefix)) && deskText(prefix) === classicText(prefix));
       const unknown = inLanguage('ar', "studioDeskErrorInfo(Object.assign(new Error('Something odd'), { status: 400, payload: { detail: 'Something odd happened' } })).text");
-      return prefixes.length >= 12 && covered && arabicOnly(String(ar)) && arabicOnly(String(unknown));
+      // the closed month (operations.py, 423) keeps its words in both languages through the same map
+      const closedMonth = language => String(inLanguage(language, "studioDeskErrorInfo(Object.assign(new Error('x'), { status: 423, payload: { detail: 'Financial period 2026-09 is closed. An Admin must unlock it before editing.' } })).text"));
+      return prefixes.length >= 12 && covered && !deskSrc.includes('STUDIO_DESK_REFUSALS') && deskSrc.includes("const info = studioErrorInfo(error, 'action');") && arabicOnly(String(unknown))
+        && closedMonth('en') === 'This month is closed in the books. An admin must unlock it first.' && closedMonth('ar') === 'هذا الشهر مقفل في الدفاتر. يجب أن يفتحه المدير أولاً.';
     })());
   // The pulse: a new stop request rings (when the switch is on) and the title follows; leaving the desk stops the watch and restores the title.
   run("studioDeskToggleSound()");
@@ -5604,6 +5734,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // 'afterEvaluate'). Static checks cover the bundle, the styles, the texts, the classic map and the 15f handover.
   const vm = require('vm');
   const pagesSrc = read('src/systems/ads_studio/15o-studio-pages.js');
+  const loaderSrc = read('src/systems/ads_studio/15o0-studio-staff-loader.js');  // the 15f handover and the guide links go through it
   const socialSrc = read('src/systems/ads_studio/15f-social-studio.js');
   const coreSrc = read('src/systems/ads_studio/15g-studio-core.js');
   const shellSrc = read('src/systems/ads_studio/15h-studio-shell.js');
@@ -5697,6 +5828,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     vm.runInContext(homeSrc, box);
     vm.runInContext(adsSrc, box);
     vm.runInContext(helpSrc, box);
+    vm.runInContext(loaderSrc, box);
     vm.runInContext(pagesSrc, box);
     vm.runInContext("function render() { const html = renderStudioV2View(); __html = html || '<classic>'; }", box);
   } catch (error) { loadError = String(error && error.message || error); }
@@ -5738,15 +5870,18 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 
   // Bundle, manifest and the shell registry.
   const lazy = bundleManifestJson.lazy['studio.js'];
+  const pagesBundle = bundleManifestJson.lazy['studio-pages.js'];
   const studioSize = fs.statSync(path.join(ROOT, 'studio.js')).size;
-  check('Studio v2 Pages & replies (15o) ships in the lazy studio bundle right after 15n, in both built copies under 1 MiB, never in script.js, and registers the replies and posts screens with the shell',
-    !loadError && lazy.indexOf('systems/ads_studio/15o-studio-pages.js') > lazy.indexOf('systems/ads_studio/15n-studio-help.js')  // after 15n (the staff loader 15o0 may sit between)
+  const pagesSize = fs.statSync(path.join(ROOT, 'studio-pages.js')).size;
+  check('Studio v2 Pages & replies (15o) is its own lazy bundle studio-pages.js (never in studio.js or script.js), in both built copies under 1 MiB, and registers the replies and posts screens with the shell when it arrives',
+    !loadError && JSON.stringify(pagesBundle) === JSON.stringify(['systems/ads_studio/15o-studio-pages.js']) && !lazy.some(file => /15o-studio/.test(file))
       && !bundleManifestJson.files.some(file => /15o-studio/.test(file))
-      && [read('studio.js'), read('www/studio.js')].every(bundle => bundle.includes(pagesSrc)) && !read('script.js').includes('renderStudioPagesBody')
-      && studioSize < 1024 * 1024
+      && [read('studio-pages.js'), read('www/studio-pages.js')].every(bundle => bundle === pagesSrc)
+      && !read('studio.js').includes('function renderStudioPagesBody(') && !read('script.js').includes('renderStudioPagesBody')
+      && studioSize < 1024 * 1024 && pagesSize < 1024 * 1024
       && run("_studioV2Screens.has('replies') && _studioV2Screens.has('posts')") === true
       && pagesSrc.includes("studioV2RegisterScreen('replies', renderStudioPagesBody)"),
-    loadError || `studio.js ${studioSize} bytes`);
+    loadError || `studio.js ${studioSize} bytes, studio-pages.js ${pagesSize} bytes`);
 
   // Pages: health from the server, checked X ago, one fix with "I did it", the team's fix, no Check now for a customer.
   meReply(meBase);
@@ -5953,11 +6088,33 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     between(postsHtml, 'studio-pg-post-sp_1').includes('data-status="scheduled"') && between(postsHtml, 'studio-pg-post-sp_1').includes('Ramadan &lt;offer&gt;') && between(postsHtml, 'studio-pg-post-sp_1').includes('2 photos') && between(postsHtml, 'studio-pg-post-sp_1').includes('Sara &lt;Shop&gt;') && !postsHtml.includes('studio-pg-post-sp_2'),
     postsHtml.includes('data-testid="studio-pg-posts-filter-failed"') && postsFailed.includes('data-testid="studio-pg-post-sp_2" data-status="failed"') && postsFailed.includes('Meta refused &lt;it&gt;'),
     String(classicV2).includes('data-testid="studio-pg-classic"') && String(classicV2).includes('data-testid="studio-pg" data-section="pages"') && String(classicPostsV2).includes('data-testid="studio-pg-posts-card"'),
-    !String(classicPlain).includes('studio-pg') && (socialSrc.match(/apiJson\(/g) || []).length === 1 && socialSrc.includes("typeof studioPagesClassicDelegate === 'function' ? studioPagesClassicDelegate('replies') : ''") && socialSrc.includes("studioPagesClassicDelegate('posts')"),
+    !String(classicPlain).includes('studio-pg') && (socialSrc.match(/apiJson\(/g) || []).length === 1 && socialSrc.includes("typeof studioPagesClassicHandover === 'function' ? studioPagesClassicHandover('replies') : ''") && socialSrc.includes("studioPagesClassicHandover('posts')"),
     ended.includes('data-testid="studio-pg-plan-ended"') && ended.includes('data-testid="studio-pg-renew" onclick="studioV2Open(\'wallet\')"') && !ended.includes('studio-pg-pages')
   ];
   check('Studio v2 posts as they are (statuses, pages, photos, the failed reason), the posts tab, the classic Replies / Posts tabs hand over to 15o only while /me says v2 (15f keeps exactly one apiJson), the plan-ended state',
     !loadError && postsCases.every(Boolean), loadError || `cases ${failed(postsCases)}`);
+
+  // Stage 15 hooks with the bundle here: the Help list draws the guides card right after the contact card (15n
+  // renderStudioHelpExtras), the wallet's and the request detail's guide links come from the loader (15o0
+  // studioGuideLinks -> 15o renderStudioGuideLinks) and open the sheet.
+  meReply(meBase);
+  openAt('/studio?tab=help');
+  const helpWithGuides = html();
+  run("state.adCampaignRequests = [{ id: 'req_g1', createdBy: 'u1', status: 'Draft', name: 'Guide me', _created: 1, _lastModified: 2 }];");
+  const detailWithGuides = String(run("renderStudioAdsDetail({ tab: 'campaigns', section: '', id: 'req_g1', step: 0 })"));
+  run('state.adCampaignRequests = [];');
+  const walletGuides = String(run("studioGuideLinks(['money', 'settle'], 'studio-wallet-guides')"));
+  const hookCases = [
+    helpWithGuides.includes('data-testid="studio-help-contact"') && helpWithGuides.includes('data-testid="studio-guides"')
+      && helpWithGuides.indexOf('data-testid="studio-guides"') > helpWithGuides.indexOf('data-testid="studio-help-contact"') && !helpWithGuides.includes('studio-pages-bundle-loading'),
+    detailWithGuides.includes('data-testid="studio-ad-detail"') && detailWithGuides.includes('data-testid="studio-ad-guides"')
+      && detailWithGuides.includes('data-testid="studio-guide-link-stages" onclick="studioGuideOpen(\'stages\', this)"') && detailWithGuides.includes('data-testid="studio-guide-link-settle"')
+      && detailWithGuides.indexOf('data-testid="studio-ad-guides"') > detailWithGuides.indexOf('class="studio-ads-tracker') && detailWithGuides.indexOf('data-testid="studio-ad-guides"') < detailWithGuides.indexOf('class="studio-ads-next"'),
+    walletGuides.includes('data-testid="studio-wallet-guides"') && walletGuides.includes('data-testid="studio-guide-link-money" onclick="studioGuideOpen(\'money\', this)"') && walletGuides.includes('data-testid="studio-guide-link-settle"'),
+    helpSrc.includes('${renderStudioHelpContact()}${renderStudioHelpExtras()}') && helpSrc.includes("if (typeof renderStudioGuidesCard === 'function') guides = renderStudioGuidesCard();")
+  ];
+  check('Studio v2 guides reach the screens (stage 15 hooks): the Help list draws the guides card after the contact card, the request detail links the stages and settle guides under its tracker, the wallet links money and settle; every link opens the sheet',
+    !loadError && hookCases.every(Boolean), loadError || `cases ${failed(hookCases)}`);
 
   // Help guides (P5-03): seven bilingual guides, the hours guide reads /me, the card and the sheet handlers.
   const guideKeys = json('studioGuideKeys()') || [];
@@ -5987,7 +6144,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const arabic = detail => String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(detail)})`));
   const socialPy = read('server/systems/ads_studio/social_studio.py');
   const addedFrom = refusalMap.findIndex(entry => entry[0] === 'Rule name is required');
-  const added = refusalMap.slice(addedFrom);
+  const added = refusalMap.slice(addedFrom, refusalMap.findIndex(entry => entry[0] === 'Admin only') + 1);  // the reply-rule block (the P2-11 block moved here in stage 15 follows it)
   const staticCases = [
     textPairs.length >= 150 && textPairs.every(ar => /[؀-ۿ]/.test(ar)),
     onclicks.length > 60 && onclicks.every(attr => safeHandler.test(attr)),
@@ -6219,6 +6376,34 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio TikTok (P5-02): the section reads GET /tiktok/requests once, draws the server\'s state words and the team note escaped, validates the handle rule, POSTs one request with an operationId, refuses an invalid form without sending; the desk rows open, step and note with single flight; no native dialogs; every input has an id',
     !loadError && tiktokCases.every(Boolean), loadError || `cases ${failed(tiktokCases)} handlers ${onclicks.filter(attr => !safeHandler.test(attr)).slice(0, 3).join(' | ')}`);
 
+  // Stage 15 hooks (15n, 15j): the Help body draws the TikTok section for ?section=tiktok, the Help list its row
+  // after the contact card, and Home shows the "TikTok help" goal (opening the section) only while /me says the
+  // service is on for this account.
+  meReply(meV2);
+  const helpTiktok = String(run('renderStudioHelpBody({ tab: "help", section: "tiktok", id: "", step: 0 })'));
+  const helpListWithRow = String(run('renderStudioHelpBody({ tab: "help", section: "", id: "", step: 0 })'));
+  const homeOn = String(run('renderStudioHomeGoals(false)'));
+  hist.reset('/studio?tab=home');
+  const goalOn = run("studioHomeGoal('tiktok')");
+  const goalUrl = win.location.search;
+  meReply({ ...meV2, services: { ...meV2.services, tiktok: false } });
+  const helpListOff = String(run('renderStudioHelpBody({ tab: "help", section: "", id: "", step: 0 })'));
+  const homeOff = String(run('renderStudioHomeGoals(false)'));
+  const goalOff = run("studioHomeGoal('tiktok')");
+  meReply(meV2);
+  const hookCases = [
+    helpTiktok.includes('data-testid="studio-tiktok"') && !helpTiktok.includes('data-testid="studio-help"'),
+    helpListWithRow.includes('data-testid="studio-help-contact"') && helpListWithRow.includes('data-testid="studio-tiktok-entry"') && helpListWithRow.indexOf('data-testid="studio-tiktok-entry"') > helpListWithRow.indexOf('data-testid="studio-help-contact"'),
+    !helpListOff.includes('studio-tiktok-entry'),
+    homeOn.includes('data-testid="studio-goal-tiktok" onclick="studioHomeGoal(\'tiktok\')"') && homeOn.includes('TikTok help') && !homeOff.includes('studio-goal-tiktok') && goalOff === false,
+    goalOn === true && goalUrl === '?tab=help&section=tiktok',
+    helpSrc.includes("String(route.section || '') === 'tiktok' && typeof renderStudioTikTokSection === 'function') return renderStudioTikTokSection(route);")
+      && helpSrc.includes("const tiktok = typeof renderStudioTikTokEntry === 'function' ? renderStudioTikTokEntry() : '';") && homeSrc.includes("['tiktok', 'music-2', 'TikTok help', 'مساعدة تيك توك',")
+      && homeSrc.includes("if (goal === 'tiktok') return studioHomeTikTokOn() && typeof studioTikTokOpen === 'function' ? studioTikTokOpen() : false;")
+  ];
+  check('Studio TikTok hooks (stage 15): Help draws the section for ?section=tiktok and lists its row after the contact card while the service is on; Home shows the "TikTok help" goal only then, and it opens the section',
+    !loadError && hookCases.every(Boolean), loadError || `cases ${failed(hookCases)}`);
+
   // P3-05 (client): the bell's count follows the pulse hook while the customer layout is on.
   run("__calls.length = 0; studioPulseStop('inbox'); _studioInbox.forUser = '__none__'; studioInboxScope();");
   meReply(meV2);  // the /me listener starts the watch
@@ -6265,7 +6450,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && ready.includes('data-testid="studio-results-checked">checked 3 min ago<') && ready.includes('Running') && ready.includes('Reported by Meta'),
     readyAr.includes('استخدمت ميتا $3.40 من $50.00') && readyAr.includes('تحقّقنا قبل 3 دقائق') && readyAr.includes('يعمل الآن') && readyAr.includes('نقرات على الرابط') && !latin.test(readyAr.replace(/<[^>]+>/g, '').replace(/[\d$.,]/g, '')),
     stale.includes('data-state="stale"') && stale.includes('Meta used $3.40 of $50.00') && stale.includes('the last ones we read') && calls('GET', '/api/studio/campaigns/r_linked/results').length === 3,
-    extrasSrc.includes('function renderStudioResultsCard(campaignId)') && extrasSrc.includes('adsStudioShowsResults(request)') && adsSrc.includes('${renderStudioAdsResults(request)}')
+    extrasSrc.includes('function renderStudioResultsCard(campaignId)') && extrasSrc.includes('adsStudioShowsResults(request)')
+      && adsSrc.includes("${typeof renderStudioResultsCard === 'function' ? renderStudioResultsCard(request.id) : renderStudioAdsResults(request)}"),
+    // the request detail (15k hook, stage 15) draws this card in place of its own results block
+    (() => { const detail = String(run("renderStudioAdsDetail({ tab: 'campaigns', section: '', id: 'r_linked', step: 0 })")); return detail.includes('data-testid="studio-ad-detail"') && detail.includes('data-testid="studio-results-card" data-campaign="r_linked"') && !detail.includes('data-testid="studio-ad-results"'); })()
   ];
   check('Studio results card (P3-04b): nothing before a Meta link; "Meta used $Y of $X", impressions, reach, results and "checked X ago" from GET campaigns/{id}/results in EN/AR; the last good values stay on a failed read',
     !loadError && resultCases.every(Boolean), loadError || `cases ${failed(resultCases)}`);
@@ -6369,9 +6557,16 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const patternsText = coreSrc.slice(coreSrc.indexOf('const STUDIO_OPEN_REQUESTS_RE'), coreSrc.indexOf(']);', coreSrc.indexOf('const STUDIO_ERROR_PATTERNS')) + 3);
   const patterns = vm.runInNewContext(`${patternsText} STUDIO_ERROR_PATTERNS;`, {});
   const needles = classicMap.map(entry => entry[0]);
+  const isRegExp = value => Object.prototype.toString.call(value) === '[object RegExp]';
+  const hitsNeedle = (needle, text) => (typeof needle === 'string' ? text.includes(needle) : isRegExp(needle) && needle.test(text));
   const inScope = refusals.filter(r => ['400', '403', '409', '413'].includes(r.status));
   const plain = inScope.filter(r => !r.dynamic);
-  const covered = r => { const text = r.template.replace(/\u0000/g, '0'); return needles.some(n => text.includes(n)) || patterns.some(([re]) => re.test(text)); };
+  const covered = r => { const text = r.template.replace(/\u0000/g, '0'); return needles.some(n => hitsNeedle(n, text)) || patterns.some(([re]) => re.test(text)); };
+  // ONE Arabic map (stage 15): the P2-11 entries and the desk's settle refusals live in the classic map from
+  // 'Meta is still delivering this ad' on, as [needle, Arabic, '', English]; the v2 list keeps only its two texts.
+  const movedFrom = classicMap.findIndex(entry => entry[0] === 'Meta is still delivering this ad');
+  const movedEntries = movedFrom < 0 ? [] : classicMap.slice(movedFrom);
+  const deskSrcForMap = read('src/systems/ads_studio/15p-studio-desk.js');
   const uncovered = plain.filter(r => !covered(r));
   const clientTexts = json('STUDIO_ERROR_TEXTS') || {};
   const info = (message, language, status = 400) => { box.state.language = language; const out = json(`studioErrorInfo(Object.assign(new Error(${JSON.stringify(message)}), { status: ${status}, payload: { detail: ${JSON.stringify(message)} } }), 'action')`) || {}; box.state.language = 'en'; return out; };
@@ -6383,7 +6578,18 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const mapCases = [
     refusals.length >= 200 && plain.length >= 180 && inScope.filter(r => r.dynamic).length <= 6,
     uncovered.length === 0,
-    patterns.length >= 50 && patterns.every(([re, en, ar]) => Object.prototype.toString.call(re) === '[object RegExp]' && typeof en === 'string' && en.length > 8 && arabic.test(ar) && !latin.test(ar.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, ''))),
+    patterns.length === 2 && patterns.every(([re, en, ar]) => isRegExp(re) && typeof en === 'string' && en.length > 8 && arabic.test(ar) && !latin.test(ar))
+      && movedEntries.length >= 60 && movedEntries.every(([needle, ar, kind, en]) => (typeof needle === 'string' || isRegExp(needle)) && arabic.test(ar) && !latin.test(ar.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, '')) && kind === '' && typeof en === 'string' && en.length > 8)
+      && !deskSrcForMap.includes('STUDIO_DESK_REFUSALS') && !coreSrc.includes('P2-11: every other plain-text refusal'),
+    // ONE Arabic wording per server text: the v2 lookup and the classic lookup agree on every plain refusal
+    // the classic map covers (the two v2-only texts aside), and the classic English rewording reaches v2 too
+    plain.every(r => {
+      const text = r.template.replace(/\u0000/g, '0');
+      if (patterns.some(([re]) => re.test(text))) return true;
+      const classicAr = String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(text)})`));
+      const classicEn = String(run(`adsStudioRefusalText(${JSON.stringify(text)})`));
+      return classicAr !== text && info(text, 'ar').text === classicAr && info(text, 'en').text === classicEn;
+    }),
     sampleInfo.every(([ar, en]) => arabic.test(ar.text) && !latin.test(ar.text.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, '')) && ar.text !== generic && en.text && !/^(creativeImages|Photo \d|name is|Unsupported|primaryText)/.test(en.text)),
     ['SETTLE_NOT_READY', 'NEEDS_MANUAL_RENAME'].every(code => Array.isArray(clientTexts[code]) && arabic.test(clientTexts[code][1]) && coded(code, 'ar').text === clientTexts[code][1] && coded(code, 'en').text === clientTexts[code][0])
       && /"code": SETTLE_NOT_READY/.test(pySources['server/systems/ads_studio/ad_campaign_actions.py']) && /"code": NEEDS_MANUAL_RENAME/.test(pySources['server/systems/ads_studio/ad_campaign_actions.py']),

@@ -295,8 +295,20 @@ const STUDIO_HOME_GOALS = Object.freeze([
   ['promote', 'rocket', 'Promote a post', 'روّج منشوراً', 'Show one of your posts to more people', 'اعرض أحد منشوراتك على أشخاص أكثر'],
   ['grow', 'trending-up', 'Grow my page', 'نمِّ صفحتي', 'More people find and follow your page', 'يجد صفحتك ويتابعها أشخاص أكثر'],
   ['comments', 'messages-square', 'Answer comments', 'ردّ على التعليقات', 'Replies on your posts, set up once', 'ردود على منشوراتك تضبطها مرة واحدة'],
-  ['help', 'life-buoy', 'Get help', 'اطلب المساعدة', 'Talk to the Albayan team', 'تحدّث مع فريق البيان']
+  ['help', 'life-buoy', 'Get help', 'اطلب المساعدة', 'Talk to the Albayan team', 'تحدّث مع فريق البيان'],
+  // Only while /me says the TikTok service is on for this account (15r studioTikTokOpen; P5-02).
+  ['tiktok', 'music-2', 'TikTok help', 'مساعدة تيك توك', 'Hands-on help from our team, by hand', 'مساعدة يدوية من فريقنا']
 ]);
+
+function studioHomeTikTokOn() {
+  const me = studioMe();
+  return !!(me && me.services && me.services.tiktok === true);
+}
+
+// The goals shown now: the TikTok one only while its service is on.
+function studioHomeGoals() {
+  return STUDIO_HOME_GOALS.filter(([key]) => key !== 'tiktok' || studioHomeTikTokOn());
+}
 // goal -> [the builder's kind, its start options] (studioBuilderStart, 15l).
 const STUDIO_HOME_AD_GOALS = Object.freeze({
   messages: Object.freeze(['full', Object.freeze({ goal: 'messages' })]),
@@ -320,6 +332,7 @@ function studioHomeGoal(key) {
   }
   if (goal === 'comments') return studioV2Open('replies');
   if (goal === 'help') return studioV2Open('help');
+  if (goal === 'tiktok') return studioHomeTikTokOn() && typeof studioTikTokOpen === 'function' ? studioTikTokOpen() : false;
   return false;
 }
 
@@ -578,7 +591,7 @@ function renderStudioHomeTrackers(requests) {
 
 function renderStudioHomeGoals(paused) {
   const canAsk = studioHomeCanAsk();
-  const cards = STUDIO_HOME_GOALS.map(([key, icon, en, ar, hintEn, hintAr]) => {
+  const cards = studioHomeGoals().map(([key, icon, en, ar, hintEn, hintAr]) => {
     const adGoal = Object.prototype.hasOwnProperty.call(STUDIO_HOME_AD_GOALS, key);
     const off = adGoal && !canAsk;
     return `

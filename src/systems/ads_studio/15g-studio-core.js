@@ -5,9 +5,10 @@
 // draws a screen, and nothing runs while the bundle loads: every helper waits to be called.
 // - studioApi(): apiJson with the studio error map attached (error.studio = studioErrorInfo(error)).
 //   ONE lookup for every refusal: the /api/studio codes (studio_errors.py) in STUDIO_ERROR_TEXTS,
-//   the older routes' English prefixes through the classic map (adsStudioRefusalText, 15c, reused,
-//   never copied; STUDIO_ERROR_PATTERNS holds the few it lacks), 429 by its status (it has no
-//   body), and a calm fallback that never shows raw English to an Arabic reader.
+//   the older routes' English texts through the classic map (adsStudioRefusalText, 15c: the ONE
+//   Arabic map, reused, never copied; STUDIO_ERROR_PATTERNS holds only the two v2-only texts), 429
+//   by its status (it has no body), and a calm fallback that never shows raw English to an Arabic
+//   reader.
 // - studioReadSignal() / studioReadCancelled(): a read the app cancelled by moving on is no
 //   failure; a read cut off by its timeout is one.
 // - studioMe() / studioLoadMe(): GET /api/studio/me, cleaned, kept per user; a reply younger than
@@ -96,8 +97,10 @@ const STUDIO_ERROR_KIND_TEXTS = Object.freeze({
   })
 });
 
-// Refusals of the older routes (a plain English sentence) that the classic map (15c) does not carry:
-// [pattern, English, Arabic]. The builder also tells the open-request limit apart by its pattern.
+// The two v2-only refusals of the older routes (stage 11): [pattern, English, Arabic]. The builder also
+// tells the open-request limit apart by its pattern. Every other plain-English server text has ONE
+// Arabic wording, in the classic map (15c _ADS_STUDIO_REFUSAL_AR, read through adsStudioRefusalText
+// by both layouts; stage 15 moved the P2-11 entries there). Nothing is added here any more.
 const STUDIO_OPEN_REQUESTS_RE = /at most \d+ open campaign requests/i;  // main.py: MAX_AD_CAMPAIGN_ACTIVE_REQUESTS_PER_OWNER
 const STUDIO_ERROR_PATTERNS = Object.freeze([
   [STUDIO_OPEN_REQUESTS_RE,
@@ -105,142 +108,7 @@ const STUDIO_ERROR_PATTERNS = Object.freeze([
     'لديك طلبات مفتوحة كثيرة. احذف مسودة قديمة أو انتظر حتى ينتهي أحد طلباتك، ثم أعد المحاولة.'],
   [/cannot be deleted while under review/i,
     'Our team is reviewing this request, so it cannot be removed now. Withdraw it first.',
-    'يراجع فريقنا هذا الطلب، لذلك لا يمكن حذفه الآن. اسحبه أولاً.'],
-  // P2-11: every other plain-text refusal of /api/ad-studio, /api/social-studio and /api/wallet that the
-  // classic map (15c) does not carry (scripts/test-mobile-ui.js compares this list and the classic map
-  // with the server files). Grouped by what the reader can do about it; the first match wins, so the
-  // exact texts come before the generic shapes. Entries are only ever added.
-  // -- the ad request (ad_campaign_actions.py, ad_campaign_fields.py, studio_posts.py)
-  [/^destination must be an HTTPS website/,
-    'The destination must be an https:// website, a WhatsApp or Messenger link, or an international phone number.',
-    'يجب أن تكون الوجهة موقعاً يبدأ بـ https:// أو رابط واتساب أو ماسنجر أو رقم هاتف دولياً.'],
-  [/^sourcePostRef (must be an HTTPS link|is required for a Boost Post)/,
-    'Paste the link of a Facebook or Instagram post.', 'الصق رابط منشور من فيسبوك أو إنستغرام.'],
-  [/^sourcePost(Platform|Id) /,
-    'Pick the post again from your linked page.', 'اختر المنشور مرة أخرى من صفحتك المربوطة.'],
-  [/^refundMinorUSD must be between 0 and the paid budget/,
-    'The refund must be between 0 and the amount paid for this ad.', 'يجب أن يكون المبلغ المسترد بين 0 والمبلغ المدفوع لهذا الإعلان.'],
-  [/^Meta is still delivering this ad/,
-    'Meta is still showing this ad, so it cannot be settled yet.', 'ما زالت ميتا تعرض هذا الإعلان، لذلك لا يمكن تسويته بعد.'],
-  [/^Meta has not confirmed that this ad ended/,
-    "Meta has not confirmed that this ad ended yet. Wait for its final numbers.", 'لم تؤكد ميتا انتهاء هذا الإعلان بعد. انتظر أرقامها النهائية.'],
-  [/^This ad account does not bill in USD/,
-    'This ad account does not bill in US dollars, so the final amount cannot be settled here.', 'حساب الإعلانات هذا لا يُحاسَب بالدولار، لذلك لا يمكن تسوية المبلغ النهائي هنا.'],
-  [/^Only Draft or Changes Requested campaigns can be submitted/,
-    'Only a draft or a request sent back for changes can be sent.', 'لا يمكن إرسال إلا مسودة أو طلب أُعيد للتعديل.'],
-  [/campaign needs a budget greater than zero/,
-    'Set a budget above zero first.', 'حدّد ميزانية أكبر من صفر أولاً.'],
-  [/^(Nobody can override the settlement of their own request|Only an admin can override the settlement rules)/,
-    'Only an admin who does not own this request can lift the settlement rules.', 'لا يستطيع رفع قواعد التسوية إلا مدير ليس صاحب هذا الطلب.'],
-  [/^Only staff can choose (a partial refund amount|how a campaign closed)/,
-    'Only the Albayan team chooses the refund amount and how an ad closes.', 'فريق البيان وحده يحدد مبلغ الاسترداد وطريقة إغلاق الإعلان.'],
-  [/^Write why the settlement rules are lifted/,
-    'Write why the settlement rules are lifted (10 to 300 characters).', 'اكتب سبب رفع قواعد التسوية (من 10 إلى 300 حرف).'],
-  [/^(Forbidden|Admin only|You can only manage your own Social Studio)$/,
-    'You do not have access to this.', 'لا تملك صلاحية الوصول إلى هذا.'],
-  [/^goalDetail must be one of/,
-    'Choose one of the listed goals.', 'اختر هدفاً من القائمة.'],
-  [/^locationKeys (must be a list|must contain only text|cannot combine all of Libya)/,
-    'Choose up to 25 places; "All of Libya" cannot be combined with a city.', 'اختر حتى 25 موقعاً؛ لا يمكن الجمع بين «كل ليبيا» ومدينة.'],
-  [/^(creativeImages |creativeAssetIds contains|Each campaign image must be 4 MB|Campaign image dimensions are too large|A campaign image data URL is too large|Campaign images contain too many total pixels)/,
-    'The photos are not accepted: use up to 3 PNG, JPEG or WebP photos, each under 4 MB.', 'الصور غير مقبولة: استخدم حتى 3 صور PNG أو JPEG أو WebP، كل واحدة أقل من 4 ميغابايت.'],
-  [/^Unsupported (callToAction|campaign objective|advertising platform|gender targeting value|special ad category)/,
-    'One of the choices is not in the list any more. Reload the page and choose again.', 'أحد الخيارات لم يعد في القائمة. أعد تحميل الصفحة واختر مرة أخرى.'],
-  [/^specialAdCategories cannot combine none/,
-    '"None" cannot be combined with another special category.', 'لا يمكن الجمع بين «لا شيء» وفئة خاصة أخرى.'],
-  [/^ageMin cannot be greater than ageMax/,
-    'The youngest age cannot be above the oldest.', 'لا يمكن أن يكون أصغر عمر أكبر من أكبر عمر.'],
-  [/^budgetMinorUSD must be a non-negative integer/,
-    'The budget must be a whole number of cents within the limit.', 'يجب أن تكون الميزانية عدداً صحيحاً من السنتات ضمن الحد.'],
-  [/^endDate cannot be before startDate/,
-    'The end date cannot be before the start date.', 'لا يمكن أن يكون تاريخ الانتهاء قبل تاريخ البدء.'],
-  [/^Campaign duration cannot exceed 366 days/,
-    'An ad cannot run longer than 366 days.', 'لا يمكن أن يعمل الإعلان أكثر من 366 يوماً.'],
-  [/required before submission$/,
-    'Something is still missing: fill every step (page, text, photo, audience, dates and budget) before sending.',
-    'ما زال شيء ناقصاً: أكمل كل الخطوات (الصفحة والنص والصورة والجمهور والتواريخ والميزانية) قبل الإرسال.'],
-  // -- pages, reply rules and posts (social_studio.py)
-  [/^This page is already linked to an account/,
-    'This page is already linked to another account.', 'هذه الصفحة مربوطة بحساب آخر بالفعل.'],
-  [/^(Private messages|Public replies|Likes) are not available for (Facebook pages|Instagram accounts) right now/,
-    'This kind of reply is not available for this platform right now.', 'هذا النوع من الردود غير متاح لهذه المنصة حالياً.'],
-  [/^quietHours/,
-    'Quiet hours need a from and a to time (HH:MM).', 'تحتاج ساعات الهدوء إلى وقت بداية ونهاية (HH:MM).'],
-  [/^Unknown timezone/,
-    'This time zone is not known.', 'هذه المنطقة الزمنية غير معروفة.'],
-  [/^Add at least one keyword for a keyword rule/,
-    'Add at least one keyword.', 'أضف كلمة مفتاحية واحدة على الأقل.'],
-  [/^Choose at least one post for a chosen-posts rule/,
-    'Choose at least one post for this rule.', 'اختر منشوراً واحداً على الأقل لهذه القاعدة.'],
-  [/^A rule needs a public reply or a private message/,
-    'A rule needs a public reply or a private message.', 'تحتاج القاعدة إلى رد عام أو رسالة خاصة.'],
-  [/^Page \S+ is not linked to this account/,
-    'One of the pages is not linked to your account.', 'إحدى الصفحات غير مربوطة بحسابك.'],
-  [/^Page \S+ is not on this rule's platform/,
-    "One of the pages is not on this rule's platform (Facebook or Instagram).", 'إحدى الصفحات ليست على منصة هذه القاعدة (فيسبوك أو إنستغرام).'],
-  [/^Choose at least one page/,
-    'Choose at least one page.', 'اختر صفحة واحدة على الأقل.'],
-  [/^(media must be a list of images|A post supports at most \d+ photos|Photo \d+\b)/,
-    'The post photos are not accepted: PNG, JPEG or WebP, each under 3 MB, and not too many.', 'صور المنشور غير مقبولة: PNG أو JPEG أو WebP، كل واحدة أقل من 3 ميغابايت، وبعدد معقول.'],
-  [/^A post needs a caption or at least one photo/,
-    'A post needs a caption or at least one photo.', 'يحتاج المنشور إلى نص أو صورة واحدة على الأقل.'],
-  [/^scheduledAt /,
-    'Choose a date and time at least one minute in the future.', 'اختر تاريخاً ووقتاً بعد دقيقة واحدة على الأقل من الآن.'],
-  [/^autoReplyRuleId is not one of your rules/,
-    'The chosen reply rule is not one of yours.', 'قاعدة الرد المختارة ليست من قواعدك.'],
-  [/^Post is not claimed for publishing/,
-    'This post is not being published right now. Refresh and try again.', 'هذا المنشور ليس قيد النشر الآن. حدّث الصفحة وحاول مرة أخرى.'],
-  [/^Only draft, scheduled or failed posts can be changed/,
-    'Only a draft, a scheduled post or a failed post can be changed.', 'لا يمكن تغيير إلا مسودة أو منشور مجدول أو منشور فشل نشره.'],
-  [/^A page already published this post/,
-    'A page already published this post, so its text and photos cannot change here. Retry the failed pages or delete the post (the live post stays on Meta).',
-    'نشرت صفحة هذا المنشور بالفعل، لذلك لا يمكن تغيير نصه وصوره هنا. أعد المحاولة للصفحات التي فشلت أو احذف المنشور (يبقى المنشور على ميتا).'],
-  [/^The post changed while publishing/,
-    'The post changed while it was being published. Refresh and try again.', 'تغيّر المنشور أثناء نشره. حدّث الصفحة وحاول مرة أخرى.'],
-  [/^Only scheduled posts can be cancelled/,
-    'Only a scheduled post can be cancelled.', 'لا يمكن إلغاء إلا منشور مجدول.'],
-  // -- the wallet (wallet_payments.py)
-  [/^Campaign is no longer awaiting review/,
-    'This request is no longer waiting for review. Refresh and try again.', 'هذا الطلب لم يعد بانتظار المراجعة. حدّث الصفحة وحاول مرة أخرى.'],
-  [/^Customer wallet can no longer cover this campaign budget/,
-    "The customer's wallet no longer covers this budget.", 'لم تعد محفظة العميل تغطي هذه الميزانية.'],
-  [/^(No captured payment exists for this campaign cycle|The captured payment row is not refundable|This campaign cycle's payment was already returned|This campaign's payment was already reversed by an admin)/,
-    'This ad has no payment that can still be returned.', 'لا توجد لهذا الإعلان دفعة يمكن إعادتها.'],
-  [/^Refund must be between 1 cent and the captured budget/,
-    'The refund must be between one cent and the amount paid.', 'يجب أن يكون المبلغ المسترد بين سنت واحد والمبلغ المدفوع.'],
-  [/^Conflict: payment request has changed/,
-    'This payment request changed meanwhile. Refresh and try again.', 'تغيّر طلب الدفع هذا في الأثناء. حدّث الصفحة وحاول مرة أخرى.'],
-  [/^(The wallet is charged in USD or LYD|Unknown payment method)/,
-    'Choose a currency (USD or LYD) and a payment method from the list.', 'اختر عملة (دولار أو دينار) وطريقة دفع من القائمة.'],
-  [/^Minimum wallet charge is 1\.00/,
-    'The smallest top-up is 1.00 of the currency.', 'أقل مبلغ للشحن هو 1.00 من العملة.'],
-  [/^Idempotency key was already used for another operation/,
-    'This was already sent with different details. Refresh and try again.', 'أُرسل هذا من قبل بتفاصيل مختلفة. حدّث الصفحة وأعد المحاولة.'],
-  [/^Too many unpaid charge requests/,
-    'You have too many unpaid top-up requests. Pay or cancel one first.', 'لديك طلبات شحن غير مدفوعة كثيرة. ادفع إحداها أو ألغِها أولاً.'],
-  [/^The receipt photo is invalid or too large/,
-    'The receipt photo is not accepted: use a clear JPG or PNG under 4 MB.', 'صورة الإيصال غير مقبولة: استخدم صورة JPG أو PNG واضحة أقل من 4 ميغابايت.'],
-  [/^Only a pending request can take a receipt/,
-    'A receipt can be attached only to a request that is still waiting for payment.', 'لا يمكن إرفاق إيصال إلا بطلب ما زال بانتظار الدفع.'],
-  [/^Payment request is /,
-    'This payment request is no longer open. Refresh the page.', 'طلب الدفع هذا لم يعد مفتوحاً. حدّث الصفحة.'],
-  [/^The customer has not attached the transfer receipt yet/,
-    'The customer has not attached the transfer receipt yet.', 'لم يرفق العميل إيصال التحويل بعد.'],
-  [/^This account was deleted; cancel the request instead/,
-    'This account was deleted; cancel the request instead.', 'حُذف هذا الحساب؛ ألغِ الطلب بدلاً من ذلك.'],
-  [/^Payment was already received/,
-    'This payment was already received; confirm it instead.', 'استُلمت هذه الدفعة بالفعل؛ أكّدها بدلاً من ذلك.'],
-  // -- generic shapes of a field check (last, so the exact texts above and the classic map's own win)
-  [/^(?!expectedVersion )\w+ is required$/,
-    'A required field is empty.', 'إحدى الخانات المطلوبة فارغة.'],
-  [/characters or fewer$/,
-    'One of the texts is too long.', 'أحد النصوص طويل جداً.'],
-  [/ supports at most \d+ entries$/,
-    'One of the lists has too many entries.', 'إحدى القوائم تحوي عناصر كثيرة.'],
-  [/^(?!note )\w+ (must be text|must be a list( of at most \d+ items)?|must contain only text|must be a valid ISO date|must be an integer from 18 to 65)$/,
-    'One of the fields has a value of the wrong kind. Check the form and try again.', 'إحدى الخانات تحمل قيمة من نوع غير مناسب. راجع النموذج وحاول مرة أخرى.'],
-  [/^(boostType must be|autoReply must be|extendsCampaignId is invalid|Invalid operationId|budgetType must be|connectedAssetId is invalid|Campaign data must be an object|Unsupported campaign field|platform must be fb or ig|scope must be all or chosen|trigger must be every or keywords|status must be draft or scheduled|reason must be instagram_private or empty|Unknown (log|post) status|before must be <createdAt>:<id>|metaPageId must be the numeric Meta page id|igUserId is required for an Instagram account)/,
-    'This screen sent something the server does not accept. Reload the page and try again.', 'أرسلت هذه الشاشة شيئاً لا يقبله الخادم. أعد تحميل الصفحة وحاول مرة أخرى.']
+    'يراجع فريقنا هذا الطلب، لذلك لا يمكن حذفه الآن. اسحبه أولاً.']
 ]);
 
 function studioKnownErrorCode(code) {
@@ -281,12 +149,13 @@ function studioErrorInfo(error, kind = 'action') {
     code = 'INVALID_REQUEST';  // FastAPI's own body check: a list of fields, not words for a person
   } else if (status >= 400 && status < 500 && message && !/^\s*[[{]/.test(message)) {
     // The older routes send a plain string with a stable English prefix: the classic map knows them.
-    // Arabic shows only what the map translates; English shows the refusal itself (400/403/409).
+    // Arabic shows only what the map translates; English shows the refusal itself (400/403/409, and
+    // the closed month's 423 that the Team desk's settle meets), reworded where the map says so.
     const own = studioErrorPattern(message);
     const mapped = own ? '' : adsStudioRefusalText(message);
     if (own) text = pair(own);
     else if (adsStudioIsAr()) text = mapped && mapped !== message ? mapped : '';
-    else if (status === 400 || status === 403 || status === 409) text = mapped;
+    else if (status === 400 || status === 403 || status === 409 || status === 423) text = mapped;
   }
   if (!text && studioKnownErrorCode(code)) text = pair(STUDIO_ERROR_TEXTS[code]);
   if (!text) {

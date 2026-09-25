@@ -1286,3 +1286,29 @@ def test_me_open_now_follows_a_fixed_tripoli_clock(actors, monkeypatch):
         monkeypatch.setattr(studio_settings, "utc_now", lambda moment=moment: moment)
         hours = _me(actors["customer"])["serviceHours"]
         assert hours["openNow"] is open_now and hours["holidays"] == holidays, moment
+
+
+# ---------------------------------------------------------------------------
+# The lazy studio bundles (stage 15: studio-pages.js joins studio.js and studio-staff.js)
+# ---------------------------------------------------------------------------
+
+
+def test_studio_pages_bundle_is_served_like_the_other_lazy_bundles():
+    """GET /studio-pages.js serves the built bundle with the same caching rule as /studio.js."""
+    root = Path(main_module.__file__).resolve().parent.parent
+    manifest = json.loads((root / "src" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["lazy"]["studio-pages.js"] == ["systems/ads_studio/15o-studio-pages.js"]
+    assert "systems/ads_studio/15o-studio-pages.js" not in manifest["lazy"]["studio.js"]
+    for name in ("studio.js", "studio-staff.js", "studio-pages.js"):
+        response = client.get(f"/{name}")
+        assert response.status_code == 200, name
+        assert response.headers["content-type"].startswith("application/javascript"), name
+        assert "no-store" in response.headers.get("cache-control", ""), name  # no ?v=: never cached
+    pages = client.get("/studio-pages.js")
+    assert pages.text.startswith("// ==========================================\n// ALBAYAN STUDIO v2 — PAGES & REPLIES")
+    assert "function renderStudioPagesBody(" in pages.text and "function studioGuideOpen(" in pages.text
+    version = main_module._asset_version(main_module._select_script_source())
+    cached = client.get(f"/studio-pages.js?v={version}")
+    assert cached.status_code == 200 and "no-store" not in cached.headers.get("cache-control", "")
+    dockerfile = (root / "server" / "Dockerfile").read_text(encoding="utf-8")
+    assert any(line.startswith("COPY ") and " studio-pages.js " in line for line in dockerfile.splitlines())

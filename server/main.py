@@ -2919,6 +2919,11 @@ def serve_studio_staff_script(request: Request):
     return _serve_lazy_bundle(request, "studio-staff.js")
 
 
+@app.get("/studio-pages.js")
+def serve_studio_pages_script(request: Request):
+    return _serve_lazy_bundle(request, "studio-pages.js")
+
+
 @app.get("/clothes.js")
 def serve_clothes_script(request: Request):
     return _serve_lazy_bundle(request, "clothes.js")

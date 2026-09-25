@@ -442,8 +442,9 @@ function socialSetPostsFilter(filter) {
 }
 
 function renderSocialStudioPostsTab() {
-  // Studio v2 (P4-06, 15o-studio-pages.js): the new screens while /me says the v2 layout; '' = classic below.
-  const postsV2Html = typeof studioPagesClassicDelegate === 'function' ? studioPagesClassicDelegate('posts') : '';
+  // Studio v2 (P4-06, 15o-studio-pages.js in the lazy bundle studio-pages.js, fetched by the 15o0 loader
+  // before the handover): the new screens while /me says the v2 layout; '' = classic below.
+  const postsV2Html = typeof studioPagesClassicHandover === 'function' ? studioPagesClassicHandover('posts') : '';
   if (postsV2Html) return postsV2Html;
   if (!socialStudioAvailable()) return renderSocialStudioUnavailable();
   socialStudioEnsureLoaded();
@@ -929,8 +930,9 @@ async function socialToggleRule(ruleId) {
 }
 
 function renderSocialStudioRepliesTab() {
-  // Studio v2 (P4-06, 15o-studio-pages.js): the new screens while /me says the v2 layout; '' = classic below.
-  const repliesV2Html = typeof studioPagesClassicDelegate === 'function' ? studioPagesClassicDelegate('replies') : '';
+  // Studio v2 (P4-06, 15o-studio-pages.js in the lazy bundle studio-pages.js, fetched by the 15o0 loader
+  // before the handover): the new screens while /me says the v2 layout; '' = classic below.
+  const repliesV2Html = typeof studioPagesClassicHandover === 'function' ? studioPagesClassicHandover('replies') : '';
   if (repliesV2Html) return repliesV2Html;
   if (!socialStudioAvailable()) return renderSocialStudioUnavailable();
   socialStudioEnsureLoaded();

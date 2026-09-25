@@ -956,7 +956,18 @@ function renderStudioHelpList(view) {
             ${slot.loadedAt && slot.error ? `<p class="studio-help-note">${studioEsc(adsStudioText('The list could not be refreshed; it shows what we know.', 'تعذّر تحديث القائمة؛ تعرض ما نعرفه.'))}</p>` : ''}
             ${body}
           </section>
-          ${renderStudioHelpContact()}`;
+          ${renderStudioHelpContact()}${renderStudioHelpExtras()}`;
+}
+
+// After the contact card: the short guides (15o, in the lazy bundle studio-pages.js: the loader's card
+// until it is here) and the TikTok service row (15r). Each hook is guarded: the list stays complete
+// without them.
+function renderStudioHelpExtras() {
+  let guides = '';
+  if (typeof renderStudioGuidesCard === 'function') guides = renderStudioGuidesCard();
+  else if (typeof studioBundleScreen === 'function') guides = studioBundleScreen('studio-pages.js');
+  const tiktok = typeof renderStudioTikTokEntry === 'function' ? renderStudioTikTokEntry() : '';
+  return `${guides}${tiktok}`;
 }
 
 function renderStudioHelpForm() {
@@ -1107,6 +1118,8 @@ function studioHelpRenderView(view) {
 
 // The v2 Help screen (registered with the shell) and the classic help tab (drawn by 15c).
 function renderStudioHelpBody(route) {
+  // The TikTok service section (15r) lives here: ?tab=help&section=tiktok.
+  if (route && typeof route === 'object' && String(route.section || '') === 'tiktok' && typeof renderStudioTikTokSection === 'function') return renderStudioTikTokSection(route);
   studioHelpScope();
   const view = studioHelpViewOf(route);
   return `

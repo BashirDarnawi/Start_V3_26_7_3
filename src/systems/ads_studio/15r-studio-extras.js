@@ -832,10 +832,12 @@ if (typeof studioMeSubscribe === 'function') studioMeSubscribe(studioInboxPulseS
 try { studioInboxPulseStart(typeof studioMe === 'function' ? studioMe() : null); } catch (_) { /* the next /me read starts it */ }
 studioLoginHelpMount();
 
-// Hooks in the files before this one (each guarded with typeof at its call site):
+// Hooks in the files before this one (each guarded with typeof at its call site; all in place since
+// stage 15):
 // - 15n Help: renderStudioHelpBody draws renderStudioTikTokSection() for ?section=tiktok and the list
-//   draws renderStudioTikTokEntry(); 15j Home: a "TikTok help" goal opens studioTikTokOpen();
+//   draws renderStudioTikTokEntry() after the contact card (renderStudioHelpExtras); 15j Home: a
+//   "TikTok help" goal, shown while /me says the service is on, opens studioTikTokOpen();
 // - 15h shell: the bell's badge stays studioInboxBadge (15n); this file only keeps it current;
-// - 15k My ads: renderStudioResultsCard(request.id) can replace its own results block;
+// - 15k My ads: renderStudioResultsCard(request.id) draws the results of the request detail;
 // - 12-views.js (startup): <div id="studio-login-help"> in the studio login header; 01b-mobile-runtime.js
 //   (startup): studioHandleBack() before the app's own Back (15h).

@@ -24,10 +24,13 @@
 // after a reload this tab has no proof of) gets its parents put under it. The builder hides the
 // section bar (focus mode).
 // Screens: a screen file registers the body of its tab with studioV2RegisterScreen(tab, draw) (15j
-// Home, 15k My ads, 15l the builder, 15m Wallet and Account, 15n Help and Inbox). The shell keeps the
-// screen root; a tab with no screen, or a draw that fails, shows "Coming soon in the new studio"
-// inside that root. Two guarded hooks reach 15n: the bell's badge (studioInboxBadge) and the classic
-// 'help' tab (studioHelpClassicTab, through studioV2ClassicTabKnown).
+// Home, 15k My ads, 15l the builder, 15m Wallet and Account, 15n Help and Inbox, 15o Pages & replies
+// and Scheduled posts). The shell keeps the screen root; a tab with no screen, or a draw that fails,
+// shows "Coming soon in the new studio" inside that root. The replies and posts screens live in the
+// lazy bundle studio-pages.js (STUDIO_V2_LAZY_SCREENS): drawing either tab asks the loader (15o0) for
+// it and shows its card until the screen registers itself. Two guarded hooks reach 15n: the bell's
+// badge (studioInboxBadge) and the classic 'help' tab (studioHelpClassicTab, through
+// studioV2ClassicTabKnown).
 
 const STUDIO_V2_TABS = Object.freeze([
   // [tab, icon, English, Arabic, place] place: 'nav' = bottom bar / side rail, 'head' = header button
@@ -59,6 +62,8 @@ const STUDIO_V2_BUILDER_STEPS = Object.freeze({
 
 const STUDIO_V2_CLASSIC_TABS = Object.freeze(['dashboard', 'campaigns', 'builder', 'posts', 'replies', 'review']);
 const STUDIO_V2_ONLY_TABS = Object.freeze(['wallet', 'help', 'inbox', 'account']);
+// tab -> the lazy bundle (15o0 loader) whose file registers that tab's screen.
+const STUDIO_V2_LAZY_SCREENS = Object.freeze({ replies: 'studio-pages.js', posts: 'studio-pages.js' });
 const STUDIO_V2_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/;
 const STUDIO_V2_SECTION_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const STUDIO_V2_WAIT_MS = 3000;  // at most this long a known v2 user sees "Opening the studio…" instead of classic
@@ -68,9 +73,11 @@ const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (th
 // pinned layout (studioV2Layout). repin: entered the studio while /me was being read again. session:
 // the /me session the visit notes belong to. fromApp: this visit came from another screen of this app
 // in this document (so Home's Back is the browser's Back). popping: a Back/Forward move is running.
+// opening: the address of the first v2 draw of this page ({tab, section, id, step}); reapplied: it was
+// put back once after the platform's post-login rewrite (studioV2ReapplyOpeningAddress).
 const _studioV2 = {
   shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false,
-  layout: null, repin: false, session: -1, fromApp: false, popping: false
+  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false
 };
 const _studioV2Screens = new Map();  // tab -> draw(route): the body of that tab's screen root (studioV2RegisterScreen)
 const _studioV2ScreenWarned = new Set();
@@ -134,6 +141,8 @@ function studioV2NoteVisit() {
     _studioV2.session = session;
     _studioV2.fromApp = false;
     _studioV2.repin = false;
+    _studioV2.opening = null;
+    _studioV2.reapplied = false;
   }
   const previous = typeof _lastRenderedView !== 'undefined' ? _lastRenderedView : null;
   if (!previous || previous === 'ads-studio') return;
@@ -227,7 +236,7 @@ function renderStudioV2View() {
     studioLoadMe();  // reuses a fresh answer, joins a read on its way, re-reads an old one
     studioV2NoteVisit();
     const frame = studioV2Frame();
-    if (frame) studioV2RestoreOpeningAddress();
+    if (frame) { studioV2RestoreOpeningAddress(); studioV2ReapplyOpeningAddress(); }
     if (frame === 'staff') { _studioV2.shown = 'staff'; return renderStudioV2StaffFrame(); }
     if (frame === 'customer') {
       const route = studioV2Route(studioV2ReadAddress(), 'customer');
@@ -411,6 +420,7 @@ function studioV2EnsureHistory(route, frame) {
     const chain = studioV2HistoryChain();
     const firstDraw = !_studioV2.docRendered;
     _studioV2.docRendered = true;
+    if (!_studioV2.opening) _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };
     if (chain && chain[chain.length - 1] === keys[keys.length - 1]) {
       // already marked: nothing to write
     } else if (path.length === 1 || (firstDraw && studioV2NavigationType() !== 'navigate' && studioV2Proven(keys))) {
@@ -445,6 +455,30 @@ function studioV2RestoreOpeningAddress() {
       if (value) params.set(key, value);
     }
     window.history.replaceState(window.history.state, '', `${window.location.pathname}?${params.toString()}`);
+  } catch (_) { /* the address stays as it is */ }
+}
+
+// Logging in AT a deep link (/studio?tab=review&section=tickets, ?tab=campaigns&id=…): the platform's
+// post-login route restore (12-views restoreRequestedViewAfterLogin -> updateUrlForView) runs a
+// moment after the first v2 draw and puts its own entry, with the bare ?tab= and no studioV2 mark,
+// over the marked one. The address that first draw showed (studioV2EnsureHistory keeps it in
+// _studioV2.opening) comes back once, within the first 15 s of the page, when such an entry replaces
+// it: same tab, nothing beyond the tab in the address. The reader's own moves carry the mark, so they
+// are never touched; the path under the restored screen is rebuilt by the draw that follows.
+function studioV2ReapplyOpeningAddress() {
+  const opening = _studioV2.opening;
+  if (!opening || _studioV2.reapplied || !_studioV2.docRendered) return;
+  if (!opening.section && !opening.id && !opening.step) return;  // nothing beyond the tab to bring back
+  try {
+    if (typeof performance === 'undefined' || !(performance.now() < 15000)) return;
+    if (studioV2HistoryChain()) return;  // the studio's own entry
+    const now = new URLSearchParams(window.location.search || '');
+    if (['section', 'id', 'step'].some(key => now.get(key))) return;
+    const tab = now.get('tab') || '';
+    const home = opening.tab === 'home' && (tab === '' || tab === 'dashboard');
+    if (!(tab === opening.tab || home)) return;
+    _studioV2.reapplied = true;
+    window.history.replaceState(window.history.state, '', studioV2Url(opening));
   } catch (_) { /* the address stays as it is */ }
 }
 
@@ -750,6 +784,10 @@ function studioV2ScreenBody(route) {
 function renderStudioV2CustomerScreen(route) {
   const info = studioV2TabInfo(route.tab);
   let body = studioV2ScreenBody(route);  // the registered screen first; the placeholders below otherwise
+  if (body === null && STUDIO_V2_LAZY_SCREENS[route.tab] && typeof studioBundleScreen === 'function') {
+    // The screen's bundle is asked for (15o0); its card meanwhile, '' once it is here and still no screen.
+    body = studioBundleScreen(STUDIO_V2_LAZY_SCREENS[route.tab]) || null;
+  }
   if (body === null && route.tab === 'builder') {
     body = renderStudioV2Builder(route);
   } else if (body === null) {

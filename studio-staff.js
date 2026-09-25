@@ -581,25 +581,9 @@ const STUDIO_DESK_COUNTDOWN_MS = 60 * 1000;
 const STUDIO_DESK_SOUND_KEY = 'albayan.studio.desk.sound.';
 const STUDIO_DESK_OVERRIDE_REASON = [10, 300];
 const STUDIO_DESK_SECTIONS = Object.freeze(['requests', 'launch', 'settle', 'tickets', 'health', 'more']);
-// Refusals of the settle routes (/api/ad-studio …/stop and …/settle-override: a plain English
-// prefix): [prefix, English, Arabic]. SETTLE_NOT_READY comes as {code, message, messageAr, readyAt}.
-const STUDIO_DESK_REFUSALS = Object.freeze([
-  ['Meta is still delivering this ad', 'Meta is still delivering this ad. Pause it in Meta first, then settle after the final read.', 'ما زالت ميتا تعرض هذا الإعلان. أوقفه في ميتا أولاً، ثم سوِّ الحساب بعد القراءة النهائية.'],
-  ['Meta has not confirmed that this ad ended', 'Meta has not confirmed that this ad ended yet. Check Meta now, then try again.', 'لم تؤكد ميتا انتهاء هذا الإعلان بعد. افحص ميتا الآن ثم أعد المحاولة.'],
-  ['The final amount is not ready', 'The final amount is not ready: the final Meta read is still pending.', 'المبلغ النهائي غير جاهز: قراءة ميتا النهائية لم تصل بعد.'],
-  ['This ad account does not bill in USD', 'This ad account does not bill in USD, so the final amount needs an admin override.', 'هذا الحساب الإعلاني لا يُحاسب بالدولار، لذلك يحتاج المبلغ النهائي إلى تجاوز من المدير.'],
-  ['refundMinorUSD is above paid minus Meta spend', "The return is above what is left after Meta's spend. Lower it (an admin can override with a written reason).", 'المبلغ المعاد أكبر مما تبقى بعد صرف ميتا. اخفضه (يمكن للمدير التجاوز مع كتابة السبب).'],
-  ['refundMinorUSD must be between 0 and the paid budget', 'The return must be between 0 and what the customer paid.', 'يجب أن يكون المبلغ المعاد بين 0 وما دفعه العميل.'],
-  ['refundMinorUSD is required for a launched campaign', 'Enter the amount to return (0 closes the ad without a return).', 'أدخل المبلغ المعاد (0 يغلق الإعلان دون إعادة).'],
-  ['refundMinorUSD must be between 0 and the unspent captured budget', 'The return must be between 0 and the unspent budget.', 'يجب أن يكون المبلغ المعاد بين 0 والميزانية غير المصروفة.'],
-  ['Only an admin can override the settlement rules', 'Only an admin can override the settlement rules.', 'تجاوز قواعد التسوية للمدير فقط.'],
-  ['Nobody can override the settlement of their own request', 'Nobody can override the settlement of their own request.', 'لا يمكن لأحد تجاوز تسوية طلبه هو.'],
-  ['Write why the settlement rules are lifted', 'Write why the rules are lifted (10 to 300 characters).', 'اكتب سبب تجاوز القواعد (من 10 إلى 300 حرف).'],
-  ['refundMinorUSD is required for an override', 'Enter the amount to return for the override (0 closes the ad without a return).', 'أدخل المبلغ المعاد للتجاوز (0 يغلق الإعلان دون إعادة).'],
-  ['Only Approved campaigns can be stopped', 'Only an approved request can be settled.', 'لا يمكن تسوية إلا طلب معتمد.'],
-  ['Conflict: record has changed', 'This request changed meanwhile. Refresh and try again.', 'تغيّر هذا الطلب في الأثناء. حدّث الصفحة وأعد المحاولة.'],
-  ['Financial period', 'This month is closed in the books. An admin must unlock it first.', 'هذا الشهر مقفل في الدفاتر. يجب أن يفتحه المدير أولاً.']
-]);
+// A refusal of the settle routes (/api/ad-studio …/stop and …/settle-override: a plain English prefix)
+// is read through the ONE Arabic map (15c, via 15g studioErrorInfo). SETTLE_NOT_READY comes as {code,
+// message, messageAr, readyAt} and is shown from that shape with its countdown.
 
 const _studioDesk = {
   forUser: '', generation: 0,
@@ -738,10 +722,8 @@ function studioDeskErrorInfo(error) {
     const base = adsStudioText(clean(detail.message) || 'The final amount is not ready yet.', clean(detail.messageAr) || 'المبلغ النهائي غير جاهز بعد.');
     return { code: 'SETTLE_NOT_READY', readyAt, text: countdown ? `${base} (${countdown})` : base };
   }
-  const info = adsStudioErrorInfo(error);
-  const hit = STUDIO_DESK_REFUSALS.find(([needle]) => String(info.message || '').includes(needle));
-  if (hit) return { code: info.code || '', readyAt: '', text: adsStudioText(hit[1], hit[2]) };
-  return { code: info.code || '', readyAt: '', text: studioErrorInfo(error, 'action').text };
+  const info = studioErrorInfo(error, 'action');
+  return { code: info.code || '', readyAt: '', text: info.text };
 }
 
 function studioDeskNotify(ok, title, text) {

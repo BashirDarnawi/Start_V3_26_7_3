@@ -1100,13 +1100,100 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['Likes are not available for Facebook pages right now', 'الإعجاب بالتعليقات غير متاح لصفحات فيسبوك حالياً'],
   ['You can only manage your own Social Studio', 'يمكنك إدارة صفحاتك وردودك أنت فقط'],
   ['Admin only', 'هذا الإجراء للمدير فقط'],
+  // ONE Arabic map (stage 15, P2-11): the entries below came from the v2 pattern list (15g) and the
+  // Team desk's own list (15p); both layouts now read every plain-English server text through this
+  // map (adsStudioRefusalText, 15g studioErrorInfo). A needle may be a RegExp (an anchored shape); a
+  // fourth item is the English shown instead of the server's own words (both layouts; the third item
+  // stays the dynamic kind of the P1 entries above, '' here). The first match wins, so the exact
+  // texts come before the generic shapes at the end. Entries are only ever added.
+  // -- the settle routes of the Team desk (ad_campaign_actions.py REFUSE_SETTLE_* / REFUND_* / OVERRIDE_*)
+  ['Meta is still delivering this ad', 'ما زالت ميتا تعرض هذا الإعلان. أوقفه في ميتا أولاً، ثم سوِّ الحساب بعد القراءة النهائية.', '', 'Meta is still delivering this ad. Pause it in Meta first, then settle after the final read.'],
+  ['Meta has not confirmed that this ad ended', 'لم تؤكد ميتا انتهاء هذا الإعلان بعد. افحص ميتا الآن ثم أعد المحاولة.', '', 'Meta has not confirmed that this ad ended yet. Check Meta now, then try again.'],
+  ['The final amount is not ready', 'المبلغ النهائي غير جاهز: قراءة ميتا النهائية لم تصل بعد.', '', 'The final amount is not ready: the final Meta read is still pending.'],
+  ['This ad account does not bill in USD', 'هذا الحساب الإعلاني لا يُحاسب بالدولار، لذلك يحتاج المبلغ النهائي إلى تجاوز من المدير.', '', 'This ad account does not bill in USD, so the final amount needs an admin override.'],
+  ['refundMinorUSD is above paid minus Meta spend', 'المبلغ المعاد أكبر مما تبقى بعد صرف ميتا. اخفضه (يمكن للمدير التجاوز مع كتابة السبب).', '', "The return is above what is left after Meta's spend. Lower it (an admin can override with a written reason)."],
+  ['refundMinorUSD must be between 0 and the paid budget', 'يجب أن يكون المبلغ المعاد بين 0 وما دفعه العميل.', '', 'The return must be between 0 and what the customer paid.'],
+  ['refundMinorUSD must be between 0 and the unspent captured budget', 'يجب أن يكون المبلغ المعاد بين 0 والميزانية غير المصروفة.', '', 'The return must be between 0 and the unspent budget.'],
+  ['Only an admin can override the settlement rules', 'تجاوز قواعد التسوية للمدير فقط.', '', 'Only an admin can override the settlement rules.'],
+  ['Nobody can override the settlement of their own request', 'لا يمكن لأحد تجاوز تسوية طلبه هو.', '', 'Nobody can override the settlement of their own request.'],
+  ['Write why the settlement rules are lifted', 'اكتب سبب تجاوز القواعد (من 10 إلى 300 حرف).', '', 'Write why the rules are lifted (10 to 300 characters).'],
+  ['Financial period', 'هذا الشهر مقفل في الدفاتر. يجب أن يفتحه المدير أولاً.', '', 'This month is closed in the books. An admin must unlock it first.'],
+  // -- the ad request (ad_campaign_actions.py, ad_campaign_fields.py, studio_posts.py)
+  [/^destination must be an HTTPS website/, 'يجب أن تكون الوجهة موقعاً يبدأ بـ https:// أو رابط واتساب أو ماسنجر أو رقم هاتف دولياً.', '',
+    'The destination must be an https:// website, a WhatsApp or Messenger link, or an international phone number.'],
+  [/^sourcePostRef (must be an HTTPS link|is required for a Boost Post)/, 'الصق رابط منشور من فيسبوك أو إنستغرام.', '', 'Paste the link of a Facebook or Instagram post.'],
+  [/^sourcePost(Platform|Id) /, 'اختر المنشور مرة أخرى من صفحتك المربوطة.', '', 'Pick the post again from your linked page.'],
+  [/^Only Draft or Changes Requested campaigns can be submitted/, 'لا يمكن إرسال إلا مسودة أو طلب أُعيد للتعديل.', '', 'Only a draft or a request sent back for changes can be sent.'],
+  [/campaign needs a budget greater than zero/, 'حدّد ميزانية أكبر من صفر أولاً.', '', 'Set a budget above zero first.'],
+  [/^Only staff can choose (a partial refund amount|how a campaign closed)/, 'فريق البيان وحده يحدد مبلغ الاسترداد وطريقة إغلاق الإعلان.', '', 'Only the Albayan team chooses the refund amount and how an ad closes.'],
+  [/^Forbidden$/, 'لا تملك صلاحية الوصول إلى هذا.', '', 'You do not have access to this.'],
+  [/^goalDetail must be one of/, 'اختر هدفاً من القائمة.', '', 'Choose one of the listed goals.'],
+  [/^locationKeys (must be a list|must contain only text|cannot combine all of Libya)/, 'اختر حتى 25 موقعاً؛ لا يمكن الجمع بين «كل ليبيا» ومدينة.', '', 'Choose up to 25 places; "All of Libya" cannot be combined with a city.'],
+  [/^(creativeImages |creativeAssetIds contains|Each campaign image must be 4 MB|Campaign image dimensions are too large|A campaign image data URL is too large|Campaign images contain too many total pixels)/,
+    'الصور غير مقبولة: استخدم حتى 3 صور PNG أو JPEG أو WebP، كل واحدة أقل من 4 ميغابايت.', '', 'The photos are not accepted: use up to 3 PNG, JPEG or WebP photos, each under 4 MB.'],
+  [/^Unsupported (callToAction|campaign objective|advertising platform|gender targeting value|special ad category)/, 'أحد الخيارات لم يعد في القائمة. أعد تحميل الصفحة واختر مرة أخرى.', '', 'One of the choices is not in the list any more. Reload the page and choose again.'],
+  [/^specialAdCategories cannot combine none/, 'لا يمكن الجمع بين «لا شيء» وفئة خاصة أخرى.', '', '"None" cannot be combined with another special category.'],
+  [/^ageMin cannot be greater than ageMax/, 'لا يمكن أن يكون أصغر عمر أكبر من أكبر عمر.', '', 'The youngest age cannot be above the oldest.'],
+  [/^budgetMinorUSD must be a non-negative integer/, 'يجب أن تكون الميزانية عدداً صحيحاً من السنتات ضمن الحد.', '', 'The budget must be a whole number of cents within the limit.'],
+  [/^endDate cannot be before startDate/, 'لا يمكن أن يكون تاريخ الانتهاء قبل تاريخ البدء.', '', 'The end date cannot be before the start date.'],
+  [/^Campaign duration cannot exceed 366 days/, 'لا يمكن أن يعمل الإعلان أكثر من 366 يوماً.', '', 'An ad cannot run longer than 366 days.'],
+  [/required before submission$/, 'ما زال شيء ناقصاً: أكمل كل الخطوات (الصفحة والنص والصورة والجمهور والتواريخ والميزانية) قبل الإرسال.', '',
+    'Something is still missing: fill every step (page, text, photo, audience, dates and budget) before sending.'],
+  // -- pages, reply rules and posts (social_studio.py)
+  [/^This page is already linked to an account/, 'هذه الصفحة مربوطة بحساب آخر بالفعل.', '', 'This page is already linked to another account.'],
+  [/^quietHours/, 'تحتاج ساعات الهدوء إلى وقت بداية ونهاية (HH:MM).', '', 'Quiet hours need a from and a to time (HH:MM).'],
+  [/^Unknown timezone/, 'هذه المنطقة الزمنية غير معروفة.', '', 'This time zone is not known.'],
+  [/^Choose at least one page/, 'اختر صفحة واحدة على الأقل.', '', 'Choose at least one page.'],
+  [/^(media must be a list of images|A post supports at most \d+ photos|Photo \d+\b)/, 'صور المنشور غير مقبولة: PNG أو JPEG أو WebP، كل واحدة أقل من 3 ميغابايت، وبعدد معقول.', '',
+    'The post photos are not accepted: PNG, JPEG or WebP, each under 3 MB, and not too many.'],
+  [/^A post needs a caption or at least one photo/, 'يحتاج المنشور إلى نص أو صورة واحدة على الأقل.', '', 'A post needs a caption or at least one photo.'],
+  [/^scheduledAt /, 'اختر تاريخاً ووقتاً بعد دقيقة واحدة على الأقل من الآن.', '', 'Choose a date and time at least one minute in the future.'],
+  [/^autoReplyRuleId is not one of your rules/, 'قاعدة الرد المختارة ليست من قواعدك.', '', 'The chosen reply rule is not one of yours.'],
+  [/^Post is not claimed for publishing/, 'هذا المنشور ليس قيد النشر الآن. حدّث الصفحة وحاول مرة أخرى.', '', 'This post is not being published right now. Refresh and try again.'],
+  [/^Only draft, scheduled or failed posts can be changed/, 'لا يمكن تغيير إلا مسودة أو منشور مجدول أو منشور فشل نشره.', '', 'Only a draft, a scheduled post or a failed post can be changed.'],
+  [/^A page already published this post/, 'نشرت صفحة هذا المنشور بالفعل، لذلك لا يمكن تغيير نصه وصوره هنا. أعد المحاولة للصفحات التي فشلت أو احذف المنشور (يبقى المنشور على ميتا).', '',
+    'A page already published this post, so its text and photos cannot change here. Retry the failed pages or delete the post (the live post stays on Meta).'],
+  [/^The post changed while publishing/, 'تغيّر المنشور أثناء نشره. حدّث الصفحة وحاول مرة أخرى.', '', 'The post changed while it was being published. Refresh and try again.'],
+  [/^Only scheduled posts can be cancelled/, 'لا يمكن إلغاء إلا منشور مجدول.', '', 'Only a scheduled post can be cancelled.'],
+  // -- the wallet (wallet_payments.py)
+  [/^Campaign is no longer awaiting review/, 'هذا الطلب لم يعد بانتظار المراجعة. حدّث الصفحة وحاول مرة أخرى.', '', 'This request is no longer waiting for review. Refresh and try again.'],
+  [/^Customer wallet can no longer cover this campaign budget/, 'لم تعد محفظة العميل تغطي هذه الميزانية.', '', "The customer's wallet no longer covers this budget."],
+  [/^(No captured payment exists for this campaign cycle|The captured payment row is not refundable|This campaign cycle's payment was already returned|This campaign's payment was already reversed by an admin)/,
+    'لا توجد لهذا الإعلان دفعة يمكن إعادتها.', '', 'This ad has no payment that can still be returned.'],
+  [/^Refund must be between 1 cent and the captured budget/, 'يجب أن يكون المبلغ المسترد بين سنت واحد والمبلغ المدفوع.', '', 'The refund must be between one cent and the amount paid.'],
+  [/^Conflict: payment request has changed/, 'تغيّر طلب الدفع هذا في الأثناء. حدّث الصفحة وحاول مرة أخرى.', '', 'This payment request changed meanwhile. Refresh and try again.'],
+  [/^(The wallet is charged in USD or LYD|Unknown payment method)/, 'اختر عملة (دولار أو دينار) وطريقة دفع من القائمة.', '', 'Choose a currency (USD or LYD) and a payment method from the list.'],
+  [/^Minimum wallet charge is 1\.00/, 'أقل مبلغ للشحن هو 1.00 من العملة.', '', 'The smallest top-up is 1.00 of the currency.'],
+  [/^Idempotency key was already used for another operation/, 'أُرسل هذا من قبل بتفاصيل مختلفة. حدّث الصفحة وأعد المحاولة.', '', 'This was already sent with different details. Refresh and try again.'],
+  [/^Too many unpaid charge requests/, 'لديك طلبات شحن غير مدفوعة كثيرة. ادفع إحداها أو ألغِها أولاً.', '', 'You have too many unpaid top-up requests. Pay or cancel one first.'],
+  [/^The receipt photo is invalid or too large/, 'صورة الإيصال غير مقبولة: استخدم صورة JPG أو PNG واضحة أقل من 4 ميغابايت.', '', 'The receipt photo is not accepted: use a clear JPG or PNG under 4 MB.'],
+  [/^Only a pending request can take a receipt/, 'لا يمكن إرفاق إيصال إلا بطلب ما زال بانتظار الدفع.', '', 'A receipt can be attached only to a request that is still waiting for payment.'],
+  [/^Payment request is /, 'طلب الدفع هذا لم يعد مفتوحاً. حدّث الصفحة.', '', 'This payment request is no longer open. Refresh the page.'],
+  [/^The customer has not attached the transfer receipt yet/, 'لم يرفق العميل إيصال التحويل بعد.', '', 'The customer has not attached the transfer receipt yet.'],
+  [/^This account was deleted; cancel the request instead/, 'حُذف هذا الحساب؛ ألغِ الطلب بدلاً من ذلك.', '', 'This account was deleted; cancel the request instead.'],
+  [/^Payment was already received/, 'استُلمت هذه الدفعة بالفعل؛ أكّدها بدلاً من ذلك.', '', 'This payment was already received; confirm it instead.'],
+  // -- generic shapes of a field check (last, so the exact texts above win)
+  [/^(?!expectedVersion )\w+ is required$/, 'إحدى الخانات المطلوبة فارغة.', '', 'A required field is empty.'],
+  [/characters or fewer$/, 'أحد النصوص طويل جداً.', '', 'One of the texts is too long.'],
+  [/ supports at most \d+ entries$/, 'إحدى القوائم تحوي عناصر كثيرة.', '', 'One of the lists has too many entries.'],
+  [/^(?!note )\w+ (must be text|must be a list( of at most \d+ items)?|must contain only text|must be a valid ISO date|must be an integer from 18 to 65)$/,
+    'إحدى الخانات تحمل قيمة من نوع غير مناسب. راجع النموذج وحاول مرة أخرى.', '', 'One of the fields has a value of the wrong kind. Check the form and try again.'],
+  [/^(boostType must be|autoReply must be|extendsCampaignId is invalid|Invalid operationId|budgetType must be|connectedAssetId is invalid|Campaign data must be an object|Unsupported campaign field|platform must be fb or ig|scope must be all or chosen|trigger must be every or keywords|status must be draft or scheduled|reason must be instagram_private or empty|Unknown (log|post) status|before must be <createdAt>:<id>|metaPageId must be the numeric Meta page id|igUserId is required for an Instagram account)/,
+    'أرسلت هذه الشاشة شيئاً لا يقبله الخادم. أعد تحميل الصفحة وحاول مرة أخرى.', '', 'This screen sent something the server does not accept. Reload the page and try again.'],
 ];
+// The map entry for a server text: a string needle is a prefix or a piece of the text, a RegExp an
+// anchored shape; the first match wins.
+function adsStudioRefusalEntry(text) {
+  const words = String(text || '');
+  return _ADS_STUDIO_REFUSAL_AR.find(([needle]) => (typeof needle === 'string' ? words.includes(needle) : needle.test(words))) || null;
+}
 // A /api/studio refusal is {code, message}; the classic routes send a plain string (a 422 a list).
+// English readers get the server's own words unless the entry carries a fourth item (its English).
 function adsStudioRefusalText(detail) {
   const text = Array.isArray(detail) ? detail.map(item => String(typeof item === 'string' ? item : (item?.msg || ''))).filter(Boolean).join('; ')
     : detail && typeof detail === 'object' ? String(detail.message || '') : String(detail || '');
-  if (!adsStudioIsAr()) return text;
-  const hit = _ADS_STUDIO_REFUSAL_AR.find(([needle]) => text.includes(needle));
+  const hit = adsStudioRefusalEntry(text);
+  if (!adsStudioIsAr()) return hit && hit[3] ? hit[3] : text;
   if (!hit) return text;
   if (!hit[2]) return hit[1];
   const tail = text.slice(text.indexOf(hit[0]) + hit[0].length);
