@@ -27,6 +27,7 @@ from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_diagnostics import read_diagnostics
 from .studio_errors import studio_error
 from .studio_facts import create_studio_checks_router
+from .studio_jobs import create_studio_jobs_router, jobs_heartbeat
 from .studio_posts import create_studio_posts_router
 from .studio_settings import env_switch, me_view, read_all_settings, read_setting, require_known_key, save_setting
 from .studio_types import STUDIO_SETTINGS_TYPE
@@ -137,10 +138,12 @@ def create_studio_router(
         rate_limit(user, "diagnostics", DIAGNOSTICS_READS_PER_MINUTE)
         report = read_diagnostics()
         report["switches"] = {"envStudioV2": env_switch()}
+        report["jobs"] = jobs_heartbeat()  # studio jobs loop heartbeat, late after 5 min (studio_jobs.py, P1-21)
         report["generatedAt"] = _iso_now()
         return report
 
     router.include_router(create_studio_checks_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/facts + checks (studio_facts.py)
     router.include_router(create_studio_summaries_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /wallet/summary + /campaigns/summary (studio_wallet.py, studio_results.py)
     router.include_router(create_studio_posts_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /pages, /pages/{id}/recent-posts, /ad-options (studio_posts.py)
+    router.include_router(create_studio_jobs_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/alerts + the jobs loop startup/shutdown (studio_jobs.py, P1-21)
     return router

@@ -10,10 +10,12 @@
  *   2. waits until it accepts connections;
  *   3. runs the same commands as CI's postgres-migration job:
  *      `alembic upgrade head`, `alembic current`, then
- *      `pytest server/test_postgres_financial_review.py`;
+ *      `pytest server/test_postgres_financial_review.py server/test_postgres_studio_jobs.py`
+ *      (the studio jobs loop's sweep and alert scenarios, plan tasks P1-19 and P1-21);
  *   4. ALWAYS removes the container: on success, on failure and on Ctrl-C.
  * A skipped scenario counts as a failure: a release must show they ran.
- * 36-40 s on the owner's PC (2026-09-25: start 2 s, migrations 1.5 s, scenarios 32-35 s).
+ * 36-40 s on the owner's PC (2026-09-25: start 2 s, migrations 1.5 s, scenarios 32-35 s);
+ * about 43 s with the studio jobs scenarios (scenarios 38-39 s).
  *
  * Usage:
  *   npm run test:postgres                 (also run by npm run release:image:push)
@@ -31,7 +33,7 @@ const DB_USER = 'albayan';
 const LABEL = 'albayan.release-postgres.expires';
 const LIFETIME_MS = 60 * 60 * 1000; // a run killed without cleanup is removed by the next run after this
 const READY_TIMEOUT_MS = 120_000;
-const TEST_FILE = 'server/test_postgres_financial_review.py';
+const TEST_FILES = ['server/test_postgres_financial_review.py', 'server/test_postgres_studio_jobs.py'];
 
 const password = crypto.randomBytes(24).toString('hex'); // hex: nothing to escape in the URL
 const container = `albayan-release-pg-${crypto.randomBytes(4).toString('hex')}`;
@@ -189,8 +191,8 @@ async function main() {
   step('alembic upgrade head', since);
 
   since = Date.now();
-  console.log(`\n> python -m pytest -q -p no:cacheprovider -rs ${TEST_FILE}`);
-  const tests = await py('-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-rs', TEST_FILE);
+  console.log(`\n> python -m pytest -q -p no:cacheprovider -rs ${TEST_FILES.join(' ')}`);
+  const tests = await py('-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-rs', ...TEST_FILES);
   step('PostgreSQL financial scenarios', since);
   if (tests.code !== 0) fail('a PostgreSQL financial scenario failed (see above).');
   if (/\b\d+ (?:skipped|deselected)\b/.test(tests.stdout)) {

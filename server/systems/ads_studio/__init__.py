@@ -16,5 +16,7 @@ OWNED_TYPES = frozenset(
         "socialReplyLog",
         "studioSettings",  # /api/studio switches (studio_settings.py)
         "adCampaignResults",  # Meta's view of a linked request (studio_results.py)
+        "studioAlerts",  # staff/admin alerts raised by the studio jobs loop (studio_jobs.py)
+        "studioJobState",  # the jobs loop's one heartbeat and claims row (studio_jobs.py)
     }
 )

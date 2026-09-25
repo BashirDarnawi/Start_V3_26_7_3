@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pytest -q -p no:cacheprovider -rs server/test_postgres_financial_review.py | tee "$RUNNER_TEMP/postgres-release.log"
+          python -m pytest -q -p no:cacheprovider -rs server/test_postgres_financial_review.py server/test_postgres_studio_jobs.py | tee "$RUNNER_TEMP/postgres-release.log"
           # A skipped scenario proves nothing; the release must show they ran.
           if grep -Eq '[0-9]+ (skipped|deselected)' "$RUNNER_TEMP/postgres-release.log"; then
             echo "::error::PostgreSQL scenarios were skipped; no image is built."

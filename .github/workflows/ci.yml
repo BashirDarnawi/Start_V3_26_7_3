@@ -135,7 +135,7 @@ jobs:
       - name: Query migrated PostgreSQL database
         run: python -c "from sqlalchemy import text; from server.db import get_engine; c=get_engine().connect(); print(c.execute(text('SELECT 1')).scalar_one()); c.close()"
       - name: Exercise real PostgreSQL backup and financial workflows
-        run: python -m pytest -q -p no:cacheprovider server/test_full_backup_postgres.py server/test_postgres_financial_review.py
+        run: python -m pytest -q -p no:cacheprovider server/test_full_backup_postgres.py server/test_postgres_financial_review.py server/test_postgres_studio_jobs.py
       - name: Build the actual application backup client
         run: docker build --tag albayan-backup-ci --file server/Dockerfile .
       - name: Prove a PostgreSQL backup can be restored
