@@ -12,7 +12,8 @@
  *    OCI media types are not accepted either — hence the explicit flags below.
  *
  * Usage:
- *   npm run release:image:push     (runs the full test suite first)
+ *   npm run release:image:push     (runs the full test suite, then the
+ *                                   PostgreSQL money scenarios, first)
  *   node scripts/publish-image.js --dry-run
  */
 const { spawnSync } = require('child_process');
@@ -55,7 +56,7 @@ console.log(`\nRelease: ${release}`);
 console.log(`Command: docker ${args.join(' ')}\n`);
 
 if (dryRun) {
-  console.log('--dry-run: publishing would first require release:quality; nothing was built or pushed.');
+  console.log('--dry-run: publishing would first require release:quality and test:postgres; nothing was built or pushed.');
   process.exit(0);
 }
 
@@ -68,6 +69,18 @@ const checked = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['ru
 });
 if (checked.status !== 0) {
   console.error('Release checks failed. No image build or push was attempted.');
+  process.exit(1);
+}
+
+// Production runs PostgreSQL, the suite above SQLite: the money race scenarios
+// must also pass on a real PostgreSQL 16 (a throwaway Docker container that the
+// script always removes) before anything is built or pushed.
+console.log('Proving the money race scenarios on a throwaway PostgreSQL 16...');
+const postgres = spawnSync(process.execPath, [path.join(__dirname, 'test-postgres-release.js')], {
+  cwd: ROOT, stdio: 'inherit', shell: false,
+});
+if (postgres.status !== 0) {
+  console.error('PostgreSQL release checks failed. No image build or push was attempted.');
   process.exit(1);
 }
 

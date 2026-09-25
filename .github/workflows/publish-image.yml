@@ -21,6 +21,23 @@ jobs:
     name: Test, smoke-check, and publish
     runs-on: ubuntu-latest
     environment: production
+    # A throwaway PostgreSQL 16 (production's database) for the money race
+    # scenarios; same as CI's postgres-migration job and `npm run test:postgres`.
+    # "5432/tcp" publishes it on a random runner port.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: albayan_test_release
+          POSTGRES_USER: albayan
+          POSTGRES_PASSWORD: release-check-only-password
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U albayan -d albayan_test_release"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,6 +62,24 @@ jobs:
           npm run build
           npm run sync:www
           npm run verify:generated
+      - name: Migrate the throwaway PostgreSQL 16 database
+        env:
+          DATABASE_URL: postgresql+psycopg://albayan:release-check-only-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/albayan_test_release
+        run: |
+          python -m alembic upgrade head
+          python -m alembic current
+      - name: Prove the money race scenarios on real PostgreSQL
+        env:
+          ALBAYAN_TEST_POSTGRES_URL: postgresql+psycopg://albayan:release-check-only-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/albayan_test_release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q -p no:cacheprovider -rs server/test_postgres_financial_review.py | tee "$RUNNER_TEMP/postgres-release.log"
+          # A skipped scenario proves nothing; the release must show they ran.
+          if grep -Eq '[0-9]+ (skipped|deselected)' "$RUNNER_TEMP/postgres-release.log"; then
+            echo "::error::PostgreSQL scenarios were skipped; no image is built."
+            exit 1
+          fi
       - name: Build immutable release image
         env:
           IMAGE: bashird/albayan

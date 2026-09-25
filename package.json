@@ -14,6 +14,7 @@
     "test:money": "node scripts/test-money.js",
     "test:profitability": "node scripts/test-profitability.js",
     "test:backend": "node scripts/test-backend.js",
+    "test:postgres": "node scripts/test-postgres-release.js",
     "test:e2e": "npm run test:modal-presentation && npm run test:modal-keyboard-stability && npm run test:indexeddb-snapshot && playwright test",
     "test:e2e:chromium": "playwright test --project=desktop-chromium --project=mobile-chromium",
     "test:architecture": "node scripts/test-architecture.js",

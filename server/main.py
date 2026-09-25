@@ -14007,6 +14007,8 @@ app.include_router(create_studio_router(  # /api/studio: Albayan Studio v2 (serv
     current_user_dependency=current_user, require_same_origin=require_same_origin,
     ctx={"user_has_permission": lambda *a, **k: user_has_permission(*a, **k), "audit": lambda *a, **k: audit(*a, **k),
          "validate_entity_id": lambda *a, **k: validate_entity_id(*a, **k)}))
+from .meta_collisions import create_meta_collisions_router  # P0-10: Studio campaigns in Manager's books
+app.include_router(create_meta_collisions_router(current_user_dependency=current_user))  # GET /api/meta-ads/collisions (admin)
 app.include_router(
     create_delivery_ops_router(
         current_user_dependency=current_user,
