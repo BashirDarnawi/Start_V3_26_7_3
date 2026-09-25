@@ -39,6 +39,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from ... import meta_ads as _meta
 from ...db import db_conn, json_fields_select_sql, json_loads_or_raw
 from ...user_directory import account_created_at
 from ...wallet_payments import confirmed_top_up_amounts
@@ -227,4 +228,5 @@ def read_diagnostics(now: datetime | None = None) -> dict[str, Any]:
         top_ups = confirmed_top_up_amounts(conn, TOP_UP_CURRENCY, TOP_UP_PRESETS)
     report = compute_diagnostics(rows, created, now)
     report["topUpPresets"] = {"currency": TOP_UP_CURRENCY, **top_ups}
+    report["metaLanes"] = _meta.lane_state_report(refresh=True)  # P3-00c: pauses, counts and parks (last 4 digits) only
     return report

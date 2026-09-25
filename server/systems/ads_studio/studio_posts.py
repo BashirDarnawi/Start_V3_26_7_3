@@ -16,13 +16,15 @@ only ever sees their own pages):
   createdAt}``. Another customer's page, or an id that is no linked page, is 404
   ``UNKNOWN_PAGE`` "This page is not linked to your account" (T12). Meta is read through the
   platform door (meta_ads.read_page_recent_posts / read_instagram_recent_media, with the page's
-  token, paced, refused while Albayan's Meta pause runs) at most once per 10 minutes per page and
-  platform; ``refresh=1`` reads again when the list is older than a minute. ``platforms`` says per
+  token, paced on the page's lane, PLAN P3-00: refused while an app-wide Meta pause or a park of
+  that page runs; the admin lane's own pause does not hold it up) at most once per 10 minutes per
+  page and platform; ``refresh=1`` reads again when the list is older than a minute. ``platforms`` says per
   platform ``state`` (``ok``, ``paused`` = try again after ``retryAfterSeconds``, ``error`` with
   ``errorCode`` ``page_access`` or ``meta_error``) and when it was read; a platform Meta did not
   answer keeps its last list (up to a day old). Nothing to show because Meta is busy: 409
   ``META_PAUSED`` with Retry-After; Albayan's Meta connection not set up: 409
-  ``META_NOT_CONFIGURED``. Never a 500 for a Meta problem. 10 reads a minute per user.
+  ``META_NOT_CONFIGURED``. Never a 500 for a Meta problem. 10 reads a minute per user. A read
+  Meta refuses for authorization runs the studio's token check (after_meta_authorization_failure).
 * ``GET /api/studio/ad-options``: the goals (``goalDetail`` keys with their objective and main
   result) and the Libya location keys, with English and Arabic labels, for the wizard's chips.
 
@@ -79,6 +81,7 @@ from .ad_campaign_fields import (
 )
 from .social_studio import PAGES_TYPE
 from .studio_errors import studio_error
+from .studio_ig_poll import after_meta_authorization_failure
 
 POSTS_PER_PLATFORM = 10
 EXCERPT_MAX = 140
@@ -264,8 +267,14 @@ def _part(entry: dict[str, Any] | None, state: str, error_code: str = "", retry_
     }
 
 
-def _retry_seconds() -> int:
-    return _meta.studio_meta_pause_seconds() or DEFAULT_RETRY_SECONDS
+def _pause_seconds(meta_page_id: str) -> int:
+    """Seconds before the page's lane may read this page (PLAN P3-00): an app-wide Meta pause or a
+    park of the page. The admin lane's own pause never holds these reads up."""
+    return _meta.meta_lane_pause_seconds("page", meta_page_id)
+
+
+def _retry_seconds(meta_page_id: str) -> int:
+    return _pause_seconds(meta_page_id) or DEFAULT_RETRY_SECONDS
 
 
 def read_platform_posts(platform: str, meta_page_id: str, ig_user_id: str, *, refresh: bool,
@@ -293,7 +302,9 @@ def read_platform_posts(platform: str, meta_page_id: str, ig_user_id: str, *, re
         except _meta.MetaAdsError as error:
             stale = _cache_get(key, CACHE_KEEP_SECONDS)
             if error.retryable:
-                return _part(stale, "paused", retry_after=_retry_seconds())
+                return _part(stale, "paused", retry_after=_retry_seconds(meta_page_id))
+            if error.code == "authorization":
+                after_meta_authorization_failure()
             return _part(stale, "error", "page_access" if error.code == "authorization" else "meta_error")
         posts = [post for post in (_public_post(platform, row) for row in rows) if post]
         return _part(_cache_put(key, posts[:POSTS_PER_PLATFORM]), "ok")
@@ -306,7 +317,7 @@ def read_recent_posts(group: dict[str, Any], *, refresh: bool = False) -> dict[s
     if not _meta.load_meta_ads_config().configured:
         studio_error(409, "META_NOT_CONFIGURED",
                      "Albayan's Meta connection is not set up yet, so your posts cannot be listed. Paste the post link instead.")
-    pause = _meta.studio_meta_pause_seconds()
+    pause = _pause_seconds(group["metaPageId"])
     parts: dict[str, dict[str, Any]] = {}
     if group["fbRowId"]:
         parts["fb"] = read_platform_posts("fb", group["metaPageId"], "", refresh=refresh, pause_seconds=pause)
@@ -370,16 +381,19 @@ def verify_source_post(owner_id: str, platform: str, post_id: str, *, may_read_m
         return  # approval: checked at submit; inside submit's media slot: checked just before it
     if not _meta.load_meta_ads_config().configured:
         _not_from_linked_page(" (Albayan's Meta connection is not set up, so the post cannot be checked; paste the post link instead)")
-    pause = _meta.studio_meta_pause_seconds()
-    if pause > 0:  # Albayan's Meta pause runs: nothing is asked
+    checked = accounts[:MAX_IG_ACCOUNTS_CHECKED]
+    pause = max(_pause_seconds(group["metaPageId"]) for group in checked)
+    if pause > 0:  # an app-wide Meta pause, or a park of a page it would read with: nothing is asked
         _meta_busy(pause)
     linked = {group["igUserId"] for group in accounts}
-    for group in accounts[:MAX_IG_ACCOUNTS_CHECKED]:
+    for group in checked:
         try:
             media = _meta.read_instagram_media_owner(group["metaPageId"], post_id)
         except _meta.MetaAdsError as error:
             if error.retryable:
-                _meta_busy(_retry_seconds())
+                _meta_busy(_retry_seconds(group["metaPageId"]))
+            if error.code == "authorization":
+                after_meta_authorization_failure()
             continue  # this page's token cannot see the media (another account's, or deleted)
         if media["ownerId"]:
             if media["ownerId"] in linked:

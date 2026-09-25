@@ -32,8 +32,9 @@ Routes (admin only; mounted under /api/studio by studio_api.create_studio_router
 The once-a-day claims and the reply claims live in metaHealthState/"studioFactTests" (through
 the platform door meta_ads.save_meta_health_state, one transaction with a version check, so
 two presses at the same moment cannot both win). Their keys are derived ids (hashes), never
-Meta ids. While Albayan's Meta pause runs a test is refused (409 ``META_PAUSED``) before the
-day is claimed, and a test the pause stopped before anything reached Meta gives the day back.
+Meta ids. Both tests read on the tested page's lane (PLAN P3-00): while an app-wide Meta pause or
+a park of that page runs a test is refused (409 ``META_PAUSED``) before the day is claimed, and a
+test the pause stopped before anything reached Meta gives the day back.
 Otherwise a claim is taken before Meta is called: a test that failed at Meta still used the day.
 
 Facts (b) and (g) read socialReplyLog rows of the last 30 days (by the row's created_at):
@@ -442,16 +443,17 @@ def create_studio_checks_router(
         except _meta.MetaAdsError:
             studio_error(409, "META_NOT_CONFIGURED", "Albayan's Meta connection is not set up, so nothing was tested")
 
-    def meta_paused(seconds: int = 0) -> NoReturn:
-        wait = max(1, int(seconds or _meta.studio_meta_pause_seconds() or 60))
+    def meta_paused(meta_page_id: str, seconds: int = 0) -> NoReturn:
+        wait = max(1, int(seconds or _meta.meta_lane_pause_seconds("page", meta_page_id) or 60))
         studio_error(409, "META_PAUSED", "Meta asked Albayan to wait, so nothing was tested and the day is still free",
                      headers={"Retry-After": str(wait)})
 
-    def refuse_while_paused() -> None:
-        """Before the day is claimed: a test the Meta pause would refuse must not use it up."""
-        seconds = _meta.studio_meta_pause_seconds()
+    def refuse_while_paused(meta_page_id: str) -> None:
+        """Before the day is claimed: a test the Meta pause would refuse must not use it up. Both
+        tests read on the page's lane (PLAN P3-00): an app-wide pause or a park of that page."""
+        seconds = _meta.meta_lane_pause_seconds("page", meta_page_id)
         if seconds:
-            meta_paused(seconds)
+            meta_paused(meta_page_id, seconds)
 
     def claim_today(section: str, key: str, today: str, now: datetime) -> None:
         try:
@@ -489,7 +491,7 @@ def create_studio_checks_router(
         rate_limit(user, "fact-tests", TEST_PRESSES_PER_MINUTE)
         page = load_page(page_id)
         client = require_meta()
-        refuse_while_paused()
+        refuse_while_paused(page["metaPageId"])
         now = _now()
         today = tripoli_day(now)
         key = derived_id("sft", "subscribe", page["metaPageId"])
@@ -504,7 +506,7 @@ def create_studio_checks_router(
         except _meta.MetaAdsError as error:
             if _meta.is_meta_pause_refusal(error):  # the pause began just now: the subscribe was never sent
                 release("subscribe", key, today, state="running")
-                meta_paused()
+                meta_paused(page["metaPageId"])
             code, provider = error.code, error.provider_code
         record("subscribe", key, {"state": "done", "ok": ok, "errorCode": code}, today)
         ctx["audit"](
@@ -529,15 +531,16 @@ def create_studio_checks_router(
             studio_error(409, "NOT_INSTAGRAM", "This linked page is not an Instagram account")
         comment_id, containing, reply = _reply_request(body)
         client = require_meta()
-        refuse_while_paused()
+        refuse_while_paused(page["metaPageId"])
         now = _now()
         today = tripoli_day(now)
         key = derived_id("sft", "igread", page["igUserId"])
         claim_today("igRead", key, today, now)
-        read = read_recent_ig_comments(client, page["igUserId"], with_text=bool(containing))
+        read = read_recent_ig_comments(client, page["igUserId"], meta_page_id=page["metaPageId"],
+                                       with_text=bool(containing))
         if read["pausedLocally"] and not read["mediaRead"]:  # the pause began just now: nothing reached Meta
             release("igRead", key, today, state="running")
-            meta_paused()
+            meta_paused(page["metaPageId"])
         result: dict[str, Any] = {
             "testedOn": today, "mediaRead": read["mediaRead"], "mediaWithComments": read["mediaWithComments"],
             "commentsRead": read["commentsRead"], "errorCode": read["errorCode"], "providerCode": read["providerCode"],

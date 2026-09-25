@@ -14,8 +14,10 @@ Route (admin only; mounted under /api/studio by studio_api.create_studio_router)
   check a minute per Instagram account (429 ``RATE_LIMITED`` with Retry-After); audited
   ``check_comments`` (counts and codes only; a kept audit action). Refusals: 403 ``CROSS_SITE`` /
   ``ADMIN_ONLY``, 404 ``UNKNOWN_PAGE``, 409 ``NOT_INSTAGRAM``, 409 ``META_NOT_CONFIGURED``, 409
-  ``META_PAUSED`` with Retry-After (nothing was read; when the pause began during the check the
-  account's minute is given back).
+  ``META_PAUSED`` with Retry-After (an app-wide Meta pause or a park of the linked page on the page
+  lane, PLAN P3-00: nothing was read; when the pause began during the check the account's minute is
+  given back). A read Meta refuses for authorization runs the studio's token check
+  (after_meta_authorization_failure).
 
   The answer is counts only, ``{read, new, replied, skipped, errorCode}``:
 
@@ -130,7 +132,7 @@ def _comment_key(comment_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Reading Meta (Albayan's system token, the shared paced lane)
+# Reading Meta (Albayan's system token, on the linked page's lane)
 # ---------------------------------------------------------------------------
 
 
@@ -138,6 +140,7 @@ def read_recent_ig_comments(
     client: Any,
     ig_user_id: str,
     *,
+    meta_page_id: str,
     with_text: bool,
     with_author: bool = False,
     media_limit: int = IG_MEDIA_WITH_COMMENTS,
@@ -145,6 +148,8 @@ def read_recent_ig_comments(
 ) -> dict[str, Any]:
     """Recent media of the account, then the comments of the newest media that have any.
 
+    Every read goes on the page lane for the linked Facebook page ``meta_page_id`` (PLAN P3-00a):
+    a page limit parks that page only, and the admin lane's pause never holds these reads up.
     Returns counts, and the comments (id, time, media id; text and author id when asked) for this
     request only. ``media`` lists each media read with its comment count; ``mediaDone`` the media
     whose comments were read (``skip_media(media id, count)`` leaves one out: the check's cursor
@@ -154,31 +159,32 @@ def read_recent_ig_comments(
     out: dict[str, Any] = {"mediaRead": 0, "mediaWithComments": 0, "commentsRead": 0, "comments": [], "media": [],
                            "mediaDone": [], "errorCode": "", "providerCode": "", "pausedLocally": False}
     try:
-        media = client._get(f"{ig_user_id}/media", {"fields": "id,comments_count,timestamp", "limit": IG_MEDIA_READ})
-        rows = [row for row in (media.get("data") or []) if isinstance(row, dict)][:IG_MEDIA_READ]
-        out["mediaRead"] = len(rows)
-        out["media"] = [{"id": str(row["id"]), "count": _meta._metric_int(row.get("comments_count"))}
-                        for row in rows if _META_ID_RE.fullmatch(str(row.get("id") or ""))]
-        commented = [row for row in rows if _meta._metric_int(row.get("comments_count")) > 0
-                     and _META_ID_RE.fullmatch(str(row.get("id") or ""))]
-        out["mediaWithComments"] = len(commented)
-        fields = ("id,timestamp,text" if with_text else "id,timestamp") + (",from" if with_author else "")
-        for row in commented[:media_limit]:
-            media_id = str(row["id"])
-            if skip_media is not None and skip_media(media_id, _meta._metric_int(row.get("comments_count"))):
-                continue
-            payload = client._get(f"{media_id}/comments", {"fields": fields, "limit": IG_COMMENTS_PER_MEDIA})
-            for item in payload.get("data") or []:
-                comment_id = str(item.get("id") or "") if isinstance(item, dict) else ""
-                if not _META_ID_RE.fullmatch(comment_id):
+        with _meta.meta_call_lane("page", subject=meta_page_id):
+            media = client._get(f"{ig_user_id}/media", {"fields": "id,comments_count,timestamp", "limit": IG_MEDIA_READ})
+            rows = [row for row in (media.get("data") or []) if isinstance(row, dict)][:IG_MEDIA_READ]
+            out["mediaRead"] = len(rows)
+            out["media"] = [{"id": str(row["id"]), "count": _meta._metric_int(row.get("comments_count"))}
+                            for row in rows if _META_ID_RE.fullmatch(str(row.get("id") or ""))]
+            commented = [row for row in rows if _meta._metric_int(row.get("comments_count")) > 0
+                         and _META_ID_RE.fullmatch(str(row.get("id") or ""))]
+            out["mediaWithComments"] = len(commented)
+            fields = ("id,timestamp,text" if with_text else "id,timestamp") + (",from" if with_author else "")
+            for row in commented[:media_limit]:
+                media_id = str(row["id"])
+                if skip_media is not None and skip_media(media_id, _meta._metric_int(row.get("comments_count"))):
                     continue
-                comment = {"id": comment_id, "at": str(item.get("timestamp") or ""),
-                           "text": str(item.get("text") or "") if with_text else "", "mediaId": media_id}
-                if with_author:
-                    author = item.get("from") if isinstance(item.get("from"), dict) else {}
-                    comment["fromId"] = str(author.get("id") or "")
-                out["comments"].append(comment)
-            out["mediaDone"].append(media_id)
+                payload = client._get(f"{media_id}/comments", {"fields": fields, "limit": IG_COMMENTS_PER_MEDIA})
+                for item in payload.get("data") or []:
+                    comment_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+                    if not _META_ID_RE.fullmatch(comment_id):
+                        continue
+                    comment = {"id": comment_id, "at": str(item.get("timestamp") or ""),
+                               "text": str(item.get("text") or "") if with_text else "", "mediaId": media_id}
+                    if with_author:
+                        author = item.get("from") if isinstance(item.get("from"), dict) else {}
+                        comment["fromId"] = str(author.get("id") or "")
+                    out["comments"].append(comment)
+                out["mediaDone"].append(media_id)
     except _meta.MetaAdsError as error:
         out["errorCode"], out["providerCode"] = error.code, error.provider_code
         out["pausedLocally"] = _meta.is_meta_pause_refusal(error)
@@ -312,6 +318,18 @@ def save_cursor(ig_user_id: str, updates: dict[str, dict[str, Any]], now_iso: st
 # ---------------------------------------------------------------------------
 
 
+def after_meta_authorization_failure() -> None:
+    """Meta refused a studio read for authorization: the studio's token check runs, as it does for
+    Social Studio's replies (studio_alerts_meta.after_authorization_failure: at most one Meta call
+    per 10 minutes; only a token that is really invalid marks the connection down). Never raises."""
+    from . import studio_alerts_meta  # late: it imports modules that are loaded with this one
+
+    try:
+        studio_alerts_meta.after_authorization_failure()
+    except Exception as error:
+        print(f"[albayan] Studio Meta connection check failed ({type(error).__name__}).")
+
+
 def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "manual_check",
                           now: datetime | None = None) -> dict[str, Any]:
     """Read the account's recent comments and feed the new ones to process_comment (module docstring).
@@ -330,8 +348,10 @@ def check_recent_comments(client: Any, page: dict[str, Any], *, source: str = "m
         entry = cursor.get(_media_key(ig_user_id, media_id))
         return bool(entry) and entry.get("count") == count
 
-    read = read_recent_ig_comments(client, ig_user_id, with_text=True, with_author=True, media_limit=IG_MEDIA_READ,
-                                   skip_media=unchanged)
+    read = read_recent_ig_comments(client, ig_user_id, meta_page_id=page["metaPageId"], with_text=True,
+                                   with_author=True, media_limit=IG_MEDIA_READ, skip_media=unchanged)
+    if read["errorCode"] == "authorization":
+        after_meta_authorization_failure()
     with db_conn() as conn:
         floor = rule_floor_second(conn, page["ownerId"])
     if floor is not None:
@@ -421,8 +441,8 @@ def create_studio_ig_poll_router(
             studio_error(429, "RATE_LIMITED", message,
                          headers={"Retry-After": str(max(1, math.ceil(int(retry_after_ms or 0) / 1000)))})
 
-    def meta_paused(seconds: int = 0) -> NoReturn:
-        wait = max(1, int(seconds or _meta.studio_meta_pause_seconds() or 60))
+    def meta_paused(page: dict[str, Any], seconds: int = 0) -> NoReturn:
+        wait = max(1, int(seconds or _meta.meta_lane_pause_seconds("page", page["metaPageId"]) or 60))
         studio_error(409, "META_PAUSED", "Meta asked Albayan to wait, so no comment was read. Try again in a few minutes.",
                      headers={"Retry-After": str(wait)})
 
@@ -437,16 +457,18 @@ def create_studio_ig_poll_router(
             client = _meta.get_meta_ads_client()
         except _meta.MetaAdsError:
             studio_error(409, "META_NOT_CONFIGURED", "Albayan's Meta connection is not set up, so no comment was read")
-        pause = _meta.studio_meta_pause_seconds()
+        # The page lane of the linked page: an app-wide pause or a park of that page (never the admin
+        # lane's own pause, which these reads do not wait for).
+        pause = _meta.meta_lane_pause_seconds("page", page["metaPageId"])
         if pause:
-            meta_paused(pause)  # before the account's minute is used
+            meta_paused(page, pause)  # before the account's minute is used
         bucket = account_bucket(page["igUserId"])
         rate_limit(bucket, CHECKS_PER_ACCOUNT_MINUTE,
                    "This Instagram account was checked less than a minute ago. Try again in a minute.")
         result = check_recent_comments(client, page)
         if result["pausedLocally"] and not result["mediaRead"]:
             reset_rate_limit(bucket)  # the pause began just now: nothing reached Meta, the minute is still free
-            meta_paused()
+            meta_paused(page)
         counts = {key: result[key] for key in ("read", "new", "replied", "skipped")}
         ctx["audit"](
             str(user.get("id") or "") or None, "check_comments", PAGES_TYPE, page["id"],

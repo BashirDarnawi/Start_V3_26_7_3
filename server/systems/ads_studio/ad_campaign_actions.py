@@ -716,6 +716,15 @@ def _meta_link_error(error: Any) -> HTTPException:
     return HTTPException(status_code=502, detail=f"{REFUSE_LINK_META_FAILED}" + (f" (Meta code {provider})" if provider else ""))
 
 
+def _check_meta_connection(error: Any) -> None:
+    """A link read or rename Meta refused for authorization runs the studio's token check, as Social
+    Studio's replies do (studio_ig_poll.after_meta_authorization_failure; never raises)."""
+    if getattr(error, "code", "") == "authorization":
+        from .studio_ig_poll import after_meta_authorization_failure  # late: its neighbours import this module
+
+        after_meta_authorization_failure()
+
+
 def _needs_manual_rename(ref: str, name: str) -> HTTPException:
     return HTTPException(status_code=409, detail={
         "code": NEEDS_MANUAL_RENAME, "message": REFUSE_NEEDS_MANUAL_RENAME, "studioRef": ref, "studioName": name,
@@ -888,6 +897,7 @@ def _link_meta_campaign(
     try:
         meta = _meta.read_studio_campaign(meta_id)
     except _meta.MetaAdsError as error:
+        _check_meta_connection(error)
         raise _meta_link_error(error)
     if str(meta.get("accountId") or "") != account:
         raise HTTPException(status_code=400, detail=REFUSE_LINK_WRONG_ACCOUNT)
@@ -904,6 +914,7 @@ def _link_meta_campaign(
         try:
             _meta.rename_studio_campaign(meta_id, name)
         except _meta.MetaAdsError as error:
+            _check_meta_connection(error)
             if error.retryable or error.code == "not_configured":
                 raise _meta_link_error(error)
             raise _needs_manual_rename(ref, name)  # Meta refused the rename: staff rename it by hand

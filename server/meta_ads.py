@@ -35,6 +35,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from .db import db_conn, get_engine, json_dumps, json_field_sql, json_fields_select_sql, json_loads, now_ms
 from .entity_projection import _without_inline_media
@@ -77,6 +78,9 @@ _META_LANE_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = contextvars
     "albayan_meta_lane", default=None
 )
 _META_ADS_CODES = frozenset({"80000", "80003", "80004", "80014"})
+# Code 613 with one of these subcodes is an ad account's own limit (too many changes or reads on
+# that account), so it is ads-scoped like the 80xxx ads codes; a plain 613 stays app-wide.
+_META_ADS_613_SUBCODES = frozenset({"1487742", "1487632", "1487225", "5044001"})
 _META_PAGE_CODES = frozenset({"32", "80001", "80002", "80006"})
 # X-Business-Use-Case-Usage types (Meta's rate-limiting page); any other type counts as app-wide.
 _META_ADS_USAGE_TYPES = frozenset({"ads_insights", "ads_management", "custom_audience"})
@@ -87,6 +91,9 @@ _META_LANE_STATE_ID = "lanes"  # metaProviderState/"lanes", beside metaProviderS
 _META_LANE_STATE_REFRESH_LOCK = threading.Lock()
 _META_LANE_STATE_REFRESHED_AT = 0.0
 _META_PARK_KEY_RE = re.compile(r"[0-9a-f]{24}")
+# A stored pause or park row that another lane or process wrote between the read and the write
+# (the version check's 409, or two first inserts) is read again and merged: at most this many tries.
+_META_STATE_WRITE_ATTEMPTS = 3
 
 
 class _MetaLaneState:
@@ -347,6 +354,16 @@ def _backoff_delay_seconds(seconds: Any) -> int:
         return 60
 
 
+def _pause_reason_after(current: str, running: bool, incoming: str) -> str:
+    """The admin pause's reason once ``incoming`` is added to it. Albayan's own ``usage_high``
+    never replaces a refusal by Meta (``meta_<code>``, ``rate_limited``) while that pause runs:
+    the headroom exception (_meta_pause_leaves_headroom) is for Albayan's safety margin only and
+    must never let a read through Meta's own throttle."""
+    if incoming == "usage_high" and running and current and current != "usage_high":
+        return current
+    return incoming
+
+
 def _set_meta_remote_backoff(
     seconds: Any = 60,
     *,
@@ -361,11 +378,13 @@ def _set_meta_remote_backoff(
         parsed_usage = min(max(int(float(usage_percent or 0)), 0), 100)
     except (TypeError, ValueError, OverflowError):
         parsed_usage = 0
+    clean_reason = _clean_text(reason, 80) or "rate_limited"
     with _META_REMOTE_BACKOFF_LOCK:
-        _META_REMOTE_BACKOFF_UNTIL = max(
-            _META_REMOTE_BACKOFF_UNTIL, time.monotonic() + delay
+        now = time.monotonic()
+        _META_REMOTE_BACKOFF_REASON = _pause_reason_after(
+            _META_REMOTE_BACKOFF_REASON, _META_REMOTE_BACKOFF_UNTIL > now, clean_reason
         )
-        _META_REMOTE_BACKOFF_REASON = _clean_text(reason, 80) or "rate_limited"
+        _META_REMOTE_BACKOFF_UNTIL = max(_META_REMOTE_BACKOFF_UNTIL, now + delay)
         _META_REMOTE_USAGE_PERCENT = max(_META_REMOTE_USAGE_PERCENT, parsed_usage)
     if persist:
         _persist_meta_provider_state()
@@ -590,11 +609,11 @@ def _usage_entries(response: Any) -> list[tuple[str, str, int, int]]:
     return entries
 
 
-def _throttle_scope(code: str) -> str:
+def _throttle_scope(code: str, subcode: str = "") -> str:
     """The scope of one of Meta's limit codes: "app", "ads" or "page". The app-wide codes 4, 17
     and 613, and any limit Albayan does not map (HTTP 429 alone, the other 80xxx use cases),
-    count as app-wide."""
-    if code in _META_ADS_CODES:
+    count as app-wide; 613 with an ad-account subcode (_META_ADS_613_SUBCODES) is ads."""
+    if code in _META_ADS_CODES or (code == "613" and subcode in _META_ADS_613_SUBCODES):
         return "ads"
     if code in _META_PAGE_CODES:
         return "page"
@@ -611,6 +630,7 @@ def _record_meta_throttle(
     reason: str,
     usage_percent: Any,
     persist: bool,
+    subcode: str = "",
 ) -> None:
     """Meta refused a call for a limit: act by the limit's scope (PLAN P3-00b).
 
@@ -621,7 +641,7 @@ def _record_meta_throttle(
     admin lane, the lane of the ads allowance. Page codes on the other lanes park the call's own
     object and any page the usage header names, never a whole lane.
     """
-    scope = _throttle_scope(code)
+    scope = _throttle_scope(code, subcode)
     threshold = _meta_usage_pause_percent()
     named = tuple(dict.fromkeys(
         object_id for kind, object_id, usage, regain in _usage_entries(response)
@@ -1525,6 +1545,7 @@ class MetaAdsClient:
                 reason=f"meta_{provider_code}",
                 usage_percent=usage_percent,
                 persist=_server_token_matches(self.config),
+                subcode=subcode,
             )
             return MetaAdsError("rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True, provider_code=provider_code)
         # Graph codes 1 ("unknown"/"please reduce the amount of data") and 2
@@ -3806,40 +3827,80 @@ def _load_meta_provider_state() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _persist_meta_provider_state() -> None:
-    """Best-effort cooldown checkpoint shared across restarts/processes."""
+def _write_meta_state_row(state_id: str, build: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
+    """Best-effort read-merge-write of one metaProviderState row: ``build(stored data)`` gives the
+    row to write. When another lane's thread or another process wrote the row between the read and
+    the write (the version check's 409, or a second first insert), the row is read again and
+    merged again, so neither write's pause or park is lost from storage."""
+    for _attempt in range(_META_STATE_WRITE_ATTEMPTS):
+        try:
+            with db_conn() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
+                        "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
+                    ),
+                    {"type": _META_PROVIDER_STATE_TYPE, "id": state_id},
+                ).mappings().first()
+                stored = json_loads(row.get("data_json") or "{}") if row else {}
+                clean = build(stored if isinstance(stored, dict) else {})
+                if row:
+                    _write_entity_data(conn, row, clean)
+                else:
+                    _insert_internal_entity(conn, _META_PROVIDER_STATE_TYPE, state_id, clean)
+            return
+        except HTTPException as error:
+            if error.status_code != 409:
+                return
+        except IntegrityError:
+            continue
+        except Exception:
+            # A database outage must never replace the original Meta response with
+            # a second failure. The in-process pause or park still remains active.
+            return
+
+
+def _provider_state_for_storage() -> dict[str, Any]:
+    """This process's admin-lane pause, in wall-clock milliseconds."""
     with _META_REMOTE_BACKOFF_LOCK:
         remaining = max(0, int(math.ceil(_META_REMOTE_BACKOFF_UNTIL - time.monotonic())))
         reason = _META_REMOTE_BACKOFF_REASON
         usage_percent = _META_REMOTE_USAGE_PERCENT
         last_request_at = _META_LAST_REMOTE_REQUEST_AT
-    clean = {
-        "recordType": _META_PROVIDER_STATE_TYPE,
+    return {
         "backoffUntilMs": now_ms() + remaining * 1000,
         "backoffReason": _clean_text(reason, 80),
         "usagePercent": min(max(int(usage_percent or 0), 0), 100),
         "lastRequestAt": _clean_time(last_request_at),
+    }
+
+
+def _merged_provider_row(stored: dict[str, Any], fresh: dict[str, Any]) -> dict[str, Any]:
+    """The stored admin pause and this process's together: the later end wins, and a refusal by
+    Meta keeps its reason over usage_high while it runs (_pause_reason_after)."""
+    stamp = now_ms()
+    stored_until = _metric_int(stored.get("backoffUntilMs"))
+    until, reason = fresh["backoffUntilMs"], fresh["backoffReason"]
+    if stored_until > stamp:
+        stored_reason = _clean_text(stored.get("backoffReason"), 80) or "rate_limited"
+        reason = _pause_reason_after(stored_reason, True, reason) if until > stamp else stored_reason
+        until = max(until, stored_until)
+    return {
+        "recordType": _META_PROVIDER_STATE_TYPE,
+        "backoffUntilMs": until,
+        "backoffReason": reason,
+        "usagePercent": fresh["usagePercent"],
+        "lastRequestAt": fresh["lastRequestAt"] or _clean_time(stored.get("lastRequestAt")),
         "updatedAt": _iso_now(),
     }
-    try:
-        with db_conn() as conn:
-            row = conn.execute(
-                text(
-                    "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
-                    "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
-                ),
-                {"type": _META_PROVIDER_STATE_TYPE, "id": _META_PROVIDER_STATE_ID},
-            ).mappings().first()
-            if row:
-                _write_entity_data(conn, row, clean)
-            else:
-                _insert_internal_entity(
-                    conn, _META_PROVIDER_STATE_TYPE, _META_PROVIDER_STATE_ID, clean
-                )
-    except Exception:
-        # A database outage must never replace the original Meta response with
-        # a second failure. The in-process cooldown still remains active.
-        return
+
+
+def _persist_meta_provider_state() -> None:
+    """Best-effort cooldown checkpoint shared across restarts/processes, merged with what another
+    process stored."""
+    _write_meta_state_row(
+        _META_PROVIDER_STATE_ID, lambda stored: _merged_provider_row(stored, _provider_state_for_storage())
+    )
 
 
 def _refresh_meta_provider_state(*, force: bool = False) -> None:
@@ -3861,12 +3922,15 @@ def _refresh_meta_provider_state(*, force: bool = False) -> None:
         if remaining_ms <= 0:
             return
         with _META_REMOTE_BACKOFF_LOCK:
+            now = time.monotonic()
+            _META_REMOTE_BACKOFF_REASON = _pause_reason_after(
+                _META_REMOTE_BACKOFF_REASON,
+                _META_REMOTE_BACKOFF_UNTIL > now,
+                _clean_text(state.get("backoffReason"), 80) or "rate_limited",
+            )
             _META_REMOTE_BACKOFF_UNTIL = max(
                 _META_REMOTE_BACKOFF_UNTIL,
-                time.monotonic() + math.ceil(remaining_ms / 1000),
-            )
-            _META_REMOTE_BACKOFF_REASON = (
-                _clean_text(state.get("backoffReason"), 80) or "rate_limited"
+                now + math.ceil(remaining_ms / 1000),
             )
             _META_REMOTE_USAGE_PERCENT = max(
                 _META_REMOTE_USAGE_PERCENT,
@@ -3983,27 +4047,9 @@ def _load_meta_lane_state() -> dict[str, Any]:
 
 def _persist_meta_lane_state() -> None:
     """Best-effort checkpoint of the app-wide mark and the lane parks, merged with what another
-    process stored."""
-    fresh = _lane_state_for_storage()
-    try:
-        with db_conn() as conn:
-            row = conn.execute(
-                text(
-                    "SELECT id,type,data_json,deleted,created_at,created_by,last_modified "
-                    "FROM entities WHERE type=:type AND id=:id AND deleted=false LIMIT 1"
-                ),
-                {"type": _META_PROVIDER_STATE_TYPE, "id": _META_LANE_STATE_ID},
-            ).mappings().first()
-            stored = json_loads(row.get("data_json") or "{}") if row else {}
-            clean = _merged_lane_row(stored if isinstance(stored, dict) else {}, fresh)
-            if row:
-                _write_entity_data(conn, row, clean)
-            else:
-                _insert_internal_entity(conn, _META_PROVIDER_STATE_TYPE, _META_LANE_STATE_ID, clean)
-    except Exception:
-        # Like _persist_meta_provider_state: a database outage never replaces Meta's answer
-        # with a second failure. The parks and the mark stay active in this process.
-        return
+    lane or process stored (read again on a write race; each try takes this process's latest
+    parks)."""
+    _write_meta_state_row(_META_LANE_STATE_ID, lambda stored: _merged_lane_row(stored, _lane_state_for_storage()))
 
 
 def _refresh_meta_lane_state(*, force: bool = False) -> None:
@@ -7824,6 +7870,8 @@ def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any =
     so the caller keeps its last good spend and never overwrites it with 0. ``adsetEndTime`` is
     the latest ad set end time, '' when an ad set has none (it runs until stopped), or None when
     Meta did not answer the ad sets read (the caller keeps the end time it knows).
+    ``anyAdDelivering`` is true while an ad is ACTIVE and no Meta end time (``adsetEndTime``,
+    ``stopTime``) has passed. Every read goes on the studio_results lane for the account.
     """
     refused = MetaAdsError("not_allowed", "This Meta campaign is not linked to an Albayan Studio request.")
     try:
@@ -7846,7 +7894,10 @@ def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any =
     client = get_meta_ads_client()
 
     def _read(path: str, params: dict[str, Any]) -> dict[str, Any]:
-        return client._request("GET", path, params=params)
+        # The studio_results lane for the AD ACCOUNT (PLAN P3-00a/b): the account's usage headers
+        # and ads limits (80000/80004) park that account, never the campaign id or the admin lane.
+        with meta_call_lane("studio_results", subject=account):
+            return client._request("GET", path, params=params)
 
     core = "id,name,account_id,status,effective_status,start_time,stop_time"
     ads_fields = "effective_status,ad_review_feedback"
@@ -7890,6 +7941,12 @@ def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any =
         if status:
             counts[status] = counts.get(status, 0) + 1
     end_times = [_clean_time(item.get("end_time")) for item in adsets or []]
+    adset_end = None if adsets is None else (max(end_times) if end_times and all(end_times) else "")
+    stop_time = _clean_time(row.get("stop_time"))
+    now = datetime.now(timezone.utc)
+    # Meta has no COMPLETED status: ads stay ACTIVE after their ad sets' end time or the campaign's
+    # stop time, so an end time that has passed means nothing delivers any more.
+    ended = any(datetime.fromisoformat(stamp.replace("Z", "+00:00")) <= now for stamp in (adset_end, stop_time) if stamp)
     insights_node = row.get("insights") if isinstance(row.get("insights"), dict) else None
     insights: dict[str, Any] | None = None
     if insights_node is None or not isinstance(insights_node.get("data"), list):
@@ -7907,11 +7964,11 @@ def get_campaign_results(account_id: Any, campaign_id: Any, *, request_id: Any =
         "status": _clean_text(row.get("status"), 40).upper(),
         "effectiveStatus": _clean_text(row.get("effective_status"), 40).upper(),
         "startTime": _clean_time(row.get("start_time")),
-        "stopTime": _clean_time(row.get("stop_time")),
+        "stopTime": stop_time,
         "adStatusCounts": counts,
         "adsTotal": len(ads),
-        "anyAdDelivering": counts.get("ACTIVE", 0) > 0,
-        "adsetEndTime": None if adsets is None else (max(end_times) if end_times and all(end_times) else ""),
+        "anyAdDelivering": counts.get("ACTIVE", 0) > 0 and not ended,
+        "adsetEndTime": adset_end,
         "reviewFeedback": _studio_review_feedback(ads),
         "insightsState": "ok" if insights is not None else "unavailable",
         "spendMinor": insights["spendMinor"] if insights is not None else None,

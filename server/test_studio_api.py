@@ -604,6 +604,7 @@ def test_diagnostics_admin_only_no_pii(actors):
         assert set(body["baselines"]) == {"B1", "B2", "B3", "B4", "B5", "B6"}
         assert body["campaigns"]["byStatus"]["Approved"] >= 1 and body["holds"]["count"] >= 0
         assert body["switches"] == {"envStudioV2": "off"}
+        assert set(body["metaLanes"]["lanes"]) == {"admin", "studio_results", "page"}  # P3-00c lane report
         for secret in (owner["email"], f"Pii Marker Person {TAG}", f"Secret Campaign Name {TAG}", f"Private Page {TAG}",
                        phone, owner["id"], campaign_id, actors["staff"]["id"], actors["admin"]["id"], "@"):
             assert secret not in response.text, secret

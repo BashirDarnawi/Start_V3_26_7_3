@@ -26,7 +26,7 @@ from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import studio_ig_poll
+from server.systems.ads_studio import studio_alerts_meta, studio_ig_poll
 from server.systems.ads_studio.studio_ig_poll import account_bucket
 
 TAG = secrets.token_hex(4)
@@ -120,15 +120,18 @@ def _replace_rows(entity_type: str, rows: list[dict]) -> None:
 
 
 class FakeGraph:
-    """Answers MetaAdsClient._request by (method, path); records every call. Replies always land."""
+    """Answers MetaAdsClient._request by (method, path); records every call (and the meta_call_lane
+    block it was made in). Replies always land."""
 
     def __init__(self):
         self.calls = []
+        self.lanes = []
         self.routes = {}
 
     def request(self, method, path, *, params=None, data=None, access_token=None, use_headroom=False):
         body = dict(params or {}) if method == "GET" else dict(data or {})
         self.calls.append((method, path, body, access_token))
+        self.lanes.append((method, path, meta_ads._META_LANE_CONTEXT.get()))
         answer = self.routes.get((method, path))
         if answer is None and method == "POST" and path.endswith("/replies"):
             return {"id": "18999999999999999"}
@@ -153,8 +156,21 @@ def graph(monkeypatch):
     return fake
 
 
+@pytest.fixture
+def token_checks(monkeypatch):
+    """The studio's token check (studio_alerts_meta.after_authorization_failure), counted, never run:
+    the real one asks Meta's debug_token."""
+    checks = []
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", lambda: checks.append(True) or False)
+    return checks
+
+
+def _fresh_lanes() -> dict:
+    return {"studio_results": meta_ads._MetaLaneState(), "page": meta_ads._MetaLaneState()}
+
+
 @pytest.fixture(autouse=True)
-def _clean(actors, monkeypatch):
+def _clean(actors, monkeypatch, token_checks):
     saved = {entity_type: _rows_of(entity_type) for entity_type in TYPES}
     for entity_type in TYPES:
         _replace_rows(entity_type, [])
@@ -165,6 +181,11 @@ def _clean(actors, monkeypatch):
     for name in ("_META_REMOTE_BACKOFF_REASON", "_META_REMOTE_USAGE_PERCENT"):
         monkeypatch.setattr(meta_ads, name, getattr(meta_ads, name))  # put back after the test
     monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", 0.0)
+    # Meta call lanes (PLAN P3-00): no app-wide pause and no parked page.
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_REASON", "")
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATES", _fresh_lanes())
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATE_REFRESHED_AT", 0.0)
     meta_ads._PAGE_TOKEN_CACHE.clear()
     _next_minute()
     for user in actors.values():
@@ -492,7 +513,7 @@ def test_counts_only_audited_and_the_cursor_keeps_no_meta_ids(actors, graph):
             assert secret not in dumped
 
 
-def test_meta_errors_are_codes_and_unread_media_are_read_next_time(actors, graph):
+def test_meta_errors_are_codes_and_unread_media_are_read_next_time(actors, graph, token_checks):
     started = now_ms()
     _ig_page(actors)
     _rule(actors, "srule_all", created_ago=timedelta(hours=1))
@@ -506,17 +527,21 @@ def test_meta_errors_are_codes_and_unread_media_are_read_next_time(actors, graph
     _next_minute()
     _check(actors, read=1, new=1, replied=1, errorCode="")
     assert [path for path, _body, _token in graph.posts()] == ["18700000000000001/replies", "18700000000000002/replies"]
-    # A refused media list is a code, never Meta's text.
+    assert token_checks == []  # a temporary error is not an authorization problem
+    # A refused media list is a code, never Meta's text; an authorization refusal runs the studio's
+    # token check, as Social Studio's replies do.
     graph.routes[("GET", f"{IG_USER}/media")] = meta_ads.MetaAdsError("authorization", "secret text", provider_code="190")
     _next_minute()
     body = _check(actors, read=0, new=0, replied=0, skipped=0, errorCode="authorization")
     assert "secret" not in json.dumps(body)
+    assert token_checks == [True]
 
 
 def test_meta_pause_reads_nothing_and_keeps_the_minute(actors, graph, monkeypatch):
     _ig_page(actors)
     _rule(actors, "srule_all", created_ago=timedelta(hours=1))
     account = Account(graph, {MEDIA_1: [_comment("18800000000000001", timedelta(minutes=5))]})
+    meta_ads._mark_app_wide(120, reason="meta_4")  # Meta's app-wide limit (code 4): every lane waits
     meta_ads._set_meta_remote_backoff(120, reason="meta_4")
     refused = _press(actors)
     _error(refused, 409, "META_PAUSED")
@@ -529,6 +554,32 @@ def test_meta_pause_reads_nothing_and_keeps_the_minute(actors, graph, monkeypatc
     _error(_press(actors), 409, "META_PAUSED")
     Account(graph, account.media)
     _check(actors, read=1, new=1, replied=1)
+
+
+def test_the_check_reads_on_the_linked_page_lane(actors, graph):
+    """PLAN P3-00: the reads run in meta_call_lane("page", subject=<the linked metaPageId>), and the
+    press waits only for what that lane waits for (an app-wide pause, a park of that page)."""
+    _ig_page(actors)
+    _rule(actors, "srule_all", created_ago=timedelta(hours=1))
+    account = Account(graph, {MEDIA_1: [_comment("18810000000000001", timedelta(minutes=5))]})
+    # Meta's ads limit paused the admin lane (Albayan Manager's sync): the check still reads.
+    meta_ads._set_meta_remote_backoff(600, reason="meta_80004")
+    _check(actors, read=1, new=1, replied=1)
+    reads = [lane for method, path, lane in graph.lanes if method == "GET" and path.startswith((IG_USER, MEDIA_1))]
+    assert reads == [("page", IG_PAGE_FB), ("page", IG_PAGE_FB)]  # the media list and the one media's comments
+    # A park of another page does not hold it up either.
+    meta_ads._park_lane_objects("page", (FB_PAGE,), 300, reason="meta_80001")
+    account.media[MEDIA_1].append(_comment("18810000000000002", timedelta(minutes=1)))
+    _next_minute()
+    _check(actors, read=2, new=1, replied=1)
+    # A park of the linked page: refused before anything is read, and the account's minute stays free.
+    meta_ads._park_lane_objects("page", (IG_PAGE_FB,), 300, reason="meta_80001")
+    _next_minute()
+    calls = len(graph.calls)
+    refused = _press(actors)
+    _error(refused, 409, "META_PAUSED")
+    assert 240 < int(refused.headers["Retry-After"]) <= 300
+    assert len(graph.calls) == calls
 
 
 def test_a_capped_or_crashed_comment_waits_for_the_next_check(actors, graph, monkeypatch):

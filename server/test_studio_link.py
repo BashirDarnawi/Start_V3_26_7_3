@@ -39,6 +39,7 @@ from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from server.systems.ads_studio import ad_campaign_actions as actions
+from server.systems.ads_studio import studio_alerts_meta
 from server.systems.ads_studio.studio_types import (
     STUDIO_NAME_SEPARATOR,
     is_studio_ref,
@@ -217,6 +218,7 @@ class FakeMeta:
         self.snapshots: dict[str, dict] = {}
         self.posts: list[tuple[str, dict]] = []
         self.post_error = None
+        self.token_checks = 0  # studio_alerts_meta.after_authorization_failure calls (the studio's token check)
 
     def add(self, meta_id: str, name: str = "Spring promo", **fields) -> str:
         self.campaigns[meta_id] = {"name": name, "accountId": ACCOUNT, "currency": "USD", **fields}
@@ -277,6 +279,12 @@ def meta(monkeypatch):
     monkeypatch.setenv("ALBAYAN_META_AD_ACCOUNT_IDS", ACCOUNT)
     monkeypatch.setenv("ALBAYAN_META_BACKGROUND_SYNC", "false")
     monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: fake)
+
+    def token_check() -> bool:  # the real one would ask Meta's debug_token (no network in tests)
+        fake.token_checks += 1
+        return False
+
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", token_check)
     saved = meta_ads.load_meta_health_state("token")
     _grant(None)
     yield fake
@@ -467,6 +475,12 @@ def test_a_rename_meta_refuses_falls_back_and_a_busy_meta_writes_nothing(staff, 
     busy = _link(staff, campaign_id, meta_id)
     assert busy.status_code == 503 and busy.json()["detail"].startswith(actions.REFUSE_LINK_META_BUSY), busy.text
     assert int(busy.headers["Retry-After"]) >= 1
+    assert meta.token_checks == 0
+    # A rename Meta refuses for authorization: the same manual-rename answer, and the token check runs.
+    meta.rename_error = meta_ads.MetaAdsError("authorization", "Meta authorization failed.", provider_code="190")
+    refused = _link(staff, campaign_id, meta_id)
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "NEEDS_MANUAL_RENAME", refused.text
+    assert meta.token_checks == 1
     assert _last_modified(campaign_id) == before and not _data(campaign_id).get("metaCampaignId")
     assert _audit_rows(campaign_id, "publish_status") == []
 
@@ -570,9 +584,11 @@ def test_link_validation_refusals(staff, meta, monkeypatch):
     meta.read_error = meta_ads.MetaAdsError("rate_limited", "paused", retryable=True)
     response = _link(staff, campaign_id, good)
     assert response.status_code == 503 and detail(response).startswith(actions.REFUSE_LINK_META_BUSY)
+    assert meta.token_checks == 0  # only an authorization refusal runs the token check
     meta.read_error = meta_ads.MetaAdsError("authorization", "Meta authorization failed.", provider_code="190")
     response = _link(staff, campaign_id, good)
     assert response.status_code == 502 and detail(response).startswith(actions.REFUSE_LINK_META_FAILED)
+    assert meta.token_checks == 1  # the studio's token check ran, as for Social Studio's replies
     meta.read_error = None
     assert meta.renames == [] and not _data(campaign_id).get("metaCampaignId")
 

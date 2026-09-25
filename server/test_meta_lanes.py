@@ -4,7 +4,9 @@ Each lane has its own request lock, pacing clock and back-off record. Graph is f
 httpx.MockTransport; nothing here reaches the network. Replies go through Social Studio's own
 reply code (social_studio._execute_rule_actions), which sends with a Page token. The system
 token, the Page tokens and the full page and ad account ids never appear in the lane report or
-in the stored lane row.
+in the stored lane row. Also here: a Meta refusal keeps its reason over usage_high (the headroom
+exception), 613 with an ad-account subcode, meta_ads.get_campaign_results on the studio_results
+lane (and its delivering flag), write races on the stored rows, and the diagnostics lane report.
 """
 
 import json
@@ -17,9 +19,10 @@ import pytest
 from sqlalchemy import text
 
 import server.meta_ads as meta_ads
-from server.db import db_conn, init_db
+from server import meta_collisions
+from server.db import db_conn, init_db, now_ms
 from server.main import app  # noqa: F401  (the app sets up the test database)
-from server.systems.ads_studio import social_studio
+from server.systems.ads_studio import social_studio, studio_diagnostics
 
 TAG = secrets.token_hex(4)
 SYSTEM_TOKEN = f"lanes-system-token-{TAG}-never-leaks"
@@ -28,6 +31,7 @@ ACCOUNT = "444444444444461"
 ACCOUNT_2 = "444444444444472"
 CAMPAIGN = "120900000000061"
 CAMPAIGN_2 = "120900000000072"
+CAMPAIGN_3 = "120900000000083"  # a second campaign in ACCOUNT
 PAGE_A = "5100000000061"
 PAGE_B = "5100000000072"
 COMMENTS = {PAGE_A: "7100000000061_1", PAGE_B: "7100000000072_1"}
@@ -44,10 +48,9 @@ def _ok(body, headers=None):
     return lambda request: httpx.Response(200, json=body, headers=headers or {})
 
 
-def _refused(code, headers=None):
-    return lambda request: httpx.Response(
-        400, json={"error": {"code": code, "message": "Too many calls"}}, headers=headers or {}
-    )
+def _refused(code, headers=None, *, subcode=None):
+    error = {"code": code, "message": "Too many calls", **({"error_subcode": subcode} if subcode else {})}
+    return lambda request: httpx.Response(400, json={"error": error}, headers=headers or {})
 
 
 def _buc(object_id, kind, call_count, regain_minutes=0):
@@ -180,7 +183,7 @@ def _refused_locally(call):
 def _no_ids_or_tokens(value):
     dumped = json.dumps(value, ensure_ascii=False)
     for secret in (SYSTEM_TOKEN, APP_SECRET, _page_token(PAGE_A), _page_token(PAGE_B), "PAGE-TOKEN",
-                   PAGE_A, PAGE_B, ACCOUNT, ACCOUNT_2, CAMPAIGN, CAMPAIGN_2):
+                   PAGE_A, PAGE_B, ACCOUNT, ACCOUNT_2, CAMPAIGN, CAMPAIGN_2, CAMPAIGN_3):
         assert secret not in dumped, secret
 
 
@@ -494,6 +497,185 @@ def test_studio_results_usage_header_parks_the_named_account(graph):
     assert sorted(park["object"] for park in parks) == sorted(f"…{a[-4:]}" for a in (ACCOUNT, ACCOUNT_2))
 
 
+def _stored_provider_row():
+    with db_conn() as conn:
+        raw = conn.execute(
+            text("SELECT data_json FROM entities WHERE type=:type AND id='global'"), {"type": PROVIDER_TYPE}
+        ).scalar()
+    return json.loads(raw) if raw else {}
+
+
+def _headroom_read():
+    """The funds card's small read: allowed through Albayan's own usage_high margin only."""
+    return _client()._get(f"act_{ACCOUNT}", {"fields": "id"}, use_headroom=True)
+
+
+def test_usage_high_never_replaces_a_meta_refusal(graph, monkeypatch):
+    """Meta refused an admin read (80004, Retry-After 600); then a page-lane answer carries
+    x-app-usage 86 (usage_high, app-wide). The admin pause keeps Meta's reason, in memory and in the
+    stored row, so the headroom exception never lets the funds read reach Meta during Meta's throttle."""
+    app_usage = {"x-app-usage": json.dumps({"call_count": 86, "total_cputime": 10, "total_time": 10})}
+    graph.routes[("GET", ADMIN_PATH)] = _refused(80004, {"Retry-After": "600"})
+    graph.route_page(PAGE_A, reply=_ok({"id": "c1"}, app_usage))
+    graph.routes[("GET", f"act_{ACCOUNT}")] = _ok({"id": f"act_{ACCOUNT}"})
+    with pytest.raises(meta_ads.MetaAdsError) as limited:
+        _admin_read()
+    assert limited.value.provider_code == "80004"
+    assert _reply(PAGE_A)[0] == ["public"]  # the page lane does not wait for the admin lane's ads limit
+    assert meta_ads.lane_state_report()["appWide"]["reason"] == "usage_high"  # the 86% reading was taken
+    seen = len(graph.seen)
+    _refused_locally(_headroom_read)
+    assert len(graph.seen) == seen
+    assert meta_ads._public_meta_provider_state()["reason"] == "meta_80004"
+    assert meta_ads._meta_remote_backoff_remaining() > 500
+    stored = _stored_provider_row()
+    assert stored["backoffReason"] == "meta_80004" and stored["backoffUntilMs"] > now_ms() + 500_000
+    # Another process that stored usage_high later does not change it either (restored from storage).
+    with db_conn() as conn:
+        conn.execute(
+            text("UPDATE entities SET data_json=:data WHERE type=:type AND id='global'"),
+            {"data": json.dumps({**stored, "backoffReason": "usage_high", "backoffUntilMs": now_ms() + 900_000}),
+             "type": PROVIDER_TYPE},
+        )
+    meta_ads._refresh_meta_provider_state(force=True)
+    assert meta_ads._public_meta_provider_state()["reason"] == "meta_80004"
+    _refused_locally(_headroom_read)
+    # A process that starts now restores Meta's reason from the stored row it wrote.
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_REASON", "")
+    with db_conn() as conn:
+        conn.execute(
+            text("UPDATE entities SET data_json=:data WHERE type=:type AND id='global'"),
+            {"data": json.dumps(stored), "type": PROVIDER_TYPE},
+        )
+    meta_ads._refresh_meta_provider_state(force=True)
+    assert meta_ads._public_meta_provider_state()["reason"] == "meta_80004"
+    _refused_locally(_headroom_read)
+    assert len(graph.seen) == seen
+
+
+def test_usage_high_alone_still_leaves_headroom(graph):
+    """Without a refusal by Meta, Albayan's own margin keeps the headroom exception (unchanged)."""
+    graph.routes[("GET", ADMIN_PATH)] = _ok({"data": []}, _buc(ACCOUNT, "ads_management", 90))
+    graph.routes[("GET", f"act_{ACCOUNT}")] = _ok({"id": f"act_{ACCOUNT}"})
+    _admin_read()
+    _refused_locally(_admin_read)
+    assert _headroom_read()["id"] == f"act_{ACCOUNT}"
+    assert _stored_provider_row()["backoffReason"] == "usage_high"
+
+
+@pytest.mark.parametrize("subcode", [1487742, 1487632, 1487225, 5044001])
+def test_613_with_an_ad_account_subcode_is_ads_scoped(graph, subcode):
+    graph.routes[("GET", RESULTS[ACCOUNT])] = _refused(613, subcode=subcode)
+    graph.routes[("GET", RESULTS[ACCOUNT_2])] = _ok({"data": []})
+    graph.routes[("GET", ADMIN_PATH)] = _ok({"data": []})
+    graph.route_page(PAGE_A)
+    with pytest.raises(meta_ads.MetaAdsError) as limited:
+        _results_read(ACCOUNT)
+    assert limited.value.provider_code == f"613.{subcode}"
+    # The studio_results lane parks only that ad account; nothing else waits.
+    _refused_locally(lambda: _results_read(ACCOUNT))
+    _results_read(ACCOUNT_2)
+    _admin_read()
+    assert _reply(PAGE_A)[0] == ["public"]
+    report = meta_ads.lane_state_report()
+    assert report["appWide"]["paused"] is False and report["lanes"]["admin"]["paused"] is False
+    parks = report["lanes"]["studio_results"]["parks"]
+    assert [(park["object"], park["reason"]) for park in parks] == [(f"…{ACCOUNT[-4:]}", f"meta_613.{subcode}")]
+    # On the admin lane it pauses the admin lane, as Meta's ads codes do; still not app-wide.
+    graph.routes[("GET", ADMIN_PATH)] = _refused(613, subcode=subcode)
+    with pytest.raises(meta_ads.MetaAdsError):
+        _admin_read()
+    _refused_locally(_admin_read)
+    assert _reply(PAGE_A)[0] == ["public"]
+    _results_read(ACCOUNT_2)
+    assert meta_ads.lane_state_report()["appWide"]["paused"] is False
+
+
+def test_plain_613_and_other_subcodes_stay_app_wide(graph):
+    graph.routes[("GET", RESULTS[ACCOUNT])] = _refused(613, subcode=1234567)
+    graph.routes[("GET", RESULTS[ACCOUNT_2])] = _ok({"data": []})
+    with pytest.raises(meta_ads.MetaAdsError):
+        _results_read(ACCOUNT)
+    _refused_locally(lambda: _results_read(ACCOUNT_2))
+    assert meta_ads.lane_state_report()["appWide"]["reason"] == "meta_613.1234567"
+
+
+# ---------------------------------------------------------------------------
+# P3-01 through the lanes: get_campaign_results reads on the studio_results lane
+# ---------------------------------------------------------------------------
+
+
+def _campaign(campaign_id, account, *, ads=("ACTIVE",), adset_end="", stop_time=""):
+    """One combined read of a studio campaign, as Meta answers it."""
+    body = {
+        "id": campaign_id, "name": "ALB-S-LANES · Offer", "account_id": account, "status": "ACTIVE",
+        "effective_status": "ACTIVE", "start_time": "2026-09-01T08:00:00+0000",
+        "ads": {"data": [{"effective_status": status} for status in ads]},
+        "adsets": {"data": [{"effective_status": "ACTIVE", **({"end_time": adset_end} if adset_end else {})}]},
+        "insights": {"data": [{"spend": "1.00", "impressions": "10", "reach": "5", "clicks": "1",
+                               "account_currency": "USD"}]},
+    }
+    if stop_time:
+        body["stop_time"] = stop_time
+    return body
+
+
+@pytest.fixture
+def claimed(monkeypatch):
+    """Every campaign here is claimed by one studio request (the claim rule has its own tests)."""
+    monkeypatch.setattr(meta_collisions, "campaign_claimed_by", lambda conn, campaign_id: ["cmp_lanes_request"])
+
+
+@pytest.mark.parametrize("limit", ["x-ad-account-usage", 80000, 80004])
+def test_campaign_results_park_the_ad_account_not_the_campaign(graph, claimed, limit):
+    usage = {"x-ad-account-usage": json.dumps({"acc_id_util_pct": 91})}
+    graph.routes[("GET", CAMPAIGN)] = (
+        _ok(_campaign(CAMPAIGN, ACCOUNT), usage) if limit == "x-ad-account-usage" else _refused(limit)
+    )
+    graph.routes[("GET", CAMPAIGN_3)] = _ok(_campaign(CAMPAIGN_3, ACCOUNT))
+    graph.routes[("GET", CAMPAIGN_2)] = _ok(_campaign(CAMPAIGN_2, ACCOUNT_2))
+    graph.routes[("GET", ADMIN_PATH)] = _ok({"data": []})
+    if limit == "x-ad-account-usage":
+        assert meta_ads.get_campaign_results(ACCOUNT, CAMPAIGN)["spendMinor"] == 100  # read, then parked
+    else:
+        with pytest.raises(meta_ads.MetaAdsError) as limited:
+            meta_ads.get_campaign_results(ACCOUNT, CAMPAIGN)
+        assert limited.value.provider_code == str(limit)
+    seen = len(graph.seen)
+    # Campaign 2 of the same ad account is refused before anything reaches Meta.
+    _refused_locally(lambda: meta_ads.get_campaign_results(ACCOUNT, CAMPAIGN_3))
+    assert len(graph.seen) == seen
+    # Another account's campaign and the admin lane keep going.
+    assert meta_ads.get_campaign_results(ACCOUNT_2, CAMPAIGN_2)["campaignId"] == CAMPAIGN_2
+    _admin_read()
+    assert meta_ads.studio_meta_pause_seconds() == 0
+    assert meta_ads.meta_lane_pause_seconds("studio_results", ACCOUNT) > 0
+    assert meta_ads.meta_lane_pause_seconds("studio_results", CAMPAIGN) == 0  # the campaign id is never parked
+    report = meta_ads.lane_state_report()
+    assert [park["object"] for park in report["lanes"]["studio_results"]["parks"]] == [f"…{ACCOUNT[-4:]}"]
+    assert report["appWide"]["paused"] is False
+    _no_ids_or_tokens(report)
+
+
+@pytest.mark.parametrize("adset_end,stop_time,ads,delivering", [
+    ("", "", ("ACTIVE",), True),                                            # runs until stopped
+    ("2099-01-01T00:00:00+0000", "", ("ACTIVE", "PAUSED"), True),           # the end time is still ahead
+    ("2099-01-01T00:00:00+0000", "2099-02-01T00:00:00+0000", ("ACTIVE",), True),
+    ("2020-01-01T00:00:00+0000", "", ("ACTIVE",), False),                   # ads stay ACTIVE after the end time
+    ("", "2020-01-01T00:00:00+0000", ("ACTIVE",), False),                   # the campaign's stop time passed
+    ("2099-01-01T00:00:00+0000", "2020-01-01T00:00:00+0000", ("ACTIVE",), False),
+    ("2099-01-01T00:00:00+0000", "", ("PAUSED",), False),                   # nothing ACTIVE
+])
+def test_campaign_results_deliver_only_before_meta_end_times(graph, claimed, adset_end, stop_time, ads, delivering):
+    """Meta has no COMPLETED status: an ACTIVE ad whose ad set end time or campaign stop time has
+    passed delivers nothing, so anyAdDelivering is false then."""
+    graph.routes[("GET", CAMPAIGN)] = _ok(_campaign(CAMPAIGN, ACCOUNT, ads=ads, adset_end=adset_end, stop_time=stop_time))
+    got = meta_ads.get_campaign_results(ACCOUNT, CAMPAIGN)
+    assert got["anyAdDelivering"] is delivering
+    assert got["adStatusCounts"].get("ACTIVE", 0) == ads.count("ACTIVE")  # the counts stay Meta's
+
+
 # ---------------------------------------------------------------------------
 # P3-00c: lane state persisted like metaProviderState and shown for diagnostics
 # ---------------------------------------------------------------------------
@@ -579,3 +761,109 @@ def test_ended_parks_are_forgotten(graph, monkeypatch):
     assert meta_ads.meta_lane_pause_seconds("page", PAGE_A) == 0
     report = meta_ads.lane_state_report(refresh=True)
     assert report["lanes"]["page"]["parkCount"] == 0
+
+
+def _another_process_writes(state_id, change):
+    """Another process writes one stored metaProviderState row (inserts it, or bumps its version)."""
+    with db_conn() as conn:
+        row = conn.execute(
+            text("SELECT data_json, last_modified FROM entities WHERE type=:type AND id=:id"),
+            {"type": PROVIDER_TYPE, "id": state_id},
+        ).mappings().first()
+        if row is None:
+            stamp = now_ms()
+            conn.execute(
+                text(
+                    "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                    "VALUES (:type,:id,:data,false,:stamp,NULL,:stamp)"
+                ),
+                {"type": PROVIDER_TYPE, "id": state_id, "data": json.dumps(change({})), "stamp": stamp},
+            )
+        else:
+            conn.execute(
+                text("UPDATE entities SET data_json=:data, last_modified=:version WHERE type=:type AND id=:id"),
+                {"type": PROVIDER_TYPE, "id": state_id, "data": json.dumps(change(json.loads(row["data_json"]))),
+                 "version": int(row["last_modified"]) + 1},
+            )
+
+
+def _race_once(monkeypatch, merge_name, other_write):
+    """The next merge ``merge_name`` runs just after another process wrote the same row: between this
+    write's read and its write (its version check then refuses it, or its first insert fails)."""
+    real = getattr(meta_ads, merge_name)
+    raced = []
+
+    def racing(stored, fresh):
+        if not raced:
+            raced.append(True)
+            other_write()
+        return real(stored, fresh)
+
+    monkeypatch.setattr(meta_ads, merge_name, racing)
+    return raced
+
+
+def _add_park(lane, object_id):
+    def change(data):
+        park = {"key": meta_ads._lane_park_key(lane, object_id), "object": f"…{object_id[-4:]}",
+                "untilMs": now_ms() + 300_000, "reason": "meta_80001", "usagePercent": 0}
+        lanes = data.setdefault("lanes", {})
+        lanes.setdefault(lane, {"parks": []})["parks"].append(park)
+        return {**data, "recordType": PROVIDER_TYPE}
+
+    return lambda: _another_process_writes("lanes", change)
+
+
+def test_a_lane_write_race_keeps_every_park(graph, monkeypatch):
+    graph.route_page(PAGE_A, reply=_refused(80001))
+    graph.routes[("GET", RESULTS[ACCOUNT])] = _refused(80000)
+    # No row yet: another process inserts it first (page B); this insert fails, reads again, merges.
+    raced = _race_once(monkeypatch, "_merged_lane_row", _add_park("page", PAGE_B))
+    assert _reply(PAGE_A)[0] == []
+    assert raced == [True]
+    stored = json.loads(_stored_lane_row()["data_json"])
+    assert sorted(park["object"] for park in stored["lanes"]["page"]["parks"]) == sorted(
+        f"…{p[-4:]}" for p in (PAGE_A, PAGE_B))
+    # The row exists: another process parks ACCOUNT_2 between this write's read and its write (409).
+    raced = _race_once(monkeypatch, "_merged_lane_row", _add_park("studio_results", ACCOUNT_2))
+    with pytest.raises(meta_ads.MetaAdsError):
+        _results_read(ACCOUNT)
+    assert raced == [True]
+    stored = json.loads(_stored_lane_row()["data_json"])
+    assert sorted(park["object"] for park in stored["lanes"]["studio_results"]["parks"]) == sorted(
+        f"…{a[-4:]}" for a in (ACCOUNT, ACCOUNT_2))
+    assert len(stored["lanes"]["page"]["parks"]) == 2
+    _no_ids_or_tokens(stored)
+    # A process that starts now sees every park.
+    _restart(monkeypatch)
+    report = meta_ads.lane_state_report(refresh=True)
+    assert report["lanes"]["page"]["parkCount"] == 2 and report["lanes"]["studio_results"]["parkCount"] == 2
+
+
+def test_a_provider_write_race_keeps_the_longer_pause(graph, monkeypatch):
+    graph.routes[("GET", ADMIN_PATH)] = _refused(80004, {"Retry-After": "120"})
+    until = now_ms() + 900_000
+    raced = _race_once(monkeypatch, "_merged_provider_row", lambda: _another_process_writes(
+        "global", lambda data: {"recordType": PROVIDER_TYPE, "backoffUntilMs": until, "backoffReason": "meta_4"}))
+    with pytest.raises(meta_ads.MetaAdsError):
+        _admin_read()
+    assert raced == [True]
+    stored = _stored_provider_row()
+    assert stored["backoffUntilMs"] >= until and stored["backoffReason"] == "meta_80004"
+    _restart(monkeypatch)
+    meta_ads._refresh_meta_provider_state(force=True)
+    assert meta_ads._meta_remote_backoff_remaining() > 800
+
+
+def test_diagnostics_show_the_lane_report(graph):
+    """P3-00c: GET /api/studio/admin/diagnostics carries lane_state_report(): pauses, counts, parks."""
+    graph.route_page(PAGE_A, reply=_refused(80001))
+    graph.routes[("GET", RESULTS[ACCOUNT])] = _refused(80000)
+    assert _reply(PAGE_A)[0] == []
+    with pytest.raises(meta_ads.MetaAdsError):
+        _results_read(ACCOUNT)
+    lanes = studio_diagnostics.read_diagnostics()["metaLanes"]
+    assert set(lanes["lanes"]) == set(meta_ads.META_LANES) and lanes["appWide"]["paused"] is False
+    assert [park["object"] for park in lanes["lanes"]["page"]["parks"]] == [f"…{PAGE_A[-4:]}"]
+    assert lanes["lanes"]["studio_results"]["parkCount"] == 1
+    _no_ids_or_tokens(lanes)

@@ -108,15 +108,18 @@ def _replace_rows(entity_type: str, rows: list[dict]) -> None:
 
 
 class FakeGraph:
-    """Answers MetaAdsClient._request by (method, path); records every call."""
+    """Answers MetaAdsClient._request by (method, path); records every call (and the meta_call_lane
+    block it was made in)."""
 
     def __init__(self):
         self.calls = []
+        self.lanes = []
         self.routes = {}
 
     def request(self, method, path, *, params=None, data=None, access_token=None, use_headroom=False):
         body = dict(params or {}) if method == "GET" else dict(data or {})
         self.calls.append((method, path, body, access_token))
+        self.lanes.append((method, path, meta_ads._META_LANE_CONTEXT.get()))
         answer = self.routes.get((method, path))
         if answer is None:
             raise AssertionError(f"unexpected Graph {method} {path}")
@@ -150,6 +153,12 @@ def _clean(actors, monkeypatch):
     for name in ("_META_REMOTE_BACKOFF_REASON", "_META_REMOTE_USAGE_PERCENT"):
         monkeypatch.setattr(meta_ads, name, getattr(meta_ads, name))  # put back after the test
     monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", 0.0)
+    # Meta call lanes (PLAN P3-00): no app-wide pause and no parked page.
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_REASON", "")
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATES", {"studio_results": meta_ads._MetaLaneState(),
+                                                        "page": meta_ads._MetaLaneState()})
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATE_REFRESHED_AT", 0.0)
     monkeypatch.setattr(studio_facts, "_now", lambda: DAY_1)
     meta_ads._PAGE_TOKEN_CACHE.clear()
     for user in actors.values():
@@ -646,6 +655,7 @@ def test_checks_refused_while_meta_is_paused_keep_the_day(actors, graph, monkeyp
     graph.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = {"success": True}
     admin = actors["admin"]["cookies"]
     subscribe_url, ig_url = f"{API}/pages/spg_fb_1/subscribe-test", f"{API}/instagram/spg_ig_1/read-test"
+    meta_ads._mark_app_wide(120, reason="meta_4")  # Meta's app-wide limit (code 4): every lane waits
     meta_ads._set_meta_remote_backoff(120, reason="meta_4")
     for url in (subscribe_url, ig_url):
         refused = client.post(url, cookies=admin)
@@ -656,6 +666,26 @@ def test_checks_refused_while_meta_is_paused_keep_the_day(actors, graph, monkeyp
     monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
     assert client.post(subscribe_url, cookies=admin).json()["ok"] is True
     assert client.post(ig_url, cookies=admin).json()["commentsRead"] == 3
+
+
+def test_checks_wait_only_for_their_own_page_lane(actors, graph):
+    """PLAN P3-00: both tests read on the tested page's lane: the admin lane's own pause never
+    refuses them, and a park of one page refuses only that page's test."""
+    _page(actors, "spg_fb_1", FB_PAGE)
+    _page(actors, "spg_ig_1", IG_PAGE_FB, "ig", IG_USER)
+    _ig_graph(graph)
+    graph.routes[("POST", f"{FB_PAGE}/subscribed_apps")] = {"success": True}
+    admin = actors["admin"]["cookies"]
+    subscribe_url, ig_url = f"{API}/pages/spg_fb_1/subscribe-test", f"{API}/instagram/spg_ig_1/read-test"
+    meta_ads._set_meta_remote_backoff(600, reason="meta_80004")  # Meta's ads limit on Albayan Manager
+    meta_ads._park_lane_objects("page", (FB_PAGE,), 300, reason="meta_80001")  # Meta's limit on one page
+    refused = client.post(subscribe_url, cookies=admin)
+    _error(refused, 409, "META_PAUSED")
+    assert 240 < int(refused.headers["Retry-After"]) <= 300
+    assert graph.calls == [] and meta_ads.load_meta_health_state("studioFactTests") == {}  # the day is still free
+    assert client.post(ig_url, cookies=admin).json()["commentsRead"] == 3
+    reads = [lane for method, path, lane in graph.lanes if method == "GET" and path.startswith((IG_USER, "900"))]
+    assert reads and set(reads) == {("page", IG_PAGE_FB)}  # the Instagram reads ran on the linked page's lane
 
 
 def test_a_pause_that_begins_during_a_test_gives_the_day_back(actors, graph):

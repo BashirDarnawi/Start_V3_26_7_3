@@ -16,7 +16,6 @@ import os
 import secrets
 import sys
 import threading
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -34,7 +33,7 @@ from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import ad_campaign_fields, studio_posts
+from server.systems.ads_studio import ad_campaign_fields, studio_alerts_meta, studio_posts
 from server.systems.ads_studio.ad_campaign_fields import (
     AD_CAMPAIGN_GOAL_DETAILS,
     AD_CAMPAIGN_OBJECTIVES,
@@ -210,8 +209,21 @@ def clock(monkeypatch):
     return fake
 
 
+@pytest.fixture
+def token_checks(monkeypatch):
+    """The studio's token check (studio_alerts_meta.after_authorization_failure), counted, never run:
+    the real one asks Meta's debug_token."""
+    checks = []
+    monkeypatch.setattr(studio_alerts_meta, "after_authorization_failure", lambda: checks.append(True) or False)
+    return checks
+
+
+def _fresh_lanes() -> dict:
+    return {"studio_results": meta_ads._MetaLaneState(), "page": meta_ads._MetaLaneState()}
+
+
 @pytest.fixture(autouse=True)
-def _clean(actors, monkeypatch):
+def _clean(actors, monkeypatch, token_checks):
     saved = {entity_type: _rows_of(entity_type) for entity_type in TYPES}
     for entity_type in TYPES:
         _replace_rows(entity_type, [])
@@ -221,6 +233,11 @@ def _clean(actors, monkeypatch):
     for name in ("_META_REMOTE_BACKOFF_REASON", "_META_REMOTE_USAGE_PERCENT"):
         monkeypatch.setattr(meta_ads, name, getattr(meta_ads, name))
     monkeypatch.setattr(meta_ads, "_META_PROVIDER_STATE_REFRESHED_AT", 0.0)
+    # Meta call lanes (PLAN P3-00): no app-wide pause and no parked page.
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_UNTIL", 0.0)
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_REASON", "")
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATES", _fresh_lanes())
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATE_REFRESHED_AT", 0.0)
     meta_ads._PAGE_TOKEN_CACHE.clear()
     studio_posts.clear_cache()
     for user in actors.values():
@@ -553,25 +570,38 @@ def test_facebook_only_page_reads_only_facebook(actors, graph):
 def test_meta_pause_gives_a_retry_code_or_the_kept_list(actors, graph, clock, monkeypatch):
     pages = _link_owner_pages(actors)
     _route_page_a(graph)
-    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", time.monotonic() + 120)
+    meta_ads._mark_app_wide(120, reason="meta_4")  # Meta's app-wide limit (code 4): every lane waits
+    meta_ads._set_meta_remote_backoff(120, reason="meta_4")
     paused = _recent(actors, "owner", pages["a_fb"])
     _error(paused, 409, "META_PAUSED")
     assert 100 <= int(paused.headers["Retry-After"]) <= 121
     assert graph.calls == []  # nothing reached Meta while Albayan's pause runs
 
+    monkeypatch.setattr(meta_ads, "_META_APP_WIDE_UNTIL", 0.0)
     monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
-    fresh = _recent(actors, "owner", pages["a_fb"]).json()
+    # The admin lane's own pause (Meta's ads limit on Albayan Manager) never holds the page's reads up.
+    meta_ads._set_meta_remote_backoff(600, reason="meta_80004")
+    first = _recent(actors, "owner", pages["a_fb"]).json()
+    assert len(first["posts"]) == 5 and {part["state"] for part in first["platforms"].values()} == {"ok"}
     clock.now += 11 * 60  # the kept list is now too old to be shown as fresh
-    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", time.monotonic() + 90)
+    # A park of another page does not hold this one up; a park of this page (Meta's page limit) does.
+    meta_ads._park_lane_objects("page", (PAGE_B,), 300, reason="meta_80001")
+    calls = len(graph.calls)
+    fresh = _recent(actors, "owner", pages["a_fb"]).json()
+    assert len(graph.calls) == calls + 2 and {part["state"] for part in fresh["platforms"].values()} == {"ok"}
+    clock.now += 11 * 60
+    meta_ads._park_lane_objects("page", (PAGE_A,), 90, reason="meta_80001")
+    calls = len(graph.calls)
     kept = _recent(actors, "owner", pages["a_fb"])
+    assert len(graph.calls) == calls
     assert kept.status_code == 200, kept.text
     body = kept.json()
     assert body["posts"] == fresh["posts"] and body["checkedAt"] == fresh["checkedAt"]
     assert {part["state"] for part in body["platforms"].values()} == {"paused"}
-    assert all(part["retryAfterSeconds"] > 0 for part in body["platforms"].values())
+    assert all(60 < part["retryAfterSeconds"] <= 90 for part in body["platforms"].values())
 
 
-def test_meta_errors_never_give_a_500(actors, graph, monkeypatch):
+def test_meta_errors_never_give_a_500(actors, graph, monkeypatch, token_checks):
     pages = _link_owner_pages(actors)
     graph.routes[("GET", f"{PAGE_A}/posts")] = meta_ads.MetaAdsError(
         "authorization", "Meta authorization failed. Reconnect the access token.", provider_code="190")
@@ -583,6 +613,7 @@ def test_meta_errors_never_give_a_500(actors, graph, monkeypatch):
     assert body["posts"] == [] and body["checkedAt"] == ""
     assert body["platforms"]["fb"] == {"state": "error", "checkedAt": "", "errorCode": "page_access", "retryAfterSeconds": 0}
     assert body["platforms"]["ig"]["state"] == "paused" and body["platforms"]["ig"]["retryAfterSeconds"] > 0
+    assert token_checks == [True]  # the authorization refusal ran the studio's token check (once)
 
     graph.routes[("GET", f"{PAGE_A}/posts")] = meta_ads.MetaAdsError(
         "rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True,
@@ -748,13 +779,20 @@ def test_picked_instagram_media_is_checked_against_the_lists(actors, graph, monk
         assert graph.paths()[before:] == [media_id]  # one read of that media, nothing else
     unknown = foreign
 
-    # Meta busy: 503 with Retry-After, from Albayan's own pause (nothing asked) or from Meta.
+    # Meta busy: 503 with Retry-After, from Albayan's own pause of the page's lane (a park of the
+    # page it reads with; nothing asked) or from Meta.
     studio_posts.clear_cache()
-    monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", time.monotonic() + 60)
+    meta_ads._park_lane_objects("page", (PAGE_A,), 60, reason="meta_80001")
     before = len(graph.calls)
     busy = _submit(actors["owner"], unknown)
-    assert busy.status_code == 503 and int(busy.headers["Retry-After"]) > 0, busy.text
+    assert busy.status_code == 503 and 0 < int(busy.headers["Retry-After"]) <= 60, busy.text
     assert len(graph.calls) == before
+    monkeypatch.setattr(meta_ads, "_META_LANE_STATES", _fresh_lanes())
+    # The admin lane's own pause is not the page's: the media is read (and is still not the customer's).
+    meta_ads._set_meta_remote_backoff(600, reason="meta_80004")
+    refused = _submit(actors["owner"], unknown)
+    assert refused.status_code == 400 and refused.json()["detail"] == T13, refused.text
+    assert graph.paths()[before:] == ["18999999999999997"]
     monkeypatch.setattr(meta_ads, "_META_REMOTE_BACKOFF_UNTIL", 0.0)
     graph.routes[("GET", "18999999999999997")] = meta_ads.MetaAdsError(
         "rate_limited", "Meta is temporarily limiting synchronization. Albayan will retry.", retryable=True,
