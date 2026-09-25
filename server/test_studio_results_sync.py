@@ -687,6 +687,7 @@ def test_the_jobs_loop_claims_the_results_job_only_with_a_token(meta, monkeypatc
     monkeypatch.setattr(studio_jobs, "sweep_orphans", lambda ctx, now, full=False: {})
     monkeypatch.setattr(studio_jobs, "check_waiting_requests", lambda now: {})
     monkeypatch.setattr(sync, "run_results_sync", lambda now: runs.append(now) or {"reads": 0})
+    monkeypatch.setattr(studio_jobs, "meta_watch_configured", lambda: False)  # the Meta watch (P3-18) has its own tests
     with db_conn() as conn:
         conn.execute(text("DELETE FROM entities WHERE type = :t AND id = :id"),
                      {"t": studio_jobs.JOB_STATE_TYPE, "id": studio_jobs.JOB_STATE_ID})
