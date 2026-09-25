@@ -92,7 +92,16 @@ function ensureStudioBundle(name, readyCheck = null) {
     const tag = document.createElement('script');
     tag.src = _studioLazyBundleUrl(name);
     tag.onload = () => {
-      slot.state = studioBundleReady(name, readyCheck) ? 'ready' : 'failed';
+      if (studioBundleReady(name, readyCheck)) {
+        slot.state = 'ready';
+      } else {
+        // The file arrived but did not register its functions (a mismatched or truncated copy): the
+        // same failed state as a lost request, with its cooldown, so a later draw or Retry asks again.
+        try { tag.remove(); } catch (_) {}
+        slot.state = 'failed';
+        slot.promise = null;
+        slot.failedAt = Date.now();
+      }
       try { if (state.currentView === 'ads-studio') render(); } catch (_) {}
       resolve();
     };

@@ -430,6 +430,74 @@ test.describe('Team desk (v2 staff frame)', () => {
     await expect(page.getByTestId('studio-desk')).toHaveAttribute('data-section', 'tickets');  // the desk stays where it was
   });
 
+  test('admin: Acknowledge takes an alert out of the open list through the real route contract (single flight, replay-safe, UNKNOWN_ALERT in words), and Scan money now runs the real scan (a second press within 10 minutes shows the wait)', async ({ page, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    test.setTimeout(120_000);
+    const seeded = await seedDesk(playwright, baseURL, testInfo, 'ack', { withAdmin: true });
+    const errors = collectPageErrors(page);
+    let nativeDialogs = 0;
+    page.on('dialog', dialog => { nativeDialogs += 1; dialog.dismiss().catch(() => {}); });
+    await page.setViewportSize(PHONE);
+    // The e2e server raises no alert by itself (no jobs loop, no Meta): the list and the acknowledge answer come from
+    // the route's own contract (studio_jobs list_alerts_page / acknowledge_alert), the desk code is the real one.
+    const alert = id => ({ id, kind: 'stop_request_overdue', labels: { en: 'A stop request has waited longer than the target: pause the ad in Meta now', ar: 'انتظر طلب إيقاف أكثر من الوقت المحدد: أوقف الإعلان في ميتا الآن' }, relatedType: 'adCampaignRequests', relatedId: seeded.ids.ended, ownerId: null, day: libyaDay(0), firstAt: hoursFromNow(-2), lastAt: hoursFromNow(-1), count: 2, customerVisible: false, acknowledgedAt: null, acknowledgedBy: null, channelSentAt: null, details: {} });
+    const open = new Map([['alrt_e2e_1', alert('alrt_e2e_1')], ['alrt_e2e_2', alert('alrt_e2e_2')]]);
+    const acks = [];
+    await page.route('**/api/studio/admin/alerts?**', route => route.fulfill({ json: { alerts: Array.from(open.values()), nextBefore: null, status: 'open', jobs: { enabled: false, late: false, lastTickAt: null } } }));
+    await page.route('**/api/studio/admin/alerts/*/ack', route => {
+      const id = route.request().url().match(/alerts\/([^/]+)\/ack/)[1];
+      acks.push(id);
+      if (id === 'alrt_e2e_2') return route.fulfill({ status: 404, json: { detail: { code: 'UNKNOWN_ALERT', message: 'No studio alert has this id' } } });
+      const row = open.get(id);
+      if (!row) return route.fulfill({ status: 404, json: { detail: { code: 'UNKNOWN_ALERT', message: 'No studio alert has this id' } } });
+      open.delete(id);
+      return route.fulfill({ json: { alert: { ...row, acknowledgedAt: new Date().toISOString(), acknowledgedBy: seeded.deskAdmin.id }, replay: false } });
+    });
+    await openDesk(page, seeded.deskAdmin, 'more');
+    await expect(page.getByTestId('studio-admin-menu')).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-admin-open-alerts').click();
+    const first = page.locator('[data-testid="studio-admin-alert"][data-id="alrt_e2e_1"]');
+    await expect(first).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(first.getByTestId('studio-admin-alert-ack-alrt_e2e_1')).toContainText('Acknowledge');
+    await expectNoPageOverflow(page, 'alerts with Acknowledge');
+    await first.getByTestId('studio-admin-alert-ack-alrt_e2e_1').click();
+    await expect(first).toHaveCount(0, { timeout: BOOT_TIMEOUT });  // the row left the open list
+    await expect(page.locator('[data-testid="studio-admin-alert"][data-id="alrt_e2e_2"]')).toBeVisible();
+    expect(acks.filter(id => id === 'alrt_e2e_1')).toHaveLength(1);
+    // An alert another admin archived: the words of an alert, not of a campaign request; the list is read again.
+    await page.getByTestId('studio-admin-alert-ack-alrt_e2e_2').click();
+    await expect(page.locator('#notification-container [role="alert"]').filter({ hasText: 'No studio alert has this id. Refresh the page.' }).first()).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await page.getByTestId('studio-back').click();
+
+    // Scan money now: the real route (admin, once every 10 minutes), the counts in words, then the wait.
+    await page.getByTestId('studio-admin-open-diagnostics').click();
+    const scan = page.getByTestId('studio-admin-scan-now');
+    await expect(scan).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(scan).toContainText('Scan money now');
+    const [scanResponse] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/studio/admin/integrity/scan') && r.request().method() === 'POST'),
+      scan.click()
+    ]);
+    expect(scanResponse.status(), 'the first scan of this admin runs').toBe(200);
+    const report = await scanResponse.json();
+    expect(report.counts && Number.isInteger(report.counts.total), 'the scan answers the daily report').toBe(true);
+    await expect(page.getByTestId('studio-admin-scan-note')).toHaveAttribute('data-total', String(report.counts.total), { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-admin-scan-note')).toContainText('Scan done');
+    const [second] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/studio/admin/integrity/scan') && r.request().method() === 'POST'),
+      scan.click()
+    ]);
+    expect(second.status(), 'one scan every 10 minutes').toBe(429);
+    await expect(page.getByTestId('studio-admin-scan-note')).toContainText(/Please wait/, { timeout: BOOT_TIMEOUT });
+    await setLanguage(page, 'ar');
+    await expect(page.getByTestId('studio-admin-scan-now')).toContainText('افحص الأموال الآن');
+    await expect(page.getByTestId('studio-admin-scan-note')).toContainText(ARABIC);
+    await expectNoPageOverflow(page, 'diagnostics with Scan money now (AR)');
+    expect(nativeDialogs).toBe(0);
+    // The browser logs the mocked 404 and the expected 429 as failed resources; nothing else may be logged.
+    expect(errors.filter(line => !/(404 \(Not Found\).*\/api\/studio\/admin\/alerts\/alrt_e2e_2\/ack|429 \(Too Many Requests\).*\/api\/studio\/admin\/integrity\/scan)/.test(line))).toEqual([]);
+  });
+
   test('smoke: a reviewer in the Team desk pilot sees the real queue, opens a request and gets the decision box', async ({ page, playwright, baseURL }, testInfo) => {
     test.skip(testInfo.project.name === FULL_MATRIX_PROJECT, 'The full matrix above covers mobile-chromium');
     test.setTimeout(90_000);

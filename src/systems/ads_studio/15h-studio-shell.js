@@ -74,11 +74,15 @@ const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (th
 // the /me session the visit notes belong to. fromApp: this visit came from another screen of this app
 // in this document (so Home's Back is the browser's Back). popping: a Back/Forward move is running.
 // opening: the address of the first v2 draw of this page ({tab, section, id, step}); reapplied: it was
-// put back once after the platform's post-login rewrite (studioV2ReapplyOpeningAddress).
+// put back once after the platform's post-login rewrite (studioV2ReapplyOpeningAddress). enteredAt:
+// the studio's first draw of this session (Date.now(); the clock of studioV2RestoreOpeningAddress);
+// openedAt: the first v2 draw (the clock of the reapply). Both run from the studio's own moments,
+// never from the page's navigation start, so a slow sign-in keeps its deep link.
 const _studioV2 = {
   shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false,
-  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false
+  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false, enteredAt: 0, openedAt: 0
 };
+const STUDIO_V2_OPENING_WINDOW_MS = 15000;
 const _studioV2Screens = new Map();  // tab -> draw(route): the body of that tab's screen root (studioV2RegisterScreen)
 const _studioV2ScreenWarned = new Set();
 
@@ -143,6 +147,8 @@ function studioV2NoteVisit() {
     _studioV2.repin = false;
     _studioV2.opening = null;
     _studioV2.reapplied = false;
+    _studioV2.enteredAt = 0;
+    _studioV2.openedAt = 0;
   }
   const previous = typeof _lastRenderedView !== 'undefined' ? _lastRenderedView : null;
   if (!previous || previous === 'ads-studio') return;
@@ -235,6 +241,7 @@ function renderStudioV2View() {
   try {
     studioLoadMe();  // reuses a fresh answer, joins a read on its way, re-reads an old one
     studioV2NoteVisit();
+    if (!_studioV2.enteredAt) _studioV2.enteredAt = Date.now();  // the studio's first draw of this session (at boot, or right after the sign-in)
     const frame = studioV2Frame();
     if (frame) { studioV2RestoreOpeningAddress(); studioV2ReapplyOpeningAddress(); }
     if (frame === 'staff') { _studioV2.shown = 'staff'; return renderStudioV2StaffFrame(); }
@@ -420,7 +427,10 @@ function studioV2EnsureHistory(route, frame) {
     const chain = studioV2HistoryChain();
     const firstDraw = !_studioV2.docRendered;
     _studioV2.docRendered = true;
-    if (!_studioV2.opening) _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };
+    if (!_studioV2.opening) {
+      _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };
+      _studioV2.openedAt = Date.now();
+    }
     if (chain && chain[chain.length - 1] === keys[keys.length - 1]) {
       // already marked: nothing to write
     } else if (path.length === 1 || (firstDraw && studioV2NavigationType() !== 'navigate' && studioV2Proven(keys))) {
@@ -433,13 +443,16 @@ function studioV2EnsureHistory(route, frame) {
 }
 
 // The start-up address rewrite keeps only ?tab= (and loses even that when this bundle arrives after
-// it). On the first v2 draw of a page opened moments ago (a classic staff screen of the v2 layout
-// included: it is chosen by the address), the address it was opened with comes back (only tab,
-// section, id and step), unless the reader has already moved somewhere else.
+// it). On the first v2 draw of a page whose studio was entered moments ago (a classic staff screen of
+// the v2 layout included: it is chosen by the address), the address it was opened with comes back
+// (only tab, section, id and step), unless the reader has already moved somewhere else. The clock
+// runs from the studio's first draw of this session (_studioV2.enteredAt: at boot, or right after a
+// sign-in however long the form took), never from the page's navigation start.
 function studioV2RestoreOpeningAddress() {
   if (_studioV2.docRendered) return;
   try {
-    if (typeof performance === 'undefined' || !(performance.now() < 15000)) return;
+    if (!_studioV2.enteredAt || Date.now() - _studioV2.enteredAt >= STUDIO_V2_OPENING_WINDOW_MS) return;
+    if (typeof performance === 'undefined' || typeof performance.getEntriesByType !== 'function') return;
     const entry = performance.getEntriesByType('navigation')[0];
     if (!entry || !entry.name) return;
     const opened = new URL(String(entry.name));
@@ -462,15 +475,17 @@ function studioV2RestoreOpeningAddress() {
 // post-login route restore (12-views restoreRequestedViewAfterLogin -> updateUrlForView) runs a
 // moment after the first v2 draw and puts its own entry, with the bare ?tab= and no studioV2 mark,
 // over the marked one. The address that first draw showed (studioV2EnsureHistory keeps it in
-// _studioV2.opening) comes back once, within the first 15 s of the page, when such an entry replaces
-// it: same tab, nothing beyond the tab in the address. The reader's own moves carry the mark, so they
-// are never touched; the path under the restored screen is rebuilt by the draw that follows.
+// _studioV2.opening) comes back once, within 15 s of that first v2 draw (_studioV2.openedAt; the
+// platform's push follows it within the same sign-in tick, however long the form took), when such an
+// entry replaces it: same tab, nothing beyond the tab in the address. The reader's own moves carry
+// the mark, so they are never touched; the path under the restored screen is rebuilt by the draw
+// that follows.
 function studioV2ReapplyOpeningAddress() {
   const opening = _studioV2.opening;
   if (!opening || _studioV2.reapplied || !_studioV2.docRendered) return;
   if (!opening.section && !opening.id && !opening.step) return;  // nothing beyond the tab to bring back
   try {
-    if (typeof performance === 'undefined' || !(performance.now() < 15000)) return;
+    if (!_studioV2.openedAt || Date.now() - _studioV2.openedAt >= STUDIO_V2_OPENING_WINDOW_MS) return;
     if (studioV2HistoryChain()) return;  // the studio's own entry
     const now = new URLSearchParams(window.location.search || '');
     if (['section', 'id', 'step'].some(key => now.get(key))) return;

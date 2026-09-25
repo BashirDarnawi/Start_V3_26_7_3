@@ -259,6 +259,84 @@ test.describe('Albayan Studio v2 Pages & replies', () => {
     expect(errors).toEqual([]);
   });
 
+  test('a rule whose page the team removed stays saveable from the editor, and a stale draft never switches a rule back on', async ({ page, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    const seeded = await seed(playwright, baseURL, testInfo, 'removed');
+    const errors = collectPageErrors(page);
+    // A keyword rule on the Facebook page, then the team unlinks that page (the rule keeps its ref and shows "Page removed").
+    const customerApi = await openUserApi(playwright, baseURL, seeded.user);
+    const admin = await openAdminApi(playwright, baseURL);
+    let ruleId = '';
+    try {
+      const created = await jsonOrThrow(await customerApi.post('/api/social-studio/rules', { data: {
+        name: 'E2E removed page rule', platform: 'fb', trigger: 'keywords', keywords: ['price'], pageRefs: [seeded.fbPageId],
+        publicReply: 'Thanks! The price list is on its way.', dmEnabled: false, dmText: '', likeComment: false, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false
+      } }), 'Creating the rule');
+      ruleId = String(created.id);
+      await jsonOrThrow(await admin.api.post(`/api/social-studio/pages/${seeded.fbPageId}/unlink`, { data: {} }), 'Unlinking the Facebook page');
+    } finally {
+      await admin.api.dispose();
+    }
+    await page.setViewportSize(PHONE);
+    await signInStudio(page, seeded.user, '/studio?tab=replies&section=rules');
+    await page.goto('/studio?tab=replies&section=rules');
+    const rule = page.getByTestId(`studio-pg-rule-${ruleId}`);
+    await expect(rule).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect(rule.getByTestId(`studio-pg-rule-page-removed-${ruleId}`)).toBeVisible();
+    // The editor: the removed page is explained, the rename saves (the server keeps its stored list), no refusal.
+    await page.getByTestId(`studio-pg-rule-edit-${ruleId}`).click();
+    await expect(page.getByTestId('studio-pg-rule-form')).toHaveAttribute('data-rule', ruleId);
+    await expect(page.getByTestId('studio-pg-rule-page-removed')).toBeVisible();
+    await page.locator('#studio-rule-name').fill('E2E removed page rule, renamed');
+    const [saved] = await Promise.all([
+      page.waitForResponse(r => r.url().includes(`/api/social-studio/rules/${ruleId}`) && r.request().method() === 'PATCH'),
+      page.getByTestId('studio-pg-rule-save').click()
+    ]);
+    expect(saved.status(), 'the rename of a rule with a removed page is accepted').toBe(200);
+    const sentBody = saved.request().postDataJSON();
+    expect('pageRefs' in sentBody, 'an edit that leaves the pages alone omits pageRefs').toBe(false);
+    expect('enabled' in sentBody, 'the editor never sends enabled').toBe(false);
+    await expect.poll(() => new URL(page.url()).searchParams.get('id')).toBeNull();
+    await expect(rule).toContainText('E2E removed page rule, renamed');
+    try {
+      const rules = await jsonOrThrow(await customerApi.get('/api/social-studio/rules'), 'The rules');
+      const stored = (rules.rules || []).find(item => item.id === ruleId);
+      expect(stored.name).toBe('E2E removed page rule, renamed');
+      expect(stored.pageRefs, 'the removed page stays on the rule until the pages are chosen again').toEqual([seeded.fbPageId]);
+      expect(stored.enabled).toBe(true);
+    } finally {
+      await customerApi.dispose();
+    }
+    // A stale draft: open the editor, go back, switch the rule off from the list, open it again and save a text change.
+    await page.getByTestId(`studio-pg-rule-edit-${ruleId}`).click();
+    await expect(page.getByTestId('studio-pg-rule-form')).toHaveAttribute('data-rule', ruleId);
+    await page.getByTestId('studio-pg-rule-back').click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('id')).toBeNull();
+    await page.getByTestId(`studio-pg-rule-toggle-${ruleId}`).click();
+    await expect(rule).toHaveAttribute('data-enabled', '0');
+    await page.getByTestId(`studio-pg-rule-edit-${ruleId}`).click();
+    await expect(page.getByTestId('studio-pg-rule-form')).toHaveAttribute('data-rule', ruleId);
+    await page.locator('#studio-rule-public').fill('Thanks! The price list is on its way (fixed).');
+    const [saved2] = await Promise.all([
+      page.waitForResponse(r => r.url().includes(`/api/social-studio/rules/${ruleId}`) && r.request().method() === 'PATCH'),
+      page.getByTestId('studio-pg-rule-save').click()
+    ]);
+    expect(saved2.status()).toBe(200);
+    expect('enabled' in saved2.request().postDataJSON()).toBe(false);
+    await expect.poll(() => new URL(page.url()).searchParams.get('id')).toBeNull();
+    await expect(rule).toHaveAttribute('data-enabled', '0');  // still off: the draft did not switch it back on
+    const customerApi2 = await openUserApi(playwright, baseURL, seeded.user);
+    try {
+      const rules = await jsonOrThrow(await customerApi2.get('/api/social-studio/rules'), 'The rules');
+      const stored = (rules.rules || []).find(item => item.id === ruleId);
+      expect(stored.enabled, 'the list switch owns enabled').toBe(false);
+      expect(stored.publicReply).toBe('Thanks! The price list is on its way (fixed).');
+    } finally {
+      await customerApi2.dispose();
+    }
+    expect(errors).toEqual([]);
+  });
+
   test('admin: Check now is admin-only on the server, and the health of a linked page answers with the neutral state while Meta is not connected', async ({ playwright, baseURL }, testInfo) => {
     const seeded = await seed(playwright, baseURL, testInfo, 'check');
     const customerApi = await openUserApi(playwright, baseURL, seeded.user);

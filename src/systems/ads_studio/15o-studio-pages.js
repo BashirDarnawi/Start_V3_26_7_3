@@ -63,6 +63,23 @@ const STUDIO_PG_POST_STATUSES = Object.freeze([
   ['scheduled', 'clock', 'Scheduled', 'مجدولة', 'warn'], ['published', 'check', 'Published', 'منشورة', 'ok'],
   ['draft', 'pencil', 'Drafts', 'مسودات', 'slate'], ['failed', 'triangle-alert', 'Failed', 'فشلت', 'bad']
 ]);
+// A failed post's problem in plain words: the server's errorClass (social_studio publish: the class
+// of its lastError) -> [English, Arabic]. The raw Meta text stays in a details line; an unknown or
+// missing class gets the neutral pair (studioPgPostErrorText), never the raw English alone.
+const STUDIO_PG_POST_ERRORS = Object.freeze({
+  timeout: ['Meta did not answer in time; the post may have gone out. Check the page before retrying.', 'لم تجب ميتا في الوقت المحدد؛ ربما نُشر المنشور. تحقق من الصفحة قبل إعادة المحاولة.'],
+  access_paused: ['Publishing is paused: the account needs active Social Studio access.', 'النشر متوقف: يحتاج الحساب إلى اشتراك فعّال في استوديو التواصل.'],
+  page_unlinked: ['This page is no longer linked to the account.', 'هذه الصفحة لم تعد مربوطة بالحساب.'],
+  meta_paused: ['Meta asked Albayan to wait; the post is tried again later.', 'طلبت ميتا من البيان الانتظار؛ يُعاد نشر المنشور لاحقاً.'],
+  meta_not_configured: ["Albayan's Meta connection is not set up yet.", 'ربط البيان مع ميتا غير مُعدّ بعد.'],
+  meta_refused: ['Meta refused this post; the team can see why.', 'رفضت ميتا هذا المنشور؛ يمكن للفريق معرفة السبب.'],
+  publish_failed: ['Publishing failed on our side; the team can see why.', 'فشل النشر من جهتنا؛ يمكن للفريق معرفة السبب.']
+});
+const STUDIO_PG_POST_ERROR_ALIASES = Object.freeze({
+  meta_timeout: 'timeout', ambiguous: 'timeout', paused: 'access_paused', owner_paused: 'access_paused', subscription: 'access_paused',
+  unlinked: 'page_unlinked', page_removed: 'page_unlinked', page_missing: 'page_unlinked', meta_busy: 'meta_paused', rate_limited: 'meta_paused',
+  not_configured: 'meta_not_configured', refused: 'meta_refused', meta_error: 'meta_refused', meta: 'meta_refused', failed: 'publish_failed', exception: 'publish_failed'
+});
 const STUDIO_PG_LINK_QUESTIONS = Object.freeze([
   // [key, English, Arabic] — the Instagram pre-check (PLAN.md §5.5 J7)
   ['professional', 'Is it a business or creator (professional) account?', 'هل حسابك حساب أعمال أو صانع محتوى (احترافي)؟'],
@@ -261,8 +278,17 @@ function studioPgCleanPost(raw) {
   return {
     id, status, caption: studioPgClean(raw.caption, 280), pageIds: (Array.isArray(raw.pageIds) ? raw.pageIds : []).map(String).filter(pid => STUDIO_PG_ID_RE.test(pid)).slice(0, STUDIO_PG_MAX.pages),
     scheduledAt: studioPgTime(raw.scheduledAt), publishedAt: studioPgTime(raw.publishedAt), updatedAt: studioPgTime(raw.updatedAt || raw.createdAt),
-    mediaCount: Number.isSafeInteger(raw.mediaCount) && raw.mediaCount > 0 ? raw.mediaCount : 0, lastError: studioPgClean(raw.lastError, 300)
+    mediaCount: Number.isSafeInteger(raw.mediaCount) && raw.mediaCount > 0 ? raw.mediaCount : 0, lastError: studioPgClean(raw.lastError, 300),
+    errorClass: /^[a-z][a-z0-9_]{0,39}$/.test(String(raw.errorClass || '')) ? String(raw.errorClass) : ''
   };
+}
+
+// The bilingual words for a failed post's class ('' or unknown: the neutral refusal words).
+function studioPgPostErrorText(errorClass) {
+  const key = String(errorClass || '');
+  const name = Object.prototype.hasOwnProperty.call(STUDIO_PG_POST_ERRORS, key) ? key : (STUDIO_PG_POST_ERROR_ALIASES[key] || 'meta_refused');
+  const pair = STUDIO_PG_POST_ERRORS[name];
+  return studioPgText(pair[0], pair[1]);
 }
 
 function studioPgCleanValue(kind, raw) {
@@ -416,6 +442,12 @@ function renderStudioPagesBody(route) {
   studioPgScope();
   const postsTab = !!(route && route.tab === 'posts');
   const view = postsTab ? { section: 'posts', id: '' } : studioPgView(route);
+  // A draft outlives its editor only while its save is in flight: leaving the editor (Back, Cancel,
+  // a section chip, the posts tab, a deep link or Back/Forward) drops it, so the next opening builds
+  // it from the rule as the list knows it then (a switch-off or a rename from the list or another
+  // device is never overwritten by stale fields).
+  const kept = _studioPg.editor;
+  if (kept && !kept.sending && !(view.section === 'rules' && view.id === kept.for)) _studioPg.editor = null;
   let body = '';
   if (!studioPgServer()) {
     body = `<section class="studio-pg-card" data-testid="studio-pg-offline"><p class="studio-pg-note">${studioEsc(studioPgText('Pages and replies need the connection to Albayan. Sign in to the online workspace.', 'الصفحات والردود تحتاج الاتصال بالبيان. سجّل الدخول إلى مساحة العمل عبر الإنترنت.'))}</p></section>`;
@@ -906,33 +938,62 @@ function renderStudioPgRules() {
 
 // ------------------------------------------------------------------ the rule editor
 
+// A fresh rule: every action follows its channel's state, so a channel that is off or not
+// available (fbPublicReply rules the like too) starts unticked and is never sent to be refused.
 function studioPgNewRule(platform) {
   const kind = studioPgPlatform(platform) || 'fb';
   return {
     id: '', name: '', platform: kind, enabled: true, trigger: 'keywords', keywords: [], pageRefs: [], publicReply: '', dmEnabled: false, dmText: '',
-    likeComment: kind === 'fb', oncePerPerson: true, skipPublicAfterDm: false, quietHours: false, scope: 'all',
-    keywordInput: '', sending: false, error: '', problems: {}
+    likeComment: kind === 'fb' && !studioPgChannel('fb', 'like').refused, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false, scope: 'all',
+    keywordInput: '', sending: false, error: '', problems: {}, dirty: false
   };
 }
 
+// The fields of a rule the editor copies (the draft's own bookkeeping aside).
+function studioPgRuleDraftOf(rule) {
+  return Object.assign(studioPgNewRule(rule.platform), JSON.parse(JSON.stringify(rule)), { keywordInput: '', sending: false, error: '', problems: {}, dirty: false, for: rule.id });
+}
+
 // The draft the editor at ?id= shows: a fresh one for 'new', a copy of the rule otherwise (null
-// while that rule is not known yet).
+// while that rule is not known yet). Opening an existing rule asks the server for the list again;
+// until the owner types, the draft follows what that read brings (a rename or a switch from the
+// list, another tab or device), so a save never carries stale fields.
 function studioPgEditorFor(id) {
   studioPgScope();
   const draft = _studioPg.editor;
-  if (draft && draft.for === id) return draft;
+  if (draft && draft.for === id) {
+    if (!draft.dirty && !draft.sending) {
+      if (id === 'new') {
+        // The channel states may land after the fresh draft was made: its like follows them until the owner types.
+        draft.likeComment = draft.platform === 'fb' && !studioPgChannel('fb', 'like').refused;
+        return draft;
+      }
+      const rule = studioPgRule(id);
+      if (rule && JSON.stringify(studioPgRuleDraftOf(rule)) !== JSON.stringify(Object.assign({}, draft, { keywordInput: '', error: '', problems: {} }))) {
+        _studioPg.editor = studioPgRuleDraftOf(rule);
+        return _studioPg.editor;
+      }
+    }
+    return draft;
+  }
   if (id === 'new') {
     _studioPg.editor = Object.assign(studioPgNewRule('fb'), { for: 'new' });
     return _studioPg.editor;
   }
   const rule = studioPgRule(id);
   if (!rule) return null;
-  _studioPg.editor = Object.assign(studioPgNewRule(rule.platform), JSON.parse(JSON.stringify(rule)), { keywordInput: '', sending: false, error: '', problems: {}, for: id });
+  _studioPg.editor = studioPgRuleDraftOf(rule);
+  // The rule as the server knows it now (a list read older than a moment); the draft follows the answer until the owner types.
+  if (Date.now() - studioPgSlot('rules').loadedAt > 2000) studioPgWant('rules', true);
   return _studioPg.editor;
 }
 
 function studioPgEditor() {
   return _studioPg.editor && !_studioPg.editor.sending ? _studioPg.editor : null;
+}
+
+function studioPgRuleTouched(draft) {
+  draft.dirty = true;
 }
 
 function studioPgRuleSet(field, value) {
@@ -943,6 +1004,7 @@ function studioPgRuleSet(field, value) {
   else if (field === 'dmText') draft.dmText = String(value || '').slice(0, STUDIO_PG_MAX.reply);
   else if (field === 'keywordInput') draft.keywordInput = String(value || '').slice(0, 200);
   else return;
+  if (field !== 'keywordInput') studioPgRuleTouched(draft);
   const key = field === 'publicReply' || field === 'dmText' ? 'reply' : field;
   if (draft.problems[key]) { delete draft.problems[key]; studioPgRedraw(); }
 }
@@ -961,18 +1023,28 @@ function studioPgRulePick(field, value) {
     if (wanted !== 'every' && wanted !== 'keywords') return;
     draft.trigger = wanted;
   } else return;
+  studioPgRuleTouched(draft);
   delete draft.problems.keywords;
   studioPgRedraw();
 }
 
+// A switch whose channel is off or not available can only be turned OFF (the server refuses the
+// action; the executor withholds it anyway), never on.
 function studioPgRuleFlip(field) {
   const draft = studioPgEditor();
   if (!draft || !['dmEnabled', 'likeComment', 'oncePerPerson', 'skipPublicAfterDm', 'quietHours'].includes(field)) return;
   if ((field === 'dmEnabled' && !draft.dmEnabled && studioPgChannel(draft.platform, 'dm').refused)
     || (field === 'likeComment' && !draft.likeComment && (draft.platform !== 'fb' || studioPgChannel('fb', 'like').refused))) return;
   draft[field] = !draft[field];
+  studioPgRuleTouched(draft);
   delete draft.problems.reply;
   studioPgRedraw();
+}
+
+// The live pages of the draft's platform among its refs: the only ones the editor can show or send
+// (a ref whose page was removed is kept by the server while the list is left alone, P4-01).
+function studioPgRuleLiveRefs(draft) {
+  return draft.pageRefs.filter(id => { const page = studioPgPage(id); return !!page && page.platform === draft.platform; });
 }
 
 function studioPgRulePage(id) {
@@ -983,6 +1055,7 @@ function studioPgRulePage(id) {
   if (set.has(page.id)) set.delete(page.id);
   else if (set.size < STUDIO_PG_MAX.pages) set.add(page.id);
   draft.pageRefs = Array.from(set);
+  studioPgRuleTouched(draft);
   studioPgRedraw();
 }
 
@@ -995,6 +1068,7 @@ function studioPgKeywordAdd() {
   if (!parts.length) return;
   draft.keywords = Array.from(new Set(draft.keywords.concat(parts))).slice(0, STUDIO_PG_MAX.keywords);
   draft.keywordInput = '';
+  studioPgRuleTouched(draft);
   delete draft.problems.keywords;
   studioPgRedraw();
 }
@@ -1004,6 +1078,7 @@ function studioPgKeywordRemove(index) {
   const at = Number(index);
   if (!draft || !Number.isInteger(at) || at < 0 || at >= draft.keywords.length) return;
   draft.keywords.splice(at, 1);
+  studioPgRuleTouched(draft);
   studioPgRedraw();
 }
 
@@ -1026,13 +1101,24 @@ function studioPgRuleValidate(draft) {
   return problems;
 }
 
+// The body of POST /rules and PATCH /rules/{id}. `enabled` is never in it: the list switch owns it
+// (the server keeps the stored value when the body omits it; a new rule starts on), so a draft can
+// never switch a rule back on. `pageRefs` names only live pages of the draft's platform, the only
+// ones the editor can tick: an edit that left the list alone omits it (the server keeps its stored
+// list, a removed page included, P4-01), a touched list replaces it. A like whose channel is off
+// or not available is sent as false (the executor withholds it anyway), never to be refused.
 function studioPgRuleBody(draft) {
-  return {
-    name: draft.name.trim(), platform: draft.platform, enabled: draft.enabled !== false,
-    trigger: draft.trigger, keywords: draft.trigger === 'keywords' ? draft.keywords : [], pageRefs: draft.pageRefs.slice(),
+  const body = {
+    name: draft.name.trim(), platform: draft.platform,
+    trigger: draft.trigger, keywords: draft.trigger === 'keywords' ? draft.keywords : [], pageRefs: studioPgRuleLiveRefs(draft),
     publicReply: draft.publicReply.trim(), dmEnabled: draft.dmEnabled && !!draft.dmText.trim(), dmText: draft.dmEnabled ? draft.dmText.trim() : '',
-    likeComment: draft.platform === 'fb' && draft.likeComment, oncePerPerson: !!draft.oncePerPerson, skipPublicAfterDm: !!draft.skipPublicAfterDm, quietHours: !!draft.quietHours
+    likeComment: draft.platform === 'fb' && !!draft.likeComment && !studioPgChannel('fb', 'like').refused,
+    oncePerPerson: !!draft.oncePerPerson, skipPublicAfterDm: !!draft.skipPublicAfterDm, quietHours: !!draft.quietHours
   };
+  const stored = draft.id ? studioPgRule(draft.id) : null;
+  const untouched = !!stored && stored.pageRefs.length === draft.pageRefs.length && stored.pageRefs.every((id, i) => draft.pageRefs[i] === id);
+  if (untouched) delete body.pageRefs;
+  return body;
 }
 
 function studioPgRuleSave() {
@@ -1077,12 +1163,24 @@ function studioPgRuleSave() {
     if (generation !== _studioPg.generation) return null;
     draft.sending = false;
     draft.error = studioPgErrorText(error, 'action');
+    // The owner left the editor while the save was on its way: the refusal is not left unseen.
+    if (!studioPgEditorOnScreen(draft)) studioPgNotify(false, studioPgText('The rule was not saved', 'لم تُحفظ القاعدة'), draft.error);
     studioPgRedraw();
     return null;
   }).finally(() => {
     if (generation !== _studioPg.generation) return;
     _studioPg.busy.delete('save');
   });
+}
+
+// True while the editor of this draft is the screen on show (the v2 address, or the classic tab's own state).
+function studioPgEditorOnScreen(draft) {
+  if (typeof state === 'undefined' || !state || state.currentView !== 'ads-studio') return false;
+  if (studioPgInV2()) {
+    const route = typeof studioV2Route === 'function' && typeof studioV2ReadAddress === 'function' ? studioV2Route(studioV2ReadAddress(), 'customer') : null;
+    return !!route && route.tab === 'replies' && String(route.section || '') === 'rules' && String(route.id || '') === String(draft.for || '');
+  }
+  return typeof _adsStudioActiveTab !== 'undefined' && _adsStudioActiveTab === 'replies' && _studioPg.classic.section === 'rules' && _studioPg.classic.id === String(draft.for || '');
 }
 
 function studioPgRuleDelete(button = null) {
@@ -1148,10 +1246,16 @@ function renderStudioPgEditor(id) {
   const isIg = draft.platform === 'ig';
   const chip = (testId, label, on, onclick) => `<button type="button" class="studio-pg-choice" data-testid="${testId}" aria-pressed="${on ? 'true' : 'false'}" onclick="${onclick}"${off}>${studioEsc(label)}</button>`;
   const pages = studioPgPages().filter(page => page.platform === draft.platform);
+  const liveRefs = studioPgRuleLiveRefs(draft);
+  const stored = draft.id ? studioPgRule(draft.id) : null;
+  // A ref whose page was removed (the server's label on the list) is invisible here: it stays on the
+  // rule while the pages are left alone and is dropped the moment the owner chooses the pages again.
+  const removedRef = !!stored && draft.pageRefs.some(id => !studioPgPage(id)) && stored.pages.some(page => page.removed);
+  const removedNote = removedRef ? `<p class="studio-pg-note" data-testid="studio-pg-rule-page-removed">${studioEsc(studioPgText('A page of this rule was removed. It stays on the rule until you choose the pages again; the rule can still be saved or switched off.', 'أُزيلت إحدى صفحات هذه القاعدة. تبقى على القاعدة حتى تختار الصفحات من جديد؛ ويمكن حفظ القاعدة أو إيقافها.'))}</p>` : '';
   const pageChips = pages.length
     ? `<div class="studio-pg-chips" role="group" aria-labelledby="studio-pg-rule-label-pages">${pages.map(page => chip(`studio-pg-rule-page-${page.id}`, page.name, draft.pageRefs.includes(page.id), `studioPgRulePage('${studioEsc(page.id)}')`)).join('')}</div>
-              <p class="studio-pg-note">${studioEsc(draft.pageRefs.length ? studioPgText('The rule answers on the chosen pages only.', 'تردّ القاعدة على الصفحات المختارة فقط.') : studioPgText('Nothing chosen: the rule answers on all your linked pages of this platform.', 'لم تختر شيئاً: تردّ القاعدة على كل صفحاتك المربوطة على هذه المنصة.'))}</p>`
-    : `<p class="studio-pg-note" data-testid="studio-pg-rule-nopages">${studioEsc(studioPgText('No linked page on this platform yet. The rule is saved and starts once a page is linked.', 'لا توجد صفحة مربوطة على هذه المنصة بعد. تُحفظ القاعدة وتبدأ بعد ربط صفحة.'))}</p>`;
+              <p class="studio-pg-note">${studioEsc(liveRefs.length ? studioPgText('The rule answers on the chosen pages only.', 'تردّ القاعدة على الصفحات المختارة فقط.') : studioPgText('Nothing chosen: the rule answers on all your linked pages of this platform.', 'لم تختر شيئاً: تردّ القاعدة على كل صفحاتك المربوطة على هذه المنصة.'))}</p>${removedNote}`
+    : `<p class="studio-pg-note" data-testid="studio-pg-rule-nopages">${studioEsc(studioPgText('No linked page on this platform yet. The rule is saved and starts once a page is linked.', 'لا توجد صفحة مربوطة على هذه المنصة بعد. تُحفظ القاعدة وتبدأ بعد ربط صفحة.'))}</p>${removedNote}`;
   const keywords = draft.trigger === 'keywords' ? `
               <div class="studio-pg-chips is-tight">${draft.keywords.map((keyword, index) => `<span class="studio-pg-chip" data-tone="slate"><span dir="auto">${studioEsc(keyword)}</span><button type="button" class="studio-pg-chip-remove" data-testid="studio-pg-rule-keyword-remove-${index}" onclick="studioPgKeywordRemove(${index})" aria-label="${studioEsc(studioPgText('Remove keyword', 'إزالة الكلمة'))}"${off}>${studioPgIcon('x', 'studio-pg-chip-icon')}</button></span>`).join('')}</div>
               <div class="studio-pg-row">
@@ -1165,7 +1269,13 @@ function renderStudioPgEditor(id) {
   };
   const dm = studioPgChannel(draft.platform, 'dm');
   const like = studioPgChannel('fb', 'like');
-  const publicWhy = studioPgChannel(draft.platform, 'public').refused ? `<p class="studio-pg-note">${studioEsc(studioPgText('Public replies cannot be picked on this platform right now.', 'لا يمكن اختيار الردود العامة على هذه المنصة حالياً.'))}</p>` : '';
+  const pub = studioPgChannel(draft.platform, 'public');
+  // A refused channel blocks turning an action ON; what is already on can always be cleared or
+  // switched off (else a rule saved before the channel closed could never be saved again).
+  const publicLocked = pub.refused && !draft.publicReply.trim();
+  const publicWhy = pub.refused ? `<p class="studio-pg-note">${studioEsc(draft.publicReply.trim()
+    ? studioPgText('Public replies are not available on this platform right now: clear this text to save the rule, or keep it and switch the rule off from the list.', 'الردود العامة غير متاحة على هذه المنصة حالياً: امسح هذا النص لحفظ القاعدة، أو أبقِه وأوقف القاعدة من القائمة.')
+    : studioPgText('Public replies cannot be picked on this platform right now.', 'لا يمكن اختيار الردود العامة على هذه المنصة حالياً.'))}</p>` : '';
   const dmWhy = dm.refused ? `<p class="studio-pg-note" data-testid="studio-pg-rule-dm-why">${studioEsc(studioPgText('Private messages cannot be picked on this platform right now: ', 'لا يمكن اختيار الرسائل الخاصة على هذه المنصة حالياً: '))}${studioEsc(dm.label)}</p>`
     : (dm.state === 'gated' ? `<p class="studio-pg-note" data-testid="studio-pg-rule-dm-why">${studioEsc(studioPgText('Saved now, sent once Meta approves private messages.', 'تُحفظ الآن وتُرسل بعد موافقة ميتا على الرسائل الخاصة.'))}</p>` : '');
   const behaviour = (field, label, testId, disabled, hint = '') => `
@@ -1201,11 +1311,11 @@ function renderStudioPgEditor(id) {
             </div>
             <div class="studio-pg-field${draft.problems.reply ? ' is-invalid' : ''}">
               <div class="studio-pg-head"><label class="studio-pg-label" for="studio-rule-public">${studioEsc(studioPgText('Reply: public reply', 'الرد: رد عام'))}</label>${channelLine('public')}</div>
-              <textarea id="studio-rule-public" class="studio-pg-input" rows="3" maxlength="${STUDIO_PG_MAX.reply}" oninput="studioPgRuleSet('publicReply', this.value)" placeholder="${studioEsc(studioPgText('What everyone sees under the comment', 'ما يراه الجميع تحت التعليق'))}"${off || (studioPgChannel(draft.platform, 'public').refused ? ' disabled' : '')}>${studioEsc(draft.publicReply)}</textarea>
+              <textarea id="studio-rule-public" class="studio-pg-input" rows="3" maxlength="${STUDIO_PG_MAX.reply}" oninput="studioPgRuleSet('publicReply', this.value)" placeholder="${studioEsc(studioPgText('What everyone sees under the comment', 'ما يراه الجميع تحت التعليق'))}"${off || (publicLocked ? ' disabled' : '')}>${studioEsc(draft.publicReply)}</textarea>
               ${publicWhy}
               <div class="studio-pg-behaviour${dm.refused ? ' is-off' : ''}">
                 <span class="studio-pg-master-text"><span class="studio-pg-behaviour-title">${studioEsc(studioPgText('Reply: private message', 'الرد: رسالة خاصة'))}</span>${channelLine('dm')}</span>
-                ${studioPgSwitch(draft.dmEnabled, "studioPgRuleFlip('dmEnabled')", studioPgText('Private message', 'رسالة خاصة'), 'studio-pg-rule-dm', dm.refused || draft.sending)}
+                ${studioPgSwitch(draft.dmEnabled, "studioPgRuleFlip('dmEnabled')", studioPgText('Private message', 'رسالة خاصة'), 'studio-pg-rule-dm', (dm.refused && !draft.dmEnabled) || draft.sending)}
               </div>
               ${dmWhy}
               ${draft.dmEnabled ? `<textarea id="studio-rule-dm" class="studio-pg-input" rows="3" maxlength="${STUDIO_PG_MAX.reply}" oninput="studioPgRuleSet('dmText', this.value)" placeholder="${studioEsc(studioPgText('What only the commenter receives', 'ما يستلمه صاحب التعليق فقط'))}" aria-label="${studioEsc(studioPgText('Private message', 'رسالة خاصة'))}"${off}>${studioEsc(draft.dmText)}</textarea>` : ''}
@@ -1213,7 +1323,7 @@ function renderStudioPgEditor(id) {
             </div>
             <div class="studio-pg-field">
               <p class="studio-pg-label">${studioEsc(studioPgText('Also', 'وأيضاً'))}</p>
-              ${isIg ? `<p class="studio-pg-note" data-testid="studio-pg-rule-like-why">${studioEsc(studioPgText('Liking a comment is a Facebook feature; Instagram rules reply only.', 'الإعجاب بالتعليق ميزة في فيسبوك؛ قواعد إنستغرام تردّ فقط.'))}</p>` : behaviour('likeComment', studioPgText('Like the comment', 'الإعجاب بالتعليق'), 'studio-pg-rule-like', like.refused, like.open ? '' : like.label)}
+              ${isIg ? `<p class="studio-pg-note" data-testid="studio-pg-rule-like-why">${studioEsc(studioPgText('Liking a comment is a Facebook feature; Instagram rules reply only.', 'الإعجاب بالتعليق ميزة في فيسبوك؛ قواعد إنستغرام تردّ فقط.'))}</p>` : behaviour('likeComment', studioPgText('Like the comment', 'الإعجاب بالتعليق'), 'studio-pg-rule-like', like.refused && !draft.likeComment, like.open ? '' : (like.refused && draft.likeComment ? studioPgText(`${like.label}: it is not sent; switch it off or leave it.`, `${like.label}: لا يُرسل؛ أوقفه أو اتركه.`) : like.label))}
               ${behaviour('oncePerPerson', studioPgText('One reply per person', 'رد واحد لكل شخص'), 'studio-pg-rule-once', false)}
               ${behaviour('skipPublicAfterDm', studioPgText('Skip the public reply once a private message is sent', 'تجاوز الرد العام بعد إرسال رسالة خاصة'), 'studio-pg-rule-skip', false)}
               ${behaviour('quietHours', studioPgText(`Stay silent during quiet hours (${quiet}, Libya time)`, `التزم الصمت في ساعات الهدوء (${quiet} بتوقيت ليبيا)`), 'studio-pg-rule-quiet', false)}
@@ -1414,7 +1524,7 @@ function renderStudioPgPost(post) {
             <li class="studio-pg-log-row" data-testid="studio-pg-post-${studioEsc(post.id)}" data-status="${studioEsc(post.status)}">
               <div class="studio-pg-page-head">${pages.map(page => studioPgBadge(page.platform)).join('') || studioPgBadge('fb')}<span class="studio-pg-page-name" dir="auto">${studioEsc(post.caption || studioPgText('(no caption)', '(بدون نص)'))}</span>${studioPgChip(post.status === 'publishing' ? studioPgText('Publishing…', 'جارٍ النشر…') : studioPgText(look[2], look[3]), look[4], look[1])}</div>
               <p class="studio-pg-meta">${when ? `<span>${studioEsc(studioPgWhen(when))}</span>` : ''}${pages.length ? `<span dir="auto">${studioEsc(pages.map(page => page.name).join(', '))}</span>` : ''}${post.mediaCount ? `<span>${studioEsc(studioPgText(`${post.mediaCount} photo${post.mediaCount === 1 ? '' : 's'}`, `${post.mediaCount} ${post.mediaCount === 1 ? 'صورة' : (post.mediaCount === 2 ? 'صورتان' : (post.mediaCount <= 10 ? 'صور' : 'صورة'))}`))}</span>` : ''}</p>
-              ${post.status === 'failed' && post.lastError ? `<p class="studio-pg-error" data-testid="studio-pg-post-error">${studioEsc(post.lastError)}</p>` : ''}
+              ${post.status === 'failed' ? `<p class="studio-pg-error" data-testid="studio-pg-post-error" data-class="${studioEsc(post.errorClass)}">${studioEsc(studioPgPostErrorText(post.errorClass))}</p>${post.lastError ? `<details class="studio-pg-details studio-pg-post-details" data-testid="studio-pg-post-error-details"><summary>${studioEsc(studioPgText('Details from Meta', 'التفاصيل من ميتا'))}</summary><p class="studio-pg-note" dir="ltr">${studioEsc(post.lastError)}</p></details>` : ''}` : ''}
             </li>`;
 }
 
@@ -1461,7 +1571,7 @@ const STUDIO_GUIDES = Object.freeze({
       ['Reserved: held for a request waiting for our team. It is still yours; withdraw the request and it is available again.', 'المحجوز: محتجز لطلب ينتظر فريقنا. ما زال لك؛ اسحب الطلب فيعود متاحاً.'],
       ['In your ads: paid for approved ads. "Meta used" shows what Meta has spent so far; the rest may come back when the ad ends.', 'في إعلاناتك: دُفع لإعلانات موافق عليها. «صرفت ميتا» يعرض ما صرفته ميتا حتى الآن؛ وقد يعود الباقي عند انتهاء الإعلان.'],
       ['Spent: final. Meta delivered it and it will not come back.', 'المصروف: نهائي. عرضته ميتا ولن يعود.'],
-      ['Being returned: appears only while an unused part is on its way back to Available.', 'قيد الإرجاع: يظهر فقط بينما يعود جزء غير مستخدم إلى المتاح.'],
+      ['On its way back to you: shown only while a payment whose approval did not finish is coming back to Available, usually within minutes.', 'في طريقه إليك: يظهر فقط بينما يعود إلى المتاح مبلغٌ لم تكتمل الموافقة عليه، عادةً خلال دقائق.'],
       ['Your plan is paid in dinars (LYD) and is separate from the ad money in dollars.', 'اشتراكك يُدفع بالدينار الليبي وهو منفصل عن مال الإعلانات بالدولار.']
     ],
     note: null

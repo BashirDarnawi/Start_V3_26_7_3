@@ -164,7 +164,9 @@ const STUDIO_ADMIN_COLLISION_REASONS = Object.freeze({
   studio_campaign_id: ['a studio request linked this campaign', 'ربط طلبٌ في الاستوديو هذه الحملة']
 });
 
-const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [] };
+const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [], acks: new Map(), scan: null };
+// acks: alert id -> the acknowledge in flight (single flight); scan: the last on-demand money scan
+// ({promise, value, error, at}; renderStudioAdminScanRow).
 
 // ------------------------------------------------------------------ small helpers
 
@@ -180,6 +182,8 @@ function studioAdminScope() {
     _studioAdmin.reads = Object.create(null);
     _studioAdmin.settings = Object.create(null);
     _studioAdmin.alertsPages = [];
+    _studioAdmin.acks = new Map();
+    _studioAdmin.scan = null;
   }
   return uid;
 }
@@ -402,11 +406,62 @@ function renderStudioAdminAlert(alert) {
   if (alert && alert.relatedId) bits.push(`${String(alert.relatedType || '').slice(0, 30)}: ${String(alert.relatedId).slice(0, 80)}`);
   if (Number.isSafeInteger(details.absorbedMinorUSD) && details.absorbedMinorUSD > 0) bits.push(adsStudioText(`Albayan absorbs ${studioUsd(details.absorbedMinorUSD)}`, `يتحمل البيان ${studioUsd(details.absorbedMinorUSD)}`));
   if (Number.isSafeInteger(details.daysLeft)) bits.push(adsStudioText(`${details.daysLeft} days left`, `بقي ${details.daysLeft} يوماً`));
+  const id = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/.test(String((alert && alert.id) || '')) ? String(alert.id) : '';
+  const busy = !!id && _studioAdmin.acks.has(id);
+  const ackButton = !ack && id
+    ? `<div class="studio-desk-actions"><button type="button" class="studio-v2-action studio-desk-small" data-testid="studio-admin-alert-ack-${studioEsc(id)}" onclick="studioAdminAlertAck('${studioEsc(id)}', this)"${busy ? ' disabled aria-busy="true"' : ''}>${studioAdminIcon('check')}<span>${studioEsc(busy ? adsStudioText('Acknowledging…', 'جارٍ التأكيد…') : adsStudioText('Acknowledge', 'تأكيد الاطلاع'))}</span></button></div>` : '';
   return `
-              <li class="studio-desk-box studio-admin-alert" data-testid="studio-admin-alert" data-kind="${studioEsc(kind)}" data-acknowledged="${ack ? '1' : '0'}">
+              <li class="studio-desk-box studio-admin-alert" data-testid="studio-admin-alert" data-kind="${studioEsc(kind)}" data-acknowledged="${ack ? '1' : '0'}"${id ? ` data-id="${studioEsc(id)}"` : ''}>
                 <p class="studio-admin-alert-title">${studioAdminIcon(ack ? 'check' : 'bell-ring', 'studio-desk-meta-icon')}<span dir="auto">${studioEsc(label)}</span></p>
                 <p class="studio-desk-note"><code class="studio-desk-code" dir="ltr">${studioEsc(kind)}</code>${bits.length ? ` · <span dir="auto">${studioEsc(bits.join(' · '))}</span>` : ''}${ack ? ` · ${studioEsc(adsStudioText('acknowledged', 'تم الاطلاع'))}` : ''}</p>
+                ${ackButton}
               </li>`;
+}
+
+// "Acknowledge" (P3-23): POST /api/studio/admin/alerts/{id}/ack, single flight per alert. The
+// server stamps acknowledgedAt (a replay answers the stamped alert as it is), so the row leaves
+// the open list at once and the pulse count follows on its next read. UNKNOWN_ALERT (archived or a
+// stale entry) is shown through the ONE error map and the list is read again.
+function studioAdminAlertAck(id, button = null) {
+  const alertId = String(id || '');
+  if (!alertId || !studioAdminIsAdmin() || !studioAdminServer() || _studioAdmin.acks.has(alertId)) return null;
+  if (button) setAdsStudioActionButtonBusy(button, true);
+  const generation = _studioAdmin.generation;
+  const promise = studioApi(`/api/studio/admin/alerts/${encodeURIComponent(alertId)}/ack`, { method: 'POST', body: {} }).then(reply => {
+    if (generation !== _studioAdmin.generation) return null;
+    const alert = reply && reply.alert && typeof reply.alert === 'object' ? reply.alert : null;
+    if (!alert || !alert.acknowledgedAt) return null;
+    studioAdminAlertLeft(alertId);
+    if (typeof studioDeskPulseRefresh === 'function') studioDeskPulseRefresh();
+    studioAdminNotify(true, adsStudioText('Alert acknowledged', 'تم تأكيد الاطلاع على التنبيه'), reply.replay === true ? adsStudioText('It was already acknowledged.', 'كان قد تم تأكيد الاطلاع عليه من قبل.') : '');
+    return alert;
+  }, error => {
+    if (generation !== _studioAdmin.generation) return null;
+    const info = (error && error.studio) || studioErrorInfo(error, 'action');
+    studioAdminNotify(false, adsStudioText('Could not acknowledge the alert', 'تعذّر تأكيد الاطلاع على التنبيه'), info.text || '');
+    if (info.code === 'UNKNOWN_ALERT') studioAdminAlertsRefresh();
+    return null;
+  }).finally(() => {
+    if (generation !== _studioAdmin.generation) return;
+    _studioAdmin.acks.delete(alertId);
+    if (button) setAdsStudioActionButtonBusy(button, false);
+    studioAdminRedraw();
+  });
+  _studioAdmin.acks.set(alertId, promise);
+  studioAdminRedraw();
+  return promise;
+}
+
+// An acknowledged alert leaves the open list this screen holds (the current page and the earlier ones).
+function studioAdminAlertLeft(alertId) {
+  const slot = _studioAdmin.reads.alerts;
+  const drop = list => (Array.isArray(list) ? list.filter(item => !(item && String(item.id || '') === alertId)) : list);
+  if (slot && slot.value && Array.isArray(slot.value.alerts)) slot.value.alerts = drop(slot.value.alerts);
+  _studioAdmin.alertsPages = _studioAdmin.alertsPages.map(page => ({ ...page, alerts: drop(page.alerts) }));
+}
+
+function studioAdminNotify(ok, title, text) {
+  try { showNotification(title, text, ok ? 'success' : 'error'); } catch (_) {}
 }
 
 function renderStudioAdminJobs(jobs) {
@@ -526,6 +581,7 @@ function renderStudioAdminDiagnostics() {
     : token.checked ? `${token.isValid === true ? adsStudioText('valid', 'صالح') : adsStudioText('NOT valid', 'غير صالح')} · ${token.expiresNever ? adsStudioText('never expires', 'لا ينتهي') : adsStudioText(`${studioAdminNumber(token.daysLeft)} days left`, `بقي ${studioAdminNumber(token.daysLeft)} يوماً`)}` : adsStudioText('not checked yet', 'لم يُفحص بعد');
   const generated = report.generatedAt ? `<p class="studio-desk-note">${studioEsc(adsStudioText(`Generated ${studioAdminWhen(report.generatedAt)}. Counts only, no personal data.`, `أُنشئ ${studioAdminWhen(report.generatedAt)}. أرقام فقط، دون بيانات شخصية.`))}</p>` : '';
   return head + generated
+    + renderStudioAdminScanRow()
     + renderStudioAdminJobs(report.jobs)
     + renderStudioAdminQueues(operations)
     + renderStudioAdminCapacity(operations)
@@ -539,6 +595,70 @@ function renderStudioAdminDiagnostics() {
         ${renderStudioAdminLine(adsStudioText('Last backup', 'آخر نسخة احتياطية'), storage.backup && storage.backup.at ? `${studioAdminAgo(storage.backup.at)} (${studioAdminBytes(storage.backup.bytes)})` : adsStudioText('none recorded', 'لا شيء مسجل'))}
       </section>`
     + `<section class="studio-desk-box" data-testid="studio-admin-baselines"><h3 class="studio-desk-h3">${studioEsc(adsStudioText('Baselines B1–B6 (before the pilot)', 'خطوط الأساس B1–B6 (قبل التجربة)'))}</h3>${baselineLines.join('')}</section>`;
+}
+
+// ------------------------------------------------------------------ the on-demand money scan (P3-24)
+
+// "Scan money now": POST /api/studio/admin/integrity/scan (admin, one per 10 minutes on the server),
+// single flight; the answer's counts are shown and the diagnostics and alerts reads are asked again.
+// A 429 shows the wait through the ONE error map (Retry-After); nothing else changes.
+function studioAdminScanNow(button = null) {
+  if (!studioAdminIsAdmin() || !studioAdminServer() || (_studioAdmin.scan && _studioAdmin.scan.promise)) return null;
+  const slot = _studioAdmin.scan || (_studioAdmin.scan = { promise: null, value: null, error: null, at: 0 });
+  if (button) setAdsStudioActionButtonBusy(button, true);
+  const generation = _studioAdmin.generation;
+  slot.promise = studioApi('/api/studio/admin/integrity/scan', { method: 'POST', body: {} }, { timeoutMs: 45000 }).then(reply => {
+    if (generation !== _studioAdmin.generation) return null;
+    const counts = reply && reply.counts && typeof reply.counts === 'object' ? reply.counts : {};
+    slot.value = { total: Number.isSafeInteger(counts.total) && counts.total >= 0 ? counts.total : 0, scannedAt: String((reply && reply.scannedAt) || ''), alertId: String((reply && reply.alertId) || '') };
+    slot.error = null;
+    slot.at = Date.now();
+    if (_studioAdmin.reads.diagnostics) studioAdminRead('diagnostics', '/api/studio/admin/diagnostics', true);
+    if (_studioAdmin.reads.alerts) { _studioAdmin.alertsPages = []; studioAdminRead('alerts', '/api/studio/admin/alerts?limit=20', true); }
+    if (typeof studioDeskPulseRefresh === 'function') studioDeskPulseRefresh();
+    return slot.value;
+  }, error => {
+    if (generation !== _studioAdmin.generation) return null;
+    slot.error = error && typeof error === 'object' ? error : new Error(String(error || 'Request failed'));  // its words are picked at draw time (the reader may switch language)
+    slot.value = null;
+    return null;
+  }).finally(() => {
+    if (generation !== _studioAdmin.generation) return;
+    slot.promise = null;
+    if (button) setAdsStudioActionButtonBusy(button, false);
+    studioAdminRedraw();
+  });
+  studioAdminRedraw();
+  return slot.promise;
+}
+
+function renderStudioAdminScanRow() {
+  const slot = _studioAdmin.scan;
+  let note = '';
+  let tone = '';
+  if (slot && slot.value) {
+    const total = slot.value.total;
+    tone = total ? 'red' : 'green';
+    note = total
+      ? adsStudioText(`Scan done: ${total} finding${total === 1 ? '' : 's'}. The alert is in the alerts list.`, `اكتمل الفحص: ${studioAdminArCount(total, 'مخالفة واحدة', 'مخالفتان', 'مخالفات', 'مخالفة')}. التنبيه في قائمة التنبيهات.`)
+      : adsStudioText('Scan done: the money adds up, no finding.', 'اكتمل الفحص: الأموال متطابقة، لا مخالفات.');
+  } else if (slot && slot.error) {
+    tone = 'red';
+    try { note = studioErrorInfo(slot.error, 'action').text || ''; } catch (_) { note = adsStudioText('The scan could not be run.', 'تعذّر تشغيل الفحص.'); }
+  }
+  return `
+          <div class="studio-v2-list studio-admin-scan" data-testid="studio-admin-scan">
+            <button type="button" class="studio-v2-row" data-testid="studio-admin-scan-now" onclick="studioAdminScanNow(this)"${slot && slot.promise ? ' disabled aria-busy="true"' : ''}>
+              ${studioAdminIcon('scan-search')}
+              <span class="studio-admin-row-text"><span class="studio-v2-row-label">${studioEsc(slot && slot.promise ? adsStudioText('Scanning…', 'جارٍ الفحص…') : adsStudioText('Scan money now', 'افحص الأموال الآن'))}</span><span class="studio-desk-note">${studioEsc(adsStudioText('The daily money check on demand: once every 10 minutes. Counts only.', 'فحص الأموال اليومي عند الطلب: مرة كل 10 دقائق. أرقام فقط.'))}</span></span>
+            </button>
+            ${note ? `<p class="studio-desk-line" data-tone="${studioEsc(tone)}" data-testid="studio-admin-scan-note" data-total="${slot && slot.value ? slot.value.total : ''}"><span class="studio-desk-line-label">${studioEsc(note)}</span></p>` : ''}
+          </div>`;
+}
+
+function studioAdminArCount(count, one, two, few, many) {
+  if (typeof studioDeskArCount === 'function') return studioDeskArCount(count, one, two, few, many);
+  return count === 1 ? one : count === 2 ? two : `${count} ${count >= 3 && count <= 10 ? few : many}`;
 }
 
 // ------------------------------------------------------------------ the collision report (P0-10)

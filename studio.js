@@ -5305,6 +5305,7 @@ const STUDIO_ERROR_TEXTS = Object.freeze({
   SERVICE_OFF: ['Help is not open for your account yet.', 'خدمة المساعدة غير مفتوحة لحسابك بعد.'],
   UNKNOWN_TICKET: ['This ticket was not found. Refresh the page.', 'لم نجد هذه التذكرة. حدّث الصفحة.'],
   UNKNOWN_PAYMENT: ['This payment was not found. Refresh the page.', 'لم نجد هذه الدفعة. حدّث الصفحة.'],
+  UNKNOWN_ALERT: ['No studio alert has this id. Refresh the page.', 'لا يوجد تنبيه بهذا المعرّف. حدّث الصفحة.'],
   IDEMPOTENCY_MISMATCH: ['This was already sent with different details. Refresh and try again.', 'أُرسل هذا من قبل بتفاصيل مختلفة. حدّث الصفحة وأعد المحاولة.'],
   TICKET_OPEN_LIMIT: ['You have too many open tickets. Mark one as solved, then open a new one.', 'لديك تذاكر مفتوحة كثيرة. أغلق واحدة تم حلها ثم افتح تذكرة جديدة.'],
   TICKET_MESSAGE_LIMIT: ['This ticket is full. Open a new ticket to continue.', 'هذه التذكرة ممتلئة. افتح تذكرة جديدة للمتابعة.'],
@@ -5585,7 +5586,9 @@ function studioPulseVisible() {
 // onChange(value, reply) when the value moves (never for the first reading). While the tab is hidden
 // there is no timer at all; coming back polls at once if a round was missed. One read at a time;
 // failures back off (429: the server's Retry-After). Signing out or another user stops the watch.
-// Returns stop(). A second watch under the same key replaces the first.
+// options.while: a predicate asked before every poll; false skips that round (no request, the timer
+// goes on) so a watch polls only while its screen is on show. Returns stop(). A second watch under
+// the same key replaces the first; studioPulseWatching(key) tells whether one runs for this user.
 function studioPulseWatch(key, options = {}) {
   const name = String(key || '');
   const path = String(options.path || '');
@@ -5597,6 +5600,7 @@ function studioPulseWatch(key, options = {}) {
     field: typeof options.field === 'string' && options.field ? options.field : 'changedAt',
     intervalMs: Math.max(STUDIO_PULSE_MIN_MS, Number(options.intervalMs) || STUDIO_PULSE_DEFAULT_MS),
     onChange: options.onChange,
+    while: typeof options.while === 'function' ? options.while : null,
     uid: studioMeUserId(),
     timer: null,
     inFlight: false,
@@ -5620,6 +5624,12 @@ function studioPulseStop(key) {
   _studioPulse.watches.delete(watch.key);
 }
 
+// True while a watch under this key runs for the signed-in user (its baseline reading is kept).
+function studioPulseWatching(key) {
+  const watch = _studioPulse.watches.get(String(key || ''));
+  return !!watch && !watch.stopped && !!watch.uid && watch.uid === studioMeUserId();
+}
+
 function studioPulseSchedule(watch, delayMs) {
   if (watch.stopped) return;
   if (watch.timer) { clearTimeout(watch.timer); watch.timer = null; }
@@ -5630,6 +5640,11 @@ function studioPulseSchedule(watch, delayMs) {
 async function studioPulsePoll(watch) {
   if (watch.stopped || watch.inFlight || !studioPulseVisible()) return;
   if (!watch.uid || watch.uid !== studioMeUserId()) { studioPulseStop(watch.key); return; }
+  if (watch.while) {
+    let wanted = true;
+    try { wanted = watch.while() !== false; } catch (_) { wanted = true; }
+    if (!wanted) { studioPulseSchedule(watch, watch.intervalMs); return; }  // its screen is not on show: no request this round
+  }
   watch.inFlight = true;
   let delay = watch.intervalMs;
   try {
@@ -5907,11 +5922,15 @@ const STUDIO_V2_PROOF_KEY = 'albayan.studio.v2.history';   // sessionStorage (th
 // the /me session the visit notes belong to. fromApp: this visit came from another screen of this app
 // in this document (so Home's Back is the browser's Back). popping: a Back/Forward move is running.
 // opening: the address of the first v2 draw of this page ({tab, section, id, step}); reapplied: it was
-// put back once after the platform's post-login rewrite (studioV2ReapplyOpeningAddress).
+// put back once after the platform's post-login rewrite (studioV2ReapplyOpeningAddress). enteredAt:
+// the studio's first draw of this session (Date.now(); the clock of studioV2RestoreOpeningAddress);
+// openedAt: the first v2 draw (the clock of the reapply). Both run from the studio's own moments,
+// never from the page's navigation start, so a slow sign-in keeps its deep link.
 const _studioV2 = {
   shown: '', waitFor: '', waitUntil: 0, waitTimer: null, docRendered: false, warned: false,
-  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false
+  layout: null, repin: false, session: -1, fromApp: false, popping: false, opening: null, reapplied: false, enteredAt: 0, openedAt: 0
 };
+const STUDIO_V2_OPENING_WINDOW_MS = 15000;
 const _studioV2Screens = new Map();  // tab -> draw(route): the body of that tab's screen root (studioV2RegisterScreen)
 const _studioV2ScreenWarned = new Set();
 
@@ -5976,6 +5995,8 @@ function studioV2NoteVisit() {
     _studioV2.repin = false;
     _studioV2.opening = null;
     _studioV2.reapplied = false;
+    _studioV2.enteredAt = 0;
+    _studioV2.openedAt = 0;
   }
   const previous = typeof _lastRenderedView !== 'undefined' ? _lastRenderedView : null;
   if (!previous || previous === 'ads-studio') return;
@@ -6068,6 +6089,7 @@ function renderStudioV2View() {
   try {
     studioLoadMe();  // reuses a fresh answer, joins a read on its way, re-reads an old one
     studioV2NoteVisit();
+    if (!_studioV2.enteredAt) _studioV2.enteredAt = Date.now();  // the studio's first draw of this session (at boot, or right after the sign-in)
     const frame = studioV2Frame();
     if (frame) { studioV2RestoreOpeningAddress(); studioV2ReapplyOpeningAddress(); }
     if (frame === 'staff') { _studioV2.shown = 'staff'; return renderStudioV2StaffFrame(); }
@@ -6253,7 +6275,10 @@ function studioV2EnsureHistory(route, frame) {
     const chain = studioV2HistoryChain();
     const firstDraw = !_studioV2.docRendered;
     _studioV2.docRendered = true;
-    if (!_studioV2.opening) _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };
+    if (!_studioV2.opening) {
+      _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };
+      _studioV2.openedAt = Date.now();
+    }
     if (chain && chain[chain.length - 1] === keys[keys.length - 1]) {
       // already marked: nothing to write
     } else if (path.length === 1 || (firstDraw && studioV2NavigationType() !== 'navigate' && studioV2Proven(keys))) {
@@ -6266,13 +6291,16 @@ function studioV2EnsureHistory(route, frame) {
 }
 
 // The start-up address rewrite keeps only ?tab= (and loses even that when this bundle arrives after
-// it). On the first v2 draw of a page opened moments ago (a classic staff screen of the v2 layout
-// included: it is chosen by the address), the address it was opened with comes back (only tab,
-// section, id and step), unless the reader has already moved somewhere else.
+// it). On the first v2 draw of a page whose studio was entered moments ago (a classic staff screen of
+// the v2 layout included: it is chosen by the address), the address it was opened with comes back
+// (only tab, section, id and step), unless the reader has already moved somewhere else. The clock
+// runs from the studio's first draw of this session (_studioV2.enteredAt: at boot, or right after a
+// sign-in however long the form took), never from the page's navigation start.
 function studioV2RestoreOpeningAddress() {
   if (_studioV2.docRendered) return;
   try {
-    if (typeof performance === 'undefined' || !(performance.now() < 15000)) return;
+    if (!_studioV2.enteredAt || Date.now() - _studioV2.enteredAt >= STUDIO_V2_OPENING_WINDOW_MS) return;
+    if (typeof performance === 'undefined' || typeof performance.getEntriesByType !== 'function') return;
     const entry = performance.getEntriesByType('navigation')[0];
     if (!entry || !entry.name) return;
     const opened = new URL(String(entry.name));
@@ -6295,15 +6323,17 @@ function studioV2RestoreOpeningAddress() {
 // post-login route restore (12-views restoreRequestedViewAfterLogin -> updateUrlForView) runs a
 // moment after the first v2 draw and puts its own entry, with the bare ?tab= and no studioV2 mark,
 // over the marked one. The address that first draw showed (studioV2EnsureHistory keeps it in
-// _studioV2.opening) comes back once, within the first 15 s of the page, when such an entry replaces
-// it: same tab, nothing beyond the tab in the address. The reader's own moves carry the mark, so they
-// are never touched; the path under the restored screen is rebuilt by the draw that follows.
+// _studioV2.opening) comes back once, within 15 s of that first v2 draw (_studioV2.openedAt; the
+// platform's push follows it within the same sign-in tick, however long the form took), when such an
+// entry replaces it: same tab, nothing beyond the tab in the address. The reader's own moves carry
+// the mark, so they are never touched; the path under the restored screen is rebuilt by the draw
+// that follows.
 function studioV2ReapplyOpeningAddress() {
   const opening = _studioV2.opening;
   if (!opening || _studioV2.reapplied || !_studioV2.docRendered) return;
   if (!opening.section && !opening.id && !opening.step) return;  // nothing beyond the tab to bring back
   try {
-    if (typeof performance === 'undefined' || !(performance.now() < 15000)) return;
+    if (!_studioV2.openedAt || Date.now() - _studioV2.openedAt >= STUDIO_V2_OPENING_WINDOW_MS) return;
     if (studioV2HistoryChain()) return;  // the studio's own entry
     const now = new URLSearchParams(window.location.search || '');
     if (['section', 'id', 'step'].some(key => now.get(key))) return;
@@ -13817,7 +13847,16 @@ function ensureStudioBundle(name, readyCheck = null) {
     const tag = document.createElement('script');
     tag.src = _studioLazyBundleUrl(name);
     tag.onload = () => {
-      slot.state = studioBundleReady(name, readyCheck) ? 'ready' : 'failed';
+      if (studioBundleReady(name, readyCheck)) {
+        slot.state = 'ready';
+      } else {
+        // The file arrived but did not register its functions (a mismatched or truncated copy): the
+        // same failed state as a lost request, with its cooldown, so a later draw or Retry asks again.
+        try { tag.remove(); } catch (_) {}
+        slot.state = 'failed';
+        slot.promise = null;
+        slot.failedAt = Date.now();
+      }
       try { if (state.currentView === 'ads-studio') render(); } catch (_) {}
       resolve();
     };
@@ -14578,9 +14617,11 @@ const STUDIO_INBOX_PULSE_MS = 30 * 1000;
 const STUDIO_INBOX_PULSE_KEY = 'inbox';
 
 // While the customer layout is on, the pulse hook (15g) reads the feed's unreadCount every 30 s
-// (only while the page is visible, one read at a time, its own back-off); when it moves, the Inbox
-// (15n) reads again and redraws, so the bell's badge follows within a minute. Any other layout stops
-// the watch. Called by the /me listener after every settled /me read (and once at load).
+// (only while the page is visible AND a studio screen is on show, one read at a time, its own
+// back-off); when it moves, the Inbox (15n) reads again and redraws, so the bell's badge follows
+// within a minute. Any other layout stops the watch. Called by the /me listener after every settled
+// /me read (and once at load): ONE watch per signed-in user is kept across those reads (its baseline
+// reading with it), so a change that landed since the last poll is never swallowed by a restart.
 function studioInboxPulseStart(me) {
   if (typeof studioPulseWatch !== 'function' || typeof studioPulseStop !== 'function') return false;
   const layout = me && typeof me === 'object' ? me : null;
@@ -14589,8 +14630,14 @@ function studioInboxPulseStart(me) {
     studioPulseStop(STUDIO_INBOX_PULSE_KEY);
     return false;
   }
-  studioPulseWatch(STUDIO_INBOX_PULSE_KEY, { path: '/api/studio/activity', field: 'unreadCount', intervalMs: STUDIO_INBOX_PULSE_MS, onChange: studioInboxPulseChanged });
+  if (typeof studioPulseWatching === 'function' && studioPulseWatching(STUDIO_INBOX_PULSE_KEY)) return true;
+  studioPulseWatch(STUDIO_INBOX_PULSE_KEY, { path: '/api/studio/activity', field: 'unreadCount', intervalMs: STUDIO_INBOX_PULSE_MS, onChange: studioInboxPulseChanged, while: studioInboxPulseWanted });
   return true;
+}
+
+// The feed is polled only while a studio screen is on show (the bell is drawn there alone).
+function studioInboxPulseWanted() {
+  return typeof state !== 'undefined' && !!state && state.currentView === 'ads-studio';
 }
 
 function studioInboxPulseChanged() {

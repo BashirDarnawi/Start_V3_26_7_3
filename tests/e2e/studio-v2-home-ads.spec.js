@@ -390,6 +390,33 @@ test.describe('Albayan Studio v2 Home and My ads (pilot)', () => {
     expect(errors).toEqual([]);
   });
 
+  test('a deep link survives a slow sign-in: the request opened at /studio?tab=campaigns&id=… shows after a 16 s pause on the login form', async ({ page, playwright, baseURL }, testInfo) => {
+    fullMatrixOnly(testInfo);
+    test.setTimeout(120_000);
+    const seed = await seedCustomer(playwright, baseURL, testInfo, 'deeplink');
+    const errors = collectPageErrors(page);
+    await page.setViewportSize(PHONE);
+    // Signed out, at the deep link; the form is filled only after the page's 15 s opening window would have passed
+    // (the restore runs from the studio's first draw after the sign-in, never from the page's navigation start).
+    await page.goto(`/studio?tab=campaigns&id=${seed.ids.approved}`);
+    const chooser = page.getByRole('button', { name: 'Use another account', exact: true });
+    if (await chooser.isVisible().catch(() => false)) await chooser.click();
+    await expect(page.locator('#login-form')).toBeVisible();
+    await page.waitForTimeout(16_000);
+    await page.locator('#login-email').fill(seed.user.email);
+    await page.locator('#login-password').fill(seed.user.password);
+    const [response] = await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/auth/login') && r.request().method() === 'POST'),
+      page.locator('#login-form button[type="submit"]').click()
+    ]);
+    expect(response.ok(), `Studio login for ${seed.user.email} failed with HTTP ${response.status()}`).toBe(true);
+    await expect(page.getByTestId('studio-screen-campaigns')).toHaveAttribute('data-id', seed.ids.approved, { timeout: BOOT_TIMEOUT });
+    await expect(page.getByTestId('studio-ad-detail')).toBeVisible({ timeout: BOOT_TIMEOUT });
+    await expect.poll(() => new URL(page.url()).searchParams.get('id'), { timeout: BOOT_TIMEOUT }).toBe(seed.ids.approved);
+    await expect.poll(() => tabParam(page)).toBe('campaigns');
+    expect(errors).toEqual([]);
+  });
+
   test('smoke: Home shows the server numbers on this browser', async ({ page, playwright, baseURL }, testInfo) => {
     test.skip(testInfo.project.name === FULL_MATRIX_PROJECT, 'mobile-chromium runs the full matrix above');
     const seed = await seedCustomer(playwright, baseURL, testInfo, 'smoke');

@@ -686,6 +686,19 @@ function studioDeskLinked(request) {
   return /^\d{1,40}$/.test(String((request && request.metaCampaignId) || '').trim());
 }
 
+// The Meta campaign a request carried once and lost since (an unlink; the server keeps
+// lastLinkedMetaCampaignId / everLinked, ad_campaign_actions._link_history): '' when never linked.
+function studioDeskLastLinkedId(request) {
+  const last = String((request && request.lastLinkedMetaCampaignId) || '').trim();
+  return /^\d{1,40}$/.test(last) ? last : '';
+}
+
+// Linked now, or linked before: the server settles such a request on that campaign's results row
+// (never as a "never linked" full return), so the settle section reads its results and shows the cap.
+function studioDeskWasLinked(request) {
+  return studioDeskLinked(request) || !!studioDeskLastLinkedId(request) || !!(request && request.everLinked === true);
+}
+
 function studioDeskLibyaToday() {
   try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Tripoli', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); } catch (_) { return new Date().toISOString().slice(0, 10); }
 }
@@ -763,7 +776,9 @@ function studioDeskStage(request) {
   const raw = linked
     ? { stage: 4, labels: { en: 'Approved — checking Meta', ar: 'مقبول — نتحقق من ميتا' }, linked: true, checking: true }
     : endPassed
-      ? { stage: 10, labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' }, variantLabels: { en: 'Meta never showed this ad: a full return', ar: 'لم تعرض ميتا هذا الإعلان: يعود المبلغ كاملاً' } }
+      ? (studioDeskWasLinked(request)
+        ? { stage: 10, labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' } }  // was linked: no "never showed" guess
+        : { stage: 10, labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' }, variantLabels: { en: 'Meta never showed this ad: a full return', ar: 'لم تعرض ميتا هذا الإعلان: يعود المبلغ كاملاً' } })
       : { stage: 4, labels: { en: 'Approved — being set up in Meta', ar: 'مقبول — نجهّزه في ميتا' } };
   const view = studioStageView(raw);
   view.fromServer = false;
@@ -809,7 +824,7 @@ function studioDeskReadResults(id, force = false) {
 }
 
 function studioDeskWantResults(list) {
-  for (const request of list) if (studioDeskLinked(request)) studioDeskReadResults(request.id);
+  for (const request of list) if (studioDeskWasLinked(request)) studioDeskReadResults(request.id);
 }
 
 // "Check Meta now": the classic single-flight call (15c), then this desk's own read of the answer.
@@ -1189,18 +1204,35 @@ function studioDeskSettleEntry(id) {
 }
 
 // What the sheet starts from: paid, Meta's confirmed spend (null = unknown), the cap and the basis.
+// A request linked before and unlinked since (wasLinked) is judged by the server on the old
+// campaign's results row (ad_campaign_actions.settle_plan, last_linked_meta_ids): its spend comes
+// from the staff row of THAT campaign (confirmed, USD), else the cap is unknown and the amount empty.
 function studioDeskSettleNumbers(request) {
   const paid = studioDeskPaid(request);
   const entry = _studioDesk.results.get(String(request.id));
   const stage = studioDeskStage(request);
   const staff = entry && entry.staff ? entry.staff : {};
   const linked = studioDeskLinked(request);
-  // Never delivered (the server's flag on the results row) or never linked: the whole payment returns.
-  const never = linked ? (stage.stage === 10 && staff.neverDelivered === true) : true;
-  const spend = never ? 0 : stage.metaUsedMinor;
+  const wasLinked = !linked && studioDeskWasLinked(request);
+  let spend = null;
+  let never = false;
+  if (linked) {
+    // Never delivered (the server's flag on the results row): the whole payment returns.
+    never = stage.stage === 10 && staff.neverDelivered === true;
+    spend = never ? 0 : stage.metaUsedMinor;
+  } else if (wasLinked) {
+    const lastId = studioDeskLastLinkedId(request);
+    const sameRow = !!lastId && String(staff.metaCampaignId || '') === lastId;
+    const confirmed = sameRow && !!staff.spendConfirmedAt && String(staff.currency || 'USD') === 'USD' && Number.isSafeInteger(staff.spendMinorUSD) && staff.spendMinorUSD >= 0;
+    never = sameRow && staff.neverDelivered === true && confirmed && staff.spendMinorUSD === 0;
+    spend = confirmed ? staff.spendMinorUSD : null;
+  } else {
+    never = true;  // never linked: the whole payment returns
+    spend = 0;
+  }
   const cap = spend === null ? null : Math.max(paid - spend, 0);
   return {
-    paid, spend, cap, never,
+    paid, spend, cap, never, wasLinked,
     readyAt: String(staff.settleReadDueAt || studioDeskSettleEntry(request.id).readyAt || ''),
     finalRead: !!staff.settleReadAt,
     confirmedAt: String(staff.spendConfirmedAt || '')
@@ -1212,7 +1244,8 @@ function renderStudioDeskSettleCard(request) {
   const numbers = studioDeskSettleNumbers(request);
   const linked = studioDeskLinked(request);
   const busy = typeof _adsStudioResultsChecks !== 'undefined' && _adsStudioResultsChecks.has(String(request.id));
-  const countdown = !linked
+  const wasLinked = numbers.wasLinked;
+  const countdown = !linked && !wasLinked
     ? adsStudioText('Never linked to Meta: the full amount goes back now.', 'لم يُربط بميتا: يعود المبلغ كاملاً الآن.')
     : numbers.finalRead
       ? adsStudioText('Final Meta read done: ready to settle.', 'تمت قراءة ميتا النهائية: جاهز للتسوية.')
@@ -1220,14 +1253,16 @@ function renderStudioDeskSettleCard(request) {
         ? adsStudioText('Meta never showed this ad: the full amount can go back now.', 'لم تعرض ميتا هذا الإعلان: يمكن إعادة المبلغ كاملاً الآن.')
         : numbers.readyAt
           ? adsStudioText(`Final Meta read ${studioDeskCountdown(numbers.readyAt)}`, `قراءة ميتا النهائية ${studioDeskCountdown(numbers.readyAt)}`)
-          : adsStudioText('The final Meta read is scheduled 48 h after delivery ends.', 'تُجدول قراءة ميتا النهائية بعد 48 ساعة من انتهاء العرض.');
+          : wasLinked
+            ? adsStudioText('Was linked to Meta before: the server sets the cap from that campaign\'s final Meta reading.', 'كان مربوطاً بميتا من قبل: يحدد الخادم الحد الأقصى من قراءة ميتا النهائية لتلك الحملة.')
+            : adsStudioText('The final Meta read is scheduled after delivery ends; the countdown appears here then.', 'تُجدول قراءة ميتا النهائية بعد انتهاء العرض؛ ويظهر العدّ التنازلي هنا حينها.');
   const money = [
     `${adsStudioText('Paid', 'مدفوع')} ${studioUsd(numbers.paid)}`,
     numbers.spend === null ? adsStudioText('Meta used: not confirmed yet', 'صرف ميتا: غير مؤكد بعد') : `${adsStudioText('Meta used', 'صرف ميتا')} ${studioUsd(numbers.spend)}`,
     numbers.cap === null ? '' : `${adsStudioText('Return up to', 'يعود حتى')} ${studioUsd(numbers.cap)}`
   ].filter(Boolean).join(' · ');
   return `
-              <li class="studio-desk-box" data-testid="studio-desk-settle-${id}" data-ready="${numbers.finalRead || numbers.never || !linked ? '1' : '0'}">
+              <li class="studio-desk-box" data-testid="studio-desk-settle-${id}" data-ready="${numbers.finalRead || numbers.never || (!linked && !wasLinked) ? '1' : '0'}"${wasLinked ? ' data-was-linked="1"' : ''}>
                 <h3 class="studio-desk-h3" dir="auto">${studioEsc(studioDeskName(request))}</h3>
                 ${renderStudioDeskMeta(request)}
                 ${renderStudioDeskStageLine(request)}
@@ -1248,7 +1283,7 @@ function renderStudioDeskSettle() {
   const shown = ended.slice(0, studioDeskShown('settle'));
   const intro = renderStudioDeskIntro(
     adsStudioText(`Ended — settle (${ended.length})`, `منتهية — التسوية (${ended.length})`),
-    adsStudioText("The final amount comes from Meta's confirmed spend, read 48 h after delivery ended. An ad Meta never showed returns everything at once.", 'يُحسب المبلغ النهائي من صرف ميتا المؤكد، ويُقرأ بعد 48 ساعة من انتهاء العرض. الإعلان الذي لم تعرضه ميتا يعود مبلغه كاملاً فوراً.'),
+    adsStudioText("The final amount comes from Meta's confirmed spend after the final Meta reading (each row counts down to it; the wait is the Settlement setting). An ad Meta never showed returns everything at once.", 'يُحسب المبلغ النهائي من صرف ميتا المؤكد بعد قراءة ميتا النهائية (يعدّ كل صف تنازلياً إليها؛ ومدة الانتظار في إعداد التسوية). الإعلان الذي لم تعرضه ميتا يعود مبلغه كاملاً فوراً.'),
     'studio-desk-settle-head');
   if (!ended.length) return intro + renderStudioDeskEmpty('scale', adsStudioText('No ended ad waits for its settlement', 'لا إعلان منتهٍ ينتظر التسوية'), '', 'studio-desk-settle-empty');
   return `${intro}
@@ -1524,6 +1559,10 @@ function renderStudioDeskMore(route) {
 
 // ------------------------------------------------------------------ the staff pulse (P3-17)
 
+// The pulse's numbers. openTickets includes the urgent ticket every open stop request opens
+// (studio_stop.create_stop_ticket); stopTicketsOpen is that overlap (stop tickets still open), so
+// the badge and the title count one stop request once: openTickets + the stop requests whose ticket
+// was answered but whose ad is not stopped yet (studioDeskStopsNotTicketed).
 function studioDeskCleanPulse(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const whole = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
@@ -1531,9 +1570,14 @@ function studioDeskCleanPulse(raw) {
     waitingReview: whole(raw.waitingReview),
     stopRequests: whole(raw.stopRequests),
     openTickets: whole(raw.openTickets),
+    stopTicketsOpen: whole(raw.stopTicketsOpen),
     alerts: whole(raw.alerts),
     paymentsWaiting: Number.isSafeInteger(raw.paymentsWaiting) ? whole(raw.paymentsWaiting) : null
   };
+}
+
+function studioDeskStopsNotTicketed(pulse) {
+  return pulse ? Math.max(0, pulse.stopRequests - (pulse.stopTicketsOpen || 0)) : 0;
 }
 
 function studioDeskPulseStart() {
@@ -1571,7 +1615,7 @@ function studioDeskOnPulse(reply) {
 }
 
 function studioDeskTitleCount(pulse) {
-  return pulse ? pulse.waitingReview + pulse.stopRequests + pulse.openTickets + (pulse.paymentsWaiting || 0) : 0;
+  return pulse ? pulse.waitingReview + pulse.openTickets + studioDeskStopsNotTicketed(pulse) + (pulse.paymentsWaiting || 0) : 0;
 }
 
 // The document title carries the count of items waiting for the team while the desk is open.
@@ -1593,7 +1637,7 @@ function studioDeskBadgeCounts() {
     requests: pulse ? pulse.waitingReview : 0,
     launch: studioDeskLaunchQueue().length,
     settle: studioDeskEndedList().length,
-    tickets: pulse ? pulse.openTickets + pulse.stopRequests : 0,
+    tickets: pulse ? pulse.openTickets + studioDeskStopsNotTicketed(pulse) : 0,
     health: pulse ? pulse.alerts : 0,
     more: pulse && pulse.paymentsWaiting ? pulse.paymentsWaiting : 0
   };
@@ -1862,7 +1906,9 @@ const STUDIO_ADMIN_COLLISION_REASONS = Object.freeze({
   studio_campaign_id: ['a studio request linked this campaign', 'ربط طلبٌ في الاستوديو هذه الحملة']
 });
 
-const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [] };
+const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [], acks: new Map(), scan: null };
+// acks: alert id -> the acknowledge in flight (single flight); scan: the last on-demand money scan
+// ({promise, value, error, at}; renderStudioAdminScanRow).
 
 // ------------------------------------------------------------------ small helpers
 
@@ -1878,6 +1924,8 @@ function studioAdminScope() {
     _studioAdmin.reads = Object.create(null);
     _studioAdmin.settings = Object.create(null);
     _studioAdmin.alertsPages = [];
+    _studioAdmin.acks = new Map();
+    _studioAdmin.scan = null;
   }
   return uid;
 }
@@ -2100,11 +2148,62 @@ function renderStudioAdminAlert(alert) {
   if (alert && alert.relatedId) bits.push(`${String(alert.relatedType || '').slice(0, 30)}: ${String(alert.relatedId).slice(0, 80)}`);
   if (Number.isSafeInteger(details.absorbedMinorUSD) && details.absorbedMinorUSD > 0) bits.push(adsStudioText(`Albayan absorbs ${studioUsd(details.absorbedMinorUSD)}`, `يتحمل البيان ${studioUsd(details.absorbedMinorUSD)}`));
   if (Number.isSafeInteger(details.daysLeft)) bits.push(adsStudioText(`${details.daysLeft} days left`, `بقي ${details.daysLeft} يوماً`));
+  const id = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/.test(String((alert && alert.id) || '')) ? String(alert.id) : '';
+  const busy = !!id && _studioAdmin.acks.has(id);
+  const ackButton = !ack && id
+    ? `<div class="studio-desk-actions"><button type="button" class="studio-v2-action studio-desk-small" data-testid="studio-admin-alert-ack-${studioEsc(id)}" onclick="studioAdminAlertAck('${studioEsc(id)}', this)"${busy ? ' disabled aria-busy="true"' : ''}>${studioAdminIcon('check')}<span>${studioEsc(busy ? adsStudioText('Acknowledging…', 'جارٍ التأكيد…') : adsStudioText('Acknowledge', 'تأكيد الاطلاع'))}</span></button></div>` : '';
   return `
-              <li class="studio-desk-box studio-admin-alert" data-testid="studio-admin-alert" data-kind="${studioEsc(kind)}" data-acknowledged="${ack ? '1' : '0'}">
+              <li class="studio-desk-box studio-admin-alert" data-testid="studio-admin-alert" data-kind="${studioEsc(kind)}" data-acknowledged="${ack ? '1' : '0'}"${id ? ` data-id="${studioEsc(id)}"` : ''}>
                 <p class="studio-admin-alert-title">${studioAdminIcon(ack ? 'check' : 'bell-ring', 'studio-desk-meta-icon')}<span dir="auto">${studioEsc(label)}</span></p>
                 <p class="studio-desk-note"><code class="studio-desk-code" dir="ltr">${studioEsc(kind)}</code>${bits.length ? ` · <span dir="auto">${studioEsc(bits.join(' · '))}</span>` : ''}${ack ? ` · ${studioEsc(adsStudioText('acknowledged', 'تم الاطلاع'))}` : ''}</p>
+                ${ackButton}
               </li>`;
+}
+
+// "Acknowledge" (P3-23): POST /api/studio/admin/alerts/{id}/ack, single flight per alert. The
+// server stamps acknowledgedAt (a replay answers the stamped alert as it is), so the row leaves
+// the open list at once and the pulse count follows on its next read. UNKNOWN_ALERT (archived or a
+// stale entry) is shown through the ONE error map and the list is read again.
+function studioAdminAlertAck(id, button = null) {
+  const alertId = String(id || '');
+  if (!alertId || !studioAdminIsAdmin() || !studioAdminServer() || _studioAdmin.acks.has(alertId)) return null;
+  if (button) setAdsStudioActionButtonBusy(button, true);
+  const generation = _studioAdmin.generation;
+  const promise = studioApi(`/api/studio/admin/alerts/${encodeURIComponent(alertId)}/ack`, { method: 'POST', body: {} }).then(reply => {
+    if (generation !== _studioAdmin.generation) return null;
+    const alert = reply && reply.alert && typeof reply.alert === 'object' ? reply.alert : null;
+    if (!alert || !alert.acknowledgedAt) return null;
+    studioAdminAlertLeft(alertId);
+    if (typeof studioDeskPulseRefresh === 'function') studioDeskPulseRefresh();
+    studioAdminNotify(true, adsStudioText('Alert acknowledged', 'تم تأكيد الاطلاع على التنبيه'), reply.replay === true ? adsStudioText('It was already acknowledged.', 'كان قد تم تأكيد الاطلاع عليه من قبل.') : '');
+    return alert;
+  }, error => {
+    if (generation !== _studioAdmin.generation) return null;
+    const info = (error && error.studio) || studioErrorInfo(error, 'action');
+    studioAdminNotify(false, adsStudioText('Could not acknowledge the alert', 'تعذّر تأكيد الاطلاع على التنبيه'), info.text || '');
+    if (info.code === 'UNKNOWN_ALERT') studioAdminAlertsRefresh();
+    return null;
+  }).finally(() => {
+    if (generation !== _studioAdmin.generation) return;
+    _studioAdmin.acks.delete(alertId);
+    if (button) setAdsStudioActionButtonBusy(button, false);
+    studioAdminRedraw();
+  });
+  _studioAdmin.acks.set(alertId, promise);
+  studioAdminRedraw();
+  return promise;
+}
+
+// An acknowledged alert leaves the open list this screen holds (the current page and the earlier ones).
+function studioAdminAlertLeft(alertId) {
+  const slot = _studioAdmin.reads.alerts;
+  const drop = list => (Array.isArray(list) ? list.filter(item => !(item && String(item.id || '') === alertId)) : list);
+  if (slot && slot.value && Array.isArray(slot.value.alerts)) slot.value.alerts = drop(slot.value.alerts);
+  _studioAdmin.alertsPages = _studioAdmin.alertsPages.map(page => ({ ...page, alerts: drop(page.alerts) }));
+}
+
+function studioAdminNotify(ok, title, text) {
+  try { showNotification(title, text, ok ? 'success' : 'error'); } catch (_) {}
 }
 
 function renderStudioAdminJobs(jobs) {
@@ -2224,6 +2323,7 @@ function renderStudioAdminDiagnostics() {
     : token.checked ? `${token.isValid === true ? adsStudioText('valid', 'صالح') : adsStudioText('NOT valid', 'غير صالح')} · ${token.expiresNever ? adsStudioText('never expires', 'لا ينتهي') : adsStudioText(`${studioAdminNumber(token.daysLeft)} days left`, `بقي ${studioAdminNumber(token.daysLeft)} يوماً`)}` : adsStudioText('not checked yet', 'لم يُفحص بعد');
   const generated = report.generatedAt ? `<p class="studio-desk-note">${studioEsc(adsStudioText(`Generated ${studioAdminWhen(report.generatedAt)}. Counts only, no personal data.`, `أُنشئ ${studioAdminWhen(report.generatedAt)}. أرقام فقط، دون بيانات شخصية.`))}</p>` : '';
   return head + generated
+    + renderStudioAdminScanRow()
     + renderStudioAdminJobs(report.jobs)
     + renderStudioAdminQueues(operations)
     + renderStudioAdminCapacity(operations)
@@ -2237,6 +2337,70 @@ function renderStudioAdminDiagnostics() {
         ${renderStudioAdminLine(adsStudioText('Last backup', 'آخر نسخة احتياطية'), storage.backup && storage.backup.at ? `${studioAdminAgo(storage.backup.at)} (${studioAdminBytes(storage.backup.bytes)})` : adsStudioText('none recorded', 'لا شيء مسجل'))}
       </section>`
     + `<section class="studio-desk-box" data-testid="studio-admin-baselines"><h3 class="studio-desk-h3">${studioEsc(adsStudioText('Baselines B1–B6 (before the pilot)', 'خطوط الأساس B1–B6 (قبل التجربة)'))}</h3>${baselineLines.join('')}</section>`;
+}
+
+// ------------------------------------------------------------------ the on-demand money scan (P3-24)
+
+// "Scan money now": POST /api/studio/admin/integrity/scan (admin, one per 10 minutes on the server),
+// single flight; the answer's counts are shown and the diagnostics and alerts reads are asked again.
+// A 429 shows the wait through the ONE error map (Retry-After); nothing else changes.
+function studioAdminScanNow(button = null) {
+  if (!studioAdminIsAdmin() || !studioAdminServer() || (_studioAdmin.scan && _studioAdmin.scan.promise)) return null;
+  const slot = _studioAdmin.scan || (_studioAdmin.scan = { promise: null, value: null, error: null, at: 0 });
+  if (button) setAdsStudioActionButtonBusy(button, true);
+  const generation = _studioAdmin.generation;
+  slot.promise = studioApi('/api/studio/admin/integrity/scan', { method: 'POST', body: {} }, { timeoutMs: 45000 }).then(reply => {
+    if (generation !== _studioAdmin.generation) return null;
+    const counts = reply && reply.counts && typeof reply.counts === 'object' ? reply.counts : {};
+    slot.value = { total: Number.isSafeInteger(counts.total) && counts.total >= 0 ? counts.total : 0, scannedAt: String((reply && reply.scannedAt) || ''), alertId: String((reply && reply.alertId) || '') };
+    slot.error = null;
+    slot.at = Date.now();
+    if (_studioAdmin.reads.diagnostics) studioAdminRead('diagnostics', '/api/studio/admin/diagnostics', true);
+    if (_studioAdmin.reads.alerts) { _studioAdmin.alertsPages = []; studioAdminRead('alerts', '/api/studio/admin/alerts?limit=20', true); }
+    if (typeof studioDeskPulseRefresh === 'function') studioDeskPulseRefresh();
+    return slot.value;
+  }, error => {
+    if (generation !== _studioAdmin.generation) return null;
+    slot.error = error && typeof error === 'object' ? error : new Error(String(error || 'Request failed'));  // its words are picked at draw time (the reader may switch language)
+    slot.value = null;
+    return null;
+  }).finally(() => {
+    if (generation !== _studioAdmin.generation) return;
+    slot.promise = null;
+    if (button) setAdsStudioActionButtonBusy(button, false);
+    studioAdminRedraw();
+  });
+  studioAdminRedraw();
+  return slot.promise;
+}
+
+function renderStudioAdminScanRow() {
+  const slot = _studioAdmin.scan;
+  let note = '';
+  let tone = '';
+  if (slot && slot.value) {
+    const total = slot.value.total;
+    tone = total ? 'red' : 'green';
+    note = total
+      ? adsStudioText(`Scan done: ${total} finding${total === 1 ? '' : 's'}. The alert is in the alerts list.`, `اكتمل الفحص: ${studioAdminArCount(total, 'مخالفة واحدة', 'مخالفتان', 'مخالفات', 'مخالفة')}. التنبيه في قائمة التنبيهات.`)
+      : adsStudioText('Scan done: the money adds up, no finding.', 'اكتمل الفحص: الأموال متطابقة، لا مخالفات.');
+  } else if (slot && slot.error) {
+    tone = 'red';
+    try { note = studioErrorInfo(slot.error, 'action').text || ''; } catch (_) { note = adsStudioText('The scan could not be run.', 'تعذّر تشغيل الفحص.'); }
+  }
+  return `
+          <div class="studio-v2-list studio-admin-scan" data-testid="studio-admin-scan">
+            <button type="button" class="studio-v2-row" data-testid="studio-admin-scan-now" onclick="studioAdminScanNow(this)"${slot && slot.promise ? ' disabled aria-busy="true"' : ''}>
+              ${studioAdminIcon('scan-search')}
+              <span class="studio-admin-row-text"><span class="studio-v2-row-label">${studioEsc(slot && slot.promise ? adsStudioText('Scanning…', 'جارٍ الفحص…') : adsStudioText('Scan money now', 'افحص الأموال الآن'))}</span><span class="studio-desk-note">${studioEsc(adsStudioText('The daily money check on demand: once every 10 minutes. Counts only.', 'فحص الأموال اليومي عند الطلب: مرة كل 10 دقائق. أرقام فقط.'))}</span></span>
+            </button>
+            ${note ? `<p class="studio-desk-line" data-tone="${studioEsc(tone)}" data-testid="studio-admin-scan-note" data-total="${slot && slot.value ? slot.value.total : ''}"><span class="studio-desk-line-label">${studioEsc(note)}</span></p>` : ''}
+          </div>`;
+}
+
+function studioAdminArCount(count, one, two, few, many) {
+  if (typeof studioDeskArCount === 'function') return studioDeskArCount(count, one, two, few, many);
+  return count === 1 ? one : count === 2 ? two : `${count} ${count >= 3 && count <= 10 ? few : many}`;
 }
 
 // ------------------------------------------------------------------ the collision report (P0-10)

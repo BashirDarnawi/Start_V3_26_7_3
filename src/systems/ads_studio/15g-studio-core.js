@@ -64,6 +64,7 @@ const STUDIO_ERROR_TEXTS = Object.freeze({
   SERVICE_OFF: ['Help is not open for your account yet.', 'خدمة المساعدة غير مفتوحة لحسابك بعد.'],
   UNKNOWN_TICKET: ['This ticket was not found. Refresh the page.', 'لم نجد هذه التذكرة. حدّث الصفحة.'],
   UNKNOWN_PAYMENT: ['This payment was not found. Refresh the page.', 'لم نجد هذه الدفعة. حدّث الصفحة.'],
+  UNKNOWN_ALERT: ['No studio alert has this id. Refresh the page.', 'لا يوجد تنبيه بهذا المعرّف. حدّث الصفحة.'],
   IDEMPOTENCY_MISMATCH: ['This was already sent with different details. Refresh and try again.', 'أُرسل هذا من قبل بتفاصيل مختلفة. حدّث الصفحة وأعد المحاولة.'],
   TICKET_OPEN_LIMIT: ['You have too many open tickets. Mark one as solved, then open a new one.', 'لديك تذاكر مفتوحة كثيرة. أغلق واحدة تم حلها ثم افتح تذكرة جديدة.'],
   TICKET_MESSAGE_LIMIT: ['This ticket is full. Open a new ticket to continue.', 'هذه التذكرة ممتلئة. افتح تذكرة جديدة للمتابعة.'],
@@ -344,7 +345,9 @@ function studioPulseVisible() {
 // onChange(value, reply) when the value moves (never for the first reading). While the tab is hidden
 // there is no timer at all; coming back polls at once if a round was missed. One read at a time;
 // failures back off (429: the server's Retry-After). Signing out or another user stops the watch.
-// Returns stop(). A second watch under the same key replaces the first.
+// options.while: a predicate asked before every poll; false skips that round (no request, the timer
+// goes on) so a watch polls only while its screen is on show. Returns stop(). A second watch under
+// the same key replaces the first; studioPulseWatching(key) tells whether one runs for this user.
 function studioPulseWatch(key, options = {}) {
   const name = String(key || '');
   const path = String(options.path || '');
@@ -356,6 +359,7 @@ function studioPulseWatch(key, options = {}) {
     field: typeof options.field === 'string' && options.field ? options.field : 'changedAt',
     intervalMs: Math.max(STUDIO_PULSE_MIN_MS, Number(options.intervalMs) || STUDIO_PULSE_DEFAULT_MS),
     onChange: options.onChange,
+    while: typeof options.while === 'function' ? options.while : null,
     uid: studioMeUserId(),
     timer: null,
     inFlight: false,
@@ -379,6 +383,12 @@ function studioPulseStop(key) {
   _studioPulse.watches.delete(watch.key);
 }
 
+// True while a watch under this key runs for the signed-in user (its baseline reading is kept).
+function studioPulseWatching(key) {
+  const watch = _studioPulse.watches.get(String(key || ''));
+  return !!watch && !watch.stopped && !!watch.uid && watch.uid === studioMeUserId();
+}
+
 function studioPulseSchedule(watch, delayMs) {
   if (watch.stopped) return;
   if (watch.timer) { clearTimeout(watch.timer); watch.timer = null; }
@@ -389,6 +399,11 @@ function studioPulseSchedule(watch, delayMs) {
 async function studioPulsePoll(watch) {
   if (watch.stopped || watch.inFlight || !studioPulseVisible()) return;
   if (!watch.uid || watch.uid !== studioMeUserId()) { studioPulseStop(watch.key); return; }
+  if (watch.while) {
+    let wanted = true;
+    try { wanted = watch.while() !== false; } catch (_) { wanted = true; }
+    if (!wanted) { studioPulseSchedule(watch, watch.intervalMs); return; }  // its screen is not on show: no request this round
+  }
   watch.inFlight = true;
   let delay = watch.intervalMs;
   try {

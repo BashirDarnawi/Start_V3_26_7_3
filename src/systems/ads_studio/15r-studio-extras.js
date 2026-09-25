@@ -673,9 +673,11 @@ const STUDIO_INBOX_PULSE_MS = 30 * 1000;
 const STUDIO_INBOX_PULSE_KEY = 'inbox';
 
 // While the customer layout is on, the pulse hook (15g) reads the feed's unreadCount every 30 s
-// (only while the page is visible, one read at a time, its own back-off); when it moves, the Inbox
-// (15n) reads again and redraws, so the bell's badge follows within a minute. Any other layout stops
-// the watch. Called by the /me listener after every settled /me read (and once at load).
+// (only while the page is visible AND a studio screen is on show, one read at a time, its own
+// back-off); when it moves, the Inbox (15n) reads again and redraws, so the bell's badge follows
+// within a minute. Any other layout stops the watch. Called by the /me listener after every settled
+// /me read (and once at load): ONE watch per signed-in user is kept across those reads (its baseline
+// reading with it), so a change that landed since the last poll is never swallowed by a restart.
 function studioInboxPulseStart(me) {
   if (typeof studioPulseWatch !== 'function' || typeof studioPulseStop !== 'function') return false;
   const layout = me && typeof me === 'object' ? me : null;
@@ -684,8 +686,14 @@ function studioInboxPulseStart(me) {
     studioPulseStop(STUDIO_INBOX_PULSE_KEY);
     return false;
   }
-  studioPulseWatch(STUDIO_INBOX_PULSE_KEY, { path: '/api/studio/activity', field: 'unreadCount', intervalMs: STUDIO_INBOX_PULSE_MS, onChange: studioInboxPulseChanged });
+  if (typeof studioPulseWatching === 'function' && studioPulseWatching(STUDIO_INBOX_PULSE_KEY)) return true;
+  studioPulseWatch(STUDIO_INBOX_PULSE_KEY, { path: '/api/studio/activity', field: 'unreadCount', intervalMs: STUDIO_INBOX_PULSE_MS, onChange: studioInboxPulseChanged, while: studioInboxPulseWanted });
   return true;
+}
+
+// The feed is polled only while a studio screen is on show (the bell is drawn there alone).
+function studioInboxPulseWanted() {
+  return typeof state !== 'undefined' && !!state && state.currentView === 'ads-studio';
 }
 
 function studioInboxPulseChanged() {

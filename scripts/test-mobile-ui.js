@@ -2803,7 +2803,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // The tab's sessionStorage stays (a reload keeps it); the page's own memory starts empty.
   const openAt = (url, navType = 'navigate', entryState = null, opened = '') => {
     hist.reset(url, entryState);
-    run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.fromApp = false; _studioV2.popping = false; _studioV2.repin = false; _studioV2.opening = null; _studioV2.reapplied = false;
+    run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.fromApp = false; _studioV2.popping = false; _studioV2.repin = false; _studioV2.opening = null; _studioV2.reapplied = false; _studioV2.enteredAt = 0; _studioV2.openedAt = 0;
       __navType = ${JSON.stringify(navType)}; __navName = ${JSON.stringify(opened ? `http://localhost${opened}` : '')}; render();`);
   };
   const chainOf = entry => (entry && entry.state && entry.state.studioV2 && entry.state.studioV2.chain) || null;
@@ -3378,10 +3378,24 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   openAt('/studio?tab=campaigns&id=req_79');
   run("studioV2Go({ tab: 'campaigns' });");  // the reader's own move up: a marked entry
   const ownMove = { search: search(), chain: chainOf(hist.entries[hist.index]) };
+  // A late platform entry: 20 s after the first v2 draw (the studio's own clock, Date.now), the address is left alone.
   openAt('/studio?tab=campaigns&id=req_80');
-  run('performance.now = () => 20000;');
+  run('var __realDateNow = Date.now; Date.now = () => __realDateNow() + 20000;');
   const late = platformRestore('campaigns');
+  run('Date.now = __realDateNow;');
+  // A slow sign-in: the page was opened long ago (performance.now 20 s) but the studio's first draw is now, so both the
+  // reapply after the platform's push and the restore of the opening address keep the deep link.
+  run('performance.now = () => 20000;');
+  openAt('/studio?tab=campaigns&id=req_81');
+  const slowLogin = platformRestore('campaigns');
+  openAt('/studio?tab=campaigns', 'navigate', null, '/studio?tab=campaigns&id=req_82');
+  const slowRestore = { search: search(), html: html() };
   run('performance.now = () => 100;');
+  // Entered the studio long ago (enteredAt 20 s back) and only now the first v2 draw: the opening address is not brought back.
+  hist.reset('/studio?tab=campaigns');
+  run(`_studioV2.docRendered = false; _studioV2.layout = null; _studioV2.opening = null; _studioV2.reapplied = false; _studioV2.enteredAt = Date.now() - 20000; _studioV2.openedAt = 0;
+    __navType = 'navigate'; __navName = 'http://localhost/studio?tab=campaigns&id=req_83'; render();`);
+  const lateEntry = search();
   const deepLinkCases = [
     deskFirst.search === '?tab=review&section=tickets' && deskFirst.html.includes('data-section="tickets"') && deskFirst.entries === 2,
     deskRestored.search === '?tab=review&section=tickets' && deskRestored.html.includes('data-section="tickets"') && JSON.stringify(deskRestored.chain) === JSON.stringify(['review|requests||', 'review|tickets||']),
@@ -3390,10 +3404,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     otherTab.search === '?tab=wallet' && bareOpening.search === '?tab=wallet',
     ownMove.search === '?tab=campaigns' && Array.isArray(ownMove.chain),
     late.search === '?tab=campaigns' && !late.html.includes('data-id="req_80"'),
+    slowLogin.search === '?tab=campaigns&id=req_81' && slowLogin.html.includes('data-id="req_81"'),
+    slowRestore.search === '?tab=campaigns&id=req_82' && slowRestore.html.includes('data-id="req_82"'),
+    lateEntry === '?tab=campaigns',
     shellSrc.includes('function studioV2ReapplyOpeningAddress()') && shellSrc.includes('if (frame) { studioV2RestoreOpeningAddress(); studioV2ReapplyOpeningAddress(); }')
-      && shellSrc.includes('if (!_studioV2.opening) _studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };')
+      && shellSrc.includes('_studioV2.opening = { tab: route.tab, section: route.section, id: route.id, step: route.step || 0 };')
+      && shellSrc.includes('if (!_studioV2.enteredAt) _studioV2.enteredAt = Date.now();') && shellSrc.includes('_studioV2.openedAt = Date.now();')
+      && shellSrc.includes('if (!_studioV2.enteredAt || Date.now() - _studioV2.enteredAt >= STUDIO_V2_OPENING_WINDOW_MS) return;')
+      && shellSrc.includes('if (!_studioV2.openedAt || Date.now() - _studioV2.openedAt >= STUDIO_V2_OPENING_WINDOW_MS) return;')
+      && !shellSrc.includes('performance.now()')
   ];
-  check('Studio v2 deep link through the login form: the platform\'s bare ?tab= entry after the first draw gets the opening section / id back once (same tab, unmarked entry, within 15 s); never the reader\'s own moves, another tab, a bare opening or a late entry',
+  check('Studio v2 deep link through the login form: the platform\'s bare ?tab= entry after the first draw gets the opening section / id back once (same tab, unmarked entry, within 15 s of the studio\'s own first draw, never of the page\'s navigation start, so a slow sign-in keeps it); never the reader\'s own moves, another tab, a bare opening or a late entry',
     !loadError && deepLinkCases.every(Boolean), loadError || `cases ${failed(deepLinkCases)}`);
 
   // The replies and posts screens live in the lazy bundle studio-pages.js: without a registered screen the shell
@@ -5402,7 +5423,43 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('the lazy bundle loader in a sandbox: one script request per bundle with the main bundle\'s ?v=, the bilingual card meanwhile, a failed request backs off 30 s (Retry asks again at once and redraws), the desk section and the pages screen draw once their functions are here, the classic handover shows the card only while /me says v2, guide links wait for the bundle',
     !loaderError && loaderCases.every(Boolean), loaderError || `cases ${loaderCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
-  const deskPairs = [...(deskSrc + adminSrc).matchAll(/adsStudioText\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)\s*,\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g)]
+  // A bundle that executed but did not register its functions (a mismatched or truncated copy): the failed state with
+  // the same cooldown as a lost request (the tag is removed, the promise freed), a later draw asks again after 30 s
+  // and Retry asks again at once; never a resolved promise that every later draw returns without a request.
+  const brokenDoc = { tags: [], createElement: () => ({ removed: false, remove() { this.removed = true; } }), querySelectorAll: () => [{ src: 'https://albayan.example/studio/script.js?v=abc123' }] };
+  brokenDoc.head = { appendChild: tag => brokenDoc.tags.push(tag) };
+  const brokenBox = vm.createContext({ state: { language: 'en', currentView: 'ads-studio' }, document: brokenDoc, __now: 1000, studioMe: () => ({ ui: 'v2' }), adsStudioIsAr: () => false }, { microtaskMode: 'afterEvaluate' });
+  let brokenError = '';
+  try {
+    vm.runInContext('var __renders = 0; function render() { __renders++; } var Date = { now: () => __now };', brokenBox);
+    vm.runInContext(loaderSrc, brokenBox);
+  } catch (error) { brokenError = String(error && error.message || error); }
+  const brun = code => { try { return vm.runInContext(code, brokenBox); } catch (error) { return `THREW ${error && error.message}`; } };
+  brun("studioBundleScreen('studio-pages.js')");
+  brun('document.tags[0].onload()');  // executed, but renderStudioPagesBody / studioGuideOpen never appeared
+  const brokenState = { state: brun("studioBundleState('studio-pages.js')"), removed: brun('document.tags[0].removed'), promise: brun("_studioBundles.get('studio-pages.js').promise === null"), failedAt: brun("_studioBundles.get('studio-pages.js').failedAt") };
+  const brokenCard = String(brun("studioBundleScreen('studio-pages.js')"));
+  const brokenTagsInCooldown = brun('document.tags.length');
+  brun('__now += 30001;');
+  const brokenAfterCooldown = String(brun("studioBundleScreen('studio-pages.js')"));
+  const brokenTagsAfterCooldown = brun('document.tags.length');
+  brun('document.tags[1].onload(); __now += 1;');  // the same broken copy again
+  const brokenRendersBeforeRetry = brun('__renders');
+  brun("retryStudioBundle('studio-pages.js')");
+  const brokenTagsAfterRetry = brun('document.tags.length');
+  const brokenRendersAfterRetry = brun('__renders');
+  brun("function renderStudioPagesBody() { return '<pages>'; } function studioGuideOpen() { return true; } document.tags[2].onload();");
+  const brokenReady = { state: brun("studioBundleState('studio-pages.js')"), screen: String(brun("studioBundleScreen('studio-pages.js')")) };
+  const brokenCases = [
+    brokenState.state === 'failed' && brokenState.removed === true && brokenState.promise === true && brokenState.failedAt === 1000,
+    brokenCard.includes('data-testid="studio-pages-bundle-failed"') && brokenTagsInCooldown === 1,
+    brokenAfterCooldown.includes('data-testid="studio-pages-bundle-loading"') && brokenTagsAfterCooldown === 2,
+    brokenTagsAfterRetry === 3 && brokenRendersAfterRetry === brokenRendersBeforeRetry + 1,
+    brokenReady.state === 'ready' && brokenReady.screen === ''
+  ];
+  check('the lazy bundle loader: a bundle that executed without registering its functions is failed with the 30 s cooldown (tag removed, promise freed), a later draw and Retry request it again, and it is ready once a good copy registers',
+    !brokenError && brokenCases.every(Boolean), brokenError || `cases ${brokenCases.map((ok, i) => ok ? '' : i).filter(String).join(',')} state ${JSON.stringify(brokenState)}`);
+  const deskPairs =[...(deskSrc + adminSrc).matchAll(/adsStudioText\(\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)\s*,\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g)]
     .map(m => m[4] ?? m[5] ?? m[6] ?? '');
   const deskCss = workspaceCssFor => workspaceCssFor.slice(workspaceCssFor.indexOf('/* Albayan Studio v2 Team desk and admin tools'));
   const deskCssText = deskCss(read('assets/ads-workspace.css'));
@@ -5539,11 +5596,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     { id: 'r_own', createdBy: 'u1', status: 'Submitted', name: 'My own request', budgetMinorUSD: 500, _created: 7, _lastModified: 17 },
     { id: 'r_app', createdBy: 'c1', status: 'Approved', name: 'Approved, not linked', paidMinorUSD: 5000, budgetMinorUSD: 5000, budgetType: 'lifetime', durationDays: 7, studioRef: 'ALB-S-AB12CD34', studioName: 'ALB-S-AB12CD34 · Approved, not linked', startDate: '2099-01-10', endDate: '2099-01-16', _created: 6, _lastModified: 16 },
     { id: 'r_lnk', createdBy: 'c1', status: 'Approved', name: 'Linked and ended', paidMinorUSD: 4000, budgetMinorUSD: 4000, budgetType: 'lifetime', durationDays: 3, studioRef: 'ALB-S-EF56GH78', studioName: 'ALB-S-EF56GH78 · Linked and ended', metaAdAccountId: '9876543210', metaCampaignId: '120200000000000001', startDate: '2026-01-01', endDate: '2026-01-03', _created: 5, _lastModified: 15 },
-    { id: 'r_old', createdBy: 'c1', status: 'Approved', name: 'Never linked, past its end', paidMinorUSD: 900, budgetMinorUSD: 900, budgetType: 'lifetime', durationDays: 2, startDate: '2025-01-01', endDate: '2025-01-02', _created: 4, _lastModified: 14 }
+    { id: 'r_old', createdBy: 'c1', status: 'Approved', name: 'Never linked, past its end', paidMinorUSD: 900, budgetMinorUSD: 900, budgetType: 'lifetime', durationDays: 2, startDate: '2025-01-01', endDate: '2025-01-02', _created: 4, _lastModified: 14 },
+    // Linked once, unlinked by staff since (the server keeps the link history): settled on the old campaign's row, never a "never linked" full return.
+    { id: 'r_was', createdBy: 'c1', status: 'Approved', name: 'Unlinked after a link', paidMinorUSD: 3000, budgetMinorUSD: 3000, budgetType: 'lifetime', durationDays: 2, lastLinkedMetaCampaignId: '120200000000000009', lastLinkedMetaAdAccountId: '9876543210', everLinked: true, startDate: '2025-02-01', endDate: '2025-02-02', _created: 3, _lastModified: 13 }
   ];
   const endedStage = { stage: 10, stageKey: 'ended_settling', labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' }, linked: true, checkedAt: hours(-1), checkedAgo: { en: 'checked 1 hour ago', ar: 'فُحص قبل ساعة' }, metaUsedMinor: 1234, actions: ['ask'], tracker: { step: 'ended', side: false } };
   const endedResults = { campaignId: 'r_lnk', linked: true, stage: endedStage, results: { metaUsedMinor: 1234, paidMinor: 4000 }, staff: { syncState: 'ok', deliveryEndedAt: hours(-1), settleReadDueAt: hours(47), settleReadAt: null, spendConfirmedAt: hours(-1), neverDelivered: false } };
-  const pulse = { waitingReview: 2, stopRequests: 1, openTickets: 3, alerts: 0, updatedAt: hours(0) };
+  // The server's answer for the unlinked-after-link row: its stage logic sees no Meta id (the "never linked" variant), the staff row is the old campaign's.
+  const wasResults = { campaignId: 'r_was', linked: false, stage: { stage: 10, stageKey: 'ended_settling', labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' }, variantLabels: { en: 'Meta never showed this ad: a full return', ar: 'لم تعرض ميتا هذا الإعلان: يعود المبلغ كاملاً' }, linked: false, actions: ['ask'] },
+    results: { metaUsedMinor: null, paidMinor: 3000 }, staff: { metaCampaignId: '120200000000000009', metaAdAccountId: '9876543210', syncState: 'ok', currency: 'USD', spendMinorUSD: 1500, spendConfirmedAt: hours(-50), deliveryEndedAt: hours(-60), settleReadDueAt: hours(-12), settleReadAt: hours(-11), neverDelivered: false } };
+  // openTickets includes the urgent ticket of every open stop request (stopTicketsOpen is that overlap): one stop request counts once.
+  const pulse = { waitingReview: 2, stopRequests: 1, openTickets: 3, stopTicketsOpen: 1, alerts: 0, updatedAt: hours(0) };
   box.state.adCampaignRequests = requestsRows();
   meReply(staffMe);
   reply('/api/studio/staff/pulse', pulse);
@@ -5554,8 +5617,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     !loadError && queueHtml.includes('data-testid="studio-desk" data-section="requests"') && !queueHtml.includes('studio-staff-bundle-loading') && !queueHtml.includes('studio-soon')
       && queueHtml.includes('studio-desk-request-r_sub') && queueHtml.includes('studio-desk-request-r_sub2') && !queueHtml.includes('studio-desk-request-r_own')
       && queueHtml.includes('Waiting for review (2)') && queueHtml.includes('$10.00/day × 7 days = $70.00') && queueHtml.includes('Shop Page') && queueHtml.includes('Weekly &lt;offer&gt;') && queueHtml.includes('Customer One')
-      && json("Object.keys(_studioDesk.pulse.value || {})").length === 5 && json('studioDeskBadgeCounts()').requests === 2 && json('studioDeskBadgeCounts()').tickets === 4
-      && run('document.title') === '(6) Albayan Studio' && calls('GET', '/api/studio/staff/pulse').length >= 1,
+      && json("Object.keys(_studioDesk.pulse.value || {})").length === 6 && json('studioDeskBadgeCounts()').requests === 2 && json('studioDeskBadgeCounts()').tickets === 3
+      && run('document.title') === '(5) Albayan Studio' && calls('GET', '/api/studio/staff/pulse').length >= 1
+      // two stop requests whose tickets were answered (queue rows open, tickets no longer 'open') still count once each
+      && String(json(`(function () { const keep = _studioDesk.pulse.value; _studioDesk.pulse.value = studioDeskCleanPulse(${JSON.stringify({ ...pulse, stopRequests: 3, stopTicketsOpen: 1 })}); const out = [studioDeskBadgeCounts().tickets, studioDeskTitleCount(_studioDesk.pulse.value)]; _studioDesk.pulse.value = keep; return out; })()`)) === '5,7',
     loadError || `title ${run('document.title')} html ${queueHtml.slice(0, 300)}`);
   openAt('/studio?tab=review&section=requests&id=r_sub');
   const detailHtml = html();
@@ -5593,9 +5658,12 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && launchHtml.includes("openAdsStudioLinkSheet('r_app')") && launchHtml.includes('within what was paid ($50.00)') && launchHtml.includes('data-testid="studio-desk-launch-r_sub2"')
       && !launchHtml.includes('studio-desk-linked-r_lnk') && !launchHtml.includes('studio-desk-launch-r_lnk') && calls('GET', '/api/studio/campaigns/r_lnk/results').length === 1,
     launchHtml.slice(0, 200));
+  reply('/api/studio/campaigns/r_was/results', wasResults);
   openAt('/studio?tab=review&section=settle');
+  run('render()');  // the results read of the unlinked-after-link row answered
   const settleHtml = html();
   const settleAr = inLanguage('ar', 'render(); __html');
+  const wasCard = settleHtml.slice(settleHtml.indexOf('data-testid="studio-desk-settle-r_was"'), settleHtml.indexOf('</li>', settleHtml.indexOf('data-testid="studio-desk-settle-r_was"')));
   replyError('/api/ad-studio/campaigns/r_lnk/stop', { status: 409, payload: { detail: { code: 'SETTLE_NOT_READY', message: 'The final amount is not ready until ' + hours(47), messageAr: 'المبلغ النهائي غير جاهز قبل ' + hours(47), readyAt: hours(47) } } });
   const notReady = outcome("studioDeskSettleRun('settle', 'r_lnk', 2766, '')");
   const keptReadyAt = String(json("_studioDesk.settle.get('r_lnk').readyAt") || '');
@@ -5608,10 +5676,14 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     /قراءة ميتا النهائية بعد 4[67] س \d+ د/.test(String(settleAr)), String(settleAr).includes('مدفوع $40.00'),
     !!notReady && notReady.ok === false && String(notReady.text).startsWith('The final amount is not ready until'), /^\d{4}-\d{2}-\d{2}T/.test(keptReadyAt),
     !!settled && settled.ok === true, stopCalls.length === 2 && stopCalls.every(c => c.body.closeReason === 'completed' && c.body.refundMinorUSD === 2766 && c.body.expectedLastModified === 15), stopCalls.length === 2 && stopCalls[0].body.operationId === stopCalls[1].body.operationId,
-    json("state.adCampaignRequests.find(r => r.id === 'r_lnk').status") === 'Stopped'
+    json("state.adCampaignRequests.find(r => r.id === 'r_lnk').status") === 'Stopped',
+    // unlinked after a link: its results are read, Meta used and the cap come from the old campaign's row, no "never linked" words, no Check Meta now
+    calls('GET', '/api/studio/campaigns/r_was/results').length === 1 && wasCard.includes('data-ready="1" data-was-linked="1"') && wasCard.includes('Paid $30.00 · Meta used $15.00 · Return up to $15.00')
+      && wasCard.includes('Final Meta read done') && !wasCard.includes('Never linked') && !wasCard.includes('never showed') && !wasCard.includes('studio-desk-check-r_was') && wasCard.includes('studio-desk-finish-r_was'),
+    !settleHtml.includes('48 h') && !String(settleAr).includes('48 ساعة') && settleHtml.includes('after the final Meta reading') && !deskSrc.includes('48 h') && !deskSrc.includes('48 ساعة')
   ];
-  check('Team desk settle: the ended linked request shows paid, Meta used, the cap and the countdown to the final read (in Arabic too); the never-linked one is ready at once; a SETTLE_NOT_READY 409 is shown from its bilingual shape and keeps readyAt; the settle posts closeReason completed with the amount and one operationId per version',
-    settleCases.every(Boolean), `cases ${failed(settleCases)}; notReady ${JSON.stringify(notReady)} settled ${JSON.stringify(settled)} calls ${stopCalls.length}`);
+  check('Team desk settle: the ended linked request shows paid, Meta used, the cap and the countdown to the final read (in Arabic too); the never-linked one is ready at once; one unlinked after a link is settled on the old campaign\'s row (Meta used and the cap shown, never "never linked"); no hardcoded 48 h; a SETTLE_NOT_READY 409 is shown from its bilingual shape and keeps readyAt; the settle posts closeReason completed with the amount and one operationId per version',
+    settleCases.every(Boolean), `cases ${failed(settleCases)}; notReady ${JSON.stringify(notReady)} settled ${JSON.stringify(settled)} calls ${stopCalls.length}; was-linked money ${(wasCard.match(/studio-desk-settle-money">([^<]*)</) || [])[1]} ready ${(wasCard.match(/data-ready="(\d)"/) || [])[1]}`);
   check('Team desk refusals: every settle refusal prefix of the server is read through the ONE Arabic map (15c; the desk keeps no list of its own, the classic lookup gives the same words), the unknown fallback stays calm, and Arabic readers never see raw English',
     (() => {
       const actionsPy = read('server/systems/ads_studio/ad_campaign_actions.py');
@@ -5635,8 +5707,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const titleAway = run('document.title');
   const watching = json('_studioDesk.pulse.watching');
   box.state.currentView = 'ads-studio';
-  check('Team desk pulse: the sound switch is a per-browser choice, the title carries the count of items waiting for the team and drops it when the desk is left (the watch stops too)',
-    soundOn === true && title2 === '(7) Albayan Studio' && titleAway === 'Albayan Studio' && watching === false);
+  check('Team desk pulse: the sound switch is a per-browser choice, the title carries the count of items waiting for the team (a stop request once, not with its ticket again) and drops it when the desk is left (the watch stops too)',
+    soundOn === true && title2 === '(6) Albayan Studio' && titleAway === 'Albayan Studio' && watching === false);
   // Admin: More lists the tools and every setting; the intake form saves with expectedVersion; 409 reloads; the server's message shows.
   who.admin = true;
   meReply({ ...staffMe, isAdmin: true });
@@ -5692,11 +5764,29 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && hoursValue && hoursValue.value && hoursValue.value.week.tue && hoursValue.value.week.tue.open === '09:00' && hoursValue.value.week.wed === null && hoursValue.value.holidays.length === 2 && hoursValue.value.holidays[1].labelAr === 'العيد' && hoursValue.value.ramadan === null && hoursValue.value.onDutyUntil === '23:00'
       && hoursBad && /closing later than opening/.test(hoursBad.error),
     `value ${JSON.stringify(hoursValue)} bad ${JSON.stringify(hoursBad)}`);
-  reply('/api/studio/admin/alerts?limit=20', { alerts: [{ id: 'al1', kind: 'stop_request_overdue', labels: { en: 'A stop request has waited longer than the target: pause the ad in Meta now', ar: 'انتظر طلب إيقاف أكثر من الوقت المحدد: أوقف الإعلان في ميتا الآن' }, count: 2, lastAt: hours(-1), relatedType: 'adCampaignRequests', relatedId: 'r_lnk', acknowledgedAt: null, details: {} }], nextBefore: null, jobs: { enabled: true, late: true, lastTickAt: hours(-1) } });
+  const alertRow = (id, extra = {}) => ({ id, kind: 'stop_request_overdue', labels: { en: 'A stop request has waited longer than the target: pause the ad in Meta now', ar: 'انتظر طلب إيقاف أكثر من الوقت المحدد: أوقف الإعلان في ميتا الآن' }, count: 2, lastAt: hours(-1), relatedType: 'adCampaignRequests', relatedId: 'r_lnk', acknowledgedAt: null, details: {}, ...extra });
+  reply('/api/studio/admin/alerts?limit=20', { alerts: [alertRow('al1'), alertRow('al2', { kind: 'integrity_violation', count: 1 }), alertRow('al3', { acknowledgedAt: hours(-2), acknowledgedBy: 'u9' })], nextBefore: null, jobs: { enabled: true, late: true, lastTickAt: hours(-1) } });
   openAt('/studio?tab=review&section=more&id=alerts');
   run('render()');
   const alertsHtml = html();
   const alertsAr = inLanguage('ar', 'render(); __html');
+  // Acknowledge (P3-23): single flight, the row leaves the open list, the pulse is read again; a replay is a success;
+  // UNKNOWN_ALERT (archived or stale) is told in the reader's words and the list is read again.
+  reply('/api/studio/admin/alerts/al1/ack', { alert: alertRow('al1', { acknowledgedAt: hours(0), acknowledgedBy: 'u1' }), replay: false });
+  run("__notes.length = 0; studioAdminAlertAck('al1'); studioAdminAlertAck('al1');");
+  run('render()');
+  const ackedHtml = html();
+  const ackCalls = calls('POST', '/api/studio/admin/alerts/al1/ack');
+  const ackNotes = json('__notes') || [];
+  const pulseReadsAfterAck = calls('GET', '/api/studio/staff/pulse').length;
+  replyError('/api/studio/admin/alerts/al2/ack', { status: 404, message: 'x', payload: { detail: { code: 'UNKNOWN_ALERT', message: 'No studio alert has this id' } } });
+  reply('/api/studio/admin/alerts?limit=20', { alerts: [alertRow('al3', { acknowledgedAt: hours(-2) })], nextBefore: null, jobs: { enabled: true, late: false, lastTickAt: hours(0) } });
+  run("__notes.length = 0;");
+  inLanguage('ar', "studioAdminAlertAck('al2');");
+  const unknownNote = (json('__notes') || [])[0] || {};
+  run('render()');
+  const refreshedHtml = html();
+  const alertsReads = calls('GET', '/api/studio/admin/alerts?limit=20').length;
   reply('/api/meta-ads/collisions', { generatedAt: hours(0), counts: { total: 2, open: 1, kept: 1, byReason: { studio_name: 2, studio_campaign_id: 1 }, withMoney: 1, withCustomer: 0, removable: 1, untouched: 1 }, rows: [{ adId: 'ad_1', reasons: ['studio_name'], studioRequestIds: ['r_lnk'], kept: false, hasMoney: false, hasCustomer: false, removable: true, untouched: true, importState: 'imported', spend: { metaSpendMinor: 0, metaCurrency: 'USD' } }, { adId: 'ad_2', reasons: ['studio_campaign_id'], studioRequestIds: [], kept: true, hasMoney: true, hasCustomer: false, removable: false, untouched: false, importState: 'edited', spend: { metaSpendMinor: 1500, metaCurrency: 'USD' } }] });
   openAt('/studio?tab=review&section=more&id=collisions');
   run('render()');
@@ -5705,15 +5795,37 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   openAt('/studio?tab=review&section=more&id=diagnostics');
   run('render()');
   const diagHtml = html();
+  // Scan money now (P3-24): single flight, the counts in words, the diagnostics read again; a 429 shows the wait.
+  reply('/api/studio/admin/integrity/scan', { counts: { total: 2, byCode: { unreleased_hold: 2 } }, alertId: 'al9', scannedAt: hours(0), swept: { examined: 5, released: [] } });
+  reply('/api/studio/admin/diagnostics', { generatedAt: hours(0), jobs: { enabled: true, late: false, lastTickAt: hours(0) }, baselines: {}, operations: {} });
+  run("__notes.length = 0; studioAdminScanNow(); studioAdminScanNow();");
+  run('render()');
+  const scannedHtml = html();
+  const scanCalls = calls('POST', '/api/studio/admin/integrity/scan');
+  const diagReads = calls('GET', '/api/studio/admin/diagnostics').length;
+  replyError('/api/studio/admin/integrity/scan', { status: 429, message: 'x', retryAfter: 540, payload: { detail: { code: 'RATE_LIMITED', message: 'One money scan every 10 minutes. Please wait and try again.' } } });
+  run('studioAdminScanNow();');
+  run('render()');
+  const scanWaitHtml = html();
+  const scanWaitAr = inLanguage('ar', 'render(); __html');
   const adminCases = [
     alertsHtml.includes('data-testid="studio-admin-alert" data-kind="stop_request_overdue"'), alertsHtml.includes('pause the ad in Meta now'), alertsHtml.includes('2 times'), alertsHtml.includes('data-testid="studio-admin-heartbeat" data-late="1"'),
     String(alertsAr).includes('أوقف الإعلان في ميتا الآن'), String(alertsAr).includes('متأخر'),
+    // the Acknowledge button per open alert only (al3 is acknowledged), in Arabic too
+    alertsHtml.includes('data-testid="studio-admin-alert-ack-al1" onclick="studioAdminAlertAck(\'al1\', this)"') && alertsHtml.includes('data-testid="studio-admin-alert-ack-al2"') && !alertsHtml.includes('studio-admin-alert-ack-al3') && alertsHtml.includes('>Acknowledge<') && String(alertsAr).includes('تأكيد الاطلاع'),
+    ackCalls.length === 1 && JSON.stringify(ackCalls[0].body) === '{}' && !ackedHtml.includes('data-id="al1"') && ackedHtml.includes('data-id="al2"') && ackNotes.some(note => note.type === 'success' && note.title === 'Alert acknowledged') && pulseReadsAfterAck >= 2,
+    unknownNote.type === 'error' && unknownNote.message === 'لا يوجد تنبيه بهذا المعرّف. حدّث الصفحة.' && alertsReads === 2 && !refreshedHtml.includes('data-id="al2"') && refreshedHtml.includes('data-id="al3"'),
+    JSON.stringify(json('STUDIO_ERROR_TEXTS.UNKNOWN_ALERT')) === JSON.stringify(['No studio alert has this id. Refresh the page.', 'لا يوجد تنبيه بهذا المعرّف. حدّث الصفحة.']),
+    // the diagnostics card's Scan money now
+    diagHtml.includes('data-testid="studio-admin-scan-now" onclick="studioAdminScanNow(this)"') && diagHtml.includes('>Scan money now<'),
+    scanCalls.length === 1 && JSON.stringify(scanCalls[0].body) === '{}' && scannedHtml.includes('data-testid="studio-admin-scan-note" data-total="2"') && scannedHtml.includes('Scan done: 2 findings') && diagReads === 2,
+    scanWaitHtml.includes('data-testid="studio-admin-scan-note" data-total=""') && /Please wait 9 minutes/.test(scanWaitHtml) && String(scanWaitAr).includes('افحص الأموال الآن') && arabicOnly((String(scanWaitAr).match(/studio-admin-scan-note[^>]*><span class="studio-desk-line-label">([^<]*)</) || [])[1] || ''),
     collisionsHtml.includes('data-testid="studio-admin-collision-counts" data-total="2"'), collisionsHtml.includes('data-kept="0" data-removable="1"'), collisionsHtml.includes('an untouched imported copy: removable'), collisionsHtml.includes('kept by the owner&#39;s signed choice'), collisionsHtml.includes('studio_collision_repair.py'), !/apply|repair now/i.test(collisionsHtml.replace(/studio_collision_repair\.py/g, '')),
     diagHtml.includes('data-tone="green" data-testid="studio-admin-queue-reviews"'), diagHtml.includes('100% met (3 of 3), 0 waiting past the target'), diagHtml.includes('data-tone="red" data-testid="studio-admin-queue-stopRequests"'),
     diagHtml.includes('open, cap 5 a day'), diagHtml.includes('$1,234.00'), diagHtml.includes('$3,766.00'), diagHtml.includes('data-tone="green" data-testid="studio-admin-go-reviewsOnTarget"'), diagHtml.includes('data-tone="green" data-testid="studio-admin-stop-heartbeatLate"'), diagHtml.includes('data-testid="studio-admin-heartbeat" data-late="0"'), diagHtml.includes('41 days left')
   ];
-  check('Admin alerts, collisions and diagnostics: the server\'s bilingual alert label (Arabic in Arabic) with the late heartbeat; the collision counts and rows with why each is kept or removable and no apply button; the queues met %, capacity, USD owed vs funds, the go/no-go rows and the heartbeat',
-    adminCases.every(Boolean), `cases ${failed(adminCases)}`);
+  check('Admin alerts, collisions and diagnostics: the server\'s bilingual alert label (Arabic in Arabic) with the late heartbeat and an Acknowledge per open alert (single flight, the row leaves the list, UNKNOWN_ALERT in the reader\'s words); the collision counts and rows with why each is kept or removable and no apply button; the queues met %, capacity, USD owed vs funds, the go/no-go rows, the heartbeat and Scan money now (single flight, the counts, a 429 shows the wait)',
+    adminCases.every(Boolean), `cases ${failed(adminCases)}; ack ${ackCalls.length} notes ${JSON.stringify(ackNotes)} pulse ${pulseReadsAfterAck} unknown ${JSON.stringify(unknownNote)} reads ${alertsReads}; scan ${scanCalls.length} diag ${diagReads} note ${(scannedHtml.match(/studio-admin-scan-note[^>]*>[^<]*<[^>]*>([^<]*)</) || [])[1]} wait ${(scanWaitHtml.match(/studio-admin-scan-note[^>]*>[^<]*<[^>]*>([^<]*)</) || [])[1]}`);
   who.admin = false;
   meReply(staffMe);
   openAt('/studio?tab=review&section=more&id=settings-rollout');
@@ -6032,12 +6144,109 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     editorProblems.includes('data-testid="studio-pg-rule-problem-name"') && editorProblems.includes('data-testid="studio-pg-rule-problem-keywords"') && editorProblems.includes('data-testid="studio-pg-rule-problem-reply"') && !editorProblems.includes('id="studio-rule-dm"') && editorNoCall,
     editorFilled.includes('value="Prices"') && editorFilled.includes('data-testid="studio-pg-rule-keyword-remove-1"') && editorFilled.includes('>بكم<') && editorFilled.includes('data-testid="studio-pg-rule-page-spg_fb" aria-pressed="true"') && editorFilled.includes('The rule answers on the chosen pages only'),
     String(editorRefused).includes('data-testid="studio-pg-rule-error"') && String(editorRefused).includes('الردود العامة غير متاحة لصفحات فيسبوك حالياً') && !String(editorRefused).includes('right now'),
-    saveCalls.length === 2 && JSON.stringify(saveCalls[1].body) === JSON.stringify({ name: 'Prices', platform: 'fb', enabled: true, trigger: 'keywords', keywords: ['price', 'بكم'], pageRefs: ['spg_fb'], publicReply: 'See the price list', dmEnabled: false, dmText: '', likeComment: false, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false }),
+    saveCalls.length === 2 && JSON.stringify(saveCalls[1].body) === JSON.stringify({ name: 'Prices', platform: 'fb', trigger: 'keywords', keywords: ['price', 'بكم'], pageRefs: ['spg_fb'], publicReply: 'See the price list', dmEnabled: false, dmText: '', likeComment: false, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false }),
     afterSave.includes('data-testid="studio-pg" data-section="rules" data-id=""') && afterSave.includes('data-testid="studio-pg-rule-srule_3"') && calls('GET', RULES).length === 2 && (json('__notes') || []).some(note => note.title === 'Rule saved'),
     editorExisting.includes('data-rule="srule_1"') && editorExisting.includes('value="Price &lt;b&gt;questions&lt;/b&gt;"') && editorExisting.includes('data-testid="studio-pg-rule-delete" onclick="studioPgRuleDelete(this)"') && editorExisting.includes('id="studio-rule-dm"') && editorExisting.includes('data-testid="studio-pg-rule-back" onclick="studioPgGo(\'rules\')"') && run("studioPgRuleDelete()") === false
   ];
-  check('Studio v2 rule editor: where (the platform\'s pages), when (keywords), the actions with their channel state (a channel that is off or unavailable cannot be picked and says why; a gated one is saved as waiting), inline validation before any call, the exact saved body, a server refusal in Arabic, edit and delete of an existing rule',
+  check('Studio v2 rule editor: where (the platform\'s pages), when (keywords), the actions with their channel state (a channel that is off or unavailable cannot be picked and says why; a gated one is saved as waiting), inline validation before any call, the exact saved body (never `enabled`: the list switch owns it), a server refusal in Arabic, edit and delete of an existing rule',
     !loadError && editorCases.every(Boolean), loadError || `cases ${failed(editorCases)}`);
+
+  // A rule whose page was removed (srule_1 keeps spg_gone): a text edit sends no pageRefs (the server keeps its stored
+  // list), the editor says so; choosing the pages again sends only live pages of the platform (the removed ref is gone).
+  const patchesOf = () => calls('PATCH', `${RULES}/srule_1`);
+  const patchesBefore = patchesOf().length;
+  run(`__replies[${JSON.stringify(`${RULES}/srule_1`)}] = [];`);  // an answer queued above for a PATCH that never came
+  reply(`${RULES}/srule_1`, { ...rules().rules[0], name: 'Prices renamed' });
+  reply(RULES, rules());
+  run("studioPgRuleSet('name', 'Prices renamed'); render();");
+  const removedEditor = html();
+  run('studioPgRuleSave();');
+  const renamePatch = patchesOf()[patchesBefore];
+  reply(`${RULES}/srule_1`, { ...rules().rules[0], pageRefs: [], pages: [], pageRemoved: false, pageRemovedLabel: null });
+  reply(RULES, rules());
+  openAt('/studio?tab=replies&section=rules&id=srule_1');
+  run("studioPgRulePage('spg_fb'); studioPgRuleSave();");  // the only live page unticked: every page, and spg_gone dropped
+  const pagesPatch = patchesOf()[patchesBefore + 1];
+  const removedCases = [
+    removedEditor.includes('data-testid="studio-pg-rule-page-removed"') && removedEditor.includes('choose the pages again') && !removedEditor.includes('spg_gone'),
+    !!renamePatch && renamePatch.body.name === 'Prices renamed' && !('pageRefs' in renamePatch.body) && !('enabled' in renamePatch.body),
+    !!pagesPatch && JSON.stringify(pagesPatch.body.pageRefs) === '[]' && !JSON.stringify(pagesPatch.body).includes('spg_gone') && !('enabled' in pagesPatch.body),
+    (json('__notes') || []).filter(note => note.title === 'Rule saved').length >= 3
+  ];
+  check('Studio v2 rule editor with a removed page (P4-01): the removed ref is never in the sent body (a text edit omits pageRefs, the server keeps its stored list; a touched list names live pages only), the editor explains it, and the rule stays saveable',
+    !loadError && removedCases.every(Boolean), loadError || `cases ${failed(removedCases)} rename ${JSON.stringify(renamePatch && renamePatch.body)} pages ${JSON.stringify(pagesPatch && pagesPatch.body)}`);
+
+  // fbPublicReply off (the like follows it, P4-05): a new Facebook rule starts with no like and saves with a private
+  // message alone; an old rule with a like or a public reply can still be cleared and saved (the switch turns OFF, the
+  // text can be emptied), and the like is sent as false while refused.
+  const offStates = { fbPublicReply: 'off', fbPrivateReply: 'on', igPublicReply: 'poll', igPrivateReply: 'unavailable' };
+  reply(RULES, { ...rules(), channels: { states: offStates, labels } });
+  run(`_studioPg.slots.rules.loadedAt = 0; _studioPg.editor = null; __replies[${JSON.stringify(`${RULES}/srule_1`)}] = [];`);
+  openAt('/studio?tab=replies&section=rules');  // the list (and the channel states) first, as the owner reaches New rule
+  openAt('/studio?tab=replies&section=rules&id=new');
+  const offNew = html();
+  const offDraft = json('_studioPg.editor') || {};
+  run("studioPgRuleFlip('likeComment'); studioPgRuleSet('name', 'DM only'); studioPgRulePick('trigger', 'every'); studioPgRuleFlip('dmEnabled'); studioPgRuleSet('dmText', 'Hello from the shop');");
+  const offLikeStays = json('_studioPg.editor.likeComment');
+  const dmRule = { ...rules().rules[0], id: 'srule_4', name: 'DM only', trigger: 'every', keywords: [], publicReply: '', dmEnabled: true, dmText: 'Hello from the shop', likeComment: false, pageRefs: [], pages: [], pageRemoved: false, pageRemovedLabel: null };
+  reply(RULES, dmRule);
+  reply(RULES, { ...rules(), rules: rules().rules.concat([dmRule]), channels: { states: offStates, labels } });
+  run('studioPgRuleSave();');
+  const offPost = calls('POST', RULES)[2];
+  openAt('/studio?tab=replies&section=rules&id=srule_1');  // likeComment true and a public reply, saved before the channel closed
+  const offExisting = html();
+  const offNoPatch = patchesOf().length;
+  run('studioPgRuleSave();');
+  const offRefused = html();
+  const offRefusedPatches = patchesOf().length;
+  reply(`${RULES}/srule_1`, { ...rules().rules[0], publicReply: '', likeComment: false });
+  reply(RULES, { ...rules(), channels: { states: offStates, labels } });
+  run("studioPgRuleSet('publicReply', ''); studioPgRuleFlip('likeComment'); studioPgRuleSave();");
+  const offPatch = patchesOf()[offNoPatch];
+  const offCases = [
+    offNew.includes('data-testid="studio-pg-rule-channel-public" data-state="off"') && /aria-checked="false" aria-label="Like the comment" data-testid="studio-pg-rule-like" onclick="studioPgRuleFlip\('likeComment'\)" disabled/.test(offNew) && offDraft.likeComment === false,
+    offLikeStays === false,
+    !!offPost && offPost.body.likeComment === false && offPost.body.publicReply === '' && offPost.body.dmEnabled === true && offPost.body.dmText === 'Hello from the shop' && !('enabled' in offPost.body),
+    /aria-checked="true" aria-label="Like the comment" data-testid="studio-pg-rule-like" onclick="studioPgRuleFlip\('likeComment'\)"><\/button>/.test(offExisting.replace(/<span class="studio-pg-switch-knob"[^>]*><\/span>/g, ''))
+      && /id="studio-rule-public"[^>]*oninput="studioPgRuleSet\('publicReply', this\.value\)"[^>]*>DM sent!<\/textarea>/.test(offExisting) && !/id="studio-rule-public"[^>]*disabled/.test(offExisting) && offExisting.includes('clear this text to save the rule'),
+    offRefused.includes('data-testid="studio-pg-rule-problem-reply"') && offRefusedPatches === offNoPatch,
+    !!offPatch && offPatch.body.likeComment === false && offPatch.body.publicReply === '' && !('pageRefs' in offPatch.body)
+  ];
+  check('Studio v2 rule editor while fbPublicReply is off: a new Facebook rule starts without the like (the switch cannot turn it on) and saves with a private message alone; an old rule keeps its like switch and public text operable to clear them (a public reply still set is refused inline, no call), and the like is sent as false',
+    !loadError && offCases.every(Boolean), loadError || `cases ${failed(offCases)} post ${JSON.stringify(offPost && offPost.body)} patch ${JSON.stringify(offPatch && offPatch.body)} draft ${JSON.stringify(offDraft.likeComment)} refused ${offRefused.includes('studio-pg-rule-problem-reply')} patches ${offRefusedPatches}/${offNoPatch} like ${(offNew.match(/data-testid="studio-pg-rule-like"[^>]*>/) || [''])[0]} channel ${(offNew.match(/studio-pg-rule-channel-public" data-state="[a-z]+"/) || [''])[0]}`);
+
+  // A stale draft never switches a rule back on: Back drops the draft, the list toggle owns `enabled`, the editor opened
+  // again follows the rule the list knows (and a fresh list read) until the owner types; the saved body has no `enabled`.
+  reply(RULES, rules());
+  run(`_studioPg.slots.rules.loadedAt = 0; _studioPg.editor = null; __replies[${JSON.stringify(`${RULES}/srule_1`)}] = [];`);
+  openAt('/studio?tab=replies&section=rules&id=srule_1');
+  const staleOpened = !!json('_studioPg.editor && _studioPg.editor.for === "srule_1" && _studioPg.editor.enabled === true');
+  run("studioPgGo('rules');");
+  const staleDropped = json('_studioPg.editor') === null;
+  reply(`${RULES}/srule_1`, { ...rules().rules[0], enabled: false });
+  run("studioPgRuleToggle('srule_1');");
+  openAt('/studio?tab=replies&section=rules&id=srule_1');
+  const staleReopened = json('_studioPg.editor') || {};
+  run("_studioPg.slots.rules.value.rules[0].name = 'Renamed elsewhere'; render();");  // a fresh list read landed: the untouched draft follows it
+  const followed = json('_studioPg.editor.name');
+  run("studioPgRuleSet('publicReply', 'Fixed typo'); _studioPg.slots.rules.value.rules[0].name = 'Renamed again'; render();");  // typed: the draft is the owner's now
+  const keptTyping = json('[_studioPg.editor.name, _studioPg.editor.publicReply, _studioPg.editor.dirty]');
+  reply(`${RULES}/srule_1`, { ...rules().rules[0], enabled: false, publicReply: 'Fixed typo' });
+  reply(RULES, rules());
+  const staleBefore = patchesOf().length;
+  run('studioPgRuleSave();');
+  const stalePatch = patchesOf()[staleBefore];
+  const staleCases = [
+    staleOpened && staleDropped,
+    staleReopened.for === 'srule_1' && staleReopened.enabled === false && staleReopened.dirty === false,
+    followed === 'Renamed elsewhere' && JSON.stringify(keptTyping) === JSON.stringify(['Renamed elsewhere', 'Fixed typo', true]),
+    !!stalePatch && stalePatch.body.publicReply === 'Fixed typo' && !('enabled' in stalePatch.body),
+    pagesSrc.includes('if (kept && !kept.sending && !(view.section === \'rules\' && view.id === kept.for)) _studioPg.editor = null;') && !pagesSrc.includes('enabled: draft.enabled')
+  ];
+  check('Studio v2 rule editor never re-enables a rule from a stale draft: leaving the editor drops the draft, the reopened draft follows the list (and a fresh read) until the owner types, and the saved body carries no `enabled`',
+    !loadError && staleCases.every(Boolean), loadError || `cases ${failed(staleCases)} reopened ${JSON.stringify(staleReopened.enabled)} followed ${followed} typing ${JSON.stringify(keptTyping)} patch ${JSON.stringify(stalePatch && stalePatch.body)}`);
+  reply(RULES, rules());
+  run('_studioPg.slots.rules.loadedAt = 0; _studioPg.editor = null;');
 
   // Reply log: the server's outcome labels and counters, a problem in plain words, the filter and older rows.
   const logRow = (id, outcome, extra = {}) => ({ id, at: ago(90), commentAt: ago(91), platform: 'fb', pageId: 'spg_fb', pageName: 'Sara <Shop>', ruleId: 'srule_1', ruleName: 'Price questions', commentId: 'c1', postId: 'p1', actions: outcome === 'sent' ? ['public', 'like'] : [], skipped: [], outcome, problemCode: '', error: '', source: 'webhook', receivedAt: ago(91), sentAt: ago(90), latencySeconds: 42, attempts: 1, retryAfter: null, parkedReason: null, ...extra });
@@ -6066,12 +6275,15 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     !loadError && logCases.every(Boolean), loadError || `cases ${failed(logCases)}`);
 
   // Posts as they are, the posts tab, the classic handover and the plan-ended state.
-  reply(POSTS, { posts: [{ id: 'sp_1', status: 'scheduled', caption: 'Ramadan <offer>', pageIds: ['spg_fb'], scheduledAt: '2099-03-01T10:00:00Z', mediaCount: 2 }, { id: 'sp_2', status: 'failed', caption: 'Old', pageIds: ['spg_ig'], updatedAt: ago(500), lastError: 'Meta refused <it>' }, { id: 'sp_3', status: 'published', caption: 'Done', pageIds: [], publishedAt: ago(100) }] });
+  reply(POSTS, { posts: [{ id: 'sp_1', status: 'scheduled', caption: 'Ramadan <offer>', pageIds: ['spg_fb'], scheduledAt: '2099-03-01T10:00:00Z', mediaCount: 2 }, { id: 'sp_2', status: 'failed', caption: 'Old', pageIds: ['spg_ig'], updatedAt: ago(500), lastError: 'Meta refused <it>' }, { id: 'sp_3', status: 'published', caption: 'Done', pageIds: [], publishedAt: ago(100) },
+    { id: 'sp_4', status: 'failed', caption: 'Late', pageIds: ['spg_fb'], updatedAt: ago(400), lastError: 'Meta did not answer in time; it may have published. Check the page before retrying.', errorClass: 'timeout' }] });
   openAt('/studio?tab=posts');
   const postsHtml = html();
   allHtml.push(postsHtml);
   run("studioPgPostsFilter('failed');");
   const postsFailed = html();
+  const postsFailedAr = String(inLanguage('ar', 'render(); __html'));
+  const failedRow = (page, id) => between(page, `studio-pg-post-${id}`);
   box.state.language = 'en';
   run("_adsStudioActiveTab = 'replies';");
   const classicV2 = run('renderSocialStudioRepliesTab()');
@@ -6087,6 +6299,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     postsHtml.includes('data-testid="studio-screen-posts"') && postsHtml.includes('data-testid="studio-pg-posts-card"') && !postsHtml.includes('studio-pg-sections') && postsHtml.includes('data-testid="studio-pg-posts-all" onclick="studioV2Open(\'replies\')"'),
     between(postsHtml, 'studio-pg-post-sp_1').includes('data-status="scheduled"') && between(postsHtml, 'studio-pg-post-sp_1').includes('Ramadan &lt;offer&gt;') && between(postsHtml, 'studio-pg-post-sp_1').includes('2 photos') && between(postsHtml, 'studio-pg-post-sp_1').includes('Sara &lt;Shop&gt;') && !postsHtml.includes('studio-pg-post-sp_2'),
     postsHtml.includes('data-testid="studio-pg-posts-filter-failed"') && postsFailed.includes('data-testid="studio-pg-post-sp_2" data-status="failed"') && postsFailed.includes('Meta refused &lt;it&gt;'),
+    // the failed reason: the server's errorClass in plain words (the neutral pair without one), Meta's raw text only in a details line, Arabic in Arabic
+    failedRow(postsFailed, 'sp_4').includes('data-testid="studio-pg-post-error" data-class="timeout">Meta did not answer in time; the post may have gone out.') && failedRow(postsFailed, 'sp_4').includes('data-testid="studio-pg-post-error-details"') && failedRow(postsFailed, 'sp_4').includes('<summary>Details from Meta</summary>')
+      && failedRow(postsFailed, 'sp_2').includes('data-class="">Meta refused this post; the team can see why.') && failedRow(postsFailed, 'sp_2').includes('<p class="studio-pg-note" dir="ltr">Meta refused &lt;it&gt;</p>')
+      && arabicOnly((failedRow(postsFailedAr, 'sp_4').match(/data-testid="studio-pg-post-error"[^>]*>([^<]*)</) || [])[1] || '') && arabicOnly((failedRow(postsFailedAr, 'sp_2').match(/data-testid="studio-pg-post-error"[^>]*>([^<]*)</) || [])[1] || '')
+      && Object.values(json('STUDIO_PG_POST_ERRORS') || {}).length >= 7 && Object.values(json('STUDIO_PG_POST_ERRORS') || {}).every(pair => /[؀-ۿ]/.test(pair[1]) && !/[A-Za-z]{4}/.test(pair[1].replace(/Meta/g, ''))),
     String(classicV2).includes('data-testid="studio-pg-classic"') && String(classicV2).includes('data-testid="studio-pg" data-section="pages"') && String(classicPostsV2).includes('data-testid="studio-pg-posts-card"'),
     !String(classicPlain).includes('studio-pg') && (socialSrc.match(/apiJson\(/g) || []).length === 1 && socialSrc.includes("typeof studioPagesClassicHandover === 'function' ? studioPagesClassicHandover('replies') : ''") && socialSrc.includes("studioPagesClassicHandover('posts')"),
     ended.includes('data-testid="studio-pg-plan-ended"') && ended.includes('data-testid="studio-pg-renew" onclick="studioV2Open(\'wallet\')"') && !ended.includes('studio-pg-pages')
@@ -6125,7 +6342,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const guideCases = [
     JSON.stringify(guideKeys) === JSON.stringify(['money', 'stages', 'settle', 'share-page', 'instagram', 'tiktok', 'hours']),
     guideBodies.every(([, en, ar]) => en.includes('studio-guide-steps') && (en.match(/<li>/g) || []).length >= 2 && !/[؀-ۿ]/.test(en) && /[؀-ۿ]/.test(ar) && !/[A-Za-z]{4}/.test(ar.replace(/<[^>]+>|business\.facebook\.com|Meta Business Suite|Business settings|Business ID|Assign partners|Full control|Content|Messages and calls|Community activity|Assign|Add a Page|Add|Accounts|Pages|Settings and privacy|Account type and tools|Switch to professional account|Business|Creator|Linked accounts|Instagram|Connect account|Account privacy|Private account|Settings|Meta|LYD|Albayan|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Spring day/g, ''))),
-    guideBodies.find(([key]) => key === 'money')[1].includes('Reserved') && guideBodies.find(([key]) => key === 'settle')[1].includes('48 hours') && guideBodies.find(([key]) => key === 'share-page')[1].includes('Assign partners') && guideBodies.find(([key]) => key === 'instagram')[1].includes('Switch to professional account') && guideBodies.find(([key]) => key === 'instagram')[1].includes('Private account') && guideBodies.find(([key]) => key === 'stages')[1].includes('own report, never from a button'),
+    guideBodies.find(([key]) => key === 'money')[1].includes('Reserved') && guideBodies.find(([key]) => key === 'money')[1].includes('On its way back to you: shown only while a payment whose approval did not finish') && !guideBodies.find(([key]) => key === 'money')[1].includes('Being returned') && guideBodies.find(([key]) => key === 'money')[2].includes('في طريقه إليك') && !guideBodies.find(([key]) => key === 'money')[2].includes('قيد الإرجاع')
+      && read('src/systems/ads_studio/15m-studio-wallet.js').includes("adsStudioText('On its way back to you', 'في طريقه إليك')") && guideBodies.find(([key]) => key === 'settle')[1].includes('48 hours') && guideBodies.find(([key]) => key === 'share-page')[1].includes('Assign partners') && guideBodies.find(([key]) => key === 'instagram')[1].includes('Switch to professional account') && guideBodies.find(([key]) => key === 'instagram')[1].includes('Private account') && guideBodies.find(([key]) => key === 'stages')[1].includes('own report, never from a button'),
     !/connected|linked|managed|automated/i.test(guideBodies.find(([key]) => key === 'tiktok')[1].replace(/not linked|is linked/g, '')) && guideBodies.find(([key]) => key === 'tiktok')[1].includes('help by hand'),
     hoursGuide.includes('data-testid="studio-guide-hours"') && hoursGuide.includes('Sunday') && hoursGuide.includes('09:00–17:00') && hoursGuide.includes('data-testid="studio-guide-open-now"') && hoursGuide.includes('Open now') && hoursGuide.includes('2099-03-01 (Spring day)'),
     guidesCard.includes('data-testid="studio-guides"') && guideKeys.every(key => guidesCard.includes(`data-testid="studio-guide-link-${key}" onclick="studioGuideOpen('${key}', this)"`)),
@@ -6429,6 +6647,40 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio inbox badge (P3-05 client): the pulse hook polls the feed only in the v2 customer layout, a moved unreadCount makes the Inbox read again and the bell shows the count; the watch stops in classic',
     !loadError && pulseCases.every(Boolean), loadError || `cases ${failed(pulseCases)} polls ${firstPolls}/${afterChange}/${classicPolls}`);
+  // ONE watch across settled /me reads (its baseline reading kept, so a change since the last poll is never swallowed
+  // and no extra read fires), and no poll at all while another screen of the app is on show.
+  run("__calls.length = 0; studioPulseStop('inbox'); _studioInbox.forUser = '__none__'; studioInboxScope();");
+  meReply(meV2);
+  reply('/api/studio/activity', { items: [], nextCursor: null, unreadCount: 0, seenAt: null });
+  run('__runTimers();');
+  const keptBaseline = calls('GET', '/api/studio/activity').length;  // 1: the baseline reading
+  run("__watchBefore = _studioPulse.watches.get('inbox');");
+  meReply(meV2);  // the 5-minute /me re-read settles: the same watch goes on
+  const sameWatch = run("_studioPulse.watches.get('inbox') === __watchBefore") === true;
+  const noExtraRead = calls('GET', '/api/studio/activity').length === keptBaseline;
+  reply('/api/studio/activity', { items: [{ id: 'act_2', kind: 'ticket_answered', title: { en: 'Answered', ar: 'تم الرد' }, body: { en: 'x', ar: 'س' }, relatedType: 'ticket', relatedId: T1, createdAt: ago(1), unread: true }], nextCursor: null, unreadCount: 1, seenAt: null });
+  reply('/api/studio/activity', { items: [{ id: 'act_2', kind: 'ticket_answered', title: { en: 'Answered', ar: 'تم الرد' }, body: { en: 'x', ar: 'س' }, relatedType: 'ticket', relatedId: T1, createdAt: ago(1), unread: true }], nextCursor: null, unreadCount: 1, seenAt: null });
+  run('__runTimers();');
+  const afterKept = calls('GET', '/api/studio/activity').length;  // 3: the poll saw the move against the kept baseline, the Inbox read again
+  run("__calls.length = 0;");
+  box.state.currentView = 'dashboard';  // the manager: no bell drawn here
+  run('__runTimers(); __runTimers();');
+  const awayPolls = calls('GET', '/api/studio/activity').length;
+  const stillWatching = run("_studioPulse.watches.has('inbox')") === true;
+  box.state.currentView = 'ads-studio';
+  reply('/api/studio/activity', { items: [], nextCursor: null, unreadCount: 1, seenAt: null });
+  run('__runTimers();');
+  const backPolls = calls('GET', '/api/studio/activity').length;
+  const keptWatchCases = [
+    keptBaseline === 1 && sameWatch && noExtraRead,
+    afterKept === 3,
+    awayPolls === 0 && stillWatching,
+    backPolls === 1,
+    extrasSrc.includes("if (typeof studioPulseWatching === 'function' && studioPulseWatching(STUDIO_INBOX_PULSE_KEY)) return true;") && extrasSrc.includes('while: studioInboxPulseWanted')
+      && coreSrc.includes('function studioPulseWatching(key)') && coreSrc.includes("if (!wanted) { studioPulseSchedule(watch, watch.intervalMs); return; }")
+  ];
+  check('Studio inbox pulse: one watch per signed-in user across /me reads (the baseline is kept: a change since the last poll is reported, no extra read), and the feed is polled only while a studio screen is on show',
+    !loadError && keptWatchCases.every(Boolean), loadError || `cases ${failed(keptWatchCases)} baseline ${keptBaseline} same ${sameWatch} after ${afterKept} away ${awayPolls} back ${backPolls}`);
 
   // P3-04b: the results card. Nothing before a link; the numbers once linked; the last good values on a failed read.
   run("__calls.length = 0; resetAdsStudioResults(); state.adCampaignRequests = [{ id: 'r_unlinked', createdBy: 'u1', status: 'Approved', name: 'A', paidMinorUSD: 5000, _created: 5, _lastModified: 15 }, { id: 'r_linked', createdBy: 'u1', status: 'Approved', name: 'B', paidMinorUSD: 5000, metaCampaignId: '120', metaAdAccountId: '9', _created: 6, _lastModified: 16 }];");
@@ -6581,14 +6833,23 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     patterns.length === 2 && patterns.every(([re, en, ar]) => isRegExp(re) && typeof en === 'string' && en.length > 8 && arabic.test(ar) && !latin.test(ar))
       && movedEntries.length >= 60 && movedEntries.every(([needle, ar, kind, en]) => (typeof needle === 'string' || isRegExp(needle)) && arabic.test(ar) && !latin.test(ar.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, '')) && kind === '' && typeof en === 'string' && en.length > 8)
       && !deskSrcForMap.includes('STUDIO_DESK_REFUSALS') && !coreSrc.includes('P2-11: every other plain-text refusal'),
-    // ONE Arabic wording per server text: the v2 lookup and the classic lookup agree on every plain refusal
-    // the classic map covers (the two v2-only texts aside), and the classic English rewording reaches v2 too
+    // ONE Arabic wording per server text: for every plain refusal the classic map covers (the two v2-only texts
+    // aside) exactly one wording can answer (no second string needle with a different Arabic, which the first-match
+    // lookup would hide), and both lookups (v2 studioErrorInfo, classic adsStudioRefusalText) give THAT entry's own
+    // Arabic and its English rewording (or the server's words) — the expected wording, never a function against itself
     plain.every(r => {
       const text = r.template.replace(/\u0000/g, '0');
       if (patterns.some(([re]) => re.test(text))) return true;
+      const entry = classicMap.find(([needle]) => hitsNeedle(needle, text));  // the first match, as adsStudioRefusalEntry
+      if (!entry) return false;
+      const stringHits = classicMap.filter(([needle]) => typeof needle === 'string' && text.includes(needle));
+      if (new Set(stringHits.map(([, ar]) => ar)).size > 1) return false;
+      const expectedAr = entry[2] ? null : entry[1];  // a dynamic entry adds the server's amount or days after its words
+      const expectedEn = entry[3] || text;
       const classicAr = String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(text)})`));
       const classicEn = String(run(`adsStudioRefusalText(${JSON.stringify(text)})`));
-      return classicAr !== text && info(text, 'ar').text === classicAr && info(text, 'en').text === classicEn;
+      const wordingOk = expectedAr === null ? classicAr.startsWith(entry[1].trim()) : classicAr === expectedAr;
+      return classicAr !== text && wordingOk && classicEn === expectedEn && info(text, 'ar').text === classicAr && info(text, 'en').text === expectedEn;
     }),
     sampleInfo.every(([ar, en]) => arabic.test(ar.text) && !latin.test(ar.text.replace(/https?:\/\/|HH:MM|PNG|JPEG|WebP|JPG|USD|LYD/g, '')) && ar.text !== generic && en.text && !/^(creativeImages|Photo \d|name is|Unsupported|primaryText)/.test(en.text)),
     ['SETTLE_NOT_READY', 'NEEDS_MANUAL_RENAME'].every(code => Array.isArray(clientTexts[code]) && arabic.test(clientTexts[code][1]) && coded(code, 'ar').text === clientTexts[code][1] && coded(code, 'en').text === clientTexts[code][0])
