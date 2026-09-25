@@ -18,6 +18,9 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
   ``stopRequestTicketId`` and ``lastStopRequestOperationId``, the staff queue row below, the owner's
   inbox item ``stop_request_received`` (studio_activity.py) and the audit entry ``stop_request``
   (in main's keep list: never deleted).
+* After the commit the staff channel hears about it at once (``notify_channel_soon``:
+  studio_alert_out.send_pending on its own daemon thread, P3-21; the request never waits for the
+  webhook, and a send that fails is the operations worker's and the jobs loop's to try again).
 * The answer: ``{ticket, stopRequestedAt, afterHours, urgentContact?}``. ``afterHours`` is true when
   the team is outside its working hours now (the ``hours`` setting, Tripoli time); only then
   ``urgentContact`` is there, with the on-duty WhatsApp line (``contact.urgentWhatsapp``) and the
@@ -78,6 +81,7 @@ holidays and the Ramadan window, Tripoli time).
 """
 
 import math
+import threading
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -382,6 +386,30 @@ def _write_stop_row(conn: Any, campaign_id: str, owner: str | None, fields: dict
     )
 
 
+def notify_channel_soon() -> threading.Thread | None:
+    """P3-21: after a stop request's commit the staff channel hears about it now, not at the operations
+    worker's next 300-second turn: studio_alert_out.send_pending on its own daemon thread. The request
+    never waits for the webhook; the queue row is stamped only once the webhook accepted the alert, so
+    the worker's pass and the jobs loop never send it twice, and a send that fails is theirs to retry.
+    Never raises. Returns the thread (tests wait for it), or None when none could start."""
+
+    def run() -> None:
+        try:
+            from .studio_alert_out import send_pending  # late: studio_alert_out imports the jobs module this one imports
+
+            send_pending()
+        except Exception as error:
+            print(f"[albayan] Stop request notification left to the worker ({type(error).__name__}).")
+
+    try:
+        thread = threading.Thread(target=run, name="albayan-studio-stop-notify", daemon=True)
+        thread.start()
+        return thread
+    except Exception as error:
+        print(f"[albayan] Stop request notification thread not started ({type(error).__name__}).")
+        return None
+
+
 def add_stop_request_route(
     router: APIRouter,
     *,
@@ -474,6 +502,7 @@ def add_stop_request_route(
                      "dueAt": _iso(due) if due else None, "afterHours": after_hours, "withNote": bool(note)},
                     conn=conn,
                 )
+        notify_channel_soon()  # committed: the staff channel hears about it without waiting for the worker
         return _answer(ticket, requested_at, settings, now, user)
 
 

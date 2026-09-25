@@ -411,6 +411,34 @@ def test_tick_claims_each_job_once_per_turn(monkeypatch):
     assert studio_jobs.read_job_state()["lastIntegrityScanDay"] == _day(daily)
 
 
+def test_tick_sends_the_pending_staff_notifications(monkeypatch):
+    """P3-21: every tick that won the heartbeat write ends with studio_alert_out.send_pending, so a new
+    stop request or a channel-worthy alert reaches the team before the operations worker's 300-s turn."""
+    from server.systems.ads_studio import studio_alert_out
+
+    passes: list = []
+    quiet = {"configured": False, "stopRequests": [], "alerts": [], "skipped": 0}
+    monkeypatch.setattr(studio_alert_out, "send_pending", lambda now=None: passes.append(now) or quiet)
+    monkeypatch.setattr(studio_jobs, "sweep_orphans", lambda ctx, now, full=False: {})
+    monkeypatch.setattr(studio_jobs, "check_waiting_requests", lambda now: {})
+    _reset_state()
+    now = _night(days=5)
+    ran = run_tick(_provider, now)
+    assert passes == [now] and ran["channel"] == quiet
+    monkeypatch.setattr(studio_jobs, "update_job_state", lambda change: None)  # lost the heartbeat write: nothing runs
+    assert run_tick(_provider, now + timedelta(seconds=30)) == {"claimed": []} and passes == [now]
+
+
+def test_alert_labels_name_the_page_and_heartbeat_kinds():
+    for kind in ("page_health_drop", "instagram_comments_not_arriving", "jobs_heartbeat_late"):
+        assert kind in studio_jobs.ALERT_KINDS
+        labels = studio_jobs.ALERT_LABELS[kind]
+        assert set(labels) == {"en", "ar"} and labels["en"].strip() and labels["ar"].strip()
+    assert studio_jobs.ALERT_LABELS["jobs_heartbeat_late"]["en"] == "The studio jobs loop has not run for more than 5 minutes"
+    assert "5 دقائق" in studio_jobs.ALERT_LABELS["jobs_heartbeat_late"]["ar"]
+    assert "public" in studio_jobs.ALERT_LABELS["instagram_comments_not_arriving"]["en"]
+
+
 def test_a_failed_job_is_recorded_and_the_tick_goes_on(monkeypatch):
     def boom(ctx, now, full=False):
         raise RuntimeError("secret text")

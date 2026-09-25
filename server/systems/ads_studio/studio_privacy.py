@@ -196,8 +196,10 @@ REPLY_LOG_COMMENTER_FIELDS = (
     "fromId", "fromName", "fromUsername", "from", "commenterId", "commenterName", "commentText", "text", "message",
 )
 # Help-desk texts (P3-12): the subject (and the hash of the first send's content, which only served
-# replays) of a ticket, and the text of each message; ids, numbers, status and times stay.
-TICKET_PERSONAL_FIELDS = ("subject", "createFingerprint")
+# replays) of a ticket, a TikTok request's handle and the team's note copy on its row (P5-01; the
+# thread copy of the note is a message), and the text of each message; ids, numbers, status and
+# times stay.
+TICKET_PERSONAL_FIELDS = ("subject", "createFingerprint", "tiktokHandle", "tiktokNote")
 TICKET_MESSAGE_PERSONAL_FIELDS = ("text",)
 # Social Studio rows (P5-04): what the account wrote or named; ids and Meta ids stay.
 SOCIAL_RULE_PERSONAL_FIELDS = ("name", "keywords", "publicReply", "dmText")
@@ -239,10 +241,11 @@ def _scrub_fields(conn: Any, rows_sql: str, params: dict[str, Any], fields: tupl
 def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
     """Remove the studio's personal data of an account being anonymised (P1-16, P3-12), on the
     caller's transaction. Returns how many rows changed per kind (``tickets`` counts ticket rows and
-    message rows together). Never touches the ledger."""
+    message rows together; ``social`` the Social Studio rules, pages and posts). Never touches the
+    ledger."""
     uid = str(user_id or "")
     if not uid:
-        return {"profiles": 0, "replyLog": 0, "tickets": 0}
+        return {"profiles": 0, "replyLog": 0, "tickets": 0, "social": 0}
     stamp = now_ms()
     profiles = _scrub_fields(
         conn,
@@ -275,8 +278,6 @@ def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
         stamp,
     )
     # P5-04: the account's Social Studio rows (rules, pages, posts; every row carries created_by = owner).
-    # Their count ``social`` joins the answer only when such a row changed: the three classic counts
-    # stay the whole answer for accounts without Social Studio rows.
     social = 0
     for entity_type, fields in (
         (SOCIAL_RULES_TYPE, SOCIAL_RULE_PERSONAL_FIELDS),
@@ -290,7 +291,4 @@ def scrub_studio_personal_data_conn(conn: Any, user_id: str) -> dict[str, int]:
             fields,
             stamp,
         )
-    counts = {"profiles": profiles, "replyLog": reply_log, "tickets": tickets}
-    if social:
-        counts["social"] = social
-    return counts
+    return {"profiles": profiles, "replyLog": reply_log, "tickets": tickets, "social": social}

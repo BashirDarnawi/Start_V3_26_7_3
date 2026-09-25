@@ -26,7 +26,7 @@ from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import studio_alert_out, studio_jobs, studio_settings
+from server.systems.ads_studio import studio_alert_out, studio_jobs, studio_settings, studio_stop
 from server.systems.ads_studio.studio_alert_out import (
     AUDIT_ALERT_TEST,
     HEARTBEAT_ALERT,
@@ -42,6 +42,7 @@ from server.systems.ads_studio.studio_alert_out import (
 from server.systems.ads_studio.studio_jobs import ALERTS_TYPE, JOB_STATE_TYPE, alert_id, raise_alert
 from server.systems.ads_studio.studio_stop import stop_row_id
 
+NOTIFY_CHANNEL_SOON = studio_stop.notify_channel_soon  # the real hook, bound before the fixture below switches it off
 TAG = secrets.token_hex(4)
 PASSWORD = "StudioAlertPassword123!"
 _HASH = hash_password(PASSWORD, iterations=PBKDF2_ITERATIONS_DEFAULT)
@@ -92,10 +93,13 @@ def people():
 
 @pytest.fixture(autouse=True)
 def _isolated(people, monkeypatch):
-    """Settings rows put back exactly, the channel's memory cleared, the webhook unset unless a test sets it."""
+    """Settings rows put back exactly, the channel's memory cleared, the webhook unset unless a test sets it.
+    The stop request's own send-at-once thread is switched off (one test switches it back on), so each
+    test's send_pending is the only sender and the counts below stay exact."""
     with db_conn() as conn:
         saved = [dict(row) for row in conn.execute(text("SELECT * FROM entities WHERE type = 'studioSettings'")).mappings().all()]
     monkeypatch.delenv(WEBHOOK_ENV, raising=False)
+    monkeypatch.setattr(studio_stop, "notify_channel_soon", lambda: None)
     reset_channel_state()
     reset_rate_limit(TEST_RATE_KEY)
     for uid in _USERS:
@@ -287,6 +291,23 @@ def test_a_refused_stop_notification_is_tried_on_a_later_pass(people, monkeypatc
     assert _row(STOP_TYPE, stop_row_id(campaign_id))["channelSentAt"]
 
 
+def test_a_new_stop_request_reaches_the_channel_at_once(people, monkeypatch):
+    """The stop request's commit sends its notification itself (studio_stop.notify_channel_soon), without
+    waiting for the operations worker's 300-second turn; the worker's pass then finds the row stamped."""
+    _services_on()
+    calls = _recorder(monkeypatch)
+    threads: list = []
+    monkeypatch.setattr(studio_stop, "notify_channel_soon", lambda: threads.append(NOTIFY_CHANNEL_SOON()))
+    campaign_id = _campaign(people["owner"]["id"], "atonce")
+    ticket = _ask(people["owner"], campaign_id, "")["ticket"]
+    assert len(threads) == 1 and threads[0] is not None
+    threads[0].join(15)
+    assert not threads[0].is_alive()
+    assert [call["kind"] for call in calls] == [f"studio_stop:{ticket['number']}"]
+    assert _row(STOP_TYPE, stop_row_id(campaign_id))["channelSentAt"]
+    assert send_pending()["stopRequests"] == [] and len(calls) == 1  # the worker's pass: already sent
+
+
 def test_channel_alerts_are_sent_once_and_others_never(people, monkeypatch):
     calls = _recorder(monkeypatch)
     now = datetime.now(UTC)
@@ -328,6 +349,29 @@ def test_heartbeat_watch_alerts(monkeypatch):
     with db_conn() as conn:
         conn.execute(text("DELETE FROM entities WHERE type = :t AND data_json LIKE :like"),
                      {"t": ALERTS_TYPE, "like": "%studio-jobs:2026-09-25T10:%"})
+
+
+def test_a_refused_heartbeat_notification_is_tried_at_the_next_watch(monkeypatch):
+    """The most critical alert must not vanish for six hours because one POST was refused or timed out:
+    the episode is stamped as reported only once the webhook accepted it."""
+    calls = _recorder(monkeypatch, answer=False)
+    now = datetime(2026, 9, 25, 12, 15, tzinfo=UTC)
+    beat = _beat(lastTickAt="2026-09-25T12:00:00Z")
+    assert report_heartbeat(beat, now) is False  # refused (or timed out)
+    assert report_heartbeat({**beat, "ageSeconds": 1200}, now) is False
+    assert len(calls) == 2  # both watches reached the sender: the episode was not stamped as reported
+    monkeypatch.setattr(operations, "_send_alert", lambda *a, **k: calls.append(a) or True)
+    assert report_heartbeat({**beat, "ageSeconds": 1500}, now) is True and len(calls) == 3
+    assert report_heartbeat({**beat, "ageSeconds": 1800}, now) is False and len(calls) == 3  # stamped once accepted
+    # Not configured: the episode is stamped all the same (the admin-list alert once per reminder period, not every watch).
+    reset_channel_state()
+    monkeypatch.delenv(WEBHOOK_ENV, raising=False)
+    assert report_heartbeat(beat, now) is False and studio_alert_out._HEARTBEAT["key"] == "2026-09-25T12:00:00Z"
+    assert report_heartbeat({**beat, "ageSeconds": 1200}, now) is False and studio_alert_out._HEARTBEAT["key"] == "2026-09-25T12:00:00Z"
+    assert len(calls) == 3
+    with db_conn() as conn:
+        conn.execute(text("DELETE FROM entities WHERE type = :t AND data_json LIKE :like"),
+                     {"t": ALERTS_TYPE, "like": "%studio-jobs:2026-09-25T12:%"})
 
 
 def test_a_loop_that_never_ticked_is_reported_after_the_grace(monkeypatch):

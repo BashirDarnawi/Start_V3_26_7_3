@@ -617,4 +617,4 @@ def test_anonymisation_scrubs_social_studio_rows(actors):
         assert "Secret" not in raw and "السعر" not in raw and "base64" not in raw
     assert rows[other["id"]][0]["name"] == "Other Shop"  # another owner's page is untouched
     with db_conn() as conn:  # a second run changes nothing (and reports no social rows)
-        assert scrub_studio_personal_data_conn(conn, actors["a"]["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 0}
+        assert scrub_studio_personal_data_conn(conn, actors["a"]["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 0, "social": 0}

@@ -122,6 +122,13 @@ stores ``settleBasis`` (final_read | never_delivered | override | never_linked),
 ``metaSpendAtSettleMinorUSD`` (Meta's confirmed spend at that moment, or null),
 ``settledSpendMinorUSD`` (what the drift watch compares Meta's later spend with) and
 ``settledAt``; see settle_plan (pure, tested in test_studio_settle.py).
+
+A link is never forgotten by the gates. Every write of a Meta campaign id (the desk link,
+the classic marker with an id) keeps ``lastLinkedMetaCampaignId``, ``lastLinkedMetaAdAccountId``
+and ``everLinked`` on the request (``_link_history``), and the unlink and the cleared marker
+keep them too: a request whose link was removed is still judged on that campaign's results
+row (``last_linked_meta_ids``), the owner's own stop still treats it as started, and only the
+admin override lifts the gates. Clearing the link is not a way around the settle rules.
 """
 
 import math
@@ -642,6 +649,37 @@ def _iso_utc(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _link_history(meta_id: Any, account: Any) -> dict[str, Any]:
+    """The fields every write of a Meta campaign id leaves on the request, kept by the unlink and by
+    the cleared marker: the settle gates and the owner's stop rule read them once the link is gone."""
+    return {
+        "lastLinkedMetaCampaignId": str(meta_id or "").strip(),
+        "lastLinkedMetaAdAccountId": str(account or "").strip(),
+        "everLinked": True,
+    }
+
+
+def last_linked_meta_ids(data: dict[str, Any]) -> tuple[str, str] | None:
+    """(ad account digits, Meta campaign id) of the desk link a request carried once and lost since (an
+    unlink, a cleared marker; ``_link_history``), else None. The settle gates judge such a request on
+    that campaign's results row exactly as a linked one (P3-06a): only the admin override lifts them."""
+    from .studio_results import linked_meta_ids  # late: studio_results imports this module
+
+    return linked_meta_ids({
+        "metaCampaignId": data.get("lastLinkedMetaCampaignId"), "metaAdAccountId": data.get("lastLinkedMetaAdAccountId"),
+    })
+
+
+def ever_launched(data: dict[str, Any]) -> bool:
+    """A request that carries a launch marker or a Meta id now, or carried a Meta id once (``everLinked``):
+    its budget may have been spent on Meta, so the owner's instant full refund is over."""
+    return bool(
+        str(data.get("publishStatus") or "").strip()
+        or str(data.get("metaCampaignId") or "").strip()
+        or data.get("everLinked") is True
+    )
+
+
 def _settle_not_ready(now: datetime, ready_at: datetime) -> HTTPException:
     """409 SETTLE_NOT_READY: the final Meta read is due at ``ready_at`` (bilingual, with the time)."""
     when = _iso_utc(ready_at)
@@ -690,20 +728,24 @@ def settle_plan(
     reach the whole payment, never more (400), ``settleBasis`` override. ``absorbedMinorUSD`` is
     what Albayan pays out of its own pocket (D27): Meta's spend plus the refund above the payment.
 
+    A request whose desk link was removed since (an unlink, a marker cleared to '') is judged on the
+    SAME rules and on the results row of the campaign it was linked to (``last_linked_meta_ids``):
+    clearing the link lifts nothing, only the admin override does.
+
     A request never linked by the desk keeps the older rule: a launched one (a publish marker or a
-    Meta id set by hand) needs an explicit amount, bounded by what the request itself recorded as
-    spent; ``settleBasis`` is never_linked when it carries no launch marker at all, else '' (a
-    legacy hand-marked row: nothing is known about its Meta spend).
+    Meta id set by hand, now or ever) needs an explicit amount, bounded by what the request itself
+    recorded as spent; ``settleBasis`` is never_linked when it never carried a launch marker or a
+    Meta id at all, else '' (a legacy hand-marked row: nothing is known about its Meta spend).
     """
     from .studio_diagnostics import parse_time  # late: the studio modules import this one
     from .studio_results import linked_meta_ids, meta_delivery, normalize_results
 
     captured = max(int(captured or 0), 0)
     override = bool(str(override_reason or "").strip())
-    link = linked_meta_ids(data)
+    link = linked_meta_ids(data) or last_linked_meta_ids(data)
     if link is None:
         spent = min(_whole(data.get("spendMinorUSD")), captured)
-        launched = bool(str(data.get("publishStatus") or "").strip() or str(data.get("metaCampaignId") or "").strip())
+        launched = ever_launched(data)
         if refund is None and launched and not override:
             # A launched campaign has (almost surely) spent on Meta and nothing
             # records that spend: defaulting to the whole budget refunded it.
@@ -1136,6 +1178,7 @@ def _link_meta_campaign(
 
     def link_fields(copies: dict[str, Any]) -> dict[str, Any]:
         return {
+            **_link_history(meta_id, f"act_{account}"),
             "publishStatus": publish_status,
             "metaCampaignId": meta_id,
             "metaAdAccountId": f"act_{account}",
@@ -1314,6 +1357,8 @@ def _unlink_meta_campaign(
                 "restoreProblem": problem, "renamedBack": False, "renameBack": "pending" if rename_back else "",
             }
             data.update({
+                # The gates keep judging this request on that campaign's results row (_link_history).
+                **_link_history(meta_id, data.get("metaAdAccountId")),
                 "publishStatus": "", "metaCampaignId": "", "metaAdAccountId": "", "metaCampaignName": "",
                 "linkedAt": None, "linkedBy": None, "publishedAt": None, "publishedBy": None, "metaLinkResult": None,
                 "unlinkedAt": ctx["iso_utc"](), "unlinkedBy": actor_id, "lastUnlinkOperationId": operation_id,
@@ -1931,12 +1976,8 @@ def create_ad_campaign_actions_router(
                         )
                     close_reason = "customer_stop"
                     spent = min(max(int(data.get("spendMinorUSD") or 0), 0), max(captured, 0))
-                    started = (
-                        str(data.get("publishStatus") or "").strip()
-                        or str(data.get("metaCampaignId") or "").strip()
-                        or spent > 0
-                        or not _campaign_start_is_in_future(data)
-                    )
+                    # A link removed since still counts (ever_launched): the ad may have run on Meta.
+                    started = ever_launched(data) or spent > 0 or not _campaign_start_is_in_future(data)
                     if started:
                         raise HTTPException(
                             status_code=409,
@@ -2065,10 +2106,10 @@ def create_ad_campaign_actions_router(
         P0-09b; see _link_meta_campaign).
 
         Otherwise the marker that the Approved ad was launched/paused on Meta by hand (live /
-        paused / '' = cleared, which clears the link too). A marker that brings a NEW Meta campaign
-        id claims it like a link (unique among requests; Manager's untouched copies removed) but
-        checks nothing in Meta, so the team desk links instead; a request already linked to another
-        campaign is refused.
+        paused / '' = cleared, which clears the link too, never what the settle gates remember of
+        it: _link_history). A marker that brings a NEW Meta campaign id claims it like a link
+        (unique among requests; Manager's untouched copies removed) but checks nothing in Meta, so
+        the team desk links instead; a request already linked to another campaign is refused.
         """
         require_same_origin(request)
         if not _is_reviewer(ctx, user):
@@ -2123,14 +2164,18 @@ def create_ad_campaign_actions_router(
                 fields["metaCampaignId"] = ctx["sanitize_str"](str(body.metaCampaignId or ""))[:120]
         else:
             fields.update({"publishedAt": None, "publishedBy": None, "metaCampaignId": ""})
-        if fields.get("metaCampaignId") == "":
-            # No Meta campaign any more: the link's own fields go with it (its result stays as history).
-            fields.update({"metaAdAccountId": "", "metaCampaignName": "", "linkedAt": None, "linkedBy": None})
         linked = str(data.get("metaCampaignId") or "").strip()
+        if fields.get("metaCampaignId") == "":
+            # No Meta campaign any more: the link's own fields go with it (its result stays as history),
+            # but not what the settle gates remember of it (_link_history): clearing lifts no gate.
+            fields.update({"metaAdAccountId": "", "metaCampaignName": "", "linkedAt": None, "linkedBy": None})
+            if linked:
+                fields.update(_link_history(linked, data.get("metaAdAccountId")))
         new_meta = str(fields.get("metaCampaignId") or "")
         if new_meta and new_meta != linked:
             if linked:
                 raise HTTPException(status_code=409, detail=REFUSE_LINK_RELINK)
+            fields.update(_link_history(new_meta, data.get("metaAdAccountId")))
             saved, copies = _claim_and_write(
                 ctx, campaign_id, operation_id=operation_id, baseline=expected, meta_campaign_id=new_meta,
                 actor_id=actor_id, fields_for=lambda _copies: fields,

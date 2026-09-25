@@ -32,7 +32,11 @@ message text (§7.5). Its ``text`` field (the one line a chat webhook shows, P0-
   on and late (no tick for 5 minutes) one notification goes out per stale episode (keyed by the last
   tick time; a loop that never ticked is reported once that lasted 5 minutes; a reminder every
   ``HEARTBEAT_REMIND_HOURS``), and a ``jobs_heartbeat_late`` studio alert is raised for the admin
-  list (best effort: the database may be the very problem).
+  list (best effort: the database may be the very problem). The watch waits for the webhook's
+  answer (it runs on the worker's own thread) and stamps the episode as reported only once the
+  webhook accepted it: a refused or timed-out POST is tried again at the next watch (300 s), never
+  six hours later. While the channel is not configured the episode is stamped all the same, so the
+  admin-list alert is raised once per reminder period, not every watch.
 * ``POST /api/studio/admin/alert-channel/test`` (admin, from the Albayan site itself, one press per
   10 minutes for the whole channel, audited ``alert_channel_test``): sends one test notification
   and waits up to ``TEST_WAIT_SECONDS`` for the webhook's answer (the one place a request waits:
@@ -301,8 +305,8 @@ def send_pending(now: datetime | None = None) -> dict[str, Any]:
 # ------------------------------------------------------------------ the heartbeat watch
 
 def report_heartbeat(beat: Any, now: datetime | None = None) -> bool:
-    """The operations worker's watch of the studio jobs loop (see the module docstring). True when a
-    notification went out for this stale episode."""
+    """The operations worker's watch of the studio jobs loop (see the module docstring). True when the
+    webhook accepted a notification for this stale episode; a refused send is tried at the next watch."""
     if not isinstance(beat, dict) or not beat.get("enabled"):
         return False
     clock = time.monotonic()
@@ -333,10 +337,17 @@ def report_heartbeat(beat: Any, now: datetime | None = None) -> bool:
     except Exception as error:  # the database may be the very problem: the channel still hears about it
         print(f"[albayan] Studio heartbeat alert row not written ({type(error).__name__}).")
     bucket = int(clock // (HEARTBEAT_REMIND_HOURS * 3600))
-    return notify_staff(
+    sent = notify_staff(
         HEARTBEAT_ALERT, "Albayan Studio jobs loop is late", "حلقة مهام استوديو البيان متأخرة", body,
-        f"{key}:{bucket}", severity="critical",
+        f"{key}:{bucket}", severity="critical", wait=SEND_WAIT_SECONDS,
     )
+    if not sent and channel_configured():
+        # The webhook refused or timed out (the sender forgot the key too): forget the episode, so the
+        # next watch sends again. ``neverSince`` stays: the never-ticked grace does not start over.
+        with _LOCK:
+            if _HEARTBEAT["key"] == key:
+                _HEARTBEAT.update({"key": None, "at": 0.0})
+    return sent
 
 
 def operations_watch(beat: Any, now: datetime | None = None) -> dict[str, Any]:

@@ -36,19 +36,25 @@ amounts and counts only, no ids, names or users.
 
 * ``queues``: how many items met their D11 target (the ``targets`` setting, counted in working
   time by studio_hours.target_due_at) over the last QUEUE_WINDOW_DAYS days: reviews (submit ->
-  decision), tickets (open -> first team answer, stop requests apart), stop requests (request ->
-  handled, against the due time stored with the request) and payment confirmations (charge request
-  -> confirmed, through the platform door wallet_payments.payment_request_timings). An item still
-  waiting past its due time counts as missed. ``onTarget`` compares the share with
-  ``thresholds.queueOnTargetPercent`` (the §12.3 widening rule); None while there is no sample.
+  decision), tickets (open -> first team answer; stop requests and TikTok requests apart), TikTok
+  requests (open -> first team answer against their own ``tiktokBusinessDays`` target, the one the
+  service promises, P5-01), stop requests (request -> handled, against the due time stored with the
+  request) and payment confirmations (charge request -> confirmed, through the platform door
+  wallet_payments.payment_request_timings). An item still waiting past its due time counts as
+  missed. ``onTarget`` compares the share with ``thresholds.queueOnTargetPercent`` (the §12.3
+  widening rule); None while there is no sample.
 * ``staffTimes``: p50/p90 in minutes over the last TIMES_WINDOW_DAYS days: review, link (approval ->
   Meta link), settle (the settle gate opening -> the staff settle), ticket first response, stop ->
   paused, payment confirmation.
 * ``capacity``: today's sends against the intake cap (D29), sends per day over the last week, the
   requests waiting for review.
 * ``replies``: comment-reply latency p95 by source (webhook, poll) as ``last change - comment time``
-  of the answered log rows, the failure share (answered vs failed, parked retries left out), the
-  comments missed during a token outage and the replies parked right now.
+  of the answered log rows (``latency``) and, through read_operations, P4-02's precise measure
+  ``sentAt - receivedAt`` per source (``latencyBySource``: social_studio.reply_latency_by_source over
+  the same window, which the go rows prefer whenever it has a sample), the failure share (answered
+  vs failed, parked retries left out), the comments missed during a token outage (the rows whose
+  ``problemCode`` is social_studio.MISSED_DURING_OUTAGE, the writer's own mark) and the replies
+  parked right now.
 * ``money``: USD owed to customers (Available + Reserved = the USD wallet balances through
   wallet_payments.usd_customer_balances_total, plus In ads = what live Approved requests paid)
   against the studio ad accounts' last stored funds reading (meta_ads' metaFundsState, allowlisted
@@ -60,7 +66,9 @@ amounts and counts only, no ids, names or users.
   the engine tells it cheaply, rows and bytes by record type (top 10), the biggest owners as counts
   only (never an id), the last backup the operations worker recorded (time and size).
 * ``meta``: the Meta connection state, the token reading (validity, days left, missing scopes;
-  never the token) and the webhook delivery counters, through the platform doors.
+  never the token) and the webhook delivery counters, through the platform doors, plus the
+  Instagram polling source's state (``instagramPoll``: studio_ig_source.poll_report, counts and
+  times only, P4-09).
 * ``goNoGo``: PLAN.md §12.8 as computed booleans: each go row and stop rule is ``True``/``False``
   where the numbers exist and ``None`` where they do not (a rehearsed runbook and a restore proof
   are not recorded anywhere, so they stay None). ``go`` is True only when every go row is known
@@ -302,16 +310,18 @@ QUEUE_TARGETS = {
     # queue -> (studio_hours target name, targets field)
     "reviews": ("review", "reviewBusinessDays"),
     "tickets": ("ticket", "ticketFirstResponseMinutes"),
+    "tiktok": ("tiktok", "tiktokBusinessDays"),  # P5-01: the TikTok service's own 1-business-day promise
     "stopRequests": ("stop_request", "stopRequestMinutes"),
     "payments": ("payment", "paymentConfirmMinutes"),
 }
+TIKTOK_TICKET_KIND = "tiktok_request"  # studio_support.TIKTOK_KIND (imported late there: it imports this module)
 _RESULTS_FIELDS = (
     "campaignId", "metaCampaignId", "spendMinorUSD", "currency", "lastSyncedAt", "settleReadDueAt", "deliveryEndedAt",
     "neverDelivered",
 )
 _TICKET_FIELDS = ("kind", "status", "createdAt", "firstStaffAt")
 _STOP_FIELDS = ("campaignId", "requestedAt", "dueAt", "resolvedAt", "state", "resolvedReason")
-_REPLY_FIELDS = ("source", "commentAt", "actions", "error", "retryAfter", "processing", "parkedReason")
+_REPLY_FIELDS = ("source", "commentAt", "actions", "error", "retryAfter", "processing", "parkedReason", "problemCode")
 _ALERT_FIELDS = ("kind", "acknowledgedAt")
 _TOKEN_FIELDS = (
     "configured", "checked", "stale", "checkedAt", "isValid", "type", "expiresAt", "expiresNever", "daysLeft",
@@ -559,25 +569,35 @@ def compute_operations(inputs: dict[str, Any], settings: dict[str, Any], now: da
             if gate is not None:
                 settle_minutes.append(max(_minutes(stopped, gate), 0.0))
 
-    # --- tickets (stop-request tickets belong to the stop queue)
+    # --- tickets (stop-request tickets belong to the stop queue; TikTok requests are judged on their
+    # own 1-business-day target, in their own queue line, while their first answer still counts among
+    # the ticket first-response times)
     ticket_done: list[tuple[datetime, datetime | None]] = []
-    ticket_overdue = 0
+    tiktok_done: list[tuple[datetime, datetime | None]] = []
+    ticket_overdue = tiktok_overdue = 0
     ticket_minutes: list[float] = []
     for row in tickets:
-        if str(row.get("kind") or "question") == "stop_request":
+        kind = str(row.get("kind") or "question")
+        if kind == "stop_request":
             continue
+        tiktok = kind == TIKTOK_TICKET_KIND
+        target_name = "tiktok" if tiktok else "ticket"
         created = parse_time(row.get("createdAt"))
         first = parse_time(row.get("firstStaffAt"))
         if created is None:
             continue
         if first is not None and first >= created:
             if first >= queue_since:
-                ticket_done.append((first, _due("ticket", created, settings)))
+                (tiktok_done if tiktok else ticket_done).append((first, _due(target_name, created, settings)))
             if first >= times_since:
                 ticket_minutes.append(_minutes(first, created))
         elif str(row.get("status") or "open") in ("", "open"):
-            due = _due("ticket", created, settings)
-            ticket_overdue += bool(due is not None and now > due)
+            due = _due(target_name, created, settings)
+            late = int(bool(due is not None and now > due))
+            if tiktok:
+                tiktok_overdue += late
+            else:
+                ticket_overdue += late
 
     # --- stop requests (the due time stored with the request: working minutes at that moment)
     stop_done: list[tuple[datetime, datetime | None]] = []
@@ -634,7 +654,8 @@ def compute_operations(inputs: dict[str, Any], settings: dict[str, Any], now: da
             source = str(row.get("source") or "webhook")
             if comment_at is not None and changed >= comment_at and source in latency:
                 latency[source].append((changed - comment_at).total_seconds())
-        elif error == MISSED_DURING_OUTAGE:
+        elif str(row.get("problemCode") or "") == MISSED_DURING_OUTAGE:
+            # The writer's own mark (social_studio._missed_patch: ``error`` carries a sentence, ``problemCode`` the code).
             missed += 1
             failed += 1
         elif retry_pending:
@@ -654,6 +675,7 @@ def compute_operations(inputs: dict[str, Any], settings: dict[str, Any], now: da
     queues: dict[str, Any] = {}
     for name, done, overdue in (
         ("reviews", review_done, review_overdue), ("tickets", ticket_done, ticket_overdue),
+        ("tiktok", tiktok_done, tiktok_overdue),
         ("stopRequests", stop_done, stop_overdue), ("payments", payment_done, payment_overdue),
     ):
         field = QUEUE_TARGETS[name][1]
@@ -847,8 +869,17 @@ def go_no_go(operations: dict[str, Any], facts: dict[str, Any], thresholds: dict
     def scan_zero(*codes: str) -> bool | None:
         return None if scan is None else all(by_code.get(code, 0) == 0 for code in codes)
 
+    def latency_p95(source: str) -> Any:
+        """P4-02's ``sentAt - receivedAt`` p95 (``latencyBySource``, social_studio.reply_latency_by_source)
+        whenever that measure has a sample; else the log rows' ``last change - comment time`` p95."""
+        precise = replies.get("latencyBySource") if isinstance(replies.get("latencyBySource"), dict) else {}
+        summary = precise.get(source) if isinstance(precise.get(source), dict) else {}
+        if _whole_or_none(summary.get("count")) and summary.get("p95Seconds") is not None:
+            return summary["p95Seconds"]
+        return replies["latency"][source]["p95Seconds"]
+
     def latency_ok(source: str, limit: int) -> bool | None:
-        value = replies["latency"][source]["p95Seconds"]
+        value = latency_p95(source)
         return None if value is None else value <= limit
 
     token_ok: bool | None = None
@@ -870,8 +901,8 @@ def go_no_go(operations: dict[str, Any], facts: dict[str, Any], thresholds: dict
         "paymentsOnTarget": {"ok": queues["payments"]["onTarget"], "value": queues["payments"]["percent"]},
         "ticketsOnTarget": {"ok": queues["tickets"]["onTarget"], "value": queues["tickets"]["percent"]},
         "resultsFresh": {"ok": operations["results"]["ok"], "value": operations["results"]["percent"]},
-        "webhookReplyP95": {"ok": latency_ok("webhook", int(thresholds["webhookReplyP95Seconds"])), "value": replies["latency"]["webhook"]["p95Seconds"]},
-        "pollReplyP95": {"ok": latency_ok("poll", int(thresholds["pollReplyP95Seconds"])), "value": replies["latency"]["poll"]["p95Seconds"]},
+        "webhookReplyP95": {"ok": latency_ok("webhook", int(thresholds["webhookReplyP95Seconds"])), "value": latency_p95("webhook")},
+        "pollReplyP95": {"ok": latency_ok("poll", int(thresholds["pollReplyP95Seconds"])), "value": latency_p95("poll")},
         "replyFailureRate": {"ok": replies["failures"]["ok"], "value": replies["failures"]["percent"]},
         "commentsLostToOutage": {"ok": replies["missedDuringOutage"] == 0, "value": replies["missedDuringOutage"]},
         "noOpenMoneyIncident": {"ok": money["openIncidents"] == 0, "value": money["openIncidents"]},
@@ -907,7 +938,7 @@ def read_operations(
 ) -> dict[str, Any]:
     """The ``operations`` block (P3-19): rows read through projections and doors, then computed.
     ``inputs``: load_operations_inputs already read on the caller's connection, else read here."""
-    from . import studio_alerts_meta, studio_jobs  # late: both import this module
+    from . import social_studio, studio_alerts_meta, studio_ig_source, studio_jobs  # late: they import this module
 
     now = _aware(now or datetime.now(timezone.utc))
     settings = settings or read_all_settings()
@@ -916,6 +947,10 @@ def read_operations(
             inputs = load_operations_inputs(conn, now)
         storage = read_storage(conn)
     operations = compute_operations(inputs, settings, now, submissions_today=count_submissions_today(libya_today(now).isoformat()))
+    try:  # P4-02: the precise per-source latency (sentAt - receivedAt); the go rows prefer it (go_no_go.latency_p95)
+        operations["replies"]["latencyBySource"] = social_studio.reply_latency_by_source(days=REPLY_WINDOW_DAYS, now=now)
+    except Exception as error:
+        operations["replies"]["latencyBySource"] = {"readError": type(error).__name__}
     jobs = studio_jobs.jobs_heartbeat(now)
     funds = read_studio_funds()
     operations["money"]["studioFunds"] = funds
@@ -932,7 +967,12 @@ def read_operations(
     except Exception as error:
         connection = {"state": "unknown", "readError": type(error).__name__}
     token = read_token_state()
-    operations["meta"] = {"connection": connection, "token": token, "webhookCounters": _meta.webhook_counts_report()}
+    try:  # P4-09: the Instagram polling source's state (counts and times only)
+        ig_poll = studio_ig_source.poll_report()
+    except Exception as error:
+        ig_poll = {"readError": type(error).__name__}
+    operations["meta"] = {"connection": connection, "token": token, "webhookCounters": _meta.webhook_counts_report(),
+                          "instagramPoll": ig_poll}
     operations["goNoGo"] = go_no_go(
         operations,
         {"scan": jobs.get("lastIntegrityResult"), "jobsAgeSeconds": jobs.get("ageSeconds"), "token": token, "connection": connection, "now": now},

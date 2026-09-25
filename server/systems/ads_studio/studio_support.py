@@ -90,11 +90,15 @@ TikTok "connected", "linked", "managed" or "automated" (test_studio_tiktok check
 
 * ``POST /tiktok/requests`` ``{handle, wants, note?, operationId}`` -> ``{request, message}``
   (the ``tiktok`` service must be open for the caller: ``rollout.services.tiktok``, else 403
-  SERVICE_OFF; at most TIKTOK_CREATES_PER_DAY a day and MAX_OPEN_TIKTOK_REQUESTS open or in
-  progress at once, else 409 TICKET_OPEN_LIMIT). ``handle``: the TikTok username, with or without
-  ``@``, or the profile link ``tiktok.com/@name`` (2-24 letters, digits, underscores or periods,
-  not ending with a period). ``wants``: one value or a list of TIKTOK_WANTS. The same
-  ``operationId`` again returns the first request (409 IDEMPOTENCY_MISMATCH when anything differs).
+  SERVICE_OFF; at most MAX_OPEN_TIKTOK_REQUESTS open or in progress at once, else 409
+  TICKET_OPEN_LIMIT, and at most TIKTOK_CREATES_PER_DAY requests CREATED per Tripoli day, else 429
+  RATE_LIMITED with ``Retry-After``: the day count reads the created rows, so a refused body or a
+  replay never uses up a place; the in-memory limiter only stops floods, TIKTOK_FLOOD_PER_HOUR).
+  ``handle``: the TikTok username, with or without ``@``, or the profile link ``tiktok.com/@name``
+  (2-24 letters, digits, underscores or periods, not ending with a period). ``wants``: one value or
+  a list of TIKTOK_WANTS. The same ``operationId`` again returns the first request (409
+  IDEMPOTENCY_MISMATCH when anything differs). The request is due after ``targets.tiktokBusinessDays``
+  (the promise in TIKTOK_TEXTS), not after the plain ticket target.
 * ``GET /tiktok/requests?cursor=&limit=`` -> ``{requests, nextCursor, openCount, maxOpen,
   service}`` (the caller's own, newest first; ``service`` says whether new requests are open).
 * ``GET /staff/tiktok?state=&cursor=&limit=`` (staff) -> ``{requests, nextCursor}``; ``state`` is
@@ -106,6 +110,13 @@ TikTok "connected", "linked", "managed" or "automated" (test_studio_tiktok check
   ``declined`` also resolve the ticket. A finished request answers 409 TICKET_CLOSED, a step that
   skips the order 400 INVALID_VALUE, a ticket that is not a TikTok request 404 UNKNOWN_TICKET.
   Audited ``tiktok_status`` (number and states, never the note).
+* The service never outlives its ticket. A team member who resolves the ticket through the generic
+  ``POST /staff/tickets/{id}/status`` instead ends the service the same way (``_finish_tiktok_service``,
+  the one function both routes use): an open or in-progress request becomes ``declined`` without a
+  note, so it stops counting against the customer's cap (the ``ticket_status`` audit carries the
+  state change). A customer's reopen of a cancelled request (the reopen route or a new message)
+  puts the service back to ``open`` and takes a place among MAX_OPEN_TIKTOK_REQUESTS like a new
+  request (409 TICKET_OPEN_LIMIT past the cap).
 
 The request appears in every ticket view as ``tiktok: {handle, profileUrl, wants, state,
 stateLabels, note, stateAt}``.
@@ -117,7 +128,7 @@ import math
 import re
 import threading
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable, Iterator
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -128,7 +139,7 @@ from ...rate_limiter import check_rate_limit
 from ...wallet_payments import payment_request_belongs_to
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_errors import studio_error
-from .studio_hours import iso, target_due_at
+from .studio_hours import iso, service_zone, target_due_at
 from .studio_posts import find_owner_page
 from .studio_privacy import redact_staff_identity
 from .studio_settings import read_all_settings, service_access
@@ -165,7 +176,8 @@ TIKTOK_STATE_FILTERS = TIKTOK_STATES + ("active",)
 TIKTOK_OPEN_STATES = frozenset({"open", "in_progress"})
 TIKTOK_TRANSITIONS: dict[str, tuple[str, ...]] = {"open": ("in_progress", "declined"), "in_progress": ("done", "declined")}
 MAX_OPEN_TIKTOK_REQUESTS = 3
-TIKTOK_CREATES_PER_DAY = 5
+TIKTOK_CREATES_PER_DAY = 5  # created requests per Tripoli day (count_tiktok_requests_today), never tries
+TIKTOK_FLOOD_PER_HOUR = 30  # the in-memory guard of the create route: floods only
 TIKTOK_HANDLE_MIN = 2
 TIKTOK_HANDLE_MAX = 24
 TIKTOK_NOTE_MAX = 500  # each language of the team's note
@@ -633,6 +645,26 @@ def count_open_tiktok_requests(conn: Any, owner_id: str) -> int:
     )
 
 
+def tripoli_day_start(now: datetime) -> datetime:
+    """Midnight of ``now``'s Tripoli day (the TikTok day count's window)."""
+    zone = service_zone()
+    moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return datetime.combine(moment.astimezone(zone).date(), time.min, tzinfo=zone)
+
+
+def count_tiktok_requests_today(conn: Any, owner_id: str, now: datetime) -> int:
+    """The owner's TikTok requests CREATED since the start of the Tripoli day (the TIKTOK_CREATES_PER_DAY
+    count): only a request that exists counts, never a refused body or a replay."""
+    return int(conn.execute(
+        text(
+            "SELECT COUNT(*) FROM entities WHERE type = :type AND created_by = :uid AND deleted = false "
+            f"AND created_at >= :since AND COALESCE({json_field_sql('kind')}, 'question') = :kind"
+        ),
+        {"type": SUPPORT_TICKETS_TYPE, "uid": str(owner_id or ""), "kind": TIKTOK_KIND,
+         "since": int(tripoli_day_start(now).timestamp() * 1000)},
+    ).scalar() or 0)
+
+
 def staff_ticket_counts(conn: Any | None = None, *, include_admin: bool, now: datetime | None = None) -> dict[str, int]:
     """Counts for the staff pulse (P3-17), no texts: ``open`` (waiting for the team), ``overdue``
     (waiting past dueAt), ``urgent`` (unresolved stop requests and other urgent tickets) and
@@ -666,7 +698,13 @@ def staff_ticket_counts(conn: Any | None = None, *, include_admin: bool, now: da
 
 
 def _due(data: dict[str, Any], start: datetime, settings: dict[str, Any]) -> str | None:
-    target = "stop_request" if data.get("priority") == "urgent" else "ticket"
+    """When the team owes its first answer: the stop-request target for an urgent ticket, the TikTok
+    service's own ``tiktokBusinessDays`` for a TikTok request (P5-01: 'within one business day'),
+    else the plain ticket target."""
+    if data.get("priority") == "urgent":
+        target = "stop_request"
+    else:
+        target = "tiktok" if data.get("kind") == TIKTOK_KIND else "ticket"
     return iso(target_due_at(target, start, settings))
 
 
@@ -742,6 +780,12 @@ def open_ticket_conn(
     if kind == TIKTOK_KIND and count_open_tiktok_requests(conn, uid) >= MAX_OPEN_TIKTOK_REQUESTS:
         studio_error(409, "TICKET_OPEN_LIMIT",
                      f"You already have {MAX_OPEN_TIKTOK_REQUESTS} TikTok requests in progress. Wait for the team, then send a new one.")
+    if kind == TIKTOK_KIND and count_tiktok_requests_today(conn, uid, now) >= TIKTOK_CREATES_PER_DAY:
+        # Counted on the created rows (the counter row is locked): a refused body or a replay never uses a place.
+        next_day = tripoli_day_start(now) + timedelta(days=1)
+        studio_error(429, "RATE_LIMITED",
+                     f"At most {TIKTOK_CREATES_PER_DAY} TikTok requests a day. Please send the next one tomorrow.",
+                     headers={"Retry-After": str(max(1, int((next_day - now).total_seconds())))})
     seq = _advance_counter(conn, counter_row, value)
     at = iso(now)
     owner = created_by_or_none(conn, uid)
@@ -786,6 +830,34 @@ def _refuse_reopen_past_cap(conn: Any, owner_id: str) -> None:
     _lock_counter(conn)
     if count_open_tickets(conn, owner_id) >= MAX_OPEN_TICKETS:
         studio_error(409, "TICKET_OPEN_LIMIT", f"You already have {MAX_OPEN_TICKETS} open tickets. Resolve one before reopening this ticket.")
+
+
+def _customer_reopens_service(conn: Any, owner_id: str, data: dict[str, Any], now: datetime) -> None:
+    """A customer's reopen of a resolved ticket (the reopen route or a new message) whose TikTok request
+    they had cancelled: the service goes back to ``open`` and takes a place among
+    MAX_OPEN_TIKTOK_REQUESTS like a new request (409 TICKET_OPEN_LIMIT past the cap). Called after
+    _refuse_reopen_past_cap, so the counter row is already locked. Any other ticket: nothing."""
+    if data.get("kind") != TIKTOK_KIND or _one_of(data.get("tiktokState"), TIKTOK_STATES, "open") != "cancelled":
+        return
+    if count_open_tiktok_requests(conn, owner_id) >= MAX_OPEN_TIKTOK_REQUESTS:
+        studio_error(409, "TICKET_OPEN_LIMIT",
+                     f"You already have {MAX_OPEN_TIKTOK_REQUESTS} TikTok requests in progress. Wait for the team, then reopen this one.")
+    _set_tiktok_state(data, "open", now)
+
+
+def _finish_tiktok_service(data: dict[str, Any], state: str, now: datetime, note: dict[str, str] | None = None) -> str | None:
+    """The ONE way a TikTok request's service ends with its ticket: ``state`` done or declined, from a
+    request still open or in progress. The TikTok step (tiktok_transition_conn) brings the team's
+    bilingual note; a generic team resolve of the ticket (change_status_conn) declines without one, so
+    a request never stays 'open' behind a resolved ticket (it counted against the customer's cap for
+    ever). Returns the state it left, or None when the service was finished already (nothing changes)."""
+    if state not in ("done", "declined"):
+        raise ValueError("a TikTok service ends as done or declined")
+    current = _one_of(data.get("tiktokState"), TIKTOK_STATES, "open")
+    if current not in TIKTOK_OPEN_STATES:
+        return None
+    _set_tiktok_state(data, state, now, note)
+    return current
 
 
 def post_message_conn(
@@ -851,6 +923,7 @@ def _append_message(
         if not _can_reopen(data, now):
             studio_error(409, "TICKET_CLOSED", f"This ticket was resolved more than {REOPEN_DAYS} days ago. Open a new ticket.")
         _refuse_reopen_past_cap(conn, str(row["created_by"] or ""))
+        _customer_reopens_service(conn, str(row["created_by"] or ""), data, now)  # a cancelled TikTok request opens again
     count = _whole(data.get("messageCount"))
     if count >= MAX_MESSAGES:
         studio_error(409, "TICKET_MESSAGE_LIMIT", f"This ticket already holds {MAX_MESSAGES} messages. Open a new ticket.")
@@ -894,12 +967,18 @@ def change_status_conn(
     """Move a ticket to ``status``; returns (ticket data, changed). ``by`` 'customer' may only
     resolve or reopen (open) their own ticket, reopening within REOPEN_DAYS and only inside the
     open-ticket cap (409 TICKET_OPEN_LIMIT); 'team' may set any status. The state it already has is
-    a no-op (nothing written, nothing audited)."""
+    a no-op (nothing written, nothing audited).
+
+    A TikTok request's service follows the ticket (P5-01): a customer's resolve cancels an open
+    request and their reopen puts a cancelled one back to open (inside the TikTok cap); a team
+    resolve ends an open or in-progress request as declined through _finish_tiktok_service, the
+    same function the TikTok status route uses, so no request stays open behind a resolved ticket."""
     if status not in STATUSES or by not in ("customer", "team"):
         raise ValueError("unknown status or actor")
     now = now or utc_now()
     row, data = load_ticket(conn, row_id, owner_id=str(actor_id or "") if by == "customer" else None, admin=admin, lock=True)
     was = data.get("status")
+    owner_id = str(row["created_by"] or "")
     if by == "customer":
         if status not in ("resolved", "open"):
             raise ValueError("a customer only resolves or reopens")
@@ -908,24 +987,29 @@ def change_status_conn(
         if status == "open" and not _can_reopen(data, now):
             studio_error(409, "TICKET_CLOSED", f"This ticket was resolved more than {REOPEN_DAYS} days ago. Open a new ticket.")
         if status == "open":
-            _refuse_reopen_past_cap(conn, str(row["created_by"] or ""))
+            _refuse_reopen_past_cap(conn, owner_id)
     if was == status:
         return data, False
+    service_before: str | None = None
+    if data.get("kind") == TIKTOK_KIND:
+        if by == "customer" and status == "resolved" and _one_of(data.get("tiktokState"), TIKTOK_STATES, "open") == "open":
+            _set_tiktok_state(data, "cancelled", now)  # the customer withdraws an open request
+            service_before = "open"
+        elif by == "customer" and status == "open":
+            service_before = _one_of(data.get("tiktokState"), TIKTOK_STATES, "open")
+            _customer_reopens_service(conn, owner_id, data, now)
+            service_before = service_before if service_before != data.get("tiktokState") else None
+        elif by == "team" and status == "resolved":
+            service_before = _finish_tiktok_service(data, "declined", now)  # never left open behind a resolved ticket
     _set_status(data, status, by=by, now=now, settings=settings)
-    if by == "customer" and data.get("kind") == TIKTOK_KIND:
-        # A customer resolving an open TikTok request cancels it; reopening within the window undoes that.
-        state = _one_of(data.get("tiktokState"), TIKTOK_STATES, "open")
-        if status == "resolved" and state == "open":
-            _set_tiktok_state(data, "cancelled", now)
-        elif status == "open" and state == "cancelled":
-            _set_tiktok_state(data, "open", now)
     if operation_id:
         data["lastStatusOperationId"] = operation_id
     _update(conn, SUPPORT_TICKETS_TYPE, row, data)
     if audit is not None:
-        audit(conn, "ticket_status", row_id, f"Ticket {data.get('number')}: {was} -> {status}", {
-            "number": data.get("number"), "by": by, "statusBefore": was, "status": status,
-        })
+        metadata = {"number": data.get("number"), "by": by, "statusBefore": was, "status": status}
+        if service_before is not None:
+            metadata.update({"tiktokStateBefore": service_before, "tiktokState": data.get("tiktokState")})
+        audit(conn, "ticket_status", row_id, f"Ticket {data.get('number')}: {was} -> {status}", metadata)
     return data, True
 
 
@@ -971,9 +1055,11 @@ def tiktok_transition_conn(
         studio_error(400, "INVALID_VALUE", "status must follow open -> in_progress -> done or declined (declined is allowed from open too)")
     message, _created = _append_message(conn, row, data, author="team", author_id=actor_id, operation_id=operation_id,
                                         body=f"{note['en']}\n\n{note['ar']}", now=now, settings=settings)
-    _set_tiktok_state(data, state, now, note)
     if state in ("done", "declined"):
+        _finish_tiktok_service(data, state, now, note)  # shared with the generic status route
         _set_status(data, "resolved", by="team", now=now, settings=settings)
+    else:
+        _set_tiktok_state(data, state, now, note)
     data["lastStatusOperationId"] = operation_id
     _update(conn, SUPPORT_TICKETS_TYPE, row, data)
     if audit is not None:
@@ -1362,8 +1448,8 @@ def create_studio_support_router(
     def open_tiktok_request(request: Request, body: Any = Body(None), user: dict[str, Any] = Depends(current_user_dependency)):
         same_origin(request)
         uid = str(user.get("id") or "")
-        rate_limit(user, "tiktok-create", TIKTOK_CREATES_PER_DAY, 86_400_000)
-        clean = clean_tiktok_body(body)
+        clean = clean_tiktok_body(body)  # a refused body costs nothing: the day cap counts created requests
+        rate_limit(user, "tiktok-create", TIKTOK_FLOOD_PER_HOUR, 3_600_000)
         settings = read_all_settings()
         if not service_access(settings["rollout"], uid)["tiktok"]:
             studio_error(403, "SERVICE_OFF", "The TikTok service is not open for your account yet")

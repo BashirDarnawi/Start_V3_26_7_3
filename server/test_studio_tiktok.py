@@ -31,8 +31,11 @@ from sqlalchemy import text
 
 from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.main import app
+from server.rate_limiter import check_rate_limit as real_check_rate_limit, reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from server.systems.ads_studio import studio_settings, studio_support
+from server.systems.ads_studio.studio_hours import iso, target_due_at
+from server.systems.ads_studio.studio_privacy import TICKET_PERSONAL_FIELDS, scrub_studio_personal_data_conn
 from server.systems.ads_studio.studio_types import SUPPORT_TICKET_MESSAGES_TYPE, SUPPORT_TICKETS_TYPE
 
 TAG = secrets.token_hex(4)
@@ -274,6 +277,44 @@ def test_tiktok_replay_and_open_cap(staff):
     assert client.get("/api/studio/tiktok/requests", cookies=owner["cookies"]).json()["openCount"] == 3
 
 
+def test_tiktok_day_limit_counts_created_requests_only(staff, monkeypatch):
+    """Five refused bodies or five replays of one send used to lock a customer out for a day: the day
+    cap counts the requests that exist; the in-memory limiter only stops floods."""
+    owner = _customer("daily")
+    monkeypatch.setattr(studio_support, "check_rate_limit", real_check_rate_limit)  # the route's own limiter, live
+    reset_rate_limit(f"studio:tiktok-create:{owner['id']}")
+    for _ in range(studio_support.TIKTOK_CREATES_PER_DAY):
+        _error(_send(owner, handle="shop libya"), 400, "INVALID_VALUE")  # a refused body costs nothing
+    operation = _op("day")
+    first = _sent(owner, operation=operation)
+    for _ in range(3):
+        assert _send(owner, operation=operation).status_code == 200  # a replay costs nothing either
+    created = [first]
+    for i in range(1, studio_support.TIKTOK_CREATES_PER_DAY):
+        assert _step(staff["reviewer"], created[-1]["id"], "declined", en="Not now.", ar="ليس الآن.").status_code == 200
+        created.append(_sent(owner, handle=f"@day{i}"))
+    assert _step(staff["reviewer"], created[-1]["id"], "declined", en="Not now.", ar="ليس الآن.").status_code == 200
+    assert client.get("/api/studio/tiktok/requests", cookies=owner["cookies"]).json()["openCount"] == 0
+    sixth = _send(owner, handle="@sixth")
+    detail = _error(sixth, 429, "RATE_LIMITED")
+    assert int(sixth.headers["Retry-After"]) >= 1 and "a day" in detail["message"]
+    assert _send(owner, operation=operation).status_code == 200  # the replay of a created request still answers it
+    with db_conn() as conn:
+        assert studio_support.count_tiktok_requests_today(conn, owner["id"], datetime.now(timezone.utc)) == studio_support.TIKTOK_CREATES_PER_DAY
+        assert studio_support.count_tiktok_requests_today(conn, staff["admin"]["id"], datetime.now(timezone.utc)) == 0
+
+
+def test_tiktok_request_is_due_after_one_business_day(monkeypatch):
+    moment = datetime(2026, 9, 27, 8, 30, tzinfo=timezone.utc)  # Sunday 10:30 in Tripoli
+    monkeypatch.setattr(studio_support, "utc_now", lambda: moment)
+    owner = _customer("due")
+    view = _sent(owner)
+    settings = _settings()
+    assert view["dueAt"] == iso(target_due_at("tiktok", moment, settings))  # the promise: within one business day
+    assert view["dueAt"] != iso(target_due_at("ticket", moment, settings))  # not the plain ticket's 4 working hours
+    assert view["dueAt"].startswith("2026-09-28T")  # Monday, at the team's close
+
+
 def test_tiktok_service_switch_gates_new_requests_only(monkeypatch):
     owner = _customer("switch")
     view = _sent(owner)
@@ -383,6 +424,84 @@ def test_tiktok_customer_cancels_by_resolving_and_may_reopen(staff):
     assert _step(staff["admin"], view["id"], "in_progress").status_code == 200
     resolved = client.post(f"/api/studio/tickets/{view['id']}/resolve", json={"operationId": _op("r2")}, cookies=owner["cookies"])
     assert resolved.status_code == 200 and resolved.json()["ticket"]["tiktok"]["state"] == "in_progress"
+
+
+def test_tiktok_generic_team_resolve_ends_the_service(staff):
+    """Staff close TikTok tickets in the desk like any ticket; the service must not stay 'open' behind a
+    resolved ticket (it counted against the customer's cap for ever and sat in the active list)."""
+    owner = _customer("generic")
+    views = [_sent(owner, handle=f"@generic{i}") for i in range(3)]
+    _error(_send(owner, handle="@fourth"), 409, "TICKET_OPEN_LIMIT")
+    closed = client.post(f"/api/studio/staff/tickets/{views[0]['id']}/status", json={"status": "resolved", "operationId": _op("gs")},
+                         cookies=staff["admin"]["cookies"])
+    assert closed.status_code == 200, closed.text
+    ticket = closed.json()["ticket"]
+    assert ticket["status"] == "resolved" and ticket["tiktok"]["state"] == "declined" and ticket["tiktok"]["note"] is None
+    assert client.get("/api/studio/tiktok/requests", cookies=owner["cookies"]).json()["openCount"] == 2
+    active = client.get("/api/studio/staff/tiktok", params={"state": "active"}, cookies=staff["admin"]["cookies"]).json()
+    assert all(r["id"] != views[0]["id"] for r in active["requests"])
+    assert _sent(owner, handle="@fourth")["tiktok"]["state"] == "open"  # the place is free again
+    status_audit = [a for a in _audits(views[0]["id"]) if a["action"] == "ticket_status"][-1]
+    assert (status_audit["details"]["tiktokStateBefore"], status_audit["details"]["tiktokState"]) == ("open", "declined")
+    mine = client.get(f"/api/studio/tickets/{views[0]['id']}", cookies=owner["cookies"]).json()["ticket"]
+    assert mine["tiktok"]["stateLabels"] == studio_support.TIKTOK_TEXTS["states"]["declined"]
+    # An in-progress request the same way; a finished one is left as it is.
+    assert _step(staff["reviewer"], views[1]["id"], "in_progress").status_code == 200
+    closed = client.post(f"/api/studio/staff/tickets/{views[1]['id']}/status", json={"status": "resolved"}, cookies=staff["reviewer"]["cookies"])
+    assert closed.status_code == 200 and closed.json()["ticket"]["tiktok"]["state"] == "declined"
+    assert _step(staff["admin"], views[2]["id"], "in_progress").status_code == 200
+    assert _step(staff["admin"], views[2]["id"], "done", en="All set.", ar="تم.").status_code == 200
+    answered = client.post(f"/api/studio/staff/tickets/{views[2]['id']}/status", json={"status": "answered"}, cookies=staff["admin"]["cookies"])
+    assert answered.status_code == 200 and answered.json()["ticket"]["tiktok"]["state"] == "done"
+    closed = client.post(f"/api/studio/staff/tickets/{views[2]['id']}/status", json={"status": "resolved"}, cookies=staff["admin"]["cookies"])
+    assert closed.status_code == 200 and closed.json()["ticket"]["tiktok"]["state"] == "done"
+    assert "tiktokStateBefore" not in [a for a in _audits(views[2]["id"]) if a["action"] == "ticket_status"][-1]["details"]
+
+
+def test_tiktok_reopen_takes_a_place_inside_the_cap(staff):
+    owner = _customer("reopen-cap")
+    views = [_sent(owner, handle=f"@reopen{i}") for i in range(3)]
+    first = views[0]["id"]
+    resolved = client.post(f"/api/studio/tickets/{first}/resolve", json={"operationId": _op("r")}, cookies=owner["cookies"])
+    assert resolved.status_code == 200 and resolved.json()["ticket"]["tiktok"]["state"] == "cancelled"
+    fourth = _sent(owner, handle="@fourth")  # the cancelled one freed a place
+    assert client.get("/api/studio/tiktok/requests", cookies=owner["cookies"]).json()["openCount"] == 3
+    _error(client.post(f"/api/studio/tickets/{first}/reopen", json={"operationId": _op("o")}, cookies=owner["cookies"]), 409, "TICKET_OPEN_LIMIT")
+    assert _row(first)["tiktokState"] == "cancelled" and _row(first)["status"] == "resolved"
+    # A message on the cancelled ticket is a reopen too: refused past the cap the same way ...
+    _error(client.post(f"/api/studio/tickets/{first}/messages", json={"text": "Still interested", "operationId": _op("m")},
+                       cookies=owner["cookies"]), 409, "TICKET_OPEN_LIMIT")
+    # ... and, once a place is free, it puts the service back to open (never 'cancelled' behind an open ticket).
+    assert _step(staff["reviewer"], fourth["id"], "declined", en="Not now.", ar="ليس الآن.").status_code == 200
+    spoke = client.post(f"/api/studio/tickets/{first}/messages", json={"text": "Still interested", "operationId": _op("m")},
+                        cookies=owner["cookies"])
+    assert spoke.status_code == 200, spoke.text
+    assert spoke.json()["ticket"]["status"] == "open" and spoke.json()["ticket"]["tiktok"]["state"] == "open"
+    assert client.get("/api/studio/tiktok/requests", cookies=owner["cookies"]).json()["openCount"] == 3
+    assert _step(staff["admin"], first, "in_progress").status_code == 200  # the team can work it again
+    # The reopen route, inside the cap, opens the service too.
+    second = views[1]["id"]
+    assert client.post(f"/api/studio/tickets/{second}/resolve", json={"operationId": _op("r")}, cookies=owner["cookies"]).status_code == 200
+    reopened = client.post(f"/api/studio/tickets/{second}/reopen", json={"operationId": _op("o")}, cookies=owner["cookies"])
+    assert reopened.status_code == 200 and reopened.json()["ticket"]["tiktok"]["state"] == "open"
+    assert client.get("/api/studio/tiktok/requests", cookies=owner["cookies"]).json()["openCount"] == 3
+
+
+def test_anonymisation_scrubs_the_handle_and_the_team_note_from_the_request_row(staff):
+    owner = _customer("scrub")
+    view = _sent(owner, handle="@secret.handle")
+    assert _step(staff["admin"], view["id"], "in_progress", en="We called Ahmed on 0912345678.", ar="اتصلنا بأحمد على 0912345678.").status_code == 200
+    assert {"tiktokHandle", "tiktokNote"} <= set(TICKET_PERSONAL_FIELDS)
+    with db_conn() as conn:
+        counts = scrub_studio_personal_data_conn(conn, owner["id"])
+    assert counts["tickets"] == 3 and counts["social"] == 0  # the ticket row and its two messages
+    row = _row(view["id"])
+    assert "tiktokHandle" not in row and "tiktokNote" not in row and "subject" not in row
+    assert "secret.handle" not in json_dumps(row) and "0912345678" not in json_dumps(row)
+    assert row["tiktokState"] == "in_progress" and row["tiktokWants"] == ["advice"]
+    desk = client.get(f"/api/studio/staff/tickets/{view['id']}", cookies=staff["admin"]["cookies"]).json()
+    assert desk["ticket"]["tiktok"]["handle"] == "" and desk["ticket"]["tiktok"]["profileUrl"] is None and desk["ticket"]["tiktok"]["note"] is None
+    assert "0912345678" not in json_dumps(desk) and "secret.handle" not in json_dumps(desk)
 
 
 # ------------------------------------------------------------------ the words

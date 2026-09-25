@@ -54,6 +54,11 @@ remembered in ``studioJobState.lastError`` and runs again at its next turn, and 
   Meta): studio_alerts_meta.run_meta_watch (P3-18a/c): the daily token check and its 14/7/2-day
   expiry alerts, the ``meta_connection_down`` state (rechecked while down) and, every 6 hours, the
   funds and status of the ad accounts that carry studio campaigns.
+* **Staff channel** (the end of every tick that won the heartbeat write, reported as ``channel``):
+  studio_alert_out.send_pending (P3-21) sends the open stop requests and the channel-worthy alerts
+  nobody sent yet. It is idempotent (each row is stamped ``channelSentAt`` once the webhook accepted
+  it) and answers at once while ``ALBAYAN_ALERT_WEBHOOK_URL`` is not set, so it costs nothing next
+  to the operations worker's 300-s pass; it only makes a new stop request reach the team sooner.
 
 Records (router-only types: the generic /api/collections API refuses both):
 
@@ -200,6 +205,18 @@ ALERT_LABELS: dict[str, dict[str, str]] = {
     "replies_parked": {  # P3-18b: comment replies kept for the retry pass while the connection is down
         "en": "Comment replies are parked until the Meta connection is back",
         "ar": "الردود على التعليقات محفوظة حتى يعود اتصال ميتا",
+    },
+    "page_health_drop": {  # P4-03 (social_studio page health): a reply or a check found a problem on a linked page
+        "en": "A linked page needs attention: a reply or a check found a problem (see its reason)",
+        "ar": "صفحة مربوطة تحتاج انتباهاً: وجد ردّ أو فحص مشكلة (انظر السبب)",
+    },
+    "instagram_comments_not_arriving": {  # P4-03: the Instagram heuristic (comments grew, no comment event)
+        "en": "New Instagram comments are not reaching Albayan for a linked account (make sure it is public)",
+        "ar": "التعليقات الجديدة على إنستغرام لا تصل إلى البيان لحساب مربوط (تأكد أنه عام)",
+    },
+    "jobs_heartbeat_late": {  # P3-21 (studio_alert_out.report_heartbeat): the operations worker's watch of this loop
+        "en": "The studio jobs loop has not run for more than 5 minutes",
+        "ar": "لم تعمل حلقة مهام الاستوديو منذ أكثر من 5 دقائق",
     },
 }
 # A request in one of these states has left its submission cycle (studio_wallet.cycle_state "being
@@ -774,7 +791,14 @@ def run_tick(ctx_provider: Callable[[], dict[str, Any]], now: datetime | None = 
         ran[job] = _guarded(job, now, jobs[job])
     if "waiting" in claimed:  # P3-10: the stop requests ride the same 5-minute turn (studio_stop.py)
         ran["stop_requests"] = _guarded("stop_requests", now, lambda: _run_stop_check(now))
+    ran["channel"] = _guarded("channel", now, lambda: _send_pending_notifications(now))  # P3-21 (studio_alert_out.py)
     return ran
+
+
+def _send_pending_notifications(now: datetime) -> dict[str, Any]:
+    from .studio_alert_out import send_pending  # late: studio_alert_out imports this module
+
+    return send_pending(now)
 
 
 def _loop(stop: threading.Event, ctx_provider: Callable[[], dict[str, Any]]) -> None:

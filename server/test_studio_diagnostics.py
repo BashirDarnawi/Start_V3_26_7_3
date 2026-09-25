@@ -32,7 +32,7 @@ from server.db import db_conn, get_engine, init_db, json_dumps, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import studio_activity, studio_diagnostics as diag, studio_stop, studio_wallet
+from server.systems.ads_studio import social_studio, studio_activity, studio_diagnostics as diag, studio_stop, studio_wallet
 from server.systems.ads_studio.studio_settings import DEFAULTS
 from server.systems.ads_studio.studio_types import STUDIO_STOP_REQUESTS_TYPE, SUPPORT_TICKETS_TYPE
 from server.wallet_payments import WALLET_PAYMENT_COLLECTION, payment_request_timings, usd_customer_balances_total
@@ -141,7 +141,7 @@ def _inputs() -> dict:
         reply("poll", actions=["reply"], comment_ago=700, changed_ago=100),  # 600 s
         reply("webhook", actions=[], error="boom"),  # failed
         reply("webhook", actions=[], error="auth", retry_after=_iso(NOW + timedelta(minutes=10)), parked="meta_connection_down"),  # parked
-        reply("poll", actions=[], error="missed_during_outage"),  # lost to the outage
+        {**reply("poll", actions=[]), **social_studio._missed_patch()},  # lost to the outage, in the writer's own shape
         reply("webhook", actions=[], processing=1),  # still running: not judged
         reply("webhook", actions=["reply"], comment_ago=10 * 86400, changed_ago=10 * 86400 - 5),  # outside the week
     ]
@@ -174,7 +174,10 @@ def test_operations_lines_from_seeded_rows():
     assert {k: queues["reviews"][k] for k in ("met", "missed", "waitingOverdue", "sample", "percent", "onTarget")} == \
         {"met": 1, "missed": 2, "waitingOverdue": 1, "sample": 3, "percent": 33.3, "onTarget": False}
     assert queues["tickets"]["target"] == {"field": "ticketFirstResponseMinutes", "value": 240, "unit": "minutes"}
-    assert (queues["tickets"]["met"], queues["tickets"]["missed"], queues["tickets"]["waitingOverdue"]) == (1, 2, 1)
+    assert (queues["tickets"]["met"], queues["tickets"]["missed"], queues["tickets"]["waitingOverdue"]) == (1, 1, 1)
+    # The TikTok request (answered the next morning) is judged on its own 1-business-day promise, not the 4 working hours.
+    assert queues["tiktok"]["target"] == {"field": "tiktokBusinessDays", "value": 1, "unit": "businessDays"}
+    assert (queues["tiktok"]["met"], queues["tiktok"]["missed"], queues["tiktok"]["waitingOverdue"], queues["tiktok"]["percent"]) == (1, 0, 0, 100.0)
     assert (queues["stopRequests"]["met"], queues["stopRequests"]["missed"], queues["stopRequests"]["percent"]) == (1, 2, 33.3)
     assert queues["stopRequests"]["target"]["value"] == 120
     assert (queues["payments"]["met"], queues["payments"]["missed"], queues["payments"]["waitingOverdue"]) == (1, 2, 1)
@@ -249,6 +252,36 @@ def test_go_no_go_booleans_from_the_numbers():
     stale = diag.go_no_go(ops, {"token": {"configured": True, "checked": True, "stale": True}, "jobsAgeSeconds": None, "now": NOW}, SETTINGS["thresholds"])
     assert stale["go"]["tokenValid"]["ok"] is None and stale["stop"]["heartbeatLate"]["fired"] is True
     assert stale["stop"]["walletIdentityBreak"]["fired"] is None
+
+
+def test_tiktok_requests_are_judged_on_their_own_business_day_target():
+    sunday = _at("09-27", 8)  # Sunday 10:00 in Tripoli
+    inputs = {"tickets": [
+        {"kind": "tiktok_request", "status": "answered", "createdAt": sunday, "firstStaffAt": _at("09-27", 14)},  # 6 working hours: met
+        {"kind": "tiktok_request", "status": "open", "createdAt": sunday, "firstStaffAt": None},  # Wednesday: past Monday's close
+        {"kind": "question", "status": "answered", "createdAt": sunday, "firstStaffAt": _at("09-27", 14)},  # 4 working hours: missed
+    ]}
+    ops = diag.compute_operations(inputs, SETTINGS, NOW)
+    queues = ops["queues"]
+    assert (queues["tiktok"]["met"], queues["tiktok"]["missed"], queues["tiktok"]["waitingOverdue"]) == (1, 1, 1)
+    assert queues["tiktok"]["target"] == {"field": "tiktokBusinessDays", "value": 1, "unit": "businessDays"}
+    assert (queues["tickets"]["met"], queues["tickets"]["missed"], queues["tickets"]["waitingOverdue"]) == (0, 1, 0)
+    assert ops["staffTimes"]["ticketFirstResponse"]["sample"] == 2  # both first answers still count as ticket first responses
+
+
+def test_go_rows_prefer_the_precise_reply_latency():
+    """P4-02: read_operations adds social_studio.reply_latency_by_source (sentAt - receivedAt) as
+    ``latencyBySource``; the go rows judge it against the thresholds whenever it has a sample."""
+    ops = diag.compute_operations(_inputs(), SETTINGS, NOW, submissions_today=1)
+    facts = {"scan": {"total": 0, "byCode": {}}, "jobsAgeSeconds": 10, "now": NOW}
+    assert diag.go_no_go(ops, facts, SETTINGS["thresholds"])["go"]["webhookReplyP95"] == {"ok": True, "value": 120.0}
+    ops["replies"]["latencyBySource"] = {"webhook": {"count": 40, "p50Seconds": 30, "p95Seconds": 999},
+                                        "poll": {"count": 0, "p50Seconds": None, "p95Seconds": None}}
+    verdict = diag.go_no_go(ops, facts, SETTINGS["thresholds"])
+    assert verdict["go"]["webhookReplyP95"] == {"ok": False, "value": 999}  # the precise measure wins when it has a sample
+    assert verdict["go"]["pollReplyP95"] == {"ok": True, "value": 600.0}  # no sample: the log rows' measure stays
+    ops["replies"]["latencyBySource"] = {"readError": "RuntimeError"}
+    assert diag.go_no_go(ops, facts, SETTINGS["thresholds"])["go"]["webhookReplyP95"] == {"ok": True, "value": 120.0}
 
 
 def test_empty_inputs_give_unknowns_not_a_crash():
@@ -379,16 +412,18 @@ def test_diagnostics_route_carries_the_operations_block_without_personal_data(pe
     body = response.json()
     ops = body["operations"]
     assert set(ops) == {"window", "queues", "staffTimes", "capacity", "replies", "results", "money", "storage", "meta", "goNoGo", "jobs"}
-    assert set(ops["queues"]) == {"reviews", "tickets", "stopRequests", "payments"}
+    assert set(ops["queues"]) == {"reviews", "tickets", "tiktok", "stopRequests", "payments"}
     assert ops["queues"]["stopRequests"]["sample"] >= 1 and ops["queues"]["payments"]["sample"] >= 1
-    assert ops["queues"]["tickets"]["sample"] >= 1 and ops["queues"]["reviews"]["sample"] >= 1
+    assert ops["queues"]["tiktok"]["sample"] >= 1 and ops["queues"]["reviews"]["sample"] >= 1  # the seeded ticket is a TikTok request
     assert ops["staffTimes"]["link"]["sample"] >= 1 and ops["staffTimes"]["stopToPaused"]["sample"] >= 1
     assert ops["results"]["linked"] >= 1 and ops["money"]["owed"]["inAdsMinorUSD"] >= 700
     assert ops["money"]["owed"]["walletBalancesMinorUSD"] >= 5000 and ops["money"]["owed"]["owedMinorUSD"] >= 5700
     assert ops["money"]["absorbedOverspend"]["totalMinorUSD"] >= 200 and ops["money"]["openIncidents"] >= 1
     assert "studioFunds" in ops["money"] and set(ops["money"]["studioFunds"]) == {"readAt", "allowlistConfigured", "accounts", "fundsMinorUSD", "unreadable"}
     assert ops["replies"]["latency"]["webhook"]["sample"] >= 1
-    assert set(ops["meta"]) == {"connection", "token", "webhookCounters"}
+    assert set(ops["replies"]["latencyBySource"]["webhook"]) == {"count", "p50Seconds", "p95Seconds"}  # P4-02, counts and seconds
+    assert set(ops["meta"]) == {"connection", "token", "webhookCounters", "instagramPoll"}
+    assert {"capability", "claimed", "accounts", "byOutcome"} <= set(ops["meta"]["instagramPoll"])  # P4-09, counts and times
     assert set(ops["meta"]["token"]) <= set(diag._TOKEN_FIELDS) | {"readError"}  # health fields only, never a token value
     assert set(ops["goNoGo"]) == {"go", "stop", "allKnownOk", "unknown", "goVerdict", "stopVerdict", "consecutiveWeeksNeeded"}
     assert ops["goNoGo"]["go"]["noOpenMoneyIncident"]["ok"] is False

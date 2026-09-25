@@ -169,6 +169,19 @@ def _setting(key: str, **fields) -> None:
     studio_settings.save_setting(key, fields, record["version"], "", "2026-09-25T00:00:00Z", audit=lambda *args: None)
 
 
+def _clear_link(staff, campaign_id: str):
+    """The classic marker route's '' (cleared): the link's fields go, something any reviewer may do."""
+    return client.post(f"/api/ad-studio/campaigns/{campaign_id}/publish-status", json={
+        "expectedLastModified": _last_modified(campaign_id), "operationId": _uid("clear-op"), "publishStatus": "",
+    }, cookies=staff["reviewer"]["cookies"])
+
+
+def _unlink(staff, campaign_id: str):
+    return client.post(f"/api/ad-studio/campaigns/{campaign_id}/unlink-meta", json={
+        "expectedLastModified": _last_modified(campaign_id), "operationId": _uid("unlink-op"), "reason": "Linked by mistake",
+    }, cookies=staff["reviewer"]["cookies"])
+
+
 # ------------------------------------------------------------------ the gates (P3-06a)
 
 def test_settle_gate_refuses_while_meta_delivers(staff):
@@ -300,14 +313,109 @@ def test_unlinked_staff_stop_keeps_the_older_rules(staff):
     assert data["settledSpendMinorUSD"] == 1500 and data["settledAt"]
 
     # A legacy request marked launched by hand (no account): the amount stays required and bounded.
+    # (Its own Meta id: the marker route claims an id as unique among requests, and this row stays.)
     user2, campaign2 = _approved(staff)
     with db_conn() as conn:
-        _force(campaign2, conn, publishStatus="live", metaCampaignId="123456789")
+        _force(campaign2, conn, publishStatus="live", metaCampaignId=_meta_id())
     missing = _stop(staff["reviewer"]["cookies"], campaign2)
     assert missing.status_code == 400 and missing.json()["detail"] == REFUSE_REFUND_LAUNCHED, missing.text
     partial = _stop(staff["reviewer"]["cookies"], campaign2, 1000)
     assert partial.status_code == 200, partial.text
     assert partial.json()["data"]["settleBasis"] == "" and partial.json()["data"]["settledSpendMinorUSD"] == 2000
+
+
+def test_clearing_the_link_lifts_no_settle_gate(staff):
+    """A reviewer could lift every gate and the cap without an admin by clearing the link (publish-status
+    '') and settling the whole payment as never_linked. The gates now judge an ever-linked request on
+    that campaign's results row (lastLinkedMetaCampaignId / everLinked); only the override lifts them."""
+    user, campaign_id, meta_id = _linked(staff)
+    _results(campaign_id, user["id"], meta_id, campaignEffectiveStatus="ACTIVE", adStatusCounts={"ACTIVE": 1},
+             anyAdDelivering=True, spendMinorUSD=2000, spendConfirmedAt=_iso(_now()))
+    refused = _stop(staff["reviewer"]["cookies"], campaign_id)
+    assert refused.status_code == 409 and refused.json()["detail"].startswith(REFUSE_SETTLE_DELIVERING), refused.text
+
+    cleared = _clear_link(staff, campaign_id)
+    assert cleared.status_code == 200, cleared.text
+    data = cleared.json()["data"]
+    assert data["metaCampaignId"] == "" and data["metaAdAccountId"] == "" and data["publishStatus"] == ""
+    assert data["lastLinkedMetaCampaignId"] == meta_id and data["lastLinkedMetaAdAccountId"] == ACCOUNT and data["everLinked"] is True
+    # Meta still delivers the ad: the same refusal, nothing moves.
+    still = _stop(staff["reviewer"]["cookies"], campaign_id)
+    assert still.status_code == 409 and still.json()["detail"].startswith(REFUSE_SETTLE_DELIVERING), still.text
+    assert _refunds(user["id"]) == [] and _balance(user) == 0 and _campaign_data(campaign_id)["status"] == "Approved"
+    # The owner's own instant stop is over as well: the ad ran.
+    own = _stop(user["cookies"], campaign_id)
+    assert own.status_code == 409 and "already started" in own.json()["detail"], own.text
+
+    # Delivery ended and the final read is in: the cap is paid minus Meta's spend, exactly as for a linked request.
+    ended = _now() - timedelta(hours=50)
+    _results(campaign_id, user["id"], meta_id, campaignEffectiveStatus="PAUSED", adStatusCounts={"PAUSED": 1}, anyAdDelivering=False,
+             deliveryEndedAt=_iso(ended), settleReadDueAt=_iso(ended + timedelta(hours=48)), settleReadAt=_iso(_now()),
+             spendMinorUSD=2000, spendConfirmedAt=_iso(_now()), lifetimeImpressions=900)
+    above = _stop(staff["reviewer"]["cookies"], campaign_id, 1001)
+    assert above.status_code == 400 and above.json()["detail"].startswith(REFUSE_REFUND_ABOVE_CAP), above.text
+    settled = _stop(staff["reviewer"]["cookies"], campaign_id)
+    assert settled.status_code == 200, settled.text
+    data = settled.json()["data"]
+    assert data["refundMinorUSD"] == 1000 and data["settleBasis"] == "final_read" and data["metaSpendAtSettleMinorUSD"] == 2000
+    assert len(_refunds(user["id"])) == 1 and _balance(user) == 1000
+    assert _audits(campaign_id, "settle_override") == []
+
+
+def test_an_unlinked_request_is_settled_on_its_last_results_row(staff):
+    user, campaign_id, meta_id = _linked(staff)
+    ended = _now() - timedelta(hours=1)
+    _results(campaign_id, user["id"], meta_id, anyAdDelivering=False, deliveryEndedAt=_iso(ended),
+             settleReadDueAt=_iso(ended + timedelta(hours=48)), neverDelivered=True, lifetimeImpressions=0,
+             spendMinorUSD=0, spendConfirmedAt=_iso(ended))
+    unlinked = _unlink(staff, campaign_id)
+    assert unlinked.status_code == 200, unlinked.text
+    data = unlinked.json()["data"]
+    assert data["metaCampaignId"] == "" and data["lastLinkedMetaCampaignId"] == meta_id and data["everLinked"] is True
+    # The row says the ad never delivered: the whole payment comes back on that evidence, not as never_linked.
+    settled = _stop(staff["reviewer"]["cookies"], campaign_id)
+    assert settled.status_code == 200, settled.text
+    data = settled.json()["data"]
+    assert data["settleBasis"] == "never_delivered" and data["refundMinorUSD"] == 3000 and data["metaSpendAtSettleMinorUSD"] == 0
+
+    # Unlinked while Meta was still delivering: the gate holds; the admin override is the only way past it.
+    user2, campaign2, meta2 = _linked(staff)
+    _results(campaign2, user2["id"], meta2, campaignEffectiveStatus="ACTIVE", adStatusCounts={"ACTIVE": 1},
+             anyAdDelivering=True, spendMinorUSD=500, spendConfirmedAt=_iso(_now()))
+    assert _unlink(staff, campaign2).status_code == 200
+    refused = _stop(staff["reviewer"]["cookies"], campaign2, 2500)
+    assert refused.status_code == 409 and refused.json()["detail"].startswith(REFUSE_SETTLE_DELIVERING), refused.text
+    assert _refunds(user2["id"]) == []
+    lifted = _override(staff["admin"]["cookies"], campaign2, refundMinorUSD=2500,
+                       reason="Wrong campaign linked by the desk; the owner's ad never ran on it")
+    assert lifted.status_code == 200, lifted.text
+    assert lifted.json()["data"]["settleBasis"] == "override" and lifted.json()["data"]["metaSpendAtSettleMinorUSD"] == 500
+    assert _balance(user2) == 2500 and len(_audits(campaign2, "settle_override")) == 1
+
+
+def test_settle_plan_remembers_a_removed_link():
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
+    row = {"metaCampaignId": "120212345", "currency": "USD", "spendMinorUSD": 700, "spendConfirmedAt": "2026-09-23T12:00:00Z",
+           "deliveryEndedAt": "2026-09-21T12:00:00Z", "settleReadAt": "2026-09-23T12:00:00Z", "adStatusCounts": {"PAUSED": 2}}
+    cleared = {"status": "Approved", "metaCampaignId": "", "metaAdAccountId": "", "publishStatus": "", "endDate": "2026-09-20",
+               "lastLinkedMetaCampaignId": "120212345", "lastLinkedMetaAdAccountId": ACCOUNT, "everLinked": True}
+    assert actions.last_linked_meta_ids(cleared) == ("1234567890", "120212345")
+    plan = settle_plan(cleared, row, 3000, None, now, {"spendDelayHours": 48})
+    assert plan == {"refund": 2300, "capMinorUSD": 2300, "metaSpendMinorUSD": 700, "settleBasis": "final_read", "absorbedMinorUSD": 0}
+    with pytest.raises(actions.HTTPException) as delivering:
+        settle_plan(cleared, {**row, "adStatusCounts": {"ACTIVE": 1}}, 3000, None, now, {"spendDelayHours": 48})
+    assert delivering.value.status_code == 409 and delivering.value.detail == REFUSE_SETTLE_DELIVERING
+    with pytest.raises(actions.HTTPException) as unseen:  # no row of that campaign: the sync must see delivery end first
+        settle_plan(cleared, None, 3000, None, now, {"spendDelayHours": 48})
+    assert unseen.value.status_code == 409 and unseen.value.detail == REFUSE_SETTLE_NOT_ENDED
+    # A classic marker with a Meta id but no ad account, cleared since: the older launched rule stays (an amount is required).
+    marked = {"status": "Approved", "metaCampaignId": "", "publishStatus": "", "everLinked": True, "lastLinkedMetaCampaignId": "123"}
+    with pytest.raises(actions.HTTPException) as needs_amount:
+        settle_plan(marked, None, 3000, None, now, {"spendDelayHours": 48})
+    assert needs_amount.value.status_code == 400 and needs_amount.value.detail == REFUSE_REFUND_LAUNCHED
+    assert settle_plan(marked, None, 3000, 1000, now, {"spendDelayHours": 48})["settleBasis"] == ""
+    # Never any Meta id: never_linked, the whole payment by default.
+    assert settle_plan({"status": "Approved"}, None, 3000, None, now, {"spendDelayHours": 48})["settleBasis"] == "never_linked"
 
 
 def test_settle_plan_is_pure():

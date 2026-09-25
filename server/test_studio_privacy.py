@@ -687,13 +687,13 @@ def test_scrub_never_touches_the_ledger_and_repeats_as_a_no_op(staff):
     with db_conn() as conn:
         before = snapshot(conn)
         assert any(row["id"] == campaign_id for row in before)
-        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 1, "replyLog": 3, "tickets": 0}
+        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 1, "replyLog": 3, "tickets": 0, "social": 0}
     with db_conn() as conn:
         assert snapshot(conn) == before
         studio_rows = conn.execute(text("SELECT id, data_json, last_modified FROM entities WHERE type IN (:p, :l) AND created_by = :uid"),
                                    {"p": STUDIO_PROFILES_TYPE, "l": LOG_TYPE, "uid": user["id"]}).mappings().all()
-        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 0}
-        assert scrub_studio_personal_data_conn(conn, "") == {"profiles": 0, "replyLog": 0, "tickets": 0}
+        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 0, "social": 0}
+        assert scrub_studio_personal_data_conn(conn, "") == {"profiles": 0, "replyLog": 0, "tickets": 0, "social": 0}
     with db_conn() as conn:
         again = conn.execute(text("SELECT id, data_json, last_modified FROM entities WHERE type IN (:p, :l) AND created_by = :uid"),
                              {"p": STUDIO_PROFILES_TYPE, "l": LOG_TYPE, "uid": user["id"]}).mappings().all()

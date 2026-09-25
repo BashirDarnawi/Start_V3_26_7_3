@@ -756,8 +756,8 @@ def test_scrub_counts_ticket_rows():
     ticket = _opened(user)
     assert _say(user, ticket, "Second message").status_code == 200
     with db_conn() as conn:
-        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 3}
-        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 0}
+        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 3, "social": 0}
+        assert scrub_studio_personal_data_conn(conn, user["id"]) == {"profiles": 0, "replyLog": 0, "tickets": 0, "social": 0}
 
 
 # ------------------------------------------------------------------ PostgreSQL scenario (studio_ticket_numbers)
