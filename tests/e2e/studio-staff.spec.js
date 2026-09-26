@@ -523,7 +523,8 @@ test.describe('Team desk (v2 staff frame)', () => {
     await expect(page.getByTestId('studio-health-heartbeat')).toHaveAttribute('data-late', /^[01]$/, { timeout: BOOT_TIMEOUT });
     await expect(page.getByTestId('studio-health-lanes')).toHaveAttribute('data-paused', /^[01]$/);
     for (const id of ['token', 'webhooks', 'heartbeat', 'lanes', 'private-replies', 'public-replies', 'daily-requests', 'allowlist', 'min-budget', 'pages', 'funds', 'spend-drift']) {
-      await expect(page.getByTestId(`studio-health-fix-${id}`), `the ${id} item says what to do`).toContainText(/What to do \(runbook /);
+      // min-budget has no runbook page of its own (the Budget limits form is the fix), so its heading carries no number.
+      await expect(page.getByTestId(`studio-health-fix-${id}`), `the ${id} item says what to do`).toContainText(id === 'min-budget' ? /What to do/ : /What to do \(runbook /);
       await expect(page.getByTestId(`studio-health-fix-link-${id}`), `the ${id} item links its fix`).toBeVisible();
     }
     await expect(page.getByTestId('studio-health-fix-page-tests')).toContainText('What to do (runbook 3.10)');
