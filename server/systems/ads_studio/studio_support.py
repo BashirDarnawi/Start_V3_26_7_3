@@ -58,16 +58,18 @@ in use.
 **Due times** (P3-16, studio_hours.py): a ticket waiting for the team is due
 ``targets.ticketFirstResponseMinutes`` working minutes after the customer's first unanswered message
 (``stopRequestMinutes`` for an urgent one), counted in the ``hours`` setting. An answer or a wait for
-the customer clears it; the customer's next message starts it again. A customer's reopen of a stop
-request's ticket the system resolved (its stop row is resolved) turns it into a normal question
-(``_demote_handled_stop``): it is no longer urgent and no longer counted as a stop ticket.
+the customer clears it; the customer's next message starts it again. A customer's reopen of a resolved
+stop request's ticket whose stop row is resolved (the system resolved it, or ``stopHandled``: the row
+was resolved after the team) turns it into a normal question (``_demote_handled_stop``): it is no
+longer urgent and no longer counted as a stop ticket.
 
 **Records** (router-only types; the generic /api/collections API refuses them):
 
 * ``supportTickets``: created_by = the owner. Fields: number, seq, ownerId, subject, category,
   audience, priority (normal|urgent), kind (question|stop_request), relatedType, relatedId, status,
   createdAt, updatedAt, dueAt, lastMessageAt, lastCustomerAt, lastStaffAt, firstStaffAt, resolvedAt,
-  resolvedBy, reopenedAt, messageCount, operationId, createFingerprint, lastStatusOperationId.
+  resolvedBy, reopenedAt, messageCount, operationId, createFingerprint, lastStatusOperationId,
+  stopHandled (a stop request's ticket whose stop row studio_stop resolved).
 * ``supportTicketMessages`` (append-only): created_by = the TICKET's owner (also for team answers,
   so the anonymisation scrub finds every message of the account). Fields: ticketId, ownerId, seq,
   author (customer|team), authorUserId (never shown to customers), text, createdAt, operationId.
@@ -736,13 +738,15 @@ def _set_status(data: dict[str, Any], status: str, *, by: str, now: datetime, se
 
 
 def _demote_handled_stop(data: dict[str, Any]) -> None:
-    """A customer's reopen (a message or the reopen route) of a stop request's ticket the SYSTEM resolved:
-    resolvedBy 'system' is only written by system_resolve_ticket_conn, after studio_stop resolved the
-    stop row (the ad is Stopped, or Meta paused or ended it). The follow-up is a plain question: normal
+    """A customer's reopen (a message or the reopen route) of a resolved stop request's ticket whose stop
+    row is resolved: resolvedBy 'system' and ``stopHandled`` are only written by system_resolve_ticket_conn,
+    after studio_stop resolved the stop row (the ad is Stopped, or Meta paused or ended it); ``stopHandled``
+    also marks a ticket the team had already resolved by hand. The follow-up is a plain question: normal
     priority and kind ``question``, so its due time, the urgent pin and the desk's ``stopOpen`` count
-    follow a plain ticket. A stop ticket the team resolved by hand keeps its kind (its stop row may
-    still be open). Call it before _set_status."""
-    if data.get("kind") == "stop_request" and data.get("status") == "resolved" and data.get("resolvedBy") == "system":
+    follow a plain ticket. A stop ticket the team resolved by hand while its stop row is still open keeps
+    its kind. Call it before _set_status."""
+    if data.get("kind") == "stop_request" and data.get("status") == "resolved" \
+            and (data.get("resolvedBy") == "system" or data.get("stopHandled")):
         data["priority"] = "normal"
         data["kind"] = "question"
 
@@ -1093,16 +1097,22 @@ def tiktok_transition_conn(
 def system_resolve_ticket_conn(conn: Any, row_id: str, *, reason: str, now: datetime | None = None) -> dict[str, Any] | None:
     """Resolve a ticket for the system (e.g. a stop request once the ad is Stopped, P3-10), on the
     caller's transaction; the caller audits. Returns the ticket data, or None when there is no such
-    live ticket. An already resolved ticket is returned unchanged."""
+    live ticket. An already resolved ticket keeps its status and times (a stop request's only gains
+    ``stopHandled``, so a later customer reply comes back as a plain question)."""
     row = _select(conn, SUPPORT_TICKETS_TYPE, str(row_id or ""), lock=True) if _TICKET_ID_RE.fullmatch(str(row_id or "")) else None
     if not row or bool(row["deleted"]):
         return None
     data = {**_data(row), "id": str(row["id"])}
     if data.get("status") == "resolved":
+        if data.get("kind") == "stop_request" and not data.get("stopHandled"):
+            data["stopHandled"] = True  # the team resolved it by hand first: its stop row is handled now
+            _update(conn, SUPPORT_TICKETS_TYPE, row, data)
         return data
     now = now or utc_now()
     data.update({"status": "resolved", "resolvedAt": iso(now), "resolvedBy": "system", "resolvedReason": str(reason or "")[:60],
                  "dueAt": None, "updatedAt": iso(now)})
+    if data.get("kind") == "stop_request":
+        data["stopHandled"] = True  # kept when the team later reopens and resolves it again
     _update(conn, SUPPORT_TICKETS_TYPE, row, data)
     return data
 

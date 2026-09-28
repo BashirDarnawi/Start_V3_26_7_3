@@ -7,8 +7,9 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
 
 * The owner only: anyone else, staff too, gets 404 "Campaign request not found" (staff stop an ad
   with /stop). An Approved request only: 409 "Only Approved campaigns can be stopped" (the same text
-  as /stop), and not one whose delivery already ended (display stage 10, ended_settling, where the v2
-  stage table offers no ask_to_stop: 409 REFUSE_STOP_ALREADY_ENDED). A lapsed plan is fine (it only protects the owner's own money). The ``stopRequest``
+  as /stop), and not one whose delivery a Meta reading shows already ended (display stage 10,
+  ended_settling, with a checkedAt, where the v2 stage table offers no ask_to_stop: 409
+  REFUSE_STOP_ALREADY_ENDED; an unlinked ad past its end date has no reading and stays askable). A lapsed plan is fine (it only protects the owner's own money). The ``stopRequest``
   service must be on for this user (studio_settings.service_access), else 403 REFUSE_STOP_REQUEST_OFF;
   the customer layout never matters (P3-20). A help-desk refusal met while the ticket is opened (an
   operationId the customer already used for another ticket, a counter race) is answered in the same
@@ -475,9 +476,12 @@ def add_stop_request_route(
                 due = stop_due_at(now, settings)
                 after_hours = not team_open_now(settings, now)
                 results, _version = load_results_row(conn, campaign_id)
-                if derive_display_stage({**data, "stopRequestedAt": None}, results, now)["stage"] == 10:
-                    # Ended, final amount being calculated (v2 offers no ask_to_stop there): a stop row
-                    # would never be Meta-handled and would raise overdue alerts until the final read.
+                stage_info = derive_display_stage({**data, "stopRequestedAt": None}, results, now)
+                if stage_info["stage"] == 10 and stage_info["checkedAt"]:
+                    # Ended per a Meta reading, final amount being calculated (v2 offers no ask_to_stop
+                    # there): a stop row would never be Meta-handled and would raise overdue alerts until
+                    # the final read. An unlinked (or hand-launched legacy) ad past its end date has no
+                    # reading that proves it ended, so it can still be asked to stop.
                     raise HTTPException(status_code=409, detail=REFUSE_STOP_ALREADY_ENDED)
                 delivering = delivering_at_request(data, results, now)  # the signal check_stop_requests needs
                 try:

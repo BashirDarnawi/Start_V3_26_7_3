@@ -8,8 +8,10 @@ the audit route. Every test here failed before its fix.
 * n9: GET /api/audit?offset=<huge> overflowed the database integer (HTTP 500).
 * n23: a customer's reply on (or reopen of) a stop ticket the SYSTEM resolved brought it back as an
   URGENT stop request (stop due time, pinned, counted as an open stop ticket by the desk badge).
+  Follow-up: the same for a stop ticket the team resolved by hand whose stop row resolved later.
 * n24: a stop request was accepted for an Approved ad whose delivery had already ended (display stage
-  10): an urgent ticket, a promise to pause it, and overdue alerts nobody could clear.
+  10): an urgent ticket, a promise to pause it, and overdue alerts nobody could clear. Follow-up: only
+  a Meta reading proves the end; an unlinked ad past its end date stays askable.
 * n26: the inbox item "Your ad has ended" took Meta's end time, which can be older than a seen marker
   set before the sync noticed the end: the item was born already read.
 
@@ -269,6 +271,64 @@ def test_n23_reply_or_reopen_on_a_system_resolved_stop_ticket_is_a_plain_questio
     assert again.json()["ticket"]["priority"] == "urgent" and again.json()["ticket"]["kind"] == "stop_request"
 
 
+def _staff_status(admin: dict, ticket_id: str, status: str):
+    return client.post(f"/api/studio/staff/tickets/{ticket_id}/status",
+                       json={"status": status, "operationId": f"staff-{secrets.token_hex(5)}"}, cookies=admin["cookies"])
+
+
+def test_n23_hand_resolved_stop_ticket_whose_stop_row_resolves_later_is_a_plain_question(people, monkeypatch):
+    """Review r1 follow-up: the team resolves the stop ticket by hand while its stop row is still open;
+    later the row resolves (Meta paused the ad, or it was Stopped). system_resolve_ticket_conn used to
+    skip the already-resolved ticket, so a customer's "thanks" brought it back URGENT, pinned and
+    counted as an open stop ticket. Also: a system-resolved stop ticket the team reopened and resolved
+    again (resolvedBy becomes 'team') stays a handled stop."""
+    _fix_clock(monkeypatch, THURSDAY_OPEN)
+    _services_on()
+    owner, admin = people["owner"], people["admin"]
+    settings = studio_settings.read_all_settings()
+    tickets = {}
+    for label in ("handfirst", "teamagain"):
+        campaign_id = _campaign(owner["id"], label)
+        asked = _ask(owner, campaign_id)
+        assert asked.status_code == 200, asked.text
+        tickets[label] = (campaign_id, asked.json()["ticket"]["id"])
+
+    # The team answers and resolves the stop ticket by hand; its stop row is still open.
+    campaign_id, ticket_id = tickets["handfirst"]
+    assert _staff_status(admin, ticket_id, "resolved").status_code == 200
+    assert _row(STOP_TYPE, stop_row_id(campaign_id))["data"]["state"] == "open"
+    # Later the stop row resolves (the jobs loop saw Meta pause it): the ticket stays resolved by the team.
+    assert studio_stop.resolve_stop_request(campaign_id, "meta_paused", THURSDAY_OPEN) is True
+    stored = _row(SUPPORT_TICKETS_TYPE, ticket_id)["data"]
+    assert stored["status"] == "resolved" and stored["resolvedBy"] == "team"
+
+    before = _counts()
+    replied = client.post(f"/api/studio/tickets/{ticket_id}/messages",
+                          json={"text": "Thanks!", "operationId": f"reply-{secrets.token_hex(5)}"}, cookies=owner["cookies"])
+    assert replied.status_code == 200, replied.text
+    view = replied.json()["ticket"]
+    assert view["status"] == "open" and view["priority"] == "normal" and view["kind"] == "question"
+    stored = _row(SUPPORT_TICKETS_TYPE, ticket_id)["data"]
+    assert stored["dueAt"] == iso(target_due_at("ticket", THURSDAY_OPEN, settings))  # the plain ticket target
+    after = _counts()
+    assert after["open"] == before["open"] + 1
+    assert after["stopOpen"] == before["stopOpen"] and after["urgent"] == before["urgent"]  # no phantom stop ticket
+
+    # The system resolves the row and ticket, the team reopens it and resolves it again by hand.
+    campaign_id, ticket_id = tickets["teamagain"]
+    assert studio_stop.resolve_stop_request(campaign_id, "stopped", THURSDAY_OPEN) is True
+    assert _staff_status(admin, ticket_id, "open").status_code == 200
+    assert _staff_status(admin, ticket_id, "resolved").status_code == 200
+    assert _row(SUPPORT_TICKETS_TYPE, ticket_id)["data"]["resolvedBy"] == "team"
+    before = _counts()
+    reopened = client.post(f"/api/studio/tickets/{ticket_id}/reopen",
+                           json={"operationId": f"reopen-{secrets.token_hex(5)}"}, cookies=owner["cookies"])
+    assert reopened.status_code == 200, reopened.text
+    view = reopened.json()["ticket"]
+    assert view["status"] == "open" and view["priority"] == "normal" and view["kind"] == "question"
+    assert _counts()["stopOpen"] == before["stopOpen"]
+
+
 # ------------------------------------------------------------------ n24: no stop request for an ad that already ended
 
 
@@ -307,6 +367,24 @@ def test_n24_stop_request_refused_for_an_ad_whose_delivery_ended(people):
     accepted = _ask(owner, running)
     assert accepted.status_code == 200, accepted.text
     assert _row(STOP_TYPE, stop_row_id(running))["data"]["deliveringAtRequest"] is True
+
+
+@pytest.mark.parametrize("marker", [{"publishStatus": "live"}, {"metaCampaignId": "launched-by-hand"}, {}])
+def test_n24_unlinked_ad_past_its_end_date_can_still_be_asked_to_stop(people, marker):
+    """Review r1 follow-up: an unlinked Approved ad past its end date is display stage 10 without any Meta
+    reading (a hand-launched legacy ad may still be running in Meta; a never-linked one is a full return).
+    The refusal needs a Meta reading, so these stay askable, as the classic card still offers."""
+    _services_on()
+    owner = people["owner"]
+    now = datetime.now(timezone.utc)
+    campaign_id = _campaign(owner["id"], "unlinked", startDate=(now - timedelta(days=9)).date().isoformat(),
+                            endDate=(now - timedelta(days=2)).date().isoformat(), **marker)
+    asked = _ask(owner, campaign_id)
+    assert asked.status_code == 200, asked.text
+    ticket = _row(SUPPORT_TICKETS_TYPE, asked.json()["ticket"]["id"])["data"]
+    assert ticket["kind"] == "stop_request" and ticket["priority"] == "urgent"
+    assert _row(STOP_TYPE, stop_row_id(campaign_id))["data"]["state"] == "open"
+    assert _row(CAMPAIGNS, campaign_id)["data"].get("stopRequestedAt")
 
 
 # ------------------------------------------------------------------ n26: "Your ad has ended" is never born read
