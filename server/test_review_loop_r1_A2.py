@@ -10,7 +10,8 @@ Behaviour tests for the verified findings of this batch (each fails before its f
 * #11 a signed ad-account webhook during Albayan's Meta pause is not a server error.
 * #12 an in-memory park of ONE ad account on the studio_results lane parks that account; the pass
   goes on with the others (it is not the lane's app-wide pause).
-* #13 a paused or throttled page lookup of the partner-pages refresh is not a definitive miss.
+* #13 a paused or throttled page lookup of the partner-pages refresh is not a definitive miss, and
+  one ad whose lookup keeps failing (5xx, Graph code 1) never blocks the ads after it.
 * #14 a second Meta outage on the same Tripoli day raises its own, unacknowledged, unsent alert.
 * #15 a failed POST to the staff channel starts no per-kind cooldown.
 
@@ -346,13 +347,18 @@ class _PartnerClient:
 
     def __init__(self, rows: list[dict], page_id: str):
         self.rows, self.page_id, self.fail = rows, page_id, None
+        self.fail_for: dict[str, Exception] = {}
+        self.calls: list[str] = []
 
     def get_ad_spend_rows_90d(self, account_id, *, max_pages=8):
         return [dict(row) for row in self.rows]
 
     def _get(self, path, params=None):
+        self.calls.append(str(path))
         if self.fail is not None:
             raise self.fail
+        if str(path) in self.fail_for:
+            raise self.fail_for[str(path)]
         return {"id": path, "creative": {"object_story_spec": {"page_id": self.page_id}}}
 
     def get_ad_page_identity(self, meta_ad_id):
@@ -380,6 +386,43 @@ def test_a_paused_page_lookup_is_not_remembered_as_a_miss(monkeypatch):
         fresh = meta_ads._compute_partner_page_stats(config, refresh=True)
         pages = {row["pageId"]: row for row in fresh["pages"]}
         assert page_id in pages and pages[page_id]["spendMinor"] == 12_000 and pages[page_id]["qualified"] is True
+    finally:
+        if original:
+            meta_ads._save_partner_state(original)
+        else:
+            with db_conn() as conn:
+                conn.execute(text("DELETE FROM entities WHERE type = :t AND id = :id"),
+                             {"t": meta_ads._META_PARTNER_STATE_TYPE, "id": meta_ads._META_PARTNER_STATE_ID})
+
+
+def test_one_ad_whose_lookup_keeps_failing_never_blocks_the_ads_after_it(monkeypatch):
+    """A steady 5xx / Graph code 1 on the top-spending unknown ad: the ads after it still map in
+    the SAME refresh, and the failing ad is retried in about an hour (not every refresh, not a day)."""
+    init_db()
+    original = meta_ads._load_partner_state()
+    base = int(TAG, 16) % 10**6
+    ads = [f"94{base:06d}{n:05d}" for n in range(3)]
+    page_id = f"78{base:06d}00009"
+    fake = _PartnerClient([{"adId": ads[0], "spendMinor": 9_000}, {"adId": ads[1], "spendMinor": 7_000},
+                           {"adId": ads[2], "spendMinor": 4_000}], page_id)
+    fake.fail_for[ads[0]] = meta_ads.MetaAdsError("temporary", "Meta is temporarily unavailable. Albayan will retry.",
+                                                  retryable=True, provider_code="1")
+    monkeypatch.setattr(meta_ads, "get_meta_ads_client", lambda: fake)
+    config = SimpleNamespace(allowed_account_ids=("444444444444444",))
+    try:
+        before = now_ms()
+        stats = meta_ads._compute_partner_page_stats(config, refresh=True)
+        pages = {row["pageId"]: row for row in stats["pages"]}
+        assert page_id in pages and pages[page_id]["spendMinor"] == 11_000  # the 2nd and 3rd ads mapped now
+        assert stats["accountErrors"]  # the failed read is reported: the scan is partial
+        state = meta_ads._load_partner_state()
+        assert ads[1] in state["adPageMap"] and ads[2] in state["adPageMap"]
+        stamp = int(state["adPageMisses"][ads[0]])
+        retry_in = stamp + meta_ads._PARTNER_MISS_RETRY_MS - before
+        assert 0 < retry_in <= meta_ads._PARTNER_MISS_RETRY_MS // 12  # about an hour, never a day
+        fake.calls.clear()  # the next refresh inside that hour does not hammer the failing ad
+        meta_ads._compute_partner_page_stats(config, refresh=True)
+        assert ads[0] not in fake.calls
     finally:
         if original:
             meta_ads._save_partner_state(original)

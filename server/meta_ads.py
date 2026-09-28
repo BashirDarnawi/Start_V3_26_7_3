@@ -138,6 +138,8 @@ _PARTNER_AD_PAGE_MAP_LIMIT = 5_000
 # day, so unresolvable history can never exhaust the per-refresh budget.
 _PARTNER_AD_PAGE_MISS_LIMIT = 2_000
 _PARTNER_MISS_RETRY_MS = 24 * 60 * 60 * 1000
+# A lookup that failed for a passing reason (5xx, timeout) is retried after about an hour.
+_PARTNER_MISS_TRANSIENT_RETRY_MS = 60 * 60 * 1000
 _META_PARTNER_LOCK = threading.Lock()
 # Money Meta reports in each ad account (Meta Insights, admin read-only). One small
 # GET per account; cached briefly so opening the dialog never re-reads Meta.
@@ -5287,12 +5289,18 @@ def _compute_partner_page_stats(
             try:
                 identity = client.get_ad_page_identity(meta_ad_id)
             except MetaAdsError as error:
-                # Paused, throttled or timed out: not a definitive miss. Nothing is remembered
-                # for this ad and the rest waits for the next refresh (a partial scan's short TTL).
-                account_errors.append(error.public_message)
+                # Not a definitive miss. Paused or throttled: nothing is remembered and the rest
+                # waits for the next refresh (a partial scan's short TTL). Any other retryable
+                # failure (5xx, Graph code 1/2, timeout, network) concerns this ad's read only:
+                # it is retried in about an hour and the ads after it still resolve now.
+                if error.public_message not in account_errors:
+                    account_errors.append(error.public_message)
                 if error.code == "rate_limited":
                     rate_limited_scan = True
-                break
+                    break
+                resolved_now += 1
+                misses[meta_ad_id] = current - _PARTNER_MISS_RETRY_MS + _PARTNER_MISS_TRANSIENT_RETRY_MS
+                continue
             resolved_now += 1
             page_id = _clean_text(identity.get("pageId"), 40) if identity else ""
             if _META_ID_RE.fullmatch(page_id):
