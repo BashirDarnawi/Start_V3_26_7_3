@@ -297,6 +297,9 @@ function studioLoadMe(maxAgeMs = STUDIO_ME_MAX_AGE_MS) {
   const maxAge = Math.max(0, Number(maxAgeMs) || 0);
   if (_studioMe.value && age >= 0 && age < maxAge) return Promise.resolve(_studioMe.value);
   if (!_studioMe.value && _studioMe.failedAt && Date.now() - _studioMe.failedAt < STUDIO_ME_RETRY_MS) return Promise.resolve(null);
+  // An old reply whose re-read just failed is kept for the same pause (offline, every render asked
+  // again at once and the builder's redraw looped); a forced read (maxAgeMs 0) still goes.
+  if (maxAge > 0 && _studioMe.value && _studioMe.failedAt && Date.now() - _studioMe.failedAt < STUDIO_ME_RETRY_MS) return Promise.resolve(_studioMe.value);
   _studioMe.forUser = uid;
   const generation = ++_studioMe.generation;
   const promise = (async () => {

@@ -835,7 +835,7 @@ const _studioDesk = {
   results: new Map(),           // request id -> {state, view, staff, results, at, promise}
   decisions: new Map(),         // request id -> {reason, note, error, outcome}
   settle: new Map(),            // request id -> {refund, reason, error, readyAt}
-  sheet: { kind: '', id: '', el: null, opener: null },
+  sheet: { kind: '', id: '', el: null, opener: null, version: 0 },
   runs: new Map(),              // `${kind}:${id}` -> the action in flight (single flight)
   pulse: { value: null, at: 0, watching: false, baseTitle: '', shownCount: -1 },
   audio: null, redrawTimer: null, countdownTimer: null, paintTimer: null
@@ -943,6 +943,13 @@ function studioDeskWasLinked(request) {
   return studioDeskLinked(request) || !!studioDeskLastLinkedId(request) || !!(request && request.everLinked === true);
 }
 
+// A legacy request staff marked launched by hand (a publish marker, or a Meta id that is not a
+// number): it may have run on Meta, so it is never a "never linked" full return (the server's
+// ad_campaign_actions.ever_launched and the `marked` rule of studio_results).
+function studioDeskHandMarked(request) {
+  return !!(String((request && request.publishStatus) || '').trim() || String((request && request.metaCampaignId) || '').trim());
+}
+
 function studioDeskLibyaToday() {
   try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Tripoli', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); } catch (_) { return new Date().toISOString().slice(0, 10); }
 }
@@ -1027,8 +1034,8 @@ function studioDeskStage(request) {
   const raw = linked
     ? { stage: 4, labels: { en: 'Approved — checking Meta', ar: 'مقبول — نتحقق من ميتا' }, linked: true, checking: true }
     : endPassed
-      ? (studioDeskWasLinked(request)
-        ? { stage: 10, labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' } }  // was linked: no "never showed" guess
+      ? (studioDeskWasLinked(request) || studioDeskHandMarked(request)
+        ? { stage: 10, labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' } }  // was linked or marked launched: no "never showed" guess
         : { stage: 10, labels: { en: 'Ended — final amount being calculated', ar: 'انتهى — نحسب المبلغ النهائي' }, variantLabels: { en: 'Meta never showed this ad: a full return', ar: 'لم تعرض ميتا هذا الإعلان: يعود المبلغ كاملاً' } })
       : { stage: 4, labels: { en: 'Approved — being set up in Meta', ar: 'مقبول — نجهّزه في ميتا' } };
   const view = studioStageView(raw);
@@ -1236,6 +1243,8 @@ function renderStudioDeskBrief(request) {
 function renderStudioDeskDecisionBox(request) {
   const id = studioEsc(request.id);
   const draft = studioDeskDecision(request.id);
+  // The version the reviewer read: a decision is sent for it, never for one live sync installed since.
+  if (!draft.version) draft.version = Number(request._lastModified) || 0;
   const busy = ['Approved', 'Changes Requested', 'Rejected'].some(kind => _studioDesk.runs.has(`review:${kind}:${request.id}`));
   const chips = ADS_STUDIO_REVIEW_REASONS.map(([code, en, ar]) =>
     `<button type="button" class="studio-help-chip" data-testid="studio-desk-reason-${code}" aria-pressed="${draft.reason === code ? 'true' : 'false'}" onclick="studioDeskPickReason('${id}', '${code}')">${studioEsc(adsStudioText(en, ar))}</button>`).join('');
@@ -1324,7 +1333,8 @@ function studioDeskStageOf(request) {
 }
 
 // One decision per request at a time. Approval opens the confirm sheet first (money moves).
-function studioDeskDecide(id, decision, button = null, confirmed = false) {
+// version: the one the approve sheet showed (else the one the decision box was first drawn with).
+function studioDeskDecide(id, decision, button = null, confirmed = false, version = 0) {
   const requestId = String(id || '');
   const key = `review:${decision}:${requestId}`;
   if (_studioDesk.runs.has(key)) return _studioDesk.runs.get(key);
@@ -1342,7 +1352,8 @@ function studioDeskDecide(id, decision, button = null, confirmed = false) {
     return Promise.resolve({ ok: true, pending: true });
   }
   if (button) setAdsStudioActionButtonBusy(button, true);
-  const operation = studioDeskDecideOnce(requestId, decision, note, decision === 'Approved' ? '' : draft.reason)
+  const pinned = Number(version) || Number(draft.version) || 0;
+  const operation = studioDeskDecideOnce(requestId, decision, note, decision === 'Approved' ? '' : draft.reason, pinned)
     .catch(error => ({ ok: false, text: studioDeskErrorInfo(error).text }));
   _studioDesk.runs.set(key, operation);
   const cleanup = () => {
@@ -1354,10 +1365,18 @@ function studioDeskDecide(id, decision, button = null, confirmed = false) {
   return operation;
 }
 
-async function studioDeskDecideOnce(requestId, decision, note, reasonCode) {
+async function studioDeskDecideOnce(requestId, decision, note, reasonCode, pinned = 0) {
   const request = findVisibleAdsStudioCampaign(requestId);
   if (!request || String(request.status || '') !== 'Submitted') {
     return { ok: false, text: adsStudioText('This request changed meanwhile. Check its new state.', 'تغيّر هذا الطلب في الأثناء. راجع حالته الجديدة.') };
+  }
+  if (pinned && Number(request._lastModified) !== pinned) {
+    // Withdrawn, edited and sent again since the reviewer read it (live sync installed the new
+    // version): nothing is decided or charged; the next draw shows and pins the version now here.
+    const changed = studioDeskDecision(requestId);
+    changed.version = 0;
+    changed.error = adsStudioText('This request changed meanwhile. Check its new state.', 'تغيّر هذا الطلب في الأثناء. راجع حالته الجديدة.');
+    return { ok: false, text: changed.error };
   }
   const attempt = adsStudioActionAttempt('review', request.id, Number(request._lastModified));
   let entity;
@@ -1373,6 +1392,7 @@ async function studioDeskDecideOnce(requestId, decision, note, reasonCode) {
   const draft = studioDeskDecision(requestId);
   draft.outcome = { decision, studioName: typeof adsStudioStudioName === 'function' ? adsStudioStudioName(saved) : '' };
   draft.error = '';
+  draft.version = 0;  // a request sent again later is read (and pinned) afresh
   studioDeskPulseRefresh();
   studioDeskNotify(true, adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`The request is now: ${adsStudioStatusMeta(decision).label}.`, `حالة الطلب الآن: ${adsStudioStatusMeta(decision).labelAr}.`));
   return { ok: true };
@@ -1482,6 +1502,7 @@ function studioDeskSettleNumbers(request) {
   const staff = entry && entry.staff ? entry.staff : {};
   const linked = studioDeskLinked(request);
   const wasLinked = !linked && studioDeskWasLinked(request);
+  const handMarked = !linked && !wasLinked && studioDeskHandMarked(request);
   let spend = null;
   let never = false;
   if (linked) {
@@ -1494,13 +1515,18 @@ function studioDeskSettleNumbers(request) {
     const confirmed = sameRow && !!staff.spendConfirmedAt && String(staff.currency || 'USD') === 'USD' && Number.isSafeInteger(staff.spendMinorUSD) && staff.spendMinorUSD >= 0;
     never = sameRow && staff.neverDelivered === true && confirmed && staff.spendMinorUSD === 0;
     spend = confirmed ? staff.spendMinorUSD : null;
+  } else if (handMarked) {
+    // Marked launched by hand: nothing records its Meta spend, so no cap and no full return (the
+    // server takes only an explicit amount, bounded by what the request recorded as spent).
+    never = false;
+    spend = null;
   } else {
     never = true;  // never linked: the whole payment returns
     spend = 0;
   }
   const cap = spend === null ? null : Math.max(paid - spend, 0);
   return {
-    paid, spend, cap, never, wasLinked,
+    paid, spend, cap, never, wasLinked, handMarked,
     readyAt: String(staff.settleReadDueAt || studioDeskSettleEntry(request.id).readyAt || ''),
     finalRead: !!staff.settleReadAt,
     confirmedAt: String(staff.spendConfirmedAt || '')
@@ -1513,7 +1539,10 @@ function renderStudioDeskSettleCard(request) {
   const linked = studioDeskLinked(request);
   const busy = typeof _adsStudioResultsChecks !== 'undefined' && _adsStudioResultsChecks.has(String(request.id));
   const wasLinked = numbers.wasLinked;
-  const countdown = !linked && !wasLinked
+  const neverLinked = !linked && !wasLinked && !numbers.handMarked;
+  const countdown = numbers.handMarked
+    ? adsStudioText('Marked launched by hand: enter the unspent amount (0 closes the ad without a return).', 'سُجّل يدوياً أنه نُشر: أدخل المبلغ غير المصروف (0 يغلق الإعلان دون إعادة).')
+    : neverLinked
     ? adsStudioText('Never linked to Meta: the full amount goes back now.', 'لم يُربط بميتا: يعود المبلغ كاملاً الآن.')
     : numbers.finalRead
       ? adsStudioText('Final Meta read done: ready to settle.', 'تمت قراءة ميتا النهائية: جاهز للتسوية.')
@@ -1530,7 +1559,7 @@ function renderStudioDeskSettleCard(request) {
     numbers.cap === null ? '' : `${adsStudioText('Return up to', 'يعود حتى')} ${studioUsd(numbers.cap)}`
   ].filter(Boolean).join(' · ');
   return `
-              <li class="studio-desk-box" data-testid="studio-desk-settle-${id}" data-ready="${numbers.finalRead || numbers.never || (!linked && !wasLinked) ? '1' : '0'}"${wasLinked ? ' data-was-linked="1"' : ''}>
+              <li class="studio-desk-box" data-testid="studio-desk-settle-${id}" data-ready="${numbers.finalRead || numbers.never || neverLinked ? '1' : '0'}"${wasLinked ? ' data-was-linked="1"' : ''}>
                 <h3 class="studio-desk-h3" dir="auto">${studioEsc(studioDeskName(request))}</h3>
                 ${renderStudioDeskMeta(request)}
                 ${renderStudioDeskStageLine(request)}
@@ -1685,7 +1714,10 @@ function studioDeskSheetOpen(kind, id, opener = null) {
   const el = holder.firstElementChild;
   if (!el) return false;
   const previous = _studioDesk.sheet.el;
-  Object.assign(_studioDesk.sheet, { kind, id: String(request.id), el, opener: opener || _studioDesk.sheet.opener });
+  // Approve: the version the reviewer read (the decision box's first draw, else this one) is the one
+  // approved; a newer one installed while the sheet is open is refused, never charged unseen.
+  const version = kind === 'approve' ? (Number(studioDeskDecision(request.id).version) || Number(request._lastModified) || 0) : 0;
+  Object.assign(_studioDesk.sheet, { kind, id: String(request.id), el, opener: opener || _studioDesk.sheet.opener, version });
   el.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -1702,7 +1734,7 @@ function studioDeskSheetOpen(kind, id, opener = null) {
 
 function studioDeskSheetClose() {
   const { el, opener } = _studioDesk.sheet;
-  Object.assign(_studioDesk.sheet, { kind: '', id: '', el: null, opener: null });
+  Object.assign(_studioDesk.sheet, { kind: '', id: '', el: null, opener: null, version: 0 });
   if (el && el.isConnected) el.remove();
   try { if (opener && opener.isConnected && typeof opener.focus === 'function') opener.focus(); } catch (_) {}
 }
@@ -1722,11 +1754,11 @@ function studioDeskSheetBusy(el, busy, errorText = '') {
 }
 
 function studioDeskSheetConfirm() {
-  const { el, kind, id } = _studioDesk.sheet;
+  const { el, kind, id, version } = _studioDesk.sheet;
   if (!el || !el.isConnected || !id) return null;
   let operation;
   if (kind === 'approve') {
-    operation = studioDeskDecide(id, 'Approved', null, true);
+    operation = studioDeskDecide(id, 'Approved', null, true, version);
   } else {
     const refundBox = el.querySelector('#studio-desk-refund');
     const raw = refundBox ? refundBox.value : studioDeskSettleEntry(id).refund;
@@ -2370,7 +2402,9 @@ function renderStudioAdminPayments() {
   const targets = studioAdminRead('targets', '/api/studio/admin/settings/targets');
   const minutes = targets.value && targets.value.value ? Number(targets.value.value.paymentConfirmMinutes) : 240;
   const pending = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : null;
-  const loading = pending === null;
+  // A failed read is said (with Try again), never shown as "Reading…" for ever.
+  const failed = pending === null && typeof _adsStudioWalletLoadFailed !== 'undefined' && _adsStudioWalletLoadFailed === true;
+  const loading = pending === null && !failed;
   const rows = (pending || []).map(entity => {
     const data = entity && entity.data ? entity.data : {};
     const createdAt = String(data.createdAt || '');
@@ -2381,7 +2415,8 @@ function renderStudioAdminPayments() {
   });
   const refresh = `<button type="button" class="studio-v2-action studio-desk-small" data-testid="studio-admin-payments-refresh" onclick="studioAdminPaymentsRefresh()">${studioAdminIcon('refresh-cw')}<span>${studioEsc(adsStudioText('Refresh', 'تحديث'))}</span></button>`;
   let body;
-  if (loading) body = `<p class="studio-desk-note" data-testid="studio-admin-payments-loading">${studioEsc(adsStudioText('Reading the payment requests…', 'نقرأ طلبات الدفع…'))}</p>`;
+  if (failed) body = `<div class="studio-desk-problem" role="alert" data-testid="studio-admin-payments-problem"><p>${studioEsc(adsStudioText('Could not read the payment requests. Check the connection and try again.', 'تعذّرت قراءة طلبات الدفع. تحقّق من الاتصال وأعد المحاولة.'))}</p><button type="button" class="studio-v2-action studio-desk-small" onclick="studioAdminPaymentsRefresh()">${studioEsc(adsStudioText('Try again', 'أعد المحاولة'))}</button></div>`;
+  else if (loading) body = `<p class="studio-desk-note" data-testid="studio-admin-payments-loading">${studioEsc(adsStudioText('Reading the payment requests…', 'نقرأ طلبات الدفع…'))}</p>`;
   else if (!rows.length) body = renderStudioDeskEmpty('landmark', adsStudioText('No payment waits for confirmation', 'لا دفعة تنتظر التأكيد'), '', 'studio-admin-payments-empty');
   else body = `<ul class="studio-desk-list studio-desk-classic" data-testid="studio-admin-payments">${rows.join('')}</ul>`;
   return renderStudioAdminPageHead('payments', refresh) + `<p class="studio-desk-note">${studioEsc(adsStudioText(`Target: confirm within ${Number.isFinite(minutes) ? minutes : 240} working minutes. A confirmed USD payment adds to the customer's available money; a LYD one to the plan balance.`, `الهدف: التأكيد خلال ${Number.isFinite(minutes) ? minutes : 240} دقيقة عمل. الدفعة المؤكدة بالدولار تُضاف إلى رصيد العميل المتاح، وبالدينار إلى رصيد الاشتراك.`))}</p>` + body;

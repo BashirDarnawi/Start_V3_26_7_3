@@ -26,6 +26,7 @@ const _adsStudioStopPromises = new Map();
 const _adsStudioReviewNotes = Object.create(null);
 const _adsStudioReviewReasons = Object.create(null);  // campaign id -> the reason code picked in the review form (P1-12)
 let _adsStudioApproveConfirmId = '';  // the request whose in-page "Confirm approval" row is open
+let _adsStudioApproveConfirmVersion = 0;  // its version when that row opened: the one approved, never a newer one
 const _adsStudioWithdrawPromises = new Map();
 let _adsStudioWithdrawConfirmId = '';  // the customer's waiting request whose in-page "Withdraw" sheet is open
 // Staff "Link Meta campaign" sheet (P1-09, D26): { campaignId, accountId, metaCampaignId, busy, outcome }.
@@ -66,6 +67,7 @@ function resetAdsStudioSessionState() {
   for (const id of Object.keys(_adsStudioReviewNotes)) delete _adsStudioReviewNotes[id];
   for (const id of Object.keys(_adsStudioReviewReasons)) delete _adsStudioReviewReasons[id];
   _adsStudioApproveConfirmId = '';
+  _adsStudioApproveConfirmVersion = 0;
   _adsStudioWithdrawPromises.clear();
   _adsStudioWithdrawConfirmId = '';
   _adsStudioLinkSheet = null;
@@ -1251,12 +1253,10 @@ async function stopAdsStudioCampaignOnce(id) {
       launched ? '0.00' : (remaining / 100).toFixed(2)
     );
     if (answer === null) return false;
-    // "1,000" is a thousand, "12,50" is a decimal — never silently under-refund.
-    let cleaned = normalizeDigitsAscii(String(answer)).replace(/[٫،]/g, ',').replace(/\s+/g, '');
-    if (cleaned.includes(',') && cleaned.includes('.')) cleaned = cleaned.split(',').join('');
-    else if (cleaned.includes(',')) cleaned = /^\d+,\d{1,2}$/.test(cleaned) ? cleaned.replace(',', '.') : cleaned.split(',').join('');
-    const parsed = Math.round(parseFloat(cleaned) * 100);
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed > remaining) {
+    // "1,000" is a thousand, "12,50" is a decimal — never silently under-refund: the strict studio
+    // parser (15g, Arabic digits and separators) refuses "1.234,56", "50abc", "12.5.3" and "12.345".
+    const parsed = typeof studioParseAmount === 'function' ? studioParseAmount(answer) : NaN;
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > remaining) {
       showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText(`Enter a number between 0 and ${(remaining / 100).toFixed(2)}.`, `أدخل رقماً بين 0 و${(remaining / 100).toFixed(2)}.`), 'error');
       return false;
     }
@@ -3653,10 +3653,19 @@ async function reviewAdsStudioCampaignOnce(id, decision, confirmed = false) {
   // Approval moves the customer's money: an in-page confirmation row, never a native dialog.
   if (decision === 'Approved' && !confirmed) {
     _adsStudioApproveConfirmId = String(id);
+    _adsStudioApproveConfirmVersion = Number(campaign._lastModified) || 0;
     render();
     return;
   }
+  const pinned = decision === 'Approved' && _adsStudioApproveConfirmId === String(id) ? _adsStudioApproveConfirmVersion : 0;
   _adsStudioApproveConfirmId = '';
+  _adsStudioApproveConfirmVersion = 0;
+  // Withdrawn, edited and sent again while the confirm row was open: that version was never reviewed.
+  if (pinned && Number(campaign._lastModified) !== pinned) {
+    showNotification(adsStudioText('Review failed', 'تعذر حفظ المراجعة'), adsStudioText('This request changed meanwhile. Check its new state.', 'تغيّر هذا الطلب في الأثناء. راجع حالته الجديدة.'), 'error');
+    render();
+    return;
+  }
   try {
     if (isServerModeEnabled()) {
       const attempt = adsStudioActionAttempt('review', campaign.id, Number(campaign._lastModified));
@@ -3687,6 +3696,7 @@ let _adsStudioWalletMine = null;
 let _adsStudioWalletPendingAll = null;
 let _adsStudioWalletBusy = false;
 let _adsStudioWalletForUser = '';
+let _adsStudioWalletLoadFailed = false;  // the last read of the lists failed (the admin payments page says so)
 // Server-owned Libyan payment catalog + today's USD→LYD rate.
 let _adsStudioPayMethods = null;
 let _adsStudioPayRate = null;
@@ -3697,6 +3707,7 @@ function resetAdsStudioWalletCache() {
   _adsStudioWalletMine = null;
   _adsStudioWalletPendingAll = null;
   _adsStudioWalletForUser = '';
+  _adsStudioWalletLoadFailed = false;
   _adsStudioPayMethods = null;
   _adsStudioPayRate = null;
   _adsStudioChargeMethodSel = '';
@@ -3764,6 +3775,7 @@ async function refreshAdsStudioWallet() {
       _adsStudioWalletMine = Array.isArray(mine?.requests) ? mine.requests : [];
       _adsStudioWalletPendingAll = pendingAll;
       _adsStudioWalletForUser = forUser;
+      _adsStudioWalletLoadFailed = false;
     }
   } catch (_) {
     if (forUser === String(state.currentUser?.id || '')) {
@@ -3771,6 +3783,7 @@ async function refreshAdsStudioWallet() {
       // and refetch forever; the Refresh button retries on demand.
       _adsStudioWalletMine = _adsStudioWalletMine || [];
       _adsStudioWalletForUser = forUser;
+      _adsStudioWalletLoadFailed = true;
     }
   } finally {
     _adsStudioWalletBusy = false;

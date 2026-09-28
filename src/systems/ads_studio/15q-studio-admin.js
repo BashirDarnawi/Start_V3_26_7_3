@@ -357,7 +357,9 @@ function renderStudioAdminPayments() {
   const targets = studioAdminRead('targets', '/api/studio/admin/settings/targets');
   const minutes = targets.value && targets.value.value ? Number(targets.value.value.paymentConfirmMinutes) : 240;
   const pending = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : null;
-  const loading = pending === null;
+  // A failed read is said (with Try again), never shown as "Reading…" for ever.
+  const failed = pending === null && typeof _adsStudioWalletLoadFailed !== 'undefined' && _adsStudioWalletLoadFailed === true;
+  const loading = pending === null && !failed;
   const rows = (pending || []).map(entity => {
     const data = entity && entity.data ? entity.data : {};
     const createdAt = String(data.createdAt || '');
@@ -368,7 +370,8 @@ function renderStudioAdminPayments() {
   });
   const refresh = `<button type="button" class="studio-v2-action studio-desk-small" data-testid="studio-admin-payments-refresh" onclick="studioAdminPaymentsRefresh()">${studioAdminIcon('refresh-cw')}<span>${studioEsc(adsStudioText('Refresh', 'تحديث'))}</span></button>`;
   let body;
-  if (loading) body = `<p class="studio-desk-note" data-testid="studio-admin-payments-loading">${studioEsc(adsStudioText('Reading the payment requests…', 'نقرأ طلبات الدفع…'))}</p>`;
+  if (failed) body = `<div class="studio-desk-problem" role="alert" data-testid="studio-admin-payments-problem"><p>${studioEsc(adsStudioText('Could not read the payment requests. Check the connection and try again.', 'تعذّرت قراءة طلبات الدفع. تحقّق من الاتصال وأعد المحاولة.'))}</p><button type="button" class="studio-v2-action studio-desk-small" onclick="studioAdminPaymentsRefresh()">${studioEsc(adsStudioText('Try again', 'أعد المحاولة'))}</button></div>`;
+  else if (loading) body = `<p class="studio-desk-note" data-testid="studio-admin-payments-loading">${studioEsc(adsStudioText('Reading the payment requests…', 'نقرأ طلبات الدفع…'))}</p>`;
   else if (!rows.length) body = renderStudioDeskEmpty('landmark', adsStudioText('No payment waits for confirmation', 'لا دفعة تنتظر التأكيد'), '', 'studio-admin-payments-empty');
   else body = `<ul class="studio-desk-list studio-desk-classic" data-testid="studio-admin-payments">${rows.join('')}</ul>`;
   return renderStudioAdminPageHead('payments', refresh) + `<p class="studio-desk-note">${studioEsc(adsStudioText(`Target: confirm within ${Number.isFinite(minutes) ? minutes : 240} working minutes. A confirmed USD payment adds to the customer's available money; a LYD one to the plan balance.`, `الهدف: التأكيد خلال ${Number.isFinite(minutes) ? minutes : 240} دقيقة عمل. الدفعة المؤكدة بالدولار تُضاف إلى رصيد العميل المتاح، وبالدينار إلى رصيد الاشتراك.`))}</p>` + body;

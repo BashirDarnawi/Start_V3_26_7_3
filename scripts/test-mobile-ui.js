@@ -1468,7 +1468,7 @@ check('money boxes keep thousands separators, WhatsApp links use international d
   adsStudio.includes("function adsStudioActionAttempt(kind, id, expectedLastModified) {") &&
   adsStudio.includes("const attempt = adsStudioActionAttempt('stop', campaign.id, Number(campaign._lastModified));") &&
   adsStudio.includes("const attempt = adsStudioActionAttempt('publish', campaign.id, Number(campaign._lastModified));") &&
-  adsStudio.includes("let cleaned = normalizeDigitsAscii(String(answer)).replace(/[٫،]/g, ',').replace(/\\s+/g, '');") &&
+  adsStudio.includes("const parsed = typeof studioParseAmount === 'function' ? studioParseAmount(answer) : NaN;") &&
   adsStudio.includes('id="ads-studio-field-name"') && adsStudio.includes('id="ads-studio-field-budgetMinorUSD"') &&
   actionsIo.includes("const metaOverspend = !finalSpendFrozen && metaSpendUSD !== null && metaSpendUSD > adAmountUSD + 0.005;") &&
   read('src/12a-analytics-profit.js').includes("String(ad.metaCurrency || 'USD').toUpperCase() === 'USD'") &&
@@ -4330,6 +4330,70 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 builder: its wallet lines read Home\'s one copy of the summary (renewed by every money action); a timed-out read fails with Try again, a cancelled one is asked again',
     !loadError && copyCases.every(Boolean), loadError || `cases ${failed(copyCases)}`);
+
+  // Review loop r1 #27: a failed re-read of an OLD /me answer pauses like a failed first read (offline, the
+  // builder's redraw after each failure asked /me again at once: a loop); a forced read still goes; the
+  // builder redraws only when the answer changed.
+  const openMe = "{ value: { ui: 'v2', staffDesk: 'classic', intake: { open: true }, adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }";
+  run(`studioResetMe(); __replies['/api/studio/me'] = [${openMe}]; studioLoadMe();`);
+  run("studioBuilderStart('boost');");
+  openAt('/studio?tab=builder&section=boost&step=1');
+  run(`__timers.clear(); __calls.length = 0; _studioMe.loadedAt = Date.now() - 6 * 60 * 1000;
+    __replies['/api/studio/me'] = [1, 2, 3, 4, 5, 6].map(() => ({ error: { status: 503, message: 'Service unavailable' } }));`);
+  run('render();');  // the shell's re-read of the old answer fails
+  const meLoopFirst = json("__calls.filter(call => call.path === '/api/studio/me').length");
+  run('render(); render(); studioLoadMe(60000);');
+  const meLoopLater = json("__calls.filter(call => call.path === '/api/studio/me').length");
+  const meKept = json('studioMe() && studioMe().intakeOpen');
+  run('var __meRenders = 0; var __meRender = render; render = function () { __meRenders++; return __meRender(); };');
+  run('studioLoadMe(0);');  // forced: it goes, fails, and keeps the same answer
+  const meForced = json("__calls.filter(call => call.path === '/api/studio/me').length");
+  const meFailRedraws = json('__meRenders');
+  run(`__replies['/api/studio/me'] = [{ value: { ui: 'v2', staffDesk: 'classic', intake: { open: false }, adLimits: { minTotalMinorUSD: 500, maxTotalMinorUSD: 200000, minPerDayMinorUSD: 100, maxDays: 90 } } }]; studioLoadMe(0);`);
+  const meChangeRedraws = json('__meRenders');
+  run(`render = __meRender; __timers.clear(); studioResetMe(); __replies['/api/studio/me'] = [${openMe}]; studioLoadMe();`);
+  const meLoopCases = [
+    meLoopFirst === 1 && meLoopLater === 1 && meKept === true,
+    meForced === 2 && meFailRedraws === 0,
+    meChangeRedraws >= 1 && json('studioMe() && studioMe().intakeOpen') === true
+  ];
+  check('Studio v2 /me: a failed re-read of an old answer keeps it for the retry pause (no read per render, no redraw loop in the builder); a forced read still goes; the builder redraws only for a changed answer',
+    !loadError && meLoopCases.every(Boolean), loadError || `cases ${failed(meLoopCases)}; first ${meLoopFirst} later ${meLoopLater} forced ${meForced} redraws ${meFailRedraws}/${meChangeRedraws}`);
+
+  // Review loop r1 #29: a send that finishes after the customer opened a NEW request leaves that request open
+  // (the screen, the session and the reload memory); the earlier one is only announced as sent.
+  const raceStore = new Map();
+  win.sessionStorage = { getItem: k => (raceStore.has(k) ? raceStore.get(k) : null), setItem: (k, v) => raceStore.set(k, String(v)), removeItem: k => raceStore.delete(k) };
+  run(`var __heldSubmit = null; var __submitNow = apiSubmitAdCampaignRequest; var __problemsNow = studioBuilderAllProblems;
+    apiSubmitAdCampaignRequest = function (id, expected, operationId) {
+      __calls.push({ path: 'submit:' + id, method: 'POST', expected, operationId });
+      return new Promise(resolve => { __heldSubmit = () => resolve(__entity({ ...(state.adCampaignRequests.find(item => item.id === id) || {}), status: 'Submitted', totalBudgetMinorUSD: 5000, _lastModified: Number(expected) + 1 })); });
+    };
+    studioBuilderAllProblems = () => [];  // this check is about the race, not the form
+    __notes.length = 0;`);
+  run("studioBuilderStart('boost'); studioBuilderInput('budget', { value: '50' }); __runTimers();");
+  run('var __firstSession = _studioBuilder.session; var __firstSend = null; studioBuilderSend(null).then(ok => { __firstSend = ok; });');
+  run('__runTimers();');
+  const raceInFlight = json("{ submits: __calls.filter(call => call.path === 'submit:' + __firstSession.id).length, created: __firstSession.created, held: typeof __heldSubmit === 'function' }") || {};
+  run("studioBuilderStart('full'); studioBuilderInput('notes', { value: 'The next request' }); __runTimers();");
+  const raceSecondId = String(run('_studioBuilder.session && _studioBuilder.session.id'));
+  run('__heldSubmit(); __runTimers();');
+  run('render();');
+  const raceHtml = html();
+  const race = json(`{ open: _studioBuilder.session && _studioBuilder.session.id, first: __firstSession.id, memory: studioBuilderMemory(), sent: _studioBuilder.sent, firstSend: __firstSend,
+    notes: __notes.slice(), firstStatus: (state.adCampaignRequests.find(item => item.id === __firstSession.id) || {}).status }`) || {};
+  run('apiSubmitAdCampaignRequest = __submitNow; studioBuilderAllProblems = __problemsNow; __timers.clear();');
+  delete win.sessionStorage;
+  const raceCases = [
+    raceInFlight.submits === 1 && raceInFlight.created === true && raceInFlight.held === true,
+    race.open === raceSecondId && race.first !== raceSecondId,
+    !!race.memory && race.memory.id === raceSecondId,
+    race.sent === null && !raceHtml.includes('data-testid="studio-builder-sent"') && raceHtml.includes('data-kind="full"'),
+    race.firstSend === true && race.firstStatus === 'Submitted',
+    Array.isArray(race.notes) && race.notes.some(note => note.includes('Your earlier request was sent for review'))
+  ];
+  check('Studio v2 builder: a send that finishes after a new request was opened keeps the new one open (session, reload memory, no "Sent" screen over it) and only announces the earlier one',
+    !loadError && raceCases.every(Boolean), loadError || `cases ${failed(raceCases)}; ${JSON.stringify({ raceInFlight, open: race.open, second: raceSecondId, memory: race.memory, sent: race.sent, firstSend: race.firstSend, firstStatus: race.firstStatus })}`);
 }
 
 {
@@ -5306,6 +5370,24 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio staff tickets (P3-09, P3-11): stop requests pinned and overdue, the thread, a reply marks it answered, status changes, the consented WhatsApp link; never a customer id on screen',
     !loadError && staffCases.every(Boolean), loadError || `cases ${failed(staffCases)}`);
+  // Review loop r1 #30/#33: the open thread is put into the ticket row as typed; "$$", "$&" and "$`" in a
+  // customer message or in the staff reply draft are never read as String.replace patterns.
+  const TD = 'tkt_' + 'd'.repeat(40);
+  const dollarTicket = ticket(TD, 'T-000003', 'open', { subject: 'Dollar signs', ownerId: 'cust-77', messageCount: 1 });
+  reply('/api/studio/staff/tickets?status=active', { tickets: [dollarTicket], nextCursor: null });
+  run('_studioStaff.forUser = ""; renderStudioStaffTicketsClassic();');
+  reply(`/api/studio/staff/tickets/${TD}`, { ticket: dollarTicket, messages: [{ id: 'tkm_' + '7'.repeat(40), from: 'customer', text: 'I paid $$50 and $& here $`', createdAt: ago(3), authorId: 'cust-77' }] });
+  run(`studioStaffOpen('${TD}'); studioStaffReplySet('${TD}', 'cost $$10');`);
+  const dollarHtml = String(run('renderStudioStaffTicketsClassic()'));
+  const dollarRow = dollarHtml.slice(dollarHtml.indexOf(`data-testid="studio-ticket-${TD}"`));
+  const dollarCases = [
+    dollarHtml.split('I paid $$50 and $&amp; here $`').length === 2,
+    dollarHtml.split(`data-testid="studio-ticket-${TD}"`).length === 2,
+    dollarRow.indexOf('</li>') > dollarRow.indexOf('data-testid="studio-staff-thread"'),
+    />cost \$\$10<\/textarea>/.test(dollarHtml)
+  ];
+  check('Studio staff tickets: "$$", "$&" and "$`" in a customer message and in the reply draft show as typed (one row button, the thread inside its row, the draft unchanged)',
+    !loadError && dollarCases.every(Boolean), loadError || `cases ${failed(dollarCases)}`);
   who.staff = false;
 
   // Texts, handlers and styles.
@@ -5903,6 +5985,122 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     reviewerMore.includes('studio-admin-reviewer') && !reviewerMore.includes('studio-admin-form') && !reviewerMore.includes('studio-admin-open-payments') && reviewerMore.includes('studio-basics')
       && reviewerHealth.includes('data-testid="studio-desk-pulse"') && reviewerHealth.includes('studio-desk-health-reviewer') && !reviewerHealth.includes('Studio health')
       && String(healthAr).includes('نبض المكتب') && String(healthAr).includes('بانتظار المراجعة'));
+
+  // Review loop r1 #31: a legacy request marked launched by hand (publishStatus, or a Meta id that is not a
+  // number) may have run on Meta: no "never showed" full return, no cap, the amount starts empty (the server
+  // takes only an explicit amount). A row with no marker at all is still the full return.
+  const handRow = extra => ({ id: 'r_hand', createdBy: 'c1', status: 'Approved', name: 'Marked by hand', paidMinorUSD: 5000, budgetMinorUSD: 5000, budgetType: 'lifetime', durationDays: 2, startDate: '2025-03-01', endDate: '2025-03-02', _created: 2, _lastModified: 12, ...extra });
+  const handView = row => json(`(function () {
+    const r = ${JSON.stringify(row)};
+    const n = studioDeskSettleNumbers(r);
+    const sheet = renderStudioDeskSheet('settle', r);
+    return { stage: studioDeskStage(r).stage, variant: studioDeskStage(r).variant, never: n.never, cap: n.cap, card: renderStudioDeskSettleCard(r),
+      refund: (sheet.match(/id="studio-desk-refund"[^>]*value="([^"]*)"/) || [])[1] };
+  })()`) || {};
+  const handLive = handView(handRow({ id: 'r_hand1', publishStatus: 'live', metaCampaignId: '' }));
+  const handText = handView(handRow({ id: 'r_hand2', publishStatus: '', metaCampaignId: 'abc' }));
+  const handNone = handView(handRow({ id: 'r_hand3', publishStatus: '', metaCampaignId: '' }));
+  const handCases = [
+    [handLive, handText].every(v => v.stage === 10 && v.variant === '' && v.never === false && v.cap === null && v.refund === ''
+      && String(v.card).includes('data-ready="0"') && !String(v.card).includes('Never linked to Meta') && String(v.card).includes('Marked launched by hand')),
+    handNone.stage === 10 && handNone.variant === 'Meta never showed this ad: a full return' && handNone.never === true && handNone.cap === 5000 && handNone.refund === '50.00'
+      && String(handNone.card).includes('Never linked to Meta: the full amount goes back now.') && String(handNone.card).includes('data-ready="1"')
+  ];
+  check('Team desk settle: a request marked launched by hand (publishStatus or a non-numeric Meta id) gets no "never showed" full return and no pre-filled amount; one with no marker still returns everything',
+    handCases.every(Boolean), `cases ${failed(handCases)}; ${JSON.stringify({ live: { ...handLive, card: undefined }, text: { ...handText, card: undefined }, none: { ...handNone, card: undefined } })}`);
+
+  // Review loop r1 #32: an approval is sent for the version the reviewer read. A request withdrawn, edited
+  // and sent again while the approve sheet was open (live sync installed the new version) is refused with
+  // no call; the next draw pins the new version and approves it. Send back / reject pin the first draw.
+  run(`var __keptRows = state.adCampaignRequests; var __sheetEls = [];
+    document.body = { appendChild(el) { el.isConnected = true; __sheetEls.push(el); } };
+    document.createElement = () => { const holder = {}; Object.defineProperty(holder, 'innerHTML', { set(value) { holder.firstElementChild = { html: String(value), isConnected: false, addEventListener() {}, querySelector() { return null; }, remove() { this.isConnected = false; }, replaceWith(next) { this.isConnected = false; next.isConnected = true; } }; } }); return holder; };`);
+  const pinRow = { id: 'r_pin', createdBy: 'c1', status: 'Submitted', name: 'Pinned review', objective: 'messages', budgetMinorUSD: 5000, budgetType: 'lifetime', durationDays: 5, totalBudgetMinorUSD: 5000, primaryText: 'First text', startDate: '2099-03-01', endDate: '2099-03-05', _created: 30, _lastModified: 31 };
+  const pinRow2 = { ...pinRow, id: 'r_pin2', name: 'Pinned send back', _lastModified: 41 };
+  run(`state.adCampaignRequests = __keptRows.concat([${JSON.stringify(pinRow)}, ${JSON.stringify(pinRow2)}]);`);
+  const resend = (id, version, extra) => run(`state.adCampaignRequests = state.adCampaignRequests.map(r => r.id === ${JSON.stringify(id)} ? Object.assign({}, r, ${JSON.stringify(extra)}, { _lastModified: ${version} }) : r);`);
+  openAt('/studio?tab=review&section=requests&id=r_pin');
+  const pinOpen = outcome("studioDeskDecide('r_pin', 'Approved')");
+  const pinSheet = String(run('__sheetEls.length ? __sheetEls[__sheetEls.length - 1].html : ""'));
+  resend('r_pin', 34, { totalBudgetMinorUSD: 50000, budgetMinorUSD: 50000, primaryText: 'Unseen text' });
+  const pinRefused = outcome('studioDeskSheetConfirm()');
+  const pinCallsRefused = calls('POST', '/api/ad-studio/campaigns/r_pin/review').length;
+  run('studioDeskSheetClose();');
+  openAt('/studio?tab=review&section=requests&id=r_pin');
+  const pinRedrawn = html();
+  outcome("studioDeskDecide('r_pin', 'Approved')");
+  reply('/api/ad-studio/campaigns/r_pin/review', { id: 'r_pin', data: { ...pinRow, totalBudgetMinorUSD: 50000, budgetMinorUSD: 50000, status: 'Approved', paidMinorUSD: 50000, _lastModified: 35 }, lastModified: 35 });
+  const pinApproved = outcome('studioDeskSheetConfirm()');
+  const pinCalls = calls('POST', '/api/ad-studio/campaigns/r_pin/review');
+  openAt('/studio?tab=review&section=requests&id=r_pin2');
+  run("studioDeskPickReason('r_pin2', 'text_policy'); studioDeskNoteInput('r_pin2', { value: 'Please change the text.' });");
+  resend('r_pin2', 44, { primaryText: 'Unseen text' });
+  const backRefused = outcome("studioDeskDecide('r_pin2', 'Changes Requested')");
+  const backCallsRefused = calls('POST', '/api/ad-studio/campaigns/r_pin2/review').length;
+  const backRedrawn = html();
+  reply('/api/ad-studio/campaigns/r_pin2/review', { id: 'r_pin2', data: { ...pinRow2, primaryText: 'Unseen text', status: 'Changes Requested', reviewReasonCode: 'text_policy', _lastModified: 45 }, lastModified: 45 });
+  const backDone = outcome("studioDeskDecide('r_pin2', 'Changes Requested')");
+  const backCalls = calls('POST', '/api/ad-studio/campaigns/r_pin2/review');
+  run('studioDeskSheetClose(); state.adCampaignRequests = __keptRows; delete document.body; delete document.createElement;');
+  const pinCases = [
+    !!pinOpen && pinOpen.pending === true && pinSheet.includes('This charges the held $50.00'),
+    !!pinRefused && pinRefused.ok === false && /changed meanwhile/.test(pinRefused.text) && pinCallsRefused === 0,
+    pinRedrawn.includes('Unseen text') && pinRedrawn.includes('This request changed meanwhile'),
+    !!pinApproved && pinApproved.ok === true && pinCalls.length === 1 && pinCalls[0].body.expectedLastModified === 34 && pinCalls[0].body.decision === 'Approved',
+    !!backRefused && backRefused.ok === false && backCallsRefused === 0 && backRedrawn.includes('This request changed meanwhile'),
+    !!backDone && backDone.ok === true && backCalls.length === 1 && backCalls[0].body.expectedLastModified === 44
+  ];
+  check('Team desk review: the approve sheet approves only the version it showed (a request withdrawn, edited and sent again meanwhile is refused with no call and "changed meanwhile"; the next draw approves the new version); send back / reject pin the version first drawn the same way',
+    pinCases.every(Boolean), `cases ${failed(pinCases)}; refused ${JSON.stringify(pinRefused)} approved ${JSON.stringify(pinApproved)} calls ${JSON.stringify(pinCalls.map(c => c.body.expectedLastModified))} back ${JSON.stringify(backRefused)} ${JSON.stringify(backCalls.map(c => c.body.expectedLastModified))}`);
+
+  // Review loop r1 #34: the admin "Payments waiting" page says so when the list could not be read (Try again),
+  // never "Reading…" for ever, and it does not ask again on every draw; Try again reads it.
+  who.admin = true;
+  meReply({ ...staffMe, isAdmin: true });
+  run(`var __walletLists = [];
+    function apiWalletPaymentMethods() { return Promise.resolve({ methods: [], rate: null }); }
+    function apiWalletPaymentRequestList(scope) { __walletLists.push(scope); return scope === 'pending' ? Promise.reject(Object.assign(new Error('Service unavailable'), { status: 503 })) : Promise.resolve({ requests: [] }); }
+    resetAdsStudioWalletCache();`);
+  openAt('/studio?tab=review&section=more&id=payments');
+  run('render()');
+  const payFailed = html();
+  const payReads = json('__walletLists.length');
+  run('render(); render();');
+  const payReadsLater = json('__walletLists.length');
+  run("apiWalletPaymentRequestList = function (scope) { __walletLists.push(scope); return Promise.resolve({ requests: [] }); };");
+  run('studioAdminPaymentsRefresh();');
+  run('render()');
+  const payRetried = html();
+  who.admin = false;
+  meReply(staffMe);
+  run('resetAdsStudioWalletCache();');
+  const payCases = [
+    payFailed.includes('data-testid="studio-admin-payments-problem"') && payFailed.includes('onclick="studioAdminPaymentsRefresh()"') && !payFailed.includes('data-testid="studio-admin-payments-loading"'),
+    payReads === 2 && payReadsLater === payReads,
+    payRetried.includes('data-testid="studio-admin-payments-empty"') && !payRetried.includes('studio-admin-payments-problem')
+  ];
+  check('Admin payments waiting: a failed read of the list shows the problem with Try again (not "Reading…" for ever), draws do not ask again, Try again reads the list',
+    payCases.every(Boolean), `cases ${failed(payCases)}; reads ${payReads}/${payReadsLater}`);
+
+  // Review loop r1 #35: the classic staff "Close campaign / Stop & refund" prompt reads the amount with the
+  // strict studio parser (Arabic digits and separators): an ambiguous or garbled amount is refused, never
+  // silently turned into a smaller refund.
+  run(`var __promptAnswer = ''; var __stopCalls = [];
+    function prompt() { return __promptAnswer; }
+    function apiStopAdCampaignRequest(id, expected, operationId, reason, refundMinor) { __stopCalls.push({ id, refundMinor }); return new Promise(() => {}); }
+    var __keptStopRows = state.adCampaignRequests;
+    state.adCampaignRequests = __keptStopRows.concat([{ id: 'r_stop', createdBy: 'c1', status: 'Approved', name: 'Stop me', paidMinorUSD: 200000, publishStatus: 'live', _created: 50, _lastModified: 50 }]);`);
+  const stopWith = answer => json(`(function () { __promptAnswer = ${JSON.stringify(answer)}; __stopCalls.length = 0; __notes.length = 0; stopAdsStudioCampaignOnce('r_stop');
+    return { refund: __stopCalls.length ? __stopCalls[0].refundMinor : null, invalid: __notes.some(note => note.title === 'Invalid amount') }; })()`) || {};
+  const refused = ['1.234,56', '١٬٢٣٤x', '50abc', '12.5.3', '12.345'].map(answer => [answer, stopWith(answer)]);
+  const accepted = [['1,234.56', 123456], ['12,50', 1250], ['١٬٢٣٤', 123400], ['٥٠٫٢٥', 5025], ['0.00', 0]].map(([answer, minor]) => [answer, minor, stopWith(answer)]);
+  run('state.adCampaignRequests = __keptStopRows;');
+  const stopCases = [
+    refused.every(([, out]) => out.refund === null && out.invalid === true),
+    accepted.every(([, minor, out]) => out.refund === minor && out.invalid === false)
+  ];
+  check('Classic staff Stop & refund: the typed amount is read strictly (Arabic digits and separators count; "1.234,56", "50abc", "12.5.3", "12.345" are refused, never a smaller refund)',
+    stopCases.every(Boolean), `cases ${failed(stopCases)}; ${JSON.stringify({ refused, accepted })}`);
 }
 
 {

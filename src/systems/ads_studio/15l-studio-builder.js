@@ -890,7 +890,13 @@ function studioBuilderListen() {
     }
   } catch (_) {}
   if (typeof studioMeSubscribe === 'function') {
-    studioMeSubscribe(() => { if (_studioBuilder.session && studioBuilderOnScreen()) studioBuilderRedraw(); });
+    // Only a changed answer redraws: a failed read keeps the same one, and its redraw asked /me again.
+    let seen;
+    studioMeSubscribe(me => {
+      if (me === seen) return;
+      seen = me;
+      if (_studioBuilder.session && studioBuilderOnScreen()) studioBuilderRedraw();
+    });
   }
 }
 
@@ -1630,19 +1636,31 @@ async function studioBuilderSendOnce() {
   try { upsertAdsStudioEntity(entity); } catch (_) {}
   const data = entity && entity.data ? entity.data : {};
   const total = Number.isSafeInteger(data.totalBudgetMinorUSD) && data.totalBudgetMinorUSD > 0 ? data.totalBudgetMinorUSD : studioBuilderTotalMinor(session.draft);
-  _studioBuilder.sent = { id: session.id, totalMinor: total, name: String(data.name || session.draft.name || '').slice(0, 160) };
   studioBuilderStopTimers(session);
-  _studioBuilder.session = null;
   if (_adsStudioDraft === session.draft) {
     _adsStudioDraft = null;
     _adsStudioEditingId = '';
     _adsStudioEditingBaseline = 0;
     _adsStudioConfirmationChecked = false;
   }
-  studioBuilderForget();
+  // A newer request opened while this one was on its way stays open (with its reload memory).
+  const stillOpen = _studioBuilder.session === session;
+  if (stillOpen) {
+    _studioBuilder.sent = { id: session.id, totalMinor: total, name: String(data.name || session.draft.name || '').slice(0, 160) };
+    _studioBuilder.session = null;
+    studioBuilderForget();
+  } else {
+    const memory = studioBuilderMemory();
+    if (memory && memory.id === session.id) studioBuilderForget();
+    try {
+      showNotification(studioBuilderT('Request sent', 'أُرسل الطلب'),
+        studioBuilderT('Your earlier request was sent for review. You find it in My ads.', 'أُرسل طلبك السابق للمراجعة. تجده في «إعلاناتي».'), 'success');
+    } catch (_) {}
+  }
   // The money is reserved now and the request is waiting: both summaries, for every screen.
   if (typeof studioDataRefresh === 'function') studioDataRefresh();
   else studioBuilderLoadWallet(true);
+  if (!stillOpen) return true;
   studioBuilderRedraw();
   try { if (typeof window !== 'undefined' && window.scrollTo) window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (_) {}
   return true;

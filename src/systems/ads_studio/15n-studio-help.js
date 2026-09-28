@@ -1822,7 +1822,9 @@ function renderStudioStaffTicketsClassic() {
   else {
     body = `<ul class="studio-help-list" data-testid="studio-staff-list">${slot.items.map(ticket => {
       const open = _studioStaff.openId === ticket.id;
-      return renderStudioHelpRow(ticket, `studioStaffOpen('${ticket.id}')`, true).replace('</li>', `${open ? renderStudioStaffThread(ticket.id) : ''}</li>`);
+      const thread = open ? renderStudioStaffThread(ticket.id) : '';
+      // A replacer function: "$$", "$&" or "$`" in a message or the reply draft stays as typed.
+      return renderStudioHelpRow(ticket, `studioStaffOpen('${ticket.id}')`, true).replace('</li>', () => `${thread}</li>`);
     }).join('')}</ul>`;
     if (slot.nextCursor) body += `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-staff-more" onclick="studioStaffMore()"${slot.loading ? ' disabled' : ''}>${studioEsc(adsStudioText('Show more', 'اعرض المزيد'))}</button>`;
   }
