@@ -132,6 +132,7 @@ _PRIVATE_KEYS = frozenset({"_created", "_lastModified", "_deleted", "createdBy",
 _CTX: dict[str, Any] = {}
 _FALLBACK_MEDIA_SECRET = secrets.token_hex(32)
 _COMMENT_LOCK = threading.Lock()
+_PAGE_LINK_LOCK = threading.Lock()  # _page_link_guard: one Meta page is linked by one request at a time
 _WORKER_STOP = threading.Event()
 _STOP_JOINED = False  # the stop function ran once since the last start
 _WORKER_THREAD: threading.Thread | None = None
@@ -291,11 +292,12 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        # OverflowError: year 1 or 9999 moved past the calendar by its zone (a 400 upstream, never a 500).
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -936,7 +938,21 @@ def rule_active_since_ms(rule: dict[str, Any]) -> int:
     return max(created, ms(rule.get("activeSince"))) if created else 0
 
 
-def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any], *, stored_refs: list[str] | None = None) -> dict[str, Any]:
+def _rule_asks(rule: dict[str, Any] | None, platform: str) -> set[str]:
+    """The reply actions a saved rule asks for on ``platform`` (the editor's own test); none for
+    another platform (a new channel) or no rule."""
+    rule = rule or {}
+    if str(rule.get("platform") or "") != platform:
+        return set()
+    asked = {"dm"} if _bool(rule.get("dmEnabled")) and str(rule.get("dmText") or "").strip() else set()
+    asked |= {"public"} if str(rule.get("publicReply") or "").strip() else set()
+    return asked | ({"like"} if _bool(rule.get("likeComment")) else set())
+
+
+def _clean_rule(
+    ctx: dict[str, Any], owner_id: str, raw: dict[str, Any], *, stored_refs: list[str] | None = None,
+    stored: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     name = _text_field(ctx, raw.get("name"), "Rule name", 80, required=True)
     platform = str(raw.get("platform") or "fb").strip().lower()
     if platform not in PLATFORMS:
@@ -988,11 +1004,14 @@ def _clean_rule(ctx: dict[str, Any], owner_id: str, raw: dict[str, Any], *, stor
             raise HTTPException(status_code=400, detail=f"Page {ref} is not on this rule's platform")
         page_refs.append(ref)
     # P4-05: an action its channel cannot do is refused here, with the reason; a gated one is
-    # saved and shown as waiting for Meta, and the executor holds it (channel_state).
+    # saved and shown as waiting for Meta, and the executor holds it (channel_state). An edit
+    # (``stored``: the saved rule) is refused only an action it newly asks for, so the owner can
+    # still switch the rule on or off, rename it or change its text; the executor still holds it.
     gates = capability_gates()
+    kept = _rule_asks(stored, platform)
     wanted = [("dm", dm_enabled and bool(dm_text)), ("public", bool(public_reply)), ("like", like_comment)]
     for kind, asked in wanted:
-        if asked and channel_state(gates, platform, kind) in EDITOR_REFUSED_STATES:
+        if asked and kind not in kept and channel_state(gates, platform, kind) in EDITOR_REFUSED_STATES:
             raise HTTPException(status_code=400, detail=editor_refusal(platform, kind))
     return {
         "ownerId": owner_id,
@@ -1075,7 +1094,9 @@ def _clean_post(
     rule_id = str(rule_raw or "").strip()
     if rule_id:
         rule = ctx["get_entity"](RULES_TYPE, ctx["validate_entity_id"](rule_id))
-        if not rule or rule.get("deleted") or str(rule["data"].get("ownerId") or "") != owner_id:
+        if (not rule or rule.get("deleted")) and rule_id == str(existing.get("autoReplyRuleId") or ""):
+            rule_id = ""  # the post's own rule was deleted since: cleared, so the post stays editable
+        elif not rule or rule.get("deleted") or str(rule["data"].get("ownerId") or "") != owner_id:
             raise HTTPException(status_code=400, detail="autoReplyRuleId is not one of your rules")
 
     return {
@@ -1485,6 +1506,22 @@ def _comment_reservation_guard(owner_id: str):
             yield
 
 
+@contextmanager
+def _page_link_guard(platform: str, meta_page_id: str):
+    """Serialize linking one Meta page (the already-linked check and the insert or revive), so two
+    links landing together never both pass the check: in this process and, on PostgreSQL, across
+    workers (a transaction-scoped lock held until the new row has committed)."""
+    with _PAGE_LINK_LOCK:
+        if str(get_engine().dialect.name or "") == "postgresql":
+            with db_conn() as conn:
+                _ctx()["lock_idempotency_key"](
+                    conn, f"{platform}:{meta_page_id}", postgres=True, namespace="socialPageLink"
+                )
+                yield
+        else:
+            yield
+
+
 def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[str]:
     """Rules that already answered this person on this page (full history).
 
@@ -1738,6 +1775,15 @@ def _rule_for_resend(rule: dict[str, Any], data: dict[str, Any], now: datetime, 
     if data.get("parkedReason") == PARKED_REASON and now >= _comment_time(data, now) + PUBLIC_REPLY_WINDOW:
         skip |= {"public", "like"}
     return _without_actions(rule, skip)
+
+
+def _rule_can_send(rule: dict[str, Any], platform: str, gates: dict[str, str] | None) -> bool:
+    """P4-05: the rule has an action the executor would send now (_execute_rule_actions' own test),
+    so a rule that can only wait for a closed channel never takes a comment another rule answers."""
+    dm = _bool(rule.get("dmEnabled")) and bool(str(rule.get("dmText") or "")) and not _bool(rule.get("pauseDms"))
+    return (dm and channel_state(gates, platform, "dm") is None) or (
+        bool(str(rule.get("publicReply") or "")) and channel_state(gates, platform, "public") is None) or (
+        platform == "fb" and _bool(rule.get("likeComment")) and channel_state(gates, platform, "like") is None)
 
 
 def _reply_left(rule: dict[str, Any], platform: str) -> bool:
@@ -2150,8 +2196,10 @@ def process_comment(
         preferred_rule_id = ""
         # Every public comment lands here; only ids and Meta results are
         # needed, never the base64 photos of every published post. A post
-        # whose OTHER page failed is still live on this one, so scan both.
-        for status in ("published", "failed"):
+        # whose OTHER page failed is still live on this one, and a live page
+        # result also sits on a post being published, waiting for its retry
+        # (scheduled) or cancelled back to a draft: scan every such status.
+        for status in ("published", "failed", "scheduled", "publishing", "draft"):
             for post in _lean_posts(owner_id, status, limit=1000):  # the helper caps at 1000
                 results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
                 if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):
@@ -2159,21 +2207,29 @@ def process_comment(
                     preferred_rule_id = preferred_rule_id or str(post["data"].get("autoReplyRuleId") or "")
         now_local = datetime.now(_zone(settings.get("timezone")))
         rule = None
-        if preferred_rule_id:
-            # The composer's "Auto-reply on this post" choice wins for this
-            # post whatever the rule's own scope says.
-            chosen = [dict(r, scope="all") for r in rules if str(r.get("id") or "") == preferred_rule_id]
-            rule = evaluate_rules(
-                chosen, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
-                already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
-                page_id=str(page_entity["id"]),
-            )
-        if not rule:
-            rule = evaluate_rules(
-                rules, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
-                already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
-                page_id=str(page_entity["id"]),
-            )
+        # P4-05: the rules that can send something now are tried first (oldest first as ever), so a
+        # rule whose every action waits for a closed channel never takes a comment another rule
+        # answers; only when none of them applies does the full list run (a held rule's "skipped" row).
+        gates = capability_gates()
+        sendable = [r for r in rules if _rule_can_send(r, platform, gates)]
+        for pool in ((sendable, rules) if len(sendable) < len(rules) else (rules,)):
+            if preferred_rule_id:
+                # The composer's "Auto-reply on this post" choice wins for this
+                # post whatever the rule's own scope says.
+                chosen = [dict(r, scope="all") for r in pool if str(r.get("id") or "") == preferred_rule_id]
+                rule = evaluate_rules(
+                    chosen, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
+                    already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
+                    page_id=str(page_entity["id"]),
+                )
+            if not rule:
+                rule = evaluate_rules(
+                    pool, settings, platform=platform, post_ref=refs, text=text, from_id=str(from_id or ""),
+                    already_replied_from_ids=set(), now_local=now_local, already_replied_rule_ids=replied_rules,
+                    page_id=str(page_entity["id"]),
+                )
+            if rule:
+                break
         if not rule:
             return None
         log_id = _log_id(owner_id, platform, comment_id)
@@ -2932,7 +2988,7 @@ def create_social_studio_router(
         # P4-01: only a body that names pageRefs is held to the live-page check; otherwise the saved
         # list stays (a removed page keeps its "page removed" label and the rule stays editable).
         stored = None if "pageRefs" in (body or {}) else [str(r) for r in (entity["data"].get("pageRefs") or []) if str(r)]
-        clean = {**_clean_rule(ctx, owner_id, merged, stored_refs=stored), "updatedAt": _iso_now()}
+        clean = {**_clean_rule(ctx, owner_id, merged, stored_refs=stored, stored=entity["data"]), "updatedAt": _iso_now()}
         old = entity["data"]
         if (clean["enabled"] and not _bool(old.get("enabled"), True)) or _match_fields_changed(old, clean):
             clean["activeSince"] = now_ms()  # switched on or pointed elsewhere: older comments are not its
@@ -3048,9 +3104,6 @@ def create_social_studio_router(
             raise HTTPException(status_code=400, detail="igUserId is required for an Instagram account")
         if platform == "fb":
             ig_user_id = ""
-        for existing in _rows_where_json(PAGES_TYPE, "metaPageId", meta_page_id, limit=50):
-            if str(existing["data"].get("platform") or "") == platform:
-                raise HTTPException(status_code=409, detail="This page is already linked to an account")
         now = _iso_now()
         data = {
             "ownerId": owner_id,
@@ -3066,13 +3119,17 @@ def create_social_studio_router(
             "createdAt": now,
             "updatedAt": now,
         }
-        # P4-01: the same Meta page linked again to the same owner gets its old row back (same id),
-        # so the owner's rules (pageRefs) and posts that name it fire again; another owner gets a new row.
-        saved = _revive_unlinked_page(ctx, owner_id, platform, meta_page_id, data)
-        action = "relink" if saved else "link"
-        if not saved:
-            page_id = new_id("spg")
-            saved = ctx["upsert_entity"](PAGES_TYPE, page_id, data, owner_id, reject_existing=True)
+        with _page_link_guard(platform, meta_page_id):  # the check and the insert as one step (no two rows for one page)
+            for existing in _rows_where_json(PAGES_TYPE, "metaPageId", meta_page_id, limit=50):
+                if str(existing["data"].get("platform") or "") == platform:
+                    raise HTTPException(status_code=409, detail="This page is already linked to an account")
+            # P4-01: the same Meta page linked again to the same owner gets its old row back (same id),
+            # so the owner's rules (pageRefs) and posts that name it fire again; another owner gets a new row.
+            saved = _revive_unlinked_page(ctx, owner_id, platform, meta_page_id, data)
+            action = "relink" if saved else "link"
+            if not saved:
+                page_id = new_id("spg")
+                saved = ctx["upsert_entity"](PAGES_TYPE, page_id, data, owner_id, reject_existing=True)
         page_id = str(saved["id"])
         ctx["audit"](scope.uid, action, PAGES_TYPE, page_id, f"Linked {platform} page {meta_page_id}", {"ownerId": owner_id})
         subscribed = _subscribe_page(page_id, saved["data"])  # P4-03: only while the channel is switched on
@@ -3225,8 +3282,10 @@ def create_social_studio_router(
         _editable(entity)
         _live = any(isinstance(r, dict) and r.get("metaPostId") for r in (entity["data"].get("results") or []))
         _body = body or {}
+        # A media value that is not a list is left to _clean_post's 400 (list(5) would be a 500 here).
         _changed = ("caption" in _body and str(_body.get("caption") or "") != str(entity["data"].get("caption") or "")) or (
-            "media" in _body and list(_body.get("media") or []) != list(entity["data"].get("media") or []))
+            "media" in _body and isinstance(_body.get("media") or [], list)
+            and list(_body.get("media") or []) != list(entity["data"].get("media") or []))
         if _live and _changed:  # the composer always sends caption/media; only a real change diverges the live post
             raise HTTPException(status_code=409, detail="A page already published this post; its text and photos cannot be changed here. Retry the failed pages, or delete the post (the live post stays on Meta).")
         owner_id = str(entity["data"].get("ownerId") or "")
