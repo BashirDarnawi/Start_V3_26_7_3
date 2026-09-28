@@ -53,7 +53,10 @@ def add_jsonb_indexes():
         ("idx_ads_page_id", "ads", "((data_json::jsonb->>'pageId'))"),
         ("idx_ads_status", "ads", "((data_json::jsonb->>'status'))"),
         ("idx_ads_delivery_person", "ads", "((data_json::jsonb->>'deliveryPersonId'))"),
-        
+        # Every Meta sync, link and Sync-now checks under the ad's row lock that no
+        # other live ad holds the same Meta ad (meta_ads._ensure_unique_link).
+        ("idx_ads_meta_ad_id", "ads", "((data_json::jsonb->>'metaAdId'))"),
+
         # Customers: commonly searched by name (using jsonb_path_ops for GIN)
         ("idx_customers_name", "customers", "((data_json::jsonb->>'name'))"),  # B-tree index for exact/prefix matches
         ("idx_customers_phone", "customers", "((data_json::jsonb->>'phones'))"),  # Phone search

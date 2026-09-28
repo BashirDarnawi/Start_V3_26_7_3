@@ -3148,14 +3148,20 @@ def _append_meta_activities(data: dict[str, Any], activities: list[dict[str, Any
 
 
 def _ensure_unique_link(conn: Any, local_ad_id: str, meta_ad_id: str) -> None:
-    rows = conn.execute(
-        text("SELECT id,data_json FROM entities WHERE type='ads' AND deleted=false AND id<>:id"),
-        {"id": local_ad_id},
-    ).mappings().all()
-    for row in rows:
-        data = json_loads(row.get("data_json") or "{}") or {}
-        if isinstance(data, dict) and str(data.get("metaAdId") or "") == meta_ad_id:
-            raise HTTPException(status_code=409, detail="This Meta ad is already linked to another Albayan ad")
+    # Runs on every sync under the ad's row lock: the database compares the one
+    # field and returns at most one id (loading every ad, photos included, into
+    # Python here could exhaust memory). Literal type/deleted and the bare
+    # expression match the partial index idx_ads_meta_ad_id (add_jsonb_indexes.py).
+    # meta_ad_id is always a validated, non-empty _meta_id here.
+    row = conn.execute(
+        text(
+            "SELECT id FROM entities WHERE type='ads' AND deleted=false AND id<>:id "
+            f"AND {json_field_sql('metaAdId')}=:meta LIMIT 1"
+        ),
+        {"id": local_ad_id, "meta": meta_ad_id},
+    ).first()
+    if row:
+        raise HTTPException(status_code=409, detail="This Meta ad is already linked to another Albayan ad")
 
 
 def _write_ad_data(conn: Any, row: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -3259,6 +3265,7 @@ def _scalar_entity_rows(
     order_by_sql: str = "",
     limit: int | None = None,
     params: dict[str, Any] | None = None,
+    parsed_once: bool = False,
 ) -> list[Any]:
     """Read only small top-level JSON fields, never the full entity blob.
 
@@ -3266,16 +3273,28 @@ def _scalar_entity_rows(
     discovery/maintenance scans need only a handful of scalar values, so
     projecting them in SQL prevents those large values from being copied out
     of the database and materialized as Python dictionaries every pass.
+
+    ``parsed_once``: on PostgreSQL each row's JSON is cast to jsonb ONCE in a
+    subquery (the db.json_fields_select_sql pattern) instead of once per field
+    read; where_sql/order_by_sql must then be built with ``parsed=True``.
     """
+    parsed = parsed_once and str(get_engine().dialect.name or "") == "postgresql"
     columns = ["id", "created_at", "last_modified"]
     for field_name, alias in fields:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
             raise ValueError(f"unsafe scalar alias: {alias!r}")
-        columns.append(f"{json_field_sql(field_name)} AS {alias}")
-    query = (
-        f"SELECT {','.join(columns)} FROM entities "
-        "WHERE type=:type AND deleted=false"
-    )
+        columns.append(f"{_json_text_sql(field_name, parsed=parsed)} AS {alias}")
+    if parsed:
+        query = (
+            f"SELECT {','.join(columns)} FROM (SELECT id,created_at,last_modified,"
+            "data_json::jsonb AS doc FROM entities WHERE type=:type AND deleted=false "
+            "OFFSET 0) AS parsed_once WHERE true"
+        )
+    else:
+        query = (
+            f"SELECT {','.join(columns)} FROM entities "
+            "WHERE type=:type AND deleted=false"
+        )
     if where_sql:
         query += f" AND ({where_sql})"
     if order_by_sql:
@@ -3390,9 +3409,18 @@ def _entity_by_id(conn: Any, entity_type: str, entity_id: str) -> tuple[Any | No
     return (row, data) if isinstance(data, dict) else (None, None)
 
 
-def _nonnegative_json_integer_sql(field_name: str) -> str:
+def _json_text_sql(field_name: str, *, parsed: bool = False) -> str:
+    """json_field_sql, or ``(doc ->> 'f')`` inside a _scalar_entity_rows(parsed_once=True)
+    query on PostgreSQL, where ``doc`` is the row's JSON already cast once."""
+    sql = json_field_sql(field_name)  # also validates the field name
+    if parsed and str(get_engine().dialect.name or "") == "postgresql":
+        return f"(doc ->> '{field_name}')"
+    return sql
+
+
+def _nonnegative_json_integer_sql(field_name: str, *, parsed: bool = False) -> str:
     """Portable, non-throwing integer coercion for scheduler metadata."""
-    value = json_field_sql(field_name)
+    value = _json_text_sql(field_name, parsed=parsed)
     if get_engine().dialect.name == "postgresql":
         clean = f"BTRIM(COALESCE({value}, ''))"
         return (
@@ -3406,9 +3434,9 @@ def _nonnegative_json_integer_sql(field_name: str) -> str:
     )
 
 
-def _valid_meta_id_sql(field_name: str) -> str:
+def _valid_meta_id_sql(field_name: str, *, parsed: bool = False) -> str:
     """Portable SQL guard matching the numeric Meta ID validation in Python."""
-    value = json_field_sql(field_name)
+    value = _json_text_sql(field_name, parsed=parsed)
     if get_engine().dialect.name == "postgresql":
         return f"COALESCE({value}, '') ~ '^[0-9]{{5,40}}$'"
     clean = f"CAST(COALESCE({value}, '') AS TEXT)"
@@ -6119,6 +6147,10 @@ def _defer_meta_sync_quietly(ad_id: str, expected_last_modified: int | None, *, 
             if not isinstance(data, dict):
                 return
             data["metaNextSyncAt"] = now_ms() + int(days) * 86_400_000
+            # Also a scheduling stamp: a frozen row can never reach the current
+            # media version, so without it the repair lane (which ignores
+            # metaNextSyncAt) picked it again on every pass.
+            data["metaMediaRepairVersion"] = _META_MEDIA_VERSION
             conn.execute(
                 text(
                     "UPDATE entities SET data_json=:data "
@@ -6197,14 +6229,16 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
             ("metaSyncedAt", "meta_synced_at"),
             ("metaAdCreatedTime", "meta_ad_created_time"),
         )
-        valid_id = _valid_meta_id_sql("metaAdId")
-        next_sync_sql = _nonnegative_json_integer_sql("metaNextSyncAt")
-        media_version_sql = _nonnegative_json_integer_sql("metaMediaVersion")
-        failure_count_sql = _nonnegative_json_integer_sql("metaSyncFailureCount")
-        repair_version_sql = _nonnegative_json_integer_sql("metaMediaRepairVersion")
+        # parsed=True: each row's JSON is parsed once per query, not once per field.
+        valid_id = _valid_meta_id_sql("metaAdId", parsed=True)
+        next_sync_sql = _nonnegative_json_integer_sql("metaNextSyncAt", parsed=True)
+        media_version_sql = _nonnegative_json_integer_sql("metaMediaVersion", parsed=True)
+        repair_version_sql = _nonnegative_json_integer_sql("metaMediaRepairVersion", parsed=True)
+        # A row already stamped for this version (a failed repair, or a closed
+        # month parked by _defer_meta_sync_quietly) follows metaNextSyncAt.
         repair_sql = (
             f"{media_version_sql}<:_media_version AND "
-            f"({failure_count_sql}=0 OR {repair_version_sql}<:_media_version)"
+            f"{repair_version_sql}<:_media_version"
         )
         query_params = {"_current": current, "_media_version": _META_MEDIA_VERSION}
         repair_rows = []
@@ -6217,6 +6251,7 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
                 order_by_sql="created_at DESC,id ASC",
                 limit=1,
                 params=query_params,
+                parsed_once=True,
             )
         due_where = f"{valid_id} AND {next_sync_sql}<=:_current"
         if not backoff_active:
@@ -6231,6 +6266,7 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
             order_by_sql=f"{next_sync_sql} ASC,id ASC",
             limit=safe_limit,
             params=query_params,
+            parsed_once=True,
         )
         rows = repair_rows + due_rows
     for row in rows:
@@ -6246,22 +6282,19 @@ def _due_meta_ads(limit: int) -> list[dict[str, Any]]:
         except (TypeError, ValueError, OverflowError):
             media_version = 0
         try:
-            failure_count = int(row.get("meta_sync_failure_count") or 0)
-        except (TypeError, ValueError, OverflowError):
-            failure_count = 0
-        try:
             repair_version = int(row.get("meta_media_repair_version") or 0)
         except (TypeError, ValueError, OverflowError):
             repair_version = 0
         # Every resolver upgrade grants ONE immediate repair attempt even to
         # rows that were failing under the previous resolver (their multi-hour
         # backoff would otherwise keep photos/names missing long after the
-        # deployment that fixes them). A failed attempt stamps
-        # metaMediaRepairVersion, so the priority lane never hammers Meta.
+        # deployment that fixes them). A failed attempt (or a closed-month
+        # park) stamps metaMediaRepairVersion, so the priority lane never
+        # hammers Meta. Mirrors repair_sql above.
         needs_media_repair = (
             not backoff_active
             and media_version < _META_MEDIA_VERSION
-            and (failure_count == 0 or repair_version < _META_MEDIA_VERSION)
+            and repair_version < _META_MEDIA_VERSION
         )
         if next_sync > current and not needs_media_repair:
             continue
@@ -6696,22 +6729,26 @@ def _archive_meta_media_batch(limit: int, *, stop_event: threading.Event | None 
     stored = 0
     targets: list[tuple[str, str, str, str, str]] = []  # (type, id, url, data_key, from_key)
     with db_conn() as conn:
-        ad_id_expr = json_field_sql("metaAdId")
-        ad_url_expr = json_field_sql("metaThumbnailUrl")
-        ad_from_expr = json_field_sql("metaThumbnailArchivedFrom")
-        ad_data_expr = json_field_sql("metaThumbnailData")
-        ad_rows = conn.execute(
-            text(
-                f"SELECT id,{ad_url_expr} AS media_url FROM entities "
-                "WHERE type='ads' AND deleted=false "
-                f"AND COALESCE({ad_id_expr}, '')<>'' "
+        # parsed=True: every 60 s over every ad, so each row's JSON is parsed
+        # once per scan, not once per field read.
+        ad_id_expr = _json_text_sql("metaAdId", parsed=True)
+        ad_url_expr = _json_text_sql("metaThumbnailUrl", parsed=True)
+        ad_from_expr = _json_text_sql("metaThumbnailArchivedFrom", parsed=True)
+        ad_data_expr = _json_text_sql("metaThumbnailData", parsed=True)
+        ad_rows = _scalar_entity_rows(
+            conn,
+            "ads",
+            (("metaThumbnailUrl", "media_url"),),
+            where_sql=(
+                f"COALESCE({ad_id_expr}, '')<>'' "
                 f"AND LOWER(COALESCE({ad_url_expr}, '')) LIKE 'https://%' "
                 f"AND (COALESCE({ad_from_expr}, '')<>COALESCE({ad_url_expr}, '') "
-                f"OR TRIM(COALESCE({ad_data_expr}, ''))='') "
-                "ORDER BY last_modified ASC LIMIT :limit"
+                f"OR TRIM(COALESCE({ad_data_expr}, ''))='')"
             ),
-            {"limit": scan_limit},
-        ).mappings().all()
+            order_by_sql="last_modified ASC",
+            limit=scan_limit,
+            parsed_once=True,
+        )
         for row in ad_rows:
             url = _clean_https_url(row.get("media_url"))
             if not url or not attemptable(url):
@@ -6721,22 +6758,24 @@ def _archive_meta_media_batch(limit: int, *, stop_event: threading.Event | None 
                 break
         remaining = max(0, limit - len(targets))
         if remaining:
-            page_id_expr = json_field_sql("metaPageId")
-            page_url_expr = json_field_sql("metaPagePictureUrl")
-            page_from_expr = json_field_sql("metaPagePictureArchivedFrom")
-            page_data_expr = json_field_sql("metaPagePictureData")
-            page_rows = conn.execute(
-                text(
-                    f"SELECT id,{page_url_expr} AS media_url FROM entities "
-                    "WHERE type='pages' AND deleted=false "
-                    f"AND COALESCE({page_id_expr}, '')<>'' "
+            page_id_expr = _json_text_sql("metaPageId", parsed=True)
+            page_url_expr = _json_text_sql("metaPagePictureUrl", parsed=True)
+            page_from_expr = _json_text_sql("metaPagePictureArchivedFrom", parsed=True)
+            page_data_expr = _json_text_sql("metaPagePictureData", parsed=True)
+            page_rows = _scalar_entity_rows(
+                conn,
+                "pages",
+                (("metaPagePictureUrl", "media_url"),),
+                where_sql=(
+                    f"COALESCE({page_id_expr}, '')<>'' "
                     f"AND LOWER(COALESCE({page_url_expr}, '')) LIKE 'https://%' "
                     f"AND (COALESCE({page_from_expr}, '')<>COALESCE({page_url_expr}, '') "
-                    f"OR TRIM(COALESCE({page_data_expr}, ''))='') "
-                    "ORDER BY last_modified ASC LIMIT :limit"
+                    f"OR TRIM(COALESCE({page_data_expr}, ''))='')"
                 ),
-                {"limit": remaining + min(len(_META_MEDIA_FAILURES), 200)},
-            ).mappings().all()
+                order_by_sql="last_modified ASC",
+                limit=remaining + min(len(_META_MEDIA_FAILURES), 200),
+                parsed_once=True,
+            )
             for row in page_rows:
                 url = _clean_https_url(row.get("media_url"))
                 if url and attemptable(url):
