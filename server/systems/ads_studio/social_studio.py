@@ -2199,7 +2199,8 @@ def process_comment(
         # whose OTHER page failed is still live on this one, and a live page
         # result also sits on a post being published, waiting for its retry
         # (scheduled) or cancelled back to a draft: scan every such status.
-        for status in ("published", "failed", "scheduled", "publishing", "draft"):
+        # A comment without a post id matches no post (a failed page result keeps metaPostId "").
+        for status in ("published", "failed", "scheduled", "publishing", "draft") if str(post_ref or "") else ():
             for post in _lean_posts(owner_id, status, limit=1000):  # the helper caps at 1000
                 results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
                 if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):

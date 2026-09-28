@@ -6,7 +6,8 @@ Behaviour tests for the verified findings of the batch; each one failed before i
 * 8     two admins linking the same Meta page at the same moment make ONE socialPages row (one 409);
 * 17    a customer can still switch a rule off/on (or rename it) once its channel is unavailable;
 * 18    a rule whose every action waits for a closed channel does not take a comment a later rule answers;
-* 19    a comment on a live post still in the scheduled / publishing / draft status gets the post's rule;
+* 19    a comment on a live post still in the scheduled / publishing / draft status gets the post's rule
+        (and a comment without a post id matches no post through a failed page's empty metaPostId);
 * 20    a post whose auto-reply rule was deleted can be saved again from the composer.
 
 Users are made here with unique emails; every Meta call is faked (nothing reaches the network).
@@ -388,6 +389,34 @@ def test_comment_on_a_live_post_in_another_status_gets_the_posts_rule(actors, gr
     logged = _comment(meta_page_id, f"{meta_page_id}_3", "nice", post_ref=live_ref)
     assert logged is not None and logged["ruleId"] == rule["id"]
     assert graph.paths() == [f"{meta_page_id}_3/comments"]
+
+
+@pytest.mark.parametrize("status", ["scheduled", "failed", "draft"])
+def test_comment_without_a_post_id_matches_no_post_by_its_failed_page(actors, graph, status):
+    # A failed page result keeps metaPostId "": a comment Meta sent without a post id must not
+    # match it, so neither the post's own auto-reply rule nor a rule chosen for the post answers.
+    a = actors["a"]["cookies"]
+    owner = actors["a"]["id"]
+    meta_page_id = _meta_id()
+    page = _link(actors, "a", meta_page_id)
+    post = client.post(f"{API}/posts", json={"pageIds": [page["id"]], "caption": "x"}, cookies=a)
+    assert post.status_code == 200, post.text
+    post_id = post.json()["id"]
+    own = _rule(a, name="This post", scope="chosen", postIds=["some_other_post"], publicReply="On this post")
+    chosen = _rule(a, name="Chosen", scope="chosen", postIds=[post_id], publicReply="Chosen post")
+    general = _rule(a, name="All", publicReply="Thanks")
+    studio._ctx()["patch_entity"](studio.POSTS_TYPE, post_id, {
+        "status": status, "autoReplyRuleId": own["id"],
+        "results": [{"pageId": page["id"], "metaPostId": "", "error": "x", "retryable": True}],
+    }, owner)
+    logged = _comment(meta_page_id, f"{meta_page_id}_4", "nice", post_ref="")
+    assert logged is not None and logged["ruleId"] == general["id"], (logged, own["id"], chosen["id"])
+    # The same comment ON the post (its real id) still gets the post's rule.
+    studio._ctx()["patch_entity"](studio.POSTS_TYPE, post_id, {
+        "results": [{"pageId": page["id"], "metaPostId": f"{meta_page_id}_66", "error": ""}],
+    }, owner)
+    logged = _comment(meta_page_id, f"{meta_page_id}_5", "nice", post_ref=f"{meta_page_id}_66")
+    assert logged is not None and logged["ruleId"] == own["id"]
 
 
 # ---------------------------------------------------------------------------
