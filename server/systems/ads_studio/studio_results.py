@@ -371,6 +371,9 @@ REQUEST_FIELDS = (
     # What a Submitted request holds (wallet_payments.campaign_hold_minor: the total from P1 on) and
     # whether budgetMinorUSD is one day of it (the wallet summary's Reserved list).
     "totalBudgetMinorUSD", "budgetType",
+    # A desk link removed since (ad_campaign_actions._link_history): the stop route and the settle
+    # gates still treat the request as launched (ever_launched), so the stage must too.
+    "everLinked",
 )
 
 
@@ -474,14 +477,23 @@ def _reasons(value: Any) -> list[str]:
     return out
 
 
+def _ever_linked(request: dict[str, Any]) -> bool:
+    """``everLinked`` as stored (a JSON true) or as a database read hands it back (SQLite 1,
+    PostgreSQL 'true'): the request carried a desk link once, removed since."""
+    value = request.get("everLinked")
+    return value is True or (type(value) is int and value == 1) or str(value or "").strip().lower() == "true"
+
+
 def _not_started(request: dict[str, Any], today: Any) -> bool:
-    """The customer's own stop still returns everything (mirrors the stop route's 'started' rule)."""
+    """The customer's own stop still returns everything (mirrors the stop route's 'started' rule,
+    ad_campaign_actions.ever_launched: a desk link removed since still counts as launched)."""
     start = parse_day(request.get("startDate"))
     return bool(
         start
         and today <= start
         and not str(request.get("publishStatus") or "").strip()
         and not str(request.get("metaCampaignId") or "").strip()
+        and not _ever_linked(request)
         and minor(request.get("spendMinorUSD")) == 0
     )
 
@@ -614,8 +626,10 @@ def derive_display_stage(request: dict[str, Any], results: dict[str, Any] | None
     elif end_passed:
         # A legacy request that staff marked launched by hand (publishStatus, or a Meta id that
         # is not a number) did run: it waits for its final amount like any ended ad. Only a
-        # request with no launch marker at all is a full return.
-        marked = str(request.get("publishStatus") or "").strip() or str(request.get("metaCampaignId") or "").strip()
+        # request with no launch marker at all is a full return. A desk link removed since
+        # (everLinked) is settled on that campaign's Meta spend, never a full return.
+        marked = (str(request.get("publishStatus") or "").strip() or str(request.get("metaCampaignId") or "").strip()
+                  or _ever_linked(request))
         stage, variant = 10, ("" if marked else "never_linked")
     else:
         stage = 4

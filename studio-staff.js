@@ -2415,7 +2415,10 @@ function renderStudioAdminAlert(alert) {
   const details = alert && alert.details && typeof alert.details === 'object' ? alert.details : {};
   const bits = [];
   if (alert && alert.lastAt) bits.push(adsStudioText(`last ${studioAdminAgo(alert.lastAt)}`, `آخر مرة ${studioAdminAgo(alert.lastAt)}`));
-  if (count > 1) bits.push(adsStudioText(`${count} times`, `${count} مرات`));
+  // The server's count is what the finding counts: the scan's findings, the ad account's studio campaigns.
+  if (count > 1 && kind === 'integrity_violation') bits.push(adsStudioText(`${count} findings`, `${count} مخالفات`));
+  else if (count > 1 && ['studio_funds_low', 'studio_account_inactive', 'studio_funds_unreadable'].includes(kind)) bits.push(adsStudioText(`${count} campaigns`, `${count} حملات`));
+  else if (count > 1) bits.push(adsStudioText(`${count} times`, `${count} مرات`));
   if (alert && alert.relatedId) bits.push(`${String(alert.relatedType || '').slice(0, 30)}: ${String(alert.relatedId).slice(0, 80)}`);
   if (Number.isSafeInteger(details.absorbedMinorUSD) && details.absorbedMinorUSD > 0) bits.push(adsStudioText(`Albayan absorbs ${studioUsd(details.absorbedMinorUSD)}`, `يتحمل البيان ${studioUsd(details.absorbedMinorUSD)}`));
   if (Number.isSafeInteger(details.daysLeft)) bits.push(adsStudioText(`${details.daysLeft} days left`, `بقي ${details.daysLeft} يوماً`));

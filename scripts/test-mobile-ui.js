@@ -5871,6 +5871,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Admin alerts, collisions and diagnostics: the server\'s bilingual alert label (Arabic in Arabic) with the late heartbeat and an Acknowledge per open alert (single flight, the row leaves the list, UNKNOWN_ALERT in the reader\'s words); the collision counts and rows with why each is kept or removable and no apply button; the queues met %, capacity, USD owed vs funds, the go/no-go rows, the heartbeat and Scan money now (single flight, the counts, a 429 shows the wait)',
     adminCases.every(Boolean), `cases ${failed(adminCases)}; ack ${ackCalls.length} notes ${JSON.stringify(ackNotes)} pulse ${pulseReadsAfterAck} unknown ${JSON.stringify(unknownNote)} reads ${alertsReads}; scan ${scanCalls.length} diag ${diagReads} note ${(scannedHtml.match(/studio-admin-scan-note[^>]*>[^<]*<[^>]*>([^<]*)</) || [])[1]} wait ${(scanWaitHtml.match(/studio-admin-scan-note[^>]*>[^<]*<[^>]*>([^<]*)</) || [])[1]}`);
+  // Review loop r1 (A2 #16): an alert's count is labelled by what it counts (one scan's findings, an ad account's campaigns), never "N times".
+  const countedAlert = (kind, count, language = 'en') => String(inLanguage(language, `renderStudioAdminAlert(${JSON.stringify(alertRow('alc1', { kind, count }))})`));
+  const countedCases = [
+    countedAlert('integrity_violation', 3).includes('3 findings') && !countedAlert('integrity_violation', 3).includes('3 times'),
+    countedAlert('studio_funds_low', 4).includes('4 campaigns') && !countedAlert('studio_funds_low', 4).includes('4 times'),
+    countedAlert('studio_account_inactive', 2).includes('2 campaigns') && countedAlert('studio_funds_unreadable', 5).includes('5 campaigns'),
+    countedAlert('integrity_violation', 3, 'ar').includes('3 مخالفات') && countedAlert('studio_funds_low', 4, 'ar').includes('4 حملات') && !countedAlert('studio_funds_low', 4, 'ar').includes('مرات'),
+    countedAlert('stop_request_overdue', 2).includes('2 times') && !countedAlert('integrity_violation', 1).includes('findings')
+  ];
+  check('Admin alert counts say what they count: "3 findings" for the money scan, "4 campaigns" for an ad account\'s funds/status alerts (Arabic too), never "N times" for them',
+    countedCases.every(Boolean), `cases ${failed(countedCases)}: ${countedAlert('integrity_violation', 3).replace(/\s+/g, ' ').slice(0, 400)}`);
   who.admin = false;
   meReply(staffMe);
   openAt('/studio?tab=review&section=more&id=settings-rollout');

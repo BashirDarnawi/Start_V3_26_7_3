@@ -190,7 +190,8 @@ def test_invalid_token_sets_global_state(actors, token, caplog):
     assert me["down"] is True and set(me) == {"down", "labels"} and me["labels"]["en"] and me["labels"]["ar"]
     assert "190" not in json.dumps(me) and "token" not in json.dumps(me).lower()
     [alert] = _alerts("meta_connection_down")
-    assert alert["_createdBy"] is None and alert["relatedId"] == "token"  # a system alert (created_by NULL)
+    # A system alert (created_by NULL), one per outage (keyed by its start).
+    assert alert["_createdBy"] is None and alert["relatedId"] == f"token:{state['since']}"
     assert alert["details"]["errorCode"] == "190.460" and alert["details"]["since"] == state["since"]
     listed = client.get("/api/studio/admin/alerts", cookies=actors["admin"]["cookies"]).json()["alerts"]
     shown = [row for row in listed if row["kind"] == "meta_connection_down"]

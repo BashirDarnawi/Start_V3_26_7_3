@@ -26,7 +26,7 @@ message text (§7.5). Its ``text`` field (the one line a chat webhook shows, P0-
   (``studioAlerts.channelSentAt``, the same way): stop_request_overdue, meta_connection_down,
   meta_token_expiring, integrity_violation, studio_funds_low, studio_account_inactive and
   studio_funds_unreadable (§7.4). At most ``SENDS_PER_PASS`` sends per pass; a send the webhook
-  refused is tried again on a later pass (after the sender's cooldown).
+  refused is tried again on a later pass (a refused send starts no cooldown in the sender).
 * ``report_heartbeat(beat)``: the operations worker's watch of the studio jobs loop, which cannot
   report its own death (§7.4). ``beat`` is studio_jobs.jobs_heartbeat(): while the loop is switched
   on and late (no tick for 5 minutes) one notification goes out per stale episode (keyed by the last
@@ -174,7 +174,7 @@ def notify_staff(
             box["sent"] = False
         if box["sent"] is False:
             with _LOCK:
-                _SENT.pop(payload_kind, None)  # a refused send may be tried again (after the sender's cooldown)
+                _SENT.pop(payload_kind, None)  # a refused send may be tried again (the sender forgot it too)
 
     thread = threading.Thread(target=deliver, name="albayan-studio-alert", daemon=True)
     thread.start()

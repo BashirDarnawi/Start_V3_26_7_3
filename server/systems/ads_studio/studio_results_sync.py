@@ -216,6 +216,12 @@ def fields_after_read(
     insights_ok = read.get("insightsState") == "ok" and read.get("spendMinor") is not None
     spend = minor(read.get("spendMinor"))
     impressions = minor(read.get("impressions"))
+    if (insights_ok and spend == 0 and impressions == 0 and base["spendConfirmedAt"]
+            and (base["spendMinorUSD"] > 0 or (base["lifetimeImpressions"] or 0) > 0)):
+        # Lifetime numbers never fall to zero: an empty insights answer after Meta confirmed
+        # delivery of THIS campaign is unknown, not "never delivered" (no $0 final read, no
+        # full refund from it).
+        insights_ok = False
     if insights_ok:
         count = read.get("resultCount")
         fields.update({
@@ -291,11 +297,16 @@ def fields_after_read(
 
 # ------------------------------------------------------------------ one request
 
-def _error_plan(error: Any, now: datetime) -> dict[str, Any]:
+def _error_plan(error: Any, now: datetime, account: str = "") -> dict[str, Any]:
     """What a failed read means for the row and the pass (see the module docstring, "Errors")."""
     code = str(getattr(error, "code", "") or "meta_error")
-    if _meta.is_meta_pause_refusal(error):  # Albayan's own pause: nothing reached Meta, the pass stops
-        wait = max(_meta.meta_lane_pause_seconds("studio_results"), 60)
+    if _meta.is_meta_pause_refusal(error):  # Albayan's own refusal: nothing reached Meta
+        app_wide = _meta.meta_lane_pause_seconds("studio_results")
+        parked = _meta.meta_lane_pause_seconds("studio_results", account) if account and not app_wide else 0
+        if parked:  # only this ad account is parked (its own usage): skip its requests, go on with the others
+            return {"state": "throttled", "next": now + timedelta(seconds=max(parked, 60)), "park": True, "stop": False,
+                    "called": False}
+        wait = max(app_wide, 60)  # the pause of the whole lane: the pass stops
         return {"state": "throttled", "next": now + timedelta(seconds=wait), "park": False, "stop": True, "called": False}
     if code == "not_configured":
         return {"state": "error", "next": now + RETRY_AFTER_ERROR, "park": False, "stop": True, "called": False}
@@ -358,7 +369,8 @@ def sync_campaign(
 
     Returns ``{campaignId, outcome, metaCalled, park, stopPass, code, alerts}``; ``outcome`` is
     ``synced``, ``error`` (``code`` = Albayan's error class), ``not_linked`` (no call), ``claimed``
-    (another sync holds the row) or ``lost_claim``. ``park`` is the ad account to park, or ''.
+    (another sync holds the row) or ``lost_claim``. ``park`` is the ad account to park, or ''
+    (``parkUntil``: the earliest end of that park).
     ``manual`` (Check Meta now) stamps ``manualCheckAt`` with the claim.
     """
     now = _aware(now or utc_now())
@@ -390,13 +402,14 @@ def sync_campaign(
     try:
         read = _meta.get_campaign_results(account, meta_id, request_id=campaign_id)
     except _meta.MetaAdsError as error:
-        plan = _error_plan(error, now)
+        plan = _error_plan(error, now, account)
         _write_quietly(campaign_id, request["ownerId"], {
             "syncState": plan["state"], "lastErrorCode": _error_code(error), "nextSyncAt": _iso(plan["next"]),
             "syncClaimedUntil": None,
         }, claim_version)
         return {**out, "outcome": "error", "code": str(error.code), "metaCalled": plan["called"],
-                "park": account if plan["park"] else "", "stopPass": plan["stop"]}
+                "park": account if plan["park"] else "", "parkUntil": _iso(plan["next"]) if plan["park"] else "",
+                "stopPass": plan["stop"]}
     except Exception as error:  # a fault of ours: free the claim at once, then let the caller see it
         _write_quietly(campaign_id, request["ownerId"], {
             "syncState": "error", "lastErrorCode": "internal", "nextSyncAt": _iso(now + RETRY_AFTER_ERROR),
@@ -560,7 +573,9 @@ def run_results_sync(
         elif outcome["outcome"] == "error":
             report["errors"].append({"campaignId": item["campaignId"], "code": outcome["code"]})
         if outcome["park"]:
-            parks[outcome["park"]] = parked_now[outcome["park"]] = now + PARK_FOR
+            # At least PARK_FOR, longer when Albayan's own park of the account (Meta's regain time) is.
+            until = max(now + PARK_FOR, parse_time(outcome.get("parkUntil")) or now)
+            parks[outcome["park"]] = parked_now[outcome["park"]] = until
         if outcome["stopPass"]:
             report["skipped"] = "stopped"
             break

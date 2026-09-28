@@ -152,15 +152,18 @@ def parked_reply_count() -> int:
 
 
 def _raise_connection_alert(now: datetime) -> int:
-    """The day's ``meta_connection_down`` admin alert (system: no customer), with the parked replies."""
+    """The day's ``meta_connection_down`` admin alert (system: no customer), with the parked replies.
+    One per outage (keyed by its ``since``): the watch's re-raise refreshes it, and a new outage
+    later the same day gets its own, unacknowledged and unsent alert."""
     state = connection_state()
     try:
         parked = parked_reply_count()
     except Exception:
         parked = 0
+    related = f"{TOKEN_ALERT_ID}:{state['since']}" if state["since"] else TOKEN_ALERT_ID
     with db_conn() as conn:
         _jobs().raise_alert(
-            conn, "meta_connection_down", related_type="metaConnection", related_id=TOKEN_ALERT_ID,
+            conn, "meta_connection_down", related_type="metaConnection", related_id=related,
             details={"since": state["since"], "errorCode": state["errorCode"], "parkedReplies": parked}, now=now,
         )
     return parked

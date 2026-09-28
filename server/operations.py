@@ -786,7 +786,8 @@ def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] 
 
     ``line`` (additive, P3-21) fills the payload's ``text`` field, the one line a chat webhook shows
     (Slack, Google Chat, Discord read ``text``); it defaults to ``message``. Not configured, inside
-    the per-kind cooldown, or refused: False, and the caller decides whether to try again later."""
+    the per-kind cooldown, or refused: False, and the caller decides whether to try again later (a
+    refused or failed POST starts no cooldown)."""
     url = (os.getenv("ALBAYAN_ALERT_WEBHOOK_URL") or "").strip()
     if not url:
         return False
@@ -795,7 +796,8 @@ def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] 
     with _state_lock:
         if now - _last_alert_at.get(kind, 0) < cooldown:
             return False
-        _last_alert_at[kind] = now
+        previous = _last_alert_at.get(kind)
+        _last_alert_at[kind] = now  # stamped first: two senders never post the same kind at once
     payload = json.dumps({
         "application": "Albayan",
         "kind": kind,
@@ -815,6 +817,13 @@ def _send_alert(kind: str, severity: str, message: str, details: dict[str, Any] 
         return True
     except Exception as exc:
         print(f"[albayan] Operations alert failed: {type(exc).__name__}")
+        with _state_lock:
+            # Nobody heard it: a refused or timed-out POST starts no cooldown, the next try may send.
+            if _last_alert_at.get(kind) == now:
+                if previous is None:
+                    _last_alert_at.pop(kind, None)
+                else:
+                    _last_alert_at[kind] = previous
         return False
 
 

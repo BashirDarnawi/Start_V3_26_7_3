@@ -2314,7 +2314,8 @@ class MetaAdsClient:
         return result
 
     def get_ad_page_identity(self, meta_ad_id: Any) -> dict[str, str]:
-        """Best-effort Page ID of one Meta ad (history older than Albayan)."""
+        """Best-effort Page ID of one Meta ad (history older than Albayan). A retryable failure
+        (Albayan's pause, a throttle, a timeout) is raised: it says nothing about the ad."""
         try:
             ad = self._get(
                 _meta_id(meta_ad_id, "Meta ad"),
@@ -2325,7 +2326,9 @@ class MetaAdsClient:
                     )
                 },
             )
-        except MetaAdsError:
+        except MetaAdsError as error:
+            if error.retryable:
+                raise
             return {}
         creative = ad.get("creative") if isinstance(ad.get("creative"), dict) else {}
         page_id = _creative_page_id(creative)
@@ -5281,7 +5284,15 @@ def _compute_partner_page_stats(
                 continue
             if current - misses.get(meta_ad_id, 0) < _PARTNER_MISS_RETRY_MS:
                 continue
-            identity = client.get_ad_page_identity(meta_ad_id)
+            try:
+                identity = client.get_ad_page_identity(meta_ad_id)
+            except MetaAdsError as error:
+                # Paused, throttled or timed out: not a definitive miss. Nothing is remembered
+                # for this ad and the rest waits for the next refresh (a partial scan's short TTL).
+                account_errors.append(error.public_message)
+                if error.code == "rate_limited":
+                    rate_limited_scan = True
+                break
             resolved_now += 1
             page_id = _clean_text(identity.get("pageId"), 40) if identity else ""
             if _META_ID_RE.fullmatch(page_id):
@@ -5527,6 +5538,17 @@ def _pending_meta_snapshot(
         "metaNextSyncAt": now_ms() + 5_000,
         "metaUnlinkedAt": "",
     }
+
+
+def _webhook_discovery(account_ids: list[str], startup_cutoff: str | None) -> None:
+    """The webhook's wake-up discovery, run after the 200 reply: it never raises. A refusal (the
+    Meta pause, no accounts, every read failed) is not a server error; the paced worker retries."""
+    try:
+        discover_meta_ads(account_ids, startup_cutoff=startup_cutoff)
+    except MetaAdsError:
+        return
+    except Exception:
+        print("[albayan] Webhook-triggered Meta discovery failed; the worker retries.")
 
 
 def discover_meta_ads(
@@ -7524,9 +7546,9 @@ def create_meta_ads_router(
         # Treat the webhook only as a signed wake-up signal. Albayan reads the
         # authoritative ad from Meta and never trusts webhook field values.
         background_tasks.add_task(
-            discover_meta_ads,
+            _webhook_discovery,
             account_ids or list(config.allowed_account_ids),
-            startup_cutoff=_WORKER_STARTED_AT or None,
+            _WORKER_STARTED_AT or None,
         )
         return {"received": True}
 
