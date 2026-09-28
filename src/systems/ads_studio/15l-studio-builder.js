@@ -1636,15 +1636,18 @@ async function studioBuilderSendOnce() {
   try { upsertAdsStudioEntity(entity); } catch (_) {}
   const data = entity && entity.data ? entity.data : {};
   const total = Number.isSafeInteger(data.totalBudgetMinorUSD) && data.totalBudgetMinorUSD > 0 ? data.totalBudgetMinorUSD : studioBuilderTotalMinor(session.draft);
+  // A newer request opened while this one was on its way stays open (with its reload memory). This
+  // request opened again from My ads meanwhile (a new copy of the same id) is the sent one: it closes.
+  const open = _studioBuilder.session;
+  const stillOpen = open === session || !!(open && open.id === session.id);
   studioBuilderStopTimers(session);
-  if (_adsStudioDraft === session.draft) {
+  if (stillOpen && open !== session) studioBuilderStopTimers(open);  // the copy's pending save never goes
+  if (_adsStudioDraft === session.draft || (stillOpen && _adsStudioDraft === open.draft)) {
     _adsStudioDraft = null;
     _adsStudioEditingId = '';
     _adsStudioEditingBaseline = 0;
     _adsStudioConfirmationChecked = false;
   }
-  // A newer request opened while this one was on its way stays open (with its reload memory).
-  const stillOpen = _studioBuilder.session === session;
   if (stillOpen) {
     _studioBuilder.sent = { id: session.id, totalMinor: total, name: String(data.name || session.draft.name || '').slice(0, 160) };
     _studioBuilder.session = null;

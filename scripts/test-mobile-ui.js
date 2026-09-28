@@ -1868,6 +1868,39 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('review reason codes: 7 codes EN/AR, shown to the customer, required for changes/reject (T7), in-page approval', !loadError && reasonCases.every(Boolean),
     loadError || `cases ${reasonCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
 
+  // Review loop r1 #32 (follow-up): a decision on request B never closes request A's open "Confirm approval"
+  // row (B's redraw waits for the network, so A's button stayed tappable with no version); A's confirm
+  // approves only the version its row opened with. A "Confirm approval" tapped after its row closed opens
+  // the row again (the amount now here), never an approval of an unconfirmed version.
+  box.state.adCampaignRequests = [
+    { id: 'p1-pinA', status: 'Submitted', createdBy: 'customer-9', name: 'Request A', budgetType: 'lifetime', budgetMinorUSD: 2500, totalBudgetMinorUSD: 2500, _lastModified: 21 },
+    { id: 'p1-pinB', status: 'Submitted', createdBy: 'customer-9', name: 'Request B', budgetType: 'lifetime', budgetMinorUSD: 3000, totalBudgetMinorUSD: 3000, _lastModified: 31 }
+  ];
+  const resendA = version => {
+    box.state.adCampaignRequests = box.state.adCampaignRequests.map(row => row.id === 'p1-pinA' ? { ...row, budgetMinorUSD: 50000, totalBudgetMinorUSD: 50000, _lastModified: version } : row);
+  };
+  const reviewCalls = id => apiCalls.filter(call => call.path === `/api/ad-studio/campaigns/${id}/review`);
+  apiCalls.length = 0;
+  notices.length = 0;
+  run("cancelAdsStudioApproval(); reviewAdsStudioCampaignOnce('p1-pinA', 'Approved');");  // A's confirm row opens at version 21
+  run("setAdsStudioReviewReason('p1-pinB', 'creative_quality'); setAdsStudioReviewNote('p1-pinB', 'Clearer photo please'); reviewAdsStudioCampaign('p1-pinB', 'Changes Requested');");  // B waits for the network
+  const rowAfterB = [run('_adsStudioApproveConfirmId'), run('_adsStudioApproveConfirmVersion')];
+  resendA(24);  // live sync: A withdrawn, edited ($500) and sent again
+  run("reviewAdsStudioCampaign('p1-pinA', 'Approved', null, true);");  // A's "Confirm approval", still on screen
+  const staleConfirm = { calls: reviewCalls('p1-pinA').length, changed: notices.some(note => /changed meanwhile/.test(note.message)), row: run('_adsStudioApproveConfirmId') };
+  run("cancelAdsStudioApproval(); reviewAdsStudioCampaignOnce('p1-pinA', 'Approved', true);");  // a confirm tapped after its row closed
+  const closedConfirm = { calls: reviewCalls('p1-pinA').length, row: run('_adsStudioApproveConfirmId'), version: run('_adsStudioApproveConfirmVersion'), queue: String(run('renderAdsStudioReviewQueue()')) };
+  run("reviewAdsStudioCampaignOnce('p1-pinA', 'Approved', true);");  // confirmed on the row reopened with the new amount
+  const pinnedApproval = reviewCalls('p1-pinA').map(call => call.options && call.options.body);
+  const pinCases = [
+    rowAfterB[0] === 'p1-pinA' && rowAfterB[1] === 21 && reviewCalls('p1-pinB').length === 1,
+    staleConfirm.calls === 0 && staleConfirm.changed === true && staleConfirm.row === '',
+    closedConfirm.calls === 0 && closedConfirm.row === 'p1-pinA' && closedConfirm.version === 24 && closedConfirm.queue.includes('Confirm approval') && closedConfirm.queue.includes('$500.00'),
+    pinnedApproval.length === 1 && !!pinnedApproval[0] && pinnedApproval[0].decision === 'Approved' && pinnedApproval[0].expectedLastModified === 24
+  ];
+  check('classic review: a decision on another request keeps this one\'s "Confirm approval" row and its version; a confirm for a changed request is refused, one tapped after its row closed reopens the row, never an unpinned approval',
+    !loadError && pinCases.every(Boolean), loadError || `cases ${pinCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}; ${JSON.stringify({ rowAfterB, staleConfirm, closed: { ...closedConfirm, queue: undefined }, pinnedApproval })}`);
+
   // P1-08c: the Arabic map holds every shared refusal prefix T1-T14 exactly; the entries that were
   // there before are unchanged (entries are only ever added).
   const shared = [
@@ -4394,6 +4427,50 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 builder: a send that finishes after a new request was opened keeps the new one open (session, reload memory, no "Sent" screen over it) and only announces the earlier one',
     !loadError && raceCases.every(Boolean), loadError || `cases ${failed(raceCases)}; ${JSON.stringify({ raceInFlight, open: race.open, second: raceSecondId, memory: race.memory, sent: race.sent, firstSend: race.firstSend, firstStatus: race.firstStatus })}`);
+
+  // Review loop r1 #29 (follow-up): the customer starts a new request and then opens the one on its way
+  // again from My ads (a new copy of the same id, still a Draft on the server). When the send finishes,
+  // that copy is the sent request: it closes with the "Sent" screen, its reload memory goes, and its
+  // pending save never goes (it would edit a request already sent).
+  const reopenStore = new Map();
+  win.sessionStorage = { getItem: k => (reopenStore.has(k) ? reopenStore.get(k) : null), setItem: (k, v) => reopenStore.set(k, String(v)), removeItem: k => reopenStore.delete(k) };
+  run(`__heldSubmit = null; __submitNow = apiSubmitAdCampaignRequest; __problemsNow = studioBuilderAllProblems;
+    apiSubmitAdCampaignRequest = function (id, expected, operationId) {
+      __calls.push({ path: 'submit:' + id, method: 'POST', expected, operationId });
+      return new Promise(resolve => { __heldSubmit = () => resolve(__entity({ ...(state.adCampaignRequests.find(item => item.id === id) || {}), status: 'Submitted', totalBudgetMinorUSD: 5000, _lastModified: Number(expected) + 1 })); });
+    };
+    studioBuilderAllProblems = () => [];
+    __notes.length = 0;`);
+  run("studioBuilderStart('boost'); studioBuilderInput('budget', { value: '50' }); __runTimers();");
+  run('var __sentSession = _studioBuilder.session; var __reopenSend = null; studioBuilderSend(null).then(ok => { __reopenSend = ok; });');
+  run('__runTimers();');
+  const reopenHeld = json("{ held: typeof __heldSubmit === 'function', status: (state.adCampaignRequests.find(item => item.id === __sentSession.id) || {}).status }") || {};
+  run("studioBuilderStart('full'); studioBuilderInput('notes', { value: 'Another request' }); __runTimers();");
+  run(`__replies['/api/collections/adCampaignRequests/' + encodeURIComponent(__sentSession.id) + '?include_media=false'] = [{ error: { status: 0, name: 'TypeError', message: 'Failed to fetch' } }];
+    studioBuilderEdit(__sentSession.id);`);
+  run("var __reopened = _studioBuilder.session; studioBuilderInput('name', { value: 'Typed on the copy' });");
+  const reopenBefore = json(`{ copy: __reopened !== __sentSession && !!__reopened && __reopened.id === __sentSession.id, timer: !!(__reopened && __reopened.timer),
+    memory: studioBuilderMemory() && studioBuilderMemory().id === __sentSession.id }`) || {};
+  const reopenPatches = () => json("__calls.filter(call => call.path === 'patch:' + __sentSession.id).length");
+  const patchesBefore = reopenPatches();
+  run('__heldSubmit();');
+  const reopenAfter = json(`{ open: _studioBuilder.session ? _studioBuilder.session.id : null, sent: _studioBuilder.sent && _studioBuilder.sent.id === __sentSession.id,
+    memory: studioBuilderMemory(), timer: __reopened.timer, retry: __reopened.retryTimer, draft: _adsStudioDraft === __reopened.draft, send: __reopenSend,
+    earlierNote: __notes.some(note => note.includes('Your earlier request was sent for review')) }`) || {};
+  run('__runTimers(); render();');
+  const reopenHtml = html();
+  const patchesAfter = reopenPatches();
+  run('apiSubmitAdCampaignRequest = __submitNow; studioBuilderAllProblems = __problemsNow; __timers.clear();');
+  delete win.sessionStorage;
+  const reopenCases = [
+    reopenHeld.held === true && reopenHeld.status === 'Draft',
+    reopenBefore.copy === true && reopenBefore.timer === true && reopenBefore.memory === true,
+    reopenAfter.open === null && reopenAfter.sent === true && reopenAfter.memory === null && reopenAfter.send === true,
+    reopenAfter.timer === null && reopenAfter.retry === null && reopenAfter.draft === false && patchesAfter === patchesBefore,
+    reopenAfter.earlierNote === false && reopenHtml.includes('data-testid="studio-builder-sent"')
+  ];
+  check('Studio v2 builder: a request opened again from My ads while its send was on its way closes with the "Sent" screen when the send finishes (reload memory gone, the copy\'s pending save never goes)',
+    !loadError && reopenCases.every(Boolean), loadError || `cases ${failed(reopenCases)}; ${JSON.stringify({ reopenHeld, reopenBefore, reopenAfter, patchesBefore, patchesAfter })}`);
 }
 
 {
@@ -6025,10 +6102,16 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   resend('r_pin', 34, { totalBudgetMinorUSD: 50000, budgetMinorUSD: 50000, primaryText: 'Unseen text' });
   const pinRefused = outcome('studioDeskSheetConfirm()');
   const pinCallsRefused = calls('POST', '/api/ad-studio/campaigns/r_pin/review').length;
-  run('studioDeskSheetClose();');
+  // The refused sheet (old amount, old version) closes by itself: no second "Confirm" on it, no stuck
+  // "changed meanwhile" loop; the reviewer never has to Cancel first.
+  const pinSheetAfter = json('{ kind: _studioDesk.sheet.kind, id: _studioDesk.sheet.id, connected: __sheetEls[__sheetEls.length - 1].isConnected }') || {};
+  const pinSecondTap = json('studioDeskSheetConfirm()');
+  const pinCallsSecondTap = calls('POST', '/api/ad-studio/campaigns/r_pin/review').length;
   openAt('/studio?tab=review&section=requests&id=r_pin');
   const pinRedrawn = html();
-  outcome("studioDeskDecide('r_pin', 'Approved')");
+  const pinFresh = outcome("studioDeskDecide('r_pin', 'Approved')");
+  const pinFreshSheet = String(run('__sheetEls.length ? __sheetEls[__sheetEls.length - 1].html : ""'));
+  const pinFreshVersion = json('_studioDesk.sheet.version');
   reply('/api/ad-studio/campaigns/r_pin/review', { id: 'r_pin', data: { ...pinRow, totalBudgetMinorUSD: 50000, budgetMinorUSD: 50000, status: 'Approved', paidMinorUSD: 50000, _lastModified: 35 }, lastModified: 35 });
   const pinApproved = outcome('studioDeskSheetConfirm()');
   const pinCalls = calls('POST', '/api/ad-studio/campaigns/r_pin/review');
@@ -6045,13 +6128,15 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const pinCases = [
     !!pinOpen && pinOpen.pending === true && pinSheet.includes('This charges the held $50.00'),
     !!pinRefused && pinRefused.ok === false && /changed meanwhile/.test(pinRefused.text) && pinCallsRefused === 0,
+    pinSheetAfter.kind === '' && pinSheetAfter.id === '' && pinSheetAfter.connected === false && pinSecondTap === null && pinCallsSecondTap === 0,
     pinRedrawn.includes('Unseen text') && pinRedrawn.includes('This request changed meanwhile'),
+    !!pinFresh && pinFresh.pending === true && pinFreshSheet.includes('This charges the held $500.00') && pinFreshVersion === 34,
     !!pinApproved && pinApproved.ok === true && pinCalls.length === 1 && pinCalls[0].body.expectedLastModified === 34 && pinCalls[0].body.decision === 'Approved',
     !!backRefused && backRefused.ok === false && backCallsRefused === 0 && backRedrawn.includes('This request changed meanwhile'),
     !!backDone && backDone.ok === true && backCalls.length === 1 && backCalls[0].body.expectedLastModified === 44
   ];
   check('Team desk review: the approve sheet approves only the version it showed (a request withdrawn, edited and sent again meanwhile is refused with no call and "changed meanwhile"; the next draw approves the new version); send back / reject pin the version first drawn the same way',
-    pinCases.every(Boolean), `cases ${failed(pinCases)}; refused ${JSON.stringify(pinRefused)} approved ${JSON.stringify(pinApproved)} calls ${JSON.stringify(pinCalls.map(c => c.body.expectedLastModified))} back ${JSON.stringify(backRefused)} ${JSON.stringify(backCalls.map(c => c.body.expectedLastModified))}`);
+    pinCases.every(Boolean), `cases ${failed(pinCases)}; refused ${JSON.stringify(pinRefused)} sheet after ${JSON.stringify(pinSheetAfter)} second tap ${JSON.stringify(pinSecondTap)} fresh v${pinFreshVersion} approved ${JSON.stringify(pinApproved)} calls ${JSON.stringify(pinCalls.map(c => c.body.expectedLastModified))} back ${JSON.stringify(backRefused)} ${JSON.stringify(backCalls.map(c => c.body.expectedLastModified))}`);
 
   // Review loop r1 #34: the admin "Payments waiting" page says so when the list could not be read (Try again),
   // never "Reading…" for ever, and it does not ask again on every draw; Try again reads it.

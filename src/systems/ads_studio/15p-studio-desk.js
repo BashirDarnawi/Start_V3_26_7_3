@@ -584,6 +584,9 @@ async function studioDeskDecideOnce(requestId, decision, note, reasonCode, pinne
     const changed = studioDeskDecision(requestId);
     changed.version = 0;
     changed.error = adsStudioText('This request changed meanwhile. Check its new state.', 'تغيّر هذا الطلب في الأثناء. راجع حالته الجديدة.');
+    // Its approve sheet still shows the old amount and version: it closes (the error stays in the
+    // decision box), so the next Approve opens a fresh sheet for the version now here.
+    if (_studioDesk.sheet.kind === 'approve' && _studioDesk.sheet.id === requestId) studioDeskSheetClose();
     return { ok: false, text: changed.error };
   }
   const attempt = adsStudioActionAttempt('review', request.id, Number(request._lastModified));
