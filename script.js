@@ -42752,11 +42752,8 @@ function metaAdCurrencyIsKnownUSD(ad) {
 }
 
 function metaAdAutoBudgetUSD(ad) {
-  // The ad's REAL planned total from Meta, in dollars — used as the automatic
-  // ad budget for a linked ad so the typed budget can never drift from what
-  // Meta actually runs (e.g. $50 entered for a $30 ad). Returns 0 when the
-  // budget cannot be known: not Meta-linked, an ad account that is not known to
-  // be in USD, or an open-ended ad (daily budget with no end date has no total).
+  // Meta's REAL planned total in dollars: a linked ad's automatic budget, so a typed one cannot
+  // drift from what Meta runs. 0 when unknown: not linked, not known USD, or open-ended (no end).
   if (!ad?.metaAdId) return 0;
   if (!metaAdCurrencyIsKnownUSD(ad)) return 0;
   const minor = metaAdsPlannedTotalMinor(ad);
@@ -42793,10 +42790,7 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
   const category = String(adPage?.category || ad?.metaPageCategory || '').trim();
   const displayCategory = category && category.toLocaleLowerCase() !== displayName.toLocaleLowerCase() ? category : '';
   if (!pageName && !pageId && !localName) return '<span class="text-xs text-slate-400">-</span>';
-  // The ad's own Facebook page vs the local page it is attached to. When they
-  // disagree, the cell used to print the ad's Facebook id right above ANOTHER
-  // business's page name with no hint — exactly the picture that hid the
-  // wrong-page incident. Flag it so a mislink is visible at a glance.
+  // The ad's own Facebook page vs its local page: flag a mismatch so a mislink is visible at a glance.
   const adFacebookId = String(ad?.metaPageId || '').trim();
   const linkedFacebookId = String(adPage?.metaPageId || '').trim();
   const pageMismatch = !!(adFacebookId && linkedFacebookId && adFacebookId !== linkedFacebookId);
@@ -42833,9 +42827,7 @@ function metaAdThumbnailSrc(ad) {
 function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
   const url = adPagePictureUrl(ad, adPage);
   if (!url) return '';
-  // When the main tile already shows the page picture standing in for the ad
-  // photo (page_avatar substitute, no uploaded photos visible), a second copy
-  // of the same image beside it would be pure noise.
+  // The main tile already shows the page picture (page_avatar, no visible uploads): no second copy.
   const photoCount = getAdPhotoCount(ad);
   const uploadedVisible = photoCount > 0 && can('ads', 'viewPhotos');
   if (!uploadedVisible && String(ad?.metaThumbnailSource || '') === 'page_avatar') return '';
@@ -42860,10 +42852,8 @@ function adPageAvatarError(img) {
 function renderMetaAdThumbnail(ad, isAr) {
   if (!ad?.metaAdId) return '';
   if (!metaAdThumbnailSrc(ad)) {
-    // A linked ad whose real photo has not been resolved yet: show an honest
-    // "photo loading" tile instead of nothing (and never the page logo).
-    // Admins see the technical trace (which Meta doors were closed) in the
-    // tooltip so a stuck photo can be diagnosed from a screenshot.
+    // Real photo not resolved yet: an honest "photo loading" tile (never the page logo);
+    // admins see which Meta doors were closed in the tooltip.
     const pending = isAr ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
     const trace = isCurrentUserAdmin() && ad.metaMediaTrace ? ` · ${String(ad.metaMediaTrace)}` : '';
     return `<div class="meta-ad-thumbnail-button meta-ad-thumbnail-placeholder" role="img" title="${Security.escapeHtml(pending + trace)}" aria-label="${Security.escapeHtml(pending)}"><i data-lucide="image" class="h-5 w-5"></i></div>`;
@@ -42925,9 +42915,7 @@ function adUploadedThumbnailError(img) {
 }
 
 function metaAdsThumbnailError(img) {
-  // Meta photo URLs are signed and expire. When one dies before the next
-  // sync refreshes it, degrade to the same "photo loading" tile instead of
-  // hiding the tile (which silently removed the photo column for that ad).
+  // Signed Meta photo URLs expire: degrade to the "photo loading" tile, never hide the tile.
   const button = img?.closest?.('.meta-ad-thumbnail-button');
   if (!button || button.classList.contains('meta-ad-thumbnail-placeholder')) return;
   const pending = metaAdsIsArabic() ? 'صورة الإعلان قيد التحميل من Meta' : 'Ad photo is loading from Meta';
@@ -43296,7 +43284,10 @@ function renderMetaAdActionButton(ad, isAr) {
 
 function metaAdsErrorMessage(error) {
   const raw = String(error?.message || error?.detail || '').trim();
-  return raw || (metaAdsIsArabic() ? 'تعذّر الاتصال بـ Meta. حاول مرة أخرى.' : 'Could not connect to Meta. Please try again.');
+  const isAr = metaAdsIsArabic();
+  if (isAr && /belongs to Albayan Studio/.test(raw)) return 'هذا إعلان تابع لـ Albayan Studio ولا يمكن ربطه هنا.';
+  if (isAr && /already linked to another Albayan ad/.test(raw)) return 'إعلان Meta هذا مرتبط بإعلان آخر (ربما مسودة مستوردة).';
+  return raw || (isAr ? 'تعذّر الاتصال بـ Meta. حاول مرة أخرى.' : 'Could not connect to Meta. Please try again.');
 }
 
 function metaAdsOperationId(action, adId, value = '') {
@@ -43551,12 +43542,12 @@ async function metaAdsRunMutation(action, metaAdId = '') {
       : (isAr ? 'تم تحديث معلومات Meta بدون تغيير الحسابات.' : 'Meta information updated without changing accounting.'), 'success');
   } catch (error) {
     metaAdsUi.busyAction = '';
-    if (Number(error?.status) === 409 || String(error?.message || '').toLowerCase().includes('conflict')) {
-      await metaAdsRefreshAfterConflict(target.id);
-      metaAdsUi.error = isAr ? 'تغيّر الإعلان أثناء العمل. تم تحميل النسخة الجديدة؛ راجعها وحاول مرة أخرى.' : 'The ad changed while you were working. The latest version was loaded; review it and try again.';
-    } else {
-      metaAdsUi.error = metaAdsErrorMessage(error);
-    }
+    // Only the version check's "Conflict: ..." means the ad changed; other 409s keep the server's words.
+    const is409 = Number(error?.status) === 409;
+    if (is409) await metaAdsRefreshAfterConflict(target.id);
+    metaAdsUi.error = is409 && /^conflict\b/i.test(error?.message || '')
+      ? (isAr ? 'تغيّر الإعلان أثناء العمل. تم تحميل النسخة الجديدة؛ راجعها وحاول مرة أخرى.' : 'The ad changed while you were working. The latest version was loaded; review it and try again.')
+      : metaAdsErrorMessage(error);
     metaAdsRenderModal();
   }
 }
@@ -43599,6 +43590,7 @@ async function metaAdsCheckForNewAds() {
       applyValidatedServerEntityBatch(result.imported.map(entity => ({ collection: 'ads', entity })), 'metaAutoImport');
     }
     if (metaAdsUi.status) metaAdsUi.status.importState = result.state;
+    if (result.busy) return showNotification(isAr ? 'فحص Meta يعمل الآن' : 'A Meta check is running', isAr ? 'ستظهر الإعلانات الجديدة بعد قليل.' : 'New ads will appear in a moment.', 'info');
     const count = result.imported.length;
     showNotification(
       isAr ? 'اكتمل فحص Meta' : 'Meta check complete',

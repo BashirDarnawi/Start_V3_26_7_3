@@ -5633,11 +5633,20 @@ def discover_meta_ads(
         client = get_meta_ads_client()
         state = _load_import_state()
         baseline_complete = bool(state.get("baselineComplete"))
-        scan_pages = (
-            config.discovery_baseline_pages
-            if include_existing or not baseline_complete
-            else config.discovery_fast_pages
-        )
+        # The baseline is kept PER AD ACCOUNT: an account added to the allowlist later gets its own
+        # baseline pass (only ads created after the cutoff are imported) instead of having its recent
+        # history drafted. State saved before this key existed: every account allowed now counts.
+        if "baselineAccounts" in state:
+            baselined = {str(value) for value in (state.get("baselineAccounts") or [])} & allowed
+        else:
+            baselined = set(allowed) if baseline_complete else set()
+
+        def _scan_pages(account: str) -> int:
+            if include_existing or account not in baselined:
+                return config.discovery_baseline_pages
+            return config.discovery_fast_pages
+
+        scan_pages = max(_scan_pages(account_id) for account_id in requested)
         known = {
             str(value)
             for value in (state.get("knownMetaAdIds") or [])
@@ -5646,15 +5655,17 @@ def discover_meta_ads(
         already_linked = _existing_meta_ad_ids()
         found: dict[str, tuple[str, dict[str, Any]]] = {}
         account_errors: list[str] = []
+        scanned: set[str] = set()  # accounts Meta listed in full this pass
         rate_limited_scan = False
         for account_id in requested:
             try:
-                for row in client.list_ads(account_id, max_pages=scan_pages):
+                for row in client.list_ads(account_id, max_pages=_scan_pages(account_id)):
                     if not isinstance(row, dict):
                         continue
                     meta_id = str(row.get("id") or "")
                     if _META_ID_RE.fullmatch(meta_id):
                         found[meta_id] = (account_id, row)
+                scanned.add(account_id)
             except MetaAdsError as error:
                 account_errors.append(error.public_message)
                 # Once Meta has limited this token, more account requests in
@@ -5681,14 +5692,16 @@ def discover_meta_ads(
         if include_existing:
             # A draft the office deleted stays deleted (it would come back as a duplicate).
             candidate_ids = sorted(set(found) - already_linked - _existing_meta_ad_ids(deleted=True))
-        elif baseline_complete:
-            candidate_ids = sorted(set(found) - known - already_linked)
         else:
             candidate_ids = sorted(
                 meta_id
-                for meta_id, (_, row) in found.items()
+                for meta_id, (account_id, row) in found.items()
                 if meta_id not in already_linked
-                and _created_after_cutoff(row.get("createdTime"), startup_cutoff)
+                and (
+                    meta_id not in known
+                    if account_id in baselined
+                    else _created_after_cutoff(row.get("createdTime"), startup_cutoff)
+                )
             )
 
         # Which currency an account bills in decides whether the browser may
@@ -5796,6 +5809,11 @@ def discover_meta_ads(
                     continue
                 failed.add(meta_id)
                 last_error = error.public_message
+            except HTTPException as error:
+                if error.status_code == 423:
+                    continue  # its month is closed: remembered as known, never retried every minute
+                failed.add(meta_id)
+                last_error = "One Meta ad could not be imported. Albayan will retry."
             except Exception:
                 failed.add(meta_id)
                 last_error = "One Meta ad could not be imported. Albayan will retry."
@@ -5819,6 +5837,8 @@ def discover_meta_ads(
             # old ad from that account could be mistaken for a new one later.
             "baselineComplete": baseline_complete or not account_errors,
             "baselineAt": state.get("baselineAt") or stamp,
+            # An account joins only after Meta listed it in full; a removed one leaves (re-adding it re-baselines).
+            "baselineAccounts": sorted((baselined | scanned) & allowed),
             "lastDiscoveryAt": stamp,
             "lastSuccessAt": stamp if not account_errors and not failed else state.get("lastSuccessAt"),
             # Provider throttling is a shared temporary pause, not a broken ad
@@ -5867,6 +5887,12 @@ def apply_meta_snapshot(
     imported_page_id = ""
     imported_page_created = False
     with guard, db_conn() as conn:
+        if postgres and action == "link":
+            # A link can give this row a NEW Meta ad id. Take the lock import_meta_ad_draft holds
+            # while it checks for and inserts a draft, BEFORE the row lock (the same order it and
+            # meta_collisions use), so a discovery pass importing that Meta ad right now cannot
+            # also commit a second row for it: one of the two waits and then sees the other.
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('albayan_meta_import'))"))
         row = _lock_ad_row(conn, ad_id, postgres=postgres)
         data = json_loads(row.get("data_json") or "{}") or {}
         if not isinstance(data, dict):
@@ -5942,19 +5968,26 @@ def apply_meta_snapshot(
                 "metaAdSetName",
                 "metaCampaignName",
                 "metaObjective",
-                "metaStartTime",
-                "metaEndTime",
                 "metaAdAccountName",
                 "metaCurrency",
             ):
                 if not merged.get(preserved_key) and data.get(preserved_key):
                     merged[preserved_key] = data[preserved_key]
+            # get_ad_snapshot names the ad set and campaign only when it could read them (Meta
+            # requires both names), so a missing name marks a degraded pass. Only such a pass keeps
+            # the known schedule and budget. A healthy read is taken as it is: an ad set switched to
+            # run continuously really has no end date and no planned total any more.
+            schedule_unavailable = not snapshot.get("metaAdSetName") or not snapshot.get("metaCampaignName")
+            for schedule_key in ("metaStartTime", "metaEndTime"):
+                if schedule_unavailable and not merged.get(schedule_key) and data.get(schedule_key):
+                    merged[schedule_key] = data[schedule_key]
             # A degraded pass that could not read the ad set/campaign must not
             # wipe the known budget picture. The budget block is preserved as
             # a unit, and the remaining money is recomputed against the
             # (still updating) spend so it can genuinely reach zero.
             if (
-                not _minor_units(merged.get("metaTotalBudgetMinor"))
+                schedule_unavailable
+                and not _minor_units(merged.get("metaTotalBudgetMinor"))
                 and _minor_units(data.get("metaTotalBudgetMinor"))
             ):
                 for budget_key in (

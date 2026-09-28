@@ -290,6 +290,61 @@ async function main() {
     sandbox.resetAuthenticatedServerCaches();
     assert.equal(run('metaInsightsUi.funds'), null, 'account money never survives logout');
   });
+  // Review loop r2 M2 #3: only the version check's "Conflict: ..." 409 is "the ad changed"; the
+  // link's other 409s (a Studio ad, a Meta ad another Albayan ad holds) show the server's reason.
+  await test('Meta link: a 409 that is not a version conflict shows the server reason, in both languages', async () => {
+    const linkWith = async (message, language = 'en') => {
+      const { sandbox, state, run } = loadBrowserSource();
+      state.language = language;
+      state.ads = [{ id: 'ad1', _lastModified: 5 }];
+      const reloads = [];
+      sandbox.metaAdsRenderModal = () => {};
+      sandbox.apiGetEntity = async (collection, id) => { reloads.push(id); throw new Error('offline'); };
+      sandbox.apiLinkMetaAd = async () => { throw Object.assign(new Error(message), { status: 409 }); };
+      run("metaAdsUi.targetAdId = 'ad1'; metaAdsUi.busyAction = '';");
+      await sandbox.metaAdsRunMutation('link', '123456789012345');
+      return { error: run('metaAdsUi.error'), busy: run('metaAdsUi.busyAction'), reloads };
+    };
+    const taken = await linkWith('This Meta ad is already linked to another Albayan ad');
+    assert.equal(taken.error, 'This Meta ad is already linked to another Albayan ad');
+    assert.equal(taken.busy, '');
+    const studio = 'This Meta ad belongs to Albayan Studio (a studio request linked its campaign). It cannot be linked to an Albayan Manager ad.';
+    assert.equal((await linkWith(studio)).error, studio);
+    assert.ok(!/changed while you were working/.test((await linkWith(studio)).error));
+    const takenAr = await linkWith('This Meta ad is already linked to another Albayan ad', 'ar');
+    assert.ok(/مرتبط بإعلان آخر/.test(takenAr.error) && !/[A-Za-z]{5,}/.test(takenAr.error.replace(/Meta|Albayan|Studio/g, '')), takenAr.error);
+    assert.ok(/Albayan Studio/.test((await linkWith(studio, 'ar')).error) && /تابع/.test((await linkWith(studio, 'ar')).error));
+    const stale = await linkWith('Conflict: ad has changed');
+    assert.ok(/changed while you were working/.test(stale.error), stale.error);
+    assert.deepEqual(stale.reloads, ['ad1'], 'a version conflict reloads the ad');
+  });
+  // Review loop r2 M2 #7: a check that found the background pass already running is not "no new ads".
+  await test('Check for new ads: a busy server pass is reported as running, never as "no new ads"', async () => {
+    for (const language of ['en', 'ar']) {
+      const { sandbox, state, run } = loadBrowserSource();
+      state.language = language;
+      const notes = [];
+      sandbox.metaAdsRenderModal = () => {};
+      sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+      sandbox.apiRunMetaAutoImport = async () => ({ imported: [], busy: true, state: { lastError: '' } });
+      run("metaAdsUi.busyAction = ''; metaAdsUi.status = { configured: true };");
+      await sandbox.metaAdsCheckForNewAds();
+      assert.equal(notes.length, 1);
+      assert.ok(!/no new ads|لا توجد إعلانات جديدة/.test(notes[0].message), notes[0].message);
+      assert.equal(notes[0].type, 'info');
+      assert.ok(language === 'en' ? /running/.test(notes[0].title) : /يعمل/.test(notes[0].title), notes[0].title);
+      assert.equal(run('metaAdsUi.busyAction'), '', 'the button is released');
+      assert.deepEqual(run('metaAdsUi.status.importState'), { lastError: '' });
+    }
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'en';
+    const notes = [];
+    sandbox.metaAdsRenderModal = () => {};
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.apiRunMetaAutoImport = async () => ({ imported: [], busy: false, state: {} });
+    await sandbox.metaAdsCheckForNewAds();
+    assert.equal(notes[0].message, 'There are no new ads right now.', 'a finished pass with nothing new still says so');
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 
