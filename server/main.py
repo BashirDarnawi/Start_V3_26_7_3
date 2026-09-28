@@ -143,7 +143,7 @@ from .subscription_plans import (
 from .wallet_payments import (
     campaign_capture_open_minor,
     create_wallet_payments_router,
-    release_orphan_campaign_payment,
+    release_open_campaign_capture,
     wallet_campaign_holds_minor,
 )
 from .financial_core import (
@@ -4957,10 +4957,14 @@ def _soft_delete_ad_campaign_atomic(
                 # the customer's money is stranded forever (idempotent, no-op).
                 # A Stopped cycle was settled by the stop itself (refund 0 when
                 # the budget was spent) - never "orphaned".
-                release_orphan_campaign_payment(
+                released = release_open_campaign_capture(
                     conn, _WALLET_PAYMENTS_CTX, {**data, "id": campaign_id},
                     str(user.get("id") or "system"),
                 )
+                if released:  # audited (kept forever) like every release door, on this transaction
+                    audit(str(user.get("id") or "system"), "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id,
+                          f"Returned an orphan capture for {campaign_id}",
+                          {"transactionId": released, "source": "archive", "status": str(data.get("status") or "")}, conn=conn)
             if (
                 str(data.get("status") or "") == "Approved"
                 and campaign_capture_open_minor(conn, _WALLET_PAYMENTS_CTX, {**data, "id": campaign_id}) > 0
@@ -13194,6 +13198,32 @@ ALLOWED_USER_UPDATE_FIELDS = frozenset(
 )
 
 
+def _refuse_user_delete_conn(conn: Any, user_id: str) -> None:
+    """409 while deleting this account would trap work or money: campaigns under review or approved,
+    open delivery jobs, charges waiting for confirmation, or wallet money in ANY currency (a deleted
+    account can never send, receive or be reversed, so the money could never leave it)."""
+    _open_campaigns = conn.execute(
+        text(f"SELECT COUNT(*) FROM entities WHERE type='adCampaignRequests' AND deleted=false AND created_by=:uid AND {json_field_sql('status')} IN ('Submitted','Approved')"),
+        {"uid": user_id},
+    ).scalar() or 0
+    if int(_open_campaigns) > 0:  # held or captured money would be trapped in a wallet nobody can use
+        raise HTTPException(status_code=409, detail="This account has campaigns under review or approved; decide or stop them first")
+    _open_jobs = conn.execute(
+        text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"),
+        {"uid": user_id},
+    ).scalar() or 0
+    if int(_open_jobs) > 0:  # the delivery board would show these jobs as unassigned
+        raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them first")
+    _pending_pay = conn.execute(
+        text(f"SELECT COUNT(*) FROM entities WHERE type='walletPaymentRequests' AND deleted=false AND created_by=:uid AND {json_field_sql('status')}='pending'"),
+        {"uid": user_id},
+    ).scalar() or 0
+    if int(_pending_pay) > 0:  # a confirmation after the delete would credit a wallet nobody can use
+        raise HTTPException(status_code=409, detail="This account has payment requests waiting for confirmation; cancel them first")
+    if any(_wallet_balance_minor(conn, user_id, currency) != 0 for currency in sorted(WALLET_CURRENCIES)):
+        raise HTTPException(status_code=409, detail="This account still has money in its wallet; transfer it to another user first, then delete the account")
+
+
 def _apply_user_update_atomic(
     user_id: str,
     update_fields: dict[str, Any],
@@ -13202,7 +13232,10 @@ def _apply_user_update_atomic(
     """Apply a user update while atomically preserving one active Admin."""
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     guard = nullcontext() if postgres else _SQLITE_ADMIN_MEMBERSHIP_LOCK
-    with guard, _auth_mutation_guard():
+    # A delete re-checks its blockers under the user row lock (PostgreSQL: every money path locks the
+    # same row; SQLite: the wallet lock), so a charge, credit or submit racing the delete cannot slip in.
+    wallet_guard = _SQLITE_WALLET_LOCK if not postgres and update_fields.get("deleted") is True else nullcontext()
+    with guard, _auth_mutation_guard(), wallet_guard:
         with db_conn() as conn:
             if postgres:
                 _lock_idempotency_key(
@@ -13223,6 +13256,8 @@ def _apply_user_update_atomic(
                 and str(current.get("role") or "").lower() == "admin"
             ):
                 raise HTTPException(status_code=403, detail="Only an Admin can modify an Admin account")
+            if update_fields.get("deleted") is True and not bool(current.get("deleted")):
+                _refuse_user_delete_conn(conn, user_id)
 
             current_is_admin = (
                 str(current.get("role") or "").lower() == "admin"
@@ -13415,34 +13450,17 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
         update_fields["password_iterations"] = pw.iterations
     if body.deleted is not None:
         if body.deleted is True:
-            with db_conn() as conn:
-                _open_campaigns = conn.execute(
-                    text(f"SELECT COUNT(*) FROM entities WHERE type='adCampaignRequests' AND deleted=false AND created_by=:uid AND {json_field_sql('status')} IN ('Submitted','Approved')"),
-                    {"uid": user_id},
-                ).scalar() or 0
-            if int(_open_campaigns) > 0:  # held or captured money would be trapped in a wallet nobody can use
-                raise HTTPException(status_code=409, detail="This account has campaigns under review or approved; decide or stop them first")
-            with db_conn() as conn:
-                _open_jobs = conn.execute(
-                    text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"),
-                    {"uid": user_id},
-                ).scalar() or 0
-            if int(_open_jobs) > 0:  # the delivery board would show these jobs as unassigned
-                raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them first")
-            with db_conn() as conn:
-                _pending_pay = conn.execute(
-                    text(f"SELECT COUNT(*) FROM entities WHERE type='walletPaymentRequests' AND deleted=false AND created_by=:uid AND {json_field_sql('status')}='pending'"),
-                    {"uid": user_id},
-                ).scalar() or 0
-            if int(_pending_pay) > 0:  # a confirmation after the delete would credit a wallet nobody can use
-                raise HTTPException(status_code=409, detail="This account has payment requests waiting for confirmation; cancel them first")
+            with db_conn() as conn:  # first here (the release below must never touch a live request), again under the row lock
+                _refuse_user_delete_conn(conn, user_id)
             with (nullcontext() if str(get_engine().dialect.name or "") == "postgresql" else _SQLITE_WALLET_LOCK), db_conn() as conn:  # a crashed approval's capture must not die with the account
                 _parked = conn.execute(
                     text(f"SELECT id, data_json FROM entities WHERE type='adCampaignRequests' AND created_by=:uid AND {json_field_sql('status')} NOT IN ('Approved','Stopped')"),
                     {"uid": user_id},
                 ).mappings().all()
-                for _row in _parked:
-                    release_orphan_campaign_payment(conn, _WALLET_PAYMENTS_CTX, {**(json_loads(_row["data_json"] or "{}") or {}), "id": str(_row["id"])}, str(admin.get("id") or ""))
+                for _row in _parked:  # the returned money then shows in the wallet, and the locked re-check refuses the delete
+                    _tx = release_open_campaign_capture(conn, _WALLET_PAYMENTS_CTX, {**(json_loads(_row["data_json"] or "{}") or {}), "id": str(_row["id"])}, str(admin.get("id") or ""))
+                    if _tx:  # audited (kept forever) like every release door, on this transaction
+                        audit(str(admin.get("id") or ""), "wallet_release", AD_CAMPAIGN_COLLECTION, str(_row["id"]), f"Returned an orphan capture for {_row['id']}", {"transactionId": _tx, "source": "account_delete"}, conn=conn)
         update_fields["deleted"] = bool(body.deleted)
 
     update_fields["last_modified"] = now

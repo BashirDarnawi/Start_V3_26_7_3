@@ -1119,6 +1119,10 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['Nobody can override the settlement of their own request', 'لا يمكن لأحد تجاوز تسوية طلبه هو.', '', 'Nobody can override the settlement of their own request.'],
   ['Write why the settlement rules are lifted', 'اكتب سبب تجاوز القواعد (من 10 إلى 300 حرف).', '', 'Write why the rules are lifted (10 to 300 characters).'],
   ['Financial period', 'هذا الشهر مقفل في الدفاتر. يجب أن يفتحه المدير أولاً.', '', 'This month is closed in the books. An admin must unlock it first.'],
+  // -- the link over a stop request and a hand-set id on a desk-linked request (REFUSE_LINK_STOP_REQUESTED, REFUSE_LINK_DESK_ONLY)
+  ['The customer asked to stop this ad before it was launched', 'طلب العميل إيقاف هذا الإعلان قبل إطلاقه: سوِّه بالإيقاف (يعود المبلغ كاملاً)، أو أكّد أنه أُنشئ في ميتا بالفعل.', '',
+    'The customer asked to stop this ad before it was launched: settle it with Stop (full return), or confirm it was already created in Meta.'],
+  ['This request was linked on the team desk before', 'رُبط هذا الطلب من مكتب الفريق من قبل: اربطه مرة أخرى من المكتب.', '', 'This request was linked on the Team desk before: link it again from the desk.'],
   // -- the ad request (ad_campaign_actions.py, ad_campaign_fields.py, studio_posts.py)
   [/^destination must be an HTTPS website/, 'يجب أن تكون الوجهة موقعاً يبدأ بـ https:// أو رابط واتساب أو ماسنجر أو رقم هاتف دولياً.', '',
     'The destination must be an https:// website, a WhatsApp or Messenger link, or an international phone number.'],
@@ -1396,7 +1400,10 @@ function renderAdsStudioLaunchQueue() {
   }).join('') : `<div class="glass-panel rounded-2xl p-6 text-center text-sm text-slate-500">${isAr ? 'لا توجد طلبات معتمدة تنتظر الربط.' : 'No approved request is waiting for a Meta link.'}</div>`}</div></section>`;
 }
 
-function openAdsStudioLinkSheet(id) {
+// stopAcknowledged: the desk's "Already created in Meta — link anyway" path for a request whose owner
+// asked to stop it before any launch (the link then sends stopRequestAcknowledged; the server refuses
+// such a link without it). Every other opening leaves it off.
+function openAdsStudioLinkSheet(id, stopAcknowledged = false) {
   if (!adsStudioCanReview()) return;
   const campaign = findVisibleAdsStudioCampaign(id);
   if (!campaign || String(campaign.status || '') !== 'Approved') return;
@@ -1405,6 +1412,7 @@ function openAdsStudioLinkSheet(id) {
     // Opened again while this request's link still runs: busy until that link settles.
     _adsStudioLinkSheet = { campaignId, accountId: '', metaCampaignId: '', busy: _adsStudioLinkPromises.has(campaignId), outcome: null };
   }
+  _adsStudioLinkSheet.stopAcknowledged = stopAcknowledged === true;
   _adsStudioUnlinkSheet = null;  // one sheet at a time
   adsStudioLoadMetaAccounts();
   render();
@@ -1549,7 +1557,8 @@ function renderAdsStudioLinkSheet() {
     : cache.state === 'loading'
       ? `<div class="min-h-12 flex items-center text-sm text-slate-500">${isAr ? 'جارٍ تحميل حسابات الإعلانات…' : 'Loading the ad accounts…'}</div>`
       : `<input id="ads-studio-link-account" type="text" inputmode="numeric" autocomplete="off" dir="ltr" maxlength="60" value="${Security.escapeHtml(sheet.accountId)}" oninput="adsStudioSetLinkField('accountId', this)" class="${field}" placeholder="1234567890" /><p class="mt-1 text-xs text-slate-500">${isAr ? 'اكتب رقم حساب الإعلانات (أرقام فقط، بدون act_).' : 'Type the ad account id (digits only, without act_).'}</p>`;
-  const form = linked ? '' : `
+  const form = linked ? '' : `${sheet.stopAcknowledged ? `
+        <p role="note" data-ads-studio-link-over-stop="1" class="mt-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 p-3 text-sm font-bold text-amber-900 dark:text-amber-100">${isAr ? 'طلب العميل إيقاف هذا الإعلان. اربطه فقط لأنه أُنشئ في ميتا بالفعل، ثم أوقفه مؤقتاً في ميتا الآن؛ يُغلق طلب الإيقاف حين تُظهر ميتا أنه متوقف.' : 'The customer asked to stop this ad. Link it only because it already exists in Meta, then pause it in Meta now; the stop request closes once Meta shows it paused.'}</p>` : ''}
         <ol class="mt-4 list-decimal space-y-1 ps-5 text-sm text-slate-600 dark:text-slate-300">
           <li>${isAr ? 'أنشئ الإعلان في ميتا بأي اسم.' : 'Create the ad in Meta with any name.'}</li>
           <li>${paid ? (isAr ? `اجعل ميزانية الحملة في ميتا لا تزيد عن المدفوع (${Security.escapeHtml(adsStudioMoney(paid))}).` : `Keep the campaign's budget in Meta within what was paid (${Security.escapeHtml(adsStudioMoney(paid))}).`) : (isAr ? 'اجعل ميزانية الحملة في ميتا لا تزيد عن المدفوع.' : "Keep the campaign's budget in Meta within what was paid.")}</li>
@@ -1579,11 +1588,12 @@ function renderAdsStudioLinkSheet() {
 // operationId (one per action and version, so a retry after a lost reply replays it). The route's
 // version field is expectedLastModified; expectedVersion carries the same number. The reply is the
 // request plus {renamed, removedManagerCopies, keptManagerCopies, warnings}. Never retried here: a
-// retry reaches Meta.
-async function adsStudioApiLinkMetaCampaign(campaignId, attempt, metaAdAccountId, metaCampaignId) {
+// retry reaches Meta. stopRequestAcknowledged only from the sheet's "link anyway" path (openAdsStudioLinkSheet).
+async function adsStudioApiLinkMetaCampaign(campaignId, attempt, metaAdAccountId, metaCampaignId, stopRequestAcknowledged = false) {
   const identity = getServerSessionIdentity();
   const version = attempt.expectedLastModified;
   const body = { publishStatus: 'meta_review', metaAdAccountId, metaCampaignId, operationId: attempt.operationId, expectedVersion: version, expectedLastModified: version };
+  if (stopRequestAcknowledged === true) body.stopRequestAcknowledged = true;
   const reply = await apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/publish-status`, {
     method: 'POST', body
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -1640,7 +1650,7 @@ async function linkAdsStudioMetaCampaignOnce(campaignId) {
   try {
     let reply;
     try {
-      reply = await adsStudioApiLinkMetaCampaign(campaign.id, attempt, accountId, metaCampaignId);
+      reply = await adsStudioApiLinkMetaCampaign(campaign.id, attempt, accountId, metaCampaignId, sheet.stopAcknowledged === true);
     } catch (e) {
       // A reply lost after the link committed: the request now holds this Meta campaign, and the
       // result the link stored on it (copies removed and kept, warnings) is shown as the answer.

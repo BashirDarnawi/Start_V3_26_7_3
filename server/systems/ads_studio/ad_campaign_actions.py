@@ -211,6 +211,9 @@ class AdCampaignPublishStatusBody(AdCampaignPublishStatusRequest):
     expectedVersion: Optional[int] = Field(default=None, ge=0)
     publishStatus: Optional[Literal["live", "paused", "meta_review", ""]] = None
     metaAdAccountId: Optional[str] = Field(default=None, max_length=40)
+    # True only when staff confirm the ad already exists in Meta although the owner asked to stop it
+    # before it was launched (else the link and the live/paused marker answer REFUSE_LINK_STOP_REQUESTED).
+    stopRequestAcknowledged: Optional[bool] = None
 
 
 class AdCampaignUnlinkBody(AdCampaignSubmitRequest):
@@ -253,6 +256,10 @@ REFUSE_LINK_WRONG_ACCOUNT = "This Meta campaign is not in the chosen ad account"
 REFUSE_LINK_TAKEN = "This Meta campaign is already linked to another request"
 REFUSE_LINK_OTHER_CODE = "This Meta campaign carries another request's studio code"
 REFUSE_LINK_RELINK = "This request is already linked to another Meta campaign"
+# A hand-set Meta id would drop the ad account the desk link recorded (the settle gates read it).
+REFUSE_LINK_DESK_ONLY = "This request was linked on the team desk before: link it again from the desk"
+# The owner asked to stop the ad before any link or launch marker: Stop returns it all (stopRequestAcknowledged).
+REFUSE_LINK_STOP_REQUESTED = "The customer asked to stop this ad before it was launched: settle it with Stop (full return), or confirm it was already created in Meta"
 REFUSE_LINK_META_BUSY = "Meta is busy right now, so the campaign could not be linked"
 REFUSE_LINK_META_FAILED = "Meta could not return this campaign"
 REFUSE_LINK_NOT_CONFIGURED = "The Meta connection is not configured"
@@ -680,6 +687,29 @@ def ever_launched(data: dict[str, Any]) -> bool:
     )
 
 
+def _stop_asked_before_launch(data: dict[str, Any]) -> bool:
+    """The owner asked to stop this ad (``stopRequestedAt``) while it was never linked or marked launched:
+    a link or a live/paused marker now needs ``stopRequestAcknowledged`` (the ad already exists in Meta)."""
+    return bool(str(data.get("stopRequestedAt") or "").strip()) and not ever_launched(data)
+
+
+def _record_launch_over_stop(ctx: dict[str, Any], conn: Any, campaign_id: str, actor_id: str,
+                             operation_id: str, meta_campaign_id: str) -> None:
+    """A launch staff confirmed over the owner's stop request (the ad already existed in Meta): audited
+    ``stop_request`` (kept forever) and the open queue row counts the ad as delivering at the request,
+    so studio_stop.check_stop_requests resolves it once Meta shows it paused. On ``conn``'s transaction."""
+    from .studio_stop import mark_stop_row_delivering  # late: studio_stop imports this module
+
+    marked = mark_stop_row_delivering(conn, campaign_id)
+    ctx["audit"](
+        actor_id, "stop_request", AD_CAMPAIGN_COLLECTION, campaign_id,
+        f"Launched campaign request {campaign_id} over its stop request (staff confirmed it already existed in Meta)",
+        {"operationId": operation_id, "metaCampaignId": meta_campaign_id, "stopRequestAcknowledged": True,
+         "stopRowMarked": marked},
+        conn=conn,
+    )
+
+
 def _settle_not_ready(now: datetime, ready_at: datetime) -> HTTPException:
     """409 SETTLE_NOT_READY: the final Meta read is due at ``ready_at`` (bilingual, with the time)."""
     when = _iso_utc(ready_at)
@@ -1020,6 +1050,7 @@ def _claim_and_write(
     not_approved: str,
     before_write: Optional[Callable[[], None]] = None,
     complete_marker: bool = False,
+    stop_acknowledged: bool = False,
 ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     """Claim one Meta campaign for this request: ONE transaction.
 
@@ -1032,6 +1063,8 @@ def _claim_and_write(
     Returns (entity, copies); copies is None when an identical request (same operationId) or a
     link to the same campaign committed first: nothing was written. With ``complete_marker`` a
     request the classic marker tied to this same campaign (no ``linkedAt``) is linked for real.
+    A request whose owner asked to stop it before any launch is refused (REFUSE_LINK_STOP_REQUESTED)
+    unless ``stop_acknowledged``; then the launch is recorded over the stop request (_record_launch_over_stop).
     """
     patch_guard = nullcontext() if ctx["is_postgres"]() else ctx["sqlite_patch_lock"]()
     with _collisions.claim_guard(), patch_guard:
@@ -1048,6 +1081,9 @@ def _claim_and_write(
                 return entity, None
             if str(data.get("status") or "Draft") != "Approved":
                 raise HTTPException(status_code=409, detail=not_approved)
+            stop_asked = _stop_asked_before_launch(data)
+            if stop_asked and not stop_acknowledged:
+                raise HTTPException(status_code=409, detail=REFUSE_LINK_STOP_REQUESTED)
             if int(entity.get("lastModified") or 0) != int(baseline):
                 raise HTTPException(status_code=409, detail="Conflict: record has changed")
             if linked and linked != meta_campaign_id:
@@ -1071,6 +1107,8 @@ def _claim_and_write(
             )
             if int(result.rowcount or 0) != 1:
                 raise HTTPException(status_code=409, detail="Conflict: record has changed")  # rolls the removal back too
+            if stop_asked:
+                _record_launch_over_stop(ctx, conn, campaign_id, actor_id, operation_id, meta_campaign_id)
             return {**entity, "data": data, "lastModified": modified}, copies
 
 
@@ -1127,6 +1165,9 @@ def _link_meta_campaign(
     _enforce_link_rate(user)
     if str(data.get("status") or "Draft") != "Approved":
         raise HTTPException(status_code=409, detail=REFUSE_LINK_NOT_APPROVED)
+    stop_acknowledged = body.stopRequestAcknowledged is True
+    if _stop_asked_before_launch(data) and not stop_acknowledged:
+        raise HTTPException(status_code=409, detail=REFUSE_LINK_STOP_REQUESTED)  # before any Meta call; again in _claim_and_write
     if int(campaign.get("lastModified") or 0) != baseline:
         raise HTTPException(status_code=409, detail="Conflict: record has changed")
     linked = str(data.get("metaCampaignId") or "").strip()
@@ -1207,7 +1248,7 @@ def _link_meta_campaign(
     saved, copies = _claim_and_write(
         ctx, campaign_id, operation_id=operation_id, baseline=baseline, meta_campaign_id=meta_id,
         actor_id=actor_id, fields_for=link_fields, not_approved=REFUSE_LINK_NOT_APPROVED,
-        before_write=rename_in_meta if rename else None, complete_marker=True,
+        before_write=rename_in_meta if rename else None, complete_marker=True, stop_acknowledged=stop_acknowledged,
     )
     if copies is not None:
         view = _link_view(saved.get("data") or {})
@@ -1605,10 +1646,13 @@ def create_ad_campaign_actions_router(
                 # orphan-capture release; rel: is idempotent, so replay it too.
                 _rg = nullcontext() if ctx["is_postgres"]() else ctx["sqlite_wallet_lock"]()
                 with _rg, db_conn() as conn:
-                    release_orphan_campaign_payment(
+                    replay_tx = release_open_campaign_capture(
                         conn, ctx, {**current, "id": campaign_id},
                         str(user.get("id") or "system"),
                     )
+                    if replay_tx:  # a return made only now is audited like every release door
+                        ctx["audit"](str(user.get("id") or "system"), "wallet_release", AD_CAMPAIGN_COLLECTION, campaign_id,
+                                     f"Returned an orphan capture for {campaign_id}", {"transactionId": replay_tx}, conn=conn)
             if str(current.get("status") or "Draft") not in {"Submitted", "Approved", "Rejected", "Stopped"}:
                 # A repeated review request may arrive after the customer has
                 # already edited a Changes Requested draft. Never return those
@@ -2109,7 +2153,10 @@ def create_ad_campaign_actions_router(
         paused / '' = cleared, which clears the link too, never what the settle gates remember of
         it: _link_history). A marker that brings a NEW Meta campaign id claims it like a link
         (unique among requests; Manager's untouched copies removed) but checks nothing in Meta, so
-        the team desk links instead; a request already linked to another campaign is refused.
+        the team desk links instead; a request already linked to another campaign is refused, and so
+        is one the desk linked before (REFUSE_LINK_DESK_ONLY: a hand id would drop its ad account).
+        A link or a live/paused marker on a request whose owner asked to stop it before any launch
+        needs ``stopRequestAcknowledged`` (REFUSE_LINK_STOP_REQUESTED; _record_launch_over_stop).
         """
         require_same_origin(request)
         if not _is_reviewer(ctx, user):
@@ -2152,6 +2199,10 @@ def create_ad_campaign_actions_router(
         ctx["enforce_ad_campaign_rate"](user)
         if str(data.get("status") or "Draft") != "Approved":
             raise HTTPException(status_code=409, detail="Only Approved campaigns can be marked launched")
+        stop_acknowledged = body.stopRequestAcknowledged is True
+        launch_over_stop = bool(value) and _stop_asked_before_launch(data)  # a live/paused marker launches it
+        if launch_over_stop and not stop_acknowledged:
+            raise HTTPException(status_code=409, detail=REFUSE_LINK_STOP_REQUESTED)
         actor_id = str(user.get("id") or "system")
         fields: dict[str, Any] = {
             "publishStatus": value,
@@ -2175,11 +2226,14 @@ def create_ad_campaign_actions_router(
         if new_meta and new_meta != linked:
             if linked:
                 raise HTTPException(status_code=409, detail=REFUSE_LINK_RELINK)
+            if data.get("everLinked") is True and str(data.get("lastLinkedMetaAdAccountId") or "").strip():
+                # The desk linked it before (its ad account is on record): only the desk link may link it again.
+                raise HTTPException(status_code=409, detail=REFUSE_LINK_DESK_ONLY)
             fields.update(_link_history(new_meta, data.get("metaAdAccountId")))
             saved, copies = _claim_and_write(
                 ctx, campaign_id, operation_id=operation_id, baseline=expected, meta_campaign_id=new_meta,
                 actor_id=actor_id, fields_for=lambda _copies: fields,
-                not_approved="Only Approved campaigns can be marked launched",
+                not_approved="Only Approved campaigns can be marked launched", stop_acknowledged=stop_acknowledged,
             )
             if copies is not None:
                 ctx["audit"](
@@ -2218,6 +2272,9 @@ def create_ad_campaign_actions_router(
             ):
                 raise
             return ctx["project_entity_media_for_user"](latest, user, False)
+        if launch_over_stop:  # the marker committed: the launch over the stop request is on record too
+            with db_conn() as conn:
+                _record_launch_over_stop(ctx, conn, campaign_id, actor_id, operation_id, "")
         ctx["audit"](
             actor_id,
             "publish_status",

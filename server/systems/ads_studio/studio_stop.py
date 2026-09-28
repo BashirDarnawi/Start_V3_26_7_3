@@ -31,7 +31,8 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
 **The staff queue.** ``studioStopRequests``: one slim row per ad (id ``ssr_`` + sha256(campaign
 id)[:40], ``created_by`` = the owner): campaignId, ownerId, ticketId, ticketNumber, requestedAt,
 ``dueAt`` (``targets.stopRequestMinutes`` WORKING minutes after the request), afterHours,
-``deliveringAtRequest`` (the last Meta read before the request showed an ad delivering), ``state``
+``deliveringAtRequest`` (the last Meta read before the request showed an ad delivering; set later too
+when staff launch the ad over the request, ``mark_stop_row_delivering``), ``state``
 open | resolved, resolvedAt, resolvedReason (``stopped`` | ``meta_paused``). The desk counts it
 without reading the ad requests themselves (their rows carry the photos). ``check_stop_requests``
 (the studio jobs loop, on its 5-minute waiting-requests turn) resolves a row, and its ticket, ONLY
@@ -556,6 +557,31 @@ def resolve_stop_request(campaign_id: str, reason: str, now: datetime | None = N
         if int(result.rowcount or 0) != 1:
             return False  # another writer resolved it first
         resolve_ticket(conn, str(data.get("ticketId") or ""), reason, at)
+    return True
+
+
+def mark_stop_row_delivering(conn: Any, campaign_id: str) -> bool:
+    """Staff launched the ad over the owner's stop request, confirming it already existed in Meta
+    (ad_campaign_actions ``stopRequestAcknowledged``): the open queue row now counts it as delivering at
+    the request, so check_stop_requests resolves it (``meta_paused``) once a Meta read made after the
+    request shows it paused or ended. On the caller's transaction; False when no open row changed."""
+    row_id = stop_row_id(campaign_id)
+    lock = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+    row = conn.execute(
+        text(f"SELECT data_json, deleted, last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1{lock}"),
+        {"type": STOP_TYPE, "id": row_id},
+    ).mappings().first()
+    if not row or bool(row["deleted"]):
+        return False
+    data = json_loads(row["data_json"]) or {}
+    if str(data.get("state") or "open") == "resolved" or data.get("deliveringAtRequest") is True:
+        return False
+    modified = max(now_ms(), int(row["last_modified"]) + 1)
+    data.update({"deliveringAtRequest": True, "launchedOverRequestAt": _iso(utc_now()), "_lastModified": modified})
+    conn.execute(
+        text("UPDATE entities SET data_json = :data, last_modified = :modified WHERE type = :type AND id = :id"),
+        {"data": json_dumps(data), "modified": modified, "type": STOP_TYPE, "id": row_id},
+    )
     return True
 
 

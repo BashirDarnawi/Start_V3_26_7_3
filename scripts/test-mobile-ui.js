@@ -5658,6 +5658,51 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && launchHtml.includes("openAdsStudioLinkSheet('r_app')") && launchHtml.includes('within what was paid ($50.00)') && launchHtml.includes('data-testid="studio-desk-launch-r_sub2"')
       && !launchHtml.includes('studio-desk-linked-r_lnk') && !launchHtml.includes('studio-desk-launch-r_lnk') && calls('GET', '/api/studio/campaigns/r_lnk/results').length === 1,
     launchHtml.slice(0, 200));
+  // Review loop r1 (n=22): an Approved request whose owner asked to stop it before any launch stays in the Launch queue
+  // with a "Stop requested" chip; Stop & return all is the primary action (closeReason customer_stop, the whole payment),
+  // and "Already created in Meta — link anyway" opens the in-page link sheet that sends stopRequestAcknowledged (a plain
+  // opening of the sheet never does). The server refuses the link without it (REFUSE_LINK_STOP_REQUESTED).
+  box.state.adCampaignRequests.push({ id: 'r_stp', createdBy: 'c1', status: 'Approved', name: 'Asked to stop', paidMinorUSD: 2000, budgetMinorUSD: 2000, budgetType: 'lifetime', durationDays: 5,
+    studioRef: 'ALB-S-STOP1234', studioName: 'ALB-S-STOP1234 · Asked to stop', startDate: '2099-03-01', endDate: '2099-03-05', stopRequestedAt: hours(-1), _created: 2, _lastModified: 12 });
+  openAt('/studio?tab=review&section=launch');
+  const stopLaunchHtml = html();
+  // One launch card: from its data-testid to the next card (a plain card's checklist has its own <li> items).
+  const cardOf = (page, id) => { const at = page.indexOf(`data-testid="studio-desk-launch-${id}"`); if (at < 0) return ''; const next = page.indexOf('data-testid="studio-desk-launch-', at + 10); return page.slice(at, next < 0 ? page.length : next); };
+  const stopCard = cardOf(stopLaunchHtml, 'r_stp');
+  const plainCard = cardOf(stopLaunchHtml, 'r_app');
+  const stopCardAr = cardOf(String(inLanguage('ar', 'render(); __html')), 'r_stp');
+  const stopQueued = [json("studioDeskLaunchQueue().map(r => r.id)"), json("studioDeskStopAsked(findVisibleAdsStudioCampaign('r_app'))")];
+  run('document.getElementById = () => null;');  // the link sheet reads its two fields by id
+  run("openAdsStudioLinkSheet('r_stp', true); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '777';");
+  const overStopSheet = String(run('renderAdsStudioSheets()'));
+  run('linkAdsStudioMetaCampaign()');
+  const ackCall = calls('POST', '/api/ad-studio/campaigns/r_stp/publish-status')[0] || {};
+  run("_adsStudioLinkPromises.clear(); closeAdsStudioLinkSheet(); openAdsStudioLinkSheet('r_stp'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '777';");
+  const plainSheet = String(run('renderAdsStudioSheets()'));
+  run('linkAdsStudioMetaCampaign()');
+  const plainCall = calls('POST', '/api/ad-studio/campaigns/r_stp/publish-status')[1] || {};
+  run('_adsStudioLinkPromises.clear(); closeAdsStudioLinkSheet(); delete document.getElementById;');
+  const stopSheet = String(run("renderStudioDeskSheet('settle', findVisibleAdsStudioCampaign('r_stp'))"));
+  reply('/api/ad-studio/campaigns/r_stp/stop', { id: 'r_stp', data: { ...json("findVisibleAdsStudioCampaign('r_stp')"), status: 'Stopped', closeReason: 'customer_stop', refundMinorUSD: 2000, settleBasis: 'never_linked', _lastModified: 31 }, lastModified: 31 });
+  const stopReturned = outcome("studioDeskSettleRun('settle', 'r_stp', 2000, '')");
+  const stopCall = calls('POST', '/api/ad-studio/campaigns/r_stp/stop')[0] || {};
+  const stopCases = [
+    Array.isArray(stopQueued[0]) && stopQueued[0].includes('r_stp') && stopQueued[0].includes('r_app') && stopQueued[1] === false,
+    stopCard.includes('data-stop-asked="1"') && stopCard.includes('data-testid="studio-desk-stop-asked-r_stp"') && stopCard.includes('Stop requested'),
+    stopCard.includes(`class="studio-v2-action is-primary" data-testid="studio-desk-stop-return-r_stp" onclick="studioDeskSheetOpen('settle', 'r_stp', this)"`) && stopCard.includes('Stop &amp; return all')
+      && stopCard.includes(`class="studio-v2-action" data-testid="studio-desk-link-anyway-r_stp" onclick="openAdsStudioLinkSheet('r_stp', true)"`) && !stopCard.includes("openAdsStudioLinkSheet('r_stp')\"")
+      && stopCard.includes('$20.00 goes back in full'),
+    !plainCard.includes('data-stop-asked') && plainCard.includes(`data-testid="studio-desk-link-r_app" onclick="openAdsStudioLinkSheet('r_app')"`),
+    stopCardAr.includes('طلب إيقاف') && stopCardAr.includes('أوقف وأعد المبلغ كاملاً') && stopCardAr.includes('أُنشئ في ميتا بالفعل — اربطه على أي حال'),
+    overStopSheet.includes('data-ads-studio-link-over-stop="1"') && !plainSheet.includes('data-ads-studio-link-over-stop'),
+    ackCall.body && ackCall.body.stopRequestAcknowledged === true && ackCall.body.metaAdAccountId === '111' && ackCall.body.metaCampaignId === '777',
+    plainCall.body && !('stopRequestAcknowledged' in plainCall.body) && plainCall.body.metaCampaignId === '777',
+    stopSheet.includes('Stop this ad and return the payment') && stopSheet.includes('value="20.00"'),
+    !!stopReturned && stopReturned.ok === true && stopCall.body && stopCall.body.closeReason === 'customer_stop' && stopCall.body.refundMinorUSD === 2000 && stopCall.body.expectedLastModified === 12
+  ];
+  run("state.adCampaignRequests.splice(state.adCampaignRequests.findIndex(r => r.id === 'r_stp'), 1)");
+  check('Team desk launch over a stop request (review loop r1): the chip, Stop & return all first (customer_stop, the whole payment), and the in-page "link anyway" sheet is the only way that sends stopRequestAcknowledged',
+    !loadError && stopCases.every(Boolean), `cases ${failed(stopCases)}; queue ${JSON.stringify(stopQueued)} ack ${JSON.stringify(ackCall.body || null)} plain ${JSON.stringify(plainCall.body || null)}`);
   reply('/api/studio/campaigns/r_was/results', wasResults);
   openAt('/studio?tab=review&section=settle');
   run('render()');  // the results read of the unlinked-after-link row answered

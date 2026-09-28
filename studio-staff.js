@@ -1001,6 +1001,13 @@ function studioDeskLaunchQueue() {
   return studioDeskApproved().filter(item => !String(item.metaCampaignId || '').trim());
 }
 
+// The owner asked to stop this ad before it was linked or marked launched (the server's
+// _stop_asked_before_launch): Stop returns everything; a link needs stopRequestAcknowledged.
+function studioDeskStopAsked(request) {
+  return !!String((request && request.stopRequestedAt) || '').trim() && !String(request.publishStatus || '').trim()
+    && !String(request.metaCampaignId || '').trim() && request.everLinked !== true;
+}
+
 function studioDeskLinkedList() {
   return studioDeskApproved().filter(item => studioDeskLinked(item) && studioDeskStage(item).stage !== 10);
 }
@@ -1376,6 +1383,23 @@ async function studioDeskDecideOnce(requestId, decision, note, reasonCode) {
 function renderStudioDeskLaunchCard(request) {
   const id = studioEsc(request.id);
   const paid = studioDeskPaid(request);
+  if (studioDeskStopAsked(request)) {
+    // The owner asked to stop it before it ran: Stop (the whole payment back) comes first; a link only
+    // when staff already created it in Meta (the in-page link sheet, sending stopRequestAcknowledged).
+    return `
+              <li class="studio-desk-box studio-desk-launch" data-testid="studio-desk-launch-${id}" data-stop-asked="1">
+                <h3 class="studio-desk-h3" dir="auto">${studioEsc(studioDeskName(request))}</h3>
+                ${renderStudioDeskMeta(request)}
+                <p class="studio-desk-stage"><span class="studio-flag" data-testid="studio-desk-stop-asked-${id}">${studioDeskIcon('hand', 'studio-desk-meta-icon')}<span>${studioEsc(adsStudioText('Stop requested', 'طلب إيقاف'))}</span></span>${request.stopRequestedAt ? `<span class="studio-desk-note">${studioEsc(studioDeskWhen(request.stopRequestedAt))}</span>` : ''}</p>
+                <p class="studio-desk-note">${studioEsc(adsStudioText(`The customer asked to stop this ad before it ran. Stop it: ${paid ? studioUsd(paid) : 'the payment'} goes back in full. Link it only if it was already created in Meta, then pause it there.`,
+                  `طلب العميل إيقاف هذا الإعلان قبل تشغيله. أوقفه: يعود ${paid ? studioUsd(paid) : 'المبلغ المدفوع'} كاملاً. اربطه فقط إن كان قد أُنشئ في ميتا بالفعل، ثم أوقفه هناك.`))}</p>
+                <div class="studio-desk-actions">
+                  <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>
+                  <button type="button" class="studio-v2-action" data-testid="studio-desk-link-anyway-${id}" onclick="openAdsStudioLinkSheet('${id}', true)">${studioDeskIcon('link-2')}<span>${studioEsc(adsStudioText('Already created in Meta — link anyway', 'أُنشئ في ميتا بالفعل — اربطه على أي حال'))}</span></button>
+                  <button type="button" class="studio-v2-action" onclick="studioDeskGo('requests', '${id}')">${studioDeskIcon('file-text')}<span>${studioEsc(adsStudioText('The request', 'تفاصيل الطلب'))}</span></button>
+                </div>
+              </li>`;
+  }
   const checklist = [
     adsStudioText('Create the ad in Meta on one of Albayan\'s ad accounts (any name).', 'أنشئ الإعلان في ميتا على أحد حسابات البيان الإعلانية (بأي اسم).'),
     adsStudioText('Put the studio code in the campaign name, or let Albayan rename it at the link.', 'ضع رمز الاستوديو في اسم الحملة، أو دع البيان يغيّر الاسم عند الربط.'),
@@ -1552,7 +1576,9 @@ async function studioDeskSettleOnce(requestId, kind, refundMinor, reason) {
   const attempt = adsStudioActionAttempt(kind === 'override' ? 'settle-override' : 'stop', request.id, Number(request._lastModified));
   const identity = getServerSessionIdentity();
   const path = kind === 'override' ? 'settle-override' : 'stop';
-  const body = { expectedLastModified: attempt.expectedLastModified, operationId: attempt.operationId, refundMinorUSD: refundMinor, closeReason: 'completed' };
+  // A stop the owner asked for before the ad ran closes as their stop (the server lets staff record it); else completed.
+  const closeReason = kind !== 'override' && studioDeskStopAsked(request) ? 'customer_stop' : 'completed';
+  const body = { expectedLastModified: attempt.expectedLastModified, operationId: attempt.operationId, refundMinorUSD: refundMinor, closeReason };
   if (kind === 'override') body.reason = reason; else body.reason = null;
   let entity;
   try {
@@ -1614,7 +1640,8 @@ function renderStudioDeskSheet(kind, request) {
     const entry = studioDeskSettleEntry(request.id);
     const override = kind === 'override';
     const start = entry.refund !== '' ? entry.refund : (numbers.cap === null ? '' : (numbers.cap / 100).toFixed(2));
-    title = override ? adsStudioText('Admin override: settle past the rules', 'تجاوز المدير: تسوية خارج القواعد') : adsStudioText('Finish & settle', 'إنهاء وتسوية');
+    title = override ? adsStudioText('Admin override: settle past the rules', 'تجاوز المدير: تسوية خارج القواعد')
+      : studioDeskStopAsked(request) ? adsStudioText('Stop this ad and return the payment', 'أوقف هذا الإعلان وأعد المبلغ') : adsStudioText('Finish & settle', 'إنهاء وتسوية');
     const lines = [
       `${adsStudioText('Paid', 'مدفوع')} ${studioUsd(numbers.paid)}`,
       numbers.spend === null ? adsStudioText("Meta's spend is not confirmed yet", 'صرف ميتا غير مؤكد بعد') : `${adsStudioText('Meta used', 'صرف ميتا')} ${studioUsd(numbers.spend)}${numbers.confirmedAt ? ` (${adsStudioText('confirmed', 'أُكّد')} ${studioDeskWhen(numbers.confirmedAt)})` : ''}`,
