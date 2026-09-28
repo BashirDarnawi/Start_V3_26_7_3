@@ -311,12 +311,14 @@ def ad_campaign_date(value: Any, field: str, ctx: Ctx) -> tuple[str, datetime] |
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)  # 9999-12-31T23:59-05:00 overflows here
+    except (TypeError, ValueError, OverflowError):
         raise HTTPException(status_code=400, detail=f"{field} must be a valid ISO date")
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    else:
-        parsed = parsed.astimezone(timezone.utc)
+    if not 2000 <= parsed.year <= 2100:  # a sane campaign year: the end-day arithmetic can never overflow
+        raise HTTPException(status_code=400, detail=f"{field} must be a valid ISO date")
     return raw, parsed
 
 
@@ -649,7 +651,10 @@ def prepare_ad_campaign_fields(
             first_day = datetime.strptime(start[0][:10], "%Y-%m-%d").date()
         except ValueError:
             first_day = start[1].date()
-        last_day = first_day + timedelta(days=int(clean["durationDays"]) - 1)
+        try:
+            last_day = first_day + timedelta(days=int(clean["durationDays"]) - 1)
+        except OverflowError:  # belt and braces: the start year is already bounded above
+            raise HTTPException(status_code=400, detail="startDate must be a valid ISO date")
         end = (last_day.isoformat(), datetime(last_day.year, last_day.month, last_day.day, tzinfo=timezone.utc))
         if end[1] < start[1]:  # a start with a time of day: the end day still counts whole
             end = (end[0], start[1])

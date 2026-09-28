@@ -27,7 +27,9 @@ Where the items come from:
 * **Read from the records themselves** (nothing kept twice): payment_confirmed from the owner's wallet
   ledger (a credit for one of their charge requests, through the platform door
   wallet_payments.wallet_ledger_rows) and ad_ended from the owner's adCampaignResults rows
-  (``deliveryEndedAt``, written by the Meta sync, studio_results_sync.py).
+  (``deliveryEndedAt``, written by the Meta sync, studio_results_sync.py; the item's time is
+  ``deliveryEndedNoticedAt``, when that sync saw the end, so it is never older than a seen marker set
+  before the sync ran).
 
 A row never holds free text: its kind, the related type and id, and a few plain values (amounts in
 minor units, a review reason code, the studio code, a ticket number). The titles and bodies are built
@@ -341,7 +343,11 @@ def _ended_items(conn: Any, owner_id: str) -> list[dict[str, Any]]:
         ended = parse_time(data.get("deliveryEndedAt"))
         if not campaign_id or str(row["id"]) != results_id(campaign_id) or ended is None:
             continue
-        items.append(_item(activity_id(owner_id, "ad_ended", campaign_id, _iso(ended)), _ms(ended), "ad_ended", "campaign",
+        # The item's time is when the sync noticed the end (deliveryEndedAt can be Meta's earlier end
+        # time, older than a seen marker set meanwhile); the id keeps the end time, so it stays stable.
+        noticed = parse_time(data.get("deliveryEndedNoticedAt"))
+        moment = max(ended, noticed) if noticed is not None else ended
+        items.append(_item(activity_id(owner_id, "ad_ended", campaign_id, _iso(ended)), _ms(moment), "ad_ended", "campaign",
                            campaign_id, {}))
     return items
 

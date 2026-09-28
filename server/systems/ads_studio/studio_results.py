@@ -202,6 +202,9 @@ _TIME_FIELDS = (
     # P3-03/P3-04c (studio_results_sync): the final read at settleReadDueAt, the last attempt, and
     # the last staff "Check Meta now" that reached Meta (a second press within 10 minutes is cached).
     "settleReadAt", "lastAttemptAt", "manualCheckAt",
+    # The sync that first stamped deliveryEndedAt (its own clock; deliveryEndedAt may be Meta's earlier
+    # end time): the inbox's "Your ad has ended" item is new from then (studio_activity).
+    "deliveryEndedNoticedAt",
 )
 _COUNT_FIELDS = ("lifetimeImpressions", "reach", "impressions", "clicks", "resultCount", "costPerResultMinorUSD")
 _TEXT_FIELDS = {

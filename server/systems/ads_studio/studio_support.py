@@ -58,7 +58,9 @@ in use.
 **Due times** (P3-16, studio_hours.py): a ticket waiting for the team is due
 ``targets.ticketFirstResponseMinutes`` working minutes after the customer's first unanswered message
 (``stopRequestMinutes`` for an urgent one), counted in the ``hours`` setting. An answer or a wait for
-the customer clears it; the customer's next message starts it again.
+the customer clears it; the customer's next message starts it again. A customer's reopen of a stop
+request's ticket the system resolved (its stop row is resolved) turns it into a normal question
+(``_demote_handled_stop``): it is no longer urgent and no longer counted as a stop ticket.
 
 **Records** (router-only types; the generic /api/collections API refuses them):
 
@@ -733,6 +735,18 @@ def _set_status(data: dict[str, Any], status: str, *, by: str, now: datetime, se
     data["updatedAt"] = at
 
 
+def _demote_handled_stop(data: dict[str, Any]) -> None:
+    """A customer's reopen (a message or the reopen route) of a stop request's ticket the SYSTEM resolved:
+    resolvedBy 'system' is only written by system_resolve_ticket_conn, after studio_stop resolved the
+    stop row (the ad is Stopped, or Meta paused or ended it). The follow-up is a plain question: normal
+    priority and kind ``question``, so its due time, the urgent pin and the desk's ``stopOpen`` count
+    follow a plain ticket. A stop ticket the team resolved by hand keeps its kind (its stop row may
+    still be open). Call it before _set_status."""
+    if data.get("kind") == "stop_request" and data.get("status") == "resolved" and data.get("resolvedBy") == "system":
+        data["priority"] = "normal"
+        data["kind"] = "question"
+
+
 def open_ticket_conn(
     conn: Any,
     *,
@@ -933,6 +947,7 @@ def _append_message(
         studio_error(409, "TICKET_MESSAGE_LIMIT", f"This ticket already holds {MAX_MESSAGES} messages. Open a new ticket.")
     at = iso(now)
     if author == "customer":
+        _demote_handled_stop(data)  # a reply on a stop ticket the system resolved is a plain follow-up
         _set_status(data, "open", by="customer", now=now, settings=settings)
         data["lastCustomerAt"] = at
     else:
@@ -1005,6 +1020,8 @@ def change_status_conn(
             service_before = service_before if service_before != data.get("tiktokState") else None
         elif by == "team" and status == "resolved":
             service_before = _finish_tiktok_service(data, "declined", now)  # never left open behind a resolved ticket
+    if by == "customer" and status == "open":
+        _demote_handled_stop(data)  # a reopen of a stop ticket the system resolved is a plain follow-up
     _set_status(data, status, by=by, now=now, settings=settings)
     if operation_id:
         data["lastStatusOperationId"] = operation_id
@@ -1168,7 +1185,8 @@ def check_related(owner_id: str, related_type: str | None, related_id: str | Non
 
 def _tiktok_wants(raw: Any) -> list[str]:
     values = [raw] if isinstance(raw, str) else raw
-    if not isinstance(values, list) or not values or len(values) > len(TIKTOK_WANTS) or len(set(values)) != len(values) \
+    if not isinstance(values, list) or not values or not all(isinstance(value, str) for value in values) \
+            or len(values) > len(TIKTOK_WANTS) or len(set(values)) != len(values) \
             or any(value not in TIKTOK_WANTS for value in values):
         studio_error(400, "INVALID_VALUE", "wants must be one or more of: " + ", ".join(TIKTOK_WANTS))
     return [want for want in TIKTOK_WANTS if want in values]

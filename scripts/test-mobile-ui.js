@@ -5231,6 +5231,14 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const classicHelp = run("_studioHelp.classic = { view: 'list', id: '', filter: 'active' }; renderStudioHelpClassic()");
   const card = run("renderAdsStudioCampaignCard(studioDataRequest('r_new'))");
   const cardRequested = run("renderAdsStudioCampaignCard(Object.assign({}, studioDataRequest('r_new'), { stopRequestedAt: '2026-09-25T10:00:00Z', stopRequestTicketId: '" + T1 + "' }))");
+  // Review loop r1 n24: a linked card whose kept Meta reading is stage 10 (ended, final amount being calculated)
+  // offers no "Ask to stop" (the v2 stage actions leave it out, the server answers 409); stage 8 still does.
+  const linkedNew = "Object.assign({}, studioDataRequest('r_new'), { metaCampaignId: '120200000000777', metaAdAccountId: '9' })";
+  run("_adsStudioResults.forUser = String(state.currentUser?.id || ''); _adsStudioResults.byId.set('r_new', { state: 'done', data: adsStudioCleanResults({ stage: { stage: 10, labels: { en: 'Ended', ar: 'انتهى' } }, results: {} }), at: Date.now(), promise: null });");
+  const cardEnded = run(`renderAdsStudioCampaignCard(${linkedNew})`);
+  run("_adsStudioResults.byId.get('r_new').data = adsStudioCleanResults({ stage: { stage: 8, labels: { en: 'Running', ar: 'يعمل الآن' } }, results: {} });");
+  const cardRunning = run(`renderAdsStudioCampaignCard(${linkedNew})`);
+  run("_adsStudioResults.byId.delete('r_new');");
   run("_adsStudioActiveTab = 'help'; studioHelpGo('new');");
   const classicNew = run("_studioHelp.classic.view + ':' + _adsStudioActiveTab");
   const classicForm = run('renderStudioHelpClassic()');
@@ -5246,6 +5254,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     String(card).includes('data-ads-studio-ask-stop="1"') && String(card).includes("studioStopSheetOpen('r_new', this)") && String(card).includes('data-testid="studio-ask-campaign-r_new"')
       && !String(card).includes('data-ads-studio-stop-requested'),
     String(cardRequested).includes('data-ads-studio-stop-requested="1"') && String(cardRequested).includes('Stop requested') && String(cardRequested).includes(`studioHelpOpen('${T1}')`) && !String(cardRequested).includes('data-ads-studio-ask-stop'),
+    String(cardEnded).includes('data-ads-studio-campaign="r_new"') && !String(cardEnded).includes('data-ads-studio-ask-stop') && !String(cardEnded).includes('Ask us to stop it')
+      && String(cardRunning).includes('data-ads-studio-ask-stop="1"'),
     classicNew === 'new:help' && String(classicForm).includes('data-testid="studio-help-form"'),
     JSON.stringify(offTabs) === JSON.stringify(['dashboard', 'campaigns', 'builder', 'posts', 'replies']) && offButton === '' && !String(cardOff).includes('data-ads-studio-ask-stop') && String(cardOff).includes('Ask us to stop it') === false,
     droppedHelp === 'dashboard',

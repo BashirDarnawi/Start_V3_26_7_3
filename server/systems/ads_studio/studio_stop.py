@@ -7,7 +7,8 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
 
 * The owner only: anyone else, staff too, gets 404 "Campaign request not found" (staff stop an ad
   with /stop). An Approved request only: 409 "Only Approved campaigns can be stopped" (the same text
-  as /stop). A lapsed plan is fine (it only protects the owner's own money). The ``stopRequest``
+  as /stop), and not one whose delivery already ended (display stage 10, ended_settling, where the v2
+  stage table offers no ask_to_stop: 409 REFUSE_STOP_ALREADY_ENDED). A lapsed plan is fine (it only protects the owner's own money). The ``stopRequest``
   service must be on for this user (studio_settings.service_access), else 403 REFUSE_STOP_REQUEST_OFF;
   the customer layout never matters (P3-20). A help-desk refusal met while the ticket is opened (an
   operationId the customer already used for another ticket, a counter race) is answered in the same
@@ -117,6 +118,7 @@ from .studio_profile import profile_id, profile_view
 from .studio_results import (
     PAUSED_STATUSES,
     REVIEW_STATUSES,
+    derive_display_stage,
     load_request,
     load_results_row,
     meta_delivery,
@@ -148,6 +150,8 @@ GONE_STATUSES = PAUSED_STATUSES + ("DELETED", "ARCHIVED")
 # Refusal texts of the /api/ad-studio stop-request route (the classic Arabic map carries each prefix).
 REFUSE_STOP_REQUEST_OFF = "Stop requests are not open yet. Please contact the Albayan team"
 REFUSE_STOP_NOT_APPROVED = "Only Approved campaigns can be stopped"  # the same text as /stop
+# Display stage 10 (ended_settling): delivery is over, only /stop after the final read closes it.
+REFUSE_STOP_ALREADY_ENDED = "This ad has already ended; its final amount is being calculated"
 REFUSE_NOTE = "note must be text"
 # The help desk's refusals (studio_support, {code, message}) in this route's plain shape (PLAN.md §7.3).
 REFUSE_STOP_OPERATION_USED = "operationId was already used for another ticket"  # IDEMPOTENCY_MISMATCH
@@ -471,6 +475,10 @@ def add_stop_request_route(
                 due = stop_due_at(now, settings)
                 after_hours = not team_open_now(settings, now)
                 results, _version = load_results_row(conn, campaign_id)
+                if derive_display_stage({**data, "stopRequestedAt": None}, results, now)["stage"] == 10:
+                    # Ended, final amount being calculated (v2 offers no ask_to_stop there): a stop row
+                    # would never be Meta-handled and would raise overdue alerts until the final read.
+                    raise HTTPException(status_code=409, detail=REFUSE_STOP_ALREADY_ENDED)
                 delivering = delivering_at_request(data, results, now)  # the signal check_stop_requests needs
                 try:
                     ticket = create_stop_ticket(

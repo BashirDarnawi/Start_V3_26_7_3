@@ -43,7 +43,7 @@ def create_audit_router(
             raise HTTPException(status_code=403, detail="Forbidden")
 
         limit = max(1, min(int(limit), 1000))
-        offset = max(0, int(offset))
+        offset = max(0, min(int(offset), 10_000_000))  # a huge OFFSET overflows the database's bigint (500)
 
         with db_conn() as conn:
             if can_view_all:

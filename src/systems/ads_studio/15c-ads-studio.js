@@ -641,8 +641,9 @@ function renderAdsStudioCampaignCard(campaign) {
   // the owner once the service is on; the old "message us" toast stays only while it is off. An ad
   // whose stop was already asked for shows the marker instead (the ticket, when Help is on).
   const stopRequestedAt = String(campaign.stopRequestedAt || '').trim() || (typeof studioStopRequestedAt === 'function' ? studioStopRequestedAt(campaign.id) : '');
-  const askStopSheet = statusValue === 'Approved' && !staffHere && mayStop && !stopRequestedAt && typeof studioStopSheetAvailable === 'function' && studioStopSheetAvailable();
-  const showAskStop = statusValue === 'Approved' && !staffHere && mayStop && !ownerCanInstantStop && !askStopSheet && !stopRequestedAt;
+  const endedSettling = adsStudioKeptStage(campaign.id) === 10;  // ended: nothing left to stop (server 409)
+  const askStopSheet = statusValue === 'Approved' && !staffHere && mayStop && !stopRequestedAt && !endedSettling && typeof studioStopSheetAvailable === 'function' && studioStopSheetAvailable();
+  const showAskStop = statusValue === 'Approved' && !staffHere && mayStop && !ownerCanInstantStop && !askStopSheet && !stopRequestedAt && !endedSettling;
   const stopTicketId = /^tkt_[0-9a-f]{40}$/.test(String(campaign.stopRequestTicketId || '')) ? String(campaign.stopRequestTicketId) : '';
   const askAboutThis = String(campaign.createdBy || '') === String(state.currentUser?.id || '') && typeof studioHelpAskButton === 'function' ? studioHelpAskButton('campaign', campaign.id) : '';
   // Withdraw (P1-03): only the owner takes a waiting request back to Draft (the server answers 404 to anyone else).
@@ -776,6 +777,7 @@ function adsStudioCleanResults(body) {
   const labels = value => (value && typeof value === 'object' ? { en: String(value.en || ''), ar: String(value.ar || '') } : null);
   const staff = src.staff && typeof src.staff === 'object' ? src.staff : null;
   return {
+    stage: Number.isSafeInteger(stage.stage) ? stage.stage : 0,
     stageLabels: labels(stage.labels),
     variantLabels: labels(stage.variantLabels),
     runningPastEnd: stage.runningPastEnd === true,
@@ -793,6 +795,13 @@ function adsStudioCleanResults(body) {
       nextManualCheckAt: String(staff.nextManualCheckAt || '')
     } : null
   };
+}
+
+// The display stage of the card's kept Meta reading (0 while none is kept). Stage 10 (ended, final amount
+// being calculated) offers no "Ask to stop": the v2 stage actions leave it out and the server answers 409.
+function adsStudioKeptStage(campaignId) {
+  const entry = _adsStudioResults.forUser === String(state.currentUser?.id || '') ? _adsStudioResults.byId.get(String(campaignId || '')) : null;
+  return entry && entry.data ? entry.data.stage : 0;
 }
 
 function adsStudioResultsEntry(campaignId) {
@@ -1078,6 +1087,7 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['This request is not linked to a Meta campaign', 'هذا الطلب غير مرتبط بحملة ميتا'],
   // Ask to stop (P3-10, studio_stop.py REFUSE_STOP_REQUEST_OFF); "Only Approved campaigns can be stopped" is above.
   ['Stop requests are not open yet', 'طلب إيقاف الإعلان غير متاح بعد. تواصل مع فريق البيان.'],
+  ['This ad has already ended; its final amount is being calculated', 'انتهى هذا الإعلان بالفعل، ونحسب الآن مبلغه النهائي. لا حاجة لطلب إيقافه.'],
   ['note must be text', 'يجب أن تكون الملاحظة نصاً'],
   // Reply rules and the page check of the v2 Pages & replies screens (P4-06, social_studio.py: _clean_rule,
   // _text_field, _string_list, editor_refusal, _require_admin, _scope): the server's exact English prefixes.

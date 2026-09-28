@@ -25,7 +25,8 @@ on the allowlist and the campaign is claimed by THIS request.
   - ended (nothing delivering or in review, and an end signal: the request's end date, a Meta end
     time, a deleted campaign, a stop request, a Stopped or settled request; ACTIVE ads after a Meta
     end time do not deliver): ``deliveryEndedAt`` is stamped once (the earliest Meta end time that
-    passed, else the read's time), ``settleReadDueAt`` = deliveryEndedAt +
+    passed, else the read's time; ``deliveryEndedNoticedAt`` = the read's own time, for the inbox),
+    ``settleReadDueAt`` = deliveryEndedAt +
     ``settlement.spendDelayHours`` (48 h, D28) and ``driftWatchUntil`` = deliveryEndedAt +
     ``settlement.driftWatchDays`` (28). The next
     read is AT settleReadDueAt (the final read, stamped ``settleReadAt`` once Meta's insights
@@ -111,11 +112,12 @@ _FRESH: dict[str, Any] = {
     "metaStage": "", "spendMinorUSD": 0, "spendConfirmedAt": None, "insightsState": "never",
     "lifetimeImpressions": None, "impressions": None, "reach": None, "clicks": None, "resultType": "",
     "resultCount": None, "costPerResultMinorUSD": None, "currency": "", "rawSpendMinor": None,
-    "rawSpendCurrency": "", "deliveryEndedAt": None,
+    "rawSpendCurrency": "", "deliveryEndedAt": None, "deliveryEndedNoticedAt": None,
     "settleReadDueAt": None, "settleReadAt": None, "driftWatchUntil": None, "neverDelivered": False,
     "stopEffectiveAt": None, "lastSyncedAt": None, "syncState": "never", "lastErrorCode": "", "nextSyncAt": None,
 }
-_ENDED_TIMES = {"deliveryEndedAt": None, "settleReadDueAt": None, "settleReadAt": None, "driftWatchUntil": None}
+_ENDED_TIMES = {"deliveryEndedAt": None, "settleReadDueAt": None, "settleReadAt": None, "driftWatchUntil": None,
+                "deliveryEndedNoticedAt": None}
 
 # "Check Meta now" answers that did not bring a fresh reading (the stored one is shown).
 CHECK_ERRORS: dict[str, dict[str, str]] = {
@@ -260,6 +262,10 @@ def fields_after_read(
         fields.update({
             "deliveryEndedAt": _iso(ended_at), "settleReadDueAt": _iso(settle_due),
             "driftWatchUntil": _iso(watch_until), "settleReadAt": _iso(final_at) if final_at else None,
+            # When this sync first saw the end (never earlier than now): the inbox item's time, so an item
+            # stamped with Meta's older end time is never born below the owner's seen marker. An end
+            # stamped before this field existed keeps none (its item keeps the end time, as before).
+            "deliveryEndedNoticedAt": base["deliveryEndedNoticedAt"] or (None if base["deliveryEndedAt"] else at),
         })
         if final_at is None and now >= settle_due and insights_ok and not usd:
             # A non-USD account never gives a final read (staff must fix the link): once a day until
