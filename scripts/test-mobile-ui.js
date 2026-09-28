@@ -6180,12 +6180,12 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const refused = ['1.234,56', '١٬٢٣٤x', '50abc', '12.5.3', '12.345'].map(answer => [answer, stopWith(answer)]);
   const accepted = [['1,234.56', 123456], ['12,50', 1250], ['١٬٢٣٤', 123400], ['٥٠٫٢٥', 5025], ['0.00', 0]].map(([answer, minor]) => [answer, minor, stopWith(answer)]);
   run('state.adCampaignRequests = __keptStopRows;');
-  const stopCases = [
+  const classicStopCases = [
     refused.every(([, out]) => out.refund === null && out.invalid === true),
     accepted.every(([, minor, out]) => out.refund === minor && out.invalid === false)
   ];
   check('Classic staff Stop & refund: the typed amount is read strictly (Arabic digits and separators count; "1.234,56", "50abc", "12.5.3", "12.345" are refused, never a smaller refund)',
-    stopCases.every(Boolean), `cases ${failed(stopCases)}; ${JSON.stringify({ refused, accepted })}`);
+    classicStopCases.every(Boolean), `cases ${failed(classicStopCases)}; ${JSON.stringify({ refused, accepted })}`);
 }
 
 {
