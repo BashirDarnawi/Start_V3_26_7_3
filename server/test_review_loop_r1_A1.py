@@ -7,7 +7,8 @@
        account and lift the settle cap (only the desk link may link such a request again).
 * n=22 a stop request blocks the link and the live/paused marker of an ad never launched, unless staff
        confirm it already exists in Meta (``stopRequestAcknowledged``: recorded, and the stop row then
-       resolves once Meta shows the ad paused); Stop returns the whole payment.
+       resolves once Meta shows the ad paused); Stop returns the whole payment. The plain marker (no Meta id)
+       records the launch over the request on the marker's own transaction (a failure rolls both back).
 
 Every test builds its own users (unique e-mails per run) through the real routes; Meta is faked.
 """
@@ -35,7 +36,7 @@ from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from server.systems.ads_studio import ad_campaign_actions as actions
-from server.systems.ads_studio import studio_settings
+from server.systems.ads_studio import studio_settings, studio_stop
 from server.systems.ads_studio.ad_campaign_actions import (
     REFUSE_LINK_DESK_ONLY,
     REFUSE_LINK_STOP_REQUESTED,
@@ -535,3 +536,47 @@ def test_an_acknowledged_launch_marker_over_a_stop_request_is_recorded(staff):
     asked = _ask_stop(_user2, launched)
     assert asked.status_code == 200, asked.text
     assert _publish(staff, launched, publishStatus="paused").status_code == 200
+
+
+def test_an_acknowledged_plain_marker_records_the_launch_on_its_own_transaction(staff, monkeypatch):
+    """The live marker without a Meta id over a stop request writes the marker and records the launch over the
+    request in ONE transaction: a failure while recording rolls the marker back too (never a committed 'live'
+    whose stop_request audit and stop-row mark are lost for good), so the desk's retry records it all."""
+    _user, campaign_id = _stop_asked(staff)
+    original = studio_stop.mark_stop_row_delivering
+
+    def _busy(conn, request_id):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(studio_stop, "mark_stop_row_delivering", _busy)
+    failing = TestClient(app, headers={"Origin": "http://testserver"}, raise_server_exceptions=False)
+    failed = failing.post(f"/api/ad-studio/campaigns/{campaign_id}/publish-status", json={
+        "expectedLastModified": _last_modified(campaign_id), "operationId": _uid("publish-op"),
+        "publishStatus": "live", "stopRequestAcknowledged": True,
+    }, cookies=staff["reviewer"]["cookies"])
+    assert failed.status_code == 500, failed.text
+    data = _data(campaign_id)
+    assert not str(data.get("publishStatus") or "") and not str(data.get("lastPublishOperationId") or ""), data
+    assert _stop_row(campaign_id)["deliveringAtRequest"] is False
+    assert _audits(campaign_id, "publish_status") == []
+
+    # The retry (a new operationId, as the desk sends) still counts as a launch over the stop request.
+    monkeypatch.setattr(studio_stop, "mark_stop_row_delivering", original)
+    marked = _publish(staff, campaign_id, publishStatus="live", stopRequestAcknowledged=True)
+    assert marked.status_code == 200, marked.text
+    assert _data(campaign_id)["publishStatus"] == "live"
+    row = _stop_row(campaign_id)
+    assert row["deliveringAtRequest"] is True and row["state"] == "open" and row.get("launchedOverRequestAt")
+    recorded = [item for item in _audits(campaign_id, "stop_request") if item.get("stopRequestAcknowledged") is True]
+    assert len(recorded) == 1 and recorded[0]["metaCampaignId"] == "" and recorded[0]["stopRowMarked"] is True, recorded
+    assert recorded[0]["user_id"] == staff["reviewer"]["id"]
+    published = _audits(campaign_id, "publish_status")
+    assert len(published) == 1 and published[0]["publishStatus"] == "live", published
+    # The same operationId again (a lost answer): the first result, nothing recorded twice.
+    replay = client.post(f"/api/ad-studio/campaigns/{campaign_id}/publish-status", json={
+        "expectedLastModified": _last_modified(campaign_id), "operationId": _data(campaign_id)["lastPublishOperationId"],
+        "publishStatus": "live", "stopRequestAcknowledged": True,
+    }, cookies=staff["reviewer"]["cookies"])
+    assert replay.status_code == 200, replay.text
+    assert len([item for item in _audits(campaign_id, "stop_request") if item.get("stopRequestAcknowledged")]) == 1
+    assert len(_audits(campaign_id, "publish_status")) == 1

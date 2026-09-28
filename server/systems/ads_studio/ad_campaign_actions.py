@@ -1327,6 +1327,35 @@ def _write_campaign(conn: Any, campaign_id: str, data: dict[str, Any], baseline:
     return modified if int(result.rowcount or 0) == 1 else 0
 
 
+def _mark_launched_over_stop(
+    ctx: dict[str, Any], campaign_id: str, fields: dict[str, Any], *, baseline: int, actor_id: str, operation_id: str
+) -> dict[str, Any]:
+    """The live/paused marker WITHOUT a new Meta id that staff confirmed over the owner's stop request:
+    ONE transaction under the entity-patch lock (the request row locked, as patch_entity) writes the marker
+    and records the launch over the request (_record_launch_over_stop), so neither commits without the
+    other and a failed attempt leaves nothing that a retry could not record. A changed version is the same
+    409 as patch_entity's (the route then answers an identical request that committed first)."""
+    patch_guard = nullcontext() if ctx["is_postgres"]() else ctx["sqlite_patch_lock"]()
+    with patch_guard, db_conn() as conn:
+        row = _lock_campaign_row(conn, ctx, campaign_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Campaign request not found")
+        entity = ctx["entity_from_db_row"](row)
+        data = dict(entity.get("data") or {})
+        if int(entity.get("lastModified") or 0) != int(baseline):
+            raise HTTPException(status_code=409, detail="Conflict: record has changed")
+        if str(data.get("status") or "Draft") != "Approved":
+            raise HTTPException(status_code=409, detail="Only Approved campaigns can be marked launched")
+        stop_asked = _stop_asked_before_launch(data)
+        data.update(fields)
+        modified = _write_campaign(conn, campaign_id, data, baseline)
+        if not modified:
+            raise HTTPException(status_code=409, detail="Conflict: record has changed")
+        if stop_asked:
+            _record_launch_over_stop(ctx, conn, campaign_id, actor_id, operation_id, "")  # rolls the marker back on failure
+    return {**entity, "data": {**data, "_lastModified": modified}, "lastModified": modified}
+
+
 def _unlink_meta_campaign(
     ctx: dict[str, Any], user: dict[str, Any], campaign_id: str, operation_id: str, body: AdCampaignUnlinkBody
 ) -> dict[str, Any]:
@@ -2251,14 +2280,19 @@ def create_ad_campaign_actions_router(
                     _tell_owner(creator, "request_live", campaign_id, "live")
             return ctx["project_entity_media_for_user"](saved, user, False)
         try:
-            saved = ctx["patch_entity"](
-                AD_CAMPAIGN_COLLECTION,
-                campaign_id,
-                fields,
-                actor_id,
-                expected_last_modified=expected,
-                enforce_ad_campaign_quota=False,
-            )
+            if launch_over_stop:  # the marker and the launch over the stop request commit together
+                saved = _mark_launched_over_stop(
+                    ctx, campaign_id, fields, baseline=expected, actor_id=actor_id, operation_id=operation_id
+                )
+            else:
+                saved = ctx["patch_entity"](
+                    AD_CAMPAIGN_COLLECTION,
+                    campaign_id,
+                    fields,
+                    actor_id,
+                    expected_last_modified=expected,
+                    enforce_ad_campaign_quota=False,
+                )
         except HTTPException as error:
             if error.status_code != 409:
                 raise
@@ -2272,9 +2306,6 @@ def create_ad_campaign_actions_router(
             ):
                 raise
             return ctx["project_entity_media_for_user"](latest, user, False)
-        if launch_over_stop:  # the marker committed: the launch over the stop request is on record too
-            with db_conn() as conn:
-                _record_launch_over_stop(ctx, conn, campaign_id, actor_id, operation_id, "")
         ctx["audit"](
             actor_id,
             "publish_status",
