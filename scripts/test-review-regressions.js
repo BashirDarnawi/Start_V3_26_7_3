@@ -1,5 +1,21 @@
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const loadBrowserSource = require('./helpers/load-browser-source');
+
+// The Clothes System is a lazy bundle: load its source on top of the startup files.
+function clothesFixture() {
+  const fixture = loadBrowserSource();
+  fixture.run(fs.readFileSync(path.join(__dirname, '..', 'src', '15b-clothes.js'), 'utf8'));
+  const notes = [];
+  fixture.sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+  fixture.sandbox.updateClothesOrdersFiltered = () => {};
+  fixture.sandbox.refreshClothesPhotoPreview = () => {};
+  return { ...fixture, notes };
+}
+
+// Let promise chains started inside the sandbox settle (it shares this microtask queue).
+const settle = () => new Promise(resolve => setImmediate(resolve));
 
 let passed = 0;
 function near(actual, expected) {
@@ -344,6 +360,112 @@ async function main() {
     sandbox.apiRunMetaAutoImport = async () => ({ imported: [], busy: false, state: {} });
     await sandbox.metaAdsCheckForNewAds();
     assert.equal(notes[0].message, 'There are no new ads right now.', 'a finished pass with nothing new still says so');
+  });
+  await test('clothes: editing a Paid order to add a piece saves it as Partially Paid instead of crashing', async () => {
+    const { sandbox, state, run, notes } = clothesFixture();
+    state.clothesProducts = [{ id: 'p1', name: 'Shirt', costUSD: 5, priceLYD: 50, variants: [], createdBy: 'admin' }];
+    const oldLine = { productId: 'p1', color: '', size: '', qty: 2, priceLYD: 50, costUSDAtSale: 5 };
+    state.clothesOrders = [{ id: 'o1', orderNo: 12, customerName: 'Sara', status: 'New', paymentStatus: 'Paid', amountPaidLYD: 100,
+      deliveryFeeLYD: 0, lines: [oldLine], stockDeducted: true, _lastModified: 7, createdBy: 'admin' }];
+    const fields = { 'clothes-order-customer': 'Sara', 'clothes-order-fee': '0', 'clothes-order-paystatus': 'Paid',
+      'clothes-order-paid': '100', 'clothes-order-editing-id': 'o1' };
+    sandbox.document.getElementById = id => (id in fields ? { value: fields[id] } : null);
+    run(`_clothesTempOrderLines = [${JSON.stringify(oldLine)}, { productId: 'p1', color: '', size: '', qty: 1, priceLYD: 50 }]; _clothesOrderEditBaseline = 7;`);
+    let sent = null;
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiMutateClothesOrder = async request => { sent = request; return {}; };
+    sandbox.applyClothesOrderMutationResponse = () => {};
+    // Before the fix this threw "Assignment to constant variable." and nothing was sent.
+    assert.equal(await sandbox.saveClothesOrderFromModal(), true);
+    assert.equal(sent.action, 'update');
+    assert.equal(sent.orderId, 'o1');
+    assert.equal(sent.data.paymentStatus, 'Partially Paid');
+    near(sent.data.amountPaidLYD, 100);   // the 100 LYD already collected stays; the new 50 is still to collect
+    assert.equal(sent.data.lines.length, 2);
+    assert.ok(notes.some(note => note.title === 'Order is now partially paid'));
+  });
+  await test('clothes: the Partially Paid prompt reads Arabic digits and grouped commas, and refuses unclear text', async () => {
+    const cases = [['1,000', 1000], ['١٥٠', 150], ['12,5', 12.5], ['١٬٠٠٠', 1000], ['٥٠٫٢٥', 50.25], [' ‏750.5 ', 750.5], ['1,000.50', 1000.5], ['0', 0],
+      ['1.500,00', null], ['12,5.5', null], ['1,5000', null], ['1 500', null], ['abc', null], ['100 LYD', null], ['12.345', null], ['1,2,3', null], ['-5', null], ['99999', null]];
+    for (const [typed, expected] of cases) {
+      const { sandbox, state, notes } = clothesFixture();
+      state.clothesOrders = [{ id: 'o1', orderNo: 3, customerName: 'Sara', status: 'New', paymentStatus: 'Paid', amountPaidLYD: 1500,
+        deliveryFeeLYD: 0, lines: [{ productId: 'p1', qty: 1, priceLYD: 1500 }], _lastModified: 4, createdBy: 'admin' }];
+      let sent = null;
+      sandbox.prompt = () => typed;
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.apiMutateClothesOrder = async request => { sent = request; return {}; };
+      sandbox.applyClothesOrderMutationResponse = () => {};
+      await sandbox.setClothesOrderPayment('o1', 'Partially Paid');
+      if (expected === null) {
+        assert.equal(sent, null, `"${typed}" must not be saved`);
+        assert.ok(notes.some(note => note.title === 'Invalid amount'), `"${typed}" must say Invalid amount`);
+      } else {
+        assert.ok(sent, `"${typed}" must be saved`);
+        near(sent.data.amountPaidLYD, expected);   // before: "1,000" saved 1, "١٥٠" saved 0, "12,5" saved 12
+      }
+    }
+  });
+  await test('clothes: a new product photo is shrunk to a 600 px JPEG on white; GIFs and unreadable images stay as they were', async () => {
+    const png = `data:image/png;base64,${'A'.repeat(5000)}`;
+    const jpeg = `data:image/jpeg;base64,${'B'.repeat(400)}`;
+    const gif = `data:image/gif;base64,R0lGOD${'C'.repeat(50)}`;
+    for (const [source, decodes, expected] of [[png, true, jpeg], [gif, true, gif], [png, false, png]]) {
+      const { sandbox, state, run } = clothesFixture();
+      const ops = [];
+      const ctx = { fillStyle: '', fillRect(...args) { ops.push(['fill', this.fillStyle, ...args]); }, drawImage(img, x, y, w, h) { ops.push(['draw', w, h]); } };
+      const canvas = { width: 0, height: 0, getContext: () => ctx, toDataURL: (type, quality) => { ops.push(['encode', type, quality]); return jpeg; } };
+      const makeElement = sandbox.document.createElement;
+      sandbox.document.createElement = tag => (tag === 'canvas' ? canvas : makeElement(tag));
+      sandbox.Image = function FakeImage() {
+        let src = '';
+        Object.defineProperty(this, 'src', { get: () => src, set: value => {
+          src = value; this.naturalWidth = 1600; this.naturalHeight = 1200;
+          Promise.resolve().then(() => (decodes ? this.onload() : this.onerror()));
+        } });
+      };
+      sandbox.compressImageToDataUrl = async () => source;
+      state.activeModal = 'clothes-product';
+      sandbox.uploadClothesProductPhotoFiles([{ type: 'image/png' }]);
+      await settle();
+      assert.equal(run('_clothesTempPhoto'), expected);
+      if (expected === jpeg) {
+        assert.equal(canvas.width, 600);
+        assert.equal(canvas.height, 450);
+        assert.deepEqual(ops, [['fill', '#ffffff', 0, 0, 600, 450], ['draw', 600, 450], ['encode', 'image/jpeg', 0.75]]);
+      } else {
+        assert.ok(!ops.some(op => op[0] === 'encode'), 'a GIF or an unreadable image is never re-encoded');
+      }
+    }
+  });
+  await test('WhatsApp reminder opens one tab and keeps Albayan on screen (web), with no second open in the app', async () => {
+    for (const mode of ['web', 'popup-blocked', 'packaged']) {
+      const { sandbox, state } = loadBrowserSource();
+      state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+      sandbox.shellDebtorRows = () => [{ customer: { id: 'c1', name: 'Debtor', phone: '0912345678' }, dueLyd: 300 }];
+      sandbox.isPackagedMobileApp = () => mode === 'packaged';
+      const opens = [];
+      const tab = { opener: { name: 'albayan' } };
+      // Spec behaviour: a 'noopener'/'noreferrer' feature makes open() return null even when the tab opened.
+      sandbox.window.open = (url, target, features = '') => {
+        opens.push({ url, target, features });
+        if (/noopener|noreferrer/.test(features) || mode !== 'web') return null;
+        return tab;
+      };
+      const home = sandbox.window.location.href;
+      sandbox.remindDebtor('c1');
+      assert.equal(opens.length, 1);
+      assert.ok(opens[0].url.startsWith('https://wa.me/218912345678?text='));
+      assert.equal(opens[0].target, '_blank');
+      if (mode === 'web') {
+        assert.equal(sandbox.window.location.href, home, 'the Albayan tab must not also go to WhatsApp');
+        assert.equal(tab.opener, null, 'the WhatsApp tab gets no handle back to Albayan');
+      } else if (mode === 'packaged') {
+        assert.equal(sandbox.window.location.href, home, 'the app must not launch WhatsApp a second time');
+      } else {
+        assert.equal(sandbox.window.location.href, opens[0].url, 'a blocked popup still falls back to this tab');
+      }
+    }
   });
   console.log(`\n${passed} review behavior regressions passed.`);
 }

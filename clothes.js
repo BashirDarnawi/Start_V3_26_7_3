@@ -172,11 +172,32 @@ function clothesFmtLYD(n) {
 }
 
 function clothesParseMoney(raw) {
-  // Inputs already run through sanitizeMoneyInput (ASCII digits, one dot),
-  // this is the final defensive parse at save time.
+  // Modal money inputs already run through sanitizeMoneyInput (ASCII digits,
+  // one dot); this is the final defensive parse at save time. Text typed into
+  // a prompt() never did: use clothesParsePromptMoney for that.
   const v = parseFloat(String(raw == null ? '' : raw).trim());
   if (!Number.isFinite(v) || v < 0) return 0;
   return Math.round(v * 100) / 100;
+}
+
+// An amount typed into a prompt(), read by the same rules as the Studio's
+// studioParseAmount (15g): Arabic-Indic digits, the Arabic decimal point ٫,
+// the Arabic comma ، and thousands sign ٬, invisible direction marks dropped;
+// "1,500" is 1500 and "12,5" is 12.5. What could mean two amounts is refused,
+// not guessed: more than 2 decimals, a space or any other character inside,
+// and a comma beside a point unless the commas group thousands ("1.500,00").
+// NaN means refused ("1,000" used to save as 1 and "١٥٠" as 0).
+function clothesParsePromptMoney(raw) {
+  let s = normalizeDigitsAscii(String(raw == null ? '' : raw))
+    .replace(/[‎‏‪-‮⁦-⁩]/g, '').trim()
+    .replace(/[٬،]/g, ',').replace(/٫/g, '.');
+  if (s.includes(',')) {
+    if (/^\d{1,3}(,\d{3})+(\.\d{0,2})?$/.test(s)) s = s.replace(/,/g, '');
+    else if (/^\d+,\d{1,2}$/.test(s)) s = s.replace(',', '.');
+    else return NaN;
+  }
+  if (!/^(\d+\.?\d{0,2}|\.\d{1,2})$/.test(s)) return NaN;
+  return Math.round(parseFloat(s) * 100) / 100;
 }
 
 function getClothesProductTotalQty(product) {
@@ -1157,11 +1178,49 @@ function onClothesProductPhotoSelected(input) {
   return uploadClothesProductPhotoFiles(files);
 }
 
+// A product photo rides inside every product row (lists, live sync, order
+// responses), so a new upload is shrunk further than a receipt photo: at most
+// 600 px as a JPEG. JPEG has no transparency, so PNG/WebP are flattened onto
+// white (not black). GIFs, and any failure, keep the image as it was: a photo
+// is never lost here.
+const CLOTHES_PHOTO_MAX_DIMENSION = 600;
+const CLOTHES_PHOTO_JPEG_QUALITY = 0.75;
+
+async function shrinkClothesProductPhoto(dataUrl) {
+  const source = String(dataUrl || '');
+  if (!/^data:image\/(?:png|jpe?g|webp);base64,/i.test(source)) return source;
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Image decode failed'));
+      image.src = source;
+    });
+    const w = img.naturalWidth || img.width;
+    const h = img.naturalHeight || img.height;
+    if (!w || !h) return source;
+    const scale = Math.min(1, CLOTHES_PHOTO_MAX_DIMENSION / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return source;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const out = String(canvas.toDataURL('image/jpeg', CLOTHES_PHOTO_JPEG_QUALITY) || '');
+    // Keep the smaller one; a browser without JPEG output hands back PNG, which is not the shrink we want.
+    return (/^data:image\/jpeg;base64,/.test(out) && out.length < source.length) ? out : source;
+  } catch (_) {
+    return source;
+  }
+}
+
 function uploadClothesProductPhotoFiles(fileList) {
   const file = Array.from(fileList || [])[0];
   if (!file) return;
   const myToken = ++_clothesPhotoToken;
-  compressImageToDataUrl(file).then((dataUrl) => {
+  compressImageToDataUrl(file).then(shrinkClothesProductPhoto).then((dataUrl) => {
     if (myToken !== _clothesPhotoToken || state.activeModal !== 'clothes-product') return; // modal changed — discard
     if (!isSafeReceiptPhotoSource(dataUrl)) {
       if (isOversizedReceiptPhotoSource(dataUrl)) _showPhotoPayloadLimit();
@@ -2241,7 +2300,7 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
   } else if (newPaymentStatus === 'Partially Paid') {
     const answer = prompt(isAr ? `المبلغ المدفوع حتى الآن (الإجمالي ${totals.totalLYD.toFixed(2)} د.ل)` : `Amount paid so far (total ${totals.totalLYD.toFixed(2)} LYD)`, String(Number(order.amountPaidLYD || 0).toFixed(2)));
     if (answer === null || !String(answer).trim()) { updateClothesOrdersFiltered(); return; }  // the select must not show a status that was not saved
-    const partial = clothesParseMoney(answer);
+    const partial = clothesParsePromptMoney(answer);  // NaN (refused) for text that is not a plain amount
     if (!(partial >= 0) || partial > totals.totalLYD + 0.005) {
       showNotification(isAr ? 'مبلغ غير صالح' : 'Invalid amount', isAr ? 'أدخل مبلغاً بين صفر والإجمالي.' : 'Enter an amount between zero and the total.', 'error');
       updateClothesOrdersFiltered();
@@ -2983,7 +3042,7 @@ async function saveClothesOrderFromModal() {
   }
   const customerPhone = Security.sanitizeInput(String(document.getElementById('clothes-order-phone')?.value || ''), { maxLength: 40 }).trim();
   const deliveryFeeLYD = clothesParseMoney(document.getElementById('clothes-order-fee')?.value);
-  const paymentStatus = String(document.getElementById('clothes-order-paystatus')?.value || 'Not Paid');
+  let paymentStatus = String(document.getElementById('clothes-order-paystatus')?.value || 'Not Paid');  // `let`: adding items to a Paid order turns it Partially Paid below
   let amountPaidLYD = clothesParseMoney(document.getElementById('clothes-order-paid')?.value);
   const paymentMethod = Security.sanitizeInput(String(document.getElementById('clothes-order-method')?.value || ''), { maxLength: 60 }).trim();
   const note = Security.sanitizeInput(String(document.getElementById('clothes-order-note')?.value || ''), { maxLength: 500 }).trim();

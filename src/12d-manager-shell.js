@@ -431,8 +431,9 @@ function remindDebtor(customerId) {
     return;
   }
   const url = `${base}${base.includes('?') ? '&' : '?'}text=${encodeURIComponent(shellReminderMessage(row))}`;
-  const opened = window.open(url, '_blank', 'noopener');
-  if (!opened) { try { window.location.href = url; } catch (_) {} }
+  // No 'noopener' (it makes open() null); the packaged app hands _blank to the system.
+  const w = window.open(url, '_blank');
+  if (w) { try { w.opener = null; } catch (_) {} } else if (!isPackagedMobileApp()) { try { window.location.href = url; } catch (_) {} }
   shellReminderStamp(row.customer.id);
   showNotification(shellText('Reminder opened', 'تم فتح التذكير'), shellText('WhatsApp is ready with the message.', 'واتساب جاهز بالرسالة.'), 'success');
   render();
@@ -570,9 +571,8 @@ function renderMobileOnboarding() {
 }
 
 // ---------- compact list rows (Receipts · Customers · Pages · Team) ----------
-// The design draws these lists as one-line rows. Each row expands in place to
-// the app's full card, so every existing button keeps working exactly as
-// before — the row is only a summary on top of it.
+// One-line summary rows; each expands in place to the app's full card, so
+// every existing button keeps working as before.
 
 const _shellExpanded = new Set();
 const _shellCollapsed = new Set();
