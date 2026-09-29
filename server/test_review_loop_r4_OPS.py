@@ -257,6 +257,51 @@ def test_unlocking_a_month_wakes_its_parked_meta_ads(admin):
         _delete(("ads", parked), ("ads", other), ("financialClosures", f"financial-close-{period}"))
 
 
+def test_one_broken_ad_row_never_blocks_a_month_unlock(admin):
+    # Waking the parked ads is only a scheduling convenience: an ad row the database cannot
+    # read as JSON (any month) must not turn the only way out of the 423 lock into a 500.
+    period = "2012-05"
+    parked, broken = f"r4ops_parked5_{TAG}", f"r4ops_broken5_{TAG}"
+    far = now_ms() + 30 * 86_400_000
+    _insert("ads", parked, {"recordType": "ad", "status": "Active", "metaNextSyncAt": far,
+                            "startDate": "2012-05-20", "metaAdId": "977777777777777"})
+    _insert("ads", broken, {}, raw="{not json")
+    _insert("financialClosures", f"financial-close-{period}", {"period": period, "status": "closed"})
+    try:
+        r = client.post(f"/api/admin/operations/financial-periods/{period}/unlock",
+                        json={"reason": "correct a May ad after close"}, cookies=admin["cookies"])
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "open"
+        assert operations._close_record(period)["status"] == "open"  # committed, not rolled back
+    finally:
+        _delete(("ads", parked), ("ads", broken), ("financialClosures", f"financial-close-{period}"))
+
+
+def test_a_failed_wake_keeps_the_unlock_committed(admin, monkeypatch):
+    # PostgreSQL shape of the same failure (a NaN token or bad JSON makes the cast raise):
+    # the unlock is saved and audited even when the wake raises.
+    period = "2012-04"
+    _insert("financialClosures", f"financial-close-{period}", {"period": period, "status": "closed"})
+
+    def broken_wake(conn, wake_period):
+        raise RuntimeError("invalid input syntax for type json")
+
+    monkeypatch.setattr(operations, "_wake_parked_meta_ads", broken_wake)
+    try:
+        r = client.post(f"/api/admin/operations/financial-periods/{period}/unlock",
+                        json={"reason": "correct an April ad after close"}, cookies=admin["cookies"])
+        assert r.status_code == 200, r.text
+        assert operations._close_record(period)["status"] == "open"
+        with db_conn() as conn:
+            row = conn.execute(
+                text("SELECT metadata_json FROM audit_logs WHERE action='unlock' AND resource_id=:rid ORDER BY ts DESC LIMIT 1"),
+                {"rid": f"financial-close-{period}"},
+            ).mappings().first()
+        assert row and json_loads(row["metadata_json"])["metaAdsResynced"] == 0
+    finally:
+        _delete(("financialClosures", f"financial-close-{period}"))
+
+
 def test_the_month_close_audit_row_carries_the_totals(admin, monkeypatch):
     period = "2011-03"
     totals = {"receiptVolumeUSD": 100.0, "paidReceiptsUSD": 80.0, "adSalesUSD": 50.0, "adSpendUSD": 30.0}

@@ -1359,7 +1359,14 @@ def create_operations_router(
                 "unlockReason": reason,
                 "history": history[-50:],
             }, str(user.get("id") or ""), conn=conn)
-            woken = _wake_parked_meta_ads(conn, period)
+        # Best effort, after the unlock commits: one ad row the database cannot read as JSON
+        # (any month) must never turn the only way out of the 423 lock into a 500.
+        try:
+            with db_conn() as wake_conn:
+                woken = _wake_parked_meta_ads(wake_conn, period)
+        except Exception as exc:
+            woken = 0
+            print(f"[albayan] Could not wake parked Meta ads after unlocking {period}; they resume when the park expires: {safe_exception_text(exc, 300)}")
         audit_fn(str(user.get("id") or ""), "unlock", FINANCIAL_CLOSE_COLLECTION, saved["id"], f"Unlocked financial period {period}", {"reason": reason, "metaAdsResynced": woken})
         return saved
 
