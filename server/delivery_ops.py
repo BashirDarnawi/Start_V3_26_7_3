@@ -51,7 +51,7 @@ def create_delivery_ops_router(
         if isinstance(payload, dict) and payload.get("hours_threshold") is not None:
             try:
                 hours_threshold = int(payload.get("hours_threshold"))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):  # 1e400 / Infinity parse to float("inf")
                 hours_threshold = 72
 
         hours_threshold = max(1, min(int(hours_threshold), 720))  # Min 1 hour, max 30 days

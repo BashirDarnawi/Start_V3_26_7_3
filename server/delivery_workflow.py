@@ -32,6 +32,10 @@ TRANSITIONS: dict[str, set[str]] = {
 }
 
 _TERMINAL = {"Delivered", "Canceled"}
+# Every real delivery state. A deliveryStatus that is present but blank, null or
+# misspelt skipped every "if desired and ..." transition check, so a finished job
+# could be reopened ("" reads as "Needs Delivery") and settled again with less cash.
+KNOWN_STATUSES = frozenset(TRANSITIONS) - {""}
 _CANCEL_FIELDS = {"deliveryCancelReason", "deliveryCancelledAt", "deliveryCancelledBy"}
 _OFFICE_FIELDS = {"isReceivedInOffice", "receivedInOfficeAt", "officeHandover", "officeHandoverAt"}
 
@@ -54,6 +58,18 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def status_is_known(updates: dict[str, Any]) -> bool:
+    """False when ``updates`` carries a deliveryStatus that is not a real state."""
+    value = updates.get("deliveryStatus")
+    return "deliveryStatus" not in updates or (isinstance(value, str) and value in KNOWN_STATUSES)
+
+
+def refuse_unknown_status(updates: dict[str, Any]) -> None:
+    """Used by the driver / admin-completion PATCH branch and the atomic receipt patch."""
+    if not status_is_known(updates):
+        raise HTTPException(status_code=400, detail="Invalid deliveryStatus")
+
+
 def patch_allowed(
     existing: dict[str, Any],
     updates: dict[str, Any],
@@ -66,6 +82,8 @@ def patch_allowed(
     data = existing.get("data") or {}
     current_status = _text(data.get("deliveryStatus"))
     target_status = _text(updates.get("deliveryStatus"))
+    if not status_is_known(updates):
+        return False  # {"deliveryStatus": ""} used to pass every check below
 
     # The client sends its own history list with cancel / "Delete mission"
     # (the server rewrites it) and statusDetail with "Delete mission" (only

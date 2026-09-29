@@ -9353,6 +9353,7 @@ def _financial_patch_receipt_atomic(
     receipt_id = validate_entity_id(receipt_id_raw)
     actor_id = validate_entity_id(actor.get("id"))
     clean = sanitize_json(updates or {}) or {}
+    delivery_workflow.refuse_unknown_status(clean)  # defence in depth: every receipt writer lands here
     validate_relationship_ids(clean, "receipt settlement data")
     clean = _normalize_receipt_number_fields(clean)
     _validate_receipt_number_fields(clean)
@@ -9950,7 +9951,7 @@ def unsettle_receipt_and_linked_ads(
         raise HTTPException(
             status_code=400, detail="Receipt debt conversion must mark isPaid false"
         )
-    if str(updates.get("deliveryStatus") or "").strip() == "Delivered":
+    if str(updates.get("deliveryStatus") or "").strip() == "Delivered" and str(existing_data.get("deliveryStatus") or "").strip() != "Delivered":  # a finished job's echo is no transition
         raise HTTPException(
             status_code=400,
             detail="Receipt debt conversion cannot mark a delivery completed",
@@ -11600,6 +11601,7 @@ def update_collection_item(
         # Remove protected keys + disallow reassignment
         for k in ["id", "_created", "createdBy", "createdAt", "creatorId", "deliveryPersonId"]:
             updates.pop(k, None)
+        delivery_workflow.refuse_unknown_status(updates)  # "" / null skipped every "if desired and ..." check below
 
         if collection == "ads":
             if submitted_keys & (_DELIVERY_PAYMENT_FIELDS | {"isReceivedInOffice", "receivedInOfficeAt"}):
@@ -11955,8 +11957,10 @@ def update_collection_item(
                     updates["status"] = "Not Paid"
                     updates["isPaid"] = False
                 if str(data.get("status") or "") == "Paid" or data.get("isPaid") is True:
-                    for _k in ("amountCollectedFromCustomer", "paymentResult", "overpaidAmount", "remainingDue", "amountLocal", "amountUSD", "status", "isPaid"):
-                        updates.pop(_k, None)  # paid in the office before the run: proof and fee fields stand, the settled money does not move
+                    for _k in ("amountCollectedFromCustomer", "paymentResult", "overpaidAmount", "remainingDue", "amountLocal", "amountUSD", "status", "isPaid", "payments", "paymentMethod"):
+                        updates.pop(_k, None)  # paid in the office before the run: proof and fee fields stand, the settled money (and its payment rows) does not move
+                    if str(data.get("status") or "") == "Paid" and data.get("isPaid") is True:
+                        updates["amountCollectedFromCustomer"] = 0.0  # the office holds it, not the driver (screens fell back to amountLocal); completion truth stays skipped
 
             if desired == "Canceled":
                 reason = sanitize_str(str(updates.get("deliveryCancelReason") or ""))[:500]
@@ -12121,7 +12125,8 @@ def update_collection_item(
         desired_delivery_status = str(updates_in.get("deliveryStatus") or "").strip()
         if desired_delivery_status == "Delivered":
             data0 = existing.get("data") or {}
-            if str(data0.get("tempReceiptNo") or "").strip():
+            # Only a real transition: the form echoes a finished job's stored "Delivered" (same rule as /settle).
+            if str(data0.get("tempReceiptNo") or "").strip() and str(data0.get("deliveryStatus") or "").strip() != "Delivered":
                 raise HTTPException(status_code=403, detail="Only the assigned delivery user or an admin can mark this receipt delivered")
 
     # Receipt number uniqueness enforcement (server-side, multi-user safe)

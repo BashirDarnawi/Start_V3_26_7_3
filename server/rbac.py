@@ -138,6 +138,14 @@ def is_admin_receipt_completion(role_lower: str, collection: str, updates: dict[
     if str((updates or {}).get("deliveryStatus") or "").strip() != "Delivered":
         return False
     data = (existing or {}).get("data") or {}
+    # A finished job is only re-entered by a re-settlement attempt (collected
+    # amounts sent), which the verified branch refuses as terminal. The receipt
+    # form echoes the stored "Delivered" on every save (phone fix, cancel,
+    # refund, write-off); that edit takes the normal admin PATCH path.
+    if str(data.get("deliveryStatus") or "").strip() in {"Delivered", "Canceled"} and not (
+        set(updates or {}) & {"amountCollectedFromCustomer", "actualDeliveryFeeCollected", "deliveryFeeCollected"}
+    ):
+        return False
     return bool(str(data.get("tempReceiptNo") or "").strip())
 
 
