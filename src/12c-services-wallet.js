@@ -749,13 +749,13 @@ function renderWalletView() {
     .filter(s => s && s.userId === uid && s.status === 'active' && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))
     .slice(0, 50);
 
+  const who = id => !id || id === 'system' ? (isRTL ? 'النظام' : 'System') : (userById.get(String(id))?.name || userById.get(String(id))?.email || String(id));
+  const txLabels = { credit: ['Wallet top-up', 'شحن المحفظة'], transfer: ['Transfer', 'تحويل'], reversal: ['Reversal', 'عكس معاملة'], service_payment: ['Subscription', 'اشتراك'], campaign_payment: ['Campaign budget', 'ميزانية حملة'], campaign_refund: ['Campaign refund', 'استرجاع حملة'], campaign_payment_release: ['Campaign budget returned', 'إرجاع ميزانية حملة'] };
   const txRows = txs.map(tx => {
     const isIn = tx.toUserId === uid;
-    const otherId = isIn ? tx.fromUserId : tx.toUserId;
-    const other =
-      !otherId || otherId === 'system'
-        ? (isRTL ? 'النظام' : 'System')
-        : (userById.get(String(otherId))?.name || userById.get(String(otherId))?.email || String(otherId || ''));
+    // The admin sees everyone's rows: a row between two others has no sign.
+    const mine = isIn || tx.fromUserId === uid;
+    const other = mine ? who(isIn ? tx.fromUserId : tx.toUserId) : `${who(tx.fromUserId)} ${isRTL ? '←' : '→'} ${who(tx.toUserId)}`;
 
     const amountStr = walletFormatMinor(walletTxAmountMinor(tx), walletTxCurrency(tx));
     const when = tx.createdAt ? new Date(tx.createdAt).toLocaleString(appDateLocale()) : '';
@@ -764,12 +764,12 @@ function renderWalletView() {
     return `
       <div class="workspace-wallet-row py-3 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
-          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(tx.type || 'tx')}</div>
+          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(txLabels[tx.type]?.[isRTL ? 1 : 0] || tx.type || 'tx')}</div>
           <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
-        <div class="workspace-wallet-amount font-black ${isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
-          ${isIn ? '+' : '-'}${Security.escapeHtml(amountStr)}
+        <div class="workspace-wallet-amount font-black ${!mine ? 'text-slate-600 dark:text-slate-300' : isIn ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">
+          ${mine ? (isIn ? '+' : '-') : ''}${Security.escapeHtml(amountStr)}
         </div>
       </div>
     `;

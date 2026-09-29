@@ -1432,6 +1432,146 @@ async function main() {
     state.language = 'en';
   });
 
+  // ---- Review loop r5 batch MGR: Manager money screens and Arabic texts ----
+  const realEscape = "Security.escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')";
+  await test('r5 MGR n=11: driver completion shows the exact 107.25 LYD debt and the real 0.25 shortfall, never "107" and "remaining 0"', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    state.language = 'ar';
+    state.customers = [{ id: 'c1', name: 'Ali' }];
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', tempReceiptNo: 'D1', status: 'Not Paid', isPaid: false,
+      statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'In Progress', deliveryPersonId: 'admin',
+      amountUSD: 15, amountLocal: 0, exchangeRate: 7.15, payments: [], transfers: [] }];
+    const created = [];
+    const realCreate = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const element = realCreate(tag); created.push(element); return element; };
+    await sandbox.openReceiptDeliveryCompletionModal('r1');
+    const modal = created.find(element => element.id === 'delivery-complete-modal');
+    assert.ok(modal, 'the completion dialog was not built');
+    assert.match(String(modal.innerHTML), /id="delivery-complete-debt"[^>]*>107\.25 LYD</);
+    // The driver types the 107 they were shown: the verdict names the 0.25 that stays owed.
+    const nodes = { 'delivery-complete-modal': { dataset: { receiptId: 'r1' } }, 'delivery-collected-total': {}, 'delivery-fee-compare': {}, 'delivery-debt-compare': {} };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    sandbox.getPaymentTotalsFromDom = () => ({ totalR1: 107, totalR2: 0 });
+    sandbox._readDeliveryFeeLyd = () => 0;
+    sandbox.updateReceiptDeliveryCompletionComputed();
+    assert.ok(nodes['delivery-debt-compare'].textContent.includes('0.25 LYD'), nodes['delivery-debt-compare'].textContent);
+    assert.equal(nodes['delivery-collected-total'].textContent, '107.00 LYD');
+  });
+  await test('r5 MGR n=12: a settled or company-covered underpaid delivery leaves the uncollected tile, the CSV and the card', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    state.language = 'en';
+    state.customers = [{ id: 'c1', name: 'Ali' }];
+    const base = { recordType: 'receipt', customerId: 'c1', statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'Delivered',
+      paymentResult: 'UNDERPAID', remainingDue: 50, amountCollectedFromCustomer: 450, debtAmountLocal: 500, debtAmountUSD: 100,
+      amountLocal: 450, amountUSD: 90, exchangeRate: 5, payments: [], transfers: [], createdAt: '2026-09-01' };
+    state.receipts = [
+      { ...base, id: 'settled', tempReceiptNo: 'D1', status: 'Paid', isPaid: true, customerOutstandingUSD: 10 },    // uncovered settle keeps the old outstanding
+      { ...base, id: 'covered', tempReceiptNo: 'D2', status: 'Not Paid', isPaid: false, companyCoveredUSD: 10, customerOutstandingUSD: 0 },
+      { ...base, id: 'owed', tempReceiptNo: 'D3', status: 'Not Paid', isPaid: false, customerOutstandingUSD: 10 }
+    ];
+    const due = id => sandbox._getOutstandingDueLocal(state.receipts.find(receipt => receipt.id === id));
+    assert.equal(due('settled'), 0);
+    assert.equal(due('covered'), 0);
+    near(due('owed'), 50);
+    near(sandbox._getOutstandingDueLocal({ ...base, id: 'legacy', status: 'Not Paid', isPaid: false }), 50);  // legacy row: stored shortfall still counts
+    near(sandbox._getOutstandingDueLocal({ ...base, id: 'partly', status: 'Not Paid', isPaid: false, companyCoveredUSD: 6, customerOutstandingUSD: 4 }), 20);
+    // USD-cent rounding of the stored outstanding ($6.99 x 7.15 = 49.98) never trims the exact 50.00 shortfall.
+    near(sandbox._getOutstandingDueLocal({ ...base, id: 'rounded', status: 'Not Paid', isPaid: false, debtAmountLocal: 715, exchangeRate: 7.15, customerOutstandingUSD: 6.99 }), 50);
+    const html = String(sandbox.renderReceiptsView());
+    const card = id => html.split('data-receipt-id="').find(part => part.startsWith(`${id}"`)) || '';
+    assert.ok(card('settled') && card('covered') && card('owed'), 'every receipt card rendered');
+    assert.ok(!/Remaining 50/.test(card('settled')) && !/Remaining 50/.test(card('covered')), 'a settled or covered receipt still shows "Remaining 50"');
+    assert.ok(/Remaining 50\.00 LYD/.test(card('owed')), 'the real shortfall is still shown');
+  });
+  await test('r5 MGR n=13/14/17: closed-month, duplicate-number and company-funding refusals read right in Arabic, under "Not allowed"', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'ar';
+    const closed = { status: 423, message: 'Financial period 2026-08 is closed. An Admin must unlock it before editing.' };
+    const toast = sandbox._serverRefusalToast('save', 'receipts', closed);
+    assert.equal(toast[0], 'غير مسموح');
+    assert.ok(toast[1].includes('2026-08') && toast[1].includes('مُقفل') && !/Financial|Admin/.test(toast[1]), toast[1]);
+    const busy = sandbox._serverRefusalText('Financial period 2026-08 is being closed or unlocked; retry after it finishes');
+    assert.ok(busy.includes('2026-08') && !/[A-Za-z]/.test(busy), busy);
+    for (const message of ['serialNumber already exists', 'Receipt number already exists', 'finalReceiptNo already exists', 'tempReceiptNo already exists',
+      'Final spend cannot be less than recorded company funding; reconcile company coverage separately first', "Spent amount exceeds the ad's funding baseline"]) {
+      const text = sandbox.describe409({ status: 409, message }, 'x');
+      assert.ok(!/[A-Za-z]/.test(text), text);
+    }
+    // The destroyed-receipt dialog: the server's duplicate refusal, not "serialNumber already exists".
+    const notes = [];
+    sandbox.showNotification = (title, message) => notes.push(`${title}: ${message}`);
+    state.serverMode = true;
+    sandbox.document.getElementById = id => (id === 'destroyed-receipt-number' ? { value: '98765' } : null);
+    sandbox.apiCreateEntity = async () => { throw Object.assign(new Error('serialNumber already exists'), { status: 409, payload: { detail: 'serialNumber already exists' } }); };
+    await sandbox._saveDestroyedReceipt(null);
+    assert.ok(notes.length && !/[A-Za-z]/.test(notes[notes.length - 1]), notes.join(' | '));
+    // The new-receipt form now uses the same bilingual toast (no "HTTP 409 -" prefix).
+    const forms = fs.readFileSync(path.join(__dirname, '..', 'src', '14-forms.js'), 'utf8');
+    assert.ok(forms.includes("showNotification(..._serverRefusalToast('create', 'receipts', e), 'error');") && !forms.includes('HTTP ${e.status}'));
+    const actions = fs.readFileSync(path.join(__dirname, '..', 'src', '16-actions-io.js'), 'utf8');
+    assert.ok(actions.includes(": (_serverRefusalText(error?.message) || (isAr ? 'فشل حفظ إيقاف الإعلان.'"), 'the ad stop shows a 423 raw');
+    state.language = 'en';
+    assert.equal(sandbox._serverRefusalToast('save', 'receipts', closed)[0], 'Not allowed');
+    assert.equal(sandbox._serverRefusalToast('save', 'receipts', { status: 500, message: 'boom' })[0], 'Server Error');
+    assert.equal(sandbox.describe409({ status: 409, message: 'serialNumber already exists' }, 'x'), 'This receipt number is already used by another receipt. Check the number and try again.');
+    assert.equal(sandbox._serverRefusalText(closed.message), closed.message);
+  });
+  await test('r5 MGR n=15: the admin wallet ledger shows other people\'s money without a red minus, with both names and bilingual titles', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    state.language = 'ar';
+    state.currentUser = { id: 'adm', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser, { id: 'cust1', name: 'Ali', role: 'Customer' }];
+    state.walletTransactions = [
+      { id: 't1', type: 'credit', fromUserId: null, toUserId: 'cust1', amountMinor: 5000, currency: 'USD' },
+      { id: 't2', type: 'campaign_payment', fromUserId: 'cust1', toUserId: 'system', amountMinor: 400, currency: 'USD' },
+      { id: 't3', type: 'credit', fromUserId: null, toUserId: 'adm', amountMinor: 700, currency: 'USD' }
+    ];
+    const rows = String(sandbox.renderWalletView()).split('workspace-wallet-row').slice(1);
+    assert.equal(rows.length, 3);
+    assert.ok(rows[0].includes('شحن المحفظة') && rows[0].includes('Ali') && !rows[0].includes('text-rose-600') && !/-\s*50\.00/.test(rows[0]), rows[0]);
+    assert.ok(rows[1].includes('ميزانية حملة') && rows[1].includes('Ali') && rows[1].includes('النظام') && !rows[1].includes('text-rose-600'), rows[1]);
+    assert.ok(/\+7\.00/.test(rows[2]) && rows[2].includes('text-emerald-600'), 'the admin\'s own top-up keeps its + sign');
+    assert.ok(!rows.some(row => />(credit|campaign_payment)</.test(row)), 'a raw type code is the title');
+  });
+  await test('r5 MGR n=16: Meta money on ad cards is 1,250.00 in Arabic too, never the ar-LY 1.250,00', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'ar';
+    const text = sandbox.metaAdsFormatMoney(125000, 'USD');
+    assert.ok(text.includes('1,250.00') && !text.includes('1.250,00'), text);
+  });
+  await test('r5 MGR n=18: the month-close prompt, the month check and the Control Center panels speak Arabic', async () => {
+    const { sandbox, state, run } = controlCenterFixture();
+    state.language = 'ar';
+    sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
+      { code: 'unpaid_receipts', count: 12, message: 'Receipts are still unpaid' },
+      { code: 'ads_need_setup', count: 3, message: 'Ads still need customer, amount, or payment setup' },
+      { code: 'ads_still_running', count: 1, message: 'Meta ads from this month are still running (not stopped or completed)' }] });
+    let prompted = '';
+    let alerted = '';
+    sandbox.window.prompt = text => { prompted = text; return ''; };
+    sandbox.window.alert = text => { alerted = text; };
+    sandbox.document.getElementById = id => (id === 'control-center-period' ? { value: '2026-08' } : null);
+    await sandbox.closeControlCenterMonth();
+    assert.ok(prompted.includes('(12)') && !/[A-Za-z]{3,}/.test(prompted), prompted);
+    await sandbox.previewControlCenterMonth();
+    assert.ok(alerted.includes('(3)') && !/[A-Za-z]{3,}/.test(alerted), alerted);
+    assert.equal(sandbox.controlCenterTimestamp(0), 'أبداً');
+    state.serverMode = true;
+    run(`_controlCenter.error = ''; _controlCenter.operations = { backup: {}, monitoring: { recent_error_rate: 0.3, recent_sample_size: 100, response_ms_p95: 5000, total_requests: 100 },
+      setupTasks: ['Enable encrypted daily backups', 'Connect an operations alert webhook'] }; _controlCenter.meta = { webhookConfigured: false };
+      _planManager.loadedAt = Date.now(); _planManager.plans = [{ id: 'p1', name: 'P', nameAr: 'خ', serviceIds: ['ad_maker'], priceMinor: 100, durationDays: 30 }];`);
+    const html = String(sandbox.renderControlCenterView());
+    for (const english of ['Meta instant notifications need setup', 'Server errors need attention', 'Server responses are slow', 'Enable encrypted daily backups',
+      'Connect an operations alert webhook', 'This protection needs one server setting', '>Never<', 'Save all plans', '>Reload<', 'Subscription plans &', '>Days<', 'Add a bundle']) {
+      assert.ok(!html.includes(english), english);
+    }
+    assert.ok(html.includes('فعّل النسخ الاحتياطي اليومي المشفّر'));
+    state.language = 'en';
+  });
+
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

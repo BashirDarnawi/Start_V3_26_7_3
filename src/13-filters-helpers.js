@@ -3595,7 +3595,7 @@ function updateReceiptDeliveryCompletionComputed() {
   const collected = collectedTotals.totalR1;   // LYD — compared against the debt
   const actualFee = _readDeliveryFeeLyd();     // LYD — compared against the quoted fee
   const totalEl = document.getElementById('delivery-collected-total');
-  if (totalEl) totalEl.textContent = `${collected.toFixed(0)} LYD` + (collectedTotals.totalR2 ? ` ($${collectedTotals.totalR2.toFixed(2)})` : '');
+  if (totalEl) totalEl.textContent = `${collected.toFixed(2)} LYD` + (collectedTotals.totalR2 ? ` ($${collectedTotals.totalR2.toFixed(2)})` : '');
   const notes = String(document.getElementById('delivery-driver-notes')?.value || '').trim();
 
   const imgData = String(document.getElementById('delivery-receipt-image-data')?.dataset?.imageData || '').trim();
@@ -3619,8 +3619,8 @@ function updateReceiptDeliveryCompletionComputed() {
   }
   if (debtEl) {
     if (debtCmp.paymentResult === 'PAID_EXACT') debtEl.textContent = isArC ? 'الدفع: مطابق تماماً' : 'Payment: PAID EXACT';
-    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (+${debtCmp.overpaidAmount.toFixed(0)} LYD)` : `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(0)} LYD)`;
-    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(0)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(0)} LYD remaining)`;
+    if (debtCmp.paymentResult === 'OVERPAID') debtEl.textContent = isArC ? `الدفع: زائد (+${debtCmp.overpaidAmount.toFixed(2)} LYD)` : `Payment: OVERPAID (+${debtCmp.overpaidAmount.toFixed(2)} LYD)`;
+    if (debtCmp.paymentResult === 'UNDERPAID') debtEl.textContent = isArC ? `الدفع: ناقص (المتبقي ${debtCmp.remainingDue.toFixed(2)} LYD)` : `Payment: UNDERPAID (${debtCmp.remainingDue.toFixed(2)} LYD remaining)`;
   }
 
   // Validate (allow app-generated auto-serials: S/B/O/E + digits)
@@ -3931,7 +3931,7 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(0)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
           ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
         </div>
 
@@ -4355,7 +4355,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
             try {
               const debtEl = document.getElementById('delivery-complete-debt');
               const quotedEl = document.getElementById('delivery-complete-quoted');
-              if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(0)} LYD`;
+              if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(2)} LYD`;
               if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(0)} LYD`;
             } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
@@ -5085,7 +5085,7 @@ async function submitCompanyDebtCoverage() {
       if (_companyDebtCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
         ? describe409(error, 'This receipt changed on another device. Refresh and review its current balance.')
-        : (error?.message || 'Could not apply company funds. Try again.');
+        : (_serverRefusalText(error?.message) || 'Could not apply company funds. Try again.');
       showNotification('Company coverage failed', message, 'error');
       if (isVersionConflict409(error)) closeCompanyDebtCoverageModal({ force: true });
       return false;
@@ -5501,7 +5501,7 @@ async function submitCustomerAdDebtCoverage() {
       if (_customerAdCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
         ? describe409(error, isAr ? 'تغيّرت بيانات العميل على جهاز آخر. أعد المحاولة.' : 'This customer changed on another device. Refresh and review the current debt.')
-        : (error?.message || (isAr ? 'تعذّر تطبيق أموال الشركة. حاول مجدداً.' : 'Could not apply company funds. Try again.'));
+        : (_serverRefusalText(error?.message) || (isAr ? 'تعذّر تطبيق أموال الشركة. حاول مجدداً.' : 'Could not apply company funds. Try again.'));
       showNotification(isAr ? 'فشلت التغطية' : 'Company coverage failed', message, 'error');
       if (isVersionConflict409(error)) closeCustomerAdDebtCoverageModal({ force: true });
       return false;
@@ -6062,8 +6062,7 @@ async function _saveDestroyedReceipt(buttonEl) {
     }
   } catch (e) {
     if (buttonEl) buttonEl.disabled = false;
-    const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-    showNotification(isAr ? 'فشل الحفظ' : 'Save failed', String(detail), 'error');
+    showNotification(isAr ? 'فشل الحفظ' : 'Save failed', _serverRefusalText(e?.message || 'Request failed'), 'error');
     return;
   }
   document.getElementById('destroyed-receipt-dialog')?.remove();
@@ -6754,7 +6753,7 @@ async function saveReceiptTransfer() {
           isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',
           error?.status === 409
             ? describe409(error, isArTr ? 'تم تغيير هذا الوصل من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This receipt changed on another device. Refresh the data, then try again.')
-            : (error?.message || (isArTr ? 'فشل حفظ التحويل.' : 'The transfer could not be saved.')),
+            : (_serverRefusalText(error?.message) || (isArTr ? 'فشل حفظ التحويل.' : 'The transfer could not be saved.')),
           conflict ? 'warning' : 'error'
         );
         return false;
@@ -7166,9 +7165,7 @@ function describe409(error, conflictText) {
       ? 'هذا الإعلان منتهٍ أو مُسترجَع، لذا لم يعد هذا التغيير ممكناً. استخدم الاسترجاع لتعديل أمواله.'
       : 'This ad is already finished or refunded, so this change is no longer allowed. Use Refund to adjust its money.';
   }
-  // A receipt relink (or any ad-funding save) whose target receipt lacks the
-  // balance to back the ad's spend. Name the real reason instead of the raw
-  // server string, so the user knows to pick a receipt with enough credit.
+  // A relink/ad-funding save whose target receipt lacks the balance for the spend.
   if (/insufficient (balance on receipt|in shop receipt balance|delivery due credit)/i.test(detail)) {
     return state.language === 'ar'
       ? 'الوصل الجديد لا يملك رصيداً كافياً لتغطية المبلغ المُنفَق من هذا الإعلان. اختر وصلاً برصيد كافٍ أو أضف وصلاً آخر.'
@@ -7218,7 +7215,7 @@ function describe409(error, conflictText) {
       ? 'هذا الوصل يموّل إعلاناً بصيغة قديمة بدون صفوف تمويل، لذا يجب أن يبقى مدفوعاً.'
       : 'This receipt funds an old-format ad without funding rows, so it must remain paid.';
   }
-  return (state.language === 'ar' && _SERVER_REFUSAL_AR.find(([en]) => detail.startsWith(en))?.[1]) || detail || conflictText;
+  return _serverRefusalText(detail) || conflictText;
 }
 
 async function saveTopUps() {
@@ -7336,7 +7333,7 @@ async function saveTopUps() {
       isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
       error?.status === 409
         ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
-        : (error?.message || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
+        : (_serverRefusalText(error?.message) || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
       conflict ? 'warning' : 'error'
     );
     return;
@@ -7508,7 +7505,7 @@ async function saveRefund() {
       state.language === 'ar' ? 'تعذر حفظ الاسترجاع' : 'Refund Not Saved',
       error?.status === 409
         ? describe409(error, state.language === 'ar' ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
-        : (error?.message || (state.language === 'ar' ? 'فشل حفظ الاسترجاع.' : 'The refund could not be saved.')),
+        : (_serverRefusalText(error?.message) || (state.language === 'ar' ? 'فشل حفظ الاسترجاع.' : 'The refund could not be saved.')),
       conflict ? 'warning' : 'error'
     );
     return;

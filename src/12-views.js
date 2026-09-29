@@ -3176,9 +3176,9 @@ function renderReceiptsView() {
                   <div class="text-sm ${hasCustomerDebt ? 'text-rose-500 font-semibold' : 'text-slate-500'}">${(hasCustomerDebt ? collectionTarget.amountLocal : Number(receipt.amountLocal || 0)).toFixed(2)} LYD</div>
                   ${hasCustomerDebt ? `<div class="text-[10px] font-bold text-rose-600 dark:text-rose-400 mt-1">${isArV ? 'دين العميل' : 'Customer debt'}</div>` : ''}
                   ${receipt.isPaid ? `<div class="text-xs text-emerald-600 mt-1">✓ ${isArV ? 'مدفوع' : 'Paid'}</div>` : `<div class="text-xs text-amber-600 mt-1">⏳ ${isArV ? 'غير مدفوع' : 'Unpaid'}</div>`}
-                  ${receipt.paymentResult ? `
+                  ${receipt.paymentResult && (hasCustomerDebt || receipt.paymentResult !== 'UNDERPAID') ? `
                     <div class="text-[10px] mt-1 ${receipt.paymentResult === 'UNDERPAID' ? 'text-rose-600 dark:text-rose-400' : receipt.paymentResult === 'OVERPAID' ? 'text-blue-600' : 'text-emerald-600'} font-bold">
-                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(0)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${Number(receipt.remainingDue || 0).toFixed(0)} LYD`}
+                      ${receipt.paymentResult === 'PAID_EXACT' ? (isArV ? 'مدفوع بالضبط' : 'Paid exact') : receipt.paymentResult === 'OVERPAID' ? `${isArV ? 'دفع زائد' : 'Overpaid'} +${Number(receipt.overpaidAmount || 0).toFixed(2)} LYD` : `${isArV ? 'المتبقي' : 'Remaining'} ${_deliveryRemainingLocal(receipt, collectionTarget.amountLocal).toFixed(2)} LYD`}
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
@@ -4530,9 +4530,7 @@ async function checkStuckDeliveries() {
   }
   
   try {
-    // apiJson sends the session cookie and handles timeouts/errors. The old
-    // raw fetch here called getSessionToken(), a function that never existed,
-    // so this feature crashed before the request was even sent.
+    // apiJson sends the session cookie and handles timeouts/errors.
     const result = await apiJson('/api/deliveries/check-stuck', { method: 'POST', body: { hours_threshold: hours } }, { timeoutMs: 30000 });
 
     if (result.stuck_count === 0) {
@@ -4647,14 +4645,19 @@ function _deliveryDisplayAmounts(item) {
   return { local: target.amountLocal, usd: target.amountUSD };
 }
 
+// Settle and company cover update only customerOutstandingUSD, never the stored
+// driver shortfall: cap it by that target (0.1 LYD absorbs USD-cent rounding).
+function _deliveryRemainingLocal(item, targetLocal) {
+  const rem = Math.max(0, Number(item.remainingDue) || 0);
+  return item.customerOutstandingUSD != null && rem - targetLocal > 0.1 ? Math.max(0, targetLocal) : rem;
+}
+
 function _getOutstandingDueLocal(item) {
   if (!item) return 0;
   const ds = String(item.deliveryStatus || '').trim();
   if (ds === 'Canceled') return 0;
   const rem = Number(item.remainingDue);
-  if (Number.isFinite(rem)) return Math.max(0, rem);
-  // Cached per render pass: for legacy zero-amount receipts this derivation
-  // scans every ad, and the per-row markup asks for the same target again.
+  if (Number.isFinite(rem)) return getReceiptPaymentState(item) === 'paid' ? 0 : _deliveryRemainingLocal(item, _getCollectionTargetCached(item).amountLocal);
   const debt = _getCollectionTargetCached(item).amountLocal;
   if (debt > 0) return Math.max(0, debt - _getCollectedCashLocal(item));
   if (item.isPaid) return 0;
@@ -6601,9 +6604,7 @@ async function cleanupAuditLogs() {
   }
   
   try {
-    // apiJson sends the session cookie and handles timeouts/errors. The old
-    // raw fetch here called getSessionToken(), a function that never existed,
-    // so audit cleanup crashed before the request was even sent.
+    // apiJson sends the session cookie and handles timeouts/errors.
     const result = await apiJson('/api/audit/cleanup', { method: 'POST', body: { days_to_keep: days } }, { timeoutMs: 30000 });
     showNotification(
       isAr ? 'اكتمل التنظيف' : 'Cleanup Complete',
@@ -6611,10 +6612,7 @@ async function cleanupAuditLogs() {
       'success'
     );
     
-    // Refresh from server. The old code called syncFromServer(), which does
-    // not exist, so it threw a ReferenceError that the catch turned into a
-    // false "Cleanup failed" toast AFTER the cleanup had actually succeeded —
-    // and the view never re-rendered. serverLiveSyncOnce is the real sync fn.
+    // Refresh from server (a throw here would misreport a finished cleanup).
     if (isServerModeEnabled()) {
       await serverLiveSyncOnce();
       await refreshServerAuditLogs({ force: true });

@@ -1180,9 +1180,7 @@ function getRecordType(record) {
 function redactSensitive(obj, depth = 0) {
   if (depth > 12) return null;
   if (obj === null || obj === undefined) return obj;
-  // Audit metadata must never duplicate inline image bodies. A single update
-  // previously copied every photo in both {old,new}, then persisted that copy
-  // in the local log, causing multi-megabyte saves and storage exhaustion.
+  // Audit metadata must never duplicate inline image bodies.
   if (typeof obj === 'string' && /^data:image\//i.test(obj.trim())) return '[media omitted]';
   if (typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(x => redactSensitive(x, depth + 1));
@@ -1706,8 +1704,21 @@ const _SERVER_REFUSAL_AR = [
   ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.'],
   ['This customer was merged', 'دُمج هذا العميل في عميل آخر؛ اختر العميل الباقي.'],
   ['This customer was deleted', 'تم حذف هذا العميل؛ يجب استرجاعه أولاً.'],
-  ['Ad customer not found', 'عميل الإعلان غير موجود أو محذوف.']
+  ['Ad customer not found', 'عميل الإعلان غير موجود أو محذوف.'],
+  ['This imported ad ran on Facebook page', 'هذا الإعلان يخص صفحة فيسبوك أخرى؛ اختر الصفحة المطابقة أو اطلب من المدير تغييرها.'],
+  // [prefix or /regex/ ($1 allowed), Arabic, optional English]
+  [/^Financial period (\S+) is being closed.*/, 'الشهر $1 قيد الإقفال أو الفتح الآن؛ أعد المحاولة بعد لحظات.'],
+  [/^Financial period (\S+) is closed.*/, 'الشهر $1 مُقفل مالياً؛ اطلب من المدير فتحه قبل التعديل.'],
+  [/^(Receipt number|serialNumber|\w+ReceiptNo) already exists/, 'رقم الوصل هذا مسجّل لوصل آخر. تأكد من الرقم ثم أعد المحاولة.', 'This receipt number is already used by another receipt. Check the number and try again.'],
+  ['Final spend cannot be less than recorded company funding', 'المصروف النهائي لا يمكن أن يقل عن المبلغ الذي غطّته الشركة لهذا الإعلان. عدّل تغطية الشركة أولاً.'],
+  ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.']
 ];
+function _serverRefusalText(raw) {
+  raw = String(raw || '').trim();
+  const hit = _SERVER_REFUSAL_AR.find(([en]) => en.test ? en.test(raw) : raw.startsWith(en));
+  const out = hit?.[state.language === 'ar' ? 1 : 2];
+  return out ? (hit[0].test ? raw.replace(hit[0], out) : out) : raw;
+}
 function _serverRefusalNoun(collectionName) {
   const isAr = state.language === 'ar';
   const nouns = {
@@ -1721,20 +1732,14 @@ function _serverRefusalNoun(collectionName) {
 function _serverRefusalToast(action, collectionName, error) {
   const isAr = state.language === 'ar';
   const raw = String(error?.message || '').trim();
-  const forbidden = Number(error?.status) === 403;
-  if (forbidden && (!raw || /^forbidden$/i.test(raw))) return [isAr ? 'غير مسموح' : 'Not allowed', isAr ? 'ليس لديك صلاحية لهذا الإجراء.' : "You don't have permission for this action."];
-  let detail = raw;
-  if (isAr) {
-    const known = _SERVER_REFUSAL_AR.find(([en]) => raw.startsWith(en));
-    if (known) detail = known[1];
-    else if (raw.startsWith('This imported ad ran on Facebook page')) detail = 'هذا الإعلان يخص صفحة فيسبوك أخرى؛ اختر الصفحة المطابقة أو اطلب من المدير تغييرها.';
-  }
+  const status = Number(error?.status) || 0;
+  if (status === 403 && (!raw || /^forbidden$/i.test(raw))) return [isAr ? 'غير مسموح' : 'Not allowed', isAr ? 'ليس لديك صلاحية لهذا الإجراء.' : "You don't have permission for this action."];
+  const detail = _serverRefusalText(raw);
   const noun = _serverRefusalNoun(collectionName);
   const verbs = { save: ['فشل حفظ', 'Failed to save'], create: ['فشل إنشاء', 'Failed to create'], delete: ['فشل حذف', 'Failed to delete'] };
   const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];
-  const status = Number(error?.status) || 0;
   return [
-    forbidden ? (isAr ? 'غير مسموح' : 'Not allowed') : (isAr ? 'خطأ في الخادم' : 'Server Error'),  // a refusal names its rule, never "server error"
+    status > 399 && status < 500 ? (isAr ? 'غير مسموح' : 'Not allowed') : (isAr ? 'خطأ في الخادم' : 'Server Error'),  // a refusal names its rule, never "server error"
     `${verb} ${noun}: ${detail || (isAr ? 'خطأ' : 'Error')}${status >= 500 ? ` (${status})` : ''}`
   ];
 }

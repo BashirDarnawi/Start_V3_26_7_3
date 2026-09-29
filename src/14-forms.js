@@ -2326,9 +2326,7 @@ async function _saveReceiptFromModalInner() {
         if (saved) {
           // Continue below as a confirmed idempotent success.
         } else {
-        const status = e?.status ? `HTTP ${e.status}` : '';
-        const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-        showNotification(isArV ? 'خطأ في الخادم' : 'Server Error', `${isArV ? 'فشل إنشاء الوصل' : 'Failed to create receipt'}: ${status ? status + ' - ' : ''}${detail}`, 'error');
+        showNotification(..._serverRefusalToast('create', 'receipts', e), 'error');
         return; // keep modal open so user can retry
         }
       }

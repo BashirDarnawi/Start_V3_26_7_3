@@ -32,9 +32,32 @@ function controlCenterMoney(value) {
 
 function controlCenterTimestamp(value) {
   const number = Number(value || 0);
-  if (!Number.isFinite(number) || number <= 0) return 'Never';
-  try { return new Date(number).toLocaleString(typeof appDateLocale === 'function' ? appDateLocale() : undefined); } catch (_) { return 'Never'; }
+  const never = ccText('Never', 'أبداً');
+  if (!Number.isFinite(number) || number <= 0) return never;
+  try { return new Date(number).toLocaleString(typeof appDateLocale === 'function' ? appDateLocale() : undefined); } catch (_) { return never; }
 }
+
+// Month-close blockers carry a stable code; the server's English message is
+// only the fallback for a code this screen does not know yet.
+const CONTROL_CENTER_BLOCKER_TEXT = {
+  ads_need_setup: ['Ads still need customer, amount, or payment setup', 'إعلانات تحتاج استكمال العميل أو المبلغ أو الدفع'],
+  unpaid_receipts: ['Receipts are still unpaid', 'وصولات لا تزال غير مدفوعة'],
+  ads_still_running: ['Meta ads from this month are still running (not stopped or completed)', 'إعلانات ميتا من هذا الشهر لا تزال تعمل (لم تُوقف ولم تكتمل)']
+};
+function controlCenterBlockerLine(item) {
+  const pair = CONTROL_CENTER_BLOCKER_TEXT[String(item?.code || '')];
+  return `${Array.isArray(pair) ? ccText(pair[0], pair[1]) : String(item?.message || item?.code || '')} (${Number(item?.count) || 0})`;
+}
+
+// Server setup tasks arrive as English sentences; show the known ones in Arabic.
+const CONTROL_CENTER_SETUP_TASK_AR = {
+  'Last backup is overdue - check the backup worker and the log': 'آخر نسخة احتياطية متأخرة — راجع عامل النسخ الاحتياطي والسجل',
+  'Enable encrypted daily backups': 'فعّل النسخ الاحتياطي اليومي المشفّر',
+  'Add a permanent backup encryption key': 'أضف مفتاح تشفير دائماً للنسخ الاحتياطية',
+  'Connect private S3-compatible off-site storage': 'اربط تخزيناً خارجياً خاصاً متوافقاً مع S3',
+  'Off-site backup copy is failing - check the S3 bucket, keys and region': 'النسخة الخارجية تفشل — راجع حاوية S3 والمفاتيح والمنطقة',
+  'Connect an operations alert webhook': 'اربط رابط تنبيهات التشغيل (Webhook)'
+};
 
 function getControlCenterFacts() {
   const ads = getVisibleRecords(state.ads || []);
@@ -80,13 +103,13 @@ async function loadControlCenterStatus(force = false) {
     const [operations, meta] = await Promise.allSettled([apiOperationsStatus(), apiMetaAdsStatus()]);
     const errors = [];
     if (operations.status === 'fulfilled') _controlCenter.operations = operations.value;
-    else errors.push(`Operations: ${String(operations.reason?.message || 'unavailable')}`);
+    else errors.push(`${ccText('Server checks', 'فحوصات الخادم')}: ${String(operations.reason?.message || ccText('unavailable', 'غير متاحة'))}`);
     if (meta.status === 'fulfilled') _controlCenter.meta = meta.value;
-    else errors.push(`Meta: ${String(meta.reason?.message || 'unavailable')}`);
+    else errors.push(`${ccText('Meta', 'ميتا')}: ${String(meta.reason?.message || ccText('unavailable', 'غير متاحة'))}`);
     _controlCenter.error = errors.join(' | ');
     _controlCenter.loadedAt = Date.now();
   } catch (error) {
-    _controlCenter.error = String(error?.message || 'Could not load the server checks');
+    _controlCenter.error = String(error?.message || ccText('Could not load the server checks', 'تعذّر تحميل فحوصات الخادم'));
   } finally {
     _controlCenter.loading = false;
     if (state.currentView === 'control-center') RenderQueue.schedule('control-center-loaded');
@@ -122,7 +145,7 @@ async function previewControlCenterMonth() {
       `${ccText('Receipts', 'الوصولات')}: $${controlCenterMoney(totals.receiptVolumeUSD)}`,
       `${ccText('Ad sales', 'مبيعات الإعلانات')}: $${controlCenterMoney(totals.adSalesUSD)}`,
       `${ccText('Ad spend (actual)', 'الإنفاق الإعلاني الفعلي')}: $${controlCenterMoney(totals.adSpendUSD ?? totals.metaSpendUSD)}`,
-      blockers.length ? `${ccText('Problems to review', 'مشاكل للمراجعة')}: ${blockers.map(item => `${item.message} (${item.count})`).join(', ')}` : ccText('No closing problems found.', 'لا توجد مشاكل تمنع الإقفال.')
+      blockers.length ? `${ccText('Problems to review', 'مشاكل للمراجعة')}: ${blockers.map(controlCenterBlockerLine).join(ccText(', ', '، '))}` : ccText('No closing problems found.', 'لا توجد مشاكل تمنع الإقفال.')
     ].join('\n');
     window.alert(message);
   } catch (error) {
@@ -137,7 +160,7 @@ async function closeControlCenterMonth() {
     const blockers = Array.isArray(preview?.blockers) ? preview.blockers : [];
     let forceReason = '';
     if (blockers.length) {
-      const blockerText = blockers.map(item => `${item.message} (${item.count})`).join('\n');
+      const blockerText = blockers.map(controlCenterBlockerLine).join('\n');
       forceReason = window.prompt(ccText(
         `This month has items to review:\n${blockerText}\n\nFix them first, or type a clear reason (at least 10 characters) to close anyway:`,
         `هذا الشهر فيه عناصر تحتاج مراجعة:\n${blockerText}\n\nأصلحها أولاً، أو اكتب سبباً واضحاً (10 أحرف على الأقل) للإقفال رغم ذلك:`
@@ -217,7 +240,7 @@ async function loadPlanManager(force = false) {
     _planManager.loadedAt = Date.now();
     _planManager.dirty = false;
   } catch (error) {
-    _planManager.error = String(error?.payload?.detail || error?.message || 'Could not load the plan catalog');
+    _planManager.error = String(error?.payload?.detail || error?.message || ccText('Could not load the plan catalog', 'تعذّر تحميل كتالوج الخطط'));
   } finally {
     _planManager.loading = false;
     if (state.currentView === 'control-center') render();
@@ -297,7 +320,7 @@ async function savePlanManager() {
     if (typeof refreshSubscriptionPlans === 'function') refreshSubscriptionPlans(true).catch(() => {});
     loadPlanManager(true);
   } catch (error) {
-    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || 'Save failed');
+    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || ccText('Save failed', 'فشل الحفظ'));
     showNotification(ccText('Could not save plans', 'تعذر حفظ الخطط'), String(detail), 'error');
   }
 }
@@ -315,34 +338,34 @@ function renderPlanManagerSection() {
         </div>
         <div class="truncate text-xs text-slate-500" title="${Security.escapeHtml(String(plan.id))}">${Security.escapeHtml(services)}</div>
         <label class="text-xs text-slate-500 sm:text-right">LYD<input type="number" min="0" step="0.01" value="${(Math.max(0, Number(plan.priceMinor) || 0) / 100).toFixed(2)}" oninput="planManagerSetField(${index}, 'priceLYD', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono font-bold dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="text-xs text-slate-500 sm:text-right">Days<input type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="text-xs text-slate-500 sm:text-right">Order<input type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
-        <label class="flex items-center justify-end gap-1 text-xs font-bold ${plan.active !== false ? 'text-emerald-600' : 'text-slate-400'}"><input type="checkbox" ${plan.active !== false ? 'checked' : ''} onchange="planManagerSetField(${index}, 'active', this.checked)" class="h-5 w-5 accent-emerald-600" />On</label>
+        <label class="text-xs text-slate-500 sm:text-right">${ccText('Days', 'الأيام')}<input type="number" min="1" max="3660" value="${Math.max(1, Number(plan.durationDays) || 30)}" oninput="planManagerSetField(${index}, 'durationDays', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="text-xs text-slate-500 sm:text-right">${ccText('Order', 'الترتيب')}<input type="number" value="${Math.trunc(Number(plan.sortOrder) || 0)}" oninput="planManagerSetField(${index}, 'sortOrder', this.value)" class="min-h-10 w-full rounded-lg border border-slate-300 px-2 font-mono dark:border-slate-700 dark:bg-slate-900" /></label>
+        <label class="flex items-center justify-end gap-1 text-xs font-bold ${plan.active !== false ? 'text-emerald-600' : 'text-slate-400'}"><input type="checkbox" ${plan.active !== false ? 'checked' : ''} onchange="planManagerSetField(${index}, 'active', this.checked)" class="h-5 w-5 accent-emerald-600" />${ccText('On', 'مفعّلة')}</label>
       </div>`;
   }).join('');
   return `
       <section class="glass-panel rounded-3xl p-5 sm:p-6">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div><div class="flex items-center gap-2"><i data-lucide="badge-dollar-sign" class="h-5 w-5 text-emerald-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">Subscription plans & prices</h2></div>
-          <p class="mt-1 text-sm text-slate-500">Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version: ${Number(_planManager.version) || 0}${_planManager.dirty ? ' · <span class="font-bold text-amber-600">unsaved changes</span>' : ''}</p></div>
+          <div><div class="flex items-center gap-2"><i data-lucide="badge-dollar-sign" class="h-5 w-5 text-emerald-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">${ccText('Subscription plans & prices', 'خطط الاشتراك والأسعار')}</h2></div>
+          <p class="mt-1 text-sm text-slate-500">${ccText('Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version:', 'الأسعار بالدينار ومحفوظة على الخادم — الحفظ هنا يغيّر ما يدفعه العملاء لاحقاً، ولا يغيّر ما اشتروه سابقاً. إصدار الكتالوج:')} ${Number(_planManager.version) || 0}${_planManager.dirty ? ` · <span class="font-bold text-amber-600">${ccText('unsaved changes', 'تغييرات غير محفوظة')}</span>` : ''}</p></div>
           <div class="flex gap-2">
-            <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">Reload</button>
-            <button type="button" onclick="savePlanManager()" ${_planManager.dirty ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">Save all plans</button>
+            <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">${ccText('Reload', 'إعادة التحميل')}</button>
+            <button type="button" onclick="savePlanManager()" ${_planManager.dirty ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">${ccText('Save all plans', 'حفظ كل الخطط')}</button>
           </div>
         </div>
         ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}
-        <div class="space-y-2">${rows || `<div class="text-sm text-slate-500">${_planManager.loading ? 'Loading plans…' : 'Press Reload to fetch the plan catalog.'}</div>`}</div>
+        <div class="space-y-2">${rows || `<div class="text-sm text-slate-500">${_planManager.loading ? ccText('Loading plans…', 'جارٍ تحميل الخطط…') : ccText('Press Reload to fetch the plan catalog.', 'اضغط «إعادة التحميل» لجلب كتالوج الخطط.')}</div>`}</div>
         <details class="mt-4 rounded-2xl border border-slate-200 p-4 dark:border-slate-700">
-          <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">Add a bundle (one subscription, many systems)</summary>
+          <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">${ccText('Add a bundle (one subscription, many systems)', 'إضافة باقة (اشتراك واحد لعدة أنظمة)')}</summary>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
-            <label class="text-xs font-bold text-slate-500">Bundle id (letters/numbers/underscore)<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
-            <label class="text-xs font-bold text-slate-500">Price (LYD)<input id="plan-new-price" type="number" min="0" step="0.01" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
-            <label class="text-xs font-bold text-slate-500">Name (English)<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
-            <label class="text-xs font-bold text-slate-500">Name (Arabic)<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
-            <label class="text-xs font-bold text-slate-500">Duration (days)<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>
-            <div class="text-xs font-bold text-slate-500">Included systems<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${sid}</span></label>`).join('')}</div></div>
+            <label class="text-xs font-bold text-slate-500">${ccText('Bundle id (letters/numbers/underscore)', 'معرّف الباقة (حروف إنجليزية/أرقام/شرطة سفلية)')}<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
+            <label class="text-xs font-bold text-slate-500">${ccText('Price (LYD)', 'السعر (د.ل)')}<input id="plan-new-price" type="number" min="0" step="0.01" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
+            <label class="text-xs font-bold text-slate-500">${ccText('Name (English)', 'الاسم (بالإنجليزية)')}<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
+            <label class="text-xs font-bold text-slate-500">${ccText('Name (Arabic)', 'الاسم (بالعربية)')}<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
+            <label class="text-xs font-bold text-slate-500">${ccText('Duration (days)', 'المدة (بالأيام)')}<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>
+            <div class="text-xs font-bold text-slate-500">${ccText('Included systems', 'الأنظمة المشمولة')}<div class="mt-1 grid grid-cols-2 gap-1">${PLAN_MANAGER_SERVICE_IDS.map(sid => `<label class="flex items-center gap-2 rounded-lg bg-slate-100 px-2 py-1.5 dark:bg-slate-800"><input id="plan-new-svc-${sid}" type="checkbox" class="h-4 w-4 accent-indigo-600" /><span class="truncate">${sid}</span></label>`).join('')}</div></div>
           </div>
-          <button type="button" onclick="planManagerAddBundle()" class="mt-3 min-h-11 rounded-xl bg-indigo-600 px-4 font-bold text-white">Add to list (save to publish)</button>
+          <button type="button" onclick="planManagerAddBundle()" class="mt-3 min-h-11 rounded-xl bg-indigo-600 px-4 font-bold text-white">${ccText('Add to list (save to publish)', 'أضف إلى القائمة (احفظ للنشر)')}</button>
         </details>
       </section>`;
 }
@@ -372,13 +395,13 @@ function renderControlCenterView() {
   if (facts.metaDuplicates?.length) tasks.push(renderControlCenterTask('unlink', 'bg-amber-100 text-amber-700', text(`${facts.metaDuplicates.length} ads share one Meta ad`, `${facts.metaDuplicates.length} إعلانات مرتبطة بنفس إعلان ميتا`), text('Unlink the duplicate so both can sync again.', 'افصل الإعلان المكرر ليعود التزامن للاثنين.'), `<button type="button" onclick="navigateTo('ads')" class="min-h-11 rounded-xl border border-amber-300 px-4 py-2 text-sm font-bold text-amber-700">${text('Review', 'مراجعة')}</button>`));
   if (facts.metaFailures.length) tasks.push(renderControlCenterTask('refresh-cw-off', 'bg-rose-100 text-rose-700', text(`${facts.metaFailures.length} Meta sync items need retry`, `${facts.metaFailures.length} عناصر مزامنة ميتا تحتاج إعادة المحاولة`), text('The server keeps retrying; open Ads to inspect the affected rows.', 'يواصل الخادم إعادة المحاولة؛ افتح الإعلانات لمراجعة العناصر المتأثرة.'), `<button type="button" onclick="navigateTo('ads')" class="min-h-11 rounded-xl border border-rose-300 px-4 py-2 text-sm font-bold text-rose-700">${text('Review', 'مراجعة')}</button>`));
   const systemTasks = [];
-  if (!meta.webhookConfigured) systemTasks.push(renderControlCenterTask('webhook', 'bg-violet-100 text-violet-700', 'Meta instant notifications need setup', 'Add ALBAYAN_META_WEBHOOK_VERIFY_TOKEN in Jelastic, then subscribe Meta to /api/meta-ads/webhook. Polling remains active until then.'));
+  if (!meta.webhookConfigured) systemTasks.push(renderControlCenterTask('webhook', 'bg-violet-100 text-violet-700', text('Meta instant notifications need setup', 'إشعارات ميتا الفورية تحتاج إعداداً'), text('Add ALBAYAN_META_WEBHOOK_VERIFY_TOKEN in Jelastic, then subscribe Meta to /api/meta-ads/webhook. Polling remains active until then.', 'أضف ALBAYAN_META_WEBHOOK_VERIFY_TOKEN في Jelastic، ثم اشترك في ميتا على /api/meta-ads/webhook. يبقى الفحص الدوري يعمل حتى ذلك الحين.')));
   const _recentRate = Number(monitoring.recent_error_rate ?? monitoring.error_rate ?? 0), _recentSample = Number(monitoring.recent_sample_size ?? monitoring.total_requests ?? 0);
-  if (_recentRate >= 0.05 && _recentSample >= 50) systemTasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', 'Server errors need attention', `${(_recentRate * 100).toFixed(1)}% of recent requests failed. Check Jelastic logs.`));  // rolling window, not since-boot
-  if (Number(monitoring.response_ms_p95 || 0) >= 3000 && Number(monitoring.total_requests || 0) >= 50) systemTasks.push(renderControlCenterTask('timer-off', 'bg-amber-100 text-amber-700', 'Server responses are slow', `The slowest normal requests take about ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. Check database and container resources.`));
+  if (_recentRate >= 0.05 && _recentSample >= 50) systemTasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', text('Server errors need attention', 'أخطاء الخادم تحتاج متابعة'), text(`${(_recentRate * 100).toFixed(1)}% of recent requests failed. Check Jelastic logs.`, `فشلت ${(_recentRate * 100).toFixed(1)}% من الطلبات الأخيرة. راجع سجلات Jelastic.`)));  // rolling window, not since-boot
+  if (Number(monitoring.response_ms_p95 || 0) >= 3000 && Number(monitoring.total_requests || 0) >= 50) systemTasks.push(renderControlCenterTask('timer-off', 'bg-amber-100 text-amber-700', text('Server responses are slow', 'استجابة الخادم بطيئة'), text(`The slowest normal requests take about ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. Check database and container resources.`, `أبطأ الطلبات العادية تستغرق نحو ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. راجع موارد قاعدة البيانات والحاوية.`)));
   (operations.setupTasks || []).forEach(task => {
     const overdue = /overdue/i.test(String(task)), failing = /failing/i.test(String(task));
-    systemTasks.push(renderControlCenterTask(overdue ? 'alarm-clock' : 'shield-alert', overdue || failing ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700', task, overdue ? 'The backup worker has not produced a file for two intervals. Check the operations log and the backup volume.' : failing ? 'Backups are saved on this server only until the upload works again. The error is shown under Encrypted backup.' : 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.'));
+    systemTasks.push(renderControlCenterTask(overdue ? 'alarm-clock' : 'shield-alert', overdue || failing ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700', (isAr && CONTROL_CENTER_SETUP_TASK_AR[String(task)]) || String(task), overdue ? text('The backup worker has not produced a file for two intervals. Check the operations log and the backup volume.', 'لم يُنتج عامل النسخ الاحتياطي ملفاً منذ فترتين. راجع سجل التشغيل ومساحة النسخ الاحتياطية.') : failing ? text('Backups are saved on this server only until the upload works again. The error is shown under Encrypted backup.', 'تُحفظ النسخ على هذا الخادم فقط حتى يعود الرفع للعمل. الخطأ ظاهر تحت «نسخة احتياطية مشفرة».') : text('This protection needs one server setting in Jelastic. No secret is shown in Albayan.', 'هذه الحماية تحتاج إعداداً واحداً في الخادم عبر Jelastic. لا يُعرض أي سر داخل البيان.')));
   });
   // "Connected" only says the S3 settings exist; a failed last upload means no copy outside this server.
   const offsiteFailed = !!(backup.offsiteConfigured && backup.lastOffsiteError);

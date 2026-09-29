@@ -425,7 +425,7 @@ async function confirmStopAd(id, source = 'modal') {
           isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
           error?.status === 409
             ? describe409(error, isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
-            : (error?.message || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
+            : (_serverRefusalText(error?.message) || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
           conflict ? 'warning' : 'error'
         );
         return false;
