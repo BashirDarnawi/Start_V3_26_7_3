@@ -3922,7 +3922,8 @@ async function adsStudioAttachReceipt(requestId, inputEl) {
     );
   } catch (e) {
     const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Upload failed');
-    showNotification(adsStudioText('Could not attach', 'تعذر الإرفاق'), String(detail), 'error');
+    // Through the refusal map (the photo check's busy 503 / 429 among them), never the raw English.
+    showNotification(adsStudioText('Could not attach', 'تعذر الإرفاق'), adsStudioRefusalText(detail), 'error');
   } finally {
     // Clear the picker so choosing the same file again re-fires onchange.
     try { if (inputEl) inputEl.value = ''; } catch (_) {}

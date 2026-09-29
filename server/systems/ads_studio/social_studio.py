@@ -716,9 +716,12 @@ def _json_list(value: Any) -> list[Any]:
 
 def _comment_post_refs_sql(dialect: str | None = None) -> str:
     """The owner's posts as the comment match reads them: id, status, Meta results and the post's rule,
-    each row's JSON parsed ONCE (json_fields_select_sql), never its photos, a lean copy or a thumbnail."""
+    each row's JSON parsed ONCE (json_fields_select_sql), never its photos, a lean copy or a thumbnail.
+    Only rows whose stored text holds the post id as a JSON string (``:needle``, a LIKE pattern escaped
+    with ``!``) are parsed at all: a substring scan of the text costs far less than the jsonb cast."""
     return json_fields_select_sql(("status", "results", "autoReplyRuleId"), ("id", "created_at"),
-                                  "type = :type AND deleted = false AND created_by = :owner",
+                                  "type = :type AND deleted = false AND created_by = :owner "
+                                  "AND data_json LIKE :needle ESCAPE '!'",
                                   dialect) + " ORDER BY created_at DESC, id DESC"
 
 
@@ -727,13 +730,18 @@ def _comment_post_refs(owner_id: str, post_ref: str) -> tuple[set[str], str]:
     such post's auto-reply rule. One query for every status: published posts first, then failed,
     scheduled, publishing and draft ones (a live page result also sits on a post whose OTHER page failed,
     one waiting for its retry, or one cancelled back to a draft), newest first within a status, at most
-    1000 per status. A comment without a post id matches no post (a failed page keeps metaPostId "")."""
+    1000 candidate posts (their text holds the id) per status. A comment without a post id matches no
+    post (a failed page keeps metaPostId ""). Read-only: process_comment calls it BEFORE the shared lock."""
     ref = str(post_ref or "")
     refs, preferred = {ref}, ""
     if not ref:
         return refs, preferred
+    # The id as the stored JSON spells it (json_dumps writes every post), quotes included; "!", "%" and
+    # "_" escaped. The metaPostId check below stays the real match.
+    needle = "%" + re.sub(r"([!%_])", r"!\1", json_dumps(ref)) + "%"
     with db_conn() as conn:
-        rows = conn.execute(text(_comment_post_refs_sql()), {"type": POSTS_TYPE, "owner": owner_id}).mappings().all()
+        rows = conn.execute(text(_comment_post_refs_sql()),
+                            {"type": POSTS_TYPE, "owner": owner_id, "needle": needle}).mappings().all()
     seen = dict.fromkeys(_COMMENT_POST_STATUSES, 0)
     matched: dict[str, list[tuple[str, str]]] = {status: [] for status in _COMMENT_POST_STATUSES}
     for row in rows:  # newest first
@@ -796,11 +804,17 @@ def _post_quota_guard(owner_id: str):
             yield None
 
 
+def _media_bytes(post: dict[str, Any] | None) -> int:
+    """The length of a post's stored photos (base64 data URLs), what its storage is mostly spent on."""
+    return sum(len(item) for item in ((post or {}).get("media") or []) if isinstance(item, str))
+
+
 def _enforce_post_quota(conn: Any, owner_id: str, proposed: dict[str, Any], *, creating: bool,
                         excluding_id: str = "", current: dict[str, Any] | None = None) -> None:
     """At most MAX_UNPUBLISHED_POSTS_PER_OWNER drafts, scheduled and failed posts (a new one: 409) and
-    MAX_POSTS_OWNER_STORAGE_BYTES of stored unpublished posts (413). An edit that does not grow its post
-    (``current``: the stored data) always passes, so an owner over the bytes can still trim a post."""
+    MAX_POSTS_OWNER_STORAGE_BYTES of stored unpublished posts (413). An edit that adds no photo bytes to
+    its post (``current``: the stored data) always passes, so an owner over the bytes can still trim,
+    reword or schedule a post."""
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     status = _json_field("status")
     size = "octet_length(data_json)" if postgres else "length(data_json)"
@@ -827,7 +841,9 @@ def _enforce_post_quota(conn: Any, owner_id: str, proposed: dict[str, Any], *, c
                    "and failed posts) per account. Delete an old draft or a failed post first.",
         )
     proposed_bytes = len(json_dumps(proposed).encode("utf-8"))
-    grows = current is None or proposed_bytes > len(json_dumps(current).encode("utf-8"))
+    # Growth is measured by the photos: a status, date or caption change adds a few bounded bytes, so a
+    # full store never blocks scheduling a draft (publishing it is what frees the space).
+    grows = current is None or _media_bytes(proposed) > _media_bytes(current)
     if grows and stored_bytes + proposed_bytes > MAX_POSTS_OWNER_STORAGE_BYTES:
         raise HTTPException(
             status_code=413,
@@ -2278,6 +2294,19 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
 COMMENT_SOURCES = ("webhook", "poll", "manual_check")  # socialReplyLog.source (PLAN §7.1)
 
 
+def _comment_rules(owner_id: str, written_second: int | None) -> list[dict[str, Any]]:
+    """The owner's enabled rules, oldest first, that may answer a comment (process_comment)."""
+    rules = sorted(
+        (r["data"] for r in _rows(RULES_TYPE, owner_id) if _bool(r["data"].get("enabled"), True)),
+        key=lambda r: (int(r.get("_created") or 0), str(r.get("id") or "")),
+    )
+    if written_second is not None:
+        # A rule never answers a comment written before it applied as it is now: before it was
+        # made, switched on or pointed at other comments (unknown creation: never).
+        rules = [r for r in rules if 0 < rule_active_since_ms(r) // 1000 <= written_second]
+    return rules
+
+
 def process_comment(
     *, platform: str, entry_id: str, comment_id: str, post_ref: str, from_id: str, text: str,
     source: str = "webhook", comment_at: Any = None,
@@ -2320,26 +2349,21 @@ def process_comment(
     owner_id = str(page.get("ownerId") or "")
     if not _owner_can_automate(owner_id):
         return None
+    if not _comment_rules(owner_id, written_second):
+        return None  # no rule can answer: no post lookup, no turn at the shared lock
+    # Every public comment lands here. The post it is on and that post's rule are read-only (neither the
+    # reservation nor oncePerPerson depends on them), so they are read BEFORE the lock every owner shares:
+    # one query, only the posts whose text holds the post id, each parsed once, never the base64 photos.
+    refs, preferred_rule_id = _comment_post_refs(owner_id, str(post_ref or ""))
     with _comment_reservation_guard(owner_id):
         settings = _settings_entity(ctx, owner_id)["data"]
-        rules = sorted(
-            (r["data"] for r in _rows(RULES_TYPE, owner_id) if _bool(r["data"].get("enabled"), True)),
-            key=lambda r: (int(r.get("_created") or 0), str(r.get("id") or "")),
-        )
-        if written_second is not None:
-            # A rule never answers a comment written before it applied as it is now: before it was
-            # made, switched on or pointed at other comments (unknown creation: never).
-            rules = [r for r in rules if 0 < rule_active_since_ms(r) // 1000 <= written_second]
+        rules = _comment_rules(owner_id, written_second)
         if not rules:
             return None
         replied_rules = (
             _person_replied_rule_ids(owner_id, page_entity["id"], from_id)
             if any(_bool(rule.get("oncePerPerson")) for rule in rules) else set()
         )
-        # Every public comment lands here, inside the lock every owner shares: only ids, statuses, Meta
-        # results and rule ids are read, each post's JSON parsed once in ONE query, never the base64
-        # photos of every post (it used to be five lean scans that parsed each row about ten times).
-        refs, preferred_rule_id = _comment_post_refs(owner_id, str(post_ref or ""))
         now_local = datetime.now(_zone(settings.get("timezone")))
         rule = None
         # P4-05: the rules that can send something now are tried first (oldest first as ever), so a

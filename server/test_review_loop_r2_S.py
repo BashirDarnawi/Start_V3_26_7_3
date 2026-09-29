@@ -11,7 +11,11 @@ Behaviour tests for the verified findings of the batch; each one failed before i
          503 while both slots are busy; an edit that keeps the stored photos needs no slot;
 * 35     a deleted draft / scheduled / failed post keeps its row but not its photos; one owner keeps at
          most MAX_UNPUBLISHED_POSTS_PER_OWNER unpublished posts (409) and MAX_POSTS_OWNER_STORAGE_BYTES
-         of stored unpublished posts (413); an edit that does not grow its post always passes.
+         of stored unpublished posts (413); an edit that adds no photo bytes always passes.
+
+Review of the batch (second commit): the comment's post lookup runs BEFORE the lock every owner shares
+and parses only the posts whose text holds the post id; scheduling an unchanged draft is not growth
+(only photo bytes are); the classic receipt upload's refusal is in test-mobile-ui.js.
 
 Users are made here with unique emails; every Meta call is faked (nothing reaches the network).
 Run: python -m pytest server/test_review_loop_r2_S.py -q
@@ -294,6 +298,67 @@ def test_comment_post_match_keeps_its_preference_order(actors, graph):
     assert studio._comment_post_refs(owner, "") == ({""}, "")
 
 
+def test_comment_post_lookup_runs_before_the_shared_lock(actors, graph, monkeypatch):
+    a = actors["a"]["cookies"]
+    owner = actors["a"]["id"]
+    meta_page_id = _meta_id()
+    page = _link(actors, "a", meta_page_id)
+    live_ref = f"{meta_page_id}_83"
+    real_lookup = studio._comment_post_refs
+    lock_held = []
+
+    def recording_lookup(owner_id, post_ref):
+        lock_held.append(studio._COMMENT_LOCK.locked())
+        return real_lookup(owner_id, post_ref)
+
+    monkeypatch.setattr(studio, "_comment_post_refs", recording_lookup)
+    # No enabled rule: nothing can answer, so there is no post lookup at all.
+    assert _comment(meta_page_id, f"{meta_page_id}_4", live_ref) is None and lock_held == []
+    rule = _rule(a, name="This post", scope="chosen", postIds=["x4"], publicReply="On this post")
+    post = _post(a, page["id"], autoReplyRuleId=rule["id"]).json()
+    _set_post(owner, post["id"], status="published", results=[{"pageId": page["id"], "metaPostId": live_ref, "error": ""}])
+    logged = _comment(meta_page_id, f"{meta_page_id}_5", live_ref)
+    assert logged is not None and logged["ruleId"] == rule["id"]
+    # The read-only lookup ran once and NOT inside the lock every owner's comments wait on.
+    assert lock_held == [False]
+
+
+def test_comment_post_lookup_parses_only_posts_that_hold_the_post_id(actors):
+    a = actors["a"]["cookies"]
+    owner = actors["a"]["id"]
+    meta_page_id = _meta_id()
+    page = _link(actors, "a", meta_page_id)
+    rule = _rule(a, name="Mine", scope="chosen", postIds=["x5"], publicReply="Mine")
+    live_ref = f"{meta_page_id}_84"
+    made = [_post(a, page["id"], caption=f"Post {i}", media=[PHOTO], autoReplyRuleId=rule["id"] if i == 0 else "").json()
+            for i in range(5)]
+
+    def result(ref):
+        return [{"pageId": page["id"], "metaPostId": ref, "error": ""}]
+
+    _set_post(owner, made[0]["id"], status="published", results=result(live_ref))
+    _set_post(owner, made[1]["id"], status="published", results=result(f"{meta_page_id}x84"))  # "_" is no wildcard
+    _set_post(owner, made[2]["id"], status="published", results=result(live_ref + "9"))  # a longer id
+    _set_post(owner, made[3]["id"], status="failed", results=result(f"{meta_page_id}%84"))  # "%" is no wildcard
+    # made[4] stays a draft without results.
+    parsed = []
+    real_json_list = studio._json_list
+
+    def counting_json_list(value):
+        parsed.append(value)
+        return real_json_list(value)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(studio, "_json_list", counting_json_list)
+        refs, preferred = studio._comment_post_refs(owner, live_ref)
+    assert refs == {live_ref, made[0]["id"]} and preferred == rule["id"]
+    assert len(parsed) == 1, parsed  # every post of the owner was parsed (five rows) before the text pre-filter
+    # The pre-filter keeps the answer for an id that needs escaping in a LIKE pattern.
+    odd_ref = f"{meta_page_id}_8!5%"
+    _set_post(owner, made[4]["id"], status="failed", results=result(odd_ref))
+    assert studio._comment_post_refs(owner, odd_ref) == ({odd_ref, made[4]["id"]}, "")
+
+
 # ---------------------------------------------------------------------------
 # 18: the scheduler's 20-second reads
 # ---------------------------------------------------------------------------
@@ -485,11 +550,11 @@ def test_unpublished_post_storage_cap(actors, monkeypatch):
     assert refused.status_code == 413
     assert refused.json()["detail"] == ("Social Studio storage for unpublished posts is full. Delete old drafts or "
                                         "failed posts, or use fewer or smaller photos.")
-    # Over the bytes (the cap was lowered below what is stored): a growing edit is refused, an edit that
-    # shrinks its post or keeps its size still works, so the owner can always trim.
+    # Over the bytes (the cap was lowered below what is stored): an edit that adds photo bytes is refused,
+    # an edit that shrinks its post or keeps its photos still works, so the owner can always trim.
     monkeypatch.setattr(studio, "MAX_POSTS_OWNER_STORAGE_BYTES", 2000)
     post_id = first.json()["id"]
-    grow = client.patch(f"{API}/posts/{post_id}", json={"caption": long_words + "x" * 100}, cookies=a)
+    grow = client.patch(f"{API}/posts/{post_id}", json={"media": [PHOTO]}, cookies=a)
     assert grow.status_code == 413, grow.text
     shrink = client.patch(f"{API}/posts/{post_id}", json={"caption": "short"}, cookies=a)
     assert shrink.status_code == 200 and shrink.json()["caption"] == "short", shrink.text
@@ -499,6 +564,32 @@ def test_unpublished_post_storage_cap(actors, monkeypatch):
     # Published posts do not count (they cannot be deleted; their photos are on Meta).
     _set_post(owner, second.json()["id"], status="published")
     assert _post(a, page["id"], caption="m" * 1000).status_code == 200
+
+
+def test_a_full_store_still_lets_a_draft_be_scheduled_or_reworded(actors, monkeypatch):
+    a = actors["a"]["cookies"]
+    page = _link(actors, "a", _meta_id())
+    draft = _post(a, page["id"], caption="w" * 2000, media=[PHOTO])
+    other = _post(a, page["id"], caption="w" * 2000)
+    assert draft.status_code == 200 and other.status_code == 200, (draft.text, other.text)
+    draft_id = draft.json()["id"]
+    # The store is full (the cap is below what the owner keeps, as for an owner already over it).
+    monkeypatch.setattr(studio, "MAX_POSTS_OWNER_STORAGE_BYTES", 2000)
+    when = studio._iso_at(datetime.now(timezone.utc) + timedelta(days=1))
+    # Scheduling the unchanged draft adds only "scheduled" and a date: not growth (it was a 413 while
+    # "publish now" of the same draft was allowed).
+    scheduled = client.patch(f"{API}/posts/{draft_id}", json={"status": "scheduled", "scheduledAt": when}, cookies=a)
+    assert scheduled.status_code == 200 and scheduled.json()["status"] == "scheduled", scheduled.text
+    # The composer resends the same caption and photo with the status: still fine; so is a longer caption.
+    back = client.patch(f"{API}/posts/{draft_id}", json={"caption": "w" * 2000, "media": [PHOTO], "status": "draft"}, cookies=a)
+    assert back.status_code == 200 and back.json()["status"] == "draft", back.text
+    longer = client.patch(f"{API}/posts/{draft_id}", json={"caption": "w" * 2100}, cookies=a)
+    assert longer.status_code == 200, longer.text
+    # A photo that adds bytes is growth: refused while the store is full; a smaller set of photos is not.
+    more = client.patch(f"{API}/posts/{draft_id}", json={"media": [PHOTO, OTHER_PHOTO]}, cookies=a)
+    assert more.status_code == 413, more.text
+    fewer = client.patch(f"{API}/posts/{draft_id}", json={"media": []}, cookies=a)
+    assert fewer.status_code == 200 and fewer.json()["media"] == [], fewer.text
 
 
 def test_two_posts_at_once_never_pass_the_count_cap_together(actors, monkeypatch):

@@ -2736,6 +2736,41 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio health: admin "Check recent comments now" per Instagram account, counts and Meta error in EN/AR, 429/409 through the Arabic map', !loadError && checkCases.every(Boolean),
     loadError || healthError || `cases ${checkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
+  // Review loop r2 (S): the classic transfer-receipt input (adsStudioAttachReceipt) shows a refusal through the
+  // Arabic map: the photo check's busy 503 and 429 (other customers' photos hold the 2 slots) read in Arabic,
+  // and in English with the map's own words, never the raw "Campaign images ..." text.
+  run(`
+    var __receiptRefusals = [];
+    function compressImageToDataUrl() { return Promise.resolve('data:image/png;base64,AAAA'); }
+    function apiWalletPaymentRequestAttachReceipt() {
+      const next = __receiptRefusals.shift();
+      return next ? Promise.reject(Object.assign(new Error('Request failed'), { status: next.status, payload: { detail: next.detail } })) : Promise.resolve({ ok: true });
+    }
+  `);
+  const receiptNote = (language, status, detail) => {
+    const from = notices.length;
+    const input = { files: [{ name: 'receipt.png' }], value: 'receipt.png' };
+    box.__receiptInput = input;
+    run(`__receiptRefusals.push(${JSON.stringify({ status, detail })});`);
+    inLanguage(language, "adsStudioAttachReceipt('payreq_r2s', __receiptInput)");
+    const note = notices.slice(from).find(n => n.kind === 'error') || {};
+    return { title: note.title, message: note.message, cleared: input.value === '' };
+  };
+  const busyText = 'Campaign images are being checked. Please try again in a moment.';
+  const receiptBusyAr = receiptNote('ar', 503, busyText);
+  const receiptBusyEn = receiptNote('en', 503, busyText);
+  const receiptManyAr = receiptNote('ar', 429, 'Too many campaign image checks. Please wait and try again.');
+  const receiptOther = receiptNote('en', 400, 'Something unusual went wrong');
+  const receiptCases = [
+    receiptBusyAr.title === 'تعذر الإرفاق' && receiptBusyAr.message === 'نتحقق الآن من صور أخرى. أعد المحاولة بعد لحظات.' && receiptBusyAr.cleared,
+    receiptBusyEn.message === 'Photos are being checked right now. Please try again in a moment.',
+    receiptManyAr.message === 'فحوصات صور كثيرة. انتظر دقيقة ثم أعد المحاولة.',
+    receiptOther.message === 'Something unusual went wrong',
+    fn('adsStudioAttachReceipt').includes('adsStudioRefusalText(detail)') && !fn('adsStudioAttachReceipt').includes('String(detail)')
+  ];
+  check('Classic receipt upload (review loop r2 S): the photo-check 503/429 read through the Arabic map, never raw English', !loadError && receiptCases.every(Boolean),
+    loadError || `cases ${receiptCases.map((ok, i) => ok ? '' : i).filter(String).join(',')} ${JSON.stringify([receiptBusyAr, receiptBusyEn, receiptManyAr, receiptOther])}`);
 }
 
 {
