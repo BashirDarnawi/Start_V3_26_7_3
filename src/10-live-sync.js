@@ -527,13 +527,9 @@ async function serverLiveSyncOnce() {
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
-  // The delivery branch below early-returns before the users/permissions refresh
-  // block (~:600), which is the ONLY in-session path that re-reads /api/auth/me
-  // and rewrites state.currentUser.role/permissions. Without this, an admin
-  // promoting an active Delivery user (Delivery->Employee) or altering their
-  // permissions never reached that session until re-login, while every other
-  // role got the change within usersSyncIntervalMs. Run the SAME throttled
-  // refresh here so access changes propagate to delivery sessions too.
+  // The delivery branch below returns before the users/permissions refresh
+  // (the only in-session /api/auth/me re-read): run the same throttled
+  // refresh here so access changes reach delivery sessions too.
   if (roleLower === 'delivery') {
     const nowMs = Date.now();
     if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
@@ -1785,11 +1781,12 @@ async function wipeAuthenticatedServerDataFromClient() {
     : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
   for (const name of collections) state[name] = [];
   state.logs = [];
+  state.userTombstones = {};
   state.serverLogs = [];
   state.serverLogsLoadedAt = 0;
   if (!db) return;
   const writes = collections.map(name => saveCollectionToIndexedDB(name, [], { force: true }));  // a lost tab lock must not keep the signed-out data
-  writes.push(clearIndexedDBLogs());
+  writes.push(clearIndexedDBLogs(), idbClear(BACKUP_STORE_NAME).catch(() => {}));
   await Promise.allSettled(writes);
 }
 
@@ -1804,6 +1801,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
   if (serverMode) {
     for (const name of PERSISTED_COLLECTIONS) state[name] = [];
     state.logs = [];
+    state.userTombstones = {};
     state.serverLogs = [];
   }
   state.currentUser = null;

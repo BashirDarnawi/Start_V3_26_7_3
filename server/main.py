@@ -1331,22 +1331,30 @@ def list_entities(
     campaign_owner_uid = ""
     if ad_campaign_reviewer_scope:
         visible_status_sql = "'Submitted','Approved','Rejected','Stopped'"
+        visible_sql = f"{campaign_status_expr} IN ({visible_status_sql})"
         if updated_since is not None:
-            # Changes Requested is the only normal visible -> private-editable
-            # transition, so delta sync receives it as a redacted tombstone.
-            # Brand-new Drafts never enter the reviewer query at all (even ids
-            # and activity timestamps are private).
-            visible_status_sql += ",'Changes Requested'"
+            # Two visible -> private moves exist: Changes Requested, and the
+            # owner's withdraw (Submitted -> Draft + withdrawnAt, P1-03). Delta
+            # sync receives both as redacted tombstones. Brand-new Drafts never
+            # enter the reviewer query at all (even ids and activity timestamps
+            # are private).
+            withdrawn_expr = (
+                "data_json::jsonb ->> 'withdrawnAt'"
+                if dialect == "postgresql"
+                else "json_extract(data_json, '$.withdrawnAt')"
+            )
+            visible_sql = (
+                f"({campaign_status_expr} IN ({visible_status_sql},'Changes Requested')"
+                f" OR ({campaign_status_expr} = 'Draft' AND COALESCE({withdrawn_expr}, '') <> ''))"
+            )
         campaign_owner_uid = sanitize_str(str(campaign_owner_id or ""))[:80]
         if campaign_owner_uid:
             # A customer must still see their OWN drafts. Everyone else only
             # ever sees the workflow-visible states.
-            where.append(
-                f"({campaign_status_expr} IN ({visible_status_sql}) OR created_by = :campaign_owner)"
-            )
+            where.append(f"({visible_sql} OR created_by = :campaign_owner)")
             params["campaign_owner"] = campaign_owner_uid
         else:
-            where.append(f"{campaign_status_expr} IN ({visible_status_sql})")
+            where.append(visible_sql)
     # For delta sync (updated_since), we intentionally include deleted rows as tombstones
     # so clients can remove them without requiring a full refresh.
     if not include_deleted and updated_since is None:
@@ -12718,9 +12726,9 @@ def batch_delete_entities(
                 assert_financial_period_open(col, financial_existing.get("data"))
         normalized.append((col, eid))
 
-    now = now_ms()
     deleted = 0
     skipped = 0
+    stamps: dict[str, int] = {}
     postgres = str(get_engine().dialect.name or "") == "postgresql"
     financial_batch = any(col in {"receipts", "customers"} for col, _ in normalized)
     guard = (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK) if financial_batch else nullcontext()
@@ -12793,7 +12801,7 @@ def batch_delete_entities(
             for (col, eid) in normalized:
                 exists = (
                     conn.execute(
-                        text("SELECT id,data_json,deleted FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if postgres else "")),
+                        text("SELECT id,data_json,deleted,last_modified FROM entities WHERE type = :type AND id = :id LIMIT 1" + (" FOR UPDATE" if postgres else "")),
                         {"type": col, "id": eid},
                     )
                     .mappings()
@@ -12807,15 +12815,22 @@ def batch_delete_entities(
                     if col == "receipts":  # same as the single-item route: company rows on this receipt become direct coverage
                         release_company_rows_for_receipt_delete(conn, eid, ad_rows=_financial_active_rows_for_receipt_bounded(conn, eid), lock_row=_clothes_lock_row,
                                                                 row_data=_financial_row_data, write_row=_clothes_write_row, postgres=postgres)
-                conn.execute(
-                    text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id"),
-                    {"ts": now, "type": col, "id": eid},
+                # Stamped AFTER the lock, above the row's own stamp (like the single DELETE): an
+                # edit that committed while this batch waited must not look newer than the delete.
+                baseline = int(exists["last_modified"])
+                stamp = max(now_ms(), baseline + 1)
+                result = conn.execute(
+                    text("UPDATE entities SET deleted = true, last_modified = :ts WHERE type = :type AND id = :id AND last_modified = :baseline"),
+                    {"ts": stamp, "type": col, "id": eid, "baseline": baseline},
                 )
+                if result.rowcount != 1:
+                    raise HTTPException(status_code=409, detail="Conflict: record has changed")
+                stamps[f"{col}:{eid}"] = stamp
                 deleted += 1
 
     for (col, eid) in normalized:
         audit(str(user.get("id")), "delete", col, eid, f"Deleted {col} {eid} (atomic batch)", {})
-    return {"ok": True, "deleted": deleted, "skipped": skipped}
+    return {"ok": True, "deleted": deleted, "skipped": skipped, "stamps": stamps}
 
 
 @app.delete("/api/collections/{collection}/{entity_id}")

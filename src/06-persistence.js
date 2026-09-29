@@ -276,6 +276,17 @@ async function flushDirtyCollections() {
   // backoff instead of tight-looping or waiting for an unrelated later edit.
   if (failed.length > 0) {
     for (const name of failed) idbSync.dirty.add(name);
+    // Local mode: IndexedDB is the only saved copy. Warn once per failing spell.
+    if (!state.serverMode && !idbSync.failWarned && !isAnotherTabWriter()) {
+      idbSync.failWarned = true;
+      showNotification(
+        state.language === 'ar' ? 'مساحة التخزين ممتلئة' : 'Storage Full',
+        state.language === 'ar'
+          ? 'لا يمكن حفظ آخر التغييرات — مساحة المتصفح ممتلئة. صدّر نسخة احتياطية من الإعدادات.'
+          : 'Latest changes could not be saved — browser storage is full. Please export a backup from Settings.',
+        'error'
+      );
+    }
     if (idbSync.timer) clearTimeout(idbSync.timer);
     const delay = idbSync.retryDelayMs;
     idbSync.retryDelayMs = Math.min(idbSync.retryDelayMs * 2, idbSync.maxRetryDelayMs);
@@ -286,6 +297,7 @@ async function flushDirtyCollections() {
     return;
   }
   idbSync.retryDelayMs = 2000;
+  idbSync.failWarned = false;
   // Collections marked dirty WHILE this flush was running hit the re-entrancy
   // guard above and had their debounce swallowed — they would otherwise sit
   // unpersisted until some unrelated later edit. Flush them now. Terminates
@@ -330,14 +342,9 @@ function _albayanHadDataCookie() {
 // could never observe the eviction.
 let _storageLossAtBoot = false;
 
-// Render-side contract: when the local first-run branch would show the
-// "create your first admin" setup screen, call this first — true means the
-// browser deleted this device's stored business data (loadState() found the
-// sentinel cookie but no snapshot at boot) and a data-loss/recovery screen
-// (restore from an exported backup) must be rendered instead of first-run
-// setup. Restoring a backup or creating an admin clears it via the
-// users.length guard; renderStorageLossRecovery's "start fresh" button opts
-// out via state._storageLossAcknowledged.
+// Before the local first-run setup screen: true means the browser deleted this
+// device's data (sentinel cookie, no snapshot at boot), so render the recovery
+// screen instead. Any user clears it; "start fresh" sets _storageLossAcknowledged.
 function albayanDetectStorageLoss() {
   try {
     if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return false;
@@ -412,13 +419,8 @@ function saveState() {
     delete toSave.serverLogs;  // server-owned, refetched (04-permissions); 14 ms + 360 KB per save otherwise
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
-    // PERFORMANCE: serialize ONCE and reuse for both the size check and the
-    // write. The old code stringified the whole snapshot twice and also built a
-    // throwaway Blob just to measure it — in no-IndexedDB mode that snapshot
-    // includes every collection with base64 photos, and saveState runs on hot
-    // paths (every permission toggle / record update), so that was 2× multi-MB
-    // serialization + a Blob allocation per call. dataString.length ≈ the byte
-    // size here (base64 photos + JSON keys are ASCII), so no Blob is needed.
+    // PERFORMANCE: serialize ONCE for both the size check and the write (hot
+    // path; no-IDB snapshots carry photos). length ≈ bytes: the data is ASCII.
     let dataString = JSON.stringify(sanitizedToSave);
     const sizeInMB = dataString.length / (1024 * 1024);
     if (sizeInMB > 4) {

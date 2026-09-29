@@ -207,6 +207,117 @@ async function main() {
     finishWrite(true);
     await clear;
   });
+  // ---- Review loop r3, batch OS: offline storage, sync and the privacy of the browser cache.
+  await test('r3 OS n5: server mode writes no daily device backup; local mode still does', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    const opened = [];
+    sandbox.__fakeDb = { transaction(stores) { opened.push(Array.from(stores).join()); throw new Error('stub store'); } };
+    sandbox.console = { ...sandbox.console, error() {} };  // the stub store's refusal is expected
+    run('db = __fakeDb');
+    state.serverMode = true;
+    assert.equal(await sandbox.createAutoBackup(), false);
+    assert.deepEqual(opened, [], 'a server-mode session must not copy the signed-in user\'s data into the backups store');
+    state.serverMode = false;
+    await sandbox.createAutoBackup();
+    assert.deepEqual(opened, ['backups']);
+  });
+  await test('r3 OS n5/n10: sign-out clears deleted-staff names, the device audit trail and the backups store', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('db = {}');
+    const cleared = [];
+    sandbox.saveCollectionToIndexedDB = async () => true;
+    sandbox.clearIndexedDBLogs = async () => { cleared.push('auditLogs'); return true; };
+    sandbox.idbClear = async (store) => { cleared.push(store); return true; };
+    state.userTombstones = { u1: 'Ali' };
+    state.logs = [{ id: 'log1', metadata: { old: { phone: '0912345678' } } }];
+    await sandbox.wipeAuthenticatedServerDataFromClient();
+    assert.equal(Object.keys(state.userTombstones).length, 0);
+    assert.equal(state.logs.length, 0);
+    assert.ok(cleared.includes('auditLogs') && cleared.includes('backups'), `cleared ${cleared.join()}`);
+    state.userTombstones = { u2: 'Omar' };
+    sandbox.emergencyFinishClientSignOut(true, false);
+    assert.equal(Object.keys(state.userTombstones).length, 0, 'the emergency sign-out keeps no deleted-staff names');
+  });
+  await test('r3 OS n7: local mode warns once when IndexedDB refuses a save, and again after a recovery', async () => {
+    for (const serverMode of [false, true]) {
+      const { sandbox, state, run } = loadBrowserSource();
+      state.serverMode = serverMode;
+      run('db = {}');
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => notes.push({ title, type });
+      let saves = false;
+      sandbox.saveCollectionToIndexedDB = async () => saves;
+      const flush = async () => { run("markCollectionDirty('receipts')"); await sandbox.flushDirtyCollections(); };
+      await flush();
+      await flush();
+      assert.ok(run("idbSync.dirty.has('receipts')"), 'the failed collection stays queued for a retry');
+      if (serverMode) { assert.equal(notes.length, 0, 'in server mode IndexedDB is only a cache'); continue; }
+      assert.deepEqual(notes.map(n => `${n.title}/${n.type}`), ['Storage Full/error']);
+      saves = true;
+      await flush();
+      saves = false;
+      await flush();
+      assert.equal(notes.length, 2, 'a new failing spell after a good save warns again');
+    }
+  });
+  await test('r3 OS n8: the ads refresh after a delivery change re-reads ads changed during its paged load', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.isServerModeEnabled = () => true;
+    state.serverMode = true;
+    run('SERVER_API.liveSyncEnabled = true; _serverLiveSync.lastUsersSyncAt = Date.now(); _serverLiveSync.collectionCursors.ads = 1000;');
+    const server = { X: { id: 'X', customerId: 'c1', spentUSD: 5, _lastModified: 1000 } };
+    state.ads = [{ ...server.X }];
+    const epoch = run('_serverLiveSync.pollerEpoch');
+    sandbox.apiLoadCollectionAll = async () => {
+      const pageRead = { ...server.X };                 // X's page is read at version 1000
+      server.X = { ...server.X, spentUSD: 9, _lastModified: 50000 };
+      state.ads = [{ ...server.X }];                    // a poll applies the colleague's edit...
+      run('_serverLiveSync.collectionCursors.ads = 90000');  // ...and a later ad write moves the cursor on
+      return [pageRead];
+    };
+    const result = await sandbox.refreshAdsAfterReceiptServerCascade({ id: 'r1', status: 'Not Paid' });
+    assert.equal(result.source, 'server');
+    assert.equal(run('_serverLiveSync.collectionCursors.ads'), 1000, 'the cursor goes back to where the load began');
+    assert.equal(run('_serverLiveSync.pollerEpoch'), epoch + 1, 'a poll in flight cannot raise it again');
+    sandbox.refreshServerDataCompatibility = async () => ({ ok: true });
+    sandbox.apiLoadCollectionSince = async (collection, since) =>
+      (collection === 'ads' ? [server.X].filter(row => row._lastModified > since - 15000) : []);
+    assert.equal((await sandbox.serverLiveSyncOnce()).ok, true);
+    assert.equal(state.ads[0]._lastModified, 50000, 'the newer ad came back instead of staying stale for good');
+    assert.equal(state.ads[0].spentUSD, 9);
+  });
+  await test('r3 OS n9: writes carry the account header too; sign-in, sign-out and setup do not', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.AbortController = AbortController;
+    const sent = [];
+    sandbox.fetch = async (url, opts) => {
+      sent.push(opts.headers || {});
+      return { status: 200, ok: true, headers: { get: () => null }, text: async () => '{}' };
+    };
+    state.currentUser = { id: 'u_A', role: 'Admin', permissions: {} };
+    await sandbox.apiFetch('/api/collections/customers', { method: 'POST', body: {} });
+    await sandbox.apiFetch('/api/collections/customers/c1', { method: 'PATCH', body: {} });
+    await sandbox.apiFetch('/api/batch/delete', { method: 'POST', body: { items: [] } });
+    await sandbox.apiFetch('/api/collections/customers', { method: 'GET' });
+    for (const path of ['/api/auth/login', '/api/auth/logout', '/api/auth/setup-admin', '/api/auth/app-login/exchange']) {
+      await sandbox.apiFetch(path, { method: 'POST', body: {} });
+    }
+    assert.deepEqual(sent.map(headers => headers['X-Albayan-User'] || ''), ['u_A', 'u_A', 'u_A', 'u_A', '', '', '', '']);
+    run("_serverUserUpdate.timers.set('u2', 1); _serverUserUpdate.pending.set('u2', { name: 'Edited' });");
+    await sandbox.flushPendingUserUpdates();
+    assert.equal(sent[sent.length - 1]['X-Albayan-User'], 'u_A', 'the keepalive permission flush names its account too');
+  });
+  await test('r3 OS n6: a batch delete adopts the server tombstone stamps, never over a newer copy', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    sandbox.isServerModeEnabled = () => true;
+    state.receipts = [{ id: 'r1', _deleted: true, _lastModified: 5 }, { id: 'r2', _deleted: true, _lastModified: 5 }];
+    const ops = state.receipts.map(record => ({ collection: 'receipts', id: record.id, old: { ...record, _deleted: false }, array: state.receipts, record }));
+    state.receipts[1] = { id: 'r2', _lastModified: 99999 };  // live sync installed a newer copy mid-flight
+    sandbox.apiBatchDeleteEntities = async () => ({ ok: true, deleted: 2, skipped: 0, stamps: { 'receipts:r1': 777, 'receipts:r2': 778 } });
+    assert.equal(await sandbox.flushBatchDeletes(ops), true);
+    assert.equal(state.receipts[0]._lastModified, 777, 'the device-clock stamp is replaced by the server stamp');
+    assert.equal(state.receipts[1]._lastModified, 99999);
+  });
   await test('existing admin-to-employee scope changes use the same cleanup and reload', async () => {
     const { sandbox, state, writes } = await scopeFixture();
     state.currentUser.role = 'Admin';

@@ -30,7 +30,6 @@ const STORAGE_CONFIG = {
   CHUNK_SIZE: 1000 // Records per chunk for large operations
 };
 
-// BEST PRACTICE: Extract magic numbers to named constants for better maintainability
 const TIME_CONSTANTS = {
   MILLISECONDS_PER_SECOND: 1000,
   SECONDS_PER_MINUTE: 60,
@@ -650,8 +649,9 @@ async function loadCollectionFromIndexedDB(collectionName) {
 }
 
 async function createAutoBackup() {
-  if (!db) return false;
-  
+  // Local mode only: in server mode this copy would outlive the user's sign-out.
+  if (!db || state.serverMode) return false;
+
   return new Promise((resolve) => {
     try {
       const transaction = db.transaction([BACKUP_STORE_NAME], 'readwrite');
@@ -683,7 +683,6 @@ async function createAutoBackup() {
       
       const request = store.put(backup);
       request.onsuccess = () => {
-        // Clean old backups
         cleanOldBackups();
         resolve(true);
       };

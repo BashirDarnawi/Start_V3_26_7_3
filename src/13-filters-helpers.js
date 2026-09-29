@@ -3483,14 +3483,10 @@ function _deliveryDraftKey(receiptId) {
   return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
 }
 
-// Flush the pending debounced draft write immediately. The 500ms debounce
-// alone lost the newest keystrokes in the exact scenario the draft exists
-// for: tapping the photo Upload label backgrounds the WebView for the
-// camera, timers are suspended before the pending write fires, and the
-// process kill happens with the draft stale. visibilitychange:hidden is the
-// last reliable moment to write; pagehide covers bfcache navigations.
-// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op),
-// so these listeners are safe to keep registered permanently.
+// Flush the pending debounced draft write now: opening the camera backgrounds
+// the WebView and suspends timers before the 500ms debounce fires, so
+// visibilitychange:hidden / pagehide is the last reliable moment to write.
+// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op).
 function _flushDeliveryCompletionDraftNow() {
   if (_deliveryDraftSaveTimer) {
     clearTimeout(_deliveryDraftSaveTimer);
@@ -4040,18 +4036,19 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   updateReceiptDeliveryCompletionComputed();
 }
 
-// Delivery completion must keep the receipt and every linked ad visually
-// consistent in the same user action. The strict delivery PATCH endpoint
-// performs the server transaction but returns only the receipt, so refresh ads
-// before rendering success. If that read is temporarily unavailable, apply the
-// same exact local reclassification plan as offline mode; the next live sync
-// will still verify it against the server.
+// The delivery PATCH returns only the receipt: re-read the linked ads. If that
+// fails, a paid receipt applies the offline plan (live sync verifies it later).
 async function refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback = false } = {}) {
   try {
     if (typeof apiLoadCollectionAll !== 'function') throw new Error('Ads refresh is unavailable');
+    const adsCursorBefore = getServerCollectionCursor('ads');
     const refreshedAds = await apiLoadCollectionAll('ads', { forceRefresh: true });
     if (!Array.isArray(refreshedAds)) throw new Error('Ads refresh returned an invalid response');
     state.ads = refreshedAds;
+    // Polls kept running during this paged read: re-read every ad changed
+    // since it began, and drop a poll in flight that could raise it again.
+    _serverLiveSync.collectionCursors.ads = Math.min(getServerCollectionCursor('ads'), adsCursorBefore);
+    _serverLiveSync.pollerEpoch++;
     markCollectionDirty('ads');
     return { consistent: true, source: 'server', updated: refreshedAds.length };
   } catch (refreshError) {

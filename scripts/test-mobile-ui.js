@@ -707,6 +707,21 @@ check('mobile session timeout cannot be mistaken for a real logout',
   init.includes("const connectivityGateEnabled = (typeof connectivityUiEnabled === 'function')") &&
   init.includes(': isPackagedMobileApp();') &&
   init.includes('stopForPackagedMobileConnection();'));
+{
+  // Review loop r3 OS n5/n10: a server-mode start drops the previous user's unscoped device copies
+  // (audit trail with full old/new records, deleted-staff names, daily backups) before auth, and the
+  // daily device backup is local-mode only.
+  const serverBranch = init.slice(init.indexOf('  if (state.serverMode) {\n    // Disable legacy cloud sync'),
+    init.indexOf('// Restore login from backend cookie session'));
+  check('server-mode start clears the unscoped audit trail, deleted-staff names and backups; backups are local-only',
+    serverBranch.length > 0 &&
+    serverBranch.includes('state.logs = []; state.userTombstones = {};') &&
+    serverBranch.includes('if (db) { clearIndexedDBLogs(); idbClear(BACKUP_STORE_NAME).catch(() => {}); }') &&
+    serverBranch.indexOf('state.userTombstones = {};') < serverBranch.indexOf('saveState();') &&
+    init.includes('const runDailyBackupIfDue = () => {\n    if (!db || state.serverMode) return;') &&
+    read('src/03-storage-idb.js').includes('async function createAutoBackup() {\n  // Local mode only') &&
+    liveSync.includes("writes.push(clearIndexedDBLogs(), idbClear(BACKUP_STORE_NAME).catch(() => {}));"));
+}
 check('sync indicator cancels stale hide timers before every new status',
   liveSync.includes('let _syncIndicatorHideTimer = null;') &&
   liveSync.includes('clearTimeout(_syncIndicatorHideTimer);') &&
@@ -1456,7 +1471,7 @@ check('server-mode shipments move stock through the transactional route and vali
   !clothes.includes("String(s.receivedAt).split('T')[0]") &&
   serverApi.includes('function apiDetailMessage(data, fallback) {') &&
   serverApi.includes("const msg = apiDetailMessage(data, resp.statusText || 'Request failed');") &&
-  serverApi.includes("headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId() },") &&
+  serverApi.includes("headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId(), ") &&
   serverApi.includes("if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0;"));
 
 check('money boxes keep thousands separators, WhatsApp links use international digits, campaign actions replay safely',

@@ -105,8 +105,8 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
         ...headers,
         'X-Request-ID': requestId,
         'X-Client-Platform': (typeof Platform !== 'undefined' && Platform.platform) ? String(Platform.platform) : 'web',
-        // Reads name the account this tab believes it is: the server answers 401 when another tab switched accounts.
-        ...(method === 'GET' && typeof state !== 'undefined' && state.currentUser?.id ? { 'X-Albayan-User': String(state.currentUser.id) } : {})
+        // Reads and writes name the account this tab believes it is: 401 when another tab switched accounts.
+        ...(typeof state !== 'undefined' && state.currentUser?.id && !/^\/api\/auth\/(login|logout|setup-admin|app-login\/exchange)$/.test(path) ? { 'X-Albayan-User': String(state.currentUser.id) } : {})
       },
       signal: controller.signal
     };
@@ -493,13 +493,9 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // clients keep receiving full records because the backend default is true.
 const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
-// Media-carrying money writes (delivery-completion PATCH embedding the
-// driver's required base64 proof photo plus existing photos, ad edits with
-// adPhotos) legitimately need minutes on a weak mobile uplink (10-50KB/s on
-// 3G / in-app WebViews). A fixed 20s abort made those saves deterministically
-// impossible in the field, so any request body that embeds an image — or is
-// simply large — gets the same 90s budget Ads Studio media already uses.
-// Small bodies keep the 20s timeout everywhere (desktop behavior unchanged).
+// Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
+// mobile uplink: a body with an image, or simply large, gets the 90s media
+// budget. Small bodies keep the 20s timeout.
 const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
 function mediaAwareTimeoutMs(body) {
   // Deliberately NOT JSON.stringify(body): apiFetch serializes the same body
@@ -874,7 +870,7 @@ function flushPendingUserUpdates() {
           credentials: 'include',
           keepalive: true,
           // Native requests carry no Origin; the request id is the proof.
-          headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId() },
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId(), ...(state.currentUser?.id ? { 'X-Albayan-User': String(state.currentUser.id) } : {}) },
           body: JSON.stringify(payload)
         }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
       } catch (_) {}

@@ -1109,29 +1109,27 @@ function deleteRecord(array, id, opts) {
   return Promise.resolve(false);
 }
 
-// Push a cascade's collected soft-deletes to the server as ONE all-or-nothing
-// transaction (POST /api/batch/delete). Either every record is deleted on the
-// server or none is — a flaky connection can no longer leave a customer
-// cascade half-applied with some records resurrecting on other devices.
-// On failure the local soft-deletes are rolled back so local and server agree.
+// Push a cascade's soft-deletes as ONE all-or-nothing server transaction
+// (POST /api/batch/delete); on failure the local soft-deletes roll back.
 async function flushBatchDeletes(ops) {
   if (!Array.isArray(ops) || ops.length === 0) return true;
   if (!isServerModeEnabled()) return true;
   return await apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
-    .then(() => {
+    .then((res) => {
+      // Adopt the server's tombstone stamps, as the single DELETE does.
+      ops.forEach(o => {
+        const i = o.array.findIndex(x => x && x.id === o.id), ts = Number(res?.stamps?.[o.collection + ':' + o.id]);
+        if (i !== -1 && o.array[i] === o.record && ts > 0) { o.array[i]._lastModified = ts; markCollectionDirty(o.collection); }
+      });
       render();
       return true;
     })
     .catch((e) => {
       if (e?.status === 404 || e?.status === 405) {
-        // Never fall back to independent fire-and-forget deletes. That could
-        // commit only part of a cascade while the UI claimed full success.
+        // Never fall back to fire-and-forget deletes (a partial cascade).
       }
-      // The server refused the whole batch: roll back every local soft-delete
-      // so nothing is half-deleted anywhere. Each slot is restored only while
-      // it still holds the object that cascade marked deleted — a record that
-      // live-sync refreshed mid-flight keeps the newer committed copy instead
-      // of being overwritten with a stale snapshot.
+      // Roll back every local soft-delete, only while the slot still holds
+      // the object this cascade marked (live-sync may hold a newer copy).
       ops.forEach(o => {
         const idx = o.array.findIndex(x => x && x.id === o.id);
         if (idx !== -1 && (!o.record || o.array[idx] === o.record)) o.array[idx] = o.old;

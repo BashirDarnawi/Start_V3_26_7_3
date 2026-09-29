@@ -64,7 +64,6 @@ async function init() {
   } catch (_) {}
 
   // #region agent log
-  // Hypothesis H1: Security.escapeHtml does not escape quotes, which can break attribute contexts (value="...")
   if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
   try {
     const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
@@ -83,8 +82,6 @@ async function init() {
   // #endregion
 
   // #region agent log
-  // Hypothesis H-ENV: The app is being opened from a different origin/port (e.g. static server :8080),
-  // so server-side telemetry endpoints aren't hit and we miss runtime evidence.
   if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
   try {
     const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
@@ -197,8 +194,11 @@ async function init() {
     // loadState() runs before backend detection so preferences can be applied
     // immediately. In no-IDB/legacy installations it may also have contained
     // business arrays; clear them before auth so no previous-user data can be
-    // rendered or used if /auth/me fails.
+    // rendered or used if /auth/me fails. The unscoped device audit trail,
+    // deleted-staff names and daily backups may hold a previous user's data.
     for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    state.logs = []; state.userTombstones = {};
+    if (db) { clearIndexedDBLogs(); idbClear(BACKUP_STORE_NAME).catch(() => {}); }
     activateAnonymousServerCollectionStorage();
     saveState(); // persist serverWorkspaceKnown without persisting business arrays
 
@@ -474,7 +474,7 @@ async function init() {
     startCloudSync();
   }
 
-  // Auto-backup once per day (IndexedDB only). A phone browser never keeps a
+  // Auto-backup once per day (local mode, IndexedDB). A phone browser never keeps a
   // tab alive for 24 continuous hours, so a bare setInterval alone never
   // fired there — run a due-check at startup, on tab resume AND on the
   // interval. The newest-backup lookup keeps every trigger idempotent (at
@@ -482,7 +482,7 @@ async function init() {
   // no new awaits before render(). `db` is re-checked per call because the
   // connection can now drop/reopen mid-session.
   const runDailyBackupIfDue = () => {
-    if (!db) return;
+    if (!db || state.serverMode) return;
     try {
       const tx = db.transaction([BACKUP_STORE_NAME], 'readonly');
       const req = tx.objectStore(BACKUP_STORE_NAME).index('createdAt').openCursor(null, 'prev');

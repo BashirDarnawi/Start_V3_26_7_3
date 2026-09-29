@@ -2540,7 +2540,6 @@ const STORAGE_CONFIG = {
   CHUNK_SIZE: 1000 // Records per chunk for large operations
 };
 
-// BEST PRACTICE: Extract magic numbers to named constants for better maintainability
 const TIME_CONSTANTS = {
   MILLISECONDS_PER_SECOND: 1000,
   SECONDS_PER_MINUTE: 60,
@@ -3160,8 +3159,9 @@ async function loadCollectionFromIndexedDB(collectionName) {
 }
 
 async function createAutoBackup() {
-  if (!db) return false;
-  
+  // Local mode only: in server mode this copy would outlive the user's sign-out.
+  if (!db || state.serverMode) return false;
+
   return new Promise((resolve) => {
     try {
       const transaction = db.transaction([BACKUP_STORE_NAME], 'readwrite');
@@ -3193,7 +3193,6 @@ async function createAutoBackup() {
       
       const request = store.put(backup);
       request.onsuccess = () => {
-        // Clean old backups
         cleanOldBackups();
         resolve(true);
       };
@@ -5807,6 +5806,17 @@ async function flushDirtyCollections() {
   // backoff instead of tight-looping or waiting for an unrelated later edit.
   if (failed.length > 0) {
     for (const name of failed) idbSync.dirty.add(name);
+    // Local mode: IndexedDB is the only saved copy. Warn once per failing spell.
+    if (!state.serverMode && !idbSync.failWarned && !isAnotherTabWriter()) {
+      idbSync.failWarned = true;
+      showNotification(
+        state.language === 'ar' ? 'مساحة التخزين ممتلئة' : 'Storage Full',
+        state.language === 'ar'
+          ? 'لا يمكن حفظ آخر التغييرات — مساحة المتصفح ممتلئة. صدّر نسخة احتياطية من الإعدادات.'
+          : 'Latest changes could not be saved — browser storage is full. Please export a backup from Settings.',
+        'error'
+      );
+    }
     if (idbSync.timer) clearTimeout(idbSync.timer);
     const delay = idbSync.retryDelayMs;
     idbSync.retryDelayMs = Math.min(idbSync.retryDelayMs * 2, idbSync.maxRetryDelayMs);
@@ -5817,6 +5827,7 @@ async function flushDirtyCollections() {
     return;
   }
   idbSync.retryDelayMs = 2000;
+  idbSync.failWarned = false;
   // Collections marked dirty WHILE this flush was running hit the re-entrancy
   // guard above and had their debounce swallowed — they would otherwise sit
   // unpersisted until some unrelated later edit. Flush them now. Terminates
@@ -5861,14 +5872,9 @@ function _albayanHadDataCookie() {
 // could never observe the eviction.
 let _storageLossAtBoot = false;
 
-// Render-side contract: when the local first-run branch would show the
-// "create your first admin" setup screen, call this first — true means the
-// browser deleted this device's stored business data (loadState() found the
-// sentinel cookie but no snapshot at boot) and a data-loss/recovery screen
-// (restore from an exported backup) must be rendered instead of first-run
-// setup. Restoring a backup or creating an admin clears it via the
-// users.length guard; renderStorageLossRecovery's "start fresh" button opts
-// out via state._storageLossAcknowledged.
+// Before the local first-run setup screen: true means the browser deleted this
+// device's data (sentinel cookie, no snapshot at boot), so render the recovery
+// screen instead. Any user clears it; "start fresh" sets _storageLossAcknowledged.
 function albayanDetectStorageLoss() {
   try {
     if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return false;
@@ -5943,13 +5949,8 @@ function saveState() {
     delete toSave.serverLogs;  // server-owned, refetched (04-permissions); 14 ms + 360 KB per save otherwise
     // Sanitize before persistence (defense-in-depth)
     const sanitizedToSave = Security.sanitizeObject(toSave);
-    // PERFORMANCE: serialize ONCE and reuse for both the size check and the
-    // write. The old code stringified the whole snapshot twice and also built a
-    // throwaway Blob just to measure it — in no-IndexedDB mode that snapshot
-    // includes every collection with base64 photos, and saveState runs on hot
-    // paths (every permission toggle / record update), so that was 2× multi-MB
-    // serialization + a Blob allocation per call. dataString.length ≈ the byte
-    // size here (base64 photos + JSON keys are ASCII), so no Blob is needed.
+    // PERFORMANCE: serialize ONCE for both the size check and the write (hot
+    // path; no-IDB snapshots carry photos). length ≈ bytes: the data is ASCII.
     let dataString = JSON.stringify(sanitizedToSave);
     const sizeInMB = dataString.length / (1024 * 1024);
     if (sizeInMB > 4) {
@@ -8290,29 +8291,27 @@ function deleteRecord(array, id, opts) {
   return Promise.resolve(false);
 }
 
-// Push a cascade's collected soft-deletes to the server as ONE all-or-nothing
-// transaction (POST /api/batch/delete). Either every record is deleted on the
-// server or none is — a flaky connection can no longer leave a customer
-// cascade half-applied with some records resurrecting on other devices.
-// On failure the local soft-deletes are rolled back so local and server agree.
+// Push a cascade's soft-deletes as ONE all-or-nothing server transaction
+// (POST /api/batch/delete); on failure the local soft-deletes roll back.
 async function flushBatchDeletes(ops) {
   if (!Array.isArray(ops) || ops.length === 0) return true;
   if (!isServerModeEnabled()) return true;
   return await apiBatchDeleteEntities(ops.map(o => ({ collection: o.collection, id: o.id })))
-    .then(() => {
+    .then((res) => {
+      // Adopt the server's tombstone stamps, as the single DELETE does.
+      ops.forEach(o => {
+        const i = o.array.findIndex(x => x && x.id === o.id), ts = Number(res?.stamps?.[o.collection + ':' + o.id]);
+        if (i !== -1 && o.array[i] === o.record && ts > 0) { o.array[i]._lastModified = ts; markCollectionDirty(o.collection); }
+      });
       render();
       return true;
     })
     .catch((e) => {
       if (e?.status === 404 || e?.status === 405) {
-        // Never fall back to independent fire-and-forget deletes. That could
-        // commit only part of a cascade while the UI claimed full success.
+        // Never fall back to fire-and-forget deletes (a partial cascade).
       }
-      // The server refused the whole batch: roll back every local soft-delete
-      // so nothing is half-deleted anywhere. Each slot is restored only while
-      // it still holds the object that cascade marked deleted — a record that
-      // live-sync refreshed mid-flight keeps the newer committed copy instead
-      // of being overwritten with a stale snapshot.
+      // Roll back every local soft-delete, only while the slot still holds
+      // the object this cascade marked (live-sync may hold a newer copy).
       ops.forEach(o => {
         const idx = o.array.findIndex(x => x && x.id === o.id);
         if (idx !== -1 && (!o.record || o.array[idx] === o.record)) o.array[idx] = o.old;
@@ -9177,8 +9176,8 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
         ...headers,
         'X-Request-ID': requestId,
         'X-Client-Platform': (typeof Platform !== 'undefined' && Platform.platform) ? String(Platform.platform) : 'web',
-        // Reads name the account this tab believes it is: the server answers 401 when another tab switched accounts.
-        ...(method === 'GET' && typeof state !== 'undefined' && state.currentUser?.id ? { 'X-Albayan-User': String(state.currentUser.id) } : {})
+        // Reads and writes name the account this tab believes it is: 401 when another tab switched accounts.
+        ...(typeof state !== 'undefined' && state.currentUser?.id && !/^\/api\/auth\/(login|logout|setup-admin|app-login\/exchange)$/.test(path) ? { 'X-Albayan-User': String(state.currentUser.id) } : {})
       },
       signal: controller.signal
     };
@@ -9565,13 +9564,9 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // clients keep receiving full records because the backend default is true.
 const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
-// Media-carrying money writes (delivery-completion PATCH embedding the
-// driver's required base64 proof photo plus existing photos, ad edits with
-// adPhotos) legitimately need minutes on a weak mobile uplink (10-50KB/s on
-// 3G / in-app WebViews). A fixed 20s abort made those saves deterministically
-// impossible in the field, so any request body that embeds an image — or is
-// simply large — gets the same 90s budget Ads Studio media already uses.
-// Small bodies keep the 20s timeout everywhere (desktop behavior unchanged).
+// Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
+// mobile uplink: a body with an image, or simply large, gets the 90s media
+// budget. Small bodies keep the 20s timeout.
 const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
 function mediaAwareTimeoutMs(body) {
   // Deliberately NOT JSON.stringify(body): apiFetch serializes the same body
@@ -9946,7 +9941,7 @@ function flushPendingUserUpdates() {
           credentials: 'include',
           keepalive: true,
           // Native requests carry no Origin; the request id is the proof.
-          headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId() },
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId(), ...(state.currentUser?.id ? { 'X-Albayan-User': String(state.currentUser.id) } : {}) },
           body: JSON.stringify(payload)
         }).then(() => { try { invalidateUsersListCache(); } catch (_) {} }).catch(() => {}));
       } catch (_) {}
@@ -12722,13 +12717,9 @@ async function serverLiveSyncOnce() {
 
   const roleLower = String(state.currentUser.role || '').toLowerCase();
 
-  // The delivery branch below early-returns before the users/permissions refresh
-  // block (~:600), which is the ONLY in-session path that re-reads /api/auth/me
-  // and rewrites state.currentUser.role/permissions. Without this, an admin
-  // promoting an active Delivery user (Delivery->Employee) or altering their
-  // permissions never reached that session until re-login, while every other
-  // role got the change within usersSyncIntervalMs. Run the SAME throttled
-  // refresh here so access changes propagate to delivery sessions too.
+  // The delivery branch below returns before the users/permissions refresh
+  // (the only in-session /api/auth/me re-read): run the same throttled
+  // refresh here so access changes reach delivery sessions too.
   if (roleLower === 'delivery') {
     const nowMs = Date.now();
     if ((nowMs - (_serverLiveSync.lastUsersSyncAt || 0)) > (SERVER_API.usersSyncIntervalMs || 60000)) {
@@ -13980,11 +13971,12 @@ async function wipeAuthenticatedServerDataFromClient() {
     : ['ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory'];
   for (const name of collections) state[name] = [];
   state.logs = [];
+  state.userTombstones = {};
   state.serverLogs = [];
   state.serverLogsLoadedAt = 0;
   if (!db) return;
   const writes = collections.map(name => saveCollectionToIndexedDB(name, [], { force: true }));  // a lost tab lock must not keep the signed-out data
-  writes.push(clearIndexedDBLogs());
+  writes.push(clearIndexedDBLogs(), idbClear(BACKUP_STORE_NAME).catch(() => {}));
   await Promise.allSettled(writes);
 }
 
@@ -13999,6 +13991,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
   if (serverMode) {
     for (const name of PERSISTED_COLLECTIONS) state[name] = [];
     state.logs = [];
+    state.userTombstones = {};
     state.serverLogs = [];
   }
   state.currentUser = null;
@@ -27576,14 +27569,10 @@ function _deliveryDraftKey(receiptId) {
   return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
 }
 
-// Flush the pending debounced draft write immediately. The 500ms debounce
-// alone lost the newest keystrokes in the exact scenario the draft exists
-// for: tapping the photo Upload label backgrounds the WebView for the
-// camera, timers are suspended before the pending write fires, and the
-// process kill happens with the draft stale. visibilitychange:hidden is the
-// last reliable moment to write; pagehide covers bfcache navigations.
-// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op),
-// so these listeners are safe to keep registered permanently.
+// Flush the pending debounced draft write now: opening the camera backgrounds
+// the WebView and suspends timers before the 500ms debounce fires, so
+// visibilitychange:hidden / pagehide is the last reliable moment to write.
+// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op).
 function _flushDeliveryCompletionDraftNow() {
   if (_deliveryDraftSaveTimer) {
     clearTimeout(_deliveryDraftSaveTimer);
@@ -28133,18 +28122,19 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   updateReceiptDeliveryCompletionComputed();
 }
 
-// Delivery completion must keep the receipt and every linked ad visually
-// consistent in the same user action. The strict delivery PATCH endpoint
-// performs the server transaction but returns only the receipt, so refresh ads
-// before rendering success. If that read is temporarily unavailable, apply the
-// same exact local reclassification plan as offline mode; the next live sync
-// will still verify it against the server.
+// The delivery PATCH returns only the receipt: re-read the linked ads. If that
+// fails, a paid receipt applies the offline plan (live sync verifies it later).
 async function refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback = false } = {}) {
   try {
     if (typeof apiLoadCollectionAll !== 'function') throw new Error('Ads refresh is unavailable');
+    const adsCursorBefore = getServerCollectionCursor('ads');
     const refreshedAds = await apiLoadCollectionAll('ads', { forceRefresh: true });
     if (!Array.isArray(refreshedAds)) throw new Error('Ads refresh returned an invalid response');
     state.ads = refreshedAds;
+    // Polls kept running during this paged read: re-read every ad changed
+    // since it began, and drop a poll in flight that could raise it again.
+    _serverLiveSync.collectionCursors.ads = Math.min(getServerCollectionCursor('ads'), adsCursorBefore);
+    _serverLiveSync.pollerEpoch++;
     markCollectionDirty('ads');
     return { consistent: true, source: 'server', updated: refreshedAds.length };
   } catch (refreshError) {
@@ -45598,7 +45588,6 @@ async function init() {
   } catch (_) {}
 
   // #region agent log
-  // Hypothesis H1: Security.escapeHtml does not escape quotes, which can break attribute contexts (value="...")
   if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
   try {
     const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
@@ -45617,8 +45606,6 @@ async function init() {
   // #endregion
 
   // #region agent log
-  // Hypothesis H-ENV: The app is being opened from a different origin/port (e.g. static server :8080),
-  // so server-side telemetry endpoints aren't hit and we miss runtime evidence.
   if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
   try {
     const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
@@ -45731,8 +45718,11 @@ async function init() {
     // loadState() runs before backend detection so preferences can be applied
     // immediately. In no-IDB/legacy installations it may also have contained
     // business arrays; clear them before auth so no previous-user data can be
-    // rendered or used if /auth/me fails.
+    // rendered or used if /auth/me fails. The unscoped device audit trail,
+    // deleted-staff names and daily backups may hold a previous user's data.
     for (const name of PERSISTED_COLLECTIONS) state[name] = [];
+    state.logs = []; state.userTombstones = {};
+    if (db) { clearIndexedDBLogs(); idbClear(BACKUP_STORE_NAME).catch(() => {}); }
     activateAnonymousServerCollectionStorage();
     saveState(); // persist serverWorkspaceKnown without persisting business arrays
 
@@ -46008,7 +45998,7 @@ async function init() {
     startCloudSync();
   }
 
-  // Auto-backup once per day (IndexedDB only). A phone browser never keeps a
+  // Auto-backup once per day (local mode, IndexedDB). A phone browser never keeps a
   // tab alive for 24 continuous hours, so a bare setInterval alone never
   // fired there — run a due-check at startup, on tab resume AND on the
   // interval. The newest-backup lookup keeps every trigger idempotent (at
@@ -46016,7 +46006,7 @@ async function init() {
   // no new awaits before render(). `db` is re-checked per call because the
   // connection can now drop/reopen mid-session.
   const runDailyBackupIfDue = () => {
-    if (!db) return;
+    if (!db || state.serverMode) return;
     try {
       const tx = db.transaction([BACKUP_STORE_NAME], 'readonly');
       const req = tx.objectStore(BACKUP_STORE_NAME).index('createdAt').openCursor(null, 'prev');
