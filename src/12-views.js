@@ -5905,7 +5905,7 @@ function renderAuditView() {
       const search = auditSearchTerm;
       const matchesSearch =
         foldSearchText(log.description || '').includes(search) ||
-        foldSearchText(log.userName || '').includes(search) ||
+        foldSearchText(getKnownUserNameById(log.userId) || log.userName || '').includes(search) ||
         foldSearchText(log.action || '').includes(search) ||
         foldSearchText(log.resourceId || '').includes(search);
       if (!matchesSearch) return false;
@@ -6112,10 +6112,9 @@ function renderAuditView() {
         ` : `
           <ol class="management-timeline" aria-label="${isAr ? 'الأنشطة' : 'Activities'}">
                 ${paginatedLogs.map(log => {
-                  const user = state.users.find(u => u.id === log.userId);
                   const severity = log.severity || 'info';
                   const category = log.category || 'general';
-                  const userName = log.userName || user?.name || (isAr ? 'النظام' : 'System');
+                  const userName = getKnownUserNameById(log.userId) || log.userName || (isAr ? 'النظام' : 'System');  // deleted staff by name
                   return `
                     <li class="management-timeline-item">
                       <span class="management-timeline-marker" aria-hidden="true"><i data-lucide="${categoryIcons[category] || 'file-text'}" class="h-4 w-4"></i></span>
@@ -6298,7 +6297,6 @@ function showLogDetails(logId) {
     return;
   }
 
-  const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
@@ -6333,7 +6331,7 @@ function showLogDetails(logId) {
         <div class="audit-detail-grid grid grid-cols-3 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'المستخدم' : 'User'}</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(getKnownUserNameById(log.userId) || log.userName || (isAr ? 'النظام' : 'System'))}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الإجراء' : 'Action'}</div>
@@ -6401,7 +6399,6 @@ async function exportAuditLogs(format) {
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID', 'Metadata'];
     const rows = allLogs.map(log => {
-      const user = state.users.find(u => u.id === log.userId);
       const date = new Date(log.date);
       return [
         // Pin an unambiguous, sortable Gregorian format. On ar-SA devices the
@@ -6412,7 +6409,7 @@ async function exportAuditLogs(format) {
         // Every free-text cell must be escaped — the User name (free text, may
         // contain a comma like "Ahmad, Ltd") used to shift all later columns
         // because only Description was quoted.
-        csvCell(log.userName || user?.name || 'System'),
+        csvCell(getKnownUserNameById(log.userId) || log.userName || 'System'),
         csvCell(log.action),
         csvCell(log.category || 'general'),
         csvCell(log.severity || 'info'),

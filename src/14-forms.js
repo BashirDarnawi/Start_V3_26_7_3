@@ -5833,8 +5833,8 @@ function showAdModal() {
 }
 
 function showUserModal() {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'هذه الميزة للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('add')) {  // the Add User button's rule and the server's (users.add)
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا تملك صلاحية إضافة المستخدمين' : 'Requires the Add Users permission', 'error');
     return;
   }
   state.activeModal = 'user';

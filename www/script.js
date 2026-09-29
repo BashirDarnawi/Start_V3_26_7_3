@@ -8844,7 +8844,16 @@ const _SERVER_REFUSAL_AR = [
   [/^Financial period (\S+) is closed.*/, 'الشهر $1 مُقفل مالياً؛ اطلب من المدير فتحه قبل التعديل.'],
   [/^(Receipt number|serialNumber|\w+ReceiptNo) already exists/, 'رقم الوصل هذا مسجّل لوصل آخر. تأكد من الرقم ثم أعد المحاولة.', 'This receipt number is already used by another receipt. Check the number and try again.'],
   ['Final spend cannot be less than recorded company funding', 'المصروف النهائي لا يمكن أن يقل عن المبلغ الذي غطّته الشركة لهذا الإعلان. عدّل تغطية الشركة أولاً.'],
-  ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.']
+  ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.'],
+  // Users: create / edit / delete
+  ['This account has campaigns under review or approved', 'لهذا الحساب حملات قيد المراجعة أو معتمدة؛ قرّر فيها أو أوقفها أولاً.'],
+  ['This account has payment requests waiting for confirmation', 'لهذا الحساب طلبات دفع تنتظر التأكيد؛ ألغِها أولاً.'],
+  ['This account still has money in its wallet', 'ما زال في محفظة هذا الحساب مال؛ حوّله إلى مستخدم آخر أولاً ثم احذف الحساب.'],
+  ['This driver still has open delivery jobs', 'لدى هذا السائق مهام توصيل مفتوحة؛ أعد إسنادها أو أنهِها أولاً.'],
+  ['A user with this email already exists', 'يوجد مستخدم بهذا البريد الإلكتروني بالفعل.'],
+  ['Cannot remove the last remaining admin', 'لا يمكن إزالة آخر مدير؛ رقِّ مستخدماً آخر إلى مدير أولاً.'],
+  ['Cannot change the role of a user who holds permissions you do not', 'لا يمكنك تغيير دور مستخدم يملك صلاحيات لا تملكها.'],
+  ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.']
 ];
 function _serverRefusalText(raw) {
   raw = String(raw || '').trim();
@@ -9784,12 +9793,13 @@ async function apiListAuditLogs(limit = 500, offset = 0, after = '') {
   if (!Array.isArray(rows)) return [];
   return rows.map((r) => {
     const uid = String(r.user_id || '');
-    const u = (state.users || []).find(x => x && String(x.id) === uid);
+    const name = getKnownUserNameById(uid);  // deleted staff: the server's deleted-users directory
+    if (uid && !name) requestUserTombstoneRefresh();
     return {
       id: String(r.id || ''),
       date: new Date(Number(r.ts) || 0).toISOString(),
       userId: uid,
-      userName: u?.name || (uid ? uid : 'System'),
+      userName: name || (uid ? uid : 'System'),
       action: String(r.action || ''),
       category: _auditCategoryFor(r.resource_type),  // the filter offers auth/data/financial/general
       severity: 'info',
@@ -21012,7 +21022,7 @@ function renderAuditView() {
       const search = auditSearchTerm;
       const matchesSearch =
         foldSearchText(log.description || '').includes(search) ||
-        foldSearchText(log.userName || '').includes(search) ||
+        foldSearchText(getKnownUserNameById(log.userId) || log.userName || '').includes(search) ||
         foldSearchText(log.action || '').includes(search) ||
         foldSearchText(log.resourceId || '').includes(search);
       if (!matchesSearch) return false;
@@ -21219,10 +21229,9 @@ function renderAuditView() {
         ` : `
           <ol class="management-timeline" aria-label="${isAr ? 'الأنشطة' : 'Activities'}">
                 ${paginatedLogs.map(log => {
-                  const user = state.users.find(u => u.id === log.userId);
                   const severity = log.severity || 'info';
                   const category = log.category || 'general';
-                  const userName = log.userName || user?.name || (isAr ? 'النظام' : 'System');
+                  const userName = getKnownUserNameById(log.userId) || log.userName || (isAr ? 'النظام' : 'System');  // deleted staff by name
                   return `
                     <li class="management-timeline-item">
                       <span class="management-timeline-marker" aria-hidden="true"><i data-lucide="${categoryIcons[category] || 'file-text'}" class="h-4 w-4"></i></span>
@@ -21405,7 +21414,6 @@ function showLogDetails(logId) {
     return;
   }
 
-  const user = state.users.find(u => u.id === log.userId);
   const modal = document.getElementById('app-modal') || document.createElement('div');
   modal.id = 'app-modal';
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
@@ -21440,7 +21448,7 @@ function showLogDetails(logId) {
         <div class="audit-detail-grid grid grid-cols-3 gap-4">
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'المستخدم' : 'User'}</div>
-            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(log.userName || user?.name || (isAr ? 'النظام' : 'System'))}</div>
+            <div class="text-xs text-slate-700 dark:text-slate-300">${Security.escapeHtml(getKnownUserNameById(log.userId) || log.userName || (isAr ? 'النظام' : 'System'))}</div>
           </div>
           <div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800/50">
             <div class="text-[10px] font-bold text-slate-400 uppercase mb-1">${isAr ? 'الإجراء' : 'Action'}</div>
@@ -21508,7 +21516,6 @@ async function exportAuditLogs(format) {
   if (format === 'csv') {
     const headers = ['Date', 'Time', 'User', 'Action', 'Category', 'Severity', 'Description', 'Resource ID', 'Metadata'];
     const rows = allLogs.map(log => {
-      const user = state.users.find(u => u.id === log.userId);
       const date = new Date(log.date);
       return [
         // Pin an unambiguous, sortable Gregorian format. On ar-SA devices the
@@ -21519,7 +21526,7 @@ async function exportAuditLogs(format) {
         // Every free-text cell must be escaped — the User name (free text, may
         // contain a comma like "Ahmad, Ltd") used to shift all later columns
         // because only Description was quoted.
-        csvCell(log.userName || user?.name || 'System'),
+        csvCell(getKnownUserNameById(log.userId) || log.userName || 'System'),
         csvCell(log.action),
         csvCell(log.category || 'general'),
         csvCell(log.severity || 'info'),
@@ -26270,12 +26277,15 @@ function _unheldGrant(permissions) {
 
 // Server twin (_refuse_unheld_target): may the current user re-role / reset the password of
 // `user`? A held full action covers its Own variant; a driver's own-scope grants do not count.
-function _targetOutranksEditor(user) {
+// A reset (reset=true) also skips the rest of a driver's template grants, but no other grant.
+const _DRIVER_TEMPLATE_GRANTS = { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'], receipts: ['viewOwn'] };
+function _targetOutranksEditor(user, reset) {
   if (isCurrentUserAdmin()) return false;
   const driver = isDeliveryRole(user?.role);
   for (const [mk, list] of Object.entries(user?.permissions || {})) {
     for (const pk of (Array.isArray(list) ? list : [])) {
       if (driver && mk === 'deliveries' && (pk === 'viewOwn' || pk === 'complete')) continue;
+      if (driver && reset && (_DRIVER_TEMPLATE_GRANTS[mk] || []).includes(pk)) continue;
       const base = String(pk).endsWith('Own') ? String(pk).slice(0, -3) : String(pk);
       if (!currentUserHasPermission(mk, pk) && !(base !== pk && currentUserHasPermission(mk, base))) return true;
     }
@@ -37377,8 +37387,8 @@ function showAdModal() {
 }
 
 function showUserModal() {
-  if (!isCurrentUserAdmin()) {
-    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'هذه الميزة للأدمن فقط' : 'Admin only', 'error');
+  if (!canManageUsersAction('add')) {  // the Add User button's rule and the server's (users.add)
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا تملك صلاحية إضافة المستخدمين' : 'Requires the Add Users permission', 'error');
     return;
   }
   state.activeModal = 'user';
@@ -38491,7 +38501,7 @@ function renderModal() {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && (!canManageUsersAction('resetPassword') || (targetOutranks && !isDeliveryRole(userData.role))) ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && (!canManageUsersAction('resetPassword') || _targetOutranksEditor(userData, true)) ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
@@ -40024,8 +40034,8 @@ function renderModal() {
       } catch (err) {
         console.error('Modal submit error:', err);
         // Surface the server's actual reason (e.g. "A user with this email
-        // already exists") instead of a generic message that hides it.
-        const detail = String(err?.message || '').trim();
+        // already exists") instead of a generic message that hides it; known rules in Arabic.
+        const detail = _serverRefusalText(err?.message);
         showNotification(
           state.language === 'ar' ? 'خطأ' : 'Error',
           detail || (state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes'),
@@ -41674,9 +41684,12 @@ async function handleModalSubmit() {
             name: userName,
             email: userEmail,
             password: rawPassword,
-            role: userRole,
-            permissions: getDefaultPermissions(userRole)
+            role: userRole
           };
+          // Server rule: only users.managePermissions grants, and only held grants; else none are sent.
+          const defaults = getDefaultPermissions(userRole);
+          const canGrant = canManageUsersAction('managePermissions');
+          if (isAdminEditor || (canGrant && !_unheldGrant(defaults))) payload.permissions = defaults;
 
           const created = await apiCreateUser(payload);
           if (created?.id) {
@@ -41685,7 +41698,7 @@ async function handleModalSubmit() {
             saveState();
             showNotification(isArSubU ? 'نجاح' : 'Success', isArSubU ? 'تمت إضافة المستخدم بنجاح' : 'User added successfully', 'success');
 
-            if (!isAdminRole(userRole)) {
+            if (!isAdminRole(userRole) && canGrant) {
               setTimeout(() => showPermissionsModal(created.id), 500);
             }
           } else {
@@ -44141,9 +44154,10 @@ async function deleteUser(id) {
   // Delivery work in flight: active missions go back to the assignment pool;
   // collected cash not yet handed to the office must be pointed out before
   // the driver disappears from the per-driver lists.
-  const activeMissions = state.receipts.filter(r => r && !r._deleted
+  // Receipts AND ads: the server refuses the delete while either points at this driver.
+  const activeMissions = [state.receipts, state.ads || []].flatMap(arr => arr.filter(r => r && !r._deleted
     && String(r.deliveryPersonId || '') === String(id)
-    && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || '')));
+    && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || ''))).map(r => [arr, r.id]));
   const heldCash = state.receipts.filter(r => r && !r._deleted
     && String(r.deliveryPersonId || '') === String(id)
     && String(r.deliveryStatus || '') === 'Delivered'
@@ -44164,11 +44178,14 @@ async function deleteUser(id) {
   if (confirm(warning)) {
     // Return in-flight missions to the pool so they don't stay assigned to a
     // ghost driver. Delivered history keeps the id for the audit trail.
-    for (const r of activeMissions) {
-      if (!await updateRecord(state.receipts, r.id, { deliveryPersonId: '' })) return;
+    const cleared = [];
+    for (const [arr, rid] of activeMissions) {
+      if (!await updateRecord(arr, rid, { deliveryPersonId: '' })) break;
+      cleared.push([arr, rid]);
     }
-    if (!await deleteRecord(state.users, id)) return;
-    render();
+    if (cleared.length === activeMissions.length && await deleteRecord(state.users, id)) return render();
+    // Refused (or a clear failed): the driver stays, so give the jobs back.
+    for (const [arr, rid] of cleared) await updateRecord(arr, rid, { deliveryPersonId: id });
   }
 }
 

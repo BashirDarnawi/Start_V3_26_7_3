@@ -1953,6 +1953,131 @@ async function main() {
     assert.equal(nodes['wallet-transfer-submit'].disabled, false);
   });
 
+  // Review loop r6 batch U: user management.
+  await test('r6 U n=37: the password field protects a driver who holds unscoped grants; a template driver stays resettable', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.currentUser = { id: 'mgr', role: 'Employee', permissions: { users: ['view', 'resetPassword'] } };
+    state.users = [state.currentUser];
+    const template = { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'], receipts: ['viewOwn'] };
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Delivery', permissions: template }, true), false);
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Delivery', permissions: { ...template, users: ['managePermissions'] } }, true), true);  // before: exempt
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Delivery', permissions: { ...template, auditLogs: ['view'] } }, true), true);
+    assert.equal(sandbox._targetOutranksEditor({ role: 'Delivery', permissions: template }), true, 'a role change keeps the narrow skip');
+    const modals = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+    assert.ok(modals.includes("(!canManageUsersAction('resetPassword') || _targetOutranksEditor(userData, true))") && !modals.includes('!isDeliveryRole(userData.role))'));
+  });
+  await test('r6 U n=34: a users.add holder opens Add User and creates an Employee without an unauthorised permission map', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    const notes = [];
+    sandbox.showNotification = (title, message) => notes.push(`${title}: ${message}`);
+    sandbox.renderModal = () => {};
+    sandbox.updateUrlParams = () => {};
+    sandbox.closeModal = () => {};
+    state.serverMode = true;
+    state.currentUser = { id: 'mgr', role: 'Employee', permissions: { users: ['view', 'add'] } };
+    state.users = [state.currentUser];
+    sandbox.showUserModal();
+    assert.equal(state.activeModal, 'user', notes.join(' | '));   // before: "Admin only"
+    assert.equal(notes.length, 0, notes.join(' | '));
+    const fields = { 'user-name': { value: 'New Person' }, 'user-email': { value: 'new.person@example.com' },
+      'user-password': { value: 'LongEnough123' }, 'user-role': { value: 'Employee' } };
+    sandbox.document.getElementById = id => fields[id] || null;
+    const sent = [];
+    sandbox.apiCreateUser = async payload => { sent.push(JSON.parse(JSON.stringify(payload))); return { id: `u${sent.length}`, ...payload }; };
+    await sandbox.handleModalSubmit();
+    assert.equal(sent.length, 1, notes.join(' | '));
+    assert.ok(!('permissions' in sent[0]), JSON.stringify(sent[0]));   // before: the salesAgent map (server 403)
+    // A managePermissions holder who holds every preset grant still sends the preset.
+    const preset = run('PERMISSION_TEMPLATES.salesAgent.permissions');
+    state.currentUser.permissions = { ...JSON.parse(JSON.stringify(preset)), users: ['view', 'add', 'managePermissions'] };
+    fields['user-email'].value = 'second.person@example.com';
+    await sandbox.handleModalSubmit();
+    assert.deepEqual(sent[1].permissions, JSON.parse(JSON.stringify(preset)));
+    // ...but not one who lacks a preset grant.
+    state.currentUser.permissions = { users: ['view', 'add', 'managePermissions'], customers: ['view'] };
+    fields['user-email'].value = 'third.person@example.com';
+    await sandbox.handleModalSubmit();
+    assert.ok(!('permissions' in sent[2]), JSON.stringify(sent[2]));
+    // Without users.add the modal stays closed.
+    state.activeModal = null;
+    state.currentUser.permissions = { users: ['view'] };
+    sandbox.showUserModal();
+    assert.equal(state.activeModal, null);
+  });
+  await test('r6 U n=35: the audit log names deleted staff from the deleted-users directory (list, CSV)', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.serverMode = true;
+    state.users = [state.currentUser];
+    state.userTombstones = { u_gone: 'Dismissed Ali' };
+    const calls = [];
+    sandbox.apiJson = async url => {
+      calls.push(url);
+      if (String(url).startsWith('/api/audit')) return [{ id: 'a1', ts: 1, user_id: 'u_gone', action: 'Delete', resource_type: 'receipts' }, { id: 'a2', ts: 2, user_id: 'u_unknown', action: 'Delete', resource_type: 'receipts' }];
+      return [];
+    };
+    const rows = await sandbox.apiListAuditLogs(500);
+    assert.equal(rows[0].userName, 'Dismissed Ali');   // before: 'u_gone'
+    assert.ok(calls.includes('/api/users/tombstones'), 'an unknown id asks for the deleted-users directory');
+    // A directory that arrives after the rows were cached is still used by the export.
+    state.userTombstones = { u_gone: 'Dismissed Ali', u_unknown: 'Late Arrival' };
+    let csv = '';
+    sandbox.loadAuditLogsForExport = async () => rows;
+    sandbox.downloadFile = content => { csv = content; return true; };
+    run("Security.escapeHtml = s => String(s ?? '')");
+    await sandbox.exportAuditLogs('csv');
+    assert.ok(csv.includes('Dismissed Ali') && csv.includes('Late Arrival') && !csv.includes('u_unknown,'), csv);
+    // ...and by the list, which re-renders from the cached rows.
+    state.serverLogs = rows;
+    sandbox.refreshServerAuditLogs = () => {};
+    const html = String(sandbox.renderAuditView());
+    assert.ok(html.includes('<strong>Late Arrival</strong>') && !html.includes('<strong>u_unknown</strong>'), 'the list shows the raw id');
+  });
+  await test('r6 U n=36: user delete/create/edit refusals read in Arabic, a 409 never under "Server Error"', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.language = 'ar';
+    for (const message of [
+      'This account has campaigns under review or approved; decide or stop them first',
+      'This account has payment requests waiting for confirmation; cancel them first',
+      'This account still has money in its wallet; transfer it to another user first, then delete the account',
+      'This driver still has open delivery jobs; reassign or finish them first',
+      'This driver still has open delivery jobs; reassign or finish them before changing the role',
+      'A user with this email already exists',
+      'Cannot remove the last remaining admin. Promote another user to Admin first.',
+      'Cannot change the role of a user who holds permissions you do not',
+      'Cannot reset the password of a user who holds permissions you do not'
+    ]) {
+      const [title, body] = sandbox._serverRefusalToast('delete', 'users', { status: 409, message });
+      assert.notEqual(title, 'خطأ في الخادم');
+      assert.ok(!/[A-Za-z]/.test(body), body);
+    }
+    state.language = 'en';
+    assert.equal(sandbox._serverRefusalText('A user with this email already exists'), 'A user with this email already exists');
+    // The shared form-submit catch (user create / edit) passes the server's reason through the same map.
+    const modals = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+    assert.ok(modals.includes('const detail = _serverRefusalText(err?.message);'));
+  });
+  await test('r6 U n=38: a refused driver delete gives the cleared receipt and ad jobs back to the driver', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.users = [state.currentUser, { id: 'd1', name: 'Driver', role: 'Delivery', permissions: {} }];
+    state.receipts = [{ id: 'r1', deliveryPersonId: 'd1', deliveryStatus: 'In Progress' }, { id: 'r2', deliveryPersonId: 'd1', deliveryStatus: 'Delivered', isReceivedInOffice: true }];
+    state.ads = [{ id: 'a1', deliveryPersonId: 'd1', deliveryStatus: 'Needs Delivery' }];
+    const writes = [];
+    sandbox.updateRecord = async (arr, id, updates) => { writes.push(`${id}=${updates.deliveryPersonId}`); Object.assign(arr.find(r => r.id === id), updates); return true; };
+    let allowDelete = false;
+    sandbox.deleteRecord = async () => allowDelete;
+    await sandbox.deleteUser('d1');
+    assert.equal(state.receipts[0].deliveryPersonId, 'd1', writes.join(' '));   // before: '' - a driverless In Progress job
+    assert.equal(state.ads[0].deliveryPersonId, 'd1', writes.join(' '));
+    assert.deepEqual(writes, ['r1=', 'a1=', 'r1=d1', 'a1=d1']);
+    allowDelete = true;
+    writes.length = 0;
+    await sandbox.deleteUser('d1');
+    assert.deepEqual(writes, ['r1=', 'a1=']);
+    assert.equal(state.receipts[0].deliveryPersonId, '');
+    assert.equal(state.ads[0].deliveryPersonId, '');
+    assert.equal(state.receipts[1].deliveryPersonId, 'd1', 'delivered history keeps the driver');
+  });
+
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

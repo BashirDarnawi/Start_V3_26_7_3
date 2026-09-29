@@ -200,8 +200,9 @@ extra times (252 cases) with no flaky failure.
 An adversarial reviewer re-read every change from both rounds. It found and
 these were corrected before release: the password-reset guard could crash on
 a legacy permissions row and would have blocked managers from resetting
-drivers' passwords (now tolerant, and Delivery accounts are exempt because
-their grants are scoped to their own jobs); the alembic name filter would have hidden
+drivers' passwords (now tolerant, and a Delivery account's driver-template grants
+are skipped because they are scoped to its own jobs; since review loop r6 any
+other grant a driver holds still counts); the alembic name filter would have hidden
 the metadata's own indexes; the charge-request idempotency key was not per
 user and survived sign-out; the driver delete guard reached collections that
 have their own checks; a driver holding `receipts.add` could no longer create

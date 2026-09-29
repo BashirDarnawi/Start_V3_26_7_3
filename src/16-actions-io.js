@@ -727,9 +727,10 @@ async function deleteUser(id) {
   // Delivery work in flight: active missions go back to the assignment pool;
   // collected cash not yet handed to the office must be pointed out before
   // the driver disappears from the per-driver lists.
-  const activeMissions = state.receipts.filter(r => r && !r._deleted
+  // Receipts AND ads: the server refuses the delete while either points at this driver.
+  const activeMissions = [state.receipts, state.ads || []].flatMap(arr => arr.filter(r => r && !r._deleted
     && String(r.deliveryPersonId || '') === String(id)
-    && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || '')));
+    && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || ''))).map(r => [arr, r.id]));
   const heldCash = state.receipts.filter(r => r && !r._deleted
     && String(r.deliveryPersonId || '') === String(id)
     && String(r.deliveryStatus || '') === 'Delivered'
@@ -750,11 +751,14 @@ async function deleteUser(id) {
   if (confirm(warning)) {
     // Return in-flight missions to the pool so they don't stay assigned to a
     // ghost driver. Delivered history keeps the id for the audit trail.
-    for (const r of activeMissions) {
-      if (!await updateRecord(state.receipts, r.id, { deliveryPersonId: '' })) return;
+    const cleared = [];
+    for (const [arr, rid] of activeMissions) {
+      if (!await updateRecord(arr, rid, { deliveryPersonId: '' })) break;
+      cleared.push([arr, rid]);
     }
-    if (!await deleteRecord(state.users, id)) return;
-    render();
+    if (cleared.length === activeMissions.length && await deleteRecord(state.users, id)) return render();
+    // Refused (or a clear failed): the driver stays, so give the jobs back.
+    for (const [arr, rid] of cleared) await updateRecord(arr, rid, { deliveryPersonId: id });
   }
 }
 

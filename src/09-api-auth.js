@@ -761,12 +761,13 @@ async function apiListAuditLogs(limit = 500, offset = 0, after = '') {
   if (!Array.isArray(rows)) return [];
   return rows.map((r) => {
     const uid = String(r.user_id || '');
-    const u = (state.users || []).find(x => x && String(x.id) === uid);
+    const name = getKnownUserNameById(uid);  // deleted staff: the server's deleted-users directory
+    if (uid && !name) requestUserTombstoneRefresh();
     return {
       id: String(r.id || ''),
       date: new Date(Number(r.ts) || 0).toISOString(),
       userId: uid,
-      userName: u?.name || (uid ? uid : 'System'),
+      userName: name || (uid ? uid : 'System'),
       action: String(r.action || ''),
       category: _auditCategoryFor(r.resource_type),  // the filter offers auth/data/financial/general
       severity: 'info',

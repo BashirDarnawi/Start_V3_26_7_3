@@ -13198,16 +13198,24 @@ def _validated_permission_payload(raw_permissions: Any) -> dict[str, list[str]]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _refuse_unheld_target(actor: dict[str, Any], target: dict[str, Any], detail: str) -> None:
+# The Delivery Driver template: for a Delivery account every one of these is scoped to its own jobs.
+_DRIVER_TEMPLATE_GRANTS = {"deliveries": ("viewOwn", "accept", "complete", "markCollected"), "ads": ("viewOwn",), "customers": ("viewOwn", "viewContacts"), "receipts": ("viewOwn",)}
+
+
+def _refuse_unheld_target(actor: dict[str, Any], target: dict[str, Any], detail: str, *, driver_template_exempt: bool = False) -> None:
     """Takeover guard: a delegated manager may not act on a colleague who holds a grant the manager lacks.
     A held full action covers its Own variant; a driver's own-scope grants (deliveries.viewOwn/complete)
-    are not power an office account could inherit. Client twin: _targetOutranksEditor."""
+    are not power an office account could inherit. A password reset (driver_template_exempt) also skips
+    the rest of a driver's template grants, but never a driver's other (unscoped) grants. Client twin:
+    _targetOutranksEditor."""
     if str(actor.get("role") or "").lower() == "admin":
         return
     driver = str(target.get("role") or "").lower() == "delivery"
     for module, actions in _load_permissions(target.get("permissions_json")).items():
         for action in actions:
             if driver and module == "deliveries" and action in ("viewOwn", "complete"):
+                continue
+            if driver and driver_template_exempt and action in _DRIVER_TEMPLATE_GRANTS.get(module, ()):
                 continue
             base = action[:-3] if action.endswith("Own") else action
             if not user_has_permission(actor, module, action) and not (base != action and user_has_permission(actor, module, base)):
@@ -13314,6 +13322,13 @@ def _apply_user_update_atomic(
             )
             next_role = str(update_fields.get("role", current.get("role")) or "")
             next_deleted = bool(update_fields.get("deleted", current.get("deleted")))
+            if str(current.get("role") or "").lower() == "delivery" and next_role.lower() != "delivery" and not next_deleted:
+                _open_jobs = conn.execute(  # every editor, the Admin too: the board would show these jobs as unassigned
+                    text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"),
+                    {"uid": user_id},
+                ).scalar() or 0
+                if int(_open_jobs) > 0:
+                    raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them before changing the role")
             removes_active_admin = current_is_admin and (
                 next_role.lower() != "admin" or next_deleted
             )
@@ -13467,20 +13482,15 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
             _need("resetPassword")
             # Setting someone's password IS taking over their account: never for a
             # colleague who holds power the manager lacks (legacy names ignored).
-            # Delivery accounts are exempt (grants scoped to their own assignments).
-            if str(existing.get("role") or "").lower() != "delivery":
-                _refuse_unheld_target(admin, existing, "Cannot reset the password of a user who holds permissions you do not")
+            # A driver's template grants are scoped to their own jobs; any other grant counts.
+            _refuse_unheld_target(admin, existing, "Cannot reset the password of a user who holds permissions you do not", driver_template_exempt=True)
         if requested_role is not None and requested_role != str(existing.get("role") or ""):
             if _is_self:
                 raise HTTPException(status_code=403, detail="You cannot change your own role")
             _need("changeRole")
             # The role-flip chain (-> Delivery, reset the password, -> back) must not beat the guard above.
             _refuse_unheld_target(admin, existing, "Cannot change the role of a user who holds permissions you do not")
-            if str(existing.get("role") or "").lower() == "delivery" and str(requested_role).lower() != "delivery":
-                with db_conn() as conn:  # the board would show this driver's jobs as unassigned
-                    _open_jobs = conn.execute(text(f"SELECT COUNT(*) FROM entities WHERE type IN ('receipts','ads') AND deleted=false AND {json_field_sql('deliveryPersonId')}=:uid AND {json_field_sql('deliveryStatus')} IN ('Needs Delivery','In Progress')"), {"uid": user_id}).scalar() or 0
-                if int(_open_jobs) > 0:
-                    raise HTTPException(status_code=409, detail="This driver still has open delivery jobs; reassign or finish them before changing the role")
+            # A driver with open jobs keeps the Delivery role: checked for every editor under the row lock.
         if body.permissions is not None:
             _need("managePermissions")
         if body.deleted is not None:

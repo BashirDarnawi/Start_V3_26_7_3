@@ -2246,12 +2246,15 @@ function _unheldGrant(permissions) {
 
 // Server twin (_refuse_unheld_target): may the current user re-role / reset the password of
 // `user`? A held full action covers its Own variant; a driver's own-scope grants do not count.
-function _targetOutranksEditor(user) {
+// A reset (reset=true) also skips the rest of a driver's template grants, but no other grant.
+const _DRIVER_TEMPLATE_GRANTS = { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'], receipts: ['viewOwn'] };
+function _targetOutranksEditor(user, reset) {
   if (isCurrentUserAdmin()) return false;
   const driver = isDeliveryRole(user?.role);
   for (const [mk, list] of Object.entries(user?.permissions || {})) {
     for (const pk of (Array.isArray(list) ? list : [])) {
       if (driver && mk === 'deliveries' && (pk === 'viewOwn' || pk === 'complete')) continue;
+      if (driver && reset && (_DRIVER_TEMPLATE_GRANTS[mk] || []).includes(pk)) continue;
       const base = String(pk).endsWith('Own') ? String(pk).slice(0, -3) : String(pk);
       if (!currentUserHasPermission(mk, pk) && !(base !== pk && currentUserHasPermission(mk, base))) return true;
     }

@@ -1711,7 +1711,16 @@ const _SERVER_REFUSAL_AR = [
   [/^Financial period (\S+) is closed.*/, 'الشهر $1 مُقفل مالياً؛ اطلب من المدير فتحه قبل التعديل.'],
   [/^(Receipt number|serialNumber|\w+ReceiptNo) already exists/, 'رقم الوصل هذا مسجّل لوصل آخر. تأكد من الرقم ثم أعد المحاولة.', 'This receipt number is already used by another receipt. Check the number and try again.'],
   ['Final spend cannot be less than recorded company funding', 'المصروف النهائي لا يمكن أن يقل عن المبلغ الذي غطّته الشركة لهذا الإعلان. عدّل تغطية الشركة أولاً.'],
-  ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.']
+  ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.'],
+  // Users: create / edit / delete
+  ['This account has campaigns under review or approved', 'لهذا الحساب حملات قيد المراجعة أو معتمدة؛ قرّر فيها أو أوقفها أولاً.'],
+  ['This account has payment requests waiting for confirmation', 'لهذا الحساب طلبات دفع تنتظر التأكيد؛ ألغِها أولاً.'],
+  ['This account still has money in its wallet', 'ما زال في محفظة هذا الحساب مال؛ حوّله إلى مستخدم آخر أولاً ثم احذف الحساب.'],
+  ['This driver still has open delivery jobs', 'لدى هذا السائق مهام توصيل مفتوحة؛ أعد إسنادها أو أنهِها أولاً.'],
+  ['A user with this email already exists', 'يوجد مستخدم بهذا البريد الإلكتروني بالفعل.'],
+  ['Cannot remove the last remaining admin', 'لا يمكن إزالة آخر مدير؛ رقِّ مستخدماً آخر إلى مدير أولاً.'],
+  ['Cannot change the role of a user who holds permissions you do not', 'لا يمكنك تغيير دور مستخدم يملك صلاحيات لا تملكها.'],
+  ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.']
 ];
 function _serverRefusalText(raw) {
   raw = String(raw || '').trim();
