@@ -620,6 +620,14 @@ function renderAdsStudioEmptyState() {
   return `<div class="rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 p-8 text-center"><i data-lucide="megaphone-off" class="w-10 h-10 mx-auto text-slate-300 mb-3"></i><p class="font-bold text-slate-700 dark:text-slate-200">${isAr ? 'لا توجد حملات بعد' : 'No campaigns yet'}</p><p class="text-sm text-slate-500 mt-1">${isAr ? 'ابدأ بمسودة جديدة عندما تكون جاهزاً.' : 'Start a new draft when you are ready.'}</p></div>`;
 }
 
+// The server's ever_launched (ad_campaign_actions): a launch marker or a Meta id now, or a desk link
+// removed since (everLinked / lastLinkedMetaCampaignId) - that ad may have run on Meta, so it is settled
+// on that campaign's spend, never the whole payment by default.
+function adsStudioEverLaunched(campaign) {
+  return !!(String(campaign?.publishStatus || '').trim() || String(campaign?.metaCampaignId || '').trim()
+    || campaign?.everLinked === true || /^\d{1,40}$/.test(String(campaign?.lastLinkedMetaCampaignId || '').trim()));
+}
+
 function renderAdsStudioCampaignCard(campaign) {
   const isAr = adsStudioIsAr();
   const statusValue = String(campaign.status || 'Draft');
@@ -628,7 +636,8 @@ function renderAdsStudioCampaignCard(campaign) {
   const canEdit = editableStatus && canActOnRecord('adCampaignRequests', 'edit', campaign.createdBy);
   const canSubmit = editableStatus && canActOnRecord('adCampaignRequests', 'submit', campaign.createdBy);
   const canDuplicate = adsStudioCanCreate() && canActOnRecord('adCampaignRequests', 'add', campaign.createdBy);
-  const isLaunched = !!(String(campaign.publishStatus || '').trim() || String(campaign.metaCampaignId || '').trim());  // same predicate as the stop prompt and the server
+  const isLaunched = adsStudioEverLaunched(campaign);  // same predicate as the stop prompt and the server
+  const markedNow = !!(String(campaign.publishStatus || '').trim() || String(campaign.metaCampaignId || '').trim());  // the publish chip
   const photoCount = getEntityPhotoCountHint('adCampaignRequests', campaign);
   const safeId = Security.escapeHtml(String(campaign.id || ''));
   const platforms = (Array.isArray(campaign.platforms) ? campaign.platforms : []).map(item => String(item)).join(' + ');
@@ -687,7 +696,7 @@ function renderAdsStudioCampaignCard(campaign) {
               const extName = ext && String(ext.createdBy || '') === String(campaign.createdBy || '') ? String(ext.name || '') : '';
               return `<span class="inline-flex items-center gap-1 rounded-full bg-indigo-100 dark:bg-indigo-900/30 px-2.5 py-1 text-[11px] font-bold text-indigo-800 dark:text-indigo-200"><i data-lucide="calendar-plus" class="w-3.5 h-3.5"></i>${isAr ? 'تمديد لحملة' : 'Extension of'} ${Security.escapeHtml((extName || (isAr ? 'حملة سابقة' : 'a previous campaign')).slice(0, 40))}</span>`;
             })() : ''}
-            ${(statusValue === 'Approved' || (isLaunched && adsStudioCanReview())) && !metaReviewStale ? renderAdsStudioPublishChip(campaign) : ''}
+            ${(statusValue === 'Approved' || (markedNow && adsStudioCanReview())) && !metaReviewStale ? renderAdsStudioPublishChip(campaign) : ''}
           </div>
           <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
             <span class="inline-flex items-center gap-1"><i data-lucide="target" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioObjectiveLabel(campaign.objective))}</span>
@@ -1274,10 +1283,11 @@ async function stopAdsStudioCampaignOnce(id) {
   let closeReason;
   if (staff) {
     const remaining = paid - spent;
-    const launched = !!(String(campaign.publishStatus || '').trim() || String(campaign.metaCampaignId || '').trim());
+    const launched = adsStudioEverLaunched(campaign);
     // A launched campaign has spent on Meta: pre-fill the server's cap (paid minus Meta's confirmed
     // spend of the linked campaign) when this card knows it, else NOTHING — never a silent 0.00 that
     // keeps the customer's unspent budget, nor the whole budget (the server refuses a blind default).
+    // A link removed since counts as launched (no Meta id now: no cap read here, the field is empty).
     const cap = launched ? adsStudioSettleCap(campaign, paid) : null;
     const most = cap === null ? remaining : Math.min(cap, remaining);
     const used = cap === null ? ['', ''] : [`Meta used ${adsStudioMoney(paid - cap)} of ${adsStudioMoney(paid)}. `, `استخدمت ميتا ${adsStudioMoney(paid - cap)} من ${adsStudioMoney(paid)}. `];

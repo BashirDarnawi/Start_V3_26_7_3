@@ -5979,6 +5979,22 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Team desk launch (review loop r2 #30): a never-linked Approved request can be stopped before its end with the whole payment back (staff_stop), not only after a stop request; not on linked-before, hand-marked or ended rows',
     !loadError && stopBeforeRunCases.every(Boolean), `cases ${failed(stopBeforeRunCases)}; call ${JSON.stringify(plainStopCall.body || null)} was ${wasLaunchCard.slice(0, 200)}`);
+  // Review loop r2 (batch T follow-up): nothing records whether that never-linked ad was already created in Meta
+  // (the launch checklist creates it there before the link), so its Stop sheet says the full return is only for an
+  // ad not created in Meta yet (else link it and pause it there). Not on a stop request's sheet (its card says so),
+  // nor on a linked ad's settle sheet, nor on the admin override.
+  const plainStopSheetAr = String(inLanguage('ar', "renderStudioDeskSheet('settle', findVisibleAdsStudioCampaign('r_app'))"));
+  const linkedSettleSheet = String(run("renderStudioDeskSheet('settle', findVisibleAdsStudioCampaign('r_lnk'))"));
+  const plainOverrideSheet = String(run("renderStudioDeskSheet('override', findVisibleAdsStudioCampaign('r_app'))"));
+  const notInMetaCases = [
+    plainStopSheet.includes('data-testid="studio-desk-sheet-not-in-meta"') && plainStopSheet.includes('Only if this ad was not created in Meta yet. If it was, link it first and pause it there.'),
+    plainStopSheetAr.includes('data-testid="studio-desk-sheet-not-in-meta"') && plainStopSheetAr.includes('فقط إن لم يُنشأ هذا الإعلان في ميتا بعد'),
+    stopSheet.includes('Stop this ad and return the payment') && !stopSheet.includes('studio-desk-sheet-not-in-meta'),
+    linkedSettleSheet.includes('studio-desk-sheet-lines') && !linkedSettleSheet.includes('studio-desk-sheet-not-in-meta'),
+    plainOverrideSheet.includes('studio-desk-sheet-lines') && !plainOverrideSheet.includes('studio-desk-sheet-not-in-meta')
+  ];
+  check('Team desk plain Stop & return all (review loop r2 follow-up): the sheet warns the full return is only for an ad not created in Meta yet (link and pause it there otherwise); not on stop-request, linked or override sheets',
+    !loadError && notInMetaCases.every(Boolean), `cases ${failed(notInMetaCases)}; ${plainStopSheet.slice(0, 300)}`);
   reply('/api/studio/campaigns/r_was/results', wasResults);
   openAt('/studio?tab=review&section=settle');
   run('render()');  // the results read of the unlinked-after-link row answered
@@ -6308,7 +6324,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       Object.assign({ id: 'r_c26_unread' }, __lnk26),
       Object.assign({ id: 'r_c26_asked' }, __lnk26, { stopRequestedAt: '2025-01-03T10:00:00Z' }),
       Object.assign({ id: 'r_c26_future' }, __lnk26, { endDate: '2099-01-05' }),
-      { id: 'r_c26_hand', createdBy: 'c1', status: 'Approved', name: 'Hand marked', paidMinorUSD: 5000, publishStatus: 'live', endDate: '2025-01-05', _created: 61, _lastModified: 61 }]);
+      { id: 'r_c26_hand', createdBy: 'c1', status: 'Approved', name: 'Hand marked', paidMinorUSD: 5000, publishStatus: 'live', endDate: '2025-01-05', _created: 61, _lastModified: 61 },
+      Object.assign({ id: 'r_c26_unlinked' }, __lnk26, { publishStatus: '', metaCampaignId: '', metaAdAccountId: '', everLinked: true, lastLinkedMetaCampaignId: '120200000000000026', lastLinkedMetaAdAccountId: '111' })]);
     _adsStudioResults.forUser = String(state.currentUser.id);
     ['r_c26', 'r_c26_asked', 'r_c26_future'].forEach(id => _adsStudioResults.byId.set(id, { state: 'done', at: Date.now(), promise: null, data: adsStudioCleanResults({
       stage: { stage: 10 }, results: { metaUsedMinor: 3000, paidMinor: 10000 },
@@ -6322,6 +6339,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const futureDefault = close26('r_c26_future');
   const handDefault = close26('r_c26_hand');
   const handTyped = close26('r_c26_hand', '0');
+  // Linked once, unlinked since (everLinked / lastLinkedMetaCampaignId, the server's ever_launched): still a launched ad.
+  const unlinkedDefault = close26('r_c26_unlinked');
+  const unlinkedTyped = close26('r_c26_unlinked', '20.00');
+  const unlinkedCard = String(run("renderAdsStudioCampaignCard(findVisibleAdsStudioCampaign('r_c26_unlinked'))"));
+  const everOnlyCard = String(run("renderAdsStudioCampaignCard(Object.assign({}, findVisibleAdsStudioCampaign('r_c26_unlinked'), { lastLinkedMetaCampaignId: '' }))"));
   run('state.adCampaignRequests = __kept26; ["r_c26", "r_c26_asked", "r_c26_future"].forEach(id => _adsStudioResults.byId.delete(id));');
   const closeCases = [
     // the server's cap pre-filled and named; OK sends it, completed (ended, no stop request)
@@ -6337,10 +6359,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     // hand-marked (nothing known of its Meta spend): empty, not 0.00; a typed 0 is still taken, as completed (ended)
     !!handDefault.prompt && handDefault.prompt.value === '' && handDefault.invalid === true && !handDefault.call
       && !!handTyped.call && handTyped.call.refundMinor === 0 && handTyped.call.closeReason === 'completed',
-    adsStudio.includes("attempt.operationId, null, refundMinor, closeReason") && read('src/09-api-auth.js').includes('reason: reason || null, closeReason };')
+    adsStudio.includes("attempt.operationId, null, refundMinor, closeReason") && read('src/09-api-auth.js').includes('reason: reason || null, closeReason };'),
+    // a desk link removed since: a close (not "Refund amount" with the whole payment), the field empty and required;
+    // a typed amount goes as completed (ended, no stop request); the card's button reads Close campaign
+    !!unlinkedDefault.prompt && unlinkedDefault.prompt.value === '' && unlinkedDefault.prompt.message.includes('Close this campaign') && !unlinkedDefault.prompt.message.includes('Refund amount')
+      && unlinkedDefault.invalid === true && !unlinkedDefault.call,
+    !!unlinkedTyped.call && unlinkedTyped.call.refundMinor === 2000 && unlinkedTyped.call.closeReason === 'completed',
+    unlinkedCard.includes('Close campaign') && !unlinkedCard.includes('Stop &amp; refund') && !unlinkedCard.includes('Stop & refund')
+      && everOnlyCard.includes('Close campaign') && !everOnlyCard.includes('Stop &amp; refund') && !everOnlyCard.includes('Stop & refund')
   ];
-  check('Classic staff close of a launched ad (review loop r2 #26/#29): the cap (paid minus Meta\'s confirmed spend) is pre-filled and named, else the field is empty and required (never a silent 0.00); an ended ad with no stop request closes as completed',
-    closeCases.every(Boolean), `cases ${failed(closeCases)}; ${JSON.stringify({ linkedDefault, unreadDefault, askedDefault, futureDefault, handDefault, handTyped })}`);
+  check('Classic staff close of a launched ad (review loop r2 #26/#29): the cap (paid minus Meta\'s confirmed spend) is pre-filled and named, else the field is empty and required (never a silent 0.00); an ended ad with no stop request closes as completed; a desk link removed since still counts as launched',
+    closeCases.every(Boolean), `cases ${failed(closeCases)}; ${JSON.stringify({ linkedDefault, unreadDefault, askedDefault, futureDefault, handDefault, handTyped, unlinkedDefault, unlinkedTyped })}`);
 }
 
 {

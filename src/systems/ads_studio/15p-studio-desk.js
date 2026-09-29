@@ -897,8 +897,14 @@ function renderStudioDeskSheet(kind, request) {
       numbers.spend === null ? adsStudioText("Meta's spend is not confirmed yet", 'صرف ميتا غير مؤكد بعد') : `${adsStudioText('Meta used', 'صرف ميتا')} ${studioUsd(numbers.spend)}${numbers.confirmedAt ? ` (${adsStudioText('confirmed', 'أُكّد')} ${studioDeskWhen(numbers.confirmedAt)})` : ''}`,
       numbers.cap === null ? '' : `${adsStudioText('Return up to', 'يعود حتى')} ${studioUsd(numbers.cap)}`
     ].filter(Boolean);
+    // A never-linked ad the team stops from its plain launch card: nothing records whether it was already
+    // created in Meta (and spending), so "Meta used $0.00" is only true if it was not (a stop request's card says so).
+    const notInMeta = !override && studioDeskStopBeforeRun(request) && !studioDeskStopAsked(request)
+      ? `<p class="studio-ads-sheet-note" data-testid="studio-desk-sheet-not-in-meta">${studioEsc(adsStudioText('Only if this ad was not created in Meta yet. If it was, link it first and pause it there.',
+        'فقط إن لم يُنشأ هذا الإعلان في ميتا بعد. إن كان قد أُنشئ، اربطه أولاً ثم أوقفه هناك.'))}</p>` : '';
     body = `
         <ul class="studio-desk-sheet-lines" data-testid="studio-desk-sheet-lines">${lines.map(line => `<li>${studioEsc(line)}</li>`).join('')}</ul>
+        ${notInMeta}
         <label class="studio-desk-label" for="studio-desk-refund">${studioEsc(adsStudioText('Amount to return (USD)', 'المبلغ المعاد (بالدولار)'))}</label>
         <input id="studio-desk-refund" class="studio-desk-input" type="text" inputmode="decimal" autocomplete="off" dir="ltr" maxlength="24" value="${studioEsc(start)}" data-testid="studio-desk-refund" oninput="studioDeskRefundInput('${id}', this)" placeholder="0.00" />
         <p class="studio-ads-sheet-note">${studioEsc(override
