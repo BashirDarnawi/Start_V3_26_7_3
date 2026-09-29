@@ -3399,6 +3399,16 @@ async function main() {
     assert.equal(reopened.length, 1);
   });
 
+  // ---- r9 M (company-covered receipt money) ----
+  await test('r9 M n=4: lowering a receipt below its company coverage reads the refusal in Arabic', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const message = 'The company already covered $30.00 of this receipt; its amount cannot go below that';
+    state.language = 'ar';
+    assert.ok(!/[A-Za-z]{3,}/.test(sandbox._serverRefusalText(message)), sandbox._serverRefusalText(message));
+    state.language = 'en';
+    assert.equal(sandbox._serverRefusalText(message), message);
+  });
+
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

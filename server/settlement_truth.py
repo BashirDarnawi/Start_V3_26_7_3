@@ -23,7 +23,7 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
-from .financial_core import _financial_minor, _financial_usd
+from .financial_core import MAX_EXCHANGE_RATE, MIN_EXCHANGE_RATE, _financial_minor, _financial_usd
 
 # Same set as main._USD_BASED_PAYMENT_METHODS (this module cannot import main).
 _USD_ROW_METHODS = frozenset({"USDT", "Bank Transfer (USD)", "Cash (USD)"})
@@ -36,7 +36,10 @@ def _row_rate2_at(row: dict[str, Any], trusted_rate: Decimal) -> float:
     main._receipt_payments_credit_minor read a dollar row as amount x Rate 1 /
     Rate 2 but any other row as amount / Rate 2, so a Libyana row at Rate 1
     0.70 needs Rate 2 = trusted_rate / 0.70, and a row whose Rate 1 adds no
-    LYD (0 or unreadable) backs no dollars (Rate 2 = 0).
+    LYD (0 or unreadable) backs no dollars (Rate 2 = 0). sanitize_json clamps
+    a Rate 1 of 0 up to MIN_EXCHANGE_RATE, so that sentinel adds no LYD too,
+    and a Rate 2 outside [MIN, MAX] is never written (the credit reader
+    rejects the whole receipt's rows for one such row).
     """
     if str(row.get("method") or "") in _USD_ROW_METHODS:
         return float(trusted_rate)
@@ -44,7 +47,12 @@ def _row_rate2_at(row: dict[str, Any], trusted_rate: Decimal) -> float:
         rate1 = Decimal(str(row.get("rate") or 0))
     except ArithmeticError:  # decimal.InvalidOperation: not a number
         return 0.0
-    return float(trusted_rate / rate1) if rate1.is_finite() and rate1 > 0 else 0.0
+    if not rate1.is_finite() or rate1 <= Decimal(str(MIN_EXCHANGE_RATE)):
+        return 0.0
+    rate2 = trusted_rate / rate1
+    if not rate2.is_finite() or not Decimal(str(MIN_EXCHANGE_RATE)) <= rate2 <= Decimal(str(MAX_EXCHANGE_RATE)):
+        return 0.0
+    return float(rate2)
 
 
 def apply_delivery_completion_truth(
@@ -266,10 +274,20 @@ def apply_coverage_settlement_truth(
                 if str(merged.get("deliveryStatus") or "") == "Delivered"
                 else 0
             )
+            # The gross can never go under what the company already covered
+            # (unassigned coverage sits on no ad row, so no capacity check sees
+            # it): settling that later gave more credit than the gross.
+            if due_total(merged) < covered_minor:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"The company already covered ${_financial_usd(covered_minor):.2f} of this receipt; its amount cannot go below that",
+                )
             merged["customerOutstandingUSD"] = _financial_usd(
                 max(due_total(merged) - covered_minor - collected_minor, 0)
             )
-        if not new_paid or canceled or already_delivered:
+        # A Paid receipt whose delivery was canceled, or that was delivered
+        # after the office settled it, still has to net a gross re-save below.
+        if not new_paid or str(merged.get("status") or "") in {"Canceled", "Lost", "Destroyed"}:
             return
 
     amount_minor = _financial_minor(merged.get("amountUSD"), "receipt amount")
@@ -286,7 +304,21 @@ def apply_coverage_settlement_truth(
             # real money, and main.py's raise guard caps it at the rows.
             # Netting it stripped the company share from the customer again.
             return
-        if not _reads_as_gross(amount_minor, old_minor + covered_minor, old_minor):
+        gross_minor = old_minor + covered_minor
+        rows_are_gross = old_rows_minor is not None and abs(old_rows_minor - gross_minor) <= 1
+        if already_delivered and not rows_are_gross:
+            # Driver-collected cash (its rows back the cash, or a legacy receipt
+            # has no rows): only the office's gross rows are netted here.
+            return
+        if rows_are_gross and old_minor + 1 < amount_minor < gross_minor - max(100, gross_minor // 100):
+            # The stored rows are the gross, so a lower or re-rated total built
+            # from them is not the customer's cash: keeping it minted up to the
+            # company share as free credit.
+            raise HTTPException(
+                status_code=409,
+                detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
+            )
+        if not _reads_as_gross(amount_minor, gross_minor, old_minor):
             return
         new_amount_minor = max(amount_minor - covered_minor, 0)
     elif not old_paid and new_paid:
@@ -299,11 +331,17 @@ def apply_coverage_settlement_truth(
         # net cash the customer actually paid. Only the gross carries the
         # company share; subtracting it from net cash destroyed real money.
         gross_minor = due_total(old)
+        if gross_minor < covered_minor:
+            raise HTTPException(
+                status_code=409,
+                detail=f"The company already covered ${_financial_usd(covered_minor):.2f} of this receipt; its amount cannot go below that",
+            )
         net_expected = max(gross_minor - covered_minor, 0)
         # The form derives amountUSD from payment rows: a rate change or cent
         # rounding lands a little under the gross and still means "the gross".
         gross_floor = gross_minor - max(100, gross_minor // 100)
-        if covered_minor > 0 and net_expected < amount_minor < gross_floor:
+        # The form adds a house cent to a fractional total: net + 1 is net cash.
+        if covered_minor > 0 and net_expected + 1 < amount_minor < gross_floor:
             raise HTTPException(
                 status_code=409,
                 detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
