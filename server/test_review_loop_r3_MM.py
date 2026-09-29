@@ -117,6 +117,36 @@ def test_settling_a_small_coverage_with_net_cash_keeps_the_cash(gross, covered):
     assert stripped["amountUSD"] == net
 
 
+BETWEEN_NET_AND_GROSS = [(100, 1.5, 99.0), (1000, 15, 990), (100, 0.8, 99.6), (1000, 9, 995)]
+
+
+@pytest.mark.parametrize("gross,covered,amount", BETWEEN_NET_AND_GROSS)
+def test_settling_with_an_amount_above_the_net_never_exceeds_the_gross(gross, covered, amount):
+    # Review follow-up: the nearest-reading rule kept an amount between the net
+    # and the gross midpoint as cash, so cash plus the covered share went over
+    # the gross (99.00 on 100/1.50 -> capacity 10050, 990 on 1000/15 -> 100500).
+    old = _small_cover(gross, covered)
+    merged = _apply(old, {**old, "status": "Paid", "isPaid": True,
+                          "amountUSD": amount, "amountLocal": round(amount * 5, 2)})
+    assert merged["amountUSD"] == round(amount - covered, 2)
+    assert _financial_due_total(merged) <= gross * 100
+
+
+@pytest.mark.parametrize("gross,covered,amount", BETWEEN_NET_AND_GROSS)
+def test_resave_and_unsettle_above_the_net_never_exceed_the_gross(gross, covered, amount):
+    old = _small_cover(gross, covered)
+    net = round(gross - covered, 2)
+    settled = _apply(old, {**old, "status": "Paid", "isPaid": True,
+                           "amountUSD": net, "amountLocal": round(net * 5, 2)})
+    assert settled["amountUSD"] == net   # the exact net cash is still kept
+    resaved = _apply(settled, {**settled, "amountUSD": amount, "amountLocal": round(amount * 5, 2)})
+    assert _financial_due_total(resaved) <= gross * 100
+    unsettled = _apply(settled, {**settled, "status": "Not Paid", "isPaid": False,
+                                 "amountUSD": amount, "amountLocal": round(amount * 5, 2)})
+    assert unsettled["amountUSD"] <= gross
+    assert unsettled["customerOutstandingUSD"] <= net
+
+
 def test_large_coverage_settle_readings_are_unchanged():
     old = _small_cover(100, 40)
     assert _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 100})["amountUSD"] == 60

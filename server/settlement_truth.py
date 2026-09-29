@@ -174,11 +174,13 @@ def _reads_as_gross(amount_minor: int, gross_minor: int, net_minor: int) -> bool
     than the customer's net cash? The form derives amountUSD from payment rows,
     so a rate change or cent rounding lands a little under the gross and still
     means "the gross". When a small company share puts the net inside that
-    rounding band, the NEARER reading wins; a tie keeps net cash, so real
-    customer money is never stripped a second time.
+    rounding band, the exact net (give or take a house cent) stays net cash, so
+    real customer money is never stripped a second time. Anything above it is
+    the gross: keeping it as cash would let customer cash plus the company
+    share exceed the receipt's gross (free credit nobody paid).
     """
     gross_floor = gross_minor - max(100, gross_minor // 100)
-    return amount_minor >= gross_floor and abs(gross_minor - amount_minor) < abs(amount_minor - net_minor)
+    return amount_minor >= gross_floor and amount_minor > net_minor + 1
 
 
 def apply_coverage_settlement_truth(
@@ -266,7 +268,8 @@ def apply_coverage_settlement_truth(
                 status_code=409,
                 detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
             )
-        # A small company share puts the net inside that band: nearest wins.
+        # A small company share puts the net inside that band: the exact net
+        # stays cash, anything above it is the gross.
         treat_as_gross = _reads_as_gross(amount_minor, gross_minor, net_expected)
         new_amount_minor = max(amount_minor - covered_minor, 0) if treat_as_gross else amount_minor
         merged["customerOutstandingUSD"] = 0.0
