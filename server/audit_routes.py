@@ -89,6 +89,8 @@ def create_audit_router(
                 days_to_keep = int(payload.get("days_to_keep"))
             except (TypeError, ValueError):
                 days_to_keep = 365
+            except OverflowError:  # 1e400 / Infinity in JSON: refuse, never guess how much history to delete
+                raise HTTPException(status_code=400, detail="days_to_keep must be a whole number of days")
 
         days_to_keep = max(30, min(int(days_to_keep), 3650))  # Min 30 days, max 10 years
         cutoff_ts = now_ms() - (days_to_keep * 24 * 60 * 60 * 1000)

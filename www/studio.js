@@ -1168,6 +1168,9 @@ const _ADS_STUDIO_REFUSAL_AR = [
   ['The customer asked to stop this ad before it was launched', 'طلب العميل إيقاف هذا الإعلان قبل إطلاقه: سوِّه بالإيقاف (يعود المبلغ كاملاً)، أو أكّد أنه أُنشئ في ميتا بالفعل.', '',
     'The customer asked to stop this ad before it was launched: settle it with Stop (full return), or confirm it was already created in Meta.'],
   ['This request was linked on the team desk before', 'رُبط هذا الطلب من مكتب الفريق من قبل: اربطه مرة أخرى من المكتب.', '', 'This request was linked on the Team desk before: link it again from the desk.'],
+  // -- a link to another campaign after the earlier one delivered (REFUSE_LINK_AFTER_SPEND; the admin's reason box in the link sheet)
+  ['The Meta campaign this request was linked to before already delivered', 'حملة ميتا التي رُبط بها هذا الطلب من قبل عرضت الإعلان وصرفت بالفعل: ربط حملة أخرى للمدير فقط، مع كتابة السبب.', '',
+    'The Meta campaign this request was linked to before already delivered (its spend counts at settlement): only an admin can link another campaign, with a written reason.'],
   // -- the ad request (ad_campaign_actions.py, ad_campaign_fields.py, studio_posts.py)
   [/^destination must be an HTTPS website/, 'يجب أن تكون الوجهة موقعاً يبدأ بـ https:// أو رابط واتساب أو ماسنجر أو رقم هاتف دولياً.', '',
     'The destination must be an https:// website, a WhatsApp or Messenger link, or an international phone number.'],
@@ -1523,6 +1526,17 @@ function adsStudioSetLinkField(field, input) {
   sheet[field] = digits;
 }
 
+// REFUSE_LINK_AFTER_SPEND: the request's earlier Meta campaign delivered, so only an admin links another
+// one, with a written reason (10-300 characters; the sheet then shows an admin the box, sent as relinkReason).
+function adsStudioLinkAfterSpend(detail) {
+  const text = detail && typeof detail === 'object' ? String(detail.message || '') : String(detail || '');
+  return text.includes('The Meta campaign this request was linked to before already delivered');
+}
+
+function adsStudioSetLinkRelinkReason(input) {
+  if (_adsStudioLinkSheet) _adsStudioLinkSheet.relinkReason = String(input?.value || '').slice(0, 300);
+}
+
 function adsStudioNeedsManualRename(detail) {
   if (detail && typeof detail === 'object' && !Array.isArray(detail) && String(detail.code || '') === 'NEEDS_MANUAL_RENAME') return true;
   const text = detail && typeof detail === 'object' ? String(detail.message || '') : String(detail || '');
@@ -1629,7 +1643,10 @@ function renderAdsStudioLinkSheet() {
         <label for="ads-studio-link-account" class="mt-4 block text-sm font-bold mb-2">${isAr ? 'حساب الإعلانات' : 'Ad account'}</label>
         ${accountField}
         <label for="ads-studio-link-campaign" class="mt-4 block text-sm font-bold mb-2">${isAr ? 'رقم حملة ميتا' : 'Meta campaign id'}</label>
-        <input id="ads-studio-link-campaign" type="text" inputmode="numeric" autocomplete="off" dir="ltr" maxlength="60" value="${Security.escapeHtml(sheet.metaCampaignId)}" oninput="adsStudioSetLinkField('metaCampaignId', this)" class="${field}" placeholder="120200000000000000" />`;
+        <input id="ads-studio-link-campaign" type="text" inputmode="numeric" autocomplete="off" dir="ltr" maxlength="60" value="${Security.escapeHtml(sheet.metaCampaignId)}" oninput="adsStudioSetLinkField('metaCampaignId', this)" class="${field}" placeholder="120200000000000000" />${sheet.afterSpend && isCurrentUserAdmin() ? `
+        <label for="ads-studio-link-relink-reason" class="mt-4 block text-sm font-bold mb-2">${isAr ? 'سبب ربط حملة أخرى (للمدير)' : 'Why link another campaign (admin)'}</label>
+        <textarea id="ads-studio-link-relink-reason" data-ads-studio-relink-reason="1" rows="3" maxlength="300" oninput="adsStudioSetLinkRelinkReason(this)" class="glass-input w-full rounded-xl px-4 py-3">${Security.escapeHtml(sheet.relinkReason || '')}</textarea>
+        <p class="mt-1 text-xs text-slate-500">${isAr ? 'من 10 إلى 300 حرف. ما صرفته الحملة السابقة لن يُحتسب عند التسوية، ويُحفظ هذا القرار في السجل.' : "10 to 300 characters. The earlier campaign's spend will no longer count at settlement; this decision is recorded."}</p>` : ''}`;
   return `
     <div class="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 backdrop-blur-sm p-0 sm:items-center sm:p-4" onclick="closeAdsStudioLinkSheet()">
       <div data-ads-studio-link-sheet="${Security.escapeHtml(String(campaign.id || ''))}" class="w-full max-w-lg rounded-t-3xl sm:rounded-2xl bg-white dark:bg-slate-900 p-5 max-h-[90dvh] overflow-y-auto custom-scrollbar" onclick="event.stopPropagation()" role="dialog" aria-modal="true" aria-labelledby="ads-studio-link-title" dir="${isAr ? 'rtl' : 'ltr'}">
@@ -1650,12 +1667,14 @@ function renderAdsStudioLinkSheet() {
 // operationId (one per action and version, so a retry after a lost reply replays it). The route's
 // version field is expectedLastModified; expectedVersion carries the same number. The reply is the
 // request plus {renamed, removedManagerCopies, keptManagerCopies, warnings}. Never retried here: a
-// retry reaches Meta. stopRequestAcknowledged only from the sheet's "link anyway" path (openAdsStudioLinkSheet).
-async function adsStudioApiLinkMetaCampaign(campaignId, attempt, metaAdAccountId, metaCampaignId, stopRequestAcknowledged = false) {
+// retry reaches Meta. stopRequestAcknowledged only from the sheet's "link anyway" path (openAdsStudioLinkSheet);
+// relinkReason only from an admin's reason box after REFUSE_LINK_AFTER_SPEND.
+async function adsStudioApiLinkMetaCampaign(campaignId, attempt, metaAdAccountId, metaCampaignId, stopRequestAcknowledged = false, relinkReason = '') {
   const identity = getServerSessionIdentity();
   const version = attempt.expectedLastModified;
   const body = { publishStatus: 'meta_review', metaAdAccountId, metaCampaignId, operationId: attempt.operationId, expectedVersion: version, expectedLastModified: version };
   if (stopRequestAcknowledged === true) body.stopRequestAcknowledged = true;
+  if (relinkReason) body.relinkReason = String(relinkReason);
   const reply = await apiJson(`/api/ad-studio/campaigns/${encodeURIComponent(campaignId)}/publish-status`, {
     method: 'POST', body
   }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS });
@@ -1694,6 +1713,9 @@ async function linkAdsStudioMetaCampaignOnce(campaignId) {
   const campaignBox = box('ads-studio-link-campaign');
   if (accountBox) sheet.accountId = adsStudioDigitsOnly(accountBox.value);
   if (campaignBox) sheet.metaCampaignId = adsStudioDigitsOnly(campaignBox.value);
+  const reasonBox = box('ads-studio-link-relink-reason');
+  if (reasonBox) sheet.relinkReason = String(reasonBox.value || '').slice(0, 300);
+  const relinkReason = sheet.afterSpend && isCurrentUserAdmin() ? String(sheet.relinkReason || '').trim() : '';
   const accountId = adsStudioLinkAccountChoice(sheet);
   const metaCampaignId = sheet.metaCampaignId;
   let problem = '';
@@ -1712,7 +1734,7 @@ async function linkAdsStudioMetaCampaignOnce(campaignId) {
   try {
     let reply;
     try {
-      reply = await adsStudioApiLinkMetaCampaign(campaign.id, attempt, accountId, metaCampaignId, sheet.stopAcknowledged === true);
+      reply = await adsStudioApiLinkMetaCampaign(campaign.id, attempt, accountId, metaCampaignId, sheet.stopAcknowledged === true, relinkReason);
     } catch (e) {
       // A reply lost after the link committed: the request now holds this Meta campaign, and the
       // result the link stored on it (copies removed and kept, warnings) is shown as the answer.
@@ -1730,6 +1752,7 @@ async function linkAdsStudioMetaCampaignOnce(campaignId) {
   } catch (e) {
     const detail = e?.payload?.detail || e?.message || '';
     const offered = detail && typeof detail === 'object' && !Array.isArray(detail) ? String(detail.studioName || '').trim() : '';
+    if (adsStudioLinkAfterSpend(detail)) for (const item of sheets()) item.afterSpend = true;  // an admin's reason box now
     settle(adsStudioNeedsManualRename(detail)
       ? { kind: 'rename', studioName: offered || adsStudioStudioName(campaign) }
       : { kind: 'error', text: adsStudioRefusalText(detail) || adsStudioText('Refresh and try again.', 'حدّث الصفحة وحاول مرة أخرى.') });

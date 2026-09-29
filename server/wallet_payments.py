@@ -360,6 +360,24 @@ def _campaign_payment_key(campaign: dict[str, Any]) -> str:
     return f"cpay:{campaign_id}:{cycle}" if cycle else f"cpay:{campaign_id}"
 
 
+def _sibling_captures_in_flight_minor(conn: Any, ctx: dict[str, Any], owner_id: str, campaign_id: str) -> int:
+    """What the owner's OTHER Submitted requests already captured for their current cycle and never
+    returned: an approval between its capture (committed) and its Approved status write. That money
+    already left the ledger balance while wallet_campaign_holds_minor still counts the request's hold."""
+    rows = conn.execute(
+        text(json_fields_select_sql(
+            ("status", "submittedAt"), ("id",),
+            "type = 'adCampaignRequests' AND deleted = false AND created_by = :uid",
+        )),
+        {"uid": str(owner_id or "")},
+    ).mappings().all()
+    return sum(
+        campaign_capture_open_minor(conn, ctx, {"id": str(row["id"]), "submittedAt": row.get("f_submittedat")})
+        for row in rows
+        if str(row["id"]) != campaign_id and str(row.get("f_status") or "") == "Submitted"
+    )
+
+
 def capture_campaign_budget(
     conn: Any, ctx: dict[str, Any], campaign: dict[str, Any], actor_id: str
 ) -> str:
@@ -410,9 +428,12 @@ def capture_campaign_budget(
     if budget <= 0:
         raise HTTPException(status_code=400, detail="An approved campaign needs a budget greater than zero")
     # The campaign is still Submitted here, so its own budget sits inside the
-    # holds sum: the ledger must simply cover ALL holds for this capture.
+    # holds sum: the ledger must simply cover ALL holds for this capture. A
+    # sibling request between its capture and its Approved write is counted
+    # twice (its money left the balance, its hold is still summed): add it back.
     balance = ctx["wallet_balance_minor"](conn, owner_id, "USD")
-    if balance < wallet_campaign_holds_minor(conn, owner_id):
+    holds = wallet_campaign_holds_minor(conn, owner_id)
+    if balance < holds and balance + _sibling_captures_in_flight_minor(conn, ctx, owner_id, campaign_id) < holds:
         raise HTTPException(
             status_code=409,
             detail="Customer wallet can no longer cover this campaign budget",
@@ -687,6 +708,10 @@ def create_wallet_payments_router(
             if guard is not None:
                 guard.acquire()
             with db_conn() as conn:
+                # Owner first, then the key (the same order on every create): the open-request count
+                # below and the insert are one step per customer on PostgreSQL, so parallel creates
+                # with different keys cannot all pass the cap (SQLite: the wallet lock above).
+                ctx["lock_idempotency_key"](conn, uid, postgres=postgres, namespace="walletPaymentOwner")
                 ctx["lock_idempotency_key"](conn, idem, postgres=postgres, namespace="walletPayment")
                 prior = ctx["find_entity_by_idempotency"](conn, WALLET_PAYMENT_COLLECTION, idem)
                 if prior:

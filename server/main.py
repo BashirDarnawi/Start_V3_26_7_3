@@ -10771,6 +10771,8 @@ def _sync_watermark_max(
 
     where = ["e.type=:type"]
     params: dict[str, Any] = {"type": collection}
+    if assigned_to or personal_user_id:  # served by the partial (deleted=false) JSON indexes; a lower cursor re-delivers
+        where.append("e.deleted=false")
     if created_by:
         where.append("e.created_by=:created_by")
         params["created_by"] = created_by

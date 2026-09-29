@@ -45,8 +45,9 @@ sources, never a number with itself:
 * **request_refund_mismatch** — a Stopped request whose ``refundMinorUSD`` / ``refundTransactionId``
   are not the amount / id of its cycle's ``stoprefund:`` row (0 and '' when there is none).
 * **refund_above_unspent** — a Stopped request returned more than paid minus Meta's confirmed spend
-  (its ``adCampaignResults`` row, when one exists for the same Meta campaign) without an admin
-  ``settleOverrideReason``.
+  at settle (``metaSpendAtSettleMinorUSD``; a stop without it, the live spend of its
+  ``adCampaignResults`` row), judged only when that row exists for the same Meta campaign with a
+  confirmed USD spend, and never with an admin ``settleOverrideReason``.
 * **studio_in_core_books** — a live Albayan Manager ``ads`` row that belongs to Albayan Studio (an
   ``ALB-S-`` campaign name, or a Meta campaign id a studio request claimed), read through the
   platform door meta_collisions.collision_report; rows the owner chose to keep are not counted.
@@ -95,7 +96,7 @@ DEFAULT_STRANDED_MINUTES = 60  # studio_settings thresholds.strandedCaptureMaxMi
 MAX_IDS = 50
 _EXTRA_FIELDS = (
     "studioRef", "settleOverrideReason", "metaCampaignName", "paymentTransactionId", "refundTransactionId",
-    "schemaVersion",
+    "schemaVersion", "metaSpendAtSettleMinorUSD",
 )
 # main.py's SQL ledger balance, (conn, user id, currency) -> minor units (ctx["wallet_balance_minor"]).
 BalanceReader = Callable[[Any, str, str], int]
@@ -325,9 +326,12 @@ def _check_owner(
             meta_id = _meta_campaign_id(request.get("metaCampaignId"))
             row = results.get(request_id)
             override = str(request.get("settleOverrideReason") or "").strip()
+            # The spend the settle was judged on; Meta's later drift is meta_drift's job (its $0.50 tolerance).
+            at_settle = request.get("metaSpendAtSettleMinorUSD")
+            spend = minor(at_settle) if at_settle not in (None, "") else int((row or {}).get("spendMinorUSD") or 0)
             if (
                 row and meta_id and row["metaCampaignId"] == meta_id and row["currency"] == USD
-                and row["spendConfirmedAt"] and not override and returned > max(paid - int(row["spendMinorUSD"]), 0)
+                and row["spendConfirmedAt"] and not override and returned > max(paid - spend, 0)
             ):
                 findings.add("refund_above_unspent", request_ids=[request_id], user_id=uid)
 

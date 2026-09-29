@@ -128,7 +128,10 @@ the classic marker with an id) keeps ``lastLinkedMetaCampaignId``, ``lastLinkedM
 and ``everLinked`` on the request (``_link_history``), and the unlink and the cleared marker
 keep them too: a request whose link was removed is still judged on that campaign's results
 row (``last_linked_meta_ids``), the owner's own stop still treats it as started, and only the
-admin override lifts the gates. Clearing the link is not a way around the settle rules.
+admin override lifts the gates. Clearing the link is not a way around the settle rules. Linking
+ANOTHER campaign after the earlier one delivered (its results row shows spend, impressions or an ad
+delivering) would drop that spend, so it is refused (REFUSE_LINK_AFTER_SPEND) unless an admin gives
+a written ``relinkReason`` (the override's rules; audited ``settle_override``, kept forever).
 """
 
 import math
@@ -214,6 +217,9 @@ class AdCampaignPublishStatusBody(AdCampaignPublishStatusRequest):
     # True only when staff confirm the ad already exists in Meta although the owner asked to stop it
     # before it was launched (else the link and the live/paused marker answer REFUSE_LINK_STOP_REQUESTED).
     stopRequestAcknowledged: Optional[bool] = None
+    # An admin's written reason (10-300 characters) to link ANOTHER Meta campaign after the one linked
+    # before delivered (else REFUSE_LINK_AFTER_SPEND); audited ``settle_override`` on the link's transaction.
+    relinkReason: Optional[Any] = None
 
 
 class AdCampaignUnlinkBody(AdCampaignSubmitRequest):
@@ -260,6 +266,9 @@ REFUSE_LINK_RELINK = "This request is already linked to another Meta campaign"
 REFUSE_LINK_DESK_ONLY = "This request was linked on the team desk before: link it again from the desk"
 # The owner asked to stop the ad before any link or launch marker: Stop returns it all (stopRequestAcknowledged).
 REFUSE_LINK_STOP_REQUESTED = "The customer asked to stop this ad before it was launched: settle it with Stop (full return), or confirm it was already created in Meta"
+# The settle gates judge the linked campaign only: linking another one after the earlier one delivered would drop
+# that spend from the settlement, so only an admin may, with a written reason (relinkReason, audited settle_override).
+REFUSE_LINK_AFTER_SPEND = "The Meta campaign this request was linked to before already delivered: only an admin can link another campaign, with a written reason"
 REFUSE_LINK_META_BUSY = "Meta is busy right now, so the campaign could not be linked"
 REFUSE_LINK_META_FAILED = "Meta could not return this campaign"
 REFUSE_LINK_NOT_CONFIGURED = "The Meta connection is not configured"
@@ -710,6 +719,45 @@ def _record_launch_over_stop(ctx: dict[str, Any], conn: Any, campaign_id: str, a
     )
 
 
+def _earlier_link_delivery(conn: Any, campaign_id: str, data: dict[str, Any], meta_id: str) -> dict[str, Any] | None:
+    """What the Meta campaign this request was linked to before (``lastLinkedMetaCampaignId``, kept by the
+    unlink) delivered, when a link to ANOTHER campaign ``meta_id`` would drop it from the settle gates (they
+    judge the linked campaign only, and its first sync starts the results row afresh). Only while the results
+    row (read on ``conn``, never locked) still describes that campaign and shows delivery: spend, impressions
+    or an ad delivering. None when nothing known would be lost (a mistaken link Meta never delivered)."""
+    from .studio_results import load_results_row  # late: studio_results imports this module
+
+    earlier = str(data.get("lastLinkedMetaCampaignId") or "").strip()
+    if not earlier or earlier == str(meta_id or "").strip():
+        return None
+    row, _modified = load_results_row(conn, campaign_id)
+    if row is None or row["metaCampaignId"] != earlier:
+        return None
+    impressions = max(int(row["lifetimeImpressions"] or 0), int(row["impressions"] or 0))
+    if row["spendMinorUSD"] <= 0 and not (row["rawSpendMinor"] or 0) and impressions <= 0 and not row["anyAdDelivering"]:
+        return None
+    return {
+        "metaCampaignId": earlier, "metaAdAccountId": row["metaAdAccountId"], "spendMinorUSD": row["spendMinorUSD"],
+        "currency": row["currency"], "rawSpendMinor": row["rawSpendMinor"], "lifetimeImpressions": impressions,
+        "spendConfirmedAt": row["spendConfirmedAt"], "anyAdDelivering": row["anyAdDelivering"],
+    }
+
+
+def _relink_reason(ctx: dict[str, Any], user: dict[str, Any], creator: str, raw: Any) -> str:
+    """The written reason to link another campaign after the earlier one delivered (409 REFUSE_LINK_AFTER_SPEND
+    without one), under the settle override's rules: an admin only, never on their own request, 10-300 characters."""
+    reason = ctx["sanitize_str"](raw).strip() if isinstance(raw, str) else ""
+    if not reason:
+        raise HTTPException(status_code=409, detail=REFUSE_LINK_AFTER_SPEND)
+    if str(user.get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail=REFUSE_OVERRIDE_ADMIN)
+    if str(user.get("id") or "") == str(creator or ""):
+        raise HTTPException(status_code=403, detail=REFUSE_OVERRIDE_OWN)
+    if not OVERRIDE_REASON_CHARS[0] <= len(reason) <= OVERRIDE_REASON_CHARS[1]:
+        raise HTTPException(status_code=400, detail=REFUSE_OVERRIDE_REASON)
+    return reason
+
+
 def _settle_not_ready(now: datetime, ready_at: datetime) -> HTTPException:
     """409 SETTLE_NOT_READY: the final Meta read is due at ``ready_at`` (bilingual, with the time)."""
     when = _iso_utc(ready_at)
@@ -1051,6 +1099,7 @@ def _claim_and_write(
     before_write: Optional[Callable[[], None]] = None,
     complete_marker: bool = False,
     stop_acknowledged: bool = False,
+    relink_reason: str = "",
 ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
     """Claim one Meta campaign for this request: ONE transaction.
 
@@ -1065,6 +1114,8 @@ def _claim_and_write(
     request the classic marker tied to this same campaign (no ``linkedAt``) is linked for real.
     A request whose owner asked to stop it before any launch is refused (REFUSE_LINK_STOP_REQUESTED)
     unless ``stop_acknowledged``; then the launch is recorded over the stop request (_record_launch_over_stop).
+    A campaign other than the one linked before, when that one delivered (_earlier_link_delivery), needs the
+    admin's ``relink_reason`` (else 409 REFUSE_LINK_AFTER_SPEND), audited ``settle_override`` on this transaction.
     """
     patch_guard = nullcontext() if ctx["is_postgres"]() else ctx["sqlite_patch_lock"]()
     with _collisions.claim_guard(), patch_guard:
@@ -1088,6 +1139,9 @@ def _claim_and_write(
                 raise HTTPException(status_code=409, detail="Conflict: record has changed")
             if linked and linked != meta_campaign_id:
                 raise HTTPException(status_code=409, detail=REFUSE_LINK_RELINK)
+            earlier = _earlier_link_delivery(conn, campaign_id, data, meta_campaign_id)
+            if earlier is not None and not relink_reason:
+                raise HTTPException(status_code=409, detail=REFUSE_LINK_AFTER_SPEND)
             try:
                 _collisions.claim_campaign(conn, meta_campaign_id, campaign_id)
             except _collisions.CampaignClaimedError:
@@ -1109,6 +1163,15 @@ def _claim_and_write(
                 raise HTTPException(status_code=409, detail="Conflict: record has changed")  # rolls the removal back too
             if stop_asked:
                 _record_launch_over_stop(ctx, conn, campaign_id, actor_id, operation_id, meta_campaign_id)
+            if earlier is not None:  # the admin's reason: kept forever, with what the earlier campaign delivered
+                ctx["audit"](
+                    actor_id, AUDIT_SETTLE_OVERRIDE, AD_CAMPAIGN_COLLECTION, campaign_id,
+                    f"Admin linked campaign request {campaign_id} to Meta campaign {meta_campaign_id} after its earlier "
+                    f"campaign {earlier['metaCampaignId']} delivered: that spend no longer counts at settle",
+                    {"relink": True, "operationId": operation_id, "reason": relink_reason,
+                     "metaCampaignId": meta_campaign_id, "earlierLink": earlier},
+                    conn=conn,
+                )
             return {**entity, "data": data, "lastModified": modified}, copies
 
 
@@ -1125,9 +1188,11 @@ def _link_meta_campaign(
 
     Checks, in order: the ids; the request (404 for a private draft); an operationId replay (the
     first result again); Approved; the version; not linked elsewhere; Meta configured and the account
-    on the allowlist; the campaign not claimed by another request (409); ONE Meta read (the campaign
-    exists and is in that account; its budget -> warning ``meta_budget_above_paid`` above what the
-    customer paid). Then the name: it already carries this request's studio code -> link; it carries
+    on the allowlist; the campaign not claimed by another request (409); not another campaign than one
+    linked before that delivered (409 REFUSE_LINK_AFTER_SPEND unless an admin's ``relinkReason``);
+    ONE Meta read (the campaign exists and is in that account; its budget -> warning
+    ``meta_budget_above_paid`` above what the customer paid). Then the name: it already carries this
+    request's studio code -> link; it carries
     ANOTHER request's code -> 409; the stored token reading (never a debug_token call) shows
     ``ads_management`` -> rename it in Meta to the request's studio name inside the link's
     transaction, then link; otherwise -> 409 NEEDS_MANUAL_RENAME with the studio name (staff rename
@@ -1183,6 +1248,9 @@ def _link_meta_campaign(
     with db_conn() as conn:
         if [rid for rid in _collisions.campaign_claimed_by(conn, meta_id) if rid != campaign_id]:
             raise HTTPException(status_code=409, detail=REFUSE_LINK_TAKEN)
+        # Before any Meta call (again in _claim_and_write): the earlier campaign's spend must not vanish.
+        earlier = _earlier_link_delivery(conn, campaign_id, data, meta_id)
+        relink_reason = _relink_reason(ctx, user, creator, body.relinkReason) if earlier else ""
         ref = assign_studio_ref(conn, campaign_id, data)
     stored_name = str(data.get("studioName") or "")  # the approval's name; built now for older approvals
     name = stored_name if stored_name.startswith(ref) else studio_campaign_name(ref, data.get("name"))
@@ -1249,6 +1317,7 @@ def _link_meta_campaign(
         ctx, campaign_id, operation_id=operation_id, baseline=baseline, meta_campaign_id=meta_id,
         actor_id=actor_id, fields_for=link_fields, not_approved=REFUSE_LINK_NOT_APPROVED,
         before_write=rename_in_meta if rename else None, complete_marker=True, stop_acknowledged=stop_acknowledged,
+        relink_reason=relink_reason,
     )
     if copies is not None:
         view = _link_view(saved.get("data") or {})

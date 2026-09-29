@@ -2534,6 +2534,45 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('staff link sheet: studio name + Copy, allowlisted accounts, digits-only id, linked / rename in Meta / already linked / budget warning, kept Manager copies, single flight per request', !loadError && linkCases.every(Boolean),
     loadError || `cases ${linkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
 
+  // Review loop r2 (n=25): linking ANOTHER campaign after the earlier one delivered is refused (REFUSE_LINK_AFTER_SPEND).
+  // The refusal reads in the viewer's language; an admin then gets a reason box in the same sheet and the next Link sends
+  // relinkReason (audited on the server); a reviewer never gets the box and never sends a reason.
+  const afterSpend = 'The Meta campaign this request was linked to before already delivered: only an admin can link another campaign, with a written reason';
+  const refusedLink = { error: { status: 409, message: afterSpend, payload: { detail: afterSpend } } };
+  const relinkPath = '/api/ad-studio/campaigns/p9-r/publish-status';
+  const relinkWhy = 'The customer changed the photo, so the ad was rebuilt in Meta';
+  box.state.adCampaignRequests.push({ ...JSON.parse(JSON.stringify(approved)), id: 'p9-r', studioName: 'ALB-S-RELINK12 · Rebuilt', _lastModified: 70 });
+  reply(relinkPath, [refusedLink, refusedLink, { value: { id: 'p9-r', data: { ...approved, id: 'p9-r', metaCampaignId: '555', publishStatus: 'meta_review', _lastModified: 71 }, lastModified: 71 } }]);
+  const notLinked = { value: { id: 'p9-r', data: { ...approved, id: 'p9-r', studioName: 'ALB-S-RELINK12 · Rebuilt', _lastModified: 70 }, lastModified: 70 } };
+  reply('/api/collections/adCampaignRequests/p9-r', [notLinked, notLinked]);  // a 409 is read back first: still not linked
+  as('reviewer', 'p9-reviewer');
+  run("__calls.length = 0; openAdsStudioLinkSheet('p9-r'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '555';");
+  run('linkAdsStudioMetaCampaign()');
+  const reviewerRefused = [json('_adsStudioLinkSheet.outcome') || {}, String(run('renderAdsStudioSheets()')), String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(afterSpend)})`))];
+  run('_adsStudioLinkPromises.clear(); closeAdsStudioLinkSheet();');
+  as('admin', 'p9-staff');
+  run("openAdsStudioLinkSheet('p9-r'); _adsStudioLinkSheet.accountId = '111'; _adsStudioLinkSheet.metaCampaignId = '555';");
+  run('linkAdsStudioMetaCampaign()');
+  const adminRefused = [String(run('renderAdsStudioSheets()')), String(inLanguage('ar', 'renderAdsStudioSheets()'))];
+  box.__reasonInput = { value: relinkWhy };
+  run('adsStudioSetLinkRelinkReason(__reasonInput); linkAdsStudioMetaCampaign()');
+  const relinkBodies = calls().filter(call => call.path === relinkPath).map(call => call.body || {});
+  const relinkOutcome = json('_adsStudioLinkSheet.outcome') || {};
+  run('_adsStudioLinkPromises.clear(); closeAdsStudioLinkSheet();');
+  const relinkCases = [
+    reviewerRefused[0].kind === 'error' && reviewerRefused[0].text.startsWith('The Meta campaign this request was linked to before already delivered (its spend counts at settlement)'),
+    !reviewerRefused[1].includes('data-ads-studio-relink-reason') && reviewerRefused[1].includes('data-ads-studio-link-result="error"')
+      && reviewerRefused[2].startsWith('حملة ميتا التي رُبط بها هذا الطلب من قبل') && reviewerRefused[2].includes('ربط حملة أخرى للمدير فقط'),
+    adminRefused[0].includes('<textarea id="ads-studio-link-relink-reason" data-ads-studio-relink-reason="1"') && adminRefused[0].includes('Why link another campaign (admin)')
+      && adminRefused[0].includes('10 to 300 characters') && adminRefused[1].includes('سبب ربط حملة أخرى (للمدير)'),
+    relinkBodies.length === 3 && !('relinkReason' in relinkBodies[0]) && !('relinkReason' in relinkBodies[1]) && relinkBodies[2].relinkReason === relinkWhy
+      && relinkBodies[2].metaCampaignId === '555' && relinkBodies[2].metaAdAccountId === '111' && relinkBodies[2].operationId === relinkBodies[1].operationId,
+    relinkOutcome.kind === 'linked' && json("state.adCampaignRequests.find(c => c.id === 'p9-r').metaCampaignId") === '555',
+    !/\b(?:confirm|prompt|alert)\(/.test(fn('adsStudioSetLinkRelinkReason') + fn('adsStudioLinkAfterSpend'))
+  ];
+  check('staff link sheet: a relink after the earlier campaign delivered is refused in words; only an admin gets the reason box and sends relinkReason', !loadError && relinkCases.every(Boolean),
+    loadError || `cases ${relinkCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}; ${JSON.stringify({ reviewer: reviewerRefused[0], bodies: relinkBodies.length })}`);
+
   // Customer Withdraw: an in-page sheet on a waiting request, one request per (action, version).
   as('customer', 'p9-customer');
   box.state.adCampaignRequests = [
