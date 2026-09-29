@@ -5451,6 +5451,7 @@ function isAdReconciliationEligible(ad) {
   if (!ad || ad._deleted || ad.recordType === 'receipt' || !Security.isValidRecordId(ad.id)) return false;
   const status = String(ad.status || '').trim().toLowerCase();
   if (status === 'canceled' || status === 'cancelled' || status === 'lost') return false;
+  if (isMetaAdSetupPending(ad)) return false;  // unfinished Meta import: nothing to settle yet
   const refundType = String(ad.refundType || '').trim().toLowerCase();
   return !refundType || refundType === 'none';
 }

@@ -88,7 +88,7 @@ function stopAd(id) {
   const totalAllocated = getAdCommittedFundingTotalUSD(ad);
   
   const modalHTML = `
-    <div id="stop-ad-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="stop-ad-modal" data-v="${Number(ad._lastModified)}" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">
@@ -381,7 +381,8 @@ async function confirmStopAd(id, source = 'modal') {
     }
     let attempt;
     try {
-      attempt = getAdStopAttempt(storedAd, spentMinorUSD, customerInformed);
+      // The modal is never re-rendered: send the version it was built from (data-v).
+      attempt = getAdStopAttempt(isReconciliation ? storedAd : { ...storedAd, _lastModified: Number(document.getElementById('stop-ad-modal')?.dataset?.v) }, spentMinorUSD, customerInformed);
     } catch (error) {
       showNotification(isAr ? 'تعذر الحفظ' : 'Ad Not Saved', error.message, 'error');
       return;
@@ -421,6 +422,10 @@ async function confirmStopAd(id, source = 'modal') {
         return true;
       } catch (error) {
         const conflict = isVersionConflict409(error);
+        if (conflict) {  // reload the ad; an open Stop modal is rebuilt from it
+          try { applyValidatedServerEntityBatch([{ collection: 'ads', entity: await apiGetEntity('ads', storedAd.id) }], 'adStopConflict'); } catch (_) {}
+          if (!isReconciliation && document.getElementById('stop-ad-modal')) stopAd(id);
+        }
         showNotification(
           isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
           error?.status === 409

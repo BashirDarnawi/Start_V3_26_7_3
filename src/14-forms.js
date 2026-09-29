@@ -4536,9 +4536,14 @@ function getOriginalUnpaidAdBudgetUSD() {
   // budget is dead (stop already released the unspent part) — only its
   // COMMITTED total (the stop-reduced allocation rows, e.g. $1.24 of a
   // stopped $9.00 ad) still holds receipt money, so THAT is the amount the
-  // settle UI must ask for. A live debt still settles its full budget.
+  // settle UI must ask for. A live debt settles its budget minus what the company covered.
   if (adIsTerminalForEdit(ad)) return getAdCommittedFundingTotalUSD(ad);
-  return normalizeAdDriverBudgetUSD(ad.amountUSD);
+  return Math.max(Math.round((normalizeAdDriverBudgetUSD(ad.amountUSD) - getAdCompanyCoveredUSD(ad)) * 100) / 100, 0);
+}
+
+// Company money on this ad (covered rows + direct coverage), as the server's company_pool_total_minor.
+function getAdCompanyCoveredUSD(ad) {
+  return _relinkPoolSum(ad && ad.companyFundingAllocations) + Math.max(Number(ad && ad.companyDirectCoverageUSD) || 0, 0);
 }
 
 function updateAdDriverBudgetSummary() {

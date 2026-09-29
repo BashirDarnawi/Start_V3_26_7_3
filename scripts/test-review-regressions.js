@@ -1640,6 +1640,145 @@ async function main() {
     const card = String(sandbox.renderReceiptsView());
     assert.ok(/: 100\.25 LYD</.test(card) && /: 7\.00 LYD</.test(card) && !/: 100 LYD</.test(card), 'a collected-payment chip rounds to whole dinars');
   });
+  // ---- Review loop r6 batch A: Manager ad screens ----
+  const conflict409 = () => Object.assign(new Error('Conflict: ad has changed'), { status: 409 });
+  await test('r6 A n=14: the Top-ups modal saves against the version it opened with and a conflict reloads its list', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    const t1 = { date: '2026-09-01T00:00:00.000Z', amount: 10, extendDays: 0, note: 'T1' };
+    const t2 = { date: '2026-09-02T00:00:00.000Z', amount: 20, extendDays: 5, note: 'T2' };
+    const base = { id: 'adX', customerId: 'c1', status: 'Active', paymentStatus: 'paid', isPaid: true, exchangeRate: 5, initialAmountUSD: 50 };
+    const opened = { ...base, amountUSD: 60, topUps: [t1], _lastModified: 100 };
+    const live = { ...base, amountUSD: 80, topUps: [t1, t2], _lastModified: 200 };  // a colleague added T2 meanwhile
+    state.ads = [live];
+    state.modalData = opened;
+    state.activeModal = 'top-ups';
+    run(`tempTopUps = [${JSON.stringify(t1)}, { date: '2026-09-03T00:00:00.000Z', amount: 15, extendDays: 0, note: 'T3' }]`);
+    const notes = [];
+    const sent = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ message, type });
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.renderModal = () => {};
+    sandbox.closeModal = () => { throw new Error('the modal must stay open with the reloaded list'); };
+    sandbox.saveAdThroughAtomicServer = async (action, id, version, data) => { sent.push({ version, data }); throw conflict409(); };
+    sandbox.apiGetEntity = async () => ({ id: 'adX', data: live, lastModified: 200 });
+    sandbox.applyValidatedServerEntityBatch = entries => { state.ads[0] = entries[0].entity.data; return [state.ads[0]]; };
+    await run('saveTopUps()');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].version, 100, 'the save used the live version with the list built at open, erasing T2 with no conflict');
+    assert.equal(state.modalData, live, 'the open modal was not re-pointed at the reloaded ad');
+    assert.deepEqual(Array.from(run('tempTopUps'), t => t.note), ['T1', 'T2'], 'the working list still misses the colleague\'s top-up');
+    assert.ok(notes.some(n => n.type === 'warning' && /loaded the latest version/.test(n.message)), JSON.stringify(notes));
+  });
+  await test('r6 A n=15: a live Not-Paid ad the company partly covered can be switched to Paid with the customer\'s share', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.pages = [{ id: 'p1', name: 'Page', customerId: 'c1' }];
+    state.receipts = [
+      { id: 'R', customerId: 'c1', amountUSD: 100, amountLocal: 500, exchangeRate: 5, status: 'Not Paid', isPaid: false, deliveryStatus: 'Office', payments: [], transfers: [], companyCoveredUSD: 40, customerOutstandingUSD: 60 },
+      { id: 'P', customerId: 'c1', amountUSD: 60, amountLocal: 300, exchangeRate: 5, status: 'Paid', isPaid: true, deliveryStatus: 'Office', payments: [], transfers: [] }
+    ];
+    const ad = { id: 'adC', customerId: 'c1', pageId: 'p1', status: 'Active', paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      amountUSD: 100, amountLocal: 500, exchangeRate: 5, receiptId: 'R', receiptAllocations: [], dueAllocations: [{ receiptId: 'R', amountUSD: 60 }],
+      companyFundingAllocations: [{ receiptId: 'R', amountUSD: 40 }], startDate: '2026-09-01T00:00:00.000Z', endDate: '2026-09-10T00:00:00.000Z', _lastModified: 7 };
+    state.ads = [ad];
+    state.modalData = ad;
+    assert.equal(sandbox.getOriginalUnpaidAdBudgetUSD(), 60, 'the settle target still demands the company-covered $40 from the customer');
+    state.modalData = { ...ad, companyFundingAllocations: [], companyDirectCoverageUSD: 40, collectionMethod: 'driver' };
+    assert.equal(sandbox.getOriginalUnpaidAdBudgetUSD(), 60, 'receipt-less direct coverage is ignored');
+    state.modalData = { ...ad, status: 'Stopped' };
+    assert.equal(sandbox.getOriginalUnpaidAdBudgetUSD(), 60, 'a terminal ad keeps its committed-total target');
+
+    // Submit the ad form: Paid, $60 from the paid receipt.
+    state.modalData = ad;
+    state.activeModal = 'ad';
+    state.tempAdFunding = { allocations: [{ receiptId: 'P', amountUSD: '60.00' }] };
+    state.tempMergeFunding = { enabled: false, allocations: [] };
+    state.tempAdPhotos = [];
+    state.tempAdPhotosDirty = false;
+    const values = { 'ad-payment-status': 'paid', 'ad-collection-method': '', 'ad-start-date': '2026-09-01', 'ad-end-date': '2026-09-10',
+      'ad-days': '9', 'ad-page': 'p1', 'ad-customer-id': 'c1' };
+    sandbox.document.getElementById = id => (id in values ? { value: values[id], dataset: {}, classList: { add() {}, remove() {}, toggle() {} } } : null);
+    const notes = [];
+    const saved = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ message, type });
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.closeModal = () => {};
+    sandbox.saveAdThroughAtomicServer = async (action, id, version, data) => { saved.push({ action, version, data }); return data; };
+    await sandbox.handleModalSubmit();
+    assert.ok(!notes.some(n => /must equal/.test(n.message)), JSON.stringify(notes));
+    assert.equal(saved.length, 1, JSON.stringify(notes));
+    assert.equal(saved[0].data.paymentStatus, 'paid');
+    assert.deepEqual(JSON.parse(JSON.stringify(saved[0].data.receiptAllocations)), [{ receiptId: 'P', amountUSD: 60 }]);
+    assert.ok(!(saved[0].data.editHistory || []).some(row => (row.changes || []).some(c => c.field === 'Amount (USD)')), 'history shows a false $100 -> $60 drop');
+
+    // Fully covered: settles with no receipt at all (the server allows empty paid funding then).
+    const full = { ...ad, dueAllocations: [], companyFundingAllocations: [{ receiptId: 'R', amountUSD: 100 }] };
+    state.ads = [full];
+    state.modalData = full;
+    state.tempAdFunding = { allocations: [] };
+    notes.length = 0;
+    await sandbox.handleModalSubmit();
+    assert.equal(saved.length, 2, JSON.stringify(notes));
+    assert.deepEqual(Array.from(saved[1].data.receiptAllocations), []);
+  });
+  await test('r6 A n=16: the Stop dialog stops against the version it showed and a conflict rebuilds it from the latest ad', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    const htmls = [];
+    const modal = { remove() {}, get dataset() { return { v: (htmls[htmls.length - 1].match(/data-v="([^"]*)"/) || [])[1] }; } };
+    const nodes = { 'stop-ad-spent': { value: '40.00' }, 'stop-ad-customer-informed': { checked: false, disabled: false }, 'stop-ad-submit': { disabled: false } };
+    sandbox.document.body.insertAdjacentHTML = (where, html) => { htmls.push(html); };
+    sandbox.document.getElementById = id => (id === 'stop-ad-modal' ? (htmls.length ? modal : null) : (nodes[id] || null));
+    const active = { id: 'adS', customerId: 'c1', status: 'Active', paymentStatus: 'paid', isPaid: true, amountUSD: 100, spentUSD: 0, _lastModified: 5 };
+    const stoppedByColleague = { ...active, status: 'Stopped', spentUSD: 47, remainingCustomerInformed: true, _lastModified: 6 };
+    state.ads = [active];
+    sandbox.stopAd('adS');
+    assert.ok(/data-v="5"/.test(htmls[0]), 'the dialog does not record the version it was built from');
+    state.ads = [stoppedByColleague];  // live-sync, while the dialog still says "Stop Ad / $40"
+    const bodies = [];
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ message, type });
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiStopAd = async (id, body) => { bodies.push(body); throw conflict409(); };
+    sandbox.apiGetEntity = async () => ({ id: 'adS', data: stoppedByColleague, lastModified: 6 });
+    sandbox.applyValidatedServerEntityBatch = entries => { state.ads[0] = entries[0].entity.data; return [state.ads[0]]; };
+    await sandbox.confirmStopAd('adS');
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0].expectedLastModified, 5, 'the stale dialog re-stopped against the colleague\'s newer version');
+    assert.equal(htmls.length, 2, 'the conflict did not rebuild the dialog');
+    assert.ok(/data-v="6"/.test(htmls[1]) && htmls[1].includes('Edit Stop Details') && htmls[1].includes('$47.00'), 'the rebuilt dialog does not show the saved stop');
+    assert.ok(notes.some(n => n.type === 'warning'), JSON.stringify(notes));
+  });
+  await test('r6 A n=17: unfinished Meta-import drafts stay off the reconciliation list; the server refusal reads in Arabic', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const draft = { id: 'ad_draft', status: 'Active', customerId: '', amountUSD: 0, paymentStatus: 'pending_setup', metaImportState: 'needs_completion',
+      endDate: '2026-09-01T00:00:00.000Z', metaCurrency: 'USD', metaSpendMinor: 1200 };
+    assert.equal(sandbox.isAdReadyForReconciliation(draft, '2026-09-20T12:00:00'), false, 'a draft with no customer or budget is offered for final settlement');
+    assert.equal(sandbox.isAdReadyForReconciliation({ ...draft, paymentStatus: 'paid', metaImportState: 'complete', customerId: 'c1', amountUSD: 20 }, '2026-09-20T12:00:00'), true);
+    state.language = 'ar';
+    for (const message of ['Complete this imported Meta ad (customer and payment) before stopping it',
+      "Paid receipt funding must exactly settle the customer's share of the unpaid ad amount"]) {
+      assert.ok(!/[A-Za-z]{3,}/.test(sandbox._serverRefusalText(message).replace('Meta', '')), sandbox._serverRefusalText(message));
+    }
+  });
+  await test('r6 A n=23: the analytics breakdowns count the same receipts and amounts as the KPI cards that open them', async () => {
+    const { sandbox, run } = loadBrowserSource();
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '12a-analytics-profit.js'), 'utf8'));
+    const now = new Date('2026-09-20T12:00:00').getTime();
+    const receipts = [
+      { id: 'u', date: '2026-09-10T10:00:00', status: 'Not Paid', isPaid: false, deliveredAt: '2026-09-11T10:00:00', paymentResult: 'UNDERPAID', amountUSD: 60, debtAmountUSD: 100, collected: false },
+      { id: 'cb', date: '2026-09-12T10:00:00', status: 'Paid', isPaid: true, receiptType: 'CARRIED_BALANCE', amountUSD: 40, collected: true }
+    ];
+    const options = { receipts, ads: [], profitSnapshot: { rowsByAdId: new Map() }, now };
+    const month = result => result.periods[result.periods.length - 1];
+    const volume = month(sandbox.buildAnalyticsBreakdown('receipts-volume', 'month', options));
+    assert.equal(volume.count, 1, 'a carried balance is not a sale');
+    near(volume.primaryUSD, 100);
+    const collection = month(sandbox.buildAnalyticsBreakdown('collection-status', 'month', options));
+    assert.equal(collection.count, 2, 'the Collection Status card counts carried balances, its breakdown must too');
+    near(collection.primaryUSD, 40);
+    near(collection.secondaryUSD, 60);
+  });
+
   await test('r5 PRN n=19: Remind all skips overdue customers with no usable phone, reaches the next one and says how many were skipped', async () => {
     const { sandbox, state } = loadBrowserSource();
     state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };

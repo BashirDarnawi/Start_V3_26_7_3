@@ -7275,6 +7275,9 @@ async function saveTopUps() {
   // _isAdToppable). manageTopUps already blocks opening the modal for these.
   if (!_isAdToppable(ad)) { closeModal(); return; }
   const isArTU = state.language === 'ar';
+  // tempTopUps comes from the ad AS OPENED (state.modalData; live-sync swaps only the array
+  // slot), so save against THAT version — the live one silently erased a colleague's top-up.
+  const openLastMod = Number(state.modalData._lastModified);
 
   // Forgiving save: anything still typed in the form counts as a top-up too
   // (the user should not need to click "Add Top-up" before "Save Top-ups").
@@ -7365,19 +7368,30 @@ async function saveTopUps() {
       await saveAdThroughAtomicServer(
         'update',
         adId,
-        Number(ad._lastModified),
+        openLastMod,
         buildServerAdMutationData(updates)
       );
     } else {
-      const topUpsSaved = await updateRecord(state.ads, adId, updates);
+      const topUpsSaved = await updateRecord(state.ads, adId, updates, openLastMod);
       if (!topUpsSaved) return;
     }
   } catch (error) {
     const conflict = isVersionConflict409(error);
+    if (conflict) {  // reload the ad and re-seed the open modal from it
+      try { applyValidatedServerEntityBatch([{ collection: 'ads', entity: await apiGetEntity('ads', adId) }], 'topUpConflict'); } catch (_) {}
+      const fresh = state.ads.find(a => a.id === adId);
+      if (state.activeModal === 'top-ups' && state.modalData?.id === adId) {
+        if (fresh && _isAdToppable(fresh) && getAdPaymentState(fresh) === 'paid') {
+          tempTopUps = (fresh.topUps || []).map(t => ({ ...t }));
+          state.modalData = fresh;
+          renderModal();
+        } else closeModal();
+      }
+    }
     showNotification(
       isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
       error?.status === 409
-        ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+        ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حمّلنا أحدث نسخة — أضف تعبئتك مرة أخرى.' : 'This ad changed on another device. We loaded the latest version — add your top-up again.')
         : (_serverRefusalText(error?.message) || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
       conflict ? 'warning' : 'error'
     );

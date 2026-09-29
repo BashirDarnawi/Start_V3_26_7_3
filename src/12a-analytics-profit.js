@@ -285,9 +285,11 @@ function analyticsRecordTime(record, type) {
 function buildAnalyticsBreakdown(metric, granularity, options = {}) {
   const periods = analyticsPeriods(granularity, options.now || Date.now());
   const ads = Array.isArray(options.ads) ? options.ads : getVisibleRecords(state.ads || []);
+  // Same receipt sets as the KPI cards that open this dialog: Collection Status
+  // counts carried balances (revenueReceipts), Receipts Volume does not (saleReceipts).
   const receipts = (Array.isArray(options.receipts) ? options.receipts : getVisibleRecords(state.receipts || []))
     .filter(row => row && !row._deleted && (typeof isTransferInReceipt !== 'function' || !isTransferInReceipt(row))
-      && String(row.receiptType || '') !== 'CARRIED_BALANCE'
+      && (metric === 'collection-status' || String(row.receiptType || '') !== 'CARRIED_BALANCE')
       && !(typeof getReceiptPaymentState === 'function' && ['canceled', 'lost'].includes(getReceiptPaymentState(row))));
   const profit = options.profitSnapshot || buildAdProfitabilitySnapshot(options.purchases || state.dollarPurchases || [], ads);
   const findPeriod = time => periods.find(period => time >= period.start && time < period.end);
@@ -318,7 +320,12 @@ function buildAnalyticsBreakdown(metric, granularity, options = {}) {
         const share = _receiptCollectedFraction(receipt);
         period.primaryUSD += amount * share;
         period.secondaryUSD += amount * (1 - share);
-      } else period.primaryUSD += amount;
+      } else {
+        // A verified UNDERPAID completion rewrites amountUSD to the cash taken;
+        // the sale is still debtAmountUSD — the card and the month close count that.
+        const underpaid = !!receipt.deliveredAt && String(receipt.paymentResult || '') === 'UNDERPAID';
+        period.primaryUSD += underpaid ? Math.max(amount, analyticsNumber(receipt.debtAmountUSD)) : amount;
+      }
     }
   }
   return { metric, granularity: ANALYTICS_PERIOD_COUNTS[granularity] ? granularity : 'day', periods };

@@ -8857,7 +8857,9 @@ const _SERVER_REFUSAL_AR = [
   ["Reassign a paid receipt's customer", 'وصل له رصيد أو إعلانات لا يتغير عميله بالتعديل؛ استخدم تحويل رصيد الوصل.', 'A receipt with money or ads keeps its customer; use a receipt balance transfer.'],
   ['A canceled receipt the company already covered', 'غطّت الشركة هذا الوصل الملغى فلا يُعاد فتحه؛ سجّل وصلاً جديداً.'],
   ['Insufficient available receipt balance', 'رصيد الوصل المتاح لا يكفي.'],
-  ['A Paid receipt cannot be changed to Not Paid with a normal', 'حدّث الصفحة ثم أعد المحاولة.', 'Refresh the page and try again.']
+  ['A Paid receipt cannot be changed to Not Paid with a normal', 'حدّث الصفحة ثم أعد المحاولة.', 'Refresh the page and try again.'],
+  ["Paid receipt funding must exactly settle the customer's share", 'يجب أن يساوي تمويل الوصولات حصة العميل غير المدفوعة بالضبط.'],
+  ['Complete this imported Meta ad', 'أكمل العميل والدفع لإعلان Meta المستورد أولاً.']
 ];
 function _serverRefusalText(raw) {
   raw = String(raw || '').trim();
@@ -20572,6 +20574,7 @@ function isAdReconciliationEligible(ad) {
   if (!ad || ad._deleted || ad.recordType === 'receipt' || !Security.isValidRecordId(ad.id)) return false;
   const status = String(ad.status || '').trim().toLowerCase();
   if (status === 'canceled' || status === 'cancelled' || status === 'lost') return false;
+  if (isMetaAdSetupPending(ad)) return false;  // unfinished Meta import: nothing to settle yet
   const refundType = String(ad.refundType || '').trim().toLowerCase();
   return !refundType || refundType === 'none';
 }
@@ -31321,6 +31324,9 @@ async function saveTopUps() {
   // _isAdToppable). manageTopUps already blocks opening the modal for these.
   if (!_isAdToppable(ad)) { closeModal(); return; }
   const isArTU = state.language === 'ar';
+  // tempTopUps comes from the ad AS OPENED (state.modalData; live-sync swaps only the array
+  // slot), so save against THAT version — the live one silently erased a colleague's top-up.
+  const openLastMod = Number(state.modalData._lastModified);
 
   // Forgiving save: anything still typed in the form counts as a top-up too
   // (the user should not need to click "Add Top-up" before "Save Top-ups").
@@ -31411,19 +31417,30 @@ async function saveTopUps() {
       await saveAdThroughAtomicServer(
         'update',
         adId,
-        Number(ad._lastModified),
+        openLastMod,
         buildServerAdMutationData(updates)
       );
     } else {
-      const topUpsSaved = await updateRecord(state.ads, adId, updates);
+      const topUpsSaved = await updateRecord(state.ads, adId, updates, openLastMod);
       if (!topUpsSaved) return;
     }
   } catch (error) {
     const conflict = isVersionConflict409(error);
+    if (conflict) {  // reload the ad and re-seed the open modal from it
+      try { applyValidatedServerEntityBatch([{ collection: 'ads', entity: await apiGetEntity('ads', adId) }], 'topUpConflict'); } catch (_) {}
+      const fresh = state.ads.find(a => a.id === adId);
+      if (state.activeModal === 'top-ups' && state.modalData?.id === adId) {
+        if (fresh && _isAdToppable(fresh) && getAdPaymentState(fresh) === 'paid') {
+          tempTopUps = (fresh.topUps || []).map(t => ({ ...t }));
+          state.modalData = fresh;
+          renderModal();
+        } else closeModal();
+      }
+    }
     showNotification(
       isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved',
       error?.status === 409
-        ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+        ? describe409(error, isArTU ? 'تم تغيير الإعلان من مستخدم آخر. حمّلنا أحدث نسخة — أضف تعبئتك مرة أخرى.' : 'This ad changed on another device. We loaded the latest version — add your top-up again.')
         : (_serverRefusalText(error?.message) || (isArTU ? 'فشل حفظ التعبئة.' : 'The top-ups could not be saved.')),
       conflict ? 'warning' : 'error'
     );
@@ -36143,9 +36160,14 @@ function getOriginalUnpaidAdBudgetUSD() {
   // budget is dead (stop already released the unspent part) — only its
   // COMMITTED total (the stop-reduced allocation rows, e.g. $1.24 of a
   // stopped $9.00 ad) still holds receipt money, so THAT is the amount the
-  // settle UI must ask for. A live debt still settles its full budget.
+  // settle UI must ask for. A live debt settles its budget minus what the company covered.
   if (adIsTerminalForEdit(ad)) return getAdCommittedFundingTotalUSD(ad);
-  return normalizeAdDriverBudgetUSD(ad.amountUSD);
+  return Math.max(Math.round((normalizeAdDriverBudgetUSD(ad.amountUSD) - getAdCompanyCoveredUSD(ad)) * 100) / 100, 0);
+}
+
+// Company money on this ad (covered rows + direct coverage), as the server's company_pool_total_minor.
+function getAdCompanyCoveredUSD(ad) {
+  return _relinkPoolSum(ad && ad.companyFundingAllocations) + Math.max(Number(ad && ad.companyDirectCoverageUSD) || 0, 0);
 }
 
 function updateAdDriverBudgetSummary() {
@@ -38015,14 +38037,14 @@ function renderModal() {
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
-      // Settle target for the funding hint: a LIVE debt settles its full
-      // budget, a TERMINAL ad only its committed total (stop already released
+      // Settle target for the funding hint: a LIVE debt settles its budget
+      // minus company coverage, a TERMINAL ad only its committed total (stop already released
       // the rest) — in step with getOriginalUnpaidAdBudgetUSD and the save-
       // time validation, so the hint never demands the dead $9.00 of a
       // stopped ad whose remaining committed spend is $1.24.
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
-        : Number(adData.amountUSD || 0);
+        : Math.max(Number(adData.amountUSD || 0) - getAdCompanyCoveredUSD(adData), 0);
       // A stopped ad keeps its original budget as immutable history. The final
       // actual spend is changed only through the atomic stop/reconciliation
       // flow, which also updates every affected receipt balance.
@@ -40912,7 +40934,10 @@ async function handleModalSubmit() {
       let allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
         .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
 
-      if (isPaid && allocations.length === 0) {
+      // A live debt the company covered in full settles with no receipt (the server allows it).
+      const coveredSettle = isPaid && getAdCompanyCoveredUSD(state.modalData) > 0 && getAdPaymentState(state.modalData) === 'not_paid'
+        && !adIsTerminalForEdit(state.modalData) && getOriginalUnpaidAdBudgetUSD() <= 0;
+      if (isPaid && allocations.length === 0 && !coveredSettle) {
         showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء ربط وصل واحد على الأقل لتمويل هذا الإعلان.' : 'Please link at least one receipt to fund this ad.', 'error');
         return;
       }
@@ -40931,7 +40956,7 @@ async function handleModalSubmit() {
         }
 
         // Validate total allocations make sense (should be > 0)
-        if (totalAllocated <= 0) {
+        if (totalAllocated <= 0 && !coveredSettle) {
           showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'إجمالي مبلغ التخصيص يجب أن يكون أكبر من صفر.' : 'Total allocation amount must be greater than zero.', 'error');
           return;
         }
@@ -40940,7 +40965,7 @@ async function handleModalSubmit() {
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
         const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
-        // A LIVE debt settles its FULL unpaid budget (amountUSD). A TERMINAL
+        // A LIVE debt settles its budget minus company coverage. A TERMINAL
         // ad's budget is dead — stop already released the unspent part — so
         // only its COMMITTED total still holds receipt money and THAT is what
         // the paid funding must equal (e.g. $1.24 of a stopped $9.00 ad).
@@ -40948,8 +40973,8 @@ async function handleModalSubmit() {
         // for the funding UI's hint and autofill, keeping all three in step.
         const requiredSettleUSD = isTerminalSettle
           ? getAdCommittedFundingTotalUSD(state.modalData)
-          : normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
-        if (settlingUnpaidDebt && requiredSettleUSD > 0 && Math.abs(totalAllocated - requiredSettleUSD) > 0.005) {
+          : getOriginalUnpaidAdBudgetUSD();
+        if (settlingUnpaidDebt && (requiredSettleUSD > 0 || coveredSettle) && Math.abs(totalAllocated - requiredSettleUSD) > 0.005) {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isTerminalSettle
@@ -40963,7 +40988,8 @@ async function handleModalSubmit() {
           );
           return;
         }
-        amountUSD = totalAllocated;
+        // + company funding, which stays in the budget (as the server computes it)
+        amountUSD = Math.round((totalAllocated + getAdCompanyCoveredUSD(state.modalData)) * 100) / 100;
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
@@ -43583,7 +43609,7 @@ function stopAd(id) {
   const totalAllocated = getAdCommittedFundingTotalUSD(ad);
   
   const modalHTML = `
-    <div id="stop-ad-modal" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
+    <div id="stop-ad-modal" data-v="${Number(ad._lastModified)}" class="mobile-dialog-overlay fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" onclick="if(event.target === this) this.remove()">
       <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full" onclick="event.stopPropagation()">
         <div class="p-6 border-b border-slate-200 dark:border-slate-700">
           <div class="flex items-center justify-between">
@@ -43876,7 +43902,8 @@ async function confirmStopAd(id, source = 'modal') {
     }
     let attempt;
     try {
-      attempt = getAdStopAttempt(storedAd, spentMinorUSD, customerInformed);
+      // The modal is never re-rendered: send the version it was built from (data-v).
+      attempt = getAdStopAttempt(isReconciliation ? storedAd : { ...storedAd, _lastModified: Number(document.getElementById('stop-ad-modal')?.dataset?.v) }, spentMinorUSD, customerInformed);
     } catch (error) {
       showNotification(isAr ? 'تعذر الحفظ' : 'Ad Not Saved', error.message, 'error');
       return;
@@ -43916,6 +43943,10 @@ async function confirmStopAd(id, source = 'modal') {
         return true;
       } catch (error) {
         const conflict = isVersionConflict409(error);
+        if (conflict) {  // reload the ad; an open Stop modal is rebuilt from it
+          try { applyValidatedServerEntityBatch([{ collection: 'ads', entity: await apiGetEntity('ads', storedAd.id) }], 'adStopConflict'); } catch (_) {}
+          if (!isReconciliation && document.getElementById('stop-ad-modal')) stopAd(id);
+        }
         showNotification(
           isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
           error?.status === 409

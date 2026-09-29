@@ -492,14 +492,14 @@ function renderModal() {
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
-      // Settle target for the funding hint: a LIVE debt settles its full
-      // budget, a TERMINAL ad only its committed total (stop already released
+      // Settle target for the funding hint: a LIVE debt settles its budget
+      // minus company coverage, a TERMINAL ad only its committed total (stop already released
       // the rest) — in step with getOriginalUnpaidAdBudgetUSD and the save-
       // time validation, so the hint never demands the dead $9.00 of a
       // stopped ad whose remaining committed spend is $1.24.
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
-        : Number(adData.amountUSD || 0);
+        : Math.max(Number(adData.amountUSD || 0) - getAdCompanyCoveredUSD(adData), 0);
       // A stopped ad keeps its original budget as immutable history. The final
       // actual spend is changed only through the atomic stop/reconciliation
       // flow, which also updates every affected receipt balance.
@@ -3389,7 +3389,10 @@ async function handleModalSubmit() {
       let allocations = (state.tempAdFunding?.allocations || []).filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
         .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
 
-      if (isPaid && allocations.length === 0) {
+      // A live debt the company covered in full settles with no receipt (the server allows it).
+      const coveredSettle = isPaid && getAdCompanyCoveredUSD(state.modalData) > 0 && getAdPaymentState(state.modalData) === 'not_paid'
+        && !adIsTerminalForEdit(state.modalData) && getOriginalUnpaidAdBudgetUSD() <= 0;
+      if (isPaid && allocations.length === 0 && !coveredSettle) {
         showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء ربط وصل واحد على الأقل لتمويل هذا الإعلان.' : 'Please link at least one receipt to fund this ad.', 'error');
         return;
       }
@@ -3408,7 +3411,7 @@ async function handleModalSubmit() {
         }
 
         // Validate total allocations make sense (should be > 0)
-        if (totalAllocated <= 0) {
+        if (totalAllocated <= 0 && !coveredSettle) {
           showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'إجمالي مبلغ التخصيص يجب أن يكون أكبر من صفر.' : 'Total allocation amount must be greater than zero.', 'error');
           return;
         }
@@ -3417,7 +3420,7 @@ async function handleModalSubmit() {
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
         const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
-        // A LIVE debt settles its FULL unpaid budget (amountUSD). A TERMINAL
+        // A LIVE debt settles its budget minus company coverage. A TERMINAL
         // ad's budget is dead — stop already released the unspent part — so
         // only its COMMITTED total still holds receipt money and THAT is what
         // the paid funding must equal (e.g. $1.24 of a stopped $9.00 ad).
@@ -3425,8 +3428,8 @@ async function handleModalSubmit() {
         // for the funding UI's hint and autofill, keeping all three in step.
         const requiredSettleUSD = isTerminalSettle
           ? getAdCommittedFundingTotalUSD(state.modalData)
-          : normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
-        if (settlingUnpaidDebt && requiredSettleUSD > 0 && Math.abs(totalAllocated - requiredSettleUSD) > 0.005) {
+          : getOriginalUnpaidAdBudgetUSD();
+        if (settlingUnpaidDebt && (requiredSettleUSD > 0 || coveredSettle) && Math.abs(totalAllocated - requiredSettleUSD) > 0.005) {
           showNotification(
             isArSubAd ? 'تنبيه' : 'Validation',
             isTerminalSettle
@@ -3440,7 +3443,8 @@ async function handleModalSubmit() {
           );
           return;
         }
-        amountUSD = totalAllocated;
+        // + company funding, which stays in the budget (as the server computes it)
+        amountUSD = Math.round((totalAllocated + getAdCompanyCoveredUSD(state.modalData)) * 100) / 100;
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));

@@ -8703,6 +8703,10 @@ def _ad_stop_atomic(
                 ad.get("refundType") and str(ad.get("refundType")) != "None"
             ):
                 raise HTTPException(status_code=409, detail="A terminal or refunded ad cannot be stopped")
+            if str(ad.get("metaImportState") or "") == "needs_completion" or str(ad.get("paymentStatus") or "").strip().lower() == "pending_setup":
+                # An unfinished Meta import has no customer or budget yet: say so
+                # instead of failing later with a raw "Invalid entity id".
+                raise HTTPException(status_code=409, detail="Complete this imported Meta ad (customer and payment) before stopping it")
             plan = _financial_apply_stop(ad, int(body.spentMinorUSD))
             plan = confirm_final_ad_spend(
                 plan,
