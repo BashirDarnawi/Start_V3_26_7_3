@@ -303,7 +303,7 @@ def ad_effective_spend_minor(ad: dict[str, Any]) -> int:
         return 0
     if status == "stopped" and "spentUSD" in ad:
         return _financial_minor(ad.get("spentUSD") or 0, "stored ad spend")
-    if status in {"completed", "canceled", "lost"}:
+    if status in {"completed", "canceled", "cancelled", "lost"}:  # legacy British spelling, as the client
         return (
             _financial_minor(ad.get("spentUSD") or 0, "stored ad spend")
             if "spentUSD" in ad

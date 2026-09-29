@@ -7,7 +7,7 @@ before persistence (main.py's atomic receipt patch):
   re-derive every money field from locked receipt/ad state. Company-covered
   dollars are netted out first — the driver only ever collects the customer's
   remaining share, so covered money can never be recovered twice.
-- ``apply_coverage_settlement_truth``: on settle/unsettle of a covered
+- ``apply_coverage_settlement_truth``: on settle/unsettle/re-save of a covered
   receipt outside the delivery flow, keep ``amountUSD`` equal to CUSTOMER
   cash only (the company share lives in ``companyCoveredUSD``).
 
@@ -169,6 +169,18 @@ def apply_delivery_completion_truth(
         merged["isPaid"] = False
 
 
+def _reads_as_gross(amount_minor: int, gross_minor: int, net_minor: int) -> bool:
+    """Did the office send the GROSS (form prefill / gross payment rows) rather
+    than the customer's net cash? The form derives amountUSD from payment rows,
+    so a rate change or cent rounding lands a little under the gross and still
+    means "the gross". When a small company share puts the net inside that
+    rounding band, the NEARER reading wins; a tie keeps net cash, so real
+    customer money is never stripped a second time.
+    """
+    gross_floor = gross_minor - max(100, gross_minor // 100)
+    return amount_minor >= gross_floor and abs(gross_minor - amount_minor) < abs(amount_minor - net_minor)
+
+
 def apply_coverage_settlement_truth(
     old: dict[str, Any], merged: dict[str, Any], *,
     due_total: Callable[[dict[str, Any]], int],
@@ -200,30 +212,42 @@ def apply_coverage_settlement_truth(
         return
     old_paid = str(old.get("status") or "") == "Paid" or old.get("isPaid") is True
     new_paid = str(merged.get("status") or "") == "Paid" or merged.get("isPaid") is True
+    already_delivered = str(old.get("deliveryStatus") or "").strip() == "Delivered"
     if old_paid == new_paid:
         # Direct debt/payment edits are part of the same financial lifecycle as
         # settlement. Recompute only when relevant inputs change: a note edit
         # must not silently repair historical accounting state.
         money_fields = ("amountUSD", "amountLocal", "debtAmountUSD", "debtAmountLocal",
                         "exchangeRate", "deliveryStatus", "status", "isPaid")
-        if any(old.get(field) != merged.get(field) for field in money_fields):
-            if new_paid or str(merged.get("status") or "") in {"Canceled", "Lost", "Destroyed"} or str(merged.get("deliveryStatus") or "") == "Canceled":
-                merged["customerOutstandingUSD"] = 0.0
-            else:
-                collected_minor = (
-                    _financial_minor(merged.get("amountUSD"), "receipt collected amount")
-                    if str(merged.get("deliveryStatus") or "") == "Delivered"
-                    else 0
-                )
-                merged["customerOutstandingUSD"] = _financial_usd(
-                    max(due_total(merged) - covered_minor - collected_minor, 0)
-                )
-        return
+        if not any(old.get(field) != merged.get(field) for field in money_fields):
+            return
+        canceled = str(merged.get("status") or "") in {"Canceled", "Lost", "Destroyed"} or str(merged.get("deliveryStatus") or "") == "Canceled"
+        if new_paid or canceled:
+            merged["customerOutstandingUSD"] = 0.0
+        else:
+            collected_minor = (
+                _financial_minor(merged.get("amountUSD"), "receipt collected amount")
+                if str(merged.get("deliveryStatus") or "") == "Delivered"
+                else 0
+            )
+            merged["customerOutstandingUSD"] = _financial_usd(
+                max(due_total(merged) - covered_minor - collected_minor, 0)
+            )
+        if not new_paid or canceled or already_delivered:
+            return
 
     amount_minor = _financial_minor(merged.get("amountUSD"), "receipt amount")
     local_minor = _financial_minor(merged.get("amountLocal"), "receipt amount")
-    already_delivered = str(old.get("deliveryStatus") or "").strip() == "Delivered"
-    if not old_paid and new_paid:
+    if old_paid == new_paid:
+        # Re-saving a settled covered receipt: the form re-derives amountUSD
+        # from the stored (gross-prefilled) payment rows. Keeping that gross
+        # next to companyCoveredUSD counted the company share twice as free
+        # customer credit. Net it exactly like the settle branch below.
+        old_minor = _financial_minor(old.get("amountUSD"), "stored receipt amount")
+        if not _reads_as_gross(amount_minor, old_minor + covered_minor, old_minor):
+            return
+        new_amount_minor = max(amount_minor - covered_minor, 0)
+    elif not old_paid and new_paid:
         if already_delivered:
             # amountUSD is the driver's real collected cash — leave it alone;
             # settling just declares the shortfall resolved.
@@ -242,7 +266,9 @@ def apply_coverage_settlement_truth(
                 status_code=409,
                 detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
             )
-        new_amount_minor = max(amount_minor - covered_minor, 0) if amount_minor >= gross_floor else amount_minor
+        # A small company share puts the net inside that band: nearest wins.
+        treat_as_gross = _reads_as_gross(amount_minor, gross_minor, net_expected)
+        new_amount_minor = max(amount_minor - covered_minor, 0) if treat_as_gross else amount_minor
         merged["customerOutstandingUSD"] = 0.0
     else:
         if already_delivered:
@@ -258,8 +284,14 @@ def apply_coverage_settlement_truth(
             )
             return
         # Unsettle back to debt: the pot promise becomes gross again and the
-        # customer owes everything the company has not absorbed.
-        new_amount_minor = amount_minor + covered_minor
+        # customer owes everything the company has not absorbed. The form may
+        # already send the gross (its payment rows); adding the company share
+        # to that again charged the customer for it twice.
+        old_minor = _financial_minor(old.get("amountUSD"), "stored receipt amount")
+        if _reads_as_gross(amount_minor, old_minor + covered_minor, old_minor):
+            new_amount_minor = amount_minor
+        else:
+            new_amount_minor = amount_minor + covered_minor
         merged["customerOutstandingUSD"] = _financial_usd(
             max(new_amount_minor - covered_minor, 0)
         )

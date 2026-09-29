@@ -6523,7 +6523,7 @@ def _financial_status_aware_ad_spend(ad: dict[str, Any]) -> int:
         return 0
     if status == "stopped" and "spentUSD" in ad:
         return _financial_minor(ad.get("spentUSD"), "stored stopped ad spend")
-    if status in {"completed", "canceled", "lost"} and "spentUSD" in ad:
+    if status in {"completed", "canceled", "cancelled", "lost"} and "spentUSD" in ad:
         return _financial_minor(ad.get("spentUSD"), "stored final ad spend")
     return _financial_minor(ad.get("amountUSD"), "stored ad amount")
 
