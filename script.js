@@ -18428,7 +18428,7 @@ function renderReceiptsView() {
                   </div>
                   ${Array.isArray(receipt.collectedPayments) && receipt.collectedPayments.length && !receipt.collectedMatchesReceipt ? `
                     <div class="flex flex-wrap gap-1 mt-1">
-                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${(Number(p.amount) || 0).toFixed(0)} LYD</span>`).join('')}
+                      ${receipt.collectedPayments.map(p => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">${Security.escapeHtml(trMethod(p.method))}: ${(Number(p.amount) || 0).toFixed(2)} LYD</span>`).join('')}
                     </div>
                   ` : ''}
                 ` : ''}
@@ -20213,7 +20213,7 @@ function renderDeliveryDashboard() {
                         </div>
                       ` : ''}
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
-                        <span class="text-xs font-bold text-emerald-600">$${Number(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)} (${Number(_deliveryDisplayAmounts(ad).local || 0).toFixed(0)} LYD)</span>
+                        <span class="text-xs font-bold text-emerald-600">$${Number(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)} (${Number(_deliveryDisplayAmounts(ad).local || 0).toFixed(2)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
                         <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${(() => {

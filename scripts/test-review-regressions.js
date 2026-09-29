@@ -1571,6 +1571,23 @@ async function main() {
     assert.ok(html.includes('فعّل النسخ الاحتياطي اليومي المشفّر'));
     state.language = 'en';
   });
+  await test('r5 MGR n=11 follow-up: the driver job list and the collected-payment chips show 107.25 LYD, not a rounded 107', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    state.language = 'en';
+    state.currentUser = { id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} };
+    state.customers = [{ id: 'c1', name: 'Ali' }];
+    const debt = { recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' },
+      amountUSD: 15, amountLocal: 0, exchangeRate: 7.15, payments: [], transfers: [], createdAt: '2026-09-01' };
+    state.receipts = [{ ...debt, id: 'r1', tempReceiptNo: 'D1', deliveryStatus: 'In Progress', deliveryPersonId: 'drv1' }];
+    const job = String(sandbox.renderDeliveryDashboard());
+    assert.ok(job.includes('$15.00 (107.25 LYD)') && !job.includes('(107 LYD)'), 'the driver job list rounds the debt to whole dinars');
+    state.currentUser = { id: 'adm', name: 'Admin', role: 'Admin', permissions: {} };
+    state.receipts = [{ ...debt, id: 'r2', tempReceiptNo: 'D2', deliveryStatus: 'Delivered', collected: true, collectedAmount: 107.25,
+      collectedMatchesReceipt: false, collectedPayments: [{ method: 'Cash', amount: 100.25 }, { method: 'Bank Transfer', amount: 7 }] }];
+    const card = String(sandbox.renderReceiptsView());
+    assert.ok(/: 100\.25 LYD</.test(card) && /: 7\.00 LYD</.test(card) && !/: 100 LYD</.test(card), 'a collected-payment chip rounds to whole dinars');
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }
