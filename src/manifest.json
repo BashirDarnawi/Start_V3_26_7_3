@@ -23,7 +23,8 @@
     "15-modals.js",
     "15b0-clothes-loader.js",
     "15c0-ads-studio-loader.js",
-    "15d-meta-ads.js",
+    "15d0-meta-ads-core.js",
+    "15d1-meta-tools-loader.js",
     "15e-photo-paste.js",
     "16-actions-io.js",
     "17-init.js"
@@ -57,6 +58,9 @@
       "12a-analytics-profit.js",
       "12b-control-center.js",
       "13b-merge-tools.js"
+    ],
+    "meta-tools.js": [
+      "15d-meta-ads.js"
     ]
   }
 }

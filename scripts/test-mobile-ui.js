@@ -44,7 +44,11 @@ const studioParsePhoneSrc = (() => {
   const at = core.indexOf('function studioParsePhone(');
   return core.slice(at, core.indexOf('\n}\n', at) + 2);
 })();
-const metaAds = read('src/15d-meta-ads.js');
+// Meta Ads UI: startup core (ad rows, headers) + its loader + the lazy dialogs (meta-tools.js).
+const metaAdsCore = read('src/15d0-meta-ads-core.js');
+const metaToolsLoader = read('src/15d1-meta-tools-loader.js');
+const metaToolsDialogs = read('src/15d-meta-ads.js');
+const metaAds = metaAdsCore + metaToolsLoader + metaToolsDialogs;
 const photoPaste = read('src/15e-photo-paste.js');
 const actionsIo = read('src/16-actions-io.js');
 const css = read('style.css');
@@ -1263,6 +1267,104 @@ check('admin tools ship lazily with guarded call sites and a bounded retry',
   adminToolsLoader.includes("_adminToolsBundleState === 'failed' && Date.now() - _adminToolsLastFailureAt < _ADMIN_TOOLS_RETRY_COOLDOWN_MS) return;") &&
   adminToolsLoader.includes('onclick="retryAdminToolsLoad()"') &&
   read('server/main.py').includes('"admin-tools.js"'));
+
+// ---------- Meta Sync / Meta Insights dialogs (meta-tools.js lazy bundle) ----------
+{
+  // Every name the lazy dialogs declare must be unknown to the startup bundle, except the two
+  // *Now openers the loader calls after the bundle is in: a startup call (a render, live sync,
+  // sign-out, an inline onclick in a row) into a moved function would be a ReferenceError.
+  const lazyMetaNames = [...metaToolsDialogs.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|^(?:const|let)\s+([A-Za-z_$][\w$]*)/gm)].map(m => m[1] || m[2]);
+  const allowedStartupRefs = new Set(['15d1-meta-tools-loader.js:openMetaAdsConnectionModalNow', '15d1-meta-tools-loader.js:openMetaInsightsModalNow']);
+  const startupRefs = bundleManifestJson.files.flatMap(file => {
+    const code = read(`src/${file}`).replace(/^\s*\/\/.*$/gm, '');
+    return lazyMetaNames.filter(name => new RegExp(`(^|[^\\w$])${name}(?![\\w$])`).test(code)).map(name => `${file}:${name}`);
+  }).filter(ref => !allowedStartupRefs.has(ref));
+  const keptInStartup = ['metaAdsFormatDate', 'metaAdsPlannedTotalMinor', 'metaAdsTotalRemainingMinor', 'metaAdAutoBudgetUSD', 'metaAdRealSpendUSD',
+    'metaAdsIsPlaceholderPageName', 'renderMetaAdPageSummary', 'metaAdThumbnailSrc', 'renderAdPageAvatar', 'renderAdPrimaryThumbnail', 'openMetaAdPreview',
+    'renderMetaAdsHeaderButton', 'renderMetaInsightsHeaderButton', 'renderMetaAdStatusSummary', 'renderMetaAdBudgetSummary', 'renderMetaAdScheduleSummary',
+    'renderMetaAdActionButton', 'closeMetaInsightsModal', 'closeMetaAdsConnectionModal'];
+  check('Meta Sync and Meta Insights dialogs ship lazily as meta-tools.js; startup code reaches them only through the two loader openers',
+    JSON.stringify(bundleManifestJson.lazy['meta-tools.js']) === JSON.stringify(['15d-meta-ads.js']) &&
+    !bundleManifestJson.files.includes('15d-meta-ads.js') &&
+    bundleManifestJson.files.indexOf('15d1-meta-tools-loader.js') === bundleManifestJson.files.indexOf('15d0-meta-ads-core.js') + 1 &&
+    lazyMetaNames.length >= 25 && lazyMetaNames.includes('metaAdsRenderModal') && lazyMetaNames.includes('metaInsightsRenderModal') && startupRefs.length === 0 &&
+    keptInStartup.every(name => metaAdsCore.includes(`function ${name}(`)) &&
+    metaAdsCore.includes('const metaAdsUi = {') && metaAdsCore.includes('let metaAdsViewportResizeHandler = null;') && metaAdsCore.includes('const metaInsightsUi = {') &&
+    metaToolsDialogs.includes("function openMetaAdsConnectionModalNow(adId = '') {") && metaToolsDialogs.includes('function openMetaInsightsModalNow() {') &&
+    metaToolsLoader.includes("function openMetaAdsConnectionModal(adId = '') {\n  withMetaTools(() => openMetaAdsConnectionModalNow(adId));\n}") &&
+    metaToolsLoader.includes('function openMetaInsightsModal() {\n  withMetaTools(() => openMetaInsightsModalNow());\n}') &&
+    metaAdsCore.includes('onclick="openMetaAdsConnectionModal()"') && metaAdsCore.includes('onclick="openMetaAdsConnectionModal(this.dataset.adId)"') && metaAdsCore.includes('onclick="openMetaInsightsModal()"') &&
+    metaAdsCore.includes("if (typeof preloadMetaTools === 'function') preloadMetaTools();") &&
+    metaToolsLoader.includes('const _META_TOOLS_RETRY_COOLDOWN_MS = 30000;') &&
+    metaToolsLoader.includes("if (_metaToolsBundleState === 'failed' && Date.now() - _metaToolsLastFailureAt < _META_TOOLS_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
+    read('server/main.py').includes('return _serve_lazy_bundle(request, "meta-tools.js")') &&
+    /^\s*COPY\s.*\bmeta-tools\.js\b/m.test(read('server/Dockerfile')) &&
+    read('meta-tools.js') === metaToolsDialogs && read('www/meta-tools.js') === metaToolsDialogs &&
+    read('script.js').includes(metaAdsCore + metaToolsLoader) && !read('script.js').includes('function metaAdsRenderModal('),
+    startupRefs.length ? `startup references ${startupRefs.join(', ')}` : '');
+
+  // The loader alone in a vm sandbox: one request with the main bundle's ?v=, the bilingual card meanwhile,
+  // a failure's 30 s cooldown and Retry, the asked-for dialog once the bundle registers, and a card that was
+  // closed (by the user or the sign-out overlay sweep) cancels the open.
+  const vm = require('vm');
+  const metaToolsBox = () => {
+    const doc = { tags: [], nodes: new Map(), querySelectorAll: () => [{ src: 'https://albayan.example/script.js?v=abc123' }] };
+    doc.createElement = () => ({ id: '', attrs: {}, innerHTML: '', removed: false, setAttribute(key, value) { this.attrs[key] = value; },
+      remove() { this.removed = true; if (doc.nodes.get(this.id) === this) doc.nodes.delete(this.id); } });
+    doc.getElementById = id => doc.nodes.get(id) || null;
+    doc.head = { appendChild: tag => doc.tags.push(tag) };
+    doc.body = { appendChild: node => doc.nodes.set(node.id, node) };
+    const box = vm.createContext({ state: { language: 'en' }, document: doc, IconQueue: { schedule() {} }, __now: 1000 }, { microtaskMode: 'afterEvaluate' });
+    vm.runInContext('var Date = { now: () => __now }; var __opened = [];', box);
+    vm.runInContext(metaToolsLoader, box);
+    return code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
+  };
+  const registerBundle = "function openMetaAdsConnectionModalNow(adId) { __opened.push('ads:' + adId); } function openMetaInsightsModalNow() { __opened.push('insights'); }";
+  const card = run => String(run("document.getElementById('meta-tools-loading') ? document.getElementById('meta-tools-loading').innerHTML : ''"));
+  let run = metaToolsBox();
+  run("openMetaAdsConnectionModal('ad1')");
+  const loadingCard = card(run);
+  const firstRequest = Array.from(run('document.tags.map(tag => tag.src)') || []);
+  run('document.tags[0].onerror()');
+  const failedCard = card(run);
+  run('openMetaInsightsModal(); preloadMetaTools();');  // inside the cooldown: no new request
+  const tagsInCooldown = run('document.tags.length');
+  run('retryMetaToolsLoad()');
+  const retryCard = card(run);
+  const tagsAfterRetry = run('document.tags.length');
+  run(`${registerBundle} document.tags[1].onload();`);
+  const openedAfterLoad = JSON.stringify(run('__opened'));
+  const cardAfterLoad = run("document.getElementById('meta-tools-loading')");
+  run("openMetaAdsConnectionModal('ad2')");  // ready: opens at once, no card, no request
+  const openedWhenReady = JSON.stringify(run('__opened'));
+  const tagsWhenReady = run('document.tags.length');
+  run = metaToolsBox();
+  run("state.language = 'ar'; openMetaInsightsModal();");
+  const arabicCard = card(run);
+  run('closeMetaToolsLoadingCard();');
+  run(`${registerBundle} document.tags[0].onload();`);
+  const openedAfterClose = JSON.stringify(run('__opened'));
+  run = metaToolsBox();
+  run("openMetaAdsConnectionModal('ad3'); document.getElementById('meta-tools-loading').remove();");  // the sign-out sweep
+  run(`${registerBundle} document.tags[0].onload();`);
+  const openedAfterSweep = JSON.stringify(run('__opened'));
+  run = metaToolsBox();
+  run("openMetaInsightsModal(); document.tags[0].onload();");  // executed, but registered nothing
+  const broken = { state: run('_metaToolsBundleState'), removed: run('document.tags[0].removed'), promise: run('_metaToolsBundlePromise === null'), failedAt: run('_metaToolsLastFailureAt'), card: card(run) };
+  const metaLoaderCases = [
+    loadingCard.includes('Loading the Meta tools…') && loadingCard.includes('onclick="closeMetaToolsLoadingCard()"'),
+    JSON.stringify(firstRequest) === JSON.stringify(['https://albayan.example/meta-tools.js?v=abc123']),
+    failedCard.includes("Couldn't load the Meta tools") && failedCard.includes('onclick="retryMetaToolsLoad()"') && tagsInCooldown === 1,
+    retryCard.includes('Loading the Meta tools…') && tagsAfterRetry === 2,
+    openedAfterLoad === '["insights"]' && cardAfterLoad === null,
+    openedWhenReady === '["insights","ads:ad2"]' && tagsWhenReady === 2,
+    arabicCard.includes('جاري تحميل أدوات Meta…') && arabicCard.includes('dir="rtl"') && openedAfterClose === '[]',
+    openedAfterSweep === '[]',
+    broken.state === 'failed' && broken.removed === true && broken.promise === true && broken.failedAt === 1000 && broken.card.includes('onclick="retryMetaToolsLoad()"')
+  ];
+  check('the Meta tools loader in a sandbox: one request with the main bundle\'s ?v=, a bilingual card meanwhile, a 30 s failure cooldown with Retry, the asked-for dialog opens once the bundle registers, and a closed card cancels the open',
+    metaLoaderCases.every(Boolean), `cases ${metaLoaderCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+}
 
 // ---------- Social Studio (posts scheduler + auto-reply rules, studio.js bundle) ----------
 const socialStudio = read('src/systems/ads_studio/15f-social-studio.js');

@@ -57,6 +57,20 @@ def test_serve_script():
     assert "javascript" in response.headers["content-type"]
 
 
+def test_serve_meta_tools_lazy_bundle():
+    """The Meta dialogs bundle is served like the other lazy bundles and ships in the image."""
+    response = client.get("/meta-tools.js")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/javascript")
+    assert "no-store" in response.headers.get("cache-control", "")  # no ?v=: never cached
+    assert "function openMetaAdsConnectionModalNow(" in response.text
+    version = main_module._asset_version(main_module._select_script_source())
+    cached = client.get(f"/meta-tools.js?v={version}")
+    assert cached.status_code == 200 and "no-store" not in cached.headers.get("cache-control", "")
+    dockerfile = (Path(__file__).parent / "Dockerfile").read_text(encoding="utf-8")
+    assert any(line.startswith("COPY ") and " meta-tools.js " in line for line in dockerfile.splitlines())
+
+
 def test_serve_style():
     """Should serve style.css"""
     response = client.get("/style.css")

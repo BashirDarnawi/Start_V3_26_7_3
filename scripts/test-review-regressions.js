@@ -14,6 +14,14 @@ function clothesFixture() {
   return { ...fixture, notes };
 }
 
+// The Meta Sync / Meta Insights dialogs are the lazy meta-tools.js bundle: load its sources on top.
+function metaToolsFixture() {
+  const fixture = loadBrowserSource();
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+  for (const file of manifest.lazy['meta-tools.js']) fixture.run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+  return fixture;
+}
+
 // Let promise chains started inside the sandbox settle (it shares this microtask queue).
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
@@ -814,7 +822,7 @@ async function main() {
     assert.equal(notes.filter(note => note.type === 'error' && /timed out/.test(note.message)).length, 2);
   });
   await test('Meta Insights shows the money inside each ad account, escaped, with a failing account kept visible', async () => {
-    const { sandbox, state, run } = loadBrowserSource();
+    const { sandbox, state, run } = metaToolsFixture();
     state.language = 'en';
     state.ads = [{ id: 'a1', metaAdAccountId: '555555555555555', metaAdAccountName: 'Prepaid Balance 3' }];
     // The harness's fake DOM has no innerHTML escaping; use a real escaper so the escaping assertions mean something.
@@ -847,11 +855,21 @@ async function main() {
     sandbox.resetAuthenticatedServerCaches();
     assert.equal(run('metaInsightsUi.funds'), null, 'account money never survives logout');
   });
+  await test('sign-out resets the Meta dialog state from the startup bundle alone (meta-tools.js never loaded)', async () => {
+    const { sandbox, run } = loadBrowserSource();
+    assert.equal(run('typeof openMetaAdsConnectionModalNow'), 'undefined', 'the dialogs are not in the startup bundle');
+    assert.equal(run('typeof openMetaAdsConnectionModal'), 'function', 'the row and header opener is');
+    run("metaInsightsUi.funds = { accounts: [] }; metaInsightsUi.open = true; metaAdsUi.busyAction = 'sync';");
+    sandbox.resetAuthenticatedServerCaches();
+    assert.equal(run('metaInsightsUi.funds'), null);
+    assert.equal(run('metaInsightsUi.open'), false);
+    assert.equal(run('metaAdsUi.busyAction'), '');
+  });
   // Review loop r2 M2 #3: only the version check's "Conflict: ..." 409 is "the ad changed"; the
   // link's other 409s (a Studio ad, a Meta ad another Albayan ad holds) show the server's reason.
   await test('Meta link: a 409 that is not a version conflict shows the server reason, in both languages', async () => {
     const linkWith = async (message, language = 'en') => {
-      const { sandbox, state, run } = loadBrowserSource();
+      const { sandbox, state, run } = metaToolsFixture();
       state.language = language;
       state.ads = [{ id: 'ad1', _lastModified: 5 }];
       const reloads = [];
@@ -878,7 +896,7 @@ async function main() {
   // Review loop r2 M2 #7: a check that found the background pass already running is not "no new ads".
   await test('Check for new ads: a busy server pass is reported as running, never as "no new ads"', async () => {
     for (const language of ['en', 'ar']) {
-      const { sandbox, state, run } = loadBrowserSource();
+      const { sandbox, state, run } = metaToolsFixture();
       state.language = language;
       const notes = [];
       sandbox.metaAdsRenderModal = () => {};
@@ -893,7 +911,7 @@ async function main() {
       assert.equal(run('metaAdsUi.busyAction'), '', 'the button is released');
       assert.deepEqual(run('metaAdsUi.status.importState'), { lastError: '' });
     }
-    const { sandbox, state } = loadBrowserSource();
+    const { sandbox, state } = metaToolsFixture();
     state.language = 'en';
     const notes = [];
     sandbox.metaAdsRenderModal = () => {};

@@ -2944,6 +2944,11 @@ def serve_admin_tools_script(request: Request):
     return _serve_lazy_bundle(request, "admin-tools.js")
 
 
+@app.get("/meta-tools.js")
+def serve_meta_tools_script(request: Request):
+    return _serve_lazy_bundle(request, "meta-tools.js")
+
+
 @app.get("/style.css")
 def serve_style(request: Request):
     if not STYLE_PATH.exists():

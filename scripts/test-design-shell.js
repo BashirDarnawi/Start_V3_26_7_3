@@ -172,7 +172,8 @@ context.isServerModeEnabled = () => true;
 context.getServerBaseUrl = () => 'https://app.example.invalid';
 context.getAdPrimaryPhotoIndex = ad => ad.primaryAdPhotoIndex || 0;
 context.getAdPhotoSources = ad => ad.adPhotos || [];
-vm.runInContext(fs.readFileSync(path.join(root, 'src/15d-meta-ads.js'), 'utf8'), context);
+// The row renderers are the startup half of the Meta UI (the dialogs are the lazy meta-tools.js).
+vm.runInContext(fs.readFileSync(path.join(root, 'src/15d0-meta-ads-core.js'), 'utf8'), context);
 check('real renderer never exposes uploaded private media without viewPhotos', () => {
   photoAllowed = false;
   const ad = { id: 'private', photoCount: 1, adPhotos: ['data:image/png;base64,PRIVATE'] };
