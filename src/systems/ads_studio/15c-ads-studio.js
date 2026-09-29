@@ -154,6 +154,12 @@ function adsStudioCanUse() {
   return isCurrentUserAdmin() || adsStudioCanReview() || hasSubscription('ad_maker');
 }
 
+// Until this page's first server load settles (17-init), the rows may be an old device cache: a
+// request or plan missing from them is not known to be gone, so the screens say "loading".
+function adsStudioStartupLoading() {
+  return typeof _serverLiveSync === 'object' && !!_serverLiveSync && _serverLiveSync.startupLoadPending === true;
+}
+
 // A LAPSED customer keeps read access to their own campaigns: those rows may
 // still hold captured money, and the Stop-and-refund button lives on them.
 // The server agrees (reads are not subscription-gated; a self-stop skips the
@@ -481,6 +487,7 @@ function renderAdsStudioView() {
   if (studioV2Html) return studioV2Html;
   const isAr = adsStudioIsAr();
   if (!adsStudioCanUse()) {
+    if (adsStudioStartupLoading()) return renderAdsStudioLoadingState();  // a renewed plan may not be in the cache yet
     // Expired, but their campaigns may still hold their money: show those
     // read-only (Stop & refund stays available) above the activate card.
     if (adsStudioCanViewOwn() && adsStudioHasRecoverableCampaigns()) {

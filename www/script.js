@@ -12187,6 +12187,9 @@ const _serverLiveSync = {
   // (the server's updated_since window only looks back 15s).
   serverWatermark: 0,
   fullLoadCursorReady: false,
+  // True from the boot's first render until its first data load settles (17-init): the rows may
+  // still be an old device cache (adsStudioStartupLoading).
+  startupLoadPending: false,
   dataCompatibilityVersion: null,
   lastCompatibilityCheckAt: 0,
   collectionCursors: Object.create(null),
@@ -12217,6 +12220,7 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.serverWatermark = 0;
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.startupLoadPending = false;
   _serverLiveSync.dataCompatibilityVersion = null;
   _serverLiveSync.lastCompatibilityCheckAt = 0;
   _serverLiveSync.collectionCursors = Object.create(null);
@@ -14150,11 +14154,11 @@ function getUrlParams() {
 // exact same screen): the Clothes System tab, the service being viewed.
 function viewUrlParamsFor(view) {
   if (view === 'clothes-system') {
-    return { tab: (typeof _clothesActiveTab !== 'undefined' && _clothesActiveTab) || null };
+    // Before clothes.js runs, the address keeps its own tab for the loader's restore.
+    if (typeof _clothesActiveTab === 'undefined') return { tab: (window.location.pathname === VIEW_TO_PATH['clothes-system'] && getUrlParams().tab) || null };
+    return { tab: _clothesActiveTab || null };
   }
-  if (view === 'ads-studio') {
-    return { tab: (typeof _adsStudioActiveTab !== 'undefined' && _adsStudioActiveTab) || null };
-  }
+  if (view === 'ads-studio') return adsStudioUrlParams();
   if (view === 'service-placeholder') {
     return { service: state.viewData?.serviceId || null };
   }
@@ -14171,6 +14175,20 @@ function viewUrlParamsFor(view) {
     return { receipt: Security.isValidRecordId(receiptId) ? receiptId : null };
   }
   return {};
+}
+
+// At the studio's address, a rewrite that only restates the view (start-up, sign-in) keeps the
+// studio's tab, section, id and step: while studio.js is not loaded, for the same tab, or for a tab
+// the classic list could not take (its 'dashboard' stands in for a v2 tab). Another tab starts clean.
+function adsStudioUrlParams() {
+  const known = typeof _adsStudioActiveTab !== 'undefined';
+  const tab = (known && _adsStudioActiveTab) || null;
+  const here = new URLSearchParams(window.location.search || '');
+  const hereTab = here.get('tab');
+  if (!hereTab || !(IS_STUDIO_SHELL || window.location.pathname === VIEW_TO_PATH['ads-studio'])) return { tab };
+  const keep = !known || tab === hereTab
+    || (tab === 'dashboard' && !(typeof adsStudioTabsForUser === 'function' && adsStudioTabsForUser().some(item => item.id === hereTab)));
+  return keep ? { tab: hereTab, section: here.get('section'), id: here.get('id'), step: here.get('step') } : { tab };
 }
 
 // Re-apply the sub-state carried in the URL when a view is opened by link.
@@ -14295,14 +14313,17 @@ function updateUrlForView(view, replace = false) {
   // keeps a null state and popstate falls back to services-hub/Restricted.
   const samePlace = window.location.pathname === path
     && (window.location.search || '') === (qs ? `?${qs}` : '');
+  // A replaced studio entry keeps the v2 studio's Back chain (15h studioV2EnsureHistory).
+  const entry = { view };
+  try { if (view === 'ads-studio' && window.history.state && window.history.state.studioV2) entry.studioV2 = window.history.state.studioV2; } catch (_) {}
   if (samePlace) {
-    try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
+    try { window.history.replaceState(entry, '', newUrl); } catch (_) {}
     return;
   }
 
   try {
     if (replace) {
-      window.history.replaceState({ view }, '', newUrl);
+      window.history.replaceState(entry, '', newUrl);
     } else {
       window.history.pushState({ view }, '', newUrl);
     }
@@ -45491,24 +45512,32 @@ async function init() {
       // PERFORMANCE: Show UI immediately with cached data, then update from server
       setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
       
-      // Render UI immediately with cached data
+      // Render UI immediately with cached data (a missing record or plan reads "loading" until the load settles)
+      _serverLiveSync.startupLoadPending = true;
       render();
+      const startupIdentity = getServerSessionIdentity();
       
       // Check refresh throttle - prevent server overload from rapid refreshes
       if (isRefreshThrottled()) {
         console.log('[init] Refresh throttled - using cached data');
-        // Still restore modal from URL
-        restoreModalFromUrl();
         // No authoritative full snapshot is running in this branch, so start
         // the catch-up poller now (it will use cursor 0 when needed).
         startServerLiveSync();
+        // Its first tick is this boot's load: the ?modal= link replays after it, or a record the
+        // device cache lacks is dropped for good.
+        Promise.resolve(_serverLiveSync.tickPromise).catch(() => {}).then(() => {
+          _serverLiveSync.startupLoadPending = false;
+          if (serverSessionIdentityChanged(startupIdentity)) return;
+          render();
+          if (_bootModalParams) restoreModalFromUrl();  // never closes a dialog opened meanwhile
+        });
       } else {
         // Complete the authoritative snapshot before starting delta polling.
         // Running both concurrently allowed a newer delta to be applied and
         // then overwritten by an older full-list response.
-        const startupIdentity = getServerSessionIdentity();
         const startupLoad = serverLoadAllData().then((loadResult) => {
           if (loadResult?.aborted) return;
+          _serverLiveSync.startupLoadPending = false;
           // Re-render with fresh data
           render();
           // Restore modal from URL if needed (e.g., user refreshed with modal open)
@@ -45521,7 +45550,11 @@ async function init() {
           }
         });
         startupLoad.finally(() => {
-          if (!serverSessionIdentityChanged(startupIdentity)) startServerLiveSync();
+          const pending = _serverLiveSync.startupLoadPending;
+          _serverLiveSync.startupLoadPending = false;
+          if (serverSessionIdentityChanged(startupIdentity)) return;
+          if (pending) render();  // a failed load: draw what the cache knows instead of "loading"
+          startServerLiveSync();
         });
       }
     } else {

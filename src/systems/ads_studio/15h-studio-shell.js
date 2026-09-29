@@ -503,10 +503,11 @@ function studioV2EnsureHistory(route, frame) {
   } catch (_) { /* the address stays as it is */ }
 }
 
-// The start-up address rewrite keeps only ?tab= (and loses even that when this bundle arrives after
-// it). On the first v2 draw of a page whose studio was entered moments ago (a classic staff screen of
-// the v2 layout included: it is chosen by the address), the address it was opened with comes back
-// (only tab, section, id and step), unless the reader has already moved somewhere else. The clock
+// A backup: the start-up and sign-in rewrites keep the studio's own address now (11-routing
+// adsStudioUrlParams, review loop r7 n3). On the first v2 draw of a page whose studio was entered
+// moments ago (a classic staff screen of the v2 layout included: it is chosen by the address), the
+// address it was opened with comes back (only tab, section, id and step), unless the reader has
+// already moved somewhere else. The clock
 // runs from the studio's first draw of this session (_studioV2.enteredAt: at boot, or right after a
 // sign-in however long the form took), never from the page's navigation start.
 function studioV2RestoreOpeningAddress() {

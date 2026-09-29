@@ -154,6 +154,12 @@ function adsStudioCanUse() {
   return isCurrentUserAdmin() || adsStudioCanReview() || hasSubscription('ad_maker');
 }
 
+// Until this page's first server load settles (17-init), the rows may be an old device cache: a
+// request or plan missing from them is not known to be gone, so the screens say "loading".
+function adsStudioStartupLoading() {
+  return typeof _serverLiveSync === 'object' && !!_serverLiveSync && _serverLiveSync.startupLoadPending === true;
+}
+
 // A LAPSED customer keeps read access to their own campaigns: those rows may
 // still hold captured money, and the Stop-and-refund button lives on them.
 // The server agrees (reads are not subscription-gated; a self-stop skips the
@@ -481,6 +487,7 @@ function renderAdsStudioView() {
   if (studioV2Html) return studioV2Html;
   const isAr = adsStudioIsAr();
   if (!adsStudioCanUse()) {
+    if (adsStudioStartupLoading()) return renderAdsStudioLoadingState();  // a renewed plan may not be in the cache yet
     // Expired, but their campaigns may still hold their money: show those
     // read-only (Stop & refund stays available) above the activate card.
     if (adsStudioCanViewOwn() && adsStudioHasRecoverableCampaigns()) {
@@ -6603,10 +6610,11 @@ function studioV2EnsureHistory(route, frame) {
   } catch (_) { /* the address stays as it is */ }
 }
 
-// The start-up address rewrite keeps only ?tab= (and loses even that when this bundle arrives after
-// it). On the first v2 draw of a page whose studio was entered moments ago (a classic staff screen of
-// the v2 layout included: it is chosen by the address), the address it was opened with comes back
-// (only tab, section, id and step), unless the reader has already moved somewhere else. The clock
+// A backup: the start-up and sign-in rewrites keep the studio's own address now (11-routing
+// adsStudioUrlParams, review loop r7 n3). On the first v2 draw of a page whose studio was entered
+// moments ago (a classic staff screen of the v2 layout included: it is chosen by the address), the
+// address it was opened with comes back (only tab, section, id and step), unless the reader has
+// already moved somewhere else. The clock
 // runs from the studio's first draw of this session (_studioV2.enteredAt: at boot, or right after a
 // sign-in however long the form took), never from the page's navigation start.
 function studioV2RestoreOpeningAddress() {
@@ -7469,7 +7477,7 @@ function studioHomeNeeds(requests, wallet) {
   const items = [];
   const usd = wallet && wallet.usd && typeof wallet.usd === 'object' ? wallet.usd : null;
   const available = usd ? studioDataMinor(usd.availableMinor) : null;
-  if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded()) {
+  if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded() && !adsStudioStartupLoading()) {
     items.push({
       key: 'plan', icon: 'badge-alert', tone: 'orange',
       title: adsStudioText('Your plan has ended', 'انتهى اشتراكك'),
@@ -7818,9 +7826,11 @@ function renderStudioAdsList(route) {
   }).join('');
   const stages = (STUDIO_ADS_FILTERS.find(item => item[0] === section) || STUDIO_ADS_FILTERS[0])[3];
   const shown = rows.filter(item => inFilter(item, stages));
+  const loading = !rows.length && adsStudioStartupLoading();  // the cache may not have them yet
   const empty = rows.length
     ? adsStudioText('No requests in this list.', 'لا توجد طلبات في هذه القائمة.')
-    : adsStudioText('You have no ad requests yet. Start one when you are ready.', 'لا توجد لديك طلبات إعلان بعد. ابدأ واحداً عندما تكون جاهزاً.');
+    : loading ? adsStudioText('Loading your requests…', 'جارٍ تحميل طلباتك…')
+      : adsStudioText('You have no ad requests yet. Start one when you are ready.', 'لا توجد لديك طلبات إعلان بعد. ابدأ واحداً عندما تكون جاهزاً.');
   const canAsk = studioHomeCanAsk();
   return `
         <div class="studio-ads" data-testid="studio-ads">
@@ -7830,7 +7840,7 @@ function renderStudioAdsList(route) {
           </div>
           ${!summaryState.error ? '' : `<p class="studio-home-empty">${studioEsc(adsStudioText('The latest stages could not be loaded; the list shows what we know.', 'تعذّر تحميل آخر المراحل؛ تعرض القائمة ما نعرفه.'))}</p>`}
           ${shown.length ? `<ul class="studio-ads-list" data-testid="studio-ads-list">${shown.map(item => renderStudioAdsCard(item.request, item.stage)).join('')}
-          </ul>` : `<p class="studio-home-empty" data-testid="studio-ads-empty">${studioEsc(empty)}</p>`}
+          </ul>` : `<p class="studio-home-empty" data-testid="${loading ? 'studio-ads-loading' : 'studio-ads-empty'}"${loading ? ' aria-busy="true"' : ''}>${studioEsc(empty)}</p>`}
         </div>`;
 }
 
@@ -8031,6 +8041,10 @@ function renderStudioAdsBrief(request) {
 
 function renderStudioAdsDetail(route) {
   const request = studioDataRequest(route.id);
+  if (!request && adsStudioStartupLoading()) {  // the cache may not have it yet
+    return `
+        <div class="studio-ads-box studio-ads-missing" data-testid="studio-ad-loading" aria-busy="true"><p>${studioEsc(adsStudioText('Loading your requests…', 'جارٍ تحميل طلباتك…'))}</p></div>`;
+  }
   if (!request) {
     return `
         <div class="studio-ads-box studio-ads-missing" data-testid="studio-ad-missing">

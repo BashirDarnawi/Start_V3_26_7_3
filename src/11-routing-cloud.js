@@ -69,11 +69,11 @@ function getUrlParams() {
 // exact same screen): the Clothes System tab, the service being viewed.
 function viewUrlParamsFor(view) {
   if (view === 'clothes-system') {
-    return { tab: (typeof _clothesActiveTab !== 'undefined' && _clothesActiveTab) || null };
+    // Before clothes.js runs, the address keeps its own tab for the loader's restore.
+    if (typeof _clothesActiveTab === 'undefined') return { tab: (window.location.pathname === VIEW_TO_PATH['clothes-system'] && getUrlParams().tab) || null };
+    return { tab: _clothesActiveTab || null };
   }
-  if (view === 'ads-studio') {
-    return { tab: (typeof _adsStudioActiveTab !== 'undefined' && _adsStudioActiveTab) || null };
-  }
+  if (view === 'ads-studio') return adsStudioUrlParams();
   if (view === 'service-placeholder') {
     return { service: state.viewData?.serviceId || null };
   }
@@ -90,6 +90,20 @@ function viewUrlParamsFor(view) {
     return { receipt: Security.isValidRecordId(receiptId) ? receiptId : null };
   }
   return {};
+}
+
+// At the studio's address, a rewrite that only restates the view (start-up, sign-in) keeps the
+// studio's tab, section, id and step: while studio.js is not loaded, for the same tab, or for a tab
+// the classic list could not take (its 'dashboard' stands in for a v2 tab). Another tab starts clean.
+function adsStudioUrlParams() {
+  const known = typeof _adsStudioActiveTab !== 'undefined';
+  const tab = (known && _adsStudioActiveTab) || null;
+  const here = new URLSearchParams(window.location.search || '');
+  const hereTab = here.get('tab');
+  if (!hereTab || !(IS_STUDIO_SHELL || window.location.pathname === VIEW_TO_PATH['ads-studio'])) return { tab };
+  const keep = !known || tab === hereTab
+    || (tab === 'dashboard' && !(typeof adsStudioTabsForUser === 'function' && adsStudioTabsForUser().some(item => item.id === hereTab)));
+  return keep ? { tab: hereTab, section: here.get('section'), id: here.get('id'), step: here.get('step') } : { tab };
 }
 
 // Re-apply the sub-state carried in the URL when a view is opened by link.
@@ -214,14 +228,17 @@ function updateUrlForView(view, replace = false) {
   // keeps a null state and popstate falls back to services-hub/Restricted.
   const samePlace = window.location.pathname === path
     && (window.location.search || '') === (qs ? `?${qs}` : '');
+  // A replaced studio entry keeps the v2 studio's Back chain (15h studioV2EnsureHistory).
+  const entry = { view };
+  try { if (view === 'ads-studio' && window.history.state && window.history.state.studioV2) entry.studioV2 = window.history.state.studioV2; } catch (_) {}
   if (samePlace) {
-    try { window.history.replaceState({ view }, '', newUrl); } catch (_) {}
+    try { window.history.replaceState(entry, '', newUrl); } catch (_) {}
     return;
   }
 
   try {
     if (replace) {
-      window.history.replaceState({ view }, '', newUrl);
+      window.history.replaceState(entry, '', newUrl);
     } else {
       window.history.pushState({ view }, '', newUrl);
     }

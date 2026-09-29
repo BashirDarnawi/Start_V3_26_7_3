@@ -259,24 +259,32 @@ async function init() {
       // PERFORMANCE: Show UI immediately with cached data, then update from server
       setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
       
-      // Render UI immediately with cached data
+      // Render UI immediately with cached data (a missing record or plan reads "loading" until the load settles)
+      _serverLiveSync.startupLoadPending = true;
       render();
+      const startupIdentity = getServerSessionIdentity();
       
       // Check refresh throttle - prevent server overload from rapid refreshes
       if (isRefreshThrottled()) {
         console.log('[init] Refresh throttled - using cached data');
-        // Still restore modal from URL
-        restoreModalFromUrl();
         // No authoritative full snapshot is running in this branch, so start
         // the catch-up poller now (it will use cursor 0 when needed).
         startServerLiveSync();
+        // Its first tick is this boot's load: the ?modal= link replays after it, or a record the
+        // device cache lacks is dropped for good.
+        Promise.resolve(_serverLiveSync.tickPromise).catch(() => {}).then(() => {
+          _serverLiveSync.startupLoadPending = false;
+          if (serverSessionIdentityChanged(startupIdentity)) return;
+          render();
+          if (_bootModalParams) restoreModalFromUrl();  // never closes a dialog opened meanwhile
+        });
       } else {
         // Complete the authoritative snapshot before starting delta polling.
         // Running both concurrently allowed a newer delta to be applied and
         // then overwritten by an older full-list response.
-        const startupIdentity = getServerSessionIdentity();
         const startupLoad = serverLoadAllData().then((loadResult) => {
           if (loadResult?.aborted) return;
+          _serverLiveSync.startupLoadPending = false;
           // Re-render with fresh data
           render();
           // Restore modal from URL if needed (e.g., user refreshed with modal open)
@@ -289,7 +297,11 @@ async function init() {
           }
         });
         startupLoad.finally(() => {
-          if (!serverSessionIdentityChanged(startupIdentity)) startServerLiveSync();
+          const pending = _serverLiveSync.startupLoadPending;
+          _serverLiveSync.startupLoadPending = false;
+          if (serverSessionIdentityChanged(startupIdentity)) return;
+          if (pending) render();  // a failed load: draw what the cache knows instead of "loading"
+          startServerLiveSync();
         });
       }
     } else {

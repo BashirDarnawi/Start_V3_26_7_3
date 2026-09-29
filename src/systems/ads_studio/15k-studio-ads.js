@@ -129,9 +129,11 @@ function renderStudioAdsList(route) {
   }).join('');
   const stages = (STUDIO_ADS_FILTERS.find(item => item[0] === section) || STUDIO_ADS_FILTERS[0])[3];
   const shown = rows.filter(item => inFilter(item, stages));
+  const loading = !rows.length && adsStudioStartupLoading();  // the cache may not have them yet
   const empty = rows.length
     ? adsStudioText('No requests in this list.', 'لا توجد طلبات في هذه القائمة.')
-    : adsStudioText('You have no ad requests yet. Start one when you are ready.', 'لا توجد لديك طلبات إعلان بعد. ابدأ واحداً عندما تكون جاهزاً.');
+    : loading ? adsStudioText('Loading your requests…', 'جارٍ تحميل طلباتك…')
+      : adsStudioText('You have no ad requests yet. Start one when you are ready.', 'لا توجد لديك طلبات إعلان بعد. ابدأ واحداً عندما تكون جاهزاً.');
   const canAsk = studioHomeCanAsk();
   return `
         <div class="studio-ads" data-testid="studio-ads">
@@ -141,7 +143,7 @@ function renderStudioAdsList(route) {
           </div>
           ${!summaryState.error ? '' : `<p class="studio-home-empty">${studioEsc(adsStudioText('The latest stages could not be loaded; the list shows what we know.', 'تعذّر تحميل آخر المراحل؛ تعرض القائمة ما نعرفه.'))}</p>`}
           ${shown.length ? `<ul class="studio-ads-list" data-testid="studio-ads-list">${shown.map(item => renderStudioAdsCard(item.request, item.stage)).join('')}
-          </ul>` : `<p class="studio-home-empty" data-testid="studio-ads-empty">${studioEsc(empty)}</p>`}
+          </ul>` : `<p class="studio-home-empty" data-testid="${loading ? 'studio-ads-loading' : 'studio-ads-empty'}"${loading ? ' aria-busy="true"' : ''}>${studioEsc(empty)}</p>`}
         </div>`;
 }
 
@@ -342,6 +344,10 @@ function renderStudioAdsBrief(request) {
 
 function renderStudioAdsDetail(route) {
   const request = studioDataRequest(route.id);
+  if (!request && adsStudioStartupLoading()) {  // the cache may not have it yet
+    return `
+        <div class="studio-ads-box studio-ads-missing" data-testid="studio-ad-loading" aria-busy="true"><p>${studioEsc(adsStudioText('Loading your requests…', 'جارٍ تحميل طلباتك…'))}</p></div>`;
+  }
   if (!request) {
     return `
         <div class="studio-ads-box studio-ads-missing" data-testid="studio-ad-missing">

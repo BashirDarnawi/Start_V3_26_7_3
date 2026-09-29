@@ -18,6 +18,9 @@ const _serverLiveSync = {
   // (the server's updated_since window only looks back 15s).
   serverWatermark: 0,
   fullLoadCursorReady: false,
+  // True from the boot's first render until its first data load settles (17-init): the rows may
+  // still be an old device cache (adsStudioStartupLoading).
+  startupLoadPending: false,
   dataCompatibilityVersion: null,
   lastCompatibilityCheckAt: 0,
   collectionCursors: Object.create(null),
@@ -48,6 +51,7 @@ function advanceServerSessionEpoch() {
   _serverLiveSync.serverWatermark = 0;
   _serverLiveSync.cursor = 0;
   _serverLiveSync.fullLoadCursorReady = false;
+  _serverLiveSync.startupLoadPending = false;
   _serverLiveSync.dataCompatibilityVersion = null;
   _serverLiveSync.lastCompatibilityCheckAt = 0;
   _serverLiveSync.collectionCursors = Object.create(null);

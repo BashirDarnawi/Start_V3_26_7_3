@@ -2806,6 +2806,150 @@ async function main() {
       if (savedTZ === undefined) delete process.env.TZ; else process.env.TZ = savedTZ;
     }
   });
+  // ---- Review loop r7, batch N: deep links and reloads
+
+  // The fake window's address bar and history, moved by replaceState/pushState the way a browser moves them.
+  function addressBar(sandbox, url, entryState = null) {
+    const loc = sandbox.window.location;
+    const move = next => { const u = new URL(String(next), 'http://localhost'); loc.pathname = u.pathname; loc.search = u.search; loc.href = u.href; };
+    const history = { state: entryState, pushes: 0,
+      replaceState(value, _title, next) { this.state = value; move(next); },
+      pushState(value, _title, next) { this.pushes += 1; this.state = value; move(next); } };
+    sandbox.URLSearchParams = URLSearchParams;
+    sandbox.window.history = history;
+    move(url);
+    return history;
+  }
+
+  await test('r7 N n=3: the start-up and sign-in rewrites keep a studio deep link (section, id, step) and the v2 Back chain', async () => {
+    const { sandbox, run } = studioFixture();
+    const chain = { chain: ['home|||', 'campaigns|||', 'campaigns||adreq_1|'] };
+    const history = addressBar(sandbox, '/ads-studio?tab=campaigns&id=adreq_1', { view: 'ads-studio', params: { tab: 'campaigns' }, studioV2: chain });
+    run("restoreViewStateFromUrl('ads-studio'); updateUrlForView('ads-studio', true);");  // init's rewrite after a reload
+    assert.equal(sandbox.window.location.search, '?tab=campaigns&id=adreq_1');  // before: '?tab=campaigns'
+    assert.deepEqual(JSON.parse(JSON.stringify(history.state)), { view: 'ads-studio', studioV2: chain });  // before: { view } only
+    run("updateUrlForView('ads-studio')");  // the post-login route restore at the same address
+    assert.equal(history.pushes, 0, 'no second entry for the same screen');
+    assert.equal(sandbox.window.location.search, '?tab=campaigns&id=adreq_1');
+    // A v2 tab the classic list cannot take (its 'dashboard' stands in for it) keeps its address too.
+    addressBar(sandbox, '/ads-studio?tab=wallet&section=history&step=2');
+    run("_adsStudioActiveTab = 'dashboard'; restoreViewStateFromUrl('ads-studio'); updateUrlForView('ads-studio', true);");
+    assert.equal(sandbox.window.location.search, '?tab=wallet&section=history&step=2');  // before: '?tab=dashboard'
+    // Another tab starts clean: the old id is not carried over to it, and a stale classic tab is replaced.
+    addressBar(sandbox, '/ads-studio?tab=campaigns&id=adreq_1');
+    run("_adsStudioActiveTab = 'posts'; updateUrlForView('ads-studio', true);");
+    assert.equal(sandbox.window.location.search, '?tab=posts');
+    addressBar(sandbox, '/ads-studio?tab=campaigns&id=adreq_1');
+    run("_adsStudioActiveTab = 'dashboard'; updateUrlForView('ads-studio', true);");
+    assert.equal(sandbox.window.location.search, '?tab=dashboard');
+    // Entering the studio from another screen still writes only the tab (and pushes a new entry).
+    const other = addressBar(sandbox, '/receipts?tab=campaigns&id=adreq_1');
+    run("_adsStudioActiveTab = 'campaigns'; updateUrlForView('ads-studio');");
+    assert.equal(sandbox.window.location.pathname + sandbox.window.location.search, '/ads-studio?tab=campaigns');
+    assert.equal(other.pushes, 1);
+  });
+
+  await test('r7 N n=4: a tab link opened before its lazy bundle runs keeps ?tab= for the loader\'s restore (Clothes, classic studio)', async () => {
+    const { sandbox, run } = loadBrowserSource();
+    addressBar(sandbox, '/clothes-system?tab=orders');
+    run("updateUrlForView('clothes-system', true)");  // init's rewrite, clothes.js not run yet
+    assert.equal(sandbox.window.location.search, '?tab=orders');  // before: '' (the Overview after the load)
+    addressBar(sandbox, '/receipts?tab=orders');
+    run("updateUrlForView('clothes-system', true)");  // another page's tab is not taken along
+    assert.equal(sandbox.window.location.pathname + sandbox.window.location.search, '/clothes-system');
+    addressBar(sandbox, '/ads-studio?tab=review&section=tickets');
+    run("updateUrlForView('ads-studio', true)");  // studio.js not run yet
+    assert.equal(sandbox.window.location.search, '?tab=review&section=tickets');  // before: ''
+    // The bundles arrive: the loaders' restore reads the tab the address kept.
+    addressBar(sandbox, '/clothes-system?tab=orders');
+    run("updateUrlForView('clothes-system', true)");
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '15b-clothes.js'), 'utf8'));
+    run('restoreClothesTabFromUrl()');
+    assert.equal(run('_clothesActiveTab'), 'orders');
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    addressBar(sandbox, '/ads-studio?tab=review');
+    run("updateUrlForView('ads-studio', true)");
+    for (const file of manifest.lazy['studio.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    run('restoreAdsStudioTabFromUrl()');
+    assert.equal(run('_adsStudioActiveTab'), 'review');  // the admin's review queue, not the Overview
+  });
+
+  await test('r7 N n=5: before the start-up load settles, a request or plan missing from an old cache reads "loading", never gone or ended', async () => {
+    const { sandbox, state, run } = studioFixture();
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['studio-pages.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    sandbox.refreshAdsStudioLimits = () => {};
+    sandbox.renderStudioV2View = () => '';  // the classic layout
+    run("state.currentUser = { id: 'cust3', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn'] }, subscriptions: [] }; state.users = [state.currentUser];");
+    state.adCampaignRequests = [];
+    // The device cache still has last month's lapsed plan; the renewal is on its way in the load.
+    state.serviceSubscriptions = [{ id: 'sub_old', userId: 'cust3', serviceId: 'ad_maker', status: 'active', expiresAt: '2026-01-01T00:00:00Z' }];
+    const screens = () => ({
+      detail: String(run("renderStudioAdsDetail({ tab: 'campaigns', section: '', id: 'adreq_x', step: 0 })")),
+      list: String(run("renderStudioAdsList({ tab: 'campaigns', section: '', id: '', step: 0 })")),
+      classic: String(run('renderAdsStudioView()')),
+      needs: JSON.parse(run('JSON.stringify(studioHomeNeeds([], null).map(item => item.key))')),
+      pages: String(run("renderStudioPagesBody({ tab: 'replies', section: 'pages', id: '', step: 0 })"))
+    });
+    run('_serverLiveSync.startupLoadPending = true;');
+    const loading = screens();
+    assert.ok(!loading.detail.includes('studio-ad-missing') && !loading.detail.includes('not in your list any more'), loading.detail);
+    assert.ok(loading.detail.includes('data-testid="studio-ad-loading"') && loading.detail.includes('Loading your requests…'));
+    assert.ok(!loading.list.includes('You have no ad requests yet') && loading.list.includes('data-testid="studio-ads-loading"'), loading.list);
+    assert.ok(!loading.classic.includes('Activate Ads Studio') && !loading.classic.includes('Your subscription has ended'), loading.classic);
+    assert.ok(!loading.needs.includes('plan'), 'no "Your plan has ended" on Home yet');
+    assert.ok(!loading.pages.includes('studio-pg-plan-ended') && loading.pages.includes('data-testid="studio-pg-loading"'), loading.pages);
+    // The load settled and the rows still say so: the real wording.
+    run('_serverLiveSync.startupLoadPending = false;');
+    const settled = screens();
+    assert.ok(settled.detail.includes('data-testid="studio-ad-missing"') && settled.detail.includes('This request is not in your list any more.'));
+    assert.ok(settled.list.includes('data-testid="studio-ads-empty"') && settled.list.includes('You have no ad requests yet'));
+    assert.ok(settled.classic.includes('Activate Ads Studio'), settled.classic);
+    assert.ok(settled.needs.includes('plan'));
+    assert.ok(settled.pages.includes('data-testid="studio-pg-plan-ended"'));
+    // A new sign-in (a new session) is never left "loading".
+    run('_serverLiveSync.startupLoadPending = true; advanceServerSessionEpoch();');
+    assert.equal(run('adsStudioStartupLoading()'), false);
+  });
+
+  await test('r7 N n=6: a reload within 2 s (throttled boot) replays a ?modal=&id= link after the first catch-up tick, so a record the cache lacked still opens', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    addressBar(sandbox, '/receipts?modal=receipt&id=R1');
+    run("_bootModalParams = { modal: 'receipt', id: 'R1' };");  // captured when the page loaded
+    const timers = [];
+    sandbox.setTimeout = fn => { timers.push(fn); return timers.length; };
+    const runTimers = () => timers.splice(0).forEach(fn => fn());
+    const me = { id: 'admin', role: 'Admin', permissions: {}, name: 'Admin' };
+    Object.assign(sandbox, {
+      initIndexedDB: async () => null, loadState: () => null, apiHealthCheck: async () => true, apiAuthMe: async () => me,
+      activateServerCollectionStorage() {}, activateAnonymousServerCollectionStorage() {}, setupMobileRuntime: async () => {},
+      updateMobileServerReachability() {}, setMobileColdStartBlocked() {}, initializeNativeSessionProtection: async () => true,
+      isRefreshThrottled: () => true  // the tab booted less than 2 s ago
+    });
+    state.serverModeOverride = 'server';
+    state.receipts = [];  // R1 was made by a colleague: not in this device's cache
+    let finishTick = null;
+    sandbox.serverLiveSyncOnce = () => new Promise(resolve => { finishTick = resolve; });
+    const opened = [];
+    sandbox.editReceipt = id => {
+      opened.push(id);
+      const receipt = state.receipts.find(row => row.id === id);
+      if (receipt) { state.activeModal = 'receipt'; state.modalData = receipt; }
+    };
+    await run('init()');
+    assert.equal(sandbox.window.location.search, '', 'the address was rewritten to the view');
+    assert.equal(typeof finishTick, 'function', 'the first catch-up tick is running');
+    runTimers();
+    assert.deepEqual(opened, [], 'nothing is opened against the cache alone');  // before: R1 tried, not found, dropped
+    assert.equal(run('_serverLiveSync.startupLoadPending'), true, 'the screens know the load is not done (n=5)');
+    state.receipts = [{ id: 'R1', customerId: 'c1' }];  // the tick brings it
+    finishTick({ ok: true });
+    await settle(); await settle();
+    runTimers();
+    assert.deepEqual(opened, ['R1']);
+    assert.equal(state.activeModal, 'receipt');
+    assert.equal(run('_serverLiveSync.startupLoadPending'), false);
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }

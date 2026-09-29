@@ -435,7 +435,7 @@ function studioHomeNeeds(requests, wallet) {
   const items = [];
   const usd = wallet && wallet.usd && typeof wallet.usd === 'object' ? wallet.usd : null;
   const available = usd ? studioDataMinor(usd.availableMinor) : null;
-  if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded()) {
+  if (!adsStudioCanUse() && adsStudioCanCreate() && studioHomePlanEnded() && !adsStudioStartupLoading()) {
     items.push({
       key: 'plan', icon: 'badge-alert', tone: 'orange',
       title: adsStudioText('Your plan has ended', 'انتهى اشتراكك'),

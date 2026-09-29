@@ -449,7 +449,10 @@ function renderStudioPagesBody(route) {
   if (!studioPgServer()) {
     body = `<section class="studio-pg-card" data-testid="studio-pg-offline"><p class="studio-pg-note">${studioEsc(studioPgText('Pages and replies need the connection to Albayan. Sign in to the online workspace.', 'الصفحات والردود تحتاج الاتصال بالبيان. سجّل الدخول إلى مساحة العمل عبر الإنترنت.'))}</p></section>`;
   } else if (!studioPgCanUse()) {
-    body = renderStudioPgPlanEnded();
+    // A renewed plan may not be in the device cache before the first load settles.
+    body = typeof adsStudioStartupLoading === 'function' && adsStudioStartupLoading()
+      ? `<section class="studio-pg-card" data-testid="studio-pg-loading" aria-busy="true"><p class="studio-pg-note">${studioEsc(studioPgText('Loading your plan…', 'جارٍ تحميل اشتراكك…'))}</p></section>`
+      : renderStudioPgPlanEnded();
   } else if (view.section === 'pages') {
     body = view.id === 'link' ? renderStudioPgLink() : renderStudioPgPages();
   } else if (view.section === 'rules') {
