@@ -4303,6 +4303,13 @@ function socialErrorDetail(error, fallbackEn, fallbackAr) {
   return text;
 }
 
+// No answer from the server itself (a timeout, a lost connection, a gateway 5xx without the server's
+// words): the write may have landed, so "try again" from a fresh editor could make a second copy.
+function socialAnswerLost(error) {
+  const status = Number(error?.status || 0);
+  return !error?.payload?.detail && !(status >= 400 && status < 500);
+}
+
 // A failed post's problem in plain words, by the server's errorClass (social_studio.POST_ERROR_CLASSES);
 // Meta's raw lastError stays in a details line. Same five pairs as 15o STUDIO_PG_POST_ERRORS (checked).
 const SOCIAL_POST_ERROR_TEXTS = Object.freeze({
@@ -4995,9 +5002,12 @@ async function socialComposerSave(action) {
     _social.screen = 'post-done';
     socialRefreshNow();
   } catch (e) {
-    // Also after Back or a keystroke meanwhile (review loop r4 #32): nothing was saved, so it is said.
+    // Also after Back or a keystroke meanwhile (review loop r4 #32): a refusal saved nothing, so it is said.
     if (!socialStudioContextIsCurrent(context)) return;
-    showNotification(socialText('Could not save the post', 'تعذر حفظ المنشور'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
+    // After Back with no answer the post may be saved, and a new editor has a new operationId the server
+    // cannot match: say "check Posts", never "try again" (a retry in this editor reuses its operationId).
+    if (!sameDraft() && socialAnswerLost(e)) showNotification(socialText('The answer did not arrive', 'لم يصل الرد'), socialText('The post may have been saved. Check Posts before writing it again.', 'ربما حُفظ المنشور. تحقق من المنشورات قبل كتابته مرة أخرى.'), 'warning');
+    else showNotification(socialText('Could not save the post', 'تعذر حفظ المنشور'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
     if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }
@@ -5344,8 +5354,10 @@ async function socialRuleSave() {
     _social.screen = '';
     socialRefreshNow();
   } catch (e) {
-    if (!socialStudioContextIsCurrent(context)) return;  // after Back too (review loop r4 #32): nothing was saved
-    showNotification(socialText('Could not save the rule', 'تعذر حفظ القاعدة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
+    if (!socialStudioContextIsCurrent(context)) return;  // after Back too (review loop r4 #32): a refusal saved nothing
+    // After Back with no answer the rule may be saved: "check the rules", never "try again" (a second copy).
+    if (!isCurrent() && socialAnswerLost(e)) showNotification(socialText('The answer did not arrive', 'لم يصل الرد'), socialText('The rule may have been saved. Check the rules before writing it again.', 'ربما حُفظت القاعدة. تحقق من القواعد قبل كتابتها مرة أخرى.'), 'warning');
+    else showNotification(socialText('Could not save the rule', 'تعذر حفظ القاعدة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
     if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
   }

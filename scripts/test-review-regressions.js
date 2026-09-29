@@ -216,6 +216,40 @@ async function main() {
     f.gates[0].reject(f.refusal('publicReply must be 1000 characters or fewer'));
     await op;
     assert.deepEqual(f.notes.map(n => [n.title, n.type]), [['Could not save the rule', 'error']]);
+    // Schedule, Back, the answer is lost (the 20 s timeout, a dropped connection, a gateway 5xx): the post
+    // may be saved and a new editor has a new operationId, so it must not say "Please try again".
+    const lost = [Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }), new TypeError('Failed to fetch'),
+      Object.assign(new Error('Gateway Timeout'), { status: 504, payload: '<html>504</html>' })];
+    for (const error of lost) {
+      f = socialFixture();
+      f.compose('schedule');
+      op = f.sandbox.socialComposerSave('schedule');
+      f.sandbox.socialComposerClose();
+      f.gates[0].reject(error);
+      await op;
+      assert.equal(f.notes.length, 1, `${error.name}: ${JSON.stringify(f.notes)}`);
+      assert.equal(f.notes[0].type, 'warning');
+      assert.equal(f.notes[0].title, 'The answer did not arrive');
+      assert.doesNotMatch(f.notes[0].message, /try again/i);
+      assert.match(f.notes[0].message, /may have been saved/);
+    }
+    // Still in the editor, a lost answer keeps "try again": the retry reuses the same operationId.
+    f = socialFixture();
+    f.compose('schedule');
+    op = f.sandbox.socialComposerSave('schedule');
+    f.gates[0].reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+    await op;
+    assert.deepEqual(f.notes.map(n => [n.title, n.message, n.type]), [['Could not save the post', 'Please try again.', 'error']]);
+    // A new rule, Back, the answer is lost: the same warning, never "Please try again" (no second rule).
+    f = socialFixture();
+    f.run("_social.ruleDraft = { ...socialNewRule(), id: '', name: 'Rule B', trigger: 'every', publicReply: 'Thank you' }; _social.screen = 'rule';");
+    op = f.sandbox.socialRuleSave();
+    f.sandbox.socialRuleClose();
+    f.gates[0].reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+    await op;
+    assert.equal(f.calls[0].method, 'POST');
+    assert.deepEqual(f.notes.map(n => [n.title, n.type]), [['The answer did not arrive', 'warning']]);
+    assert.match(f.notes[0].message, /rule may have been saved/);
     // Another session meanwhile stays silent (the late-session rule).
     f = socialFixture();
     f.compose('now');
