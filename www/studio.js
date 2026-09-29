@@ -1383,8 +1383,12 @@ async function adsStudioReloadCampaign(id) {
 // a lost reply replays the same request instead of piling up duplicates on
 // the admin's pending list.
 let _adsStudioChargeIdem = { fingerprint: '', key: '' };
-function adsStudioOpenChargeForm() {
-  // The studio shell has no wallet page: the charge form lives on the Overview
+function adsStudioOpenChargeForm(amountMinor = 0) {
+  // The v2 customer layout draws its screens from the address, never from the classic tab: the paywall's
+  // "Charge wallet" opens its Add money flow for the plan (LYD) instead (PLAN J1).
+  if (typeof studioV2Frame === 'function' && studioV2Frame() === 'customer' && typeof studioWalletOpenAdd === 'function'
+    && studioWalletOpenAdd('plan', Math.max(0, Number(amountMinor) || 0))) return;
+  // The classic studio shell has no wallet page: the charge form lives on the Overview
   // tab, or under the activate card for a lapsed customer.
   _adsStudioActiveTab = 'dashboard';
   if (state.currentView !== 'ads-studio') navigateTo('ads-studio'); else render();
@@ -12425,7 +12429,9 @@ function studioHelpCleanTicket(raw) {
     // staff only (never drawn as a person: the owner id is used for the audited contact link only)
     ownerId: typeof raw.ownerId === 'string' && Security.isValidRecordId(raw.ownerId) ? raw.ownerId : '',
     overdue: raw.overdue === true,
-    messageCount: Number.isSafeInteger(raw.messageCount) ? raw.messageCount : 0
+    messageCount: Number.isSafeInteger(raw.messageCount) ? raw.messageCount : 0,
+    // a TikTok request (15r): its service part, so the staff thread can draw the team's steps
+    tiktok: raw.kind === 'tiktok_request' && typeof studioTikTokCleanRequest === 'function' ? studioTikTokCleanRequest(raw) : null
   };
 }
 
@@ -12803,7 +12809,8 @@ function studioHelpDraftRelated(value) {
     draft.relatedType = option.type;
     draft.relatedId = option.id;
     draft.relatedLabel = option.label;
-    if (!draft.category) draft.category = option.category;
+    // A payment question goes to an admin (the server routes any ticket about a payment there): the chip says so.
+    if (!draft.category || option.type === 'payment') draft.category = option.category;
   }
   studioHelpRedraw();
 }
@@ -13851,6 +13858,13 @@ function studioStaffRetryThread(id) {
   studioHelpRedraw();
 }
 
+// A TikTok step saved from the thread (15r studioTikTokDeskSend hands over the updated request): read the
+// thread again, so the new state, the team's note and the ticket's status (and its list row) show.
+function studioStaffTikTokChanged(request) {
+  const ticketId = String((request && request.id) || '');
+  if (STUDIO_HELP_TICKET_ID_RE.test(ticketId)) studioStaffRetryThread(ticketId);
+}
+
 function studioStaffReply(id) {
   studioStaffScope();
   const key = String(id || '');
@@ -13944,14 +13958,20 @@ function renderStudioStaffThread(id) {
   const contactHtml = contact.url
     ? `<a class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp-link" href="${studioEsc(contact.url)}" target="_blank" rel="noopener noreferrer">${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Open WhatsApp', 'افتح واتساب'))}</span></a>`
     : `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp" onclick="studioStaffContact('${id}')"${contact.loading ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Message on WhatsApp', 'راسل على واتساب'))}</span></button>`;
+  // A TikTok request (P5-02) moves through the team's steps (Start / Done / Decline, each with a note for the
+  // customer, 15r). While it is open or in progress the plain Resolve is hidden: the server would end the
+  // service as "declined" (studio_support._finish_tiktok_service), even for work the team finished.
+  const tiktok = ticket.tiktok && typeof renderStudioTikTokDeskActions === 'function' ? ticket.tiktok : null;
+  const tiktokActive = !!tiktok && (tiktok.state === 'open' || tiktok.state === 'in_progress');
   return `
-            <div class="studio-help-thread" data-testid="studio-staff-thread" data-ticket="${studioEsc(id)}" data-status="${studioEsc(ticket.status)}">
+            <div class="studio-help-thread" data-testid="studio-staff-thread" data-ticket="${studioEsc(id)}" data-status="${studioEsc(ticket.status)}"${tiktok ? ` data-tiktok-state="${studioEsc(tiktok.state)}"` : ''}>
               ${studioHelpRelatedLinkStaff(ticket)}
               ${renderStudioHelpMessages(slot.messages, true)}
               ${renderStudioHelpReplyForm(id, reply, `studioStaffReplySend('${id}');`, 'studio-staff-reply')}
+              ${tiktok ? renderStudioTikTokDeskActions(tiktok, 'studioStaffTikTokChanged') : ''}
               <div class="studio-help-actions" data-testid="studio-staff-status-actions">
                 ${statusButton('waiting_customer', adsStudioText('Waiting for the customer', 'بانتظار العميل'), 'studio-staff-status-waiting')}
-                ${statusButton('resolved', adsStudioText('Resolve', 'حلّ التذكرة'), 'studio-staff-status-resolved')}
+                ${tiktokActive ? '' : statusButton('resolved', adsStudioText('Resolve', 'حلّ التذكرة'), 'studio-staff-status-resolved')}
                 ${ticket.status === 'resolved' ? statusButton('open', adsStudioText('Reopen', 'أعد الفتح'), 'studio-staff-status-open') : ''}
                 ${contactHtml}
               </div>
@@ -14222,8 +14242,9 @@ function studioPagesClassicHandover(tab) {
 //   HAND, never a connection. renderStudioTikTokSection(route) draws the request form and the
 //   customer's own requests (state words from the server), renderStudioTikTokEntry() is the Help
 //   screen's row to it, studioTikTokOpen() goes there (?tab=help&section=tiktok) and
-//   renderStudioTikTokDeskRows(items, options) draws the team's compact rows for the desk
-//   (studio-staff.js calls it; the status change POSTs through studioTikTokDeskSend).
+//   renderStudioTikTokDeskRows(items, options) draws the team's compact rows, and
+//   renderStudioTikTokDeskActions(request, onChange) the step buttons that the staff ticket thread (15n
+//   renderStudioStaffThread) draws for a TikTok request; the status change POSTs through studioTikTokDeskSend.
 // - The bell's unread count (P3-05): the pulse hook (15g) polls GET /api/studio/activity every 30 s
 //   while the page is visible; a moved unreadCount asks the Inbox (15n) to read again, and that read
 //   redraws the badge. Started from the /me listener whenever the customer layout is on.
@@ -14801,7 +14822,10 @@ function renderStudioTikTokDeskRows(items, options = {}) {
   }).join('')}</ul>`;
 }
 
-function renderStudioTikTokDeskActions(request) {
+// The step buttons (and the open note form) of one request. `onChange` (optional) names the function called
+// after a step is saved, as the rows' option does; the staff ticket thread (15n) passes its own.
+function renderStudioTikTokDeskActions(request, onChange) {
+  if (onChange !== undefined) _studioTikTokDesk.onChange = /^[A-Za-z_$][\w$]*$/.test(String(onChange || '')) ? String(onChange) : '';
   const steps = STUDIO_TIKTOK_DESK_STEPS[request.state] || [];
   if (!steps.length) return '';
   const editing = _studioTikTokDesk.editing;

@@ -2862,7 +2862,8 @@ class TestStudioWithdraw:
         assert replay.status_code == 200, replay.text
         # The reviewer's retry of the crashed approval finds a Draft: nothing is captured again.
         retry = _review_campaign(actors, "withdraw_capture", sent["lastModified"], "Approved", "withdraw-capture-approve")
-        assert retry.status_code == 409, retry.text
+        # 404 like an unknown id: a customer's private draft is never confirmed to a reviewer (review loop r3 n14).
+        assert retry.status_code == 404, retry.text
         assert _campaign_money(actors, user["id"], "withdraw_capture") == money
         assert len(_audit_rows("withdraw_capture", "wallet_release")) == 1
         _assert_wallet_identity(cookies, user["id"])
@@ -2935,7 +2936,8 @@ class TestStudioApprovalSelfRelease:
         assert len(released) == 1 and released[0]["operationId"] == "self-release-back-approve", released
         # A retry of the same approval changes nothing.
         retry = _review_campaign(actors, "self_release_back", sent["lastModified"], "Approved", "self-release-back-approve")
-        assert retry.status_code == 409, retry.text
+        # Sent back = a private request again: 404 like an unknown id (review loop r3 n14).
+        assert retry.status_code == 404, retry.text
         assert _campaign_money(actors, user["id"], "self_release_back") == money
         usd = _assert_wallet_identity(cookies, user["id"])
         assert usd["beingReturnedMinor"] == 0 and usd["availableMinor"] == before

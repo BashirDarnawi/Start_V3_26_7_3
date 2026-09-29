@@ -11,6 +11,8 @@ Routes in this first part:
   never deletes) with the value before and after, in one transaction.
 * ``GET /api/studio/admin/diagnostics`` (admin only): counts, baselines and top-up presets,
   no personal data.
+* ``GET /api/studio/admin/payments/due`` (admin only): ``{dueAt: {createdAt: due}}`` of the charge
+  requests waiting for confirmation (working minutes), for the Payments waiting page's flag.
 * ``POST /api/studio/test/seed-results`` exists ONLY in the disposable e2e server (P2-13,
   studio_e2e_seed.py); with its flag on and a real database the router refuses to build.
 
@@ -30,7 +32,7 @@ from ...rate_limiter import check_rate_limit
 from .ad_campaign_actions import AD_CAMPAIGN_COLLECTION
 from .studio_alert_out import create_studio_alert_out_router
 from .studio_alerts_meta import meta_connection_flag
-from .studio_diagnostics import read_diagnostics
+from .studio_diagnostics import pending_payment_due_times, read_diagnostics
 from .studio_e2e_seed import create_studio_e2e_seed_router
 from .studio_errors import studio_error
 from .studio_facts import create_studio_checks_router
@@ -177,6 +179,14 @@ def create_studio_router(
         report["jobs"] = jobs_heartbeat()  # studio jobs loop heartbeat, late after 5 min (studio_jobs.py, P1-21)
         report["generatedAt"] = _iso_now()
         return report
+
+    @router.get("/admin/payments/due")
+    def get_studio_payment_due_times(user: dict[str, Any] = Depends(current_user_dependency)):
+        """(admin only) ``{dueAt: {createdAt: due}}``: when each waiting charge request is due, in
+        working minutes (studio_diagnostics.pending_payment_due_times), for "Past the target"."""
+        require_admin(user)
+        rate_limit(user, "payment-due", DIAGNOSTICS_READS_PER_MINUTE)
+        return {"dueAt": pending_payment_due_times()}
 
     router.include_router(create_studio_checks_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /admin/facts + checks (studio_facts.py)
     router.include_router(create_studio_summaries_router(current_user_dependency=current_user_dependency, require_same_origin=require_same_origin, ctx=ctx))  # /wallet/summary + /campaigns/summary (studio_wallet.py, studio_results.py)

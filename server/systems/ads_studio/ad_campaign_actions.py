@@ -1732,6 +1732,17 @@ def create_ad_campaign_actions_router(
             raise HTTPException(status_code=400, detail="Invalid operationId")
         note = ctx["sanitize_str"](str(body.note or ""), 2000)
         reason_code = _review_reason_code(ctx, decision, body.reviewReasonCode)
+        reviewer_id = str(user.get("id") or "")
+        if (
+            str(user.get("role") or "").lower() != "admin"
+            and str(current.get("status") or "Draft") not in REVIEWER_VISIBLE_STATUSES
+            and not (operation_id and str(current.get("lastReviewOperationId") or "") == operation_id
+                     and str(current.get("reviewedBy") or "") == reviewer_id)
+        ):
+            # Same rule as the single GET and the link/stop routes: never confirm a customer's private
+            # draft through a 409 (an unknown id is 404). Only the reviewer's own retry of the review
+            # that sent it back replays below (its capture release and tombstone).
+            raise HTTPException(status_code=404, detail="Campaign request not found")
         if operation_id and str(current.get("lastReviewOperationId") or "") == operation_id:
             if (
                 str(current.get("reviewDecision") or "") != decision

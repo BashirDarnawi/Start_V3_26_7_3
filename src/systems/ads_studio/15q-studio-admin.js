@@ -347,8 +347,11 @@ function studioAdminPaymentsWant(force = false) {
   }
 }
 
+const STUDIO_ADMIN_PAYMENT_DUE_PATH = '/api/studio/admin/payments/due';
+
 function studioAdminPaymentsRefresh() {
   studioAdminPaymentsWant(true);
+  studioAdminRead('paymentDue', STUDIO_ADMIN_PAYMENT_DUE_PATH, true);
   studioAdminRedraw();
 }
 
@@ -356,6 +359,10 @@ function renderStudioAdminPayments() {
   studioAdminPaymentsWant();
   const targets = studioAdminRead('targets', '/api/studio/admin/settings/targets');
   const minutes = targets.value && targets.value.value ? Number(targets.value.value.paymentConfirmMinutes) : 240;
+  // "Past the target" counts WORKING minutes (evenings, weekends and holidays do not count): the server's due
+  // time of each waiting request (studio_hours, the diagnostics rule), keyed by its createdAt; no flag without one.
+  const dueRead = studioAdminRead('paymentDue', STUDIO_ADMIN_PAYMENT_DUE_PATH);
+  const dueAt = dueRead.value && dueRead.value.dueAt && typeof dueRead.value.dueAt === 'object' ? dueRead.value.dueAt : {};
   const pending = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : null;
   // A failed read is said (with Try again), never shown as "Reading…" for ever.
   const failed = pending === null && typeof _adsStudioWalletLoadFailed !== 'undefined' && _adsStudioWalletLoadFailed === true;
@@ -363,8 +370,8 @@ function renderStudioAdminPayments() {
   const rows = (pending || []).map(entity => {
     const data = entity && entity.data ? entity.data : {};
     const createdAt = String(data.createdAt || '');
-    const waitedMinutes = createdAt && Number.isFinite(Date.parse(createdAt)) ? (Date.now() - Date.parse(createdAt)) / 60000 : null;
-    const overdue = waitedMinutes !== null && waitedMinutes > (Number.isFinite(minutes) ? minutes : 240);
+    const due = createdAt && Object.prototype.hasOwnProperty.call(dueAt, createdAt) ? Date.parse(String(dueAt[createdAt] || '')) : NaN;
+    const overdue = Number.isFinite(due) && Date.now() > due;
     const wait = createdAt ? `<p class="studio-desk-note studio-admin-payment-wait" data-testid="studio-admin-payment-wait" data-overdue="${overdue ? '1' : '0'}">${studioEsc(adsStudioText(`Waiting since ${studioAdminWhen(createdAt)} (${studioAdminAgo(createdAt)})`, `بانتظار التأكيد منذ ${studioAdminWhen(createdAt)} (${studioAdminAgo(createdAt)})`))}${overdue ? ` <span class="studio-flag">${studioEsc(adsStudioText('Past the target', 'تجاوز الهدف'))}</span>` : ''}</p>` : '';
     return `<li class="studio-admin-payment">${typeof _adsStudioWalletRequestRow === 'function' ? _adsStudioWalletRequestRow(entity, true) : ''}${wait}</li>`;
   });

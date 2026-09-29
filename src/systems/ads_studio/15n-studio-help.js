@@ -267,7 +267,9 @@ function studioHelpCleanTicket(raw) {
     // staff only (never drawn as a person: the owner id is used for the audited contact link only)
     ownerId: typeof raw.ownerId === 'string' && Security.isValidRecordId(raw.ownerId) ? raw.ownerId : '',
     overdue: raw.overdue === true,
-    messageCount: Number.isSafeInteger(raw.messageCount) ? raw.messageCount : 0
+    messageCount: Number.isSafeInteger(raw.messageCount) ? raw.messageCount : 0,
+    // a TikTok request (15r): its service part, so the staff thread can draw the team's steps
+    tiktok: raw.kind === 'tiktok_request' && typeof studioTikTokCleanRequest === 'function' ? studioTikTokCleanRequest(raw) : null
   };
 }
 
@@ -645,7 +647,8 @@ function studioHelpDraftRelated(value) {
     draft.relatedType = option.type;
     draft.relatedId = option.id;
     draft.relatedLabel = option.label;
-    if (!draft.category) draft.category = option.category;
+    // A payment question goes to an admin (the server routes any ticket about a payment there): the chip says so.
+    if (!draft.category || option.type === 'payment') draft.category = option.category;
   }
   studioHelpRedraw();
 }
@@ -1693,6 +1696,13 @@ function studioStaffRetryThread(id) {
   studioHelpRedraw();
 }
 
+// A TikTok step saved from the thread (15r studioTikTokDeskSend hands over the updated request): read the
+// thread again, so the new state, the team's note and the ticket's status (and its list row) show.
+function studioStaffTikTokChanged(request) {
+  const ticketId = String((request && request.id) || '');
+  if (STUDIO_HELP_TICKET_ID_RE.test(ticketId)) studioStaffRetryThread(ticketId);
+}
+
 function studioStaffReply(id) {
   studioStaffScope();
   const key = String(id || '');
@@ -1786,14 +1796,20 @@ function renderStudioStaffThread(id) {
   const contactHtml = contact.url
     ? `<a class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp-link" href="${studioEsc(contact.url)}" target="_blank" rel="noopener noreferrer">${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Open WhatsApp', 'افتح واتساب'))}</span></a>`
     : `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp" onclick="studioStaffContact('${id}')"${contact.loading ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Message on WhatsApp', 'راسل على واتساب'))}</span></button>`;
+  // A TikTok request (P5-02) moves through the team's steps (Start / Done / Decline, each with a note for the
+  // customer, 15r). While it is open or in progress the plain Resolve is hidden: the server would end the
+  // service as "declined" (studio_support._finish_tiktok_service), even for work the team finished.
+  const tiktok = ticket.tiktok && typeof renderStudioTikTokDeskActions === 'function' ? ticket.tiktok : null;
+  const tiktokActive = !!tiktok && (tiktok.state === 'open' || tiktok.state === 'in_progress');
   return `
-            <div class="studio-help-thread" data-testid="studio-staff-thread" data-ticket="${studioEsc(id)}" data-status="${studioEsc(ticket.status)}">
+            <div class="studio-help-thread" data-testid="studio-staff-thread" data-ticket="${studioEsc(id)}" data-status="${studioEsc(ticket.status)}"${tiktok ? ` data-tiktok-state="${studioEsc(tiktok.state)}"` : ''}>
               ${studioHelpRelatedLinkStaff(ticket)}
               ${renderStudioHelpMessages(slot.messages, true)}
               ${renderStudioHelpReplyForm(id, reply, `studioStaffReplySend('${id}');`, 'studio-staff-reply')}
+              ${tiktok ? renderStudioTikTokDeskActions(tiktok, 'studioStaffTikTokChanged') : ''}
               <div class="studio-help-actions" data-testid="studio-staff-status-actions">
                 ${statusButton('waiting_customer', adsStudioText('Waiting for the customer', 'بانتظار العميل'), 'studio-staff-status-waiting')}
-                ${statusButton('resolved', adsStudioText('Resolve', 'حلّ التذكرة'), 'studio-staff-status-resolved')}
+                ${tiktokActive ? '' : statusButton('resolved', adsStudioText('Resolve', 'حلّ التذكرة'), 'studio-staff-status-resolved')}
                 ${ticket.status === 'resolved' ? statusButton('open', adsStudioText('Reopen', 'أعد الفتح'), 'studio-staff-status-open') : ''}
                 ${contactHtml}
               </div>

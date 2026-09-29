@@ -8,8 +8,9 @@
 //   HAND, never a connection. renderStudioTikTokSection(route) draws the request form and the
 //   customer's own requests (state words from the server), renderStudioTikTokEntry() is the Help
 //   screen's row to it, studioTikTokOpen() goes there (?tab=help&section=tiktok) and
-//   renderStudioTikTokDeskRows(items, options) draws the team's compact rows for the desk
-//   (studio-staff.js calls it; the status change POSTs through studioTikTokDeskSend).
+//   renderStudioTikTokDeskRows(items, options) draws the team's compact rows, and
+//   renderStudioTikTokDeskActions(request, onChange) the step buttons that the staff ticket thread (15n
+//   renderStudioStaffThread) draws for a TikTok request; the status change POSTs through studioTikTokDeskSend.
 // - The bell's unread count (P3-05): the pulse hook (15g) polls GET /api/studio/activity every 30 s
 //   while the page is visible; a moved unreadCount asks the Inbox (15n) to read again, and that read
 //   redraws the badge. Started from the /me listener whenever the customer layout is on.
@@ -587,7 +588,10 @@ function renderStudioTikTokDeskRows(items, options = {}) {
   }).join('')}</ul>`;
 }
 
-function renderStudioTikTokDeskActions(request) {
+// The step buttons (and the open note form) of one request. `onChange` (optional) names the function called
+// after a step is saved, as the rows' option does; the staff ticket thread (15n) passes its own.
+function renderStudioTikTokDeskActions(request, onChange) {
+  if (onChange !== undefined) _studioTikTokDesk.onChange = /^[A-Za-z_$][\w$]*$/.test(String(onChange || '')) ? String(onChange) : '';
   const steps = STUDIO_TIKTOK_DESK_STEPS[request.state] || [];
   if (!steps.length) return '';
   const editing = _studioTikTokDesk.editing;

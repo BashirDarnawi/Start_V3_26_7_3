@@ -2174,10 +2174,8 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
-      // Paywall sheet (2026-09 redesign). Money rules are unchanged: plans
-      // come only from the server catalog, purchases run through
-      // handleSubscribePlan (idempotent, one at a time), and a short wallet
-      // can never buy — it is sent to Charge wallet instead.
+      // Paywall sheet: plans only from the server catalog, purchases through
+      // handleSubscribePlan; a short wallet is sent to Charge wallet (the shortfall).
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
@@ -2201,7 +2199,7 @@ function renderModal() {
         return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
       };
       const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
-      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(${Math.max(0, (Number(lockPlans[0]?.priceMinor) || 0) - lydBalanceMinor)}); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
 
       const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));

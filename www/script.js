@@ -3952,8 +3952,7 @@ function renderSubscriptionStatusBadge(serviceId, isRTL) {
 // first. Server catalog when available; legacy client offer as fallback.
 function getPlansForService(serviceId) {
   const sid = String(serviceId || '');
-  // Plan purchases are server-only. If the app dropped to local mode, cached
-  // cards would offer a purchase that always fails — show the legacy path.
+  // Plan purchases are server-only: local mode shows the legacy path.
   if (!isServerModeEnabled()) return [];
   const plans = Array.isArray(state.subscriptionPlans) ? state.subscriptionPlans : [];
   const matching = plans.filter(p => p && Array.isArray(p.serviceIds) && p.serviceIds.includes(sid));
@@ -3970,17 +3969,12 @@ function showSubscriptionModal(serviceId, subscribeToId = serviceId, planId = ''
   const serviceName = state.language === 'ar' ? service.nameAr : service.name;
 
   state.activeModal = 'subscription-lock';
-  // Idempotency keys prevent double-charging if the user retries; each plan
-  // choice gets its own stable key for this modal session.
+  // Stable idempotency keys for this sheet: a retry never charges twice.
   const idem = Security.generateSecureId('idem');
   state.modalData = { serviceId, serviceName, subscribeToId, planId: String(planId || ''), idempotencyKey: idem, planIdemKeys: {} };
   renderModal();
-  // Fetch the sellable plans, then repaint the open modal with the chooser.
   if (typeof refreshSubscriptionPlans === 'function' && isServerModeEnabled()) {
-    // FORCE a fresh catalog: this is the moment money is about to be decided,
-    // and the server re-reads its own catalog inside the purchase transaction.
-    // A session-cached price would show one number and charge another after
-    // the owner changes prices.
+    // FORCE a fresh catalog: the shown price is the one the server checks (expectedPriceMinor).
     refreshSubscriptionPlans(true).then(() => {
       if (state.activeModal === 'subscription-lock') renderModal();
     }).catch(() => {});
@@ -3998,9 +3992,7 @@ async function handleSubscribePlan(planId, navigateToId, shownPriceMinor) {
   if (!state.currentUser?.id) return;
   const pid = String(planId || '');
   if (!pid) return;
-  // One purchase at a time. The per-plan idempotency key stops a double tap on
-  // the SAME card, but two different cards carry two different keys — without
-  // this guard an impatient tap on each would commit both.
+  // One purchase at a time: two cards carry two keys, so a tap on each would buy both.
   if (_subscribePlanBusy) return;
   _subscribePlanBusy = true;
   const keys = state.modalData?.planIdemKeys || {};
@@ -4018,13 +4010,16 @@ async function handleSubscribePlan(planId, navigateToId, shownPriceMinor) {
     );
     if (navigateToId) openServiceById(navigateToId);
   } catch (error) {
-    const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
-    if (/price changed/i.test(String(detail))) {  // the sheet shows the old price: reload the catalog in place
+    const detail = String(error?.payload?.detail || error?.message || '');
+    if (/price changed/i.test(detail)) {  // the sheet shows the old price: reload the catalog in place
       Promise.resolve(refreshSubscriptionPlans(true)).then(() => { if (state.activeModal === 'subscription-lock') renderModal(); }).catch(() => {});
     }
+    const ar = state.language === 'ar';  // the server's refusals in Arabic, never raw English
+    const known = [['Insufficient', 'الرصيد لا يكفي؛ اشحن المحفظة أولاً.'], ['Plan is no', 'الباقة غير متاحة.'], ['Subscription is prepaid', 'اشتراكك مدفوع مسبقاً لمدة طويلة.'],
+      ['Service is already', 'الخدمة مفعّلة بلا انتهاء.'], ['The plan price', 'تغيّر سعر الباقة؛ راجع السعر.'], ['A free plan', 'تُجدَّد الباقة المجانية قرب نهايتها.']].find(([en]) => detail.startsWith(en));
     showNotification(
-      state.language === 'ar' ? 'تعذر الاشتراك' : 'Could not subscribe',
-      String(detail) || (state.language === 'ar' ? 'حاول مرة أخرى.' : 'Please try again.'),
+      ar ? 'تعذر الاشتراك' : 'Could not subscribe',
+      ar ? (/[؀-ۿ]/.test(detail) ? detail : known ? known[1] : 'حاول مرة أخرى.') : detail || 'Please try again.',
       'error'
     );
   } finally {
@@ -4040,7 +4035,6 @@ function openServiceById(id) {
 async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
   if (!state.currentUser?.id) return;
   try {
-    // If already active, just continue
     if (hasSubscription(subscribeToId)) {
       closeModal();
       openServiceById(navigateToId);
@@ -4051,11 +4045,9 @@ async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
     const idem = String(state.modalData?.idempotencyKey || '').trim() || Security.generateSecureId('idem');
     await SUBSCRIPTIONS.subscribe(state.currentUser.id, subscribeToId, { ...offer, idempotencyKey: idem });
 
-    // Optional legacy mirror (keeps older UI logic compatible)
     if (!isServerModeEnabled() && !Array.isArray(state.currentUser.subscriptions)) state.currentUser.subscriptions = [];
     if (!isServerModeEnabled() && !state.currentUser.subscriptions.includes(subscribeToId)) {
       state.currentUser.subscriptions.push(subscribeToId);
-      // persist into the actual user record too (not only session)
       await updateRecord(state.users, state.currentUser.id, { subscriptions: state.currentUser.subscriptions });
     }
 
@@ -4066,7 +4058,6 @@ async function handleSubscribe(subscribeToId, navigateToId = subscribeToId) {
       'success'
     );
 
-    // Now navigate to the originally clicked card
     openServiceById(navigateToId);
   } catch (e) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', e?.message || 'Failed to subscribe', 'error');
@@ -10411,8 +10402,8 @@ async function apiGetSubscriptionPlans() {
   return apiJson('/api/subscriptions/plans', { method: 'GET' });
 }
 
-async function apiPurchasePlan({ planId, idempotencyKey, userId }) {
-  const body = { planId, idempotencyKey };
+async function apiPurchasePlan({ planId, idempotencyKey, userId, expectedPriceMinor }) {
+  const body = { planId, idempotencyKey, expectedPriceMinor };
   if (userId) body.userId = userId;
   const identity = getServerSessionIdentity();
   const payload = await withRetry(() => apiJson('/api/subscriptions/purchase-plan', {
@@ -10441,9 +10432,7 @@ async function apiAdminSaveSubscriptionPlans(plans, expectedVersion = null) {
 // idempotency key so a response-loss retry replays the same result.
 async function apiTransferReceipt(payload) {
   const identity = getServerSessionIdentity();
-  // A stable body/idempotency key makes a response-loss retry safe: the server
-  // checks the receiptTransfer marker BEFORE the version-conflict check and
-  // replays the committed result instead of moving the same balance twice.
+  // The server checks its transfer marker before the version check: a retry replays.
   const response = await withRetry(() => apiJson('/api/receipts/transfers?include_media=false', {
     method: 'POST',
     body: payload
@@ -39644,10 +39633,8 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
-      // Paywall sheet (2026-09 redesign). Money rules are unchanged: plans
-      // come only from the server catalog, purchases run through
-      // handleSubscribePlan (idempotent, one at a time), and a short wallet
-      // can never buy — it is sent to Charge wallet instead.
+      // Paywall sheet: plans only from the server catalog, purchases through
+      // handleSubscribePlan; a short wallet is sent to Charge wallet (the shortfall).
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
@@ -39671,7 +39658,7 @@ function renderModal() {
         return isRTL ? `/ ${d} يوم` : `/ ${d} days`;
       };
       const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
-      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+      const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(${Math.max(0, (Number(lockPlans[0]?.priceMinor) || 0) - lydBalanceMinor)}); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
 
       const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));

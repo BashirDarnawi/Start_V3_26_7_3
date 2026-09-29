@@ -1371,8 +1371,8 @@ async function apiGetSubscriptionPlans() {
   return apiJson('/api/subscriptions/plans', { method: 'GET' });
 }
 
-async function apiPurchasePlan({ planId, idempotencyKey, userId }) {
-  const body = { planId, idempotencyKey };
+async function apiPurchasePlan({ planId, idempotencyKey, userId, expectedPriceMinor }) {
+  const body = { planId, idempotencyKey, expectedPriceMinor };
   if (userId) body.userId = userId;
   const identity = getServerSessionIdentity();
   const payload = await withRetry(() => apiJson('/api/subscriptions/purchase-plan', {
@@ -1401,9 +1401,7 @@ async function apiAdminSaveSubscriptionPlans(plans, expectedVersion = null) {
 // idempotency key so a response-loss retry replays the same result.
 async function apiTransferReceipt(payload) {
   const identity = getServerSessionIdentity();
-  // A stable body/idempotency key makes a response-loss retry safe: the server
-  // checks the receiptTransfer marker BEFORE the version-conflict check and
-  // replays the committed result instead of moving the same balance twice.
+  // The server checks its transfer marker before the version check: a retry replays.
   const response = await withRetry(() => apiJson('/api/receipts/transfers?include_media=false', {
     method: 'POST',
     body: payload

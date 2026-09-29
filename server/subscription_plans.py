@@ -13,7 +13,9 @@ One PLAN sells access to one or more services for a duration:
   ``service_payment`` row per purchase; bundle member rows carry
   ``priceMinor: 0`` and only stamp the informational ``planPriceMinor``.
 * Renewal = repurchase: each service extends from ``max(now, its current
-  expiry)`` — no lost days, capped by ``MAX_PLAN_STACK_DAYS``.
+  expiry)`` — no lost days, capped by ``MAX_PLAN_STACK_DAYS``. A FREE plan
+  (price 0) renews only while its service ends within one period (409
+  otherwise), so free rows never stack years ahead of a later price.
 
 Prices are server-authoritative: hardcoded defaults overlaid by an
 admin-saved, fully validated ``appSettings`` record (append-only history,
@@ -368,6 +370,10 @@ def plan_purchase_atomic(
             stack_limit = now_dt + timedelta(days=MAX_PLAN_STACK_DAYS)
             for sid in service_ids:
                 current_max = _max_active_expiry(conn, ctx, target_uid, sid, now_dt)
+                if price_minor == 0 and current_max is not None and current_max > now_dt + timedelta(days=duration_days):
+                    # A free plan is renewed near its end only (at most two periods ahead): stacked free
+                    # rows would keep the service for years after the owner prices the plan.
+                    raise HTTPException(status_code=409, detail="A free plan can only be renewed near its end")
                 start = max(now_dt, current_max or now_dt)
                 expires = start + timedelta(days=duration_days)
                 if expires > stack_limit:

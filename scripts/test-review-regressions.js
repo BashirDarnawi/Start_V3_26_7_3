@@ -629,6 +629,51 @@ async function main() {
       }
     }
   });
+  await test('paywall: the plan purchase carries the price shown on the card, so a changed price is refused (review loop r3 n15)', async () => {
+    const { sandbox } = loadBrowserSource();
+    const posts = [];
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiJson = async (path, options) => { posts.push({ path, body: JSON.parse(JSON.stringify(options.body)) }); return { subscriptions: [] }; };
+    await sandbox.handleSubscribePlan('svc:ad_maker', '', 5000);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].path, '/api/subscriptions/purchase-plan');
+    assert.equal(posts[0].body.expectedPriceMinor, 5000);  // before: dropped, so the server's 409 price check never ran
+    assert.equal(posts[0].body.planId, 'svc:ad_maker');
+  });
+  await test('paywall: an Arabic reader sees the server\'s plan refusals in Arabic, an English reader the server\'s words (review loop r3 n18)', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const notes = [];
+    let detail = '';
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.refreshSubscriptionPlans = async () => [];
+    sandbox.apiJson = async () => { throw Object.assign(new Error('Request failed'), { status: 409, payload: { detail } }); };
+    const arabic = {
+      'Insufficient wallet balance': 'الرصيد لا يكفي؛ اشحن المحفظة أولاً.',
+      'Plan is no longer sold': 'الباقة غير متاحة.',
+      'Plan is not available for subscription': 'الباقة غير متاحة.',
+      'Subscription is prepaid too far ahead': 'اشتراكك مدفوع مسبقاً لمدة طويلة.',
+      'Service is already active without expiry': 'الخدمة مفعّلة بلا انتهاء.',
+      'The plan price changed; reload the plans and try again': 'تغيّر سعر الباقة؛ راجع السعر.',
+      'A free plan can only be renewed near its end': 'تُجدَّد الباقة المجانية قرب نهايتها.',
+      'Something new the server says': 'حاول مرة أخرى.'
+    };
+    state.language = 'ar';
+    for (const [english, words] of Object.entries(arabic)) {
+      detail = english;
+      notes.length = 0;
+      await sandbox.handleSubscribePlan('svc:ad_maker', '', 100);
+      assert.equal(notes.length, 1, english);
+      assert.equal(notes[0].type, 'error');
+      assert.equal(notes[0].message, words, english);  // before: the raw English detail under an Arabic title
+      assert.ok(!/[A-Za-z]/.test(notes[0].title + notes[0].message), english);
+    }
+    state.language = 'en';
+    detail = 'Subscription is prepaid too far ahead';
+    notes.length = 0;
+    await sandbox.handleSubscribePlan('svc:ad_maker', '', 100);
+    assert.equal(notes[0].message, 'Subscription is prepaid too far ahead');
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

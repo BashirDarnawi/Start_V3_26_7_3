@@ -4954,6 +4954,23 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio v2 Add money for the plan: dinars all the way (never "$"), the plan price as the ready amount; no dollar request without today\'s rate',
     !loadError && planCases.every(Boolean), loadError || `cases ${failed(planCases)}`);
 
+  // Review loop r3 n17: the paywall's "Charge wallet" (15-modals lockChargeLink -> adsStudioOpenChargeForm) opens the v2
+  // Add money flow for the plan with the missing dinars filled in; it never switches to the classic tab the v2 layout
+  // does not draw (the sheet used to close and nothing happened).
+  hist.reset('/studio?tab=wallet');
+  run('_studioWallet.add = null; _adsStudioActiveTab = "campaigns";');
+  run('adsStudioOpenChargeForm(4500);');
+  const chargeFlow = json('_studioWallet.add') || {};
+  const chargeCases = [
+    win.location.search === '?tab=wallet&id=add-money',
+    chargeFlow.purpose === 'plan' && chargeFlow.step === 2 && chargeFlow.amountText === '45.00',
+    run('_adsStudioActiveTab') === 'wallet',  // the v2 route's own tab (before: the classic 'dashboard', which v2 never draws)
+    read('src/15-modals.js').includes("adsStudioOpenChargeForm(${Math.max(0, (Number(lockPlans[0]?.priceMinor) || 0) - lydBalanceMinor)})")
+  ];
+  run('_studioWallet.add = null;');
+  check('Studio v2 paywall (review loop r3 n17): "Charge wallet" opens Add money for the plan (dinars) with the shortfall filled, not the classic tab',
+    !loadError && chargeCases.every(Boolean), loadError || `cases ${failed(chargeCases)}; url ${win.location.search} flow ${JSON.stringify(chargeFlow)}`);
+
   // Cancel a waiting request: an in-page sheet first, one call however many taps.
   reply('GET', SUMMARY, summary());
   reply('GET', MINE, requests);
@@ -5403,6 +5420,20 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 Help: "Ask about this" pre-fills the request, a lost answer replays the same operationId, the sent ticket opens as its thread',
     !loadError && formCases.every(Boolean), loadError || `cases ${failed(formCases)}`);
+
+  // Review loop r3 n12: a payment picked in the related-item picker after another chip turns the ticket's category to
+  // "payment" (money questions go to an admin; the server routes any ticket about a payment there too); other items
+  // keep the chip the customer chose.
+  run(`var __studioDataValue = studioDataValue;
+    studioDataValue = function (kind) { return kind === 'wallet' ? { pendingPayments: [{ reference: 'PAY-ABCD2345' }] } : __studioDataValue(kind); };
+    _studioHelp.draft = null; studioHelpDraftCategory('ad'); studioHelpDraftRelated('payment:PAY-ABCD2345');`);
+  const paymentDraft = json('[_studioHelp.draft.category, _studioHelp.draft.relatedType, _studioHelp.draft.relatedId]');
+  run("_studioHelp.draft = null; studioHelpDraftCategory('other'); studioHelpDraftRelated('campaign:r_new');");
+  const campaignDraft = json('[_studioHelp.draft.category, _studioHelp.draft.relatedType]');
+  run('studioDataValue = __studioDataValue; _studioHelp.draft = null;');
+  check('Studio v2 Help (review loop r3 n12): picking a payment after the "Ad" chip makes the ticket a payment ticket; a request keeps the chosen chip',
+    !loadError && JSON.stringify(paymentDraft) === JSON.stringify(['payment', 'payment', 'PAY-ABCD2345']) && JSON.stringify(campaignDraft) === JSON.stringify(['other', 'campaign']),
+    `payment ${JSON.stringify(paymentDraft)} campaign ${JSON.stringify(campaignDraft)}`);
 
   // The thread: the team's answer is "Albayan team" (never a name), a reply reopens, resolve and reopen carry operationIds.
   reply(`/api/studio/tickets/${T3}`, { ticket: ticket(T3, 'T-000003', 'answered'), messages: [newTicket.message, { id: 'tkm_' + '4'.repeat(40), from: 'team', text: 'Starting <today>', createdAt: ago(5) }] });
@@ -6088,6 +6119,35 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       return prefixes.length >= 12 && covered && !deskSrc.includes('STUDIO_DESK_REFUSALS') && deskSrc.includes("const info = studioErrorInfo(error, 'action');") && arabicOnly(String(unknown))
         && closedMonth('en') === 'This month is closed in the books. An admin must unlock it first.' && closedMonth('ar') === 'هذا الشهر مقفل في الدفاتر. يجب أن يفتحه المدير أولاً.';
     })());
+  // Review loop r3 n13: the team member's OWN ended ad is listed with "another team member settles it" and no Finish &
+  // settle / Admin override (the server refuses both for one's own request, an admin included); the sheet does not open
+  // for it either. Same for the Stop & return all of one's own ad whose stop was asked.
+  box.state.adCampaignRequests.push({ id: 'r_mine', createdBy: 'u1', status: 'Approved', name: 'My own ended ad', paidMinorUSD: 1500, budgetMinorUSD: 1500, budgetType: 'lifetime', durationDays: 2, startDate: '2025-03-01', endDate: '2025-03-02', _created: 1, _lastModified: 11 },
+    { id: 'r_mstp', createdBy: 'u1', status: 'Approved', name: 'My own, stop asked', paidMinorUSD: 900, budgetMinorUSD: 900, budgetType: 'lifetime', durationDays: 5, studioRef: 'ALB-S-MINE1234', startDate: '2099-04-01', endDate: '2099-04-05', stopRequestedAt: hours(-1), _created: 1, _lastModified: 11 });
+  const ownCases = [];
+  for (const asAdmin of [false, true]) {
+    who.admin = asAdmin;
+    openAt('/studio?tab=review&section=settle');
+    run('render()');
+    const page = html();
+    const card = page.slice(page.indexOf('data-testid="studio-desk-settle-r_mine"'), page.indexOf('</li>', page.indexOf('data-testid="studio-desk-settle-r_mine"')));
+    ownCases.push(card.includes('data-testid="studio-desk-own-r_mine"') && card.includes('another team member settles it') && !card.includes('studio-desk-finish-r_mine') && !card.includes('studio-desk-override-r_mine')
+      && page.includes('studio-desk-finish-r_old') && (asAdmin ? page.includes('studio-desk-override-r_old') : !page.includes('studio-desk-override-r_old')));
+    run(`var __appended = []; document.body = { appendChild(el) { __appended.push(el); } };
+      document.createElement = () => ({ set innerHTML(v) { this.firstElementChild = { html: v, isConnected: false, addEventListener() {}, querySelector() { return null; } }; } });`);
+    ownCases.push(run("studioDeskSheetOpen('settle', 'r_mine')") === false && run("studioDeskSheetOpen('override', 'r_mine')") === false
+      && run("studioDeskSheetOpen('settle', 'r_old')") === true && run("studioDeskSheetOpen('override', 'r_old')") === asAdmin);
+    run('studioDeskSheetClose(); delete document.body; delete document.createElement;');
+  }
+  who.admin = false;
+  openAt('/studio?tab=review&section=launch');
+  const ownLaunch = html();
+  const ownStopCard = ownLaunch.slice(ownLaunch.indexOf('data-testid="studio-desk-launch-r_mstp"'), ownLaunch.indexOf('</li>', ownLaunch.indexOf('data-testid="studio-desk-launch-r_mstp"')));
+  ownCases.push(ownStopCard.includes('data-stop-asked="1"') && ownStopCard.includes('data-testid="studio-desk-own-r_mstp"') && !ownStopCard.includes('studio-desk-stop-return-r_mstp'));
+  run("state.adCampaignRequests = state.adCampaignRequests.filter(r => r.id !== 'r_mine' && r.id !== 'r_mstp')");
+  check('Team desk (review loop r3 n13): one\'s own ended ad shows "another team member settles it" with no Finish & settle / Admin override (reviewer and admin), the settle and override sheets do not open for it, and one\'s own stop-asked ad has no Stop & return all',
+    !loadError && ownCases.length === 5 && ownCases.every(Boolean), `cases ${failed(ownCases)}`);
+
   // The pulse: a new stop request rings (when the switch is on) and the title follows; leaving the desk stops the watch and restores the title.
   run("studioDeskToggleSound()");
   const soundOn = json('studioDeskSoundOn()');
@@ -6343,6 +6403,34 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Admin payments waiting: a failed read of the list shows the problem with Try again (not "Reading…" for ever), draws do not ask again, Try again reads the list',
     payCases.every(Boolean), `cases ${failed(payCases)}; reads ${payReads}/${payReadsLater}`);
+
+  // Review loop r3 n19: "Past the target" follows the server's due time in WORKING minutes (GET /api/studio/admin/payments/due,
+  // keyed by createdAt), never the clock minutes since the request: 6 clock hours on a night or a weekend are not late.
+  who.admin = true;
+  meReply({ ...staffMe, isAdmin: true });
+  const nightAt = hours(-6);      // 360 clock minutes ago: the old rule (> 240) flagged it
+  const lateAt = hours(-72);
+  const unknownAt = hours(-50);   // no due time came back for it: no flag
+  const payRow = (id, createdAt) => ({ id, type: 'walletPaymentRequests', data: { reference: `PAY-${id.toUpperCase()}`, status: 'pending', currency: 'LYD', amountMinor: 5000, method: 'bank_transfer', createdAt } });
+  run(`apiWalletPaymentRequestList = function (scope) { return Promise.resolve({ requests: scope === 'pending' ? ${JSON.stringify([payRow('night0001', nightAt), payRow('late00001', lateAt), payRow('nodue0001', unknownAt)])} : [] }); };
+    resetAdsStudioWalletCache(); _studioAdmin.reads.paymentDue = null;`);
+  reply('/api/studio/admin/payments/due', { dueAt: { [nightAt]: hours(40), [lateAt]: hours(-1) } });
+  openAt('/studio?tab=review&section=more&id=payments');
+  run('render()');
+  const duePage = html();
+  const waitOf = ref => { const at = duePage.indexOf(`PAY-${ref.toUpperCase()}`); const wait = duePage.indexOf('data-testid="studio-admin-payment-wait"', at); return at < 0 || wait < 0 ? '' : duePage.slice(wait, duePage.indexOf('</p>', wait)); };
+  const dueCases = [
+    calls('GET', '/api/studio/admin/payments/due').length >= 1,
+    waitOf('night0001').includes('data-overdue="0"') && !waitOf('night0001').includes('Past the target'),
+    waitOf('late00001').includes('data-overdue="1"') && waitOf('late00001').includes('Past the target'),
+    waitOf('nodue0001').includes('data-overdue="0"'),
+    duePage.includes('working minutes')
+  ];
+  who.admin = false;
+  meReply(staffMe);
+  run('resetAdsStudioWalletCache();');
+  check('Admin payments waiting (review loop r3 n19): "Past the target" comes from the server\'s working-minutes due time of each request (a night\'s 6 clock hours are not late), none without one',
+    !loadError && dueCases.every(Boolean), `cases ${failed(dueCases)}; night ${waitOf('night0001').slice(0, 120)}`);
 
   // Review loop r1 #35: the classic staff "Close campaign / Stop & refund" prompt reads the amount with the
   // strict studio parser (Arabic digits and separators): an ambiguous or garbled amount is refused, never
@@ -7267,6 +7355,40 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio TikTok (review loop r2 #24): the TikTok cap and a finished request get their own words (EN/AR) instead of the ticket texts; the 20-ticket cap keeps the ticket text',
     !loadError && tiktokRefusalCases.every(Boolean), loadError || `cases ${failed(tiktokRefusalCases)}; ${JSON.stringify({ capEn, capAr, ticketsFull, deskFinished })}`);
+  // Review loop r3 n11: the staff ticket thread (the only desk screen a TikTok request reaches) draws the team's steps
+  // (Start / Done / Decline with the note form) and hides the plain Resolve while the request is open or in progress (the
+  // server would end it as "declined"); a saved step reads the thread again. A plain ticket keeps Resolve.
+  const T4 = 'tkt_' + 'd'.repeat(40);
+  const T5 = 'tkt_' + 'e'.repeat(40);
+  const T6 = 'tkt_' + 'f'.repeat(40);
+  const T7 = 'tkt_' + '7'.repeat(40);
+  const threadSlot = raw => `{ ticket: studioHelpCleanTicket(${JSON.stringify(raw)}), messages: [], loadedAt: Date.now(), failedAt: 0, loading: null, error: null }`;
+  run(`studioStaffScope(); _studioTikTokDesk.editing = ''; _studioTikTokDesk.problem = '';
+    _studioStaff.threads.set('${T4}', ${threadSlot(tiktokRequest(T4, 'T-000104', 'open', { ownerId: 'cust-1' }))});
+    _studioStaff.threads.set('${T5}', ${threadSlot(tiktokRequest(T5, 'T-000105', 'in_progress'))});
+    _studioStaff.threads.set('${T6}', ${threadSlot(tiktokRequest(T6, 'T-000106', 'done'))});
+    _studioStaff.threads.set('${T7}', ${threadSlot({ ...tiktokRequest(T7, 'T-000107', 'open'), category: 'ad', kind: 'question', tiktok: undefined })});`);
+  const threadOpen = String(run(`renderStudioStaffThread('${T4}')`));
+  const threadWorking = String(run(`renderStudioStaffThread('${T5}')`));
+  const threadDone = String(run(`renderStudioStaffThread('${T6}')`));
+  const threadPlain = String(run(`renderStudioStaffThread('${T7}')`));
+  const threadOnChange = run('_studioTikTokDesk.onChange');
+  reply(`/api/studio/staff/tiktok/${T5}/status`, { request: tiktokRequest(T5, 'T-000105', 'done'), message: {} });
+  run(`var __canReview = adsStudioCanReview; adsStudioCanReview = function () { return true; }; window.studioStaffTikTokChanged = studioStaffTikTokChanged;
+    studioTikTokDeskSend('${T5}', 'done', { en: 'All set up', ar: 'تم الإعداد' });`);
+  const rereads = calls('GET', `/api/studio/staff/tickets/${T5}`).length;
+  run('adsStudioCanReview = __canReview; delete window.studioStaffTikTokChanged;');
+  const threadCases = [
+    threadOpen.includes('data-tiktok-state="open"') && threadOpen.includes(`data-testid="studio-tiktok-desk-start-${T4}"`) && threadOpen.includes(`data-testid="studio-tiktok-desk-decline-${T4}"`)
+      && !threadOpen.includes('studio-staff-status-resolved') && threadOpen.includes('studio-staff-status-waiting') && threadOpen.includes('studio-staff-reply'),
+    threadWorking.includes(`data-testid="studio-tiktok-desk-done-${T5}"`) && !threadWorking.includes('studio-staff-status-resolved'),
+    threadDone.includes('data-tiktok-state="done"') && !threadDone.includes('studio-tiktok-desk-') && threadDone.includes('studio-staff-status-open'),
+    !threadPlain.includes('data-tiktok-state') && !threadPlain.includes('studio-tiktok-desk') && threadPlain.includes('studio-staff-status-resolved'),
+    threadOnChange === 'studioStaffTikTokChanged',
+    calls('POST', `/api/studio/staff/tiktok/${T5}/status`).length === 1 && rereads === 1
+  ];
+  check('Studio TikTok (review loop r3 n11): the staff ticket thread of a TikTok request draws the team\'s steps and hides the plain Resolve while it is open or in progress; a saved step reads the thread again; a plain ticket keeps Resolve',
+    !loadError && threadCases.every(Boolean), `cases ${failed(threadCases)}; onChange ${threadOnChange} rereads ${rereads}`);
 
   // Stage 15 hooks (15n, 15j): the Help body draws the TikTok section for ?section=tiktok, the Help list its row
   // after the contact card, and Home shows the "TikTok help" goal (opening the section) only while /me says the

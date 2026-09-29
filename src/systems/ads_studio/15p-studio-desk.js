@@ -76,6 +76,13 @@ function studioDeskIsAdmin() {
   return typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin();
 }
 
+// The signed-in team member's own request (the server's stop and settle-override routes treat it by the
+// customer rule: no chosen refund, no override, even for an admin).
+function studioDeskOwnRequest(request) {
+  const uid = studioDeskUserId();
+  return !!uid && !!request && String(request.createdBy || '') === uid;
+}
+
 function studioDeskCan() {
   return typeof adsStudioCanReview === 'function' && adsStudioCanReview();
 }
@@ -631,8 +638,9 @@ function renderStudioDeskLaunchCard(request) {
                 <p class="studio-desk-stage"><span class="studio-flag" data-testid="studio-desk-stop-asked-${id}">${studioDeskIcon('hand', 'studio-desk-meta-icon')}<span>${studioEsc(adsStudioText('Stop requested', 'طلب إيقاف'))}</span></span>${request.stopRequestedAt ? `<span class="studio-desk-note">${studioEsc(studioDeskWhen(request.stopRequestedAt))}</span>` : ''}</p>
                 <p class="studio-desk-note">${studioEsc(adsStudioText(`The customer asked to stop this ad before it ran. Stop it: ${paid ? studioUsd(paid) : 'the payment'} goes back in full. Link it only if it was already created in Meta, then pause it there.`,
                   `طلب العميل إيقاف هذا الإعلان قبل تشغيله. أوقفه: يعود ${paid ? studioUsd(paid) : 'المبلغ المدفوع'} كاملاً. اربطه فقط إن كان قد أُنشئ في ميتا بالفعل، ثم أوقفه هناك.`))}</p>
+                ${studioDeskOwnRequest(request) ? `<p class="studio-desk-note" data-testid="studio-desk-own-${id}">${studioEsc(adsStudioText('This is your own ad: another team member settles it.', 'هذا إعلانك أنت: يسوّيه عضو آخر من الفريق.'))}</p>` : ''}
                 <div class="studio-desk-actions">
-                  <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>
+                  ${studioDeskOwnRequest(request) ? '' : `<button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>`}
                   <button type="button" class="studio-v2-action" data-testid="studio-desk-link-anyway-${id}" onclick="openAdsStudioLinkSheet('${id}', true)">${studioDeskIcon('link-2')}<span>${studioEsc(adsStudioText('Already created in Meta — link anyway', 'أُنشئ في ميتا بالفعل — اربطه على أي حال'))}</span></button>
                   <button type="button" class="studio-v2-action" onclick="studioDeskGo('requests', '${id}')">${studioDeskIcon('file-text')}<span>${studioEsc(adsStudioText('The request', 'تفاصيل الطلب'))}</span></button>
                 </div>
@@ -759,6 +767,8 @@ function renderStudioDeskSettleCard(request) {
   const busy = typeof _adsStudioResultsChecks !== 'undefined' && _adsStudioResultsChecks.has(String(request.id));
   const wasLinked = numbers.wasLinked;
   const neverLinked = !linked && !wasLinked && !numbers.handMarked;
+  // Nobody settles their own ad, an admin included (the server refuses both actions): no dead buttons.
+  const own = studioDeskOwnRequest(request);
   const countdown = numbers.handMarked
     ? adsStudioText('Marked launched by hand: enter the unspent amount (0 closes the ad without a return).', 'سُجّل يدوياً أنه نُشر: أدخل المبلغ غير المصروف (0 يغلق الإعلان دون إعادة).')
     : neverLinked
@@ -784,10 +794,11 @@ function renderStudioDeskSettleCard(request) {
                 ${renderStudioDeskStageLine(request)}
                 <p class="studio-desk-money" data-testid="studio-desk-settle-money">${studioEsc(money)}</p>
                 <p class="studio-desk-countdown" data-testid="studio-desk-countdown-${id}">${studioDeskIcon('hourglass', 'studio-desk-meta-icon')}<span>${studioEsc(countdown)}</span></p>
+                ${own ? `<p class="studio-desk-note" data-testid="studio-desk-own-${id}">${studioEsc(adsStudioText('This is your own ad: another team member settles it.', 'هذا إعلانك أنت: يسوّيه عضو آخر من الفريق.'))}</p>` : ''}
                 <div class="studio-desk-actions">
                   ${linked ? `<button type="button" class="studio-v2-action" data-testid="studio-desk-check-${id}" onclick="studioDeskCheckMeta('${id}', this)"${busy ? ' disabled aria-busy="true"' : ''}>${studioDeskIcon('refresh-cw')}<span>${studioEsc(adsStudioText('Check Meta now', 'افحص ميتا الآن'))}</span></button>` : ''}
-                  <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-finish-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('scale')}<span>${studioEsc(adsStudioText('Finish & settle', 'إنهاء وتسوية'))}</span></button>
-                  ${studioDeskIsAdmin() ? `<button type="button" class="studio-v2-action studio-ads-danger" data-testid="studio-desk-override-${id}" onclick="studioDeskSheetOpen('override', '${id}', this)">${studioDeskIcon('shield-alert')}<span>${studioEsc(adsStudioText('Admin override', 'تجاوز المدير'))}</span></button>` : ''}
+                  ${own ? '' : `<button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-finish-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('scale')}<span>${studioEsc(adsStudioText('Finish & settle', 'إنهاء وتسوية'))}</span></button>`}
+                  ${studioDeskIsAdmin() && !own ? `<button type="button" class="studio-v2-action studio-ads-danger" data-testid="studio-desk-override-${id}" onclick="studioDeskSheetOpen('override', '${id}', this)">${studioDeskIcon('shield-alert')}<span>${studioEsc(adsStudioText('Admin override', 'تجاوز المدير'))}</span></button>` : ''}
                 </div>
               </li>`;
 }
@@ -936,6 +947,7 @@ function studioDeskSheetOpen(kind, id, opener = null) {
   const request = findVisibleAdsStudioCampaign(id);
   if (!request) return false;
   if (kind === 'override' && !studioDeskIsAdmin()) return false;
+  if (kind !== 'approve' && studioDeskOwnRequest(request)) return false;  // another team member settles it
   const holder = document.createElement('div');
   holder.innerHTML = renderStudioDeskSheet(kind, request).trim();
   const el = holder.firstElementChild;

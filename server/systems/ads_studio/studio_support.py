@@ -22,7 +22,8 @@ customers too; always the caller's own tickets: another owner's ticket is 404, n
 **Staff routes** (admins, and reviewers = ``adCampaignRequests.review``; anyone else 403 STAFF_ONLY):
 reviewers see only ``audience: 'staff'`` tickets; payment and account tickets (``audience:
 'admin'``) are admin-only and answer 404 UNKNOWN_TICKET to a reviewer, exactly like a ticket that
-does not exist (PLAN.md §7.5).
+does not exist (PLAN.md §7.5). A ticket about a payment (``relatedType: 'payment'``) is admin-only
+too, whatever category the customer chose (audience_for).
 
 * ``GET /staff/tickets?status=&priority=&cursor=&limit=`` -> ``{tickets, nextCursor}``: unresolved
   urgent tickets (stop requests) pinned on top, then newest first.
@@ -308,8 +309,10 @@ def message_id(ticket: str, operation_id: str) -> str:
     return derived_id(MESSAGE_ID_PREFIX, ticket, operation_id)
 
 
-def audience_for(category: str) -> str:
-    return AUDIENCE_ADMIN if category in ADMIN_CATEGORIES else AUDIENCE_STAFF
+def audience_for(category: str, related_type: str | None = None) -> str:
+    """'admin' for a payment or account ticket AND for any ticket about a payment, whatever category
+    the customer picked (a payment question never reaches the reviewers' queue); else 'staff'."""
+    return AUDIENCE_ADMIN if category in ADMIN_CATEGORIES or related_type == "payment" else AUDIENCE_STAFF
 
 
 def clean_text(raw: Any, *, multiline: bool) -> str | None:
@@ -814,7 +817,7 @@ def open_ticket_conn(
     ticket: dict[str, Any] = {
         **extra,
         "number": ticket_number(seq), "seq": seq, "ownerId": uid, "subject": subject, "category": category,
-        "audience": audience_for(category), "priority": priority, "kind": kind,
+        "audience": audience_for(category, related_type), "priority": priority, "kind": kind,
         "relatedType": related_type or None, "relatedId": related_id or None,
         "status": "open", "createdAt": at, "updatedAt": at, "dueAt": None, "lastMessageAt": at,
         "lastCustomerAt": at, "lastStaffAt": None, "firstStaffAt": None, "resolvedAt": None,

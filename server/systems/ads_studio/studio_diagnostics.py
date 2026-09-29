@@ -982,6 +982,22 @@ def read_operations(
     return operations
 
 
+def pending_payment_due_times() -> dict[str, str | None]:
+    """``{createdAt: dueAt}`` of every charge request still waiting for an admin: the payment target
+    in WORKING minutes (studio_hours, the rule of the ``payments`` queue line above), so the admin
+    "Payments waiting" page flags "Past the target" exactly when this report counts it overdue.
+    Keyed by the request's own createdAt text: the door gives no id, user, amount or reference."""
+    settings = read_all_settings()
+    with db_conn() as conn:
+        rows = payment_request_timings(conn)
+    out: dict[str, str | None] = {}
+    for row in rows:
+        if row["status"] == "pending" and row["createdAt"]:
+            due = _due("payment", parse_time(row["createdAt"]), settings)
+            out[row["createdAt"]] = due.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if due else None
+    return out
+
+
 def read_diagnostics(now: datetime | None = None) -> dict[str, Any]:
     now = _aware(now or datetime.now(timezone.utc))
     with db_conn() as conn:

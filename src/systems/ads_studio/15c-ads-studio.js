@@ -1383,8 +1383,12 @@ async function adsStudioReloadCampaign(id) {
 // a lost reply replays the same request instead of piling up duplicates on
 // the admin's pending list.
 let _adsStudioChargeIdem = { fingerprint: '', key: '' };
-function adsStudioOpenChargeForm() {
-  // The studio shell has no wallet page: the charge form lives on the Overview
+function adsStudioOpenChargeForm(amountMinor = 0) {
+  // The v2 customer layout draws its screens from the address, never from the classic tab: the paywall's
+  // "Charge wallet" opens its Add money flow for the plan (LYD) instead (PLAN J1).
+  if (typeof studioV2Frame === 'function' && studioV2Frame() === 'customer' && typeof studioWalletOpenAdd === 'function'
+    && studioWalletOpenAdd('plan', Math.max(0, Number(amountMinor) || 0))) return;
+  // The classic studio shell has no wallet page: the charge form lives on the Overview
   // tab, or under the activate card for a lapsed customer.
   _adsStudioActiveTab = 'dashboard';
   if (state.currentView !== 'ads-studio') navigateTo('ads-studio'); else render();
