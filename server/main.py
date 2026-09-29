@@ -13574,6 +13574,7 @@ app.include_router(
 
 _WALLET_PAYMENTS_CTX = {
     "validate_receipt_image": lambda photo: _validate_ad_campaign_image_source(photo)[0],
+    "media_validation_slot": lambda *a, **k: _ad_campaign_media_validation_slot(*a, **k),  # every full decode (receipts, Social Studio posts)
     "wallet_balance_minor": _wallet_balance_minor,
     "validate_wallet_values": _validate_wallet_values,
     "find_entity_by_idempotency": _find_entity_by_idempotency,

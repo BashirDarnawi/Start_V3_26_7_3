@@ -834,10 +834,12 @@ def create_wallet_payments_router(
         uid = str(user.get("id") or "")
         _rate_limit(f"receipt:{uid}", 10, 60.0)
         rid = str(request_id or "").strip()[:80]
-        try:
-            clean_photo = ctx["validate_receipt_image"](body.photo)
-        except HTTPException:
-            raise HTTPException(status_code=400, detail="The receipt photo is invalid or too large — use a clear JPG/PNG under 4 MB")
+        # The full decode goes through main's 2-slot guard (its 429/503 pass through unchanged).
+        with ctx["media_validation_slot"](user):
+            try:
+                clean_photo = ctx["validate_receipt_image"](body.photo)
+            except HTTPException:
+                raise HTTPException(status_code=400, detail="The receipt photo is invalid or too large — use a clear JPG/PNG under 4 MB")
         postgres = ctx["is_postgres"]()
         guard = nullcontext() if postgres else ctx["sqlite_wallet_lock"]()
         with guard, db_conn() as conn:

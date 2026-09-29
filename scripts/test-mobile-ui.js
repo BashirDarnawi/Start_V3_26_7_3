@@ -7208,6 +7208,27 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio error map completeness (P2-11): every plain-text 400/403/409/413 refusal of /api/ad-studio, /api/social-studio and /api/wallet in the server files has an Arabic entry in the classic map or the v2 patterns; the coded settle/rename refusals are in STUDIO_ERROR_TEXTS; Arabic readers never get raw English',
     !loadError && mapCases.every(Boolean), loadError || `cases ${failed(mapCases)} uncovered ${uncovered.slice(0, 5).map(r => `${r.file}:${r.line} ${JSON.stringify(r.template.replace(/\u0000/g, '{…}'))}`).join(' | ')}`);
+
+  // Review loop r2 (S 33/35): the Social Studio post quota refusals (409, 413) read in both languages with their
+  // real status (a 413 showed only the generic failure in English), and the shared photo-check guard's 503/429
+  // texts (now also met on a post photo and a transfer receipt) have their Arabic in the classic map.
+  const socialPySrc = pySources['server/systems/ads_studio/social_studio.py'];
+  const quotaTexts = [
+    ['Social Studio keeps at most 100 unpublished posts (drafts, scheduled and failed posts) per account. Delete an old draft or a failed post first.', 409],
+    ['Social Studio storage for unpublished posts is full. Delete old drafts or failed posts, or use fewer or smaller photos.', 413]
+  ];
+  const mapEntry = message => classicMap.find(([needle]) => hitsNeedle(needle, message)) || null;
+  const quotaCases = [
+    quotaTexts.every(([message, status]) => { const entry = mapEntry(message); return !!entry && String(entry[0].source || '').startsWith('^Social Studio ') && info(message, 'ar', status).text === entry[1] && info(message, 'en', status).text === entry[3]; }),
+    ['keeps at most {MAX_UNPUBLISHED_POSTS_PER_OWNER} unpublished posts (drafts, scheduled "', '"Social Studio storage for unpublished posts is full. Delete old drafts or failed posts, "'].every(piece => socialPySrc.includes(piece)),
+    ['Campaign images are being checked. Please try again in a moment.', 'Too many campaign image checks. Please wait and try again.'].every(message => {
+      const entry = mapEntry(message);
+      return !!entry && arabic.test(entry[1]) && String(inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(message)})`)) === entry[1] && String(run(`adsStudioRefusalText(${JSON.stringify(message)})`)) === entry[3];
+    }),
+    info('Ads Studio storage quota reached. Remove images, or archive a finished campaign (ask us to close a running one first).', 'en', 413).text.startsWith('Ads Studio storage quota reached')
+  ];
+  check('Social Studio post quota (review loop r2 S): the 409/413 refusals and the photo-check guard texts read in Arabic and English, a 413 shows its own words in English',
+    !loadError && quotaCases.every(Boolean), loadError || `cases ${failed(quotaCases)} ${JSON.stringify(quotaTexts.map(([message, status]) => [info(message, 'ar', status).text, info(message, 'en', status).text]))}`);
 }
 
 {

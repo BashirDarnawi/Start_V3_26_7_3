@@ -75,6 +75,11 @@ def add_jsonb_indexes():
         # D26 claim lookups (the link, every discovery pass, every imported agency ad) read which request
         # names a Meta campaign (meta_collisions._claim_rows); without this they parsed every request.
         ("idx_ad_campaign_requests_meta_campaign", "adCampaignRequests", "((data_json::jsonb->>'metaCampaignId'))"),
+        # Social Studio: the 20-second scheduler reads the scheduled and the stuck publishing posts
+        # (social_studio._due_scheduled_posts, _recover_stuck_publishing: literal type and status) and a
+        # post save counts the owner's unpublished posts (_enforce_post_quota); without this each read
+        # parsed every post, photos included.
+        ("idx_social_posts_status", "socialPosts", "((data_json::jsonb->>'status'))"),
     ]
     
     # FINANCIAL-INTEGRITY GUARANTEE: receipt numbers must be unique.

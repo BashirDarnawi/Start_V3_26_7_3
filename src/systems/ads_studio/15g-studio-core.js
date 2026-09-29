@@ -150,13 +150,14 @@ function studioErrorInfo(error, kind = 'action') {
     code = 'INVALID_REQUEST';  // FastAPI's own body check: a list of fields, not words for a person
   } else if (status >= 400 && status < 500 && message && !/^\s*[[{]/.test(message)) {
     // The older routes send a plain string with a stable English prefix: the classic map knows them.
-    // Arabic shows only what the map translates; English shows the refusal itself (400/403/409, and
-    // the closed month's 423 that the Team desk's settle meets), reworded where the map says so.
+    // Arabic shows only what the map translates; English shows the refusal itself (400/403/409, a full
+    // storage quota's 413, and the closed month's 423 that the Team desk's settle meets), reworded where
+    // the map says so.
     const own = studioErrorPattern(message);
     const mapped = own ? '' : adsStudioRefusalText(message);
     if (own) text = pair(own);
     else if (adsStudioIsAr()) text = mapped && mapped !== message ? mapped : '';
-    else if (status === 400 || status === 403 || status === 409 || status === 423) text = mapped;
+    else if (status === 400 || status === 403 || status === 409 || status === 413 || status === 423) text = mapped;
   }
   if (!text && studioKnownErrorCode(code)) text = pair(STUDIO_ERROR_TEXTS[code]);
   if (!text) {

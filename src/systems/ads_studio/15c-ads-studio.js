@@ -1172,6 +1172,13 @@ const _ADS_STUDIO_REFUSAL_AR = [
     'A page already published this post, so its text and photos cannot change here. Retry the failed pages or delete the post (the live post stays on Meta).'],
   [/^The post changed while publishing/, 'تغيّر المنشور أثناء نشره. حدّث الصفحة وحاول مرة أخرى.', '', 'The post changed while it was being published. Refresh and try again.'],
   [/^Only scheduled posts can be cancelled/, 'لا يمكن إلغاء إلا منشور مجدول.', '', 'Only a scheduled post can be cancelled.'],
+  // the per-owner post quota (_enforce_post_quota) and the photo check's shared guard (main.py, also receipts)
+  [/^Social Studio keeps at most \d+ unpublished posts/, 'وصلت إلى الحد الأقصى للمنشورات غير المنشورة (المسودات والمجدولة والتي فشل نشرها). احذف مسودة قديمة أو منشوراً فشل نشره أولاً.', '',
+    'You have reached the limit of unpublished posts (drafts, scheduled and failed). Delete an old draft or a failed post first.'],
+  [/^Social Studio storage for unpublished posts is full/, 'امتلأت مساحة المنشورات غير المنشورة. احذف مسودات قديمة أو منشورات فشل نشرها، أو استخدم صوراً أقل أو أصغر.', '',
+    'The space for unpublished posts is full. Delete old drafts or failed posts, or use fewer or smaller photos.'],
+  [/^Campaign images are being checked/, 'نتحقق الآن من صور أخرى. أعد المحاولة بعد لحظات.', '', 'Photos are being checked right now. Please try again in a moment.'],
+  [/^Too many campaign image checks/, 'فحوصات صور كثيرة. انتظر دقيقة ثم أعد المحاولة.', '', 'Too many photo checks. Please wait a minute and try again.'],
   // -- the wallet (wallet_payments.py)
   [/^Campaign is no longer awaiting review/, 'هذا الطلب لم يعد بانتظار المراجعة. حدّث الصفحة وحاول مرة أخرى.', '', 'This request is no longer waiting for review. Refresh and try again.'],
   [/^Customer wallet can no longer cover this campaign budget/, 'لم تعد محفظة العميل تغطي هذه الميزانية.', '', "The customer's wallet no longer covers this budget."],

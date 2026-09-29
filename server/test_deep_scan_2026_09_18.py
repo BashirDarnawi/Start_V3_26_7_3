@@ -88,8 +88,11 @@ def test_untrusted_proxy_headers_are_reported_once(monkeypatch, capsys):
 
 def test_comment_webhook_matches_posts_without_loading_photos():
     source = inspect.getsource(social_studio.process_comment)
-    assert "_lean_posts(owner_id, status, limit=1000)" in source  # round 13 widened the match window; still the lean projection
+    # Review loop r2 (S 17/34): one projection of status, results and rule id, each row parsed once.
+    assert "_comment_post_refs(owner_id, " in source and "_lean_posts(" not in source
     assert "_rows_where_json(POSTS_TYPE" not in source
+    helper = inspect.getsource(social_studio._comment_post_refs) + inspect.getsource(social_studio._comment_post_refs_sql)
+    assert "json_fields_select_sql((\"status\", \"results\", \"autoReplyRuleId\")" in helper and "SELECT *" not in helper
 
 
 def test_unhandled_error_log_redacts_bound_parameters():

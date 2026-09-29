@@ -55,7 +55,7 @@ import os
 import re
 import secrets
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -111,6 +111,11 @@ MAX_POST_MEDIA = 4
 MAX_CAPTION_CHARS = 2200
 MAX_MEDIA_DECODED_BYTES = 3 * 1024 * 1024
 THUMBNAIL_MAX_CHARS = 60 * 1024
+# Per-owner post quota (_enforce_post_quota; create refuses the next post with 409, a write past the bytes 413).
+# The bytes are the stored JSON of the owner's unpublished posts: a published post cannot be deleted and its
+# photos are already on Meta. Mirrors main's MAX_AD_CAMPAIGN_OWNER_STORAGE_BYTES.
+MAX_UNPUBLISHED_POSTS_PER_OWNER = 100  # drafts, scheduled and failed posts
+MAX_POSTS_OWNER_STORAGE_BYTES = 48 * 1024 * 1024
 DEFAULT_TIMEZONE = "Africa/Tripoli"
 DEFAULT_QUIET_HOURS = {"from": "22:00", "to": "08:00"}
 
@@ -133,6 +138,7 @@ _CTX: dict[str, Any] = {}
 _FALLBACK_MEDIA_SECRET = secrets.token_hex(32)
 _COMMENT_LOCK = threading.Lock()
 _PAGE_LINK_LOCK = threading.Lock()  # _page_link_guard: one Meta page is linked by one request at a time
+_POST_QUOTA_LOCK = threading.Lock()  # _post_quota_guard: a post quota check and the write it allows
 _WORKER_STOP = threading.Event()
 _STOP_JOINED = False  # the stop function ran once since the last start
 _WORKER_THREAD: threading.Thread | None = None
@@ -691,6 +697,143 @@ def _lean_posts(owner_id: str | None, status: str = "", *, limit: int = 500) -> 
         entity["data"]["thumbnail"] = first_item if len(first_item) <= THUMBNAIL_MAX_CHARS else ""
         result.append(entity)
     return result
+
+
+# The order a comment's post match prefers a post's auto-reply rule in (process_comment).
+_COMMENT_POST_STATUSES = ("published", "failed", "scheduled", "publishing", "draft")
+
+
+def _json_list(value: Any) -> list[Any]:
+    """A JSON field read as text (json_fields_select_sql) as a list; anything else is []."""
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value) if isinstance(value, str) and value else None
+    except ValueError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _comment_post_refs_sql(dialect: str | None = None) -> str:
+    """The owner's posts as the comment match reads them: id, status, Meta results and the post's rule,
+    each row's JSON parsed ONCE (json_fields_select_sql), never its photos, a lean copy or a thumbnail."""
+    return json_fields_select_sql(("status", "results", "autoReplyRuleId"), ("id", "created_at"),
+                                  "type = :type AND deleted = false AND created_by = :owner",
+                                  dialect) + " ORDER BY created_at DESC, id DESC"
+
+
+def _comment_post_refs(owner_id: str, post_ref: str) -> tuple[set[str], str]:
+    """The ids of the owner's posts live on Meta as ``post_ref`` (plus ``post_ref`` itself) and the first
+    such post's auto-reply rule. One query for every status: published posts first, then failed,
+    scheduled, publishing and draft ones (a live page result also sits on a post whose OTHER page failed,
+    one waiting for its retry, or one cancelled back to a draft), newest first within a status, at most
+    1000 per status. A comment without a post id matches no post (a failed page keeps metaPostId "")."""
+    ref = str(post_ref or "")
+    refs, preferred = {ref}, ""
+    if not ref:
+        return refs, preferred
+    with db_conn() as conn:
+        rows = conn.execute(text(_comment_post_refs_sql()), {"type": POSTS_TYPE, "owner": owner_id}).mappings().all()
+    seen = dict.fromkeys(_COMMENT_POST_STATUSES, 0)
+    matched: dict[str, list[tuple[str, str]]] = {status: [] for status in _COMMENT_POST_STATUSES}
+    for row in rows:  # newest first
+        status = str(row.get("f_status") or "")
+        if status not in seen or seen[status] >= 1000:
+            continue
+        seen[status] += 1
+        if any(isinstance(r, dict) and str(r.get("metaPostId") or "") == ref for r in _json_list(row.get("f_results"))):
+            matched[status].append((str(row["id"]), str(row.get("f_autoreplyruleid") or "")))
+    for status in _COMMENT_POST_STATUSES:
+        for post_id, rule_id in matched[status]:
+            refs.add(post_id)
+            preferred = preferred or rule_id
+    return refs, preferred
+
+
+def _delete_post_dropping_media(post_id: str, expected_last_modified: int) -> None:
+    """Soft-delete an editable post and drop its stored photos in ONE conditional UPDATE: the row stays
+    (caption, pages and Meta results, for the audit trail) without its base64 photos (a live page's
+    photos are already on Meta). A claim or an edit that landed first wins: 409, nothing changes."""
+    baseline = int(expected_last_modified)
+    with db_conn() as conn:
+        row = conn.execute(text("SELECT data_json, deleted, last_modified FROM entities WHERE type = :type AND id = :id"),
+                           {"type": POSTS_TYPE, "id": post_id}).mappings().first()
+        if not row or bool(row["deleted"]) or int(row["last_modified"] or 0) != baseline:
+            raise HTTPException(status_code=409, detail="Conflict: record has changed")
+        data = json_loads(row["data_json"] or "{}") or {}
+        data = data if isinstance(data, dict) else {}
+        stamp = max(now_ms(), baseline + 1)
+        data.update({"media": [], "_lastModified": stamp})
+        result = conn.execute(
+            text("UPDATE entities SET deleted = true, data_json = :data, last_modified = :stamp "
+                 "WHERE type = :type AND id = :id AND deleted = false AND last_modified = :baseline"),
+            {"data": json_dumps(data), "stamp": stamp, "type": POSTS_TYPE, "id": post_id, "baseline": baseline},
+        )
+    if int(result.rowcount or 0) != 1:
+        raise HTTPException(status_code=409, detail="Conflict: record has changed")
+
+
+def _has_new_photo(raw: Any, existing: dict[str, Any] | None) -> bool:
+    """The body carries a photo that is not stored on the post yet (_clean_post decodes exactly those)."""
+    media = raw.get("media") if isinstance(raw, dict) else None
+    if not isinstance(media, list):
+        return False
+    known = {m for m in ((existing or {}).get("media") or []) if isinstance(m, str)}
+    return any(isinstance(item, str) and item not in known for item in media)
+
+
+@contextmanager
+def _post_quota_guard(owner_id: str):
+    """Serialize a post quota check with the write it allows: in this process and, on PostgreSQL, across
+    workers (a transaction-scoped lock held until the write has committed). Yields the connection to
+    count on (None: count on a fresh one)."""
+    with _POST_QUOTA_LOCK:
+        if str(get_engine().dialect.name or "") == "postgresql":
+            with db_conn() as conn:
+                _ctx()["lock_idempotency_key"](conn, owner_id, postgres=True, namespace="socialPostQuota")
+                yield conn
+        else:
+            yield None
+
+
+def _enforce_post_quota(conn: Any, owner_id: str, proposed: dict[str, Any], *, creating: bool,
+                        excluding_id: str = "", current: dict[str, Any] | None = None) -> None:
+    """At most MAX_UNPUBLISHED_POSTS_PER_OWNER drafts, scheduled and failed posts (a new one: 409) and
+    MAX_POSTS_OWNER_STORAGE_BYTES of stored unpublished posts (413). An edit that does not grow its post
+    (``current``: the stored data) always passes, so an owner over the bytes can still trim a post."""
+    postgres = str(get_engine().dialect.name or "") == "postgresql"
+    status = _json_field("status")
+    size = "octet_length(data_json)" if postgres else "length(data_json)"
+    # Literal type and status list: PostgreSQL can serve it from idx_social_posts_status (add_jsonb_indexes.py).
+    where = (f"type = '{POSTS_TYPE}' AND deleted = false AND created_by = :owner "
+             f"AND {status} IN ('draft', 'scheduled', 'publishing', 'failed')")
+    params: dict[str, Any] = {"owner": owner_id}
+    if excluding_id:
+        where += " AND id <> :excluding"
+        params["excluding"] = excluding_id
+    sql = text(
+        "SELECT COALESCE(SUM(CASE WHEN st IN ('draft', 'scheduled', 'failed') THEN 1 ELSE 0 END), 0) AS open_count, "
+        f"COALESCE(SUM(sz), 0) AS stored_bytes FROM (SELECT {status} AS st, {size} AS sz FROM entities "
+        f"WHERE {where}{' OFFSET 0' if postgres else ''}) AS unpublished"
+    )
+    with (nullcontext(conn) if conn is not None else db_conn()) as reader:
+        usage = reader.execute(sql, params).mappings().first()
+    open_count = int((usage or {}).get("open_count") or 0)
+    stored_bytes = int((usage or {}).get("stored_bytes") or 0)
+    if creating and open_count >= MAX_UNPUBLISHED_POSTS_PER_OWNER:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Social Studio keeps at most {MAX_UNPUBLISHED_POSTS_PER_OWNER} unpublished posts (drafts, scheduled "
+                   "and failed posts) per account. Delete an old draft or a failed post first.",
+        )
+    proposed_bytes = len(json_dumps(proposed).encode("utf-8"))
+    grows = current is None or proposed_bytes > len(json_dumps(current).encode("utf-8"))
+    if grows and stored_bytes + proposed_bytes > MAX_POSTS_OWNER_STORAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Social Studio storage for unpublished posts is full. Delete old drafts or failed posts, "
+                   "or use fewer or smaller photos.",
+        )
 
 
 def _owner_exists(owner_id: str) -> bool:
@@ -1343,15 +1486,16 @@ def _due_scheduled_posts(now: datetime, limit: int) -> list[dict[str, Any]]:
     cursor_created, cursor_id = -1, ""
     while True:
         with db_conn() as conn:
+            # Literal type and status: PostgreSQL reads only the scheduled rows through the partial index
+            # idx_social_posts_status (add_jsonb_indexes.py), never every post with its photos each tick.
             rows = conn.execute(text(
                 "SELECT type,id,deleted,created_at,created_by,last_modified, "
                 f"{_json_field('scheduledAt')} AS scheduled_at, {_json_field('ownerId')} AS owner_id "
-                "FROM entities WHERE type=:type AND deleted=false "
-                f"AND {_json_field('status')}=:status "
+                f"FROM entities WHERE type='{POSTS_TYPE}' AND deleted=false "
+                f"AND {_json_field('status')}='scheduled' "
                 "AND (created_at>:cursor_created OR (created_at=:cursor_created AND id>:cursor_id)) "
                 "ORDER BY created_at ASC,id ASC LIMIT 500"
-            ), {"type": POSTS_TYPE, "status": "scheduled", "cursor_created": cursor_created,
-                "cursor_id": cursor_id}).mappings().all()
+            ), {"cursor_created": cursor_created, "cursor_id": cursor_id}).mappings().all()
         for row in rows:
             scheduled_at = _parse_iso(row["scheduled_at"])
             if scheduled_at is not None and scheduled_at <= now:
@@ -1385,11 +1529,11 @@ def _recover_stuck_publishing(now: datetime, limit: int = 50) -> int:
     cutoff = _iso_at(now - timedelta(minutes=15))
     with db_conn() as conn:
         rows = conn.execute(
-            text(
-                f"SELECT id, {_json_field('ownerId')} AS owner_id FROM entities WHERE type=:type AND deleted=false "
+            text(  # literal type and status: served by idx_social_posts_status, like _due_scheduled_posts
+                f"SELECT id, {_json_field('ownerId')} AS owner_id FROM entities WHERE type='{POSTS_TYPE}' AND deleted=false "
                 f"AND {_json_field('status')}='publishing' AND COALESCE({_json_field('publishingSince')}, {_json_field('updatedAt')}, '') < :cutoff LIMIT :limit"
             ),
-            {"type": POSTS_TYPE, "cutoff": cutoff, "limit": max(1, int(limit))},
+            {"cutoff": cutoff, "limit": max(1, int(limit))},
         ).mappings().all()
     for row in rows:
         _mark_publish_interrupted(str(row["id"]), str(row.get("owner_id") or ""), "Publishing was interrupted (the server restarted); check the page before retrying.")
@@ -2192,20 +2336,10 @@ def process_comment(
             _person_replied_rule_ids(owner_id, page_entity["id"], from_id)
             if any(_bool(rule.get("oncePerPerson")) for rule in rules) else set()
         )
-        refs = {str(post_ref or "")}
-        preferred_rule_id = ""
-        # Every public comment lands here; only ids and Meta results are
-        # needed, never the base64 photos of every published post. A post
-        # whose OTHER page failed is still live on this one, and a live page
-        # result also sits on a post being published, waiting for its retry
-        # (scheduled) or cancelled back to a draft: scan every such status.
-        # A comment without a post id matches no post (a failed page result keeps metaPostId "").
-        for status in ("published", "failed", "scheduled", "publishing", "draft") if str(post_ref or "") else ():
-            for post in _lean_posts(owner_id, status, limit=1000):  # the helper caps at 1000
-                results = [r for r in (post["data"].get("results") or []) if isinstance(r, dict)]
-                if any(str(r.get("metaPostId") or "") == str(post_ref or "") for r in results):
-                    refs.add(post["id"])
-                    preferred_rule_id = preferred_rule_id or str(post["data"].get("autoReplyRuleId") or "")
+        # Every public comment lands here, inside the lock every owner shares: only ids, statuses, Meta
+        # results and rule ids are read, each post's JSON parsed once in ONE query, never the base64
+        # photos of every post (it used to be five lean scans that parsed each row about ten times).
+        refs, preferred_rule_id = _comment_post_refs(owner_id, str(post_ref or ""))
         now_local = datetime.now(_zone(settings.get("timezone")))
         rule = None
         # P4-05: the rules that can send something now are tried first (oldest first as ever), so a
@@ -3257,12 +3391,16 @@ def create_social_studio_router(
     ):
         scope = _mutation(request, user, ctx, ownerId)
         now = _iso_now()
-        clean = {
-            **_clean_post(ctx, scope.owner, body or {}, None),
-            "publishedAt": "", "results": [], "createdAt": now, "updatedAt": now,
-        }
+        # A new photo is fully decoded: through main's 2-slot guard (503 while busy, 24 checks a minute).
+        with (ctx["media_validation_slot"](user) if _has_new_photo(body or {}, None) else nullcontext()):
+            clean = {
+                **_clean_post(ctx, scope.owner, body or {}, None),
+                "publishedAt": "", "results": [], "createdAt": now, "updatedAt": now,
+            }
         post_id = new_id("spost")
-        saved = ctx["upsert_entity"](POSTS_TYPE, post_id, clean, scope.owner, reject_existing=True)
+        with _post_quota_guard(scope.owner) as quota_conn:
+            _enforce_post_quota(quota_conn, scope.owner, clean, creating=True)
+            saved = ctx["upsert_entity"](POSTS_TYPE, post_id, clean, scope.owner, reject_existing=True)
         ctx["audit"](scope.uid, "create", POSTS_TYPE, post_id, f"Created social post ({clean['status']})", {"ownerId": scope.owner})
         return _public(saved, user)
 
@@ -3290,9 +3428,13 @@ def create_social_studio_router(
         if _live and _changed:  # the composer always sends caption/media; only a real change diverges the live post
             raise HTTPException(status_code=409, detail="A page already published this post; its text and photos cannot be changed here. Retry the failed pages, or delete the post (the live post stays on Meta).")
         owner_id = str(entity["data"].get("ownerId") or "")
-        clean = {**_clean_post(ctx, owner_id, body or {}, entity["data"]), "updatedAt": _iso_now()}
-        saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], clean, scope.uid,
-                                    expected_last_modified=int(entity["lastModified"]))
+        with (ctx["media_validation_slot"](user) if _has_new_photo(_body, entity["data"]) else nullcontext()):
+            clean = {**_clean_post(ctx, owner_id, body or {}, entity["data"]), "updatedAt": _iso_now()}
+        with _post_quota_guard(owner_id) as quota_conn:
+            _enforce_post_quota(quota_conn, owner_id, {**entity["data"], **clean}, creating=False,
+                                excluding_id=str(entity["id"]), current=entity["data"])
+            saved = ctx["patch_entity"](POSTS_TYPE, entity["id"], clean, scope.uid,
+                                        expected_last_modified=int(entity["lastModified"]))
         ctx["audit"](scope.uid, "update", POSTS_TYPE, entity["id"], f"Updated social post ({clean['status']})", {})
         return _public(saved, user)
 
@@ -3306,8 +3448,8 @@ def create_social_studio_router(
         scope = _mutation(request, user, ctx, ownerId)
         entity = _load_owned(ctx, POSTS_TYPE, post_id, scope)
         _editable(entity)
-        ctx["soft_delete_entity"](POSTS_TYPE, entity["id"], scope.uid,
-                                  expected_last_modified=int(entity["lastModified"]))
+        # The tombstone keeps the post for the audit trail but not its base64 photos.
+        _delete_post_dropping_media(str(entity["id"]), int(entity["lastModified"]))
         ctx["audit"](scope.uid, "delete", POSTS_TYPE, entity["id"], "Deleted social post", {})
         return {"ok": True, "id": entity["id"],
                 "metaLive": any(isinstance(r, dict) and r.get("metaPostId") for r in (entity["data"].get("results") or []))}
