@@ -108,10 +108,8 @@ function _markTabLockLost() {
   _showTabLockOverlay();
 }
 
-// Blocking overlay for the superseded tab — LOCAL MODE ONLY. In server mode
-// the backend is the source of truth (every edit goes through the API and
-// live sync reconciles), so the losing tab keeps working and merely skips
-// its local cache writes.
+// Blocking overlay for the superseded tab — LOCAL MODE ONLY (in server mode
+// that tab keeps working and only skips its cache writes).
 function _showTabLockOverlay() {
   try {
     if ((typeof isServerModeEnabled === 'function') && isServerModeEnabled()) return;
@@ -230,6 +228,7 @@ async function flushDirtyCollections() {
   const toFlush = Array.from(idbSync.dirty);
   idbSync.dirty.clear();
   const failed = [];
+  _idbQuotaHit = false;
 
   try {
     for (const name of toFlush) {
@@ -242,11 +241,8 @@ async function flushDirtyCollections() {
         const saved = await saveCollectionToIndexedDB(name, state[name]);
         if (saved === false) failed.push(name);
       } catch (e) {
-        // A connection iOS Safari force-closed can race past onclose: the
-        // handle is dead but still truthy and every transaction() throws
-        // InvalidStateError. Null it so saveState() immediately falls back to
-        // keeping collections inside the localStorage snapshot; the onclose
-        // reopen path re-persists to IndexedDB once a connection returns.
+        // iOS force-closed the connection (dead but truthy handle): null it so
+        // saveState() keeps collections in the snapshot, then reopen below.
         if (e && e.name === 'InvalidStateError') {
           console.warn('IndexedDB connection lost mid-flush — falling back to localStorage');
           db = null;
@@ -276,15 +272,18 @@ async function flushDirtyCollections() {
   // backoff instead of tight-looping or waiting for an unrelated later edit.
   if (failed.length > 0) {
     for (const name of failed) idbSync.dirty.add(name);
-    // Local mode: IndexedDB is the only saved copy. Warn once per failing spell.
-    if (!state.serverMode && !idbSync.failWarned && !isAnotherTabWriter()) {
-      idbSync.failWarned = true;
+    // Local mode: IndexedDB is the only saved copy. Warn once per failing spell;
+    // "Storage Full" only for a quota refusal (it may follow one neutral note).
+    const full = _idbQuotaHit, level = full ? 2 : 1, ar = state.language === 'ar';
+    if (!state.serverMode && (idbSync.failWarned || 0) < level && !isAnotherTabWriter()) {
+      idbSync.failWarned = level;
       showNotification(
-        state.language === 'ar' ? 'مساحة التخزين ممتلئة' : 'Storage Full',
-        state.language === 'ar'
+        full ? (ar ? 'مساحة التخزين ممتلئة' : 'Storage Full') : (ar ? 'تأخّر الحفظ' : 'Saving Delayed'),
+        full ? (ar
           ? 'لا يمكن حفظ آخر التغييرات — مساحة المتصفح ممتلئة. صدّر نسخة احتياطية من الإعدادات.'
-          : 'Latest changes could not be saved — browser storage is full. Please export a backup from Settings.',
-        'error'
+          : 'Latest changes could not be saved — browser storage is full. Please export a backup from Settings.')
+          : (ar ? 'تعذّر حفظ التغييرات على هذا الجهاز — جارٍ إعادة المحاولة.' : 'Changes could not be saved to this device yet — retrying.'),
+        full ? 'error' : 'warning'
       );
     }
     if (idbSync.timer) clearTimeout(idbSync.timer);
@@ -297,11 +296,9 @@ async function flushDirtyCollections() {
     return;
   }
   idbSync.retryDelayMs = 2000;
-  idbSync.failWarned = false;
-  // Collections marked dirty WHILE this flush was running hit the re-entrancy
-  // guard above and had their debounce swallowed — they would otherwise sit
-  // unpersisted until some unrelated later edit. Flush them now. Terminates
-  // because each pass clears the set.
+  idbSync.failWarned = 0;
+  // Collections marked dirty during this flush lost their debounce to the
+  // re-entrancy guard: flush them now (each pass clears the set).
   if (idbSync.dirty.size > 0) {
     await flushDirtyCollections();
   }
@@ -492,13 +489,8 @@ function loadState() {
   try {
     const saved = localStorage.getItem('albayan_complete_state');
     if (!saved) {
-      // EVICTION SIGNAL — capture it now or never. init()'s local branch runs
-      // loadCollectionsFromStorage(), whose trailing saveState() re-creates
-      // this snapshot before the first render; a missing snapshot combined
-      // with a surviving sentinel cookie means the browser wiped this
-      // device's stored data (Safari ITP 7-day wipe, Chrome disk pressure).
-      // Only the clean not-present case counts: a corrupt-but-present
-      // snapshot throws below and must not be misreported as eviction.
+      // EVICTION SIGNAL — now or never (a later saveState() re-creates the
+      // snapshot). Only a clean absence counts; a corrupt snapshot throws below.
       _storageLossAtBoot = _albayanHadDataCookie();
     }
     if (saved) {

@@ -252,13 +252,64 @@ async function main() {
       await flush();
       assert.ok(run("idbSync.dirty.has('receipts')"), 'the failed collection stays queued for a retry');
       if (serverMode) { assert.equal(notes.length, 0, 'in server mode IndexedDB is only a cache'); continue; }
-      assert.deepEqual(notes.map(n => `${n.title}/${n.type}`), ['Storage Full/error']);
+      // A refusal with no quota error behind it is not called "storage full" (see the follow-up test).
+      assert.deepEqual(notes.map(n => `${n.title}/${n.type}`), ['Saving Delayed/warning']);
       saves = true;
       await flush();
       saves = false;
       await flush();
       assert.equal(notes.length, 2, 'a new failing spell after a good save warns again');
     }
+  });
+  await test('r3 OS n7 follow-up: only a real quota refusal says "Storage Full"; a transient abort warns neutrally', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.serverMode = false;
+    run('db = {}');
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.console = { ...sandbox.console, error() {} };  // the refused writes below are expected
+    // The real saveCollectionToIndexedDB runs; only the IndexedDB transaction is replaced.
+    sandbox.idbGet = async () => null;
+    const failures = [];
+    sandbox.idbAtomicWrite = async () => {
+      const name = failures.shift();
+      if (name) throw Object.assign(new Error(name), { name });
+      return true;
+    };
+    const flush = async (...names) => {
+      for (const name of names) run(`markCollectionDirty('${name}')`);
+      await sandbox.flushDirtyCollections();
+    };
+    const seen = () => notes.map(n => `${n.title}/${n.type}`);
+    failures.push('UnknownError');                    // an iOS WebView went to the background mid-write
+    await flush('receipts');
+    assert.deepEqual(seen(), ['Saving Delayed/warning'], 'a transient abort is not reported as a full disk');
+    assert.match(notes[0].message, /could not be saved to this device yet/);
+    assert.doesNotMatch(notes[0].message, /storage is full/);
+    assert.ok(run("idbSync.dirty.has('receipts')"), 'the failed collection stays queued for a retry');
+    failures.push('AbortError');
+    await flush('receipts');
+    assert.equal(notes.length, 1, 'the neutral note shows once per failing spell');
+    failures.push('QuotaExceededError', 'AbortError');  // receipts: quota; ads: a later transient abort
+    await flush('receipts', 'ads');
+    assert.deepEqual(seen().slice(1), ['Storage Full/error'], 'a real quota refusal still says so, even after the neutral note');
+    failures.push('QuotaExceededError');
+    await flush('receipts');
+    assert.equal(notes.length, 2, '"Storage Full" shows once per failing spell');
+    await flush('receipts', 'ads');                   // both saves go through: the spell is over
+    assert.equal(run('idbSync.dirty.size'), 0);
+    state.language = 'ar';
+    failures.push('QuotaExceededError');
+    await flush('receipts');
+    assert.deepEqual(notes.slice(2).map(n => `${n.title}/${n.type}`), ['مساحة التخزين ممتلئة/error'], 'a new spell starts over, and quota is said at once');
+    failures.push('UnknownError');
+    await flush('ads');
+    assert.equal(notes.length, 3, 'a transient abort after "Storage Full" adds no weaker note');
+    await flush('ads');
+    failures.push('UnknownError');
+    await flush('ads');
+    assert.deepEqual(notes.slice(3).map(n => `${n.title}/${n.type}`), ['تأخّر الحفظ/warning']);
+    assert.match(notes[3].message, /تعذّر حفظ التغييرات على هذا الجهاز/);
   });
   await test('r3 OS n8: the ads refresh after a delivery change re-reads ads changed during its paged load', async () => {
     const { sandbox, state, run } = loadBrowserSource();

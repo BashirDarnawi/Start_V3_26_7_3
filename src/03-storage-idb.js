@@ -287,13 +287,7 @@ async function processIdbQueue() {
   idbTransactionInProgress = false;
 }
 
-/**
- * Retrieve a value from IndexedDB by key.
- *
- * @param {string} storeName - Name of the object store
- * @param {string} key - Key to retrieve
- * @returns {Promise<any>} Promise resolving to the stored value or null if not found
- */
+/** Read one value by key; null when absent. */
 function idbGet(storeName, key) {
   if (!db) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
@@ -309,14 +303,7 @@ function idbGet(storeName, key) {
   });
 }
 
-/**
- * Store a value in IndexedDB.
- * BEST PRACTICE: Queued to prevent race conditions from concurrent writes.
- *
- * @param {string} storeName - Name of the object store
- * @param {any} value - Value to store (must have an 'id' property)
- * @returns {Promise<void>} Promise resolving when storage is complete
- */
+/** Store one value, serialized on the write queue. */
 function idbPut(storeName, value) {
   if (!db) return Promise.resolve(false);
   return new Promise((resolve, reject) => {
@@ -333,8 +320,6 @@ function idbPut(storeName, value) {
         }
       });
     };
-    
-    // BEST PRACTICE: Queue write operations to prevent race conditions
     idbTransactionQueue.push(() => task().then(resolve).catch(reject));
     processIdbQueue();
   });
@@ -363,10 +348,6 @@ function idbDelete(storeName, key) {
  * Enqueued on the same write queue to preserve serialization. Do NOT await
  * anything between the put/delete calls — an intervening await would let the
  * transaction auto-commit early and defeat atomicity.
- *
- * @param {Array<object>} puts - records to store (each has a `key`)
- * @param {Array<string>} deleteKeys - keys to delete
- * @returns {Promise<boolean>}
  */
 function idbAtomicWrite(puts, deleteKeys) {
   if (!db) return Promise.resolve(false);
@@ -376,7 +357,7 @@ function idbAtomicWrite(puts, deleteKeys) {
         const tx = db.transaction([DATA_STORE_NAME], 'readwrite');
         const store = tx.objectStore(DATA_STORE_NAME);
         tx.oncomplete = () => innerResolve(true);
-        tx.onerror = () => innerReject(tx.error);
+        tx.onerror = (e) => innerReject(tx.error || e?.target?.error);
         tx.onabort = () => innerReject(tx.error || new Error('IndexedDB transaction aborted'));
         for (const v of (puts || [])) store.put(v);
         for (const k of (deleteKeys || [])) store.delete(k);
@@ -412,14 +393,9 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
   return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:chunk:${index}`;
 }
 
-/**
- * Save a large collection to IndexedDB by chunking it into smaller pieces.
- * Uses metadata and chunked storage for efficient retrieval.
- *
- * @param {string} collectionName - Name of the collection (e.g., 'customers', 'ads')
- * @param {Array} data - Array of items to store
- * @returns {Promise<void>} Promise resolving when all chunks are saved
- */
+// Set when a save is refused for lack of space (not a transient abort); read by flushDirtyCollections.
+let _idbQuotaHit = false;
+/** Save a collection (one record, or chunks + meta when large); resolves false when refused. */
 async function saveCollectionToIndexedDB(collectionName, data, { force = false } = {}) {
   if (!db) return false;
   // MULTI-TAB SAFETY: a tab that lost the single-writer lock must never
@@ -508,6 +484,7 @@ async function saveCollectionToIndexedDB(collectionName, data, { force = false }
     return true;
   } catch (error) {
     console.error('Error saving collection to IndexedDB:', error);
+    if (error?.name === 'QuotaExceededError') _idbQuotaHit = true;
     return false;
   }
 }
