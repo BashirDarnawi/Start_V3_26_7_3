@@ -1746,7 +1746,34 @@ async function main() {
     assert.equal(bodies[0].expectedLastModified, 5, 'the stale dialog re-stopped against the colleague\'s newer version');
     assert.equal(htmls.length, 2, 'the conflict did not rebuild the dialog');
     assert.ok(/data-v="6"/.test(htmls[1]) && htmls[1].includes('Edit Stop Details') && htmls[1].includes('$47.00'), 'the rebuilt dialog does not show the saved stop');
-    assert.ok(notes.some(n => n.type === 'warning'), JSON.stringify(notes));
+    assert.ok(notes.some(n => n.type === 'warning' && /loaded the latest version - check the amount/.test(n.message)), 'the rebuilt dialog still says "Refresh the data": ' + JSON.stringify(notes));
+  });
+  await test('r6 A n=16 follow-up: a Stop conflict on an ad a colleague canceled or refunded closes the dialog instead of rebuilding it', async () => {
+    for (const change of [{ status: 'Canceled' }, { refundType: 'Full' }, { _deleted: true }]) {
+      const { sandbox, state, run } = loadBrowserSource();
+      run(realEscape);
+      const htmls = [];
+      let open = false;
+      const modal = { remove() { open = false; }, get dataset() { return { v: (htmls[htmls.length - 1].match(/data-v="([^"]*)"/) || [])[1] }; } };
+      const nodes = { 'stop-ad-spent': { value: '40.00' }, 'stop-ad-customer-informed': { checked: false, disabled: false }, 'stop-ad-submit': { disabled: false } };
+      sandbox.document.body.insertAdjacentHTML = (where, html) => { htmls.push(html); open = true; };
+      sandbox.document.getElementById = id => (id === 'stop-ad-modal' ? (open ? modal : null) : (nodes[id] || null));
+      const active = { id: 'adS', customerId: 'c1', status: 'Active', paymentStatus: 'paid', isPaid: true, amountUSD: 100, spentUSD: 0, _lastModified: 5 };
+      const changed = { ...active, ...change, _lastModified: 6 };
+      state.ads = [active];
+      sandbox.stopAd('adS');
+      assert.equal(htmls.length, 1);
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => notes.push({ message, type });
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.apiStopAd = async () => { throw conflict409(); };
+      sandbox.apiGetEntity = async () => ({ id: 'adS', data: changed, lastModified: 6 });
+      sandbox.applyValidatedServerEntityBatch = entries => { state.ads[0] = entries[0].entity.data; return [state.ads[0]]; };
+      await sandbox.confirmStopAd('adS');
+      assert.equal(htmls.length, 1, `a new Stop dialog was built for an ad that is now ${JSON.stringify(change)}`);
+      assert.equal(open, false, `the stale Stop dialog stayed open for an ad that is now ${JSON.stringify(change)}`);
+      assert.ok(notes.some(n => n.type === 'warning' && /can no longer be stopped/.test(n.message)), JSON.stringify(notes));
+    }
   });
   await test('r6 A n=17: unfinished Meta-import drafts stay off the reconciliation list; the server refusal reads in Arabic', async () => {
     const { sandbox, state } = loadBrowserSource();

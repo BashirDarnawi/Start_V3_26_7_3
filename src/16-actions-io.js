@@ -422,14 +422,22 @@ async function confirmStopAd(id, source = 'modal') {
         return true;
       } catch (error) {
         const conflict = isVersionConflict409(error);
-        if (conflict) {  // reload the ad; an open Stop modal is rebuilt from it
+        let conflictText = isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.';
+        if (conflict) {  // reload the ad; an open Stop modal is rebuilt from it while it can still be stopped
           try { applyValidatedServerEntityBatch([{ collection: 'ads', entity: await apiGetEntity('ads', storedAd.id) }], 'adStopConflict'); } catch (_) {}
-          if (!isReconciliation && document.getElementById('stop-ad-modal')) stopAd(id);
+          const stopModal = !isReconciliation && document.getElementById('stop-ad-modal');
+          if (stopModal && isAdReconciliationEligible(state.ads.find(a => a.id === id))) {
+            stopAd(id);
+            conflictText = isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حمّلنا أحدث نسخة — راجع المبلغ ثم أعد المحاولة.' : 'This ad changed on another device. We loaded the latest version - check the amount and try again.';
+          } else if (stopModal) {  // canceled, refunded or deleted meanwhile: nothing left to stop
+            stopModal.remove();
+            conflictText = isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر ولم يعد من الممكن إيقافه.' : 'This ad changed on another device and can no longer be stopped.';
+          }
         }
         showNotification(
           isAr ? 'تعذر الحفظ' : 'Ad Not Saved',
           error?.status === 409
-            ? describe409(error, isAr ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
+            ? describe409(error, conflictText)
             : (_serverRefusalText(error?.message) || (isAr ? 'فشل حفظ إيقاف الإعلان.' : 'The ad stop could not be saved.')),
           conflict ? 'warning' : 'error'
         );
