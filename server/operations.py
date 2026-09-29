@@ -336,6 +336,33 @@ def _like_text(value: str) -> str:
     return re.sub(r"([!%_])", r"!\1", value)  # a LIKE literal for ESCAPE '!'
 
 
+def _decoded_record(raw: Any) -> dict[str, Any] | None:
+    try:
+        data = json_loads(raw or "{}")
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _rewrite_actor_stamps(data: dict[str, Any], user_id: str, name: str) -> bool:
+    """Replace the person's stamps in one decoded record, in place; True when something changed."""
+    dirty = False
+    if str(data.get("metaImportCompletedBy") or "") == str(user_id) and data.get("metaImportCompletedByName") not in (
+        None, "", DELETED_USER_NAME,
+    ):
+        data["metaImportCompletedByName"] = DELETED_USER_NAME
+        dirty = True
+    for list_key in _HISTORY_LISTS if name else ():
+        for entry in data.get(list_key) if isinstance(data.get(list_key), list) else ():
+            if not isinstance(entry, dict):
+                continue
+            for actor_key in _HISTORY_ACTOR_KEYS:
+                if isinstance(entry.get(actor_key), str) and entry[actor_key].strip() == name:
+                    entry[actor_key] = DELETED_USER_NAME
+                    dirty = True
+    return dirty
+
+
 def scrub_actor_name_stamps_conn(conn: Any, user_id: str, old_name: str, now: int, *, lock_suffix: str = "") -> int:
     """Privacy anonymisation: replace the person's name where receipts and ads copied it as text.
 
@@ -347,46 +374,41 @@ def scrub_actor_name_stamps_conn(conn: Any, user_id: str, old_name: str, now: in
     the completion stamp by the id. Both become "Deleted user", and last_modified moves on so synced
     clients take the scrubbed copy. Runs in main.py's anonymisation transaction; idempotent.
     Returns the number of rows rewritten.
+
+    Only rows that really change are locked (``lock_suffix``). The search matches the key forms
+    db.json_dumps writes (``"editedBy":"<name>"``, ``"metaImportCompletedBy":"<id>"``; every write
+    strips strings), not any mention, so a driver's delivered receipts or a same-named customer are
+    never read. It runs without a lock; each row that would change is then re-read with the lock,
+    in (type, id) order, and rewritten from that locked copy.
     """
     name = str(old_name or "").strip()
     lowered = name.casefold()
     if lowered in _SYSTEM_ACTOR_NAMES or lowered.startswith(("meta automatic", "system ")):
         name = ""
-    patterns = {"by_id": f"%{_like_text(str(user_id))}%"}
-    if name:
-        patterns["by_name"] = f"%{_like_text(json_dumps(name)[1:-1])}%"
+    stamps = [("metaImportCompletedBy", str(user_id))] + [(key, name) for key in _HISTORY_ACTOR_KEYS if name]
+    patterns = {f"p{index}": f"%{_like_text(json_dumps({key: value})[1:-1])}%" for index, (key, value) in enumerate(stamps)}
     where = " OR ".join(f"data_json LIKE :{key} ESCAPE '!'" for key in patterns)
-    rows = conn.execute(
-        text(
-            "SELECT type, id, data_json, last_modified FROM entities "
-            f"WHERE type IN ('receipts', 'ads') AND ({where}) ORDER BY type, id" + lock_suffix
-        ),
+    candidates = []
+    for row in conn.execute(
+        text(f"SELECT type, id, data_json FROM entities WHERE type IN ('receipts', 'ads') AND ({where}) ORDER BY type, id"),
         patterns,
-    ).mappings().all()
+    ).mappings().all():
+        data = _decoded_record(row.get("data_json"))
+        if data is not None and _rewrite_actor_stamps(data, user_id, name):
+            candidates.append((str(row["type"]), str(row["id"])))
+    locked = []
+    for entity_type, entity_id in candidates:  # all row locks first, then period locks: the order the old scan used
+        row = conn.execute(
+            text("SELECT type, id, data_json, last_modified FROM entities WHERE type = :type AND id = :id" + lock_suffix),
+            {"type": entity_type, "id": entity_id},
+        ).mappings().first()
+        if row:
+            locked.append(row)
     changed = 0
-    for row in rows:
-        try:
-            data = json_loads(row.get("data_json") or "{}")
-        except ValueError:
-            continue
-        if not isinstance(data, dict):
-            continue
-        dirty = False
-        if str(data.get("metaImportCompletedBy") or "") == str(user_id) and data.get("metaImportCompletedByName") not in (
-            None, "", DELETED_USER_NAME,
-        ):
-            data["metaImportCompletedByName"] = DELETED_USER_NAME
-            dirty = True
-        for list_key in _HISTORY_LISTS if name else ():
-            for entry in data.get(list_key) if isinstance(data.get(list_key), list) else ():
-                if not isinstance(entry, dict):
-                    continue
-                for actor_key in _HISTORY_ACTOR_KEYS:
-                    if isinstance(entry.get(actor_key), str) and entry[actor_key].strip() == name:
-                        entry[actor_key] = DELETED_USER_NAME
-                        dirty = True
-        if not dirty:
-            continue
+    for row in locked:
+        data = _decoded_record(row.get("data_json"))
+        if data is None or not _rewrite_actor_stamps(data, user_id, name):
+            continue  # changed since the unlocked search
         lock_financial_period_for_redaction(str(row["type"]), data, conn=conn)
         conn.execute(
             text("UPDATE entities SET data_json = :data_json, last_modified = :stamp WHERE type = :type AND id = :id"),

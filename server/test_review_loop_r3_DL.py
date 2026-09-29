@@ -175,6 +175,79 @@ def test_anonymisation_replaces_the_name_in_histories_and_the_completion_stamp()
     assert _entity("ads", ad_id) == ad and _entity("receipts", receipt_id) == receipt
 
 
+class _Fetched:
+    def __init__(self, rows: list[dict]):
+        self._rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+class _SpyConn:
+    """Runs every statement for real and notes which entity rows each SELECT returned (locked ones apart)."""
+
+    def __init__(self, conn, lock_marker: str):
+        self._conn, self._marker = conn, lock_marker
+        self.locked: set[str] = set()
+        self.loaded: set[str] = set()
+
+    def execute(self, statement, *args, **kwargs):
+        result = self._conn.execute(statement, *args, **kwargs)
+        sql = str(statement)
+        if not sql.lstrip().upper().startswith("SELECT") or "FROM entities" not in sql:
+            return result
+        rows = [dict(row) for row in result.mappings().all()]
+        ids = {str(row["id"]) for row in rows if "id" in row}
+        if "data_json" in sql.split("FROM entities")[0]:
+            self.loaded |= ids
+        if self._marker in sql:
+            self.locked |= ids
+        return _Fetched(rows)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_name_stamp_scrub_locks_and_reads_only_the_rows_it_rewrites():
+    """A driver named like many customers: only the rows that carry the person's stamps are row-locked
+    (and bystander receipts that merely mention the id or the name are not even read)."""
+    from server.operations import scrub_actor_name_stamps_conn
+
+    driver, name = f"dl_driver_{TAG}_{_next()}", f"Ali {TAG}"
+    hit_ad, hit_receipt = f"ad_dl_{TAG}_lk_hit", f"rcpt_dl_{TAG}_lk_hit"
+    delivered, same_customer, longer_name, other_list = (
+        f"rcpt_dl_{TAG}_lk_delivered", f"rcpt_dl_{TAG}_lk_customer", f"rcpt_dl_{TAG}_lk_longer", f"ad_dl_{TAG}_lk_other",
+    )
+    _insert("ads", hit_ad, {"recordType": "ad", "metaImportCompletedBy": driver, "metaImportCompletedByName": name})
+    _insert("receipts", hit_receipt, {"editHistory": [{"editedAt": "2026-09-07T10:00:00Z", "editedBy": name, "changes": []}]})
+    _insert("receipts", delivered, {"deliveryPersonId": driver, "customerName": f"Customer {TAG}"})
+    _insert("receipts", same_customer, {"customerName": name, "notes": f"call {name} after noon"})
+    _insert("receipts", longer_name, {"editHistory": [{"editedBy": f"{name} Junior", "changes": []}]})
+    _insert("ads", other_list, {"recordType": "ad", "reviewLog": [{"editedBy": name}]})  # not a history list
+    before = {key: _entity(kind, key) for kind, key in (
+        ("receipts", delivered), ("receipts", same_customer), ("receipts", longer_name), ("ads", other_list),
+    )}
+
+    marker = " /* row lock */"
+    with db_conn() as conn:
+        spy = _SpyConn(conn, marker)
+        changed = scrub_actor_name_stamps_conn(spy, driver, name, now_ms(), lock_suffix=marker)
+
+    assert changed == 2
+    assert spy.locked == {hit_ad, hit_receipt}
+    assert not spy.loaded & {delivered, same_customer, longer_name}
+    assert _entity("ads", hit_ad)["data"]["metaImportCompletedByName"] == "Deleted user"
+    assert _entity("receipts", hit_receipt)["data"]["editHistory"][0]["editedBy"] == "Deleted user"
+    for kind, key in (("receipts", delivered), ("receipts", same_customer), ("receipts", longer_name), ("ads", other_list)):
+        assert _entity(kind, key) == before[key], key
+
+
 # ------------------------------------------------------------------ n=21 the reversal record survives
 
 
