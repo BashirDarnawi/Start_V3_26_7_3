@@ -9,7 +9,8 @@
        and clears the goal (goalDetail '') is accepted; the objective alone is still refused (T9, unchanged).
 * n=41 admins remove a customer's WhatsApp number when asked: DELETE /api/studio/staff/customers/{id}/contact
        (admins only, same site), audited ``studio_profile`` "removed" without the number; the contact link
-       then answers 409 NO_CONSENT and the customer's own profile shows no number.
+       then answers 409 NO_CONSENT and the customer's own profile shows no number. The removal needs no
+       ticket and no hand-out (contact_link) first; ``removed`` says whether there was a number.
 
 Every test builds its own users (unique e-mails per run) through the real routes and removes the rows it made.
 """
@@ -221,7 +222,7 @@ def test_an_admin_removes_a_customers_whatsapp_number_audited_without_the_number
 
     removed = client.delete(path, cookies=people["admin"]["cookies"])
     assert removed.status_code == 200, removed.text
-    assert removed.json() == {"customerId": customer["id"], "whatsapp": None}
+    assert removed.json() == {"customerId": customer["id"], "whatsapp": None, "removed": True}
     mine = client.get("/api/studio/profile", cookies=customer["cookies"]).json()
     assert mine["whatsappNumber"] is None and mine["whatsappConsentAt"] is None
     link = client.get(path, cookies=people["admin"]["cookies"])
@@ -234,3 +235,31 @@ def test_an_admin_removes_a_customers_whatsapp_number_audited_without_the_number
     again = client.delete(path, cookies=people["admin"]["cookies"])
     assert again.status_code == 200 and len([row for row in _profile_audits(customer["id"])
                                              if row["action"] == "studio_profile"]) == 2  # nothing to remove, no entry
+    assert again.json()["removed"] is False
+
+
+# ------------------------------------------------------------------ n=41 follow-up: removal needs no ticket, no hand-out
+
+def test_an_admin_removes_a_number_without_a_ticket_and_without_handing_it_out_first(people):
+    """Review of n=41: the admin's removal must not need the number revealed first (a GET writes a
+    permanent contact_link entry) nor a ticket (Help may be off for the customer). The route alone does
+    it, and ``removed`` tells the screen whether there was a number to remove."""
+    customer = _customer()
+    saved = client.put("/api/studio/profile", json={"whatsappNumber": "092 123 4567", "whatsappConsent": True},
+                       cookies=customer["cookies"])
+    assert saved.status_code == 200 and saved.json()["whatsappNumber"] == "+218921234567", saved.text
+    path = f"/api/studio/staff/customers/{customer['id']}/contact"
+    removed = client.delete(path, cookies=people["admin"]["cookies"])  # no GET, no ticket before it
+    assert removed.status_code == 200 and removed.json()["removed"] is True, removed.text
+    actions = [row["action"] for row in _profile_audits(customer["id"])]
+    assert "contact_link" not in actions, actions  # the number was never handed out
+    assert [json_loads(row["metadata_json"])["whatsapp"] for row in _profile_audits(customer["id"])
+            if row["action"] == "studio_profile"] == ["set", "removed"]
+    assert client.get("/api/studio/profile", cookies=customer["cookies"]).json()["whatsappNumber"] is None
+
+    # A customer who never saved a number: 200, nothing removed, nothing audited, nothing handed out.
+    never = _customer()
+    nothing = client.delete(f"/api/studio/staff/customers/{never['id']}/contact", cookies=people["admin"]["cookies"])
+    assert nothing.status_code == 200, nothing.text
+    assert nothing.json() == {"customerId": never["id"], "whatsapp": None, "removed": False}
+    assert _profile_audits(never["id"]) == []

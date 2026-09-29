@@ -1186,6 +1186,87 @@ async function main() {
     assert.ok(!String(run("renderStudioStaffThread('tkt_1')")).includes('studio-staff-whatsapp-remove'), 'a reviewer gets no remove button');
   });
 
+  await test('r4 BP n=41 follow-up: with the Help service off (no Help tab, no tickets) the classic Overview shows and removes the number', async () => {
+    const { sandbox, run, calls, renders, replies } = studioFixture();
+    replies['/api/studio/profile'] = options => (String(options.method || 'GET') === 'PUT'
+      ? { whatsappNumber: null, whatsappConsentAt: null, updatedAt: '2026-09-29T10:00:00Z' }
+      : { whatsappNumber: '+218912345678', whatsappConsentAt: '2026-09-01T10:00:00Z', updatedAt: '2026-09-01T10:00:00Z' });
+    let sheet = null;
+    sandbox.studioWalletSheet = options => { sheet = options; };
+    sandbox.refreshAdsStudioLimits = () => {};  // the /me read of the budget limits is not this test's business
+    // Help is off for this customer (the default services.help 'off', or 'pilot' after leaving the allowlist).
+    assert.equal(run('studioHelpClassicTab()'), false);
+    assert.ok(!run('adsStudioTabsForUser()').some(tab => tab.id === 'help'), 'no classic Help tab');
+    run("_adsStudioActiveTab = 'dashboard';");
+    let html = String(run('renderAdsStudioView()'));
+    assert.ok(!html.includes('studio-classic-whatsapp'), 'the number is not known before the read');
+    await settle(); await settle();
+    assert.equal(calls.filter(call => call.url === '/api/studio/profile' && call.method === 'GET').length, 1);
+    assert.ok(renders.length >= 1, 'the Overview is drawn again when the read is done');
+    html = String(run('renderAdsStudioView()'));
+    assert.ok(html.includes('data-testid="studio-classic-whatsapp"') && html.includes('data-testid="studio-help-whatsapp-number"') && html.includes('+218912345678'), html);
+    assert.ok(html.includes('onclick="studioHelpWhatsappRemove()"'));
+    run('studioHelpWhatsappRemove()');
+    assert.ok(sheet && sheet.danger === true, 'an in-page sheet confirms (never a native dialog)');
+    sheet.onConfirm();
+    await settle(); await settle();
+    const put = calls.find(call => call.method === 'PUT' && call.url === '/api/studio/profile');
+    assert.deepEqual(JSON.parse(JSON.stringify(put.body)), { whatsappNumber: null, whatsappConsent: false });
+    assert.ok(!String(run('renderAdsStudioView()')).includes('studio-classic-whatsapp'), 'gone once removed');
+    // A lapsed subscription (the classic paywall) still shows it: the promise is "at any time".
+    replies['/api/studio/profile'] = { whatsappNumber: '+218912345678', whatsappConsentAt: '2026-09-01T10:00:00Z' };
+    run("state.currentUser = { id: 'cust3', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn'] }, subscriptions: [] }; state.users = [state.currentUser];");
+    run('renderAdsStudioView()');
+    await settle(); await settle();
+    assert.ok(String(run('renderAdsStudioView()')).includes('data-testid="studio-classic-whatsapp"'));
+  });
+
+  await test('r4 BP n=41 follow-up: an admin removes a number with no ticket and without handing it out first', async () => {
+    const { sandbox, run, calls, replies } = studioFixture();
+    let sheet = null;
+    sandbox.studioWalletSheet = options => { sheet = options; };
+    const notes = [];
+    sandbox.showNotification = (title, text, type) => { notes.push({ title, text, type }); };
+    sandbox.isCurrentUserAdmin = () => true;
+    replies['/api/studio/staff/tickets?status=active'] = { items: [], nextCursor: null };
+    // On a ticket: the Remove button stands next to "Message on WhatsApp" (the number was never read).
+    run("_studioStaff.forUser = studioHelpUserId(); studioStaffThreadSlot('tkt_2').ticket = { id: 'tkt_2', ownerId: 'cust8', status: 'open' };");
+    const thread = String(run("renderStudioStaffThread('tkt_2')"));
+    assert.ok(thread.includes('data-testid="studio-staff-whatsapp"') && thread.includes("studioStaffRemoveContact('tkt_2')"), thread);
+    replies['/api/studio/staff/customers/cust8/contact'] = options => (String(options.method) === 'DELETE' ? { customerId: 'cust8', whatsapp: null, removed: false } : Promise.reject(new Error('the number must not be read')));
+    run("studioStaffRemoveContact('tkt_2')");
+    assert.ok(sheet && sheet.danger === true, 'an in-page sheet confirms');
+    sheet.onConfirm();
+    await settle(); await settle();
+    assert.deepEqual(calls.filter(call => call.url.startsWith('/api/studio/staff/customers/cust8/contact')).map(call => call.method), ['DELETE'], 'no GET (no contact_link hand-out)');
+    assert.ok(/nothing to remove/i.test(String(run("_studioStaff.contacts.get('tkt_2').error"))), 'the answer says there was nothing to remove');
+    assert.equal(notes.at(-1).type, 'success');
+
+    // With no ticket at all: the admin card in the staff tickets section takes the customer's user id.
+    let section = String(run('renderStudioStaffTicketsClassic()'));
+    assert.ok(section.includes('data-testid="studio-staff-remover"') && section.includes('onclick="studioStaffRemoverAsk()"'), section);
+    sheet = null;
+    run("studioStaffRemoverDraft({ value: 'not an id!' }); studioStaffRemoverAsk();");
+    assert.equal(sheet, null, 'a bad id opens nothing');
+    assert.ok(String(run('renderStudioStaffTicketsClassic()')).includes('data-testid="studio-staff-remover-note"'));
+    replies['/api/studio/staff/customers/cust7/contact'] = options => (String(options.method) === 'DELETE' ? { customerId: 'cust7', whatsapp: null, removed: true } : Promise.reject(new Error('the number must not be read')));
+    run("studioStaffRemoverDraft({ value: ' cust7 ' }); studioStaffRemoverAsk();");
+    assert.ok(sheet && sheet.danger === true);
+    sheet.onConfirm();
+    await settle(); await settle();
+    assert.deepEqual(calls.filter(call => call.url.startsWith('/api/studio/staff/customers/cust7/')).map(call => call.method), ['DELETE']);
+    assert.equal(run('_studioStaff.remover.error'), 'The number was removed.');
+    // A reviewer gets neither the card nor the ticket's Remove button.
+    sandbox.isCurrentUserAdmin = () => false;
+    run("state.currentUser.permissions = { adCampaignRequests: ['view', 'review'] };");
+    section = String(run('renderStudioStaffTicketsClassic()'));
+    assert.ok(section.includes('data-testid="studio-staff-tickets"') && !section.includes('studio-staff-remover'), section);
+    assert.ok(!String(run("renderStudioStaffThread('tkt_2')")).includes('studio-staff-whatsapp-remove'));
+    sheet = null;
+    run("studioStaffRemoverDraft({ value: 'cust7' }); studioStaffRemoverAsk();");
+    assert.equal(sheet, null, 'the removal itself refuses a reviewer');
+  });
+
   await test('r4 BP n=44: the classic Add-money amount and currency survive a full render such as the language switch', async () => {
     const { sandbox, state, run } = studioFixture();
     const nodes = { 'ads-studio-charge-amount': { value: '500' }, 'ads-studio-charge-currency': { value: 'LYD' }, 'ads-studio-lyd-preview': { textContent: '' } };

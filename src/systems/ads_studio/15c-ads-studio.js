@@ -495,12 +495,13 @@ function renderAdsStudioView() {
           </div>
           ${renderAdsStudioCampaigns()}
           <div class="mt-6">${renderAdsStudioSubscriptionGate()}</div>
+          ${adsStudioClassicWhatsapp()}
           ${renderAdsStudioSheets()}
         </div>`;
     }
     // In the studio shell the paywall's "Charge wallet" has nowhere else to go: keep the wallet form reachable.
     const shellWallet = IS_STUDIO_SHELL && adsStudioCanViewOwn() ? `<div class="mt-6">${renderAdsStudioWallet()}</div>` : '';
-    return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}${shellWallet}</div>`;
+    return `<div class="max-w-7xl mx-auto" dir="${isAr ? 'rtl' : 'ltr'}">${renderAdsStudioHeader()}${renderAdsStudioSubscriptionGate()}${shellWallet}${adsStudioClassicWhatsapp()}</div>`;
   }
 
   // The budget limits arrive long before the budget step (once per session, P1-08b). Opening the
@@ -612,8 +613,15 @@ function renderAdsStudioDashboard() {
         <h3 class="font-black text-xl text-slate-900 dark:text-white mb-4 flex items-center gap-2"><i data-lucide="link-2" class="w-5 h-5"></i>${isAr ? 'ربط ميتا' : 'Meta Connection'}</h3>
         ${renderAdsStudioConnections()}
       </div>
+      ${adsStudioClassicWhatsapp()}
     </section>
   `;
+}
+
+// A WhatsApp number saved on the v2 Account screen, shown and removable here whatever the Help service
+// says (15n; the Help tab draws the same card only while that service is on for this customer).
+function adsStudioClassicWhatsapp() {
+  return typeof renderStudioClassicWhatsapp === 'function' ? renderStudioClassicWhatsapp() : '';
 }
 
 function renderAdsStudioEmptyState() {

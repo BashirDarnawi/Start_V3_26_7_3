@@ -69,8 +69,8 @@ reviewer reaches only a customer with a request the team can see or a ticket tha
 and never an admin-only ticket (404 UNKNOWN_CUSTOMER, as for an unknown id); admins reach every
 customer. Each number handed out is audited ``contact_link`` (kept forever) without the number.
 ``DELETE`` on the same path (admins only, from the Albayan site itself) removes the customer's number
-and consent when they ask in a ticket (the Account screen that removes it is v2 only), audited
-``studio_profile`` "removed" without the number.
+and consent when they ask (a ticket, or with no ticket at all), audited ``studio_profile`` "removed"
+without the number; it never hands the number out first. ``removed`` says whether there was one.
 
 **Team desk in use (P3-20).** ``desk_counts(conn)`` is the ONE source of the desk's numbers: open
 queue rows (``stopRequests``), tickets waiting for the team (``openTickets``, status open, with
@@ -876,7 +876,7 @@ def create_studio_desk_router(
         """Admins only: removes a customer's WhatsApp number and its consent when the customer asks (a
         ticket), for example a customer back on the classic layout. The same write as the owner's
         removal (studio_profile.save_profile), audited ``studio_profile`` "removed" by the admin,
-        never with the number. Repeating it changes nothing."""
+        never with the number. Repeating it changes nothing (``removed`` false: nothing was stored)."""
         same_origin(request)
         if not require_staff(user):
             studio_error(403, "ADMIN_ONLY", "Only an admin can use this")
@@ -889,14 +889,16 @@ def create_studio_desk_router(
             if not user_exists(conn, customer_id):
                 studio_error(404, "UNKNOWN_CUSTOMER", "No such customer for the team")
         actor_id = str(user.get("id") or "")
+        changes: list[str] = []
 
         def audit_removal(conn: Any, row_id: str, change: str) -> None:
+            changes.append(change)
             ctx["audit"](
                 actor_id, PROFILE_AUDIT_ACTION, STUDIO_PROFILES_TYPE, row_id,
                 f"WhatsApp number {change} by the team", {"whatsapp": change, "customerId": customer_id}, conn=conn,
             )
 
         view = save_profile(customer_id, None, audit=audit_removal)
-        return {"customerId": customer_id, "whatsapp": view["whatsappNumber"]}
+        return {"customerId": customer_id, "whatsapp": view["whatsappNumber"], "removed": bool(changes)}
 
     return router
