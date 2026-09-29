@@ -1279,11 +1279,7 @@ function addAuditLog(action, resourceId, description, metadata = {}) {
   saveState();
 }
 
-// Lightweight logging helper used across feature codepaths
-// action: 'create' | 'update' | 'delete' | etc.
-// resourceType: e.g., 'receipt', 'page'
-// resourceId: the id of the entity being logged
-// description: human-readable description
+// Lightweight logging helper (action: 'create' | 'update' | 'delete' | …).
 function addLog(action, resourceType, resourceId, description, metadata = {}) {
   addAuditLog(action, resourceId, description, { resourceType, ...metadata });
 }
@@ -1695,12 +1691,9 @@ function getReceiptPaymentState(receipt) {
 
 // Delivery identity is independent of whether the customer has already paid.
 // Strong persisted markers come first; deliveryPersonId is only a fallback for
-// Bilingual wrappers for the raw server refusal toasts. The old toasts had an
-// English-only title, exposed the INTERNAL collection name ("receipts") and
-// showed the server's English detail verbatim — that is how "Receipt type is
-// server-controlled" reached an Arabic-speaking employee. Known rule texts
-// are translated; anything unknown is still shown (never hidden), just under
-// a bilingual title and a human noun.
+// Bilingual wrappers for the raw server refusal toasts: known rule texts are
+// translated; anything unknown is still shown (never hidden), just under a
+// bilingual title and a human noun, never the internal collection name.
 const _SERVER_REFUSAL_AR = [
   ['Receipt type is server-controlled', 'نوع الوصل يحدده الخادم ولا يمكن تغييره.'],
   ['Receipt transfer fields are server-controlled', 'حقول تحويل الوصل يحددها الخادم.'],
@@ -1710,7 +1703,10 @@ const _SERVER_REFUSAL_AR = [
   ['Ad payment classification requires the transactional ad API', 'تغيير تصنيف دفع الإعلان يتم من نموذج الإعلان فقط.'],
   ['Ad funding and stopping require the transactional ad API', 'تمويل الإعلان وإيقافه يتمان من نموذج الإعلان فقط.'],
   ['Ad page not found', 'صفحة الإعلان غير موجودة.'],
-  ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.']
+  ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.'],
+  ['This customer was merged', 'دُمج هذا العميل في عميل آخر؛ اختر العميل الباقي.'],
+  ['This customer was deleted', 'تم حذف هذا العميل؛ يجب استرجاعه أولاً.'],
+  ['Ad customer not found', 'عميل الإعلان غير موجود أو محذوف.']
 ];
 function _serverRefusalNoun(collectionName) {
   const isAr = state.language === 'ar';

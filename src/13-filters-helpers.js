@@ -1863,11 +1863,8 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   }
   
   // PERFORMANCE: build the by-customer stats index ONCE and reuse it for both
-  // the financial filter and the sort. Previously the sort comparator called
-  // getCustomerStats(customer.id) with no index for BOTH operands of EVERY
-  // comparison, and the no-index path rescans all ads+receipts+pages each time —
-  // ~O(customers log customers × records), freezing the UI for seconds at a few
-  // thousand records on every search keystroke / sort change / live-sync tick.
+  // the financial filter and the sort; the no-index path rescans every
+  // ad, receipt and page per comparison.
   const needsStats = (
     financialFilter === 'hasCredit' ||
     financialFilter === 'hasDebt' ||
@@ -7221,7 +7218,7 @@ function describe409(error, conflictText) {
       ? 'هذا الوصل يموّل إعلاناً بصيغة قديمة بدون صفوف تمويل، لذا يجب أن يبقى مدفوعاً.'
       : 'This receipt funds an old-format ad without funding rows, so it must remain paid.';
   }
-  return detail || conflictText;
+  return (state.language === 'ar' && _SERVER_REFUSAL_AR.find(([en]) => detail.startsWith(en))?.[1]) || detail || conflictText;
 }
 
 async function saveTopUps() {

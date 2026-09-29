@@ -266,17 +266,118 @@ async function runPageMerge(keepPageId, losePageId) {
   }
 }
 
+// The month the server files an ad under, mirroring _record_date in
+// server/operations.py: the first of startDate, date, metaStartTime, createdAt,
+// _created; timestamps and full ISO times count on the Tripoli calendar.
+function _mergeAdPeriod(ad) {
+  for (const key of ['startDate', 'date', 'metaStartTime', 'createdAt', '_created']) {
+    const value = ad?.[key];
+    if (value === null || value === undefined || value === '') continue;
+    let when = null;
+    if (typeof value === 'number') {
+      when = new Date(Math.abs(value) < 100000000000 ? value * 1000 : value);
+    } else {
+      const textValue = String(value).trim();
+      if (textValue.length > 10 && textValue.includes('T')) {
+        const parsed = new Date(/(Z|[+-]\d\d:?\d\d)$/i.test(textValue) ? textValue : `${textValue}Z`);
+        if (!Number.isNaN(parsed.getTime())) when = parsed;
+      }
+      if (!when) {
+        if (/^\d{4}-\d{2}-\d{2}/.test(textValue)) return textValue.slice(0, 7);
+        continue;
+      }
+    }
+    if (Number.isNaN(when.getTime())) continue;
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Tripoli', year: 'numeric', month: '2-digit' }).formatToParts(when);
+      return `${parts.find(part => part.type === 'year').value}-${parts.find(part => part.type === 'month').value}`;
+    } catch (_) {
+      return when.toISOString().slice(0, 7);
+    }
+  }
+  return '';
+}
+
+// The months the server has closed, or null when they cannot be read. Only a
+// server can close a month, so a local-only app has none.
+async function _loadClosedMergePeriods() {
+  if (!isServerModeEnabled()) return new Set();
+  try {
+    const rows = await apiJson('/api/admin/operations/financial-periods', { method: 'GET' }, { timeoutMs: 20000 });
+    return new Set((Array.isArray(rows) ? rows : [])
+      .filter(row => String(row?.status || '').toLowerCase() === 'closed')
+      .map(row => String(row.period || '')));
+  } catch (_) {
+    return null;
+  }
+}
+
 // The write sequence for ONE page. Returns a plain result instead of showing a
 // toast, so merging 48 pages can report once at the end instead of 48 times.
 // Order is the safety property: every ad lands on the Meta page BEFORE the old
 // page is removed, so an interrupted run is always safe to repeat.
-async function _mergeOnePageIntoMeta(keepPageId, losePageId) {
+// closedPeriods: the Set from _loadClosedMergePeriods (the bulk run reads it
+// once); left out, it is read here.
+async function _mergeOnePageIntoMeta(keepPageId, losePageId, closedPeriods) {
   const isAr = state.language === 'ar';
   const plan = getPageMergePlan(keepPageId, losePageId);
   if (plan.blocked) return { ok: false, moved: 0, total: 0, name: '', keepName: '', reason: plan.blocked };
   const name = String(plan.losePage.name || '');
   const keepName = String(plan.keepPage.name || '');
+  const total = plan.ads.length;
   let moved = 0;
+
+  // The server refuses every edit of an ad in a closed month (423), this page
+  // move included, so such a merge could never finish. Check before writing
+  // anything: the admin learns which ads and months block it, and no ad is
+  // moved into a half-merged page.
+  const closed = closedPeriods === undefined ? await _loadClosedMergePeriods() : closedPeriods;
+  if (!closed) {
+    return {
+      ok: false, moved, total, name, keepName,
+      reason: isAr
+        ? `«${name}»: تعذّر التحقق من الأشهر المغلقة، فلم يتغير شيء. أعد المحاولة.`
+        : `"${name}": could not check which months are closed, so nothing was changed. Try again.`
+    };
+  }
+  const lockedAds = plan.ads.filter(ad => closed.has(_mergeAdPeriod(ad)));
+  if (lockedAds.length) {
+    const separator = isAr ? '، ' : ', ';
+    const months = [...new Set(lockedAds.map(_mergeAdPeriod))].sort().join(separator);
+    const list = lockedAds.slice(0, 5).map(ad => `${_describeMergeAdCustomer(ad, isAr)} (${_mergeAdPeriod(ad)})`).join(separator)
+      + (lockedAds.length > 5 ? ' …' : '');
+    return {
+      ok: false, moved, total, name, keepName, lockedAds: lockedAds.length,
+      reason: isAr
+        ? `«${name}»: ${lockedAds.length} من ${total} إعلان في أشهر مغلقة (${months}): ${list}. لم يُنقل أي إعلان ولم تُحذف الصفحة القديمة. يجب أن يعيد المدير فتح هذه الأشهر من مركز التحكم أولاً، ثم أعد الدمج.`
+        : `"${name}": ${lockedAds.length} of ${total} ads are in closed months (${months}): ${list}. No ad was moved and the old page was kept. An Admin must unlock those months in the Control Center first, then merge again.`
+    };
+  }
+
+  // Carry the hand-made page's owner across FIRST. An imported page arrives
+  // with no owner at all, so this is usually the only place that knowledge
+  // exists: it only adds ids, is safe to repeat, and must never be lost to a
+  // delete. Read from live state, not the plan's snapshot.
+  const liveKeepPage = getVisibleRecords(state.pages).find(page => String(page.id) === String(plan.keepPage.id)) || plan.keepPage;
+  const keepOwnerIds = getPageCustomerIds(liveKeepPage).map(String);
+  const addedOwnerIds = getPageCustomerIds(plan.losePage).map(String).filter(id => !keepOwnerIds.includes(id));
+  if (addedOwnerIds.length) {
+    const keepExpected = Number(liveKeepPage._lastModified);
+    const ownersSaved = await updateRecord(
+      state.pages,
+      liveKeepPage.id,
+      { customerIds: [...keepOwnerIds, ...addedOwnerIds] },
+      Number.isFinite(keepExpected) ? keepExpected : undefined
+    );
+    if (!ownersSaved) {
+      return {
+        ok: false, moved, total, name, keepName,
+        reason: isAr
+          ? `«${name}»: تعذّر نسخ مالك الصفحة إلى صفحة Meta، فلم يُنقل أي إعلان ولم تُحذف الصفحة القديمة. أعد المحاولة.`
+          : `"${name}": the owner could not be copied to the Meta page, so no ad was moved and the old page was kept. Run it again.`
+      };
+    }
+  }
 
   for (const ad of plan.ads) {
     const updates = { pageId: String(plan.keepPage.id) };
@@ -294,20 +395,6 @@ async function _mergeOnePageIntoMeta(keepPageId, losePageId) {
       };
     }
     moved += 1;
-  }
-
-  // Carry the hand-made page's owner across. An imported page arrives with no
-  // owner at all, so this is usually the only place that knowledge exists.
-  const keepOwnerIds = getPageCustomerIds(plan.keepPage).map(String);
-  const addedOwnerIds = getPageCustomerIds(plan.losePage).map(String).filter(id => !keepOwnerIds.includes(id));
-  if (addedOwnerIds.length) {
-    const keepExpected = Number(plan.keepPage._lastModified);
-    await updateRecord(
-      state.pages,
-      plan.keepPage.id,
-      { customerIds: [...keepOwnerIds, ...addedOwnerIds] },
-      Number.isFinite(keepExpected) ? keepExpected : undefined
-    );
   }
 
   const removed = await deleteRecord(state.pages, plan.losePage.id);
@@ -455,7 +542,12 @@ async function runAllPageMerges() {
   let movedAds = 0;
   const problems = [];
   try {
-    for (const job of jobs) {
+    // Read the closed months once for the whole run; unreadable means nothing is written.
+    const closedPeriods = await _loadClosedMergePeriods();
+    if (!closedPeriods) {
+      problems.push(isAr ? 'تعذّر التحقق من الأشهر المغلقة، فلم يُدمج شيء. أعد المحاولة.' : 'Could not check which months are closed, so nothing was merged. Try again.');
+    }
+    for (const job of closedPeriods ? jobs : []) {
       if (_mergeAllStopRequested) break;
       if (progress) {
         progress.textContent = isAr
@@ -464,7 +556,7 @@ async function runAllPageMerges() {
       }
       let result;
       try {
-        result = await _mergeOnePageIntoMeta(job.keepId, job.loseId);
+        result = await _mergeOnePageIntoMeta(job.keepId, job.loseId, closedPeriods);
       } catch (error) {
         result = { ok: false, moved: 0, reason: `"${job.name}": ${error?.message || 'unexpected error'}` };
       }

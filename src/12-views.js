@@ -205,12 +205,7 @@ function render() {
         // Only update the view content, not the entire app
         if (viewContainer) {
           const newViewHTML = nextViewHTML;
-          // Skip the DOM swap when this view's HTML is exactly what is already on
-          // screen. A background live-sync tick re-renders on ANY data change anywhere,
-          // so most ticks produce identical HTML for the current view; re-inserting it
-          // would tear down and rebuild the whole view — flashing every icon and
-          // re-playing the entry animation ("plink"/shake) for nothing. Only swap on a
-          // real change.
+          // Only swap on a real change (see _lastViewHTML).
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
             // A background live-sync tick may swap the view while the user is
@@ -4504,7 +4499,7 @@ function exportDeliveryReport() {
     const collected = _getCollectedCashLocal(r);   // the deliveries screen's own rules (canceled = nothing collected)
     const remaining = _getOutstandingDueLocal(r);
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 ') : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _csvPhoneText(_deliveryPhoneText(r, customer)) : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -4614,6 +4609,11 @@ function _isReceivedInOffice(item) {
   if (typeof item.isReceivedInOffice === 'boolean') return item.isReceivedInOffice;
   if (typeof item.officeHandover === 'boolean') return item.officeHandover;
   return false;
+}
+
+// CSV phone Excel keeps as text: '+218…' -> '00218 …' (no apostrophe), '0912…' -> '091 2…' (keeps the 0)
+function _csvPhoneText(v) {
+  return String(v ?? '').trim().replace(/^\+/, '00').replace(/^(00\d{3}|0[1-9]\d)(?=\d)/, '$1 ');
 }
 
 function _deliveryPhoneText(r, customer) {

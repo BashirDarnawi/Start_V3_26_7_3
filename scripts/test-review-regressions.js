@@ -847,6 +847,173 @@ async function main() {
     await sandbox.handleSubscribePlan('svc:ad_maker', '', 100);
     assert.equal(notes[0].message, 'Subscription is prepaid too far ahead');
   });
+  // ---- review loop r4, batch MG: merge tools and CSV phones ----
+  const mergeToolsFixture = ({ ownerSaves = true, closedRows = [], serverMode = false, periodsFail = false } = {}) => {
+    const fixture = loadBrowserSource();
+    const { sandbox, state, run } = fixture;
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '13b-merge-tools.js'), 'utf8'));
+    state.serverMode = serverMode;
+    state.customers = [{ id: 'c1', name: 'Hajj Customer' }];
+    state.pages = [
+      { id: 'pm_meta', name: 'Hajj Travel', metaPageId: '9911', customerIds: [], _lastModified: 10 },
+      { id: 'pm_manual', name: 'Hajj Travel', customerIds: ['c1'], _lastModified: 11 }
+    ];
+    state.ads = [];
+    const writes = [];
+    const deletes = [];
+    const periodCalls = [];
+    sandbox.updateRecord = async (array, id, updates) => {
+      const collection = array === state.pages ? 'pages' : 'ads';
+      writes.push({ collection, id, updates });
+      if (collection === 'pages') return ownerSaves;
+      const ad = state.ads.find(row => row.id === id);
+      // The server's 423: an ad in a closed month refuses every edit, a page move included.
+      if (closedRows.some(row => row.status === 'closed' && sandbox._mergeAdPeriod(ad) === row.period)) return false;
+      Object.assign(ad, updates);
+      return true;
+    };
+    sandbox.deleteRecord = async (array, id) => { deletes.push(id); return true; };
+    sandbox.apiJson = async requestPath => {
+      periodCalls.push(requestPath);
+      if (periodsFail) throw new Error('offline');
+      return closedRows;
+    };
+    return { ...fixture, writes, deletes, periodCalls };
+  };
+  await test('page merge (MG #12/#19): a failed owner copy keeps the hand-made page and moves nothing', async () => {
+    const { sandbox, state, writes, deletes } = mergeToolsFixture({ ownerSaves: false });
+    state.ads = [{ id: 'a1', pageId: 'pm_manual', customerId: 'c1', startDate: '2026-09-01', _lastModified: 5 }];
+    const result = await sandbox._mergeOnePageIntoMeta('pm_meta', 'pm_manual');
+    assert.equal(result.ok, false, 'a merge that lost the owner reported success');
+    assert.deepEqual(deletes, [], 'the only page that recorded the owner was deleted');
+    assert.match(result.reason, /owner could not be copied/);
+    assert.ok(!writes.some(write => write.collection === 'ads'), 'ads moved onto an owner-less Meta page');
+    assert.equal(state.ads[0].pageId, 'pm_manual');
+  });
+  await test('page merge (MG #12/#19): the owner is copied first, then the ads move, then the old page goes', async () => {
+    const { sandbox, state, writes, deletes } = mergeToolsFixture();
+    state.ads = [{ id: 'a1', pageId: 'pm_manual', customerId: 'c1', startDate: '2026-09-01', _lastModified: 5 }];
+    const result = await sandbox._mergeOnePageIntoMeta('pm_meta', 'pm_manual');
+    assert.equal(result.ok, true, result.reason);
+    assert.deepEqual(writes.map(write => write.collection), ['pages', 'ads']);
+    assert.deepEqual(Array.from(writes[0].updates.customerIds), ['c1']);
+    assert.deepEqual(deletes, ['pm_manual']);
+  });
+  await test('page merge (MG #18): ads in a closed month block the merge up front, named, with nothing written', async () => {
+    const closedRows = [{ period: '2026-01', status: 'closed' }, { period: '2026-02', status: 'open' }];
+    const { sandbox, state, writes, deletes, periodCalls } = mergeToolsFixture({ serverMode: true, closedRows });
+    state.ads = [
+      { id: 'a_jan', pageId: 'pm_manual', customerId: 'c1', startDate: '2026-01-15' },
+      { id: 'a_mar', pageId: 'pm_manual', customerId: 'c1', startDate: '2026-03-02T10:00:00.000Z' },
+      // 23:30 UTC on 31 January is already 1 February in Tripoli, an open month (the server's business calendar).
+      { id: 'a_feb', pageId: 'pm_manual', customerId: 'c1', startDate: '2026-01-31T23:30:00.000Z' },
+      { id: 'a_old', pageId: 'pm_manual', customerId: 'c1', createdAt: '2026-01-05T12:00:00Z' }
+    ];
+    assert.equal(sandbox._mergeAdPeriod(state.ads[2]), '2026-02');
+    assert.equal(sandbox._mergeAdPeriod({ _created: Date.UTC(2026, 0, 20) }), '2026-01');
+    const result = await sandbox._mergeOnePageIntoMeta('pm_meta', 'pm_manual');
+    assert.equal(result.ok, false);
+    assert.deepEqual(writes, [], 'the merge wrote into a page it can never finish');
+    assert.deepEqual(deletes, []);
+    assert.equal(periodCalls.length, 1);
+    assert.match(result.reason, /2 of 4 ads are in closed months \(2026-01\)/);
+    assert.match(result.reason, /Hajj Customer \(2026-01\)/);
+    assert.match(result.reason, /unlock those months/);
+    assert.ok(!/run it again/i.test(result.reason), 'the admin was told to repeat a merge that can never finish');
+    state.language = 'ar';
+    const arabic = await sandbox._mergeOnePageIntoMeta('pm_meta', 'pm_manual');
+    assert.match(arabic.reason, /أشهر مغلقة/);
+  });
+  await test('page merge (MG #18): unreadable closed months write nothing; Merge all reads them once', async () => {
+    const offline = mergeToolsFixture({ serverMode: true, periodsFail: true });
+    offline.state.ads = [{ id: 'a1', pageId: 'pm_manual', customerId: 'c1', startDate: '2026-09-01' }];
+    const result = await offline.sandbox._mergeOnePageIntoMeta('pm_meta', 'pm_manual');
+    assert.equal(result.ok, false);
+    assert.deepEqual(offline.writes, []);
+    assert.deepEqual(offline.deletes, []);
+    const bulk = mergeToolsFixture({ serverMode: true, closedRows: [] });
+    bulk.state.pages.push({ id: 'pm_meta2', name: 'Umrah', metaPageId: '7', customerIds: [] }, { id: 'pm_manual2', name: 'Umrah', customerIds: [] });
+    bulk.sandbox.closePageDuplicatesDialog = () => {};
+    await bulk.sandbox.runAllPageMerges();
+    assert.equal(bulk.periodCalls.length, 1, 'every page re-read the closed months');
+    assert.deepEqual(bulk.deletes.slice().sort(), ['pm_manual', 'pm_manual2']);
+  });
+  await test('customer merge (MG #20): a three-way group pairs the kept record with one that shares its phone', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const notes = [];
+    sandbox.showNotification = (title, message) => notes.push(`${title}: ${message}`);
+    let renders = 0;
+    sandbox.renderModal = () => { renders += 1; };
+    state.serverMode = true;
+    state.customers = [
+      { id: 'A', name: 'Ali', phones: ['0911111111'], _lastModified: 1 },
+      { id: 'C', name: 'Ali C', phones: ['0922222222'], _lastModified: 1 },
+      { id: 'B', name: 'Ali B', phones: ['0911111111', '0922222222'], _lastModified: 1 }
+    ];
+    state.receipts = ['r1', 'r2', 'r3'].map(id => ({ id, customerId: 'A' }));
+    assert.equal(sandbox.setCustomerMergePairFromGroup(0), true);
+    assert.equal(state.modalData.keepCustomerId, 'A');
+    assert.equal(state.modalData.duplicateCustomerId, 'B', 'the default pair shares no phone');
+    state.activeModal = 'customer-merge';
+    state.modalData.duplicateCustomerId = 'C';
+    sandbox.selectCustomerMergeKeep('A');
+    assert.equal(state.modalData.duplicateCustomerId, 'B');
+    assert.deepEqual(Array.from(sandbox.customerMergeSharedKeys(state.customers[0], state.customers[1])), []);
+    // A pair that shares no phone is re-picked on submit instead of "refresh and try again".
+    state.modalData.duplicateCustomerId = 'C';
+    let merged = false;
+    sandbox.apiMergeCustomers = async () => { merged = true; throw new Error('must not be called'); };
+    const realGet = sandbox.document.getElementById;
+    sandbox.document.getElementById = id => (id === 'customer-merge-confirm' ? { checked: true } : realGet(id));
+    await sandbox.handleModalSubmit();
+    sandbox.document.getElementById = realGet;
+    assert.equal(merged, false);
+    assert.ok(renders >= 2, 'the dialog was not re-drawn with a valid pair');
+    assert.ok(!notes.some(note => /refresh/i.test(note)), notes.join(' | '));
+  });
+  await test('merged customer refusal (MG #21) reads right in Arabic on create, edit and the ad form', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.language = 'ar';
+    const merged = { status: 409, message: 'This customer was merged into another customer; choose the customer that was kept instead' };
+    const latin = /[A-Za-z]/;
+    const created = sandbox._serverRefusalToast('create', 'receipts', merged);
+    assert.ok(!latin.test(created.join(' ')), created.join(' | '));
+    assert.match(created[1], /دُمج هذا العميل/);
+    assert.ok(!latin.test(sandbox.describe409(merged, 'x')), 'the edit path kept the English text');
+    assert.ok(!latin.test(sandbox._serverRefusalToast('save', 'ads', { status: 404, message: 'Ad customer not found' })[1]));
+    assert.ok(!latin.test(sandbox._serverRefusalToast('create', 'ads', { status: 409, message: 'This customer was deleted; restore the customer first' })[1]));
+    state.language = 'en';
+    assert.equal(sandbox.describe409(merged, 'x'), merged.message);
+    const modals = fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8');
+    assert.ok(modals.includes(": _serverRefusalToast('save', 'ads', error)[1],"), 'the ad form still shows the raw server text');
+    assert.equal(typeof run('_SERVER_REFUSAL_AR'), 'object');
+  });
+  await test('CSV phones (MG #6) keep the leading 0 and never show an apostrophe, in both exports', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    assert.equal(sandbox._csvPhoneText('0912345678'), '091 2345678');
+    assert.equal(sandbox._csvPhoneText('+218 91 234 5678'), '00218 91 234 5678');
+    assert.equal(sandbox._csvPhoneText('+218912345678'), '00218 912345678');
+    assert.equal(sandbox._csvPhoneText('00218912345678'), '00218 912345678');
+    assert.equal(sandbox._csvPhoneText('021 333 4455'), '021 333 4455');
+    assert.equal(sandbox._csvPhoneText(undefined), '');
+    // The CSV injection guard still applies to anything that is not a phone.
+    assert.equal(sandbox.csvCell(sandbox._csvPhoneText('=HYPERLINK(1)')), `"'=HYPERLINK(1)"`);
+    let delivery = '';
+    sandbox.downloadFile = content => { delivery = content; return true; };
+    state.receipts = [{ id: 'r1', customerId: 'c1', status: 'Not Paid', deliveryStatus: 'Out for Delivery', phoneNumber: '0912345678', amountLocal: 100, amountUSD: 20, exchangeRate: 5 }];
+    sandbox.exportDeliveryReport();
+    assert.ok(delivery.includes('"091 2345678"'), delivery);
+    const clothes = clothesFixture();
+    let orders = '';
+    clothes.sandbox.downloadFile = content => { orders = content; return true; };
+    clothes.sandbox.getFilteredClothesOrders = () => [
+      { id: 'o1', orderNo: 1, customerName: 'Mona', customerPhone: '+218 91 234 5678', status: 'new', paymentStatus: 'unpaid', lines: [] },
+      { id: 'o2', orderNo: 2, customerName: 'Sara', customerPhone: '0923456789', status: 'new', paymentStatus: 'unpaid', lines: [] }
+    ];
+    clothes.sandbox.exportClothesOrdersCSV();
+    assert.ok(orders.includes('"00218 91 234 5678"') && orders.includes('"092 3456789"'), orders);
+    assert.ok(!orders.includes(`"'+`), 'a literal apostrophe reached the clothes CSV');
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

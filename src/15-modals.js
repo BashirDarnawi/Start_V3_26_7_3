@@ -27,17 +27,30 @@ function getRecommendedCustomerToKeep(customers) {
   })[0] || null;
 }
 
+// Phone keys two customers share directly: a group is transitive (A-B, B-C), so A and C may share none.
+function customerMergeSharedKeys(a, b) {
+  const keys = new Set(getCustomerPhoneEntries(a).map(entry => entry.key));
+  return getCustomerPhoneEntries(b).map(entry => entry.key).filter(key => keys.has(key));
+}
+
+// The current duplicate while it shares a phone with keepId, else the first that does.
+function pickCustomerMergeDuplicate(group, keepId, currentId) {
+  const keep = group.customers.find(customer => String(customer.id) === keepId);
+  const others = group.customers.filter(customer => String(customer.id) !== keepId);
+  const partners = others.filter(customer => customerMergeSharedKeys(keep, customer).length);
+  return String((partners.find(customer => String(customer.id) === String(currentId || '')) || partners[0] || others[0])?.id || '');
+}
+
 function setCustomerMergePairFromGroup(groupIndex) {
   const groups = findDuplicateCustomerGroups(state.customers);
   const safeIndex = Math.max(0, Math.min(Number(groupIndex) || 0, Math.max(0, groups.length - 1)));
   const group = groups[safeIndex];
   if (!group || group.customers.length < 2) return false;
   const keep = getRecommendedCustomerToKeep(group.customers);
-  const duplicate = group.customers.find(customer => String(customer.id) !== String(keep?.id));
   state.modalData = {
     duplicateGroupIndex: safeIndex,
     keepCustomerId: String(keep?.id || ''),
-    duplicateCustomerId: String(duplicate?.id || ''),
+    duplicateCustomerId: pickCustomerMergeDuplicate(group, String(keep?.id || '')),
     idempotencyKey: Security.generateSecureId('customer-merge')
   };
   return true;
@@ -86,12 +99,8 @@ function selectCustomerMergeKeep(customerId) {
   if (!group) return;
   const keepId = String(customerId || '');
   if (!group.customers.some(customer => String(customer.id) === keepId)) return;
-  let duplicateId = String(state.modalData?.duplicateCustomerId || '');
-  if (duplicateId === keepId || !group.customers.some(customer => String(customer.id) === duplicateId)) {
-    duplicateId = String(group.customers.find(customer => String(customer.id) !== keepId)?.id || '');
-  }
   state.modalData.keepCustomerId = keepId;
-  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.duplicateCustomerId = pickCustomerMergeDuplicate(group, keepId, state.modalData?.duplicateCustomerId);
   state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
   renderModal();
 }
@@ -338,10 +347,7 @@ function renderModal() {
       if (!groupCustomers.some(customer => String(customer.id) === keepCustomerId)) {
         keepCustomerId = String(recommendedKeep?.id || groupCustomers[0]?.id || '');
       }
-      let duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
-      if (duplicateCustomerId === keepCustomerId || !groupCustomers.some(customer => String(customer.id) === duplicateCustomerId)) {
-        duplicateCustomerId = String(groupCustomers.find(customer => String(customer.id) !== keepCustomerId)?.id || '');
-      }
+      const duplicateCustomerId = pickCustomerMergeDuplicate(selectedGroup, keepCustomerId, state.modalData?.duplicateCustomerId);
       state.modalData.keepCustomerId = keepCustomerId;
       state.modalData.duplicateCustomerId = duplicateCustomerId;
       const keepCustomer = groupCustomers.find(customer => String(customer.id) === keepCustomerId);
@@ -353,7 +359,7 @@ function renderModal() {
         const counts = getCustomerMergeRelationshipCounts(customer?.id);
         return `${customer?.name || (isArMerge ? 'عميل بدون اسم' : 'Unnamed customer')} · ${firstPhone} · ${counts.total} ${isArMerge ? 'سجل مرتبط' : 'linked'}`;
       };
-      const sharedPhones = selectedGroup.sharedPhoneKeys
+      const sharedPhones = customerMergeSharedKeys(keepCustomer, duplicateCustomer)
         .map(key => key.startsWith('218') ? `+${key}` : key)
         .join(', ');
       modalContent = `
@@ -399,7 +405,7 @@ function renderModal() {
             <div class="rounded-xl border-2 border-rose-200 dark:border-rose-800 p-4 bg-rose-50/60 dark:bg-rose-900/10">
               <label for="customer-merge-duplicate" class="block text-sm font-bold text-rose-800 dark:text-rose-300 mb-2">${isArMerge ? '2. السجل المكرر الذي سيُؤرشف' : '2. Duplicate to archive'}</label>
               <select id="customer-merge-duplicate" onchange="selectCustomerMergeDuplicate(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
-                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId && customerMergeSharedKeys(keepCustomer, customer).length).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
               </select>
               <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
                 <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
@@ -862,13 +868,7 @@ function renderModal() {
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
-                      // Reconstruct a row that round-trips to the SAME USD credit
-                      // as the paid ad. amount = the LYD figure, rate1 = 1,
-                      // rate2 = the ad's own rate — so both USD-based and
-                      // LYD-based methods recompute amountUSD correctly.
-                      // Previously amount=amountUSD with rate2=defaultRate made a
-                      // LYD method divide the USD figure by the rate again,
-                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
+                      // The same round-trip row as above.
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
                       amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
                       rate: 1,
@@ -3141,10 +3141,9 @@ async function handleModalSubmit() {
         showNotification(isArMerge ? 'اختيار غير صالح' : 'Invalid selection', isArMerge ? 'اختر سجلين مختلفين ثم حاول مرة أخرى.' : 'Choose two different active records and try again.', 'error');
         return;
       }
-      const keepPhoneKeys = new Set(getCustomerPhoneEntries(keepCustomer).map(entry => entry.key));
-      const sharesPhone = getCustomerPhoneEntries(duplicateCustomer).some(entry => keepPhoneKeys.has(entry.key));
-      if (!sharesPhone) {
-        showNotification(isArMerge ? 'تغيرت البيانات' : 'Data changed', isArMerge ? 'لم يعد السجلان يشتركان في رقم هاتف. حدّث الصفحة وحاول مرة أخرى.' : 'These records no longer share a phone number. Refresh and try again.', 'warning');
+      if (!customerMergeSharedKeys(keepCustomer, duplicateCustomer).length) {
+        renderModal();
+        showNotification(isArMerge ? 'اختر سجلاً آخر' : 'Choose another record', isArMerge ? 'هذان السجلان لا يشتركان في رقم هاتف. راجع الاختيار الجديد ثم ادمج.' : 'These two records share no phone number. Check the updated choice, then merge.', 'warning');
         return;
       }
       const expectedKeepLastModified = Number(keepCustomer._lastModified);
@@ -4087,7 +4086,7 @@ async function handleModalSubmit() {
           conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
           error?.status === 409
             ? describe409(error, state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
-            : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
+            : _serverRefusalToast('save', 'ads', error)[1],
           conflict ? 'warning' : 'error'
         );
       }

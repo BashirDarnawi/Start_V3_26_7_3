@@ -566,7 +566,7 @@ function exportClothesOrdersCSV() {
     const meta = clothesOrderStatusMeta(o.status);
     const payMeta = clothesPaymentStatusMeta(o.paymentStatus);
     rows.push([
-      o.orderNo ?? '', o.customerName || '', o.customerPhone || '', isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
+      o.orderNo ?? '', o.customerName || '', _csvPhoneText(o.customerPhone), isAr ? meta.labelAr : meta.label, isAr ? payMeta.labelAr : payMeta.label,
       t.pieces, t.goodsLYD, t.feeLYD, t.totalLYD, t.paidLYD, t.remainingLYD, t.refundDueLYD,
       o.paymentMethod || '', clothesLocalDate(o.createdAt), clothesLocalDate(o.deliveredAt),
       o.note || ''

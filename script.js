@@ -8418,11 +8418,7 @@ function addAuditLog(action, resourceId, description, metadata = {}) {
   saveState();
 }
 
-// Lightweight logging helper used across feature codepaths
-// action: 'create' | 'update' | 'delete' | etc.
-// resourceType: e.g., 'receipt', 'page'
-// resourceId: the id of the entity being logged
-// description: human-readable description
+// Lightweight logging helper (action: 'create' | 'update' | 'delete' | …).
 function addLog(action, resourceType, resourceId, description, metadata = {}) {
   addAuditLog(action, resourceId, description, { resourceType, ...metadata });
 }
@@ -8834,12 +8830,9 @@ function getReceiptPaymentState(receipt) {
 
 // Delivery identity is independent of whether the customer has already paid.
 // Strong persisted markers come first; deliveryPersonId is only a fallback for
-// Bilingual wrappers for the raw server refusal toasts. The old toasts had an
-// English-only title, exposed the INTERNAL collection name ("receipts") and
-// showed the server's English detail verbatim — that is how "Receipt type is
-// server-controlled" reached an Arabic-speaking employee. Known rule texts
-// are translated; anything unknown is still shown (never hidden), just under
-// a bilingual title and a human noun.
+// Bilingual wrappers for the raw server refusal toasts: known rule texts are
+// translated; anything unknown is still shown (never hidden), just under a
+// bilingual title and a human noun, never the internal collection name.
 const _SERVER_REFUSAL_AR = [
   ['Receipt type is server-controlled', 'نوع الوصل يحدده الخادم ولا يمكن تغييره.'],
   ['Receipt transfer fields are server-controlled', 'حقول تحويل الوصل يحددها الخادم.'],
@@ -8849,7 +8842,10 @@ const _SERVER_REFUSAL_AR = [
   ['Ad payment classification requires the transactional ad API', 'تغيير تصنيف دفع الإعلان يتم من نموذج الإعلان فقط.'],
   ['Ad funding and stopping require the transactional ad API', 'تمويل الإعلان وإيقافه يتمان من نموذج الإعلان فقط.'],
   ['Ad page not found', 'صفحة الإعلان غير موجودة.'],
-  ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.']
+  ['Only a paid receipt can convert its funding to customer debt', 'الوصل المدفوع فقط يمكن تحويل تمويله إلى دين على العميل.'],
+  ['This customer was merged', 'دُمج هذا العميل في عميل آخر؛ اختر العميل الباقي.'],
+  ['This customer was deleted', 'تم حذف هذا العميل؛ يجب استرجاعه أولاً.'],
+  ['Ad customer not found', 'عميل الإعلان غير موجود أو محذوف.']
 ];
 function _serverRefusalNoun(collectionName) {
   const isAr = state.language === 'ar';
@@ -15320,12 +15316,7 @@ function render() {
         // Only update the view content, not the entire app
         if (viewContainer) {
           const newViewHTML = nextViewHTML;
-          // Skip the DOM swap when this view's HTML is exactly what is already on
-          // screen. A background live-sync tick re-renders on ANY data change anywhere,
-          // so most ticks produce identical HTML for the current view; re-inserting it
-          // would tear down and rebuild the whole view — flashing every icon and
-          // re-playing the entry animation ("plink"/shake) for nothing. Only swap on a
-          // real change.
+          // Only swap on a real change (see _lastViewHTML).
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
             // A background live-sync tick may swap the view while the user is
@@ -19619,7 +19610,7 @@ function exportDeliveryReport() {
     const collected = _getCollectedCashLocal(r);   // the deliveries screen's own rules (canceled = nothing collected)
     const remaining = _getOutstandingDueLocal(r);
     const received = (typeof r.isReceivedInOffice === 'boolean') ? r.isReceivedInOffice : !!r.officeHandover;
-    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _deliveryPhoneText(r, customer).replace(/^\+(\d{3})/, '00$1 ') : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
+    csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _csvPhoneText(_deliveryPhoneText(r, customer)) : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
   // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
@@ -19729,6 +19720,11 @@ function _isReceivedInOffice(item) {
   if (typeof item.isReceivedInOffice === 'boolean') return item.isReceivedInOffice;
   if (typeof item.officeHandover === 'boolean') return item.officeHandover;
   return false;
+}
+
+// CSV phone Excel keeps as text: '+218…' -> '00218 …' (no apostrophe), '0912…' -> '091 2…' (keeps the 0)
+function _csvPhoneText(v) {
+  return String(v ?? '').trim().replace(/^\+/, '00').replace(/^(00\d{3}|0[1-9]\d)(?=\d)/, '$1 ');
 }
 
 function _deliveryPhoneText(r, customer) {
@@ -25910,11 +25906,8 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   }
   
   // PERFORMANCE: build the by-customer stats index ONCE and reuse it for both
-  // the financial filter and the sort. Previously the sort comparator called
-  // getCustomerStats(customer.id) with no index for BOTH operands of EVERY
-  // comparison, and the no-index path rescans all ads+receipts+pages each time —
-  // ~O(customers log customers × records), freezing the UI for seconds at a few
-  // thousand records on every search keystroke / sort change / live-sync tick.
+  // the financial filter and the sort; the no-index path rescans every
+  // ad, receipt and page per comparison.
   const needsStats = (
     financialFilter === 'hasCredit' ||
     financialFilter === 'hasDebt' ||
@@ -31268,7 +31261,7 @@ function describe409(error, conflictText) {
       ? 'هذا الوصل يموّل إعلاناً بصيغة قديمة بدون صفوف تمويل، لذا يجب أن يبقى مدفوعاً.'
       : 'This receipt funds an old-format ad without funding rows, so it must remain paid.';
   }
-  return detail || conflictText;
+  return (state.language === 'ar' && _SERVER_REFUSAL_AR.find(([en]) => detail.startsWith(en))?.[1]) || detail || conflictText;
 }
 
 async function saveTopUps() {
@@ -37489,17 +37482,30 @@ function getRecommendedCustomerToKeep(customers) {
   })[0] || null;
 }
 
+// Phone keys two customers share directly: a group is transitive (A-B, B-C), so A and C may share none.
+function customerMergeSharedKeys(a, b) {
+  const keys = new Set(getCustomerPhoneEntries(a).map(entry => entry.key));
+  return getCustomerPhoneEntries(b).map(entry => entry.key).filter(key => keys.has(key));
+}
+
+// The current duplicate while it shares a phone with keepId, else the first that does.
+function pickCustomerMergeDuplicate(group, keepId, currentId) {
+  const keep = group.customers.find(customer => String(customer.id) === keepId);
+  const others = group.customers.filter(customer => String(customer.id) !== keepId);
+  const partners = others.filter(customer => customerMergeSharedKeys(keep, customer).length);
+  return String((partners.find(customer => String(customer.id) === String(currentId || '')) || partners[0] || others[0])?.id || '');
+}
+
 function setCustomerMergePairFromGroup(groupIndex) {
   const groups = findDuplicateCustomerGroups(state.customers);
   const safeIndex = Math.max(0, Math.min(Number(groupIndex) || 0, Math.max(0, groups.length - 1)));
   const group = groups[safeIndex];
   if (!group || group.customers.length < 2) return false;
   const keep = getRecommendedCustomerToKeep(group.customers);
-  const duplicate = group.customers.find(customer => String(customer.id) !== String(keep?.id));
   state.modalData = {
     duplicateGroupIndex: safeIndex,
     keepCustomerId: String(keep?.id || ''),
-    duplicateCustomerId: String(duplicate?.id || ''),
+    duplicateCustomerId: pickCustomerMergeDuplicate(group, String(keep?.id || '')),
     idempotencyKey: Security.generateSecureId('customer-merge')
   };
   return true;
@@ -37548,12 +37554,8 @@ function selectCustomerMergeKeep(customerId) {
   if (!group) return;
   const keepId = String(customerId || '');
   if (!group.customers.some(customer => String(customer.id) === keepId)) return;
-  let duplicateId = String(state.modalData?.duplicateCustomerId || '');
-  if (duplicateId === keepId || !group.customers.some(customer => String(customer.id) === duplicateId)) {
-    duplicateId = String(group.customers.find(customer => String(customer.id) !== keepId)?.id || '');
-  }
   state.modalData.keepCustomerId = keepId;
-  state.modalData.duplicateCustomerId = duplicateId;
+  state.modalData.duplicateCustomerId = pickCustomerMergeDuplicate(group, keepId, state.modalData?.duplicateCustomerId);
   state.modalData.idempotencyKey = Security.generateSecureId('customer-merge');
   renderModal();
 }
@@ -37800,10 +37802,7 @@ function renderModal() {
       if (!groupCustomers.some(customer => String(customer.id) === keepCustomerId)) {
         keepCustomerId = String(recommendedKeep?.id || groupCustomers[0]?.id || '');
       }
-      let duplicateCustomerId = String(state.modalData?.duplicateCustomerId || '');
-      if (duplicateCustomerId === keepCustomerId || !groupCustomers.some(customer => String(customer.id) === duplicateCustomerId)) {
-        duplicateCustomerId = String(groupCustomers.find(customer => String(customer.id) !== keepCustomerId)?.id || '');
-      }
+      const duplicateCustomerId = pickCustomerMergeDuplicate(selectedGroup, keepCustomerId, state.modalData?.duplicateCustomerId);
       state.modalData.keepCustomerId = keepCustomerId;
       state.modalData.duplicateCustomerId = duplicateCustomerId;
       const keepCustomer = groupCustomers.find(customer => String(customer.id) === keepCustomerId);
@@ -37815,7 +37814,7 @@ function renderModal() {
         const counts = getCustomerMergeRelationshipCounts(customer?.id);
         return `${customer?.name || (isArMerge ? 'عميل بدون اسم' : 'Unnamed customer')} · ${firstPhone} · ${counts.total} ${isArMerge ? 'سجل مرتبط' : 'linked'}`;
       };
-      const sharedPhones = selectedGroup.sharedPhoneKeys
+      const sharedPhones = customerMergeSharedKeys(keepCustomer, duplicateCustomer)
         .map(key => key.startsWith('218') ? `+${key}` : key)
         .join(', ');
       modalContent = `
@@ -37861,7 +37860,7 @@ function renderModal() {
             <div class="rounded-xl border-2 border-rose-200 dark:border-rose-800 p-4 bg-rose-50/60 dark:bg-rose-900/10">
               <label for="customer-merge-duplicate" class="block text-sm font-bold text-rose-800 dark:text-rose-300 mb-2">${isArMerge ? '2. السجل المكرر الذي سيُؤرشف' : '2. Duplicate to archive'}</label>
               <select id="customer-merge-duplicate" onchange="selectCustomerMergeDuplicate(this.value)" class="w-full glass-input px-3 py-3 rounded-xl">
-                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
+                ${groupCustomers.filter(customer => String(customer.id) !== keepCustomerId && customerMergeSharedKeys(keepCustomer, customer).length).map(customer => `<option value="${Security.escapeHtml(String(customer.id || ''))}" ${String(customer.id) === duplicateCustomerId ? 'selected' : ''}>${Security.escapeHtml(describeCustomer(customer))}</option>`).join('')}
               </select>
               <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs">
                 <div class="rounded-lg bg-white/70 dark:bg-slate-900/40 p-2"><strong class="block text-base">${duplicateCounts.pages}</strong>${isArMerge ? 'صفحات' : 'Pages'}</div>
@@ -38324,13 +38323,7 @@ function renderModal() {
                       deliveryPersonId: adData.deliveryPersonId || ''
                     }],
                     adData.collectionPayments && adData.collectionPayments.length ? adData.collectionPayments : [{
-                      // Reconstruct a row that round-trips to the SAME USD credit
-                      // as the paid ad. amount = the LYD figure, rate1 = 1,
-                      // rate2 = the ad's own rate — so both USD-based and
-                      // LYD-based methods recompute amountUSD correctly.
-                      // Previously amount=amountUSD with rate2=defaultRate made a
-                      // LYD method divide the USD figure by the rate again,
-                      // gutting the recorded amount ~10x (audit recheck HIGH #3).
+                      // The same round-trip row as above.
                       method: adData.paymentMethod || PAYMENT_METHODS[0],
                       amount: adData.amountLocal || ((adData.amountUSD || 0) * (adData.exchangeRate || state.defaultExchangeRate || 1)),
                       rate: 1,
@@ -40603,10 +40596,9 @@ async function handleModalSubmit() {
         showNotification(isArMerge ? 'اختيار غير صالح' : 'Invalid selection', isArMerge ? 'اختر سجلين مختلفين ثم حاول مرة أخرى.' : 'Choose two different active records and try again.', 'error');
         return;
       }
-      const keepPhoneKeys = new Set(getCustomerPhoneEntries(keepCustomer).map(entry => entry.key));
-      const sharesPhone = getCustomerPhoneEntries(duplicateCustomer).some(entry => keepPhoneKeys.has(entry.key));
-      if (!sharesPhone) {
-        showNotification(isArMerge ? 'تغيرت البيانات' : 'Data changed', isArMerge ? 'لم يعد السجلان يشتركان في رقم هاتف. حدّث الصفحة وحاول مرة أخرى.' : 'These records no longer share a phone number. Refresh and try again.', 'warning');
+      if (!customerMergeSharedKeys(keepCustomer, duplicateCustomer).length) {
+        renderModal();
+        showNotification(isArMerge ? 'اختر سجلاً آخر' : 'Choose another record', isArMerge ? 'هذان السجلان لا يشتركان في رقم هاتف. راجع الاختيار الجديد ثم ادمج.' : 'These two records share no phone number. Check the updated choice, then merge.', 'warning');
         return;
       }
       const expectedKeepLastModified = Number(keepCustomer._lastModified);
@@ -41549,7 +41541,7 @@ async function handleModalSubmit() {
           conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
           error?.status === 409
             ? describe409(error, state.language === 'ar' ? 'تم تغيير هذا الإعلان من مستخدم آخر. حدّث البيانات ثم أعد المحاولة.' : 'This ad changed on another device. Refresh the data, then try again.')
-            : (state.language === 'ar' ? `فشل حفظ الإعلان: ${error.message}` : `Failed to save ad: ${error.message}`),
+            : _serverRefusalToast('save', 'ads', error)[1],
           conflict ? 'warning' : 'error'
         );
       }

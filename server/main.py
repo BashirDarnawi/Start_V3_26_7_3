@@ -6734,12 +6734,20 @@ def _financial_apply_delivery_completion_truth(
     )
 
 
+def _merged_customer_detail(row: Any) -> str | None:
+    """A merged customer's records live on the kept customer, so "restore" would be the wrong advice."""
+    data = json_loads((row or {}).get("data_json") or "{}") or {}
+    if isinstance(data, dict) and str(data.get("mergedIntoCustomerId") or "").strip():
+        return "This customer was merged into another customer; choose the customer that was kept instead"
+    return None
+
+
 def _refuse_deleted_customer(customer_id: str) -> None:
-    """A device three seconds behind may still offer a customer that was just deleted."""
+    """A device three seconds behind may still offer a customer that was just deleted (or merged)."""
     with db_conn() as conn:
-        row = conn.execute(text("SELECT deleted FROM entities WHERE type='customers' AND id=:id LIMIT 1"), {"id": customer_id}).mappings().first()
+        row = conn.execute(text("SELECT deleted, data_json FROM entities WHERE type='customers' AND id=:id LIMIT 1"), {"id": customer_id}).mappings().first()
     if row is not None and bool(row["deleted"]):
-        raise HTTPException(status_code=409, detail="This customer was deleted; restore the customer first")
+        raise HTTPException(status_code=409, detail=_merged_customer_detail(row) or "This customer was deleted; restore the customer first")
 
 
 def _financial_receipt_ids(ad: dict[str, Any]) -> set[str]:
@@ -8411,7 +8419,7 @@ def _ad_mutation_atomic(
             customer_id = validate_entity_id(saved_data.get("customerId"))
             customer_row = _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
             if not customer_row or bool(customer_row["deleted"]):
-                raise HTTPException(status_code=404, detail="Ad customer not found")
+                raise HTTPException(status_code=404, detail=(customer_row and _merged_customer_detail(customer_row)) or "Ad customer not found")
 
             updated_receipt_ids: list[str] = []
             for receipt_id, receipt_row, receipt_data, _validation_row in receipt_reconciliations:
