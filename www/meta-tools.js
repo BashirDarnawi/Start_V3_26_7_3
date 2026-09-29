@@ -261,11 +261,17 @@ function openMetaAdsConnectionModalNow(adId = '') {
   metaAdsUi.loading = true;
   metaAdsUi.loadingAds = false;
   metaAdsUi.busyAction = '';
+  // A new opening: an ads reply still running for an earlier one is dropped.
+  metaAdsUi.adsSeq = (Number(metaAdsUi.adsSeq) || 0) + 1;
+  metaAdsUi.open = true;
   metaAdsRenderModal();
   metaAdsLoadConnection();
 }
 
 function metaAdsRenderModal() {
+  // Never re-create the dialog after it was closed (X, tap outside, Android
+  // Back, sign-out): a load or action finishing later must not bring it back.
+  if (!metaAdsUi.open) return;
   const isAr = metaAdsIsArabic();
   const target = metaAdsFindLocalAd(metaAdsUi.targetAdId);
   let modal = document.getElementById('meta-ads-modal');
@@ -359,7 +365,7 @@ async function metaAdsLoadConnection() {
     metaAdsUi.loading = false;
     metaAdsUi.error = '';
     metaAdsRenderModal();
-    if (metaAdsUi.status?.configured) await metaAdsReloadAccounts();
+    if (metaAdsUi.open && metaAdsUi.status?.configured) await metaAdsReloadAccounts();
   } catch (error) {
     metaAdsUi.loading = false;
     metaAdsUi.error = metaAdsErrorMessage(error);
@@ -399,18 +405,28 @@ async function metaAdsSearch(value) {
 }
 
 async function metaAdsLoadAds() {
-  if (!metaAdsUi.selectedAccountId) return;
+  const accountId = metaAdsUi.selectedAccountId;
+  if (!accountId) return;
+  // Only the newest request may fill the list: a slower reply for an account
+  // or search the admin already left must never show under the new choice.
+  const seq = metaAdsUi.adsSeq = (Number(metaAdsUi.adsSeq) || 0) + 1;
+  const current = () => seq === metaAdsUi.adsSeq && accountId === metaAdsUi.selectedAccountId;
   metaAdsUi.loadingAds = true;
   metaAdsUi.error = '';
   metaAdsRenderModal();
   try {
-    metaAdsUi.ads = await apiMetaAdsForAccount(metaAdsUi.selectedAccountId, metaAdsUi.search);
+    const ads = await apiMetaAdsForAccount(accountId, metaAdsUi.search);
+    if (current()) metaAdsUi.ads = ads;
   } catch (error) {
-    metaAdsUi.error = metaAdsErrorMessage(error);
-    metaAdsUi.ads = [];
+    if (current()) {
+      metaAdsUi.error = metaAdsErrorMessage(error);
+      metaAdsUi.ads = [];
+    }
   } finally {
-    metaAdsUi.loadingAds = false;
-    metaAdsRenderModal();
+    if (seq === metaAdsUi.adsSeq) {
+      metaAdsUi.loadingAds = false;
+      metaAdsRenderModal();
+    }
   }
 }
 

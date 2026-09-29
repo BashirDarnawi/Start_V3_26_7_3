@@ -541,6 +541,17 @@ function closeTopMobileSurface() {
     return true;
   }
 
+  // The Meta dialogs' closers clear the open flag their late loads check;
+  // a bare remove() would let the next load draw the dialog again.
+  if (topSurface.id === 'meta-ads-modal' && typeof closeMetaAdsConnectionModal === 'function') {
+    closeMetaAdsConnectionModal();
+    return true;
+  }
+  if (topSurface.id === 'meta-insights-modal' && typeof closeMetaInsightsModal === 'function') {
+    closeMetaInsightsModal();
+    return true;
+  }
+
   // This alert requires an explicit decision. Android Back follows the safe
   // "choose another customer" path instead of merely deleting the overlay and
   // leaving an unacknowledged customer selected underneath it.
@@ -42713,6 +42724,8 @@ if (IS_STUDIO_SHELL || /^\/(ads-studio|studio)(\/|$)/.test(window.location.pathn
 // (src/15d-meta-ads.js), opened through 15d1-meta-tools-loader.js.
 
 const metaAdsUi = {
+  open: false, // the renderer draws only while open: a late load never reopens a closed dialog
+  adsSeq: 0, // newest ads request; an older reply is dropped
   targetAdId: '',
   status: null,
   accounts: [],
@@ -43138,6 +43151,7 @@ function renderMetaAdActionButton(ad, isAr) {
 }
 
 function closeMetaAdsConnectionModal() {
+  metaAdsUi.open = false;
   document.getElementById('meta-ads-modal')?.remove();
   if (metaAdsViewportResizeHandler) {
     window.removeEventListener('resize', metaAdsViewportResizeHandler);

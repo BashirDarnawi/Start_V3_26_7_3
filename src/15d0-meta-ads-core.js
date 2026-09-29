@@ -11,6 +11,8 @@
 // (src/15d-meta-ads.js), opened through 15d1-meta-tools-loader.js.
 
 const metaAdsUi = {
+  open: false, // the renderer draws only while open: a late load never reopens a closed dialog
+  adsSeq: 0, // newest ads request; an older reply is dropped
   targetAdId: '',
   status: null,
   accounts: [],
@@ -436,6 +438,7 @@ function renderMetaAdActionButton(ad, isAr) {
 }
 
 function closeMetaAdsConnectionModal() {
+  metaAdsUi.open = false;
   document.getElementById('meta-ads-modal')?.remove();
   if (metaAdsViewportResizeHandler) {
     window.removeEventListener('resize', metaAdsViewportResizeHandler);

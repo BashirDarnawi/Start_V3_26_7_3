@@ -920,6 +920,100 @@ async function main() {
     await sandbox.metaAdsCheckForNewAds();
     assert.equal(notes[0].message, 'There are no new ads right now.', 'a finished pass with nothing new still says so');
   });
+  // Review loop r7 M: a tiny body for the Meta dialogs (the harness's fake document keeps no nodes).
+  function metaDialogDom({ sandbox, run }) {
+    const nodes = new Map();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    sandbox.document.getElementById = id => nodes.get(id) || null;
+    sandbox.document.querySelectorAll = selector => (/mobile-dialog-overlay/.test(selector) ? [...nodes.values()] : []);
+    sandbox.document.body.appendChild = node => {
+      nodes.set(node.id, node);
+      node.remove = () => { if (nodes.get(node.id) === node) nodes.delete(node.id); };
+      return node;
+    };
+    sandbox.isServerModeEnabled = () => true;
+    return nodes;
+  }
+  await test('r7 M n=1: a Meta Sync dialog closed while it loads stays closed when the load ends (X, or a sign-out that aborts it)', async () => {
+    for (const closeWith of ['x', 'sign-out']) {
+      const fixture = metaToolsFixture();
+      const { sandbox } = fixture;
+      const nodes = metaDialogDom(fixture);
+      let status;
+      sandbox.apiMetaAdsStatus = () => new Promise((resolve, reject) => { status = { resolve, reject }; });
+      sandbox.apiMetaAdsAccounts = async () => [{ id: '111', name: 'Previous admin account', currency: 'USD' }];
+      sandbox.apiMetaAdsForAccount = async () => [{ id: '9', name: 'Previous admin ad' }];
+      sandbox.openMetaAdsConnectionModalNow();
+      assert.ok(nodes.has('meta-ads-modal'), 'the dialog opens on its loading card');
+      if (closeWith === 'x') sandbox.closeMetaAdsConnectionModal();
+      else sandbox.resetAuthenticatedServerCaches();
+      assert.ok(!nodes.has('meta-ads-modal'));
+      if (closeWith === 'x') status.resolve({ configured: true });
+      else status.reject(new Error('signal is aborted without reason'));
+      await settle();
+      assert.ok(!nodes.has('meta-ads-modal'), `${closeWith}: the late answer must not bring the dialog back`);
+    }
+  });
+  await test('r7 M n=1: Android Back closes Meta Sync and Meta Insights through their closers, so a later load cannot reopen them', async () => {
+    const fixture = metaToolsFixture();
+    const { sandbox, run } = fixture;
+    const nodes = metaDialogDom(fixture);
+    let status;
+    sandbox.apiMetaAdsStatus = () => new Promise(resolve => { status = resolve; });
+    sandbox.openMetaAdsConnectionModalNow();
+    assert.equal(sandbox.closeTopMobileSurface(), true);
+    assert.ok(!nodes.has('meta-ads-modal'));
+    status({ configured: false });
+    await settle();
+    assert.ok(!nodes.has('meta-ads-modal'), 'Meta Sync stays closed after Back');
+    let pages;
+    sandbox.apiMetaPartnerPages = () => new Promise(resolve => { pages = resolve; });
+    sandbox.apiMetaAccountFunds = () => new Promise(() => {});
+    sandbox.openMetaInsightsModalNow();
+    assert.ok(nodes.has('meta-insights-modal'));
+    assert.equal(sandbox.closeTopMobileSurface(), true);
+    assert.equal(run('metaInsightsUi.open'), false, 'Back runs the Meta Insights closer');
+    pages({ pages: [] });
+    await settle();
+    assert.ok(!nodes.has('meta-insights-modal'), 'Meta Insights stays closed after Back');
+  });
+  await test('r7 M n=2: a slow reply for the previous ad account or search never fills the list of the newer choice', async () => {
+    const { sandbox, run } = metaToolsFixture();
+    sandbox.metaAdsRenderModal = () => {};
+    const pending = {};
+    sandbox.apiMetaAdsForAccount = (accountId, search) => new Promise(resolve => { pending[`${accountId}/${search}`] = resolve; });
+    const first = sandbox.metaAdsSelectAccount('111');
+    const second = sandbox.metaAdsSelectAccount('222');
+    pending['222/']([{ id: '2' }]);
+    await settle();
+    pending['111/']([{ id: '1' }]);
+    await Promise.all([first, second]);
+    assert.equal(run('metaAdsUi.selectedAccountId'), '222');
+    assert.equal(run("metaAdsUi.ads.map(ad => ad.id).join(',')"), '2', 'account 111 ads must not show under account 222');
+    assert.equal(run('metaAdsUi.loadingAds'), false);
+    const older = sandbox.metaAdsSearch('old');
+    const newer = sandbox.metaAdsSearch('new');
+    pending['222/old']([{ id: 'o' }]);
+    await settle();
+    assert.equal(run('metaAdsUi.loadingAds'), true, 'the older reply does not end the newer search\'s loading state');
+    assert.notEqual(run("metaAdsUi.ads.map(ad => ad.id).join(',')"), 'o', 'the older search result is dropped');
+    pending['222/new']([{ id: 'n' }]);
+    await Promise.all([older, newer]);
+    assert.equal(run("metaAdsUi.ads.map(ad => ad.id).join(',')"), 'n');
+    assert.equal(run('metaAdsUi.loadingAds'), false);
+    // A reply for a dialog that was closed and opened again (same account) never lands in the new one.
+    const late = sandbox.metaAdsSelectAccount('333');
+    sandbox.closeMetaAdsConnectionModal();
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiMetaAdsStatus = () => new Promise(() => {});
+    run("state.ads = [{ id: 'ad1', metaAdId: '5', metaAdAccountId: '333' }]");
+    sandbox.openMetaAdsConnectionModalNow('ad1');
+    assert.equal(run('metaAdsUi.open'), true, 'the dialog opened again');
+    assert.equal(run('metaAdsUi.selectedAccountId'), '333');
+    pending['333/']([{ id: '3' }]);
+    await late;
+    assert.equal(run("metaAdsUi.ads.map(ad => ad.id).join(',')"), '', 'the reopened dialog starts empty');
+  });
   await test('clothes: editing a Paid order to add a piece saves it as Partially Paid instead of crashing', async () => {
     const { sandbox, state, run, notes } = clothesFixture();
     state.clothesProducts = [{ id: 'p1', name: 'Shirt', costUSD: 5, priceLYD: 50, variants: [], createdBy: 'admin' }];

@@ -255,6 +255,17 @@ function closeTopMobileSurface() {
     return true;
   }
 
+  // The Meta dialogs' closers clear the open flag their late loads check;
+  // a bare remove() would let the next load draw the dialog again.
+  if (topSurface.id === 'meta-ads-modal' && typeof closeMetaAdsConnectionModal === 'function') {
+    closeMetaAdsConnectionModal();
+    return true;
+  }
+  if (topSurface.id === 'meta-insights-modal' && typeof closeMetaInsightsModal === 'function') {
+    closeMetaInsightsModal();
+    return true;
+  }
+
   // This alert requires an explicit decision. Android Back follows the safe
   // "choose another customer" path instead of merely deleting the overlay and
   // leaving an unacknowledged customer selected underneath it.
