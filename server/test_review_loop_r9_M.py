@@ -149,8 +149,10 @@ def test_3_the_exact_net_cash_with_the_house_cent_settles():
     assert kept["customerOutstandingUSD"] == 0
     assert _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.5})["amountUSD"] == 69.5
     assert _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 100})["amountUSD"] == 69.5
+    # One row's round-up cent plus the house cent is still the net cash (final replay P1).
+    assert _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.52})["amountUSD"] == 69.5
     with pytest.raises(HTTPException) as refused:
-        _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.52})
+        _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.53})
     assert refused.value.status_code == 409
 
 
@@ -239,8 +241,51 @@ def test_c4_gross_rows_retyped_as_net_cash_in_two_rows_are_kept():
     assert settled["amountUSD"] == 69.5
     rows = [_row(178.27, 5.13), _row(178.27, 5.13)]
     assert main._receipt_payments_credit_minor(rows) == 6952
-    kept = _apply(settled, {**settled, "payments": rows, "amountUSD": 69.52, "amountLocal": 356.54})
-    assert kept["amountUSD"] == 69.52                      # before: 409
+    kept = _apply(settled, {**settled, "payments": rows, "amountUSD": 69.53, "amountLocal": 356.54})
+    assert kept["amountUSD"] == 69.5                       # the net cash (rows round up); before: 409
+    assert _financial_due_total(kept) == 10000             # never above the gross
+
+
+# ------------------------------------------------ final replay P1-P4 (after the review corrections)
+
+def test_p1_net_cash_in_several_rows_settles_as_the_net():
+    # $70 net paid as 200 + 159.1 LYD at 5.13: each row rounds up a cent, plus the house cent -> 70.02.
+    old = _office_receipt(100, 30)
+    rows = [_row(200, 5.13), _row(159.1, 5.13)]
+    settled = _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 70.02, "amountLocal": 359.1, "payments": rows})
+    assert settled["amountUSD"] == 70.0                    # before: 409
+    assert _financial_due_total(settled) == 10000
+
+
+def test_p2_delivered_office_paid_unsettle_then_settle_again_mints_nothing():
+    settled = _paid_in_office_with_gross_rows()
+    delivered = {**settled, "deliveryStatus": "Delivered", "amountCollectedFromCustomer": 0.0}
+    unsettled = _apply(delivered, {**delivered, "status": "Not Paid", "isPaid": False, "amountUSD": 100,
+                                   "amountLocal": 700, "payments": [], "plannedPayments": [_row(700)]})
+    again = _apply(unsettled, {**unsettled, "status": "Paid", "isPaid": True, "amountUSD": 100,
+                               "amountLocal": 700, "payments": [_row(700)]})
+    assert again["amountUSD"] == 70.0                      # before: 100
+    assert _financial_due_total(again) == 10000            # before: 13000
+
+
+def test_p3_unsettling_a_net_settled_receipt_with_a_cent_net_is_not_refused():
+    old = _office_receipt(100, 30.5)
+    settled = _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.51, "amountLocal": 486.5,
+                           "payments": [_row(486.5)]})
+    assert settled["amountUSD"] == 69.5
+    unsettled = _apply(settled, {**settled, "status": "Not Paid", "isPaid": False, "amountUSD": 69.51,
+                                 "amountLocal": 486.5, "payments": [], "plannedPayments": [_row(486.5)]})
+    assert unsettled["amountUSD"] == 100.0                 # before: 100.01, refused by the raise guard
+    assert unsettled["customerOutstandingUSD"] == 69.5
+
+
+def test_p4_an_echo_re_save_keeps_the_trimmed_house_cent_out():
+    old = _office_receipt(100, 30.5)
+    settled = _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.51, "amountLocal": 486.5,
+                           "payments": [_row(486.5)]})
+    resaved = _apply(settled, {**settled, "amountUSD": 69.51, "amountLocal": 486.5, "notes": "phone fixed"})
+    assert resaved["amountUSD"] == 69.5                    # before: 69.51 (pot 100.01)
+    assert _financial_due_total(resaved) == 10000
 
 
 # ---------------------------------------------------------------- API
