@@ -34,7 +34,9 @@ too, whatever category the customer chose (audience_for), and every staff read c
 * ``POST /staff/tickets/{id}/status`` ``{status, operationId?}`` -> ``{ticket}``: any of the four.
 
 ``status`` filters take ``open``, ``answered``, ``waiting_customer``, ``resolved`` or ``active``
-(everything not resolved); ``priority`` takes ``normal`` or ``urgent``; ``cursor`` is the
+(everything not resolved; on the staff list also the ticket of a stop request still open, pinned and
+marked ``stopOpen``, even when the team resolved it by hand: the desk badge counts that stop request,
+so the list shows it); ``priority`` takes ``normal`` or ``urgent``; ``cursor`` is the
 ``nextCursor`` of the previous page; ``limit`` 1-50.
 
 **What a customer sees.** ``ticket``: id, number (``T-000123``), subject, category, status, audience,
@@ -601,8 +603,16 @@ def list_tickets_page(
     elif not admin:  # reviewer_may_see in SQL
         where.append(f"{json_field_sql('audience')} = 'staff'")
         where.append(f"COALESCE({json_field_sql('relatedType')}, '') <> 'payment'")
+    unresolved = f"COALESCE({status_sql}, '') <> 'resolved'"
+    # The team's active list also keeps the ticket of a stop request still open (the ad is not stopped
+    # yet) after the team resolved it by hand: the desk badge counts that stop request (studio_stop
+    # desk_counts), so the list the badge leads to shows it, pinned with the other urgent work.
+    held = _open_stop_ticket_ids(conn) if staff and status == "active" else []
+    if held:
+        params.update({f"held{i}": ticket_id for i, ticket_id in enumerate(held)})
+        unresolved = f"({unresolved} OR id IN ({', '.join(f':held{i}' for i in range(len(held)))}))"
     if status == "active":
-        where.append(f"COALESCE({status_sql}, '') <> 'resolved'")
+        where.append(unresolved)
     elif status:
         where.append(f"{status_sql} = :status")
         params["status"] = status
@@ -617,7 +627,7 @@ def list_tickets_page(
     elif tiktok_state:
         where.append(f"COALESCE({json_field_sql('tiktokState')}, 'open') = :tiktok_state")
         params["tiktok_state"] = tiktok_state
-    rank = f"(CASE WHEN {priority_sql} = 'urgent' AND COALESCE({status_sql}, '') <> 'resolved' THEN 1 ELSE 0 END)" if staff else "0"
+    rank = f"(CASE WHEN {priority_sql} = 'urgent' AND {unresolved} THEN 1 ELSE 0 END)" if staff else "0"
     if cursor is not None:
         where.append(f"({rank} < :cp OR ({rank} = :cp AND (created_at < :cc OR (created_at = :cc AND id < :cid))))")
         params.update({"cp": cursor[0], "cc": cursor[1], "cid": cursor[2]})
@@ -631,10 +641,21 @@ def list_tickets_page(
     ).mappings().all()
     page = rows[: int(limit)]
     last = page[-1] if page and len(rows) > int(limit) else None
+    tickets = [ticket_view({**_data(row), "id": str(row["id"])}, staff=staff, now=now) for row in page]
+    for ticket in tickets:
+        if ticket["id"] in held:
+            ticket["stopOpen"] = True  # its stop request is still open, whatever the ticket's own status
     return {
-        "tickets": [ticket_view({**_data(row), "id": str(row["id"])}, staff=staff, now=now) for row in page],
+        "tickets": tickets,
         "nextCursor": f"{int(last['pinned'])}:{int(last['created_at'])}:{last['id']}" if last else None,
     }
+
+
+def _open_stop_ticket_ids(conn: Any) -> list[str]:
+    """The tickets of the stop requests still open (studio_stop's queue rows), in a stable order."""
+    from . import studio_stop  # late: studio_stop imports this module late too (no import cycle)
+
+    return sorted({str(row.get("ticketId") or "") for row in studio_stop.open_stop_requests(conn)} - {""})
 
 
 def count_open_tickets(conn: Any, owner_id: str) -> int:

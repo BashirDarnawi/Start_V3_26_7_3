@@ -164,9 +164,10 @@ const STUDIO_ADMIN_COLLISION_REASONS = Object.freeze({
   studio_campaign_id: ['a studio request linked this campaign', 'ربط طلبٌ في الاستوديو هذه الحملة']
 });
 
-const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [], acks: new Map(), scan: null };
+const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [], acks: new Map(), scan: null, paymentsSeen: null };
 // acks: alert id -> the acknowledge in flight (single flight); scan: the last on-demand money scan
-// ({promise, value, error, at}; renderStudioAdminScanRow).
+// ({promise, value, error, at}; renderStudioAdminScanRow); paymentsSeen: the pulse's paymentsWaiting the
+// payments list was last read for (studioAdminPaymentsWant).
 
 // ------------------------------------------------------------------ small helpers
 
@@ -336,13 +337,22 @@ function renderStudioAdminMenu() {
 
 // ------------------------------------------------------------------ payments waiting
 
+// The list is read again when the pulse's paymentsWaiting moves (the badge and the menu follow the pulse):
+// once per new count, never while a read runs (a count seen during a read is compared again after it).
 function studioAdminPaymentsWant(force = false) {
   const uid = studioAdminUserId();
   if (typeof refreshAdsStudioWallet !== 'function') return;
+  const pulse = typeof _studioDesk !== 'undefined' && _studioDesk.pulse && _studioDesk.pulse.value ? _studioDesk.pulse.value.paymentsWaiting : null;
+  const counted = Number.isSafeInteger(pulse) ? pulse : null;
   if (force || _adsStudioWalletForUser !== uid) {
+    _studioAdmin.paymentsSeen = counted;
     if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
     refreshAdsStudioWallet();
   } else if (_adsStudioWalletMine === null) {
+    _studioAdmin.paymentsSeen = counted;
+    refreshAdsStudioWallet();
+  } else if (counted !== null && counted !== _studioAdmin.paymentsSeen && !(typeof _adsStudioWalletBusy !== 'undefined' && _adsStudioWalletBusy)) {
+    _studioAdmin.paymentsSeen = counted;
     refreshAdsStudioWallet();
   }
 }
@@ -391,11 +401,21 @@ function studioAdminAlertsPath() {
   return last && last.nextBefore ? `/api/studio/admin/alerts?limit=20&before=${encodeURIComponent(last.nextBefore)}` : '/api/studio/admin/alerts?limit=20';
 }
 
+// The page on screen joins the earlier ones for the read of the next (the path needs its nextBefore); until
+// that read succeeds it is drawn once (source: the slot value it came from, renderStudioAdminAlerts) and a
+// failed read takes it back, so the list never repeats a page and the error shows.
 function studioAdminAlertsMore() {
   const slot = _studioAdmin.reads.alerts;
-  if (!slot || !slot.value || !slot.value.nextBefore || slot.promise) return;
-  _studioAdmin.alertsPages.push({ alerts: Array.isArray(slot.value.alerts) ? slot.value.alerts : [], nextBefore: String(slot.value.nextBefore) });
-  studioAdminRead('alerts', studioAdminAlertsPath(), true);
+  const pages = _studioAdmin.alertsPages;
+  const held = page => !!page && page.source === slot.value;
+  if (!slot || !slot.value || !slot.value.nextBefore || slot.promise || held(pages[pages.length - 1])) return;
+  pages.push({ alerts: Array.isArray(slot.value.alerts) ? slot.value.alerts : [], nextBefore: String(slot.value.nextBefore), source: slot.value });
+  const read = studioAdminRead('alerts', studioAdminAlertsPath(), true);
+  const back = () => {
+    const now = _studioAdmin.alertsPages;  // an acknowledge maps it anew (the source stays); Refresh empties it
+    if (held(now[now.length - 1])) { now.pop(); studioAdminRedraw(); }
+  };
+  if (read.promise) read.promise.then(back); else back();
   studioAdminRedraw();
 }
 
@@ -493,14 +513,19 @@ function renderStudioAdminAlerts() {
   const head = renderStudioAdminPageHead('alerts', refresh);
   const problem = renderStudioAdminProblem(slot, "studioAdminRetry('alerts', '/api/studio/admin/alerts?limit=20')", 'studio-admin-alerts');
   if (problem) return head + problem;
-  const earlier = _studioAdmin.alertsPages.flatMap(page => page.alerts);
-  const current = slot.value && Array.isArray(slot.value.alerts) ? slot.value.alerts : [];
+  const pages = _studioAdmin.alertsPages;
+  const earlier = pages.flatMap(page => page.alerts);
+  // The page just joined the earlier ones while the next is read: not drawn twice.
+  const last = pages[pages.length - 1];
+  const current = slot.value && Array.isArray(slot.value.alerts) && !(last && last.source === slot.value) ? slot.value.alerts : [];
   const alerts = earlier.concat(current).filter(item => item && typeof item === 'object');
   const list = alerts.length
     ? `<ul class="studio-desk-list" data-testid="studio-admin-alerts">${alerts.map(renderStudioAdminAlert).join('')}</ul>`
     : renderStudioDeskEmpty('bell-off', adsStudioText('No alerts', 'لا تنبيهات'), adsStudioText('The jobs loop and the Meta checks raised nothing.', 'لم تُثر حلقة المهام وفحوص ميتا شيئاً.'), 'studio-admin-alerts-empty');
+  // A read that failed while a list is on screen (older alerts, or the minute's re-read) says so.
+  const failed = slot.value !== null && slot.error && !slot.promise ? `<p class="studio-desk-problem" role="alert" data-testid="studio-admin-alerts-read-problem">${studioEsc(slot.error.text || '')}</p>` : '';
   const more = slot.value && slot.value.nextBefore ? `<button type="button" class="studio-v2-action studio-desk-more" data-testid="studio-admin-alerts-more" onclick="studioAdminAlertsMore()"${slot.promise ? ' disabled' : ''}>${studioEsc(adsStudioText('Show older alerts', 'اعرض التنبيهات الأقدم'))}</button>` : '';
-  return head + renderStudioAdminJobs(slot.value && slot.value.jobs) + list + more;
+  return head + renderStudioAdminJobs(slot.value && slot.value.jobs) + list + failed + more;
 }
 
 // ------------------------------------------------------------------ diagnostics

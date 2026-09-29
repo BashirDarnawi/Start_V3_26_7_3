@@ -12530,6 +12530,7 @@ function studioHelpCleanTicket(raw) {
     audience: raw.audience === 'admin' ? 'admin' : 'staff',
     urgent: raw.priority === 'urgent' || raw.urgent === true,
     stopRequest: raw.kind === 'stop_request',
+    stopOpen: raw.stopOpen === true,  // staff list: its stop request is still open (kept under Active even when resolved)
     relatedType: relatedType || (relatedId ? relatedType : ''),
     relatedId,
     createdAt: studioHelpTime(raw.createdAt),
@@ -13988,7 +13989,8 @@ function studioStaffUpdateListed(ticket) {
   const at = slot.items.findIndex(item => item.id === ticket.id);
   const filter = _studioStaff.filter;
   const fits = filter === 'active' ? ticket.status !== 'resolved' : ticket.status === filter;
-  if (at >= 0) slot.items[at] = ticket;
+  // A thread read does not say whether a stop request is still open: the list row keeps what the list said.
+  if (at >= 0) slot.items[at] = slot.items[at].stopOpen && ticket.status === 'resolved' ? { ...ticket, stopOpen: true } : ticket;
   else if (fits) slot.loadedAt = 0;
 }
 
@@ -14249,7 +14251,7 @@ function renderStudioStaffTicketsClassic() {
     }).join('')}</ul>`;
     if (slot.nextCursor) body += `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-staff-more" onclick="studioStaffMore()"${slot.loading ? ' disabled' : ''}>${studioEsc(adsStudioText('Show more', 'اعرض المزيد'))}</button>`;
   }
-  const urgent = slot.items.filter(ticket => (ticket.urgent || ticket.stopRequest) && ticket.status !== 'resolved').length;
+  const urgent = slot.items.filter(ticket => (ticket.urgent || ticket.stopRequest) && (ticket.status !== 'resolved' || ticket.stopOpen)).length;
   return `
     <section class="studio-help studio-staff-tickets" data-testid="studio-staff-tickets" aria-labelledby="studio-staff-tickets-title">
       <div class="studio-help-card">

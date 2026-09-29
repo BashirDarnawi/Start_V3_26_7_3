@@ -908,9 +908,10 @@ function studioDeskShown(section) {
   return Math.max(STUDIO_DESK_PAGE, Number(_studioDesk.shown[section]) || 0);
 }
 
+// 'linked': the Launch section's "In Meta" list pages on its own (not a nav section).
 function studioDeskMore(section) {
   const key = String(section || '');
-  if (!STUDIO_DESK_SECTIONS.includes(key)) return;
+  if (!STUDIO_DESK_SECTIONS.includes(key) && key !== 'linked') return;
   _studioDesk.shown[key] = studioDeskShown(key) + STUDIO_DESK_PAGE;
   studioV2Rerender();
 }
@@ -1172,7 +1173,8 @@ function studioDeskDecision(id) {
   if (!draft) {
     const request = findVisibleAdsStudioCampaign(key);
     const legacy = typeof adsStudioIsLegacyDailyRequest === 'function' && adsStudioIsLegacyDailyRequest(request);
-    draft = { reason: legacy ? 'budget_dates' : '', note: legacy && typeof adsStudioLegacyDailyNote === 'function' ? adsStudioLegacyDailyNote() : '', error: '', outcome: null };
+    draft = { reason: legacy ? 'budget_dates' : '', note: legacy && typeof adsStudioLegacyDailyNote === 'function' ? adsStudioLegacyDailyNote() : '', error: '', outcome: null,
+      cycle: String((request && request.submittedAt) || '') };  // the send this draft is for
     _studioDesk.decisions.set(key, draft);
   }
   return draft;
@@ -1256,6 +1258,13 @@ function renderStudioDeskBrief(request) {
 
 function renderStudioDeskDecisionBox(request) {
   const id = studioEsc(request.id);
+  const old = _studioDesk.decisions.get(String(request.id));
+  // Decided here before, or sent again since the draft began: this round starts clean (the old reason and
+  // note never reach the customer again). The pin stays, so the version drawn before is still refused once.
+  if (old && (old.outcome || old.cycle !== String(request.submittedAt || ''))) {
+    _studioDesk.decisions.delete(String(request.id));
+    studioDeskDecision(request.id).version = old.version || 0;
+  }
   const draft = studioDeskDecision(request.id);
   // The version the reviewer read: a decision is sent for it, never for one live sync installed since.
   if (!draft.version) draft.version = Number(request._lastModified) || 0;
@@ -1409,6 +1418,8 @@ async function studioDeskDecideOnce(requestId, decision, note, reasonCode, pinne
   const draft = studioDeskDecision(requestId);
   draft.outcome = { decision, studioName: typeof adsStudioStudioName === 'function' ? adsStudioStudioName(saved) : '' };
   draft.error = '';
+  draft.reason = '';
+  draft.note = '';  // sent with this decision: never again with a later one
   draft.version = 0;  // a request sent again later is read (and pinned) afresh
   studioDeskPulseRefresh();
   studioDeskNotify(true, adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`The request is now: ${adsStudioStatusMeta(decision).label}.`, `حالة الطلب الآن: ${adsStudioStatusMeta(decision).labelAr}.`));
@@ -1492,10 +1503,10 @@ function renderStudioDeskLaunch() {
   const body = queue.length
     ? `<ul class="studio-desk-list" data-testid="studio-desk-launch">${shown.map(renderStudioDeskLaunchCard).join('')}</ul>${renderStudioDeskMoreButton('launch', queue.length)}`
     : renderStudioDeskEmpty('rocket', adsStudioText('Nothing waits for a Meta link', 'لا طلب ينتظر ربط ميتا'), '', 'studio-desk-launch-empty');
-  const linkedShown = linked.slice(0, studioDeskShown('launch'));
+  const linkedShown = linked.slice(0, studioDeskShown('linked'));
   const linkedPart = linked.length ? `
           <h2 class="studio-desk-h2 studio-desk-h2-later">${studioEsc(adsStudioText(`In Meta (${linked.length})`, `في ميتا (${linked.length})`))}</h2>
-          <ul class="studio-desk-list" data-testid="studio-desk-linked">${linkedShown.map(renderStudioDeskLinkedCard).join('')}</ul>` : '';
+          <ul class="studio-desk-list" data-testid="studio-desk-linked">${linkedShown.map(renderStudioDeskLinkedCard).join('')}</ul>${renderStudioDeskMoreButton('linked', linked.length)}` : '';
   return intro + body + linkedPart;
 }
 
@@ -1897,7 +1908,9 @@ function renderStudioDeskMore(route) {
 // The pulse's numbers. openTickets includes the urgent ticket every open stop request opens
 // (studio_stop.create_stop_ticket); stopTicketsOpen is that overlap (stop tickets still open), so
 // the badge and the title count one stop request once: openTickets + the stop requests whose ticket
-// was answered but whose ad is not stopped yet (studioDeskStopsNotTicketed).
+// was answered (or resolved by hand) but whose ad is not stopped yet (studioDeskStopsNotTicketed); the
+// staff Active ticket list keeps such a ticket (studio_support list_tickets_page, stopOpen) so the badge
+// always leads to something on screen.
 function studioDeskCleanPulse(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const whole = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
@@ -2241,9 +2254,10 @@ const STUDIO_ADMIN_COLLISION_REASONS = Object.freeze({
   studio_campaign_id: ['a studio request linked this campaign', 'ربط طلبٌ في الاستوديو هذه الحملة']
 });
 
-const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [], acks: new Map(), scan: null };
+const _studioAdmin = { forUser: '', generation: 0, reads: Object.create(null), settings: Object.create(null), alertsPages: [], acks: new Map(), scan: null, paymentsSeen: null };
 // acks: alert id -> the acknowledge in flight (single flight); scan: the last on-demand money scan
-// ({promise, value, error, at}; renderStudioAdminScanRow).
+// ({promise, value, error, at}; renderStudioAdminScanRow); paymentsSeen: the pulse's paymentsWaiting the
+// payments list was last read for (studioAdminPaymentsWant).
 
 // ------------------------------------------------------------------ small helpers
 
@@ -2413,13 +2427,22 @@ function renderStudioAdminMenu() {
 
 // ------------------------------------------------------------------ payments waiting
 
+// The list is read again when the pulse's paymentsWaiting moves (the badge and the menu follow the pulse):
+// once per new count, never while a read runs (a count seen during a read is compared again after it).
 function studioAdminPaymentsWant(force = false) {
   const uid = studioAdminUserId();
   if (typeof refreshAdsStudioWallet !== 'function') return;
+  const pulse = typeof _studioDesk !== 'undefined' && _studioDesk.pulse && _studioDesk.pulse.value ? _studioDesk.pulse.value.paymentsWaiting : null;
+  const counted = Number.isSafeInteger(pulse) ? pulse : null;
   if (force || _adsStudioWalletForUser !== uid) {
+    _studioAdmin.paymentsSeen = counted;
     if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
     refreshAdsStudioWallet();
   } else if (_adsStudioWalletMine === null) {
+    _studioAdmin.paymentsSeen = counted;
+    refreshAdsStudioWallet();
+  } else if (counted !== null && counted !== _studioAdmin.paymentsSeen && !(typeof _adsStudioWalletBusy !== 'undefined' && _adsStudioWalletBusy)) {
+    _studioAdmin.paymentsSeen = counted;
     refreshAdsStudioWallet();
   }
 }
@@ -2468,11 +2491,21 @@ function studioAdminAlertsPath() {
   return last && last.nextBefore ? `/api/studio/admin/alerts?limit=20&before=${encodeURIComponent(last.nextBefore)}` : '/api/studio/admin/alerts?limit=20';
 }
 
+// The page on screen joins the earlier ones for the read of the next (the path needs its nextBefore); until
+// that read succeeds it is drawn once (source: the slot value it came from, renderStudioAdminAlerts) and a
+// failed read takes it back, so the list never repeats a page and the error shows.
 function studioAdminAlertsMore() {
   const slot = _studioAdmin.reads.alerts;
-  if (!slot || !slot.value || !slot.value.nextBefore || slot.promise) return;
-  _studioAdmin.alertsPages.push({ alerts: Array.isArray(slot.value.alerts) ? slot.value.alerts : [], nextBefore: String(slot.value.nextBefore) });
-  studioAdminRead('alerts', studioAdminAlertsPath(), true);
+  const pages = _studioAdmin.alertsPages;
+  const held = page => !!page && page.source === slot.value;
+  if (!slot || !slot.value || !slot.value.nextBefore || slot.promise || held(pages[pages.length - 1])) return;
+  pages.push({ alerts: Array.isArray(slot.value.alerts) ? slot.value.alerts : [], nextBefore: String(slot.value.nextBefore), source: slot.value });
+  const read = studioAdminRead('alerts', studioAdminAlertsPath(), true);
+  const back = () => {
+    const now = _studioAdmin.alertsPages;  // an acknowledge maps it anew (the source stays); Refresh empties it
+    if (held(now[now.length - 1])) { now.pop(); studioAdminRedraw(); }
+  };
+  if (read.promise) read.promise.then(back); else back();
   studioAdminRedraw();
 }
 
@@ -2570,14 +2603,19 @@ function renderStudioAdminAlerts() {
   const head = renderStudioAdminPageHead('alerts', refresh);
   const problem = renderStudioAdminProblem(slot, "studioAdminRetry('alerts', '/api/studio/admin/alerts?limit=20')", 'studio-admin-alerts');
   if (problem) return head + problem;
-  const earlier = _studioAdmin.alertsPages.flatMap(page => page.alerts);
-  const current = slot.value && Array.isArray(slot.value.alerts) ? slot.value.alerts : [];
+  const pages = _studioAdmin.alertsPages;
+  const earlier = pages.flatMap(page => page.alerts);
+  // The page just joined the earlier ones while the next is read: not drawn twice.
+  const last = pages[pages.length - 1];
+  const current = slot.value && Array.isArray(slot.value.alerts) && !(last && last.source === slot.value) ? slot.value.alerts : [];
   const alerts = earlier.concat(current).filter(item => item && typeof item === 'object');
   const list = alerts.length
     ? `<ul class="studio-desk-list" data-testid="studio-admin-alerts">${alerts.map(renderStudioAdminAlert).join('')}</ul>`
     : renderStudioDeskEmpty('bell-off', adsStudioText('No alerts', 'لا تنبيهات'), adsStudioText('The jobs loop and the Meta checks raised nothing.', 'لم تُثر حلقة المهام وفحوص ميتا شيئاً.'), 'studio-admin-alerts-empty');
+  // A read that failed while a list is on screen (older alerts, or the minute's re-read) says so.
+  const failed = slot.value !== null && slot.error && !slot.promise ? `<p class="studio-desk-problem" role="alert" data-testid="studio-admin-alerts-read-problem">${studioEsc(slot.error.text || '')}</p>` : '';
   const more = slot.value && slot.value.nextBefore ? `<button type="button" class="studio-v2-action studio-desk-more" data-testid="studio-admin-alerts-more" onclick="studioAdminAlertsMore()"${slot.promise ? ' disabled' : ''}>${studioEsc(adsStudioText('Show older alerts', 'اعرض التنبيهات الأقدم'))}</button>` : '';
-  return head + renderStudioAdminJobs(slot.value && slot.value.jobs) + list + more;
+  return head + renderStudioAdminJobs(slot.value && slot.value.jobs) + list + failed + more;
 }
 
 // ------------------------------------------------------------------ diagnostics

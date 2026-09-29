@@ -6755,6 +6755,152 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Classic staff close of a launched ad (review loop r2 #26/#29): the cap (paid minus Meta\'s confirmed spend) is pre-filled and named, else the field is empty and required (never a silent 0.00); an ended ad with no stop request closes as completed; a desk link removed since still counts as launched',
     closeCases.every(Boolean), `cases ${failed(closeCases)}; ${JSON.stringify({ linkedDefault, unreadDefault, askedDefault, futureDefault, handDefault, handTyped, unlinkedDefault, unlinkedTyped })}`);
+
+  // Review loop r8 batch D. The pulse is not read by these checks (a read that never answers).
+  run("__replies['/api/studio/staff/pulse'] = [];");
+  const countOf = (page, needle) => page.split(needle).length - 1;
+
+  // n3: the Launch section's "In Meta" list pages on its own (it used the queue's paging, whose Show more exists only
+  // when more than 20 requests wait for a link): 20 first, its own Show more, then all, each with Check Meta now and Unlink.
+  run(`var __kept8 = state.adCampaignRequests; _studioDesk.shown = Object.create(null);
+    state.adCampaignRequests = [0, 1].map(i => ({ id: 'r_q8' + i, createdBy: 'c1', status: 'Approved', name: 'Waiting link ' + i, paidMinorUSD: 1000, budgetMinorUSD: 1000, budgetType: 'lifetime', durationDays: 5, startDate: '2099-05-01', endDate: '2099-05-05', _created: 80 + i, _lastModified: 80 + i }))
+      .concat(Array.from({ length: 25 }, (_, i) => ({ id: 'r_in8' + i, createdBy: 'c1', status: 'Approved', name: 'In Meta ' + i, paidMinorUSD: 1000, budgetMinorUSD: 1000, budgetType: 'lifetime', durationDays: 30, startDate: '2099-01-01', endDate: '2099-01-30', metaAdAccountId: '9876543210', metaCampaignId: String(120200000000100 + i), _created: 100 + i, _lastModified: 100 + i })));`);
+  openAt('/studio?tab=review&section=launch');
+  const linkedFirst = html();
+  run("studioDeskMore('linked'); render();");
+  const linkedAll = html();
+  run('state.adCampaignRequests = __kept8; _studioDesk.shown = Object.create(null);');
+  const linkedCases = [
+    linkedFirst.includes('In Meta (25)') && countOf(linkedFirst, 'data-testid="studio-desk-linked-r_in8') === 20
+      && linkedFirst.includes('data-testid="studio-desk-more-linked"') && linkedFirst.includes('Show more (5 left)') && !linkedFirst.includes('data-testid="studio-desk-more-launch"'),
+    countOf(linkedAll, 'data-testid="studio-desk-linked-r_in8') === 25 && countOf(linkedAll, 'data-testid="studio-desk-unlink-r_in8') === 25
+      && countOf(linkedAll, 'data-testid="studio-desk-check-r_in8') === 25 && !linkedAll.includes('data-testid="studio-desk-more-linked"'),
+    countOf(linkedAll, 'data-testid="studio-desk-launch-r_q8') === 2
+  ];
+  check('Team desk launch (review loop r8 n3): the "In Meta" list shows 20 linked ads, then its own Show more reveals the rest (Check Meta now and Unlink on every one), whatever the waiting queue holds',
+    linkedCases.every(Boolean), `cases ${failed(linkedCases)}; first ${countOf(linkedFirst, 'data-testid="studio-desk-linked-r_in8')} all ${countOf(linkedAll, 'data-testid="studio-desk-linked-r_in8')}`);
+
+  // n4: a decision's reason and note go with that decision only. Sent back with a note, fixed and sent again while the
+  // desk stayed open: the box opens empty and Approve sends no old note. A draft this desk never sent is dropped too
+  // when the request was sent again meanwhile (another reviewer decided it), and the version it was drawn for is still
+  // refused once ("changed meanwhile").
+  const againRow = { id: 'r_again8', createdBy: 'c1', status: 'Submitted', name: 'Sent again', objective: 'messages', budgetMinorUSD: 3000, budgetType: 'lifetime', durationDays: 3, totalBudgetMinorUSD: 3000, startDate: '2099-04-01', endDate: '2099-04-03', submittedAt: '2026-09-20T10:00:00.000Z', _created: 90, _lastModified: 91 };
+  const otherRow = { ...againRow, id: 'r_other8', name: 'Decided elsewhere', _lastModified: 101 };
+  run(`var __kept84 = state.adCampaignRequests; state.adCampaignRequests = __kept84.concat([${JSON.stringify(againRow)}, ${JSON.stringify(otherRow)}]);`);
+  const sendAgain = (id, version, submittedAt) => run(`state.adCampaignRequests = state.adCampaignRequests.map(r => r.id === ${JSON.stringify(id)} ? Object.assign({}, r, { status: 'Submitted', submittedAt: ${JSON.stringify(submittedAt)}, _lastModified: ${version} }) : r);`);
+  const noteOf = page => { const m = page.match(/data-testid="studio-desk-note"[^>]*>([^<]*)<\/textarea>/); return m ? m[1] : null; };
+  openAt('/studio?tab=review&section=requests&id=r_again8');
+  run("studioDeskPickReason('r_again8', 'creative_quality'); studioDeskNoteInput('r_again8', { value: 'Photo too dark' });");
+  reply('/api/ad-studio/campaigns/r_again8/review', { id: 'r_again8', data: { ...againRow, status: 'Changes Requested', reviewReasonCode: 'creative_quality', reviewNote: 'Photo too dark', _lastModified: 92 }, lastModified: 92 });
+  const sentBack8 = outcome("studioDeskDecide('r_again8', 'Changes Requested')");
+  sendAgain('r_again8', 95, '2026-09-21T09:00:00.000Z');
+  openAt('/studio?tab=review&section=requests&id=r_again8');
+  const againHtml = html();
+  reply('/api/ad-studio/campaigns/r_again8/review', { id: 'r_again8', data: { ...againRow, status: 'Approved', paidMinorUSD: 3000, _lastModified: 96 }, lastModified: 96 });
+  const approved8 = outcome("studioDeskDecide('r_again8', 'Approved', null, true)");
+  const againCalls = calls('POST', '/api/ad-studio/campaigns/r_again8/review');
+  openAt('/studio?tab=review&section=requests&id=r_other8');
+  run("studioDeskPickReason('r_other8', 'text_policy'); studioDeskNoteInput('r_other8', { value: 'Old words' });");
+  sendAgain('r_other8', 105, '2026-09-22T09:00:00.000Z');
+  openAt('/studio?tab=review&section=requests&id=r_other8');
+  const otherHtml = html();
+  const otherRefused = outcome("studioDeskDecide('r_other8', 'Approved', null, true)");
+  const otherRefusedCalls = calls('POST', '/api/ad-studio/campaigns/r_other8/review').length;
+  reply('/api/ad-studio/campaigns/r_other8/review', { id: 'r_other8', data: { ...otherRow, status: 'Approved', paidMinorUSD: 3000, _lastModified: 106 }, lastModified: 106 });
+  openAt('/studio?tab=review&section=requests&id=r_other8');
+  const otherApproved = outcome("studioDeskDecide('r_other8', 'Approved', null, true)");
+  const otherCalls = calls('POST', '/api/ad-studio/campaigns/r_other8/review');
+  run('state.adCampaignRequests = __kept84;');
+  const draftCases = [
+    !!sentBack8 && sentBack8.ok === true && !!againCalls[0] && againCalls[0].body.note === 'Photo too dark' && againCalls[0].body.reviewReasonCode === 'creative_quality',
+    noteOf(againHtml) === '' && againHtml.includes('data-testid="studio-desk-reason-creative_quality" aria-pressed="false"'),
+    !!approved8 && approved8.ok === true && againCalls.length === 2 && againCalls[1].body.note === '' && againCalls[1].body.expectedLastModified === 95,
+    noteOf(otherHtml) === '' && otherHtml.includes('data-testid="studio-desk-reason-text_policy" aria-pressed="false"'),
+    !!otherRefused && otherRefused.ok === false && /changed meanwhile/.test(otherRefused.text) && otherRefusedCalls === 0,
+    !!otherApproved && otherApproved.ok === true && otherCalls.length === 1 && otherCalls[0].body.note === '' && otherCalls[0].body.expectedLastModified === 105
+  ];
+  check('Team desk decision (review loop r8 n4): the reason and note of a decision are cleared once it is saved and a request sent again opens with an empty box (no old note reaches the customer with Approve); the version drawn before is still refused once',
+    draftCases.every(Boolean), `cases ${failed(draftCases)}; again note ${JSON.stringify(noteOf(againHtml))} other note ${JSON.stringify(noteOf(otherHtml))} calls ${JSON.stringify(againCalls.map(c => c.body))} ${JSON.stringify(otherCalls.map(c => c.body))} refused ${JSON.stringify(otherRefused)}`);
+
+  // n5: the admin "Payments waiting" list is read again when the pulse's count moves (the badge and the menu row follow
+  // the pulse), once per new count: a pulse or a draw with the same count reads nothing.
+  who.admin = true;
+  meReply({ ...staffMe, isAdmin: true });
+  run(`var __pendingReads = 0; var __pendingRows = ${JSON.stringify([payRow('first0001', hours(-1))])};
+    apiWalletPaymentRequestList = function (scope) { if (scope === 'pending') __pendingReads++; return Promise.resolve({ requests: scope === 'pending' ? __pendingRows : [] }); };
+    resetAdsStudioWalletCache(); _studioAdmin.reads.paymentDue = null;
+    _studioDesk.pulse.value = studioDeskCleanPulse(${JSON.stringify({ ...pulse, paymentsWaiting: 1 })});`);
+  reply('/api/studio/admin/payments/due', { dueAt: {} });
+  openAt('/studio?tab=review&section=more&id=payments');
+  run('render(); render();');
+  const payOne = html();
+  const readsOne = json('__pendingReads');
+  run(`__pendingRows = ${JSON.stringify([payRow('first0001', hours(-1)), payRow('second001', hours(-0.2)), payRow('third0001', hours(-0.1))])};`);
+  run(`studioDeskOnPulse(${JSON.stringify({ ...pulse, paymentsWaiting: 3, updatedAt: hours(0.03) })}); __runTimers();`);
+  run('render()');
+  const payThree = html();
+  const readsThree = json('__pendingReads');
+  run(`studioDeskOnPulse(${JSON.stringify({ ...pulse, paymentsWaiting: 3, alerts: 1, updatedAt: hours(0.04) })}); __runTimers(); render(); render();`);
+  const readsSame = json('__pendingReads');
+  const rowsOf = page => countOf(page, 'class="studio-admin-payment"');
+  const payCases8 = [
+    readsOne === 1 && rowsOf(payOne) === 1,
+    readsThree === 2 && rowsOf(payThree) === 3 && payThree.includes('PAY-THIRD0001'),
+    readsSame === 2
+  ];
+  check('Admin payments waiting (review loop r8 n5): a new pulse count reads the list again on its own (3 rows, as the badge says); the same count never reads it again',
+    payCases8.every(Boolean), `cases ${failed(payCases8)}; reads ${readsOne}/${readsThree}/${readsSame} rows ${rowsOf(payOne)}/${rowsOf(payThree)}`);
+
+  // n7: "Show older alerts" never repeats a page. The next page adds below; a failed read of an older page takes the
+  // page on screen back and says so (the button works again); while a read runs the page on screen is drawn once.
+  run("_studioAdmin.alertsPages = []; delete _studioAdmin.reads.alerts; __replies['/api/studio/admin/alerts?limit=20'] = [];");
+  reply('/api/studio/admin/alerts?limit=20', { alerts: [alertRow('ol1'), alertRow('ol2')], nextBefore: 'X1', jobs: { enabled: true, late: false, lastTickAt: hours(0) } });
+  reply('/api/studio/admin/alerts?limit=20&before=X1', { alerts: [alertRow('ol3')], nextBefore: 'X2', jobs: { enabled: true, late: false, lastTickAt: hours(0) } });
+  replyError('/api/studio/admin/alerts?limit=20&before=X2', { status: 503, message: 'Service unavailable' });
+  openAt('/studio?tab=review&section=more&id=alerts');
+  run('render()');
+  run('studioAdminAlertsMore()');
+  run('render()');
+  const olderOk = html();
+  run('studioAdminAlertsMore()');
+  run('render()');
+  const olderFailed = html();
+  const pagesAfterFail = json('_studioAdmin.alertsPages.length');
+  run('studioAdminAlertsMore()');  // no answer this time: the read is still running
+  run('render()');
+  const olderPending = html();
+  const pagesPending = json('_studioAdmin.alertsPages.length');
+  run("_studioAdmin.alertsPages = []; delete _studioAdmin.reads.alerts;");
+  const idsOf = (page, id) => countOf(page, `data-id="${id}"`);
+  const alertsCases = [
+    idsOf(olderOk, 'ol1') === 1 && idsOf(olderOk, 'ol3') === 1,
+    idsOf(olderFailed, 'ol1') === 1 && idsOf(olderFailed, 'ol3') === 1 && pagesAfterFail === 1,
+    olderFailed.includes('data-testid="studio-admin-alerts-read-problem"') && /data-testid="studio-admin-alerts-more" onclick="studioAdminAlertsMore\(\)">/.test(olderFailed),
+    idsOf(olderPending, 'ol1') === 1 && idsOf(olderPending, 'ol3') === 1 && pagesPending === 2 && !olderPending.includes('studio-admin-alerts-read-problem')
+  ];
+  check('Admin alerts (review loop r8 n7): Show older alerts adds the next page once; a failed read keeps no copy of the page on screen, shows the error and lets the button try again; a read still running draws each alert once',
+    alertsCases.every(Boolean), `cases ${failed(alertsCases)}; ol1 ${idsOf(olderOk, 'ol1')}/${idsOf(olderFailed, 'ol1')}/${idsOf(olderPending, 'ol1')} ol3 ${idsOf(olderOk, 'ol3')}/${idsOf(olderFailed, 'ol3')}/${idsOf(olderPending, 'ol3')} pages ${pagesAfterFail}/${pagesPending}`);
+  who.admin = false;
+  meReply(staffMe);
+  run('resetAdsStudioWalletCache();');
+
+  // n6 (the client half): the staff Active list keeps the ticket of a stop request still open after the team resolved it
+  // by hand (the server marks it stopOpen), so the Tickets badge leads to it; the heading's stop-request count counts
+  // it, and a thread read of that ticket (which does not carry the mark) keeps it counted.
+  const heldTicket = { id: `tkt_${'a'.repeat(40)}`, number: 'T-000081', subject: 'Stop my ad', category: 'ad', status: 'resolved', audience: 'staff', priority: 'urgent', kind: 'stop_request', relatedType: 'campaign', relatedId: 'r_lnk', createdAt: hours(-3), updatedAt: hours(-1), resolvedAt: hours(-1) };
+  run("__replies['/api/studio/staff/tickets?status=active'] = [];");
+  reply('/api/studio/staff/tickets?status=active', { tickets: [{ ...heldTicket, stopOpen: true }], nextCursor: null });
+  openAt('/studio?tab=review&section=tickets');
+  run('render()');
+  const heldHtml = html();
+  run(`studioStaffUpdateListed(studioHelpCleanTicket(${JSON.stringify(heldTicket)})); render();`);
+  const heldAfterThread = html();
+  const heldCases = [
+    heldHtml.includes('T-000081') && heldHtml.includes('data-testid="studio-staff-urgent-count"') && heldHtml.includes('1 stop request<'),
+    heldAfterThread.includes('T-000081') && heldAfterThread.includes('data-testid="studio-staff-urgent-count"')
+  ];
+  check('Team desk tickets (review loop r8 n6): a stop request\'s ticket resolved by hand while the stop request is open stays counted in the Tickets heading (the server keeps it in the Active list, marked stopOpen), also after its thread is read',
+    heldCases.every(Boolean), `cases ${failed(heldCases)}; ${heldHtml.slice(heldHtml.indexOf('studio-staff-tickets'), heldHtml.indexOf('studio-staff-tickets') + 600)}`);
 }
 
 {

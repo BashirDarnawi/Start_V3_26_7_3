@@ -116,9 +116,10 @@ function studioDeskShown(section) {
   return Math.max(STUDIO_DESK_PAGE, Number(_studioDesk.shown[section]) || 0);
 }
 
+// 'linked': the Launch section's "In Meta" list pages on its own (not a nav section).
 function studioDeskMore(section) {
   const key = String(section || '');
-  if (!STUDIO_DESK_SECTIONS.includes(key)) return;
+  if (!STUDIO_DESK_SECTIONS.includes(key) && key !== 'linked') return;
   _studioDesk.shown[key] = studioDeskShown(key) + STUDIO_DESK_PAGE;
   studioV2Rerender();
 }
@@ -380,7 +381,8 @@ function studioDeskDecision(id) {
   if (!draft) {
     const request = findVisibleAdsStudioCampaign(key);
     const legacy = typeof adsStudioIsLegacyDailyRequest === 'function' && adsStudioIsLegacyDailyRequest(request);
-    draft = { reason: legacy ? 'budget_dates' : '', note: legacy && typeof adsStudioLegacyDailyNote === 'function' ? adsStudioLegacyDailyNote() : '', error: '', outcome: null };
+    draft = { reason: legacy ? 'budget_dates' : '', note: legacy && typeof adsStudioLegacyDailyNote === 'function' ? adsStudioLegacyDailyNote() : '', error: '', outcome: null,
+      cycle: String((request && request.submittedAt) || '') };  // the send this draft is for
     _studioDesk.decisions.set(key, draft);
   }
   return draft;
@@ -464,6 +466,13 @@ function renderStudioDeskBrief(request) {
 
 function renderStudioDeskDecisionBox(request) {
   const id = studioEsc(request.id);
+  const old = _studioDesk.decisions.get(String(request.id));
+  // Decided here before, or sent again since the draft began: this round starts clean (the old reason and
+  // note never reach the customer again). The pin stays, so the version drawn before is still refused once.
+  if (old && (old.outcome || old.cycle !== String(request.submittedAt || ''))) {
+    _studioDesk.decisions.delete(String(request.id));
+    studioDeskDecision(request.id).version = old.version || 0;
+  }
   const draft = studioDeskDecision(request.id);
   // The version the reviewer read: a decision is sent for it, never for one live sync installed since.
   if (!draft.version) draft.version = Number(request._lastModified) || 0;
@@ -617,6 +626,8 @@ async function studioDeskDecideOnce(requestId, decision, note, reasonCode, pinne
   const draft = studioDeskDecision(requestId);
   draft.outcome = { decision, studioName: typeof adsStudioStudioName === 'function' ? adsStudioStudioName(saved) : '' };
   draft.error = '';
+  draft.reason = '';
+  draft.note = '';  // sent with this decision: never again with a later one
   draft.version = 0;  // a request sent again later is read (and pinned) afresh
   studioDeskPulseRefresh();
   studioDeskNotify(true, adsStudioText('Decision saved', 'تم حفظ القرار'), adsStudioText(`The request is now: ${adsStudioStatusMeta(decision).label}.`, `حالة الطلب الآن: ${adsStudioStatusMeta(decision).labelAr}.`));
@@ -700,10 +711,10 @@ function renderStudioDeskLaunch() {
   const body = queue.length
     ? `<ul class="studio-desk-list" data-testid="studio-desk-launch">${shown.map(renderStudioDeskLaunchCard).join('')}</ul>${renderStudioDeskMoreButton('launch', queue.length)}`
     : renderStudioDeskEmpty('rocket', adsStudioText('Nothing waits for a Meta link', 'لا طلب ينتظر ربط ميتا'), '', 'studio-desk-launch-empty');
-  const linkedShown = linked.slice(0, studioDeskShown('launch'));
+  const linkedShown = linked.slice(0, studioDeskShown('linked'));
   const linkedPart = linked.length ? `
           <h2 class="studio-desk-h2 studio-desk-h2-later">${studioEsc(adsStudioText(`In Meta (${linked.length})`, `في ميتا (${linked.length})`))}</h2>
-          <ul class="studio-desk-list" data-testid="studio-desk-linked">${linkedShown.map(renderStudioDeskLinkedCard).join('')}</ul>` : '';
+          <ul class="studio-desk-list" data-testid="studio-desk-linked">${linkedShown.map(renderStudioDeskLinkedCard).join('')}</ul>${renderStudioDeskMoreButton('linked', linked.length)}` : '';
   return intro + body + linkedPart;
 }
 
@@ -1105,7 +1116,9 @@ function renderStudioDeskMore(route) {
 // The pulse's numbers. openTickets includes the urgent ticket every open stop request opens
 // (studio_stop.create_stop_ticket); stopTicketsOpen is that overlap (stop tickets still open), so
 // the badge and the title count one stop request once: openTickets + the stop requests whose ticket
-// was answered but whose ad is not stopped yet (studioDeskStopsNotTicketed).
+// was answered (or resolved by hand) but whose ad is not stopped yet (studioDeskStopsNotTicketed); the
+// staff Active ticket list keeps such a ticket (studio_support list_tickets_page, stopOpen) so the badge
+// always leads to something on screen.
 function studioDeskCleanPulse(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const whole = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
