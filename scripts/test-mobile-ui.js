@@ -1597,6 +1597,20 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Classic wallet (review loop r2 #21): charge rows show the status in words (EN/AR), refusals of create, confirm/cancel and attach go through the one Arabic map',
     !studioLoadError && walletCases.every(Boolean), studioLoadError || `cases ${walletCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}; ar ${statusWord(rowIn('ar', 'pending'))}`);
 
+  // Review loop r5 n2: the wallet's own rate limit (429) and an unknown charge request (404) have Arabic words too,
+  // never the generic "refresh and try again" (a refresh within the minute meets the same 429).
+  const walletRefusalAt = (language, status, detail) => String(inLanguage(language, `adsStudioWalletRefusal(${JSON.stringify({ status, payload: { detail } })})`));
+  const genericAr = 'تعذر إتمام الطلب. حدّث الصفحة وحاول مرة أخرى.';
+  const walletLimitCases = [
+    walletRefusalAt('ar', 429, 'Too many wallet payment requests') === 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.',
+    walletRefusalAt('en', 429, 'Too many wallet payment requests') === 'Too many requests. Please wait a minute and try again.',
+    walletRefusalAt('ar', 404, 'Payment request not found') === 'لم نجد طلب الشحن هذا. حدّث الصفحة.' && walletRefusalAt('ar', 404, 'Payment request not found') !== genericAr,
+    walletRefusalAt('en', 404, 'Payment request not found') === 'This top-up request was not found. Refresh the page.',
+    walletRefusalAt('ar', 409, 'Payment request is canceled').includes('لم يعد مفتوحاً')
+  ];
+  check('Classic wallet (review loop r5 n2): the wallet rate limit and an unknown charge request speak Arabic (not the generic refresh line) and plain English',
+    !studioLoadError && walletLimitCases.every(Boolean), studioLoadError || `cases ${walletLimitCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+
   // P1-08a: /studio has no 'ads' view, so the Connections card explains instead of a dead button.
   const studioSources = fs.readdirSync(path.join(ROOT, 'src/systems/ads_studio')).filter(file => file.endsWith('.js'))
     .map(file => read(`src/systems/ads_studio/${file}`)).concat([read('studio.js'), read('www/studio.js')]);
@@ -3891,9 +3905,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     !loadError && wiringCases.every(Boolean), loadError || `cases ${failed(wiringCases)}`);
 
   // Getting started: a new customer (nothing sent yet) sees the four steps; the page step waits for its read.
-  const fresh = open('/studio?tab=home', { rows: [requests()[0]], summaryReply: { r_draft: stageRow(1) }, walletReply: wallet({ addedMinor: 0, availableMinor: 0, reservedMinor: 0, inAdsMinor: 0, spentMinor: 0, metaUsedInAdsMinor: null }),
+  // A new customer's wallet has no paid-ad chains (a chain means a request was sent and paid: review loop r5 n28).
+  const fresh = open('/studio?tab=home', { rows: [requests()[0]], summaryReply: { r_draft: stageRow(1) }, walletReply: { ...wallet({ addedMinor: 0, availableMinor: 0, reservedMinor: 0, inAdsMinor: 0, spentMinor: 0, metaUsedInAdsMinor: null }), chains: [] },
     extra: () => reply('/api/studio/pages', { pages: [] }) });
-  const lapsedStart = (() => { who.plan = false; const page = open('/studio?tab=home', { rows: [] }); who.plan = true; return page; })();
+  const lapsedStart = (() => { who.plan = false; const page = open('/studio?tab=home', { rows: [], walletReply: { ...wallet(), chains: [] } }); who.plan = true; return page; })();
   // A customer whose ad_maker plan ran out (a row of theirs that is no longer active) is.
   const lapsedPlan = (() => {
     who.plan = false;
@@ -3923,6 +3938,23 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 Home: Getting started (plan, page, money, first request) until the first send; lapsed plan; a failed wallet read offers Retry; other tabs keep the shell placeholder',
     !loadError && startCases.every(Boolean), loadError || `cases ${failed(startCases)}`);
+
+  // Review loop r5 n28: a returning customer who archived every request is not new again. An archived (synced
+  // _deleted) sent row of theirs ends Getting started, and so does a paid ad in the wallet summary (the archived rows
+  // never reached this device); another customer's sent row and a plain draft do not.
+  const noChains = { ...wallet({ addedMinor: 0, availableMinor: 0, reservedMinor: 0, inAdsMinor: 0, spentMinor: 0, metaUsedInAdsMinor: null }), reserved: [], inAds: [], chains: [] };
+  const archivedAll = open('/studio?tab=home', { rows: [{ id: 'r_gone', createdBy: 'u1', status: 'Rejected', name: 'Old ad', submittedAt: '2026-09-01T10:00:00Z', _deleted: true, _created: 1, _lastModified: 9 }],
+    summaryReply: {}, walletReply: noChains });
+  const archivedPaid = open('/studio?tab=home', { rows: [], summaryReply: {} });
+  const othersOnly = open('/studio?tab=home', { rows: [{ id: 'r_theirs', createdBy: 'u2', status: 'Approved', name: 'Theirs', submittedAt: '2026-09-01T10:00:00Z', _created: 1, _lastModified: 9 }, requests()[0]],
+    summaryReply: { r_draft: stageRow(1) }, walletReply: noChains });
+  const returningCases = [
+    archivedAll.includes('data-testid="studio-home"') && !archivedAll.includes('studio-home-start') && !archivedAll.includes('Send your first ad request'),
+    archivedPaid.includes('data-testid="studio-home"') && !archivedPaid.includes('studio-home-start'),
+    othersOnly.includes('data-testid="studio-home-start"') && othersOnly.includes('data-testid="studio-start-first"')
+  ];
+  check('Studio v2 Home (review loop r5 n28): Getting started stays gone for a customer whose sent requests are all archived (a synced archived row, or paid ads in the wallet); a draft or another customer\'s request does not end it',
+    !loadError && returningCases.every(Boolean), loadError || `cases ${failed(returningCases)}`);
 
   // My ads: list + filters (in the address), detail per stage, money chain, results, reasons.
   const list = open('/studio?tab=campaigns');
@@ -5471,6 +5503,46 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 Help thread: the team is always "Albayan team", a reply reopens the ticket, resolve and reopen post operationIds',
     !loadError && threadCases.every(Boolean), loadError || `cases ${failed(threadCases)}`);
+
+  // Review loop r5 n26: a message keeps its line breaks (CRLF read as one break, at most one blank line, other control
+  // characters still spaces), drawn escaped inside the pre-wrap text; the English and Arabic halves of a bilingual
+  // TikTok note stay apart. A subject stays on one line.
+  const T9 = 'tkt_' + '9'.repeat(40);
+  const multiMessage = json(`studioHelpCleanMessage({ id: 'tkm_${'9'.repeat(40)}', from: 'team', text: 'Step 1: open Meta\\r\\n2) Add the page\\n\\n\\n\\nمرحبا\\u0007<b>x</b>  ', createdAt: '2026-09-01T00:00:00Z' })`) || {};
+  const bilingual = json(`studioHelpCleanMessage({ id: 'tkm_${'8'.repeat(40)}', from: 'team', text: 'We set it up.\\n\\nأعددناه.', createdAt: '2026-09-01T00:00:00Z' }).text`);
+  const multiDrawn = String(run(`renderStudioHelpMessages([${JSON.stringify(multiMessage)}])`));
+  const oneLineSubject = json(`studioHelpCleanTicket(${JSON.stringify(ticket(T9, 'T-000009', 'open', { subject: 'Line one\nLine two' }))}).subject`);
+  const lineCases = [
+    multiMessage.text === 'Step 1: open Meta\n2) Add the page\n\nمرحبا <b>x</b>',
+    bilingual === 'We set it up.\n\nأعددناه.',
+    multiDrawn.includes('<p class="studio-help-msg-text" dir="auto">Step 1: open Meta\n2) Add the page\n\nمرحبا &lt;b&gt;x&lt;/b&gt;</p>') && !multiDrawn.includes('<b>x'),
+    oneLineSubject === 'Line one Line two'
+  ];
+  check('Studio v2 Help (review loop r5 n26): ticket messages keep their line breaks (escaped, pre-wrap), a bilingual note keeps its two halves apart, subjects stay on one line',
+    !loadError && lineCases.every(Boolean), loadError || `cases ${failed(lineCases)}; ${JSON.stringify(multiMessage.text)}`);
+
+  // Review loop r5 n29: resolving the only open ticket and going back to the Open list within its 30 s freshness keeps
+  // the row with its new status (studioHelpUpdateListed's rule), never a blank card with no row and no text.
+  const T8 = 'tkt_' + '8'.repeat(40);
+  run("_studioHelp.lists.active = studioHelpEmptySlot(); __replies['/api/studio/tickets?status=active'] = [];");
+  reply('/api/studio/tickets?status=active', { tickets: [ticket(T8, 'T-000008', 'open')], nextCursor: null });
+  const listReadsBefore = calls('GET', '/api/studio/tickets?status=active').length;
+  openAt('/studio?tab=help');
+  const onlyOpen = html();
+  reply(`/api/studio/tickets/${T8}/resolve`, { ticket: ticket(T8, 'T-000008', 'resolved', { resolvedAt: ago(0), reopenUntil: soon(7 * 24 * 60) }) });
+  run(`studioHelpStatus('${T8}', 'resolve');`);
+  openAt('/studio?tab=help');
+  const afterResolve = html();
+  const afterResolveAr = String(inLanguage('ar', 'render(); __html'));
+  const resolvedListCases = [
+    onlyOpen.includes('data-testid="studio-help-list-team"') && onlyOpen.includes(`data-testid="studio-ticket-${T8}" data-status="open"`),
+    afterResolve.includes('data-testid="studio-help-list-done"') && afterResolve.includes(`data-testid="studio-ticket-${T8}" data-status="resolved"`)
+      && !afterResolve.includes('data-testid="studio-help-list-team"'),
+    afterResolveAr.includes('<h3 class="studio-help-h3">محلولة</h3>'),
+    calls('GET', '/api/studio/tickets?status=active').length === listReadsBefore + 1  // the list was still fresh: not read again
+  ];
+  check('Studio v2 Help (review loop r5 n29): after resolving the only open ticket the Open list still shows it as resolved (EN/AR), never a blank card',
+    !loadError && resolvedListCases.every(Boolean), loadError || `cases ${failed(resolvedListCases)}`);
 
   // Inbox: opening it reads the feed afresh (the bell's read above is minutes young), the feed in the
   // reader's language, unread items, the bell badge inside the header's bell, "Mark all seen".
@@ -7466,6 +7538,30 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio TikTok (review loop r2 #24): the TikTok cap and a finished request get their own words (EN/AR) instead of the ticket texts; the 20-ticket cap keeps the ticket text',
     !loadError && tiktokRefusalCases.every(Boolean), loadError || `cases ${failed(tiktokRefusalCases)}; ${JSON.stringify({ capEn, capAr, ticketsFull, deskFinished })}`);
+
+  // Review loop r5 n27: the daily cap (429 RATE_LIMITED with Retry-After up to Tripoli midnight) says "tomorrow",
+  // never "wait 840 minutes"; a short 429 keeps the general wait words.
+  const tiktokLimited = (retryAfter, message, language = 'en') => {
+    run(`__replies[${JSON.stringify(TIKTOK_PATH)}] = []; _studioTikTok.draft = null; studioTikTokSet("handle", "shop.three"); studioTikTokToggleWant("advice", true);`);
+    replyError(TIKTOK_PATH, { status: 429, retryAfter, message: 'x', payload: { detail: { code: 'RATE_LIMITED', message } } });
+    inLanguage(language, 'studioTikTokSend();');
+    const error = String(json('_studioTikTok.draft && _studioTikTok.draft.error') || '');
+    run(`__replies[${JSON.stringify(TIKTOK_PATH)}] = []; _studioTikTok.draft = null;`);
+    return error;
+  };
+  const dailyMessage = 'At most 5 TikTok requests a day. Please send the next one tomorrow.';
+  const dailyEn = tiktokLimited(50400, dailyMessage);
+  const dailyAr = tiktokLimited(50400, dailyMessage, 'ar');
+  const dailyNoWords = tiktokLimited(7200, '');
+  const shortLimit = tiktokLimited(120, 'Too many requests');
+  const dailyCases = [
+    dailyEn === "You have sent today's maximum of TikTok requests. Please send the next one tomorrow." && !/\d/.test(dailyEn),
+    dailyAr === 'أرسلت اليوم الحد الأقصى من طلبات تيك توك. أرسل الطلب التالي غداً.' && !/840|\d/.test(dailyAr),
+    dailyNoWords === dailyEn,
+    shortLimit === 'Too many requests. Please wait 2 minutes and try again.'
+  ];
+  check('Studio TikTok (review loop r5 n27): the daily limit says to send the next request tomorrow (EN/AR), never a count of hundreds of minutes; a short 429 keeps the wait words',
+    !loadError && dailyCases.every(Boolean), loadError || `cases ${failed(dailyCases)}; ${JSON.stringify({ dailyEn, dailyAr, dailyNoWords, shortLimit })}`);
   // Review loop r3 n11: the staff ticket thread (the only desk screen a TikTok request reaches) draws the team's steps
   // (Start / Done / Decline with the note form) and hides the plain Resolve while the request is open or in progress (the
   // server would end it as "declined"); a saved step reads the thread again. A plain ticket keeps Resolve.

@@ -1237,6 +1237,8 @@ const _ADS_STUDIO_REFUSAL_AR = [
   [/^Minimum wallet charge is 1\.00/, 'أقل مبلغ للشحن هو 1.00 من العملة.', '', 'The smallest top-up is 1.00 of the currency.'],
   [/^Idempotency key was already used for another operation/, 'أُرسل هذا من قبل بتفاصيل مختلفة. حدّث الصفحة وأعد المحاولة.', '', 'This was already sent with different details. Refresh and try again.'],
   [/^Too many unpaid charge requests/, 'لديك طلبات شحن غير مدفوعة كثيرة. ادفع إحداها أو ألغِها أولاً.', '', 'You have too many unpaid top-up requests. Pay or cancel one first.'],
+  [/^Too many wallet payment requests/, 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.', '', 'Too many requests. Please wait a minute and try again.'],
+  [/^Payment request not found/, 'لم نجد طلب الشحن هذا. حدّث الصفحة.', '', 'This top-up request was not found. Refresh the page.'],
   [/^The receipt photo is invalid or too large/, 'صورة الإيصال غير مقبولة: استخدم صورة JPG أو PNG واضحة أقل من 4 ميغابايت.', '', 'The receipt photo is not accepted: use a clear JPG or PNG under 4 MB.'],
   [/^Only a pending request can take a receipt/, 'لا يمكن إرفاق إيصال إلا بطلب ما زال بانتظار الدفع.', '', 'A receipt can be attached only to a request that is still waiting for payment.'],
   [/^Payment request is /, 'طلب الدفع هذا لم يعد مفتوحاً. حدّث الصفحة.', '', 'This payment request is no longer open. Refresh the page.'],

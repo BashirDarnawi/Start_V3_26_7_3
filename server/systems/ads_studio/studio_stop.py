@@ -26,7 +26,8 @@ calls ``add_stop_request_route``), so its refusals are plain texts like the othe
 * The answer: ``{ticket, stopRequestedAt, afterHours, urgentContact?}``. ``afterHours`` is true when
   the team is outside its working hours now (the ``hours`` setting, Tripoli time); only then
   ``urgentContact`` is there, with the on-duty WhatsApp line (``contact.urgentWhatsapp``) and the
-  public phone, each only when set. The screen shows ``serviceHours.onDutyUntil`` from /me with it.
+  public phone, each only when set, and empty outside the on-duty window (studio_hours.on_duty_at:
+  after closing until ``hours.onDutyUntil``). The screen shows ``serviceHours.onDutyUntil`` from /me with it.
 * One stop request per ad: a repeat (a lost answer, a second tap, another device, another
   operationId) answers with the SAME ticket and changes nothing.
 
@@ -116,6 +117,7 @@ from .ad_campaign_actions import (
 from .studio_activity import create_studio_activity_router, record_activity
 from .studio_diagnostics import parse_time
 from .studio_errors import error_code, studio_error
+from .studio_hours import on_duty_at
 from .studio_jobs import ALERTS_TYPE, _day_hours, _zone, raise_alert
 from .studio_privacy import redact_staff_identity
 from .studio_profile import AUDIT_ACTION as PROFILE_AUDIT_ACTION
@@ -378,7 +380,9 @@ def _answer(ticket: Any, requested_at: str, settings: dict[str, Any], now: datet
         "afterHours": after_hours,
     }
     if after_hours:
-        contact = settings["contact"]
+        # Only inside the on-duty window (hours.onDutyUntil, D11/D29): outside it nobody answers "right
+        # now", so nothing is offered and the screen says the team handles it at the next opening.
+        contact = settings["contact"] if on_duty_at(now, settings) else {}
         out["urgentContact"] = {
             key: value for key, value in (("whatsapp", contact.get("urgentWhatsapp")), ("phone", contact.get("phone")))
             if value

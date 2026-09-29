@@ -615,6 +615,16 @@ function renderStudioHomeGoals(paused) {
           </section>`;
 }
 
+// Sent at least once, so Getting started is over for good: one of the caller's requests is past Draft or
+// was sent, archived ones too (archiving only marks the synced row _deleted), or the wallet summary
+// shows a paid ad (an archived row this device never received).
+function studioHomeEverSent(wallet) {
+  const uid = studioMeUserId();
+  const rows = uid && Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [];
+  return rows.some(row => row && String(row.createdBy || '') === uid && (String(row.status || 'Draft') !== 'Draft' || String(row.submittedAt || '')))
+    || !!(wallet && Array.isArray(wallet.chains) && wallet.chains.length);
+}
+
 function renderStudioHomeBody() {
   studioDataWant('campaigns');
   studioDataWant('wallet');
@@ -628,7 +638,7 @@ function renderStudioHomeBody() {
             ${studioV2Icon('circle-pause')}
             <p>${studioEsc(adsStudioText('New ad requests will open again soon — your drafts are saved.', 'نستقبل طلبات الإعلانات الجديدة مجدداً قريباً — مسوداتك محفوظة.'))}</p>
           </div>` : '';
-  const firstRun = !requests.some(row => String(row.status || 'Draft') !== 'Draft' || String(row.submittedAt || ''));
+  const firstRun = !studioHomeEverSent(wallet);
   const needs = studioHomeNeeds(requests, wallet);
   const gate = !adsStudioCanUse() ? `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>` : '';
   return `

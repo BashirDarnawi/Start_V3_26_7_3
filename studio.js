@@ -1237,6 +1237,8 @@ const _ADS_STUDIO_REFUSAL_AR = [
   [/^Minimum wallet charge is 1\.00/, 'أقل مبلغ للشحن هو 1.00 من العملة.', '', 'The smallest top-up is 1.00 of the currency.'],
   [/^Idempotency key was already used for another operation/, 'أُرسل هذا من قبل بتفاصيل مختلفة. حدّث الصفحة وأعد المحاولة.', '', 'This was already sent with different details. Refresh and try again.'],
   [/^Too many unpaid charge requests/, 'لديك طلبات شحن غير مدفوعة كثيرة. ادفع إحداها أو ألغِها أولاً.', '', 'You have too many unpaid top-up requests. Pay or cancel one first.'],
+  [/^Too many wallet payment requests/, 'طلبات كثيرة. انتظر دقيقة ثم أعد المحاولة.', '', 'Too many requests. Please wait a minute and try again.'],
+  [/^Payment request not found/, 'لم نجد طلب الشحن هذا. حدّث الصفحة.', '', 'This top-up request was not found. Refresh the page.'],
   [/^The receipt photo is invalid or too large/, 'صورة الإيصال غير مقبولة: استخدم صورة JPG أو PNG واضحة أقل من 4 ميغابايت.', '', 'The receipt photo is not accepted: use a clear JPG or PNG under 4 MB.'],
   [/^Only a pending request can take a receipt/, 'لا يمكن إرفاق إيصال إلا بطلب ما زال بانتظار الدفع.', '', 'A receipt can be attached only to a request that is still waiting for payment.'],
   [/^Payment request is /, 'طلب الدفع هذا لم يعد مفتوحاً. حدّث الصفحة.', '', 'This payment request is no longer open. Refresh the page.'],
@@ -7647,6 +7649,16 @@ function renderStudioHomeGoals(paused) {
           </section>`;
 }
 
+// Sent at least once, so Getting started is over for good: one of the caller's requests is past Draft or
+// was sent, archived ones too (archiving only marks the synced row _deleted), or the wallet summary
+// shows a paid ad (an archived row this device never received).
+function studioHomeEverSent(wallet) {
+  const uid = studioMeUserId();
+  const rows = uid && Array.isArray(state.adCampaignRequests) ? state.adCampaignRequests : [];
+  return rows.some(row => row && String(row.createdBy || '') === uid && (String(row.status || 'Draft') !== 'Draft' || String(row.submittedAt || '')))
+    || !!(wallet && Array.isArray(wallet.chains) && wallet.chains.length);
+}
+
 function renderStudioHomeBody() {
   studioDataWant('campaigns');
   studioDataWant('wallet');
@@ -7660,7 +7672,7 @@ function renderStudioHomeBody() {
             ${studioV2Icon('circle-pause')}
             <p>${studioEsc(adsStudioText('New ad requests will open again soon — your drafts are saved.', 'نستقبل طلبات الإعلانات الجديدة مجدداً قريباً — مسوداتك محفوظة.'))}</p>
           </div>` : '';
-  const firstRun = !requests.some(row => String(row.status || 'Draft') !== 'Draft' || String(row.submittedAt || ''));
+  const firstRun = !studioHomeEverSent(wallet);
   const needs = studioHomeNeeds(requests, wallet);
   const gate = !adsStudioCanUse() ? `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>` : '';
   return `
@@ -12385,6 +12397,13 @@ function studioHelpText(value, max = 300) {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max) : '';
 }
 
+// A message body keeps its line breaks (the server keeps them, at most one blank line; the message
+// style is pre-wrap and studioEsc escapes it when drawn); subjects and labels stay on one line.
+function studioHelpMultiline(value, max) {
+  return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ')
+    .replace(/\n{3,}/g, '\n\n').trim().slice(0, max) : '';
+}
+
 function studioHelpTime(value) {
   const text = studioHelpText(value, 40);
   return text && Number.isFinite(Date.parse(text)) ? text : '';
@@ -12517,7 +12536,7 @@ function studioHelpCleanMessage(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const id = String(raw.id || '');
   if (!Security.isValidRecordId(id)) return null;
-  return { id, from: raw.from === 'team' ? 'team' : 'customer', text: studioHelpText(raw.text, STUDIO_HELP_MESSAGE_MAX), createdAt: studioHelpTime(raw.createdAt) };
+  return { id, from: raw.from === 'team' ? 'team' : 'customer', text: studioHelpMultiline(raw.text, STUDIO_HELP_MESSAGE_MAX), createdAt: studioHelpTime(raw.createdAt) };
 }
 
 function studioHelpCleanList(raw) {
@@ -13179,11 +13198,14 @@ function renderStudioHelpList(view) {
     } else {
       const forYou = slot.items.filter(ticket => ticket.status === 'answered' || ticket.status === 'waiting_customer');
       const forTeam = slot.items.filter(ticket => ticket.status === 'open');
+      // resolved from its thread: it stays with its new status until the list is read again (studioHelpUpdateListed)
+      const done = slot.items.filter(ticket => ticket.status === 'resolved');
       const group = (items, title, testId) => (items.length ? `
             <h3 class="studio-help-h3">${studioEsc(title)}</h3>
             <ul class="studio-help-list" data-testid="${testId}">${items.map(ticket => renderStudioHelpRow(ticket, open(ticket))).join('')}</ul>` : '');
       body = group(forYou, adsStudioText('Waiting for you', 'بانتظار ردك'), 'studio-help-list-you')
-        + group(forTeam, adsStudioText('Waiting for our team', 'بانتظار فريقنا'), 'studio-help-list-team');
+        + group(forTeam, adsStudioText('Waiting for our team', 'بانتظار فريقنا'), 'studio-help-list-team')
+        + group(done, adsStudioText('Resolved', 'محلولة'), 'studio-help-list-done');
     }
     if (slot.nextCursor) body += `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-help-more" onclick="studioHelpMore('${filter}')"${slot.loading ? ' disabled' : ''}>${studioEsc(adsStudioText('Show older tickets', 'اعرض التذاكر الأقدم'))}</button>`;
   }
@@ -14566,6 +14588,8 @@ const STUDIO_TIKTOK_TEXTS = Object.freeze({
   // shared texts speak of tickets: the TikTok screens say what really happened.
   errorFull: ['You already have {n} TikTok requests in progress. Wait for the team, then send a new one.', 'لديك {n} طلبات تيك توك قيد العمل بالفعل. انتظر الفريق ثم أرسل طلباً جديداً.'],
   errorFinished: ['This TikTok request is already finished or was cancelled by the customer. Refresh the list.', 'طلب تيك توك هذا انتهى بالفعل أو ألغاه العميل. حدّث القائمة.'],
+  // the daily cap (429 RATE_LIMITED until Tripoli midnight): "tomorrow", never "wait 840 minutes"
+  errorDaily: ["You have sent today's maximum of TikTok requests. Please send the next one tomorrow.", 'أرسلت اليوم الحد الأقصى من طلبات تيك توك. أرسل الطلب التالي غداً.'],
   yours: ['Your requests', 'طلباتك'],
   none: ['No TikTok requests yet.', 'لا توجد طلبات تيك توك بعد.'],
   reading: ['Reading your requests…', 'نقرأ طلباتك…'],
@@ -14839,6 +14863,10 @@ async function studioTikTokSend() {
     if (generation !== _studioTikTok.generation) return false;
     draft.error = studioExtrasErrorText(error, 'action');
     if (studioExtrasErrorCode(error) === 'IDEMPOTENCY_MISMATCH') draft.operationId = studioExtrasOperationId('tiktok');
+    const limited = studioExtrasErrorCode(error) === 'RATE_LIMITED' && error.studio;
+    if (limited && (/TikTok requests a day/i.test(String(limited.message || '')) || Number(limited.retryAfterSeconds) > 3600)) {
+      draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.errorDaily);
+    }
     if (studioExtrasErrorCode(error) === 'TICKET_OPEN_LIMIT' && /TikTok requests in progress/.test(String((error.studio && error.studio.message) || ''))) {
       // The TikTok cap (not the 20-ticket one): this screen's count was stale, so read it again.
       draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.errorFull).replace('{n}', String((_studioTikTok.service && _studioTikTok.service.maxOpen) || _studioTikTok.maxOpen || 3));

@@ -124,6 +124,8 @@ const STUDIO_TIKTOK_TEXTS = Object.freeze({
   // shared texts speak of tickets: the TikTok screens say what really happened.
   errorFull: ['You already have {n} TikTok requests in progress. Wait for the team, then send a new one.', 'لديك {n} طلبات تيك توك قيد العمل بالفعل. انتظر الفريق ثم أرسل طلباً جديداً.'],
   errorFinished: ['This TikTok request is already finished or was cancelled by the customer. Refresh the list.', 'طلب تيك توك هذا انتهى بالفعل أو ألغاه العميل. حدّث القائمة.'],
+  // the daily cap (429 RATE_LIMITED until Tripoli midnight): "tomorrow", never "wait 840 minutes"
+  errorDaily: ["You have sent today's maximum of TikTok requests. Please send the next one tomorrow.", 'أرسلت اليوم الحد الأقصى من طلبات تيك توك. أرسل الطلب التالي غداً.'],
   yours: ['Your requests', 'طلباتك'],
   none: ['No TikTok requests yet.', 'لا توجد طلبات تيك توك بعد.'],
   reading: ['Reading your requests…', 'نقرأ طلباتك…'],
@@ -397,6 +399,10 @@ async function studioTikTokSend() {
     if (generation !== _studioTikTok.generation) return false;
     draft.error = studioExtrasErrorText(error, 'action');
     if (studioExtrasErrorCode(error) === 'IDEMPOTENCY_MISMATCH') draft.operationId = studioExtrasOperationId('tiktok');
+    const limited = studioExtrasErrorCode(error) === 'RATE_LIMITED' && error.studio;
+    if (limited && (/TikTok requests a day/i.test(String(limited.message || '')) || Number(limited.retryAfterSeconds) > 3600)) {
+      draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.errorDaily);
+    }
     if (studioExtrasErrorCode(error) === 'TICKET_OPEN_LIMIT' && /TikTok requests in progress/.test(String((error.studio && error.studio.message) || ''))) {
       // The TikTok cap (not the 20-ticket one): this screen's count was stale, so read it again.
       draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.errorFull).replace('{n}', String((_studioTikTok.service && _studioTikTok.service.maxOpen) || _studioTikTok.maxOpen || 3));

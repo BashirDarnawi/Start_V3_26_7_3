@@ -147,6 +147,13 @@ function studioHelpText(value, max = 300) {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max) : '';
 }
 
+// A message body keeps its line breaks (the server keeps them, at most one blank line; the message
+// style is pre-wrap and studioEsc escapes it when drawn); subjects and labels stay on one line.
+function studioHelpMultiline(value, max) {
+  return typeof value === 'string' ? value.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ')
+    .replace(/\n{3,}/g, '\n\n').trim().slice(0, max) : '';
+}
+
 function studioHelpTime(value) {
   const text = studioHelpText(value, 40);
   return text && Number.isFinite(Date.parse(text)) ? text : '';
@@ -279,7 +286,7 @@ function studioHelpCleanMessage(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const id = String(raw.id || '');
   if (!Security.isValidRecordId(id)) return null;
-  return { id, from: raw.from === 'team' ? 'team' : 'customer', text: studioHelpText(raw.text, STUDIO_HELP_MESSAGE_MAX), createdAt: studioHelpTime(raw.createdAt) };
+  return { id, from: raw.from === 'team' ? 'team' : 'customer', text: studioHelpMultiline(raw.text, STUDIO_HELP_MESSAGE_MAX), createdAt: studioHelpTime(raw.createdAt) };
 }
 
 function studioHelpCleanList(raw) {
@@ -941,11 +948,14 @@ function renderStudioHelpList(view) {
     } else {
       const forYou = slot.items.filter(ticket => ticket.status === 'answered' || ticket.status === 'waiting_customer');
       const forTeam = slot.items.filter(ticket => ticket.status === 'open');
+      // resolved from its thread: it stays with its new status until the list is read again (studioHelpUpdateListed)
+      const done = slot.items.filter(ticket => ticket.status === 'resolved');
       const group = (items, title, testId) => (items.length ? `
             <h3 class="studio-help-h3">${studioEsc(title)}</h3>
             <ul class="studio-help-list" data-testid="${testId}">${items.map(ticket => renderStudioHelpRow(ticket, open(ticket))).join('')}</ul>` : '');
       body = group(forYou, adsStudioText('Waiting for you', 'بانتظار ردك'), 'studio-help-list-you')
-        + group(forTeam, adsStudioText('Waiting for our team', 'بانتظار فريقنا'), 'studio-help-list-team');
+        + group(forTeam, adsStudioText('Waiting for our team', 'بانتظار فريقنا'), 'studio-help-list-team')
+        + group(done, adsStudioText('Resolved', 'محلولة'), 'studio-help-list-done');
     }
     if (slot.nextCursor) body += `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-help-more" onclick="studioHelpMore('${filter}')"${slot.loading ? ' disabled' : ''}>${studioEsc(adsStudioText('Show older tickets', 'اعرض التذاكر الأقدم'))}</button>`;
   }

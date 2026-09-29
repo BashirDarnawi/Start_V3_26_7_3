@@ -25,6 +25,8 @@ Functions:
 * ``is_open_at(when)`` / ``is_open_now()``: inside the working hours or not (an after-hours stop
   request shows the urgent line, P3-10).
 * ``next_open_at(start)``: the first working moment at or after ``start``.
+* ``on_duty_at(when)``: inside the on-duty window of ``hours.onDutyUntil`` (D11, D29), when an
+  after-hours stop request may offer the urgent line.
 
 ``settings`` may be the whole studio settings (read_all_settings()), only the ``hours`` value, or
 None (read now). Every result is an aware UTC datetime (``None`` only when no working time exists in
@@ -125,6 +127,31 @@ def is_open_at(when: datetime, settings: dict[str, Any] | None = None) -> bool:
 
 def is_open_now(settings: dict[str, Any] | None = None, now: datetime | None = None) -> bool:
     return is_open_at(now or utc_now(), settings)
+
+
+def on_duty_at(when: datetime, settings: dict[str, Any] | None = None) -> bool:
+    """Inside the on-duty window at ``when`` (D11: outside the hours, "the urgent line until
+    ``onDutyUntil``"). No ``onDutyUntil`` set: True (no window to keep). Otherwise the window of a
+    Tripoli day starts at its closing time, or on a closed day or holiday at its usual opening (a
+    closed weekday: the earliest opening of the week), and ends at ``onDutyUntil``; an
+    ``onDutyUntil`` before that start runs past midnight into the next morning (equal to it: no
+    window)."""
+    hours = hours_of(settings)
+    until = hours.get("onDutyUntil")
+    if not until:
+        return True
+    local = _aware(when).astimezone(service_zone())
+    clock = local.strftime("%H:%M")
+    today = day_hours(hours, local.date())
+    if today:
+        start = today["close"]
+    else:
+        week = hours.get("week") or {}
+        usual = week.get(WEEKDAYS[(local.weekday() + 1) % 7])  # weekday(): Monday = 0
+        start = usual["open"] if usual else min((day["open"] for day in week.values() if day), default="00:00")
+    if start < until:
+        return start <= clock < until
+    return until < start and (clock >= start or clock < until)
 
 
 def next_open_at(start: datetime, settings: dict[str, Any] | None = None) -> datetime | None:
