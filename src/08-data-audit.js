@@ -968,11 +968,32 @@ function updateRecord(array, id, updates, expectedLastModified) {
           return false;
         });
       };
-      // Chain this PATCH after any in-flight PATCH for the same record (run
-      // regardless of whether the previous one resolved or rejected), and drop
+      // A queued edit whose predecessor FAILED is never sent: its payload was
+      // built on that failed optimistic copy, and after a conflict reload it
+      // would carry the fresh version and undo another device's change (fast
+      // stock +/- taps erasing a sale). A slot still holding our copy reloads.
+      const abandonQueued = async () => {
+        if (_optimisticRecord && array.includes(_optimisticRecord)) {
+          let fresh = old;
+          try {
+            const latest = await apiGetEntity(collectionName, id);
+            if (latest?.data) fresh = Security.sanitizeObject(latest.data);
+          } catch (_) {}
+          const idx = array.indexOf(_optimisticRecord);
+          if (idx !== -1) {
+            array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
+              ? makeLightweightMediaRecord(collectionName, fresh) : fresh;
+            markCollectionDirty(collectionName);
+            saveState();
+          }
+        }
+        RenderQueue.schedule('patchAbandoned');
+        return false;
+      };
+      // Chain this PATCH after any in-flight PATCH for the same record, and drop
       // the chain entry once it settles so a later idle edit starts fresh.
       const _prevPatch = _patchChains.get(_patchChainKey) || Promise.resolve();
-      const _thisPatch = _prevPatch.then(sendPatch, sendPatch);
+      const _thisPatch = _prevPatch.then(ok => (ok === false ? abandonQueued() : sendPatch()), abandonQueued);
       _patchChains.set(_patchChainKey, _thisPatch);
       const cleanupPatchChain = () => {
         if (_patchChains.get(_patchChainKey) === _thisPatch) _patchChains.delete(_patchChainKey);

@@ -2960,6 +2960,140 @@ async function main() {
     assert.equal(state.activeModal, 'receipt');
     assert.equal(run('_serverLiveSync.startupLoadPending'), false);
   });
+  // Review loop r7 K n=20: three fast "+" taps on a Clothes stock chip. The server row is the truth;
+  // `firstFails` makes the first PATCH fail (a version conflict or a lost network) while taps 2 and 3
+  // wait behind it.
+  async function stepperRun(serverStart, localStart, firstFails) {
+    const { sandbox, state } = clothesFixture();
+    let server = { id: 'p1', name: 'Shirt', createdBy: 'admin', ...serverStart };
+    state.clothesProducts = [{ id: 'p1', name: 'Shirt', createdBy: 'admin', ...localStart }];
+    const sent = [];
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.updateClothesProductsFiltered = () => {};
+    sandbox.apiGetEntity = async () => ({ data: JSON.parse(JSON.stringify(server)) });
+    sandbox.apiPatchEntity = async (collection, id, updates, expected) => {
+      sent.push({ qty: updates.variants[0].qty, expected });
+      if (sent.length === 1 && firstFails === 'network') throw new TypeError('Failed to fetch');
+      if (Number(expected) !== server._lastModified) throw Object.assign(new Error('Conflict: product has changed'), { status: 409 });
+      server = { ...server, ...JSON.parse(JSON.stringify(updates)), _lastModified: server._lastModified + 1 };
+      return { data: JSON.parse(JSON.stringify(server)) };
+    };
+    await Promise.all([1, 2, 3].map(() => sandbox.adjustClothesVariantQty('p1', 0, 1)));
+    await settle();
+    return { sent, server, local: state.clothesProducts[0] };
+  }
+
+  await test('r7 K n=20: fast stock "+" taps after a missed sale never undo that sale (queued taps behind a failed one are dropped)', async () => {
+    // The phone sold 2 (5 -> 3 at version 101); this tab still shows 5 at version 100.
+    const conflict = await stepperRun({ _lastModified: 101, variants: [{ color: 'Red', size: 'M', qty: 3 }] },
+      { _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] }, 'conflict');
+    assert.deepEqual(conflict.sent.map(call => call.qty), [6], 'before: [6, 7, 8] - 7 and 8 were accepted on the reloaded version');
+    assert.equal(conflict.server.variants[0].qty, 3, 'the other device\'s sale stays');
+    assert.equal(conflict.local.variants[0].qty, 3, 'the screen shows the server stock');
+    // A lost network on the first tap: the queued taps are not sent on a guessed version either.
+    const network = await stepperRun({ _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] },
+      { _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] }, 'network');
+    assert.deepEqual(network.sent.map(call => call.qty), [6]);
+    assert.equal(network.server.variants[0].qty, 5);
+    assert.equal(network.local.variants[0].qty, 5, 'the dropped taps\' optimistic count is replaced by the server copy');
+    // Control: in sync, all three taps still chain on each echoed version.
+    const ok = await stepperRun({ _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] },
+      { _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] }, '');
+    assert.deepEqual(ok.sent, [{ qty: 6, expected: 100 }, { qty: 7, expected: 101 }, { qty: 8, expected: 102 }]);
+    assert.equal(ok.server.variants[0].qty, 8);
+    assert.equal(ok.local.variants[0].qty, 8);
+  });
+
+  await test('r7 K n=21: a "partial" payment of the whole order total is shown and stored as Paid', async () => {
+    for (const serverMode of [true, false]) {
+      const { sandbox, state, notes } = clothesFixture();
+      state.clothesOrders = [{ id: 'o1', orderNo: 3, customerName: 'Sara', status: 'New', paymentStatus: 'Not Paid', amountPaidLYD: 0,
+        deliveryFeeLYD: 5, lines: [{ productId: 'p1', qty: 2, priceLYD: 20 }], _lastModified: 4, createdBy: 'admin' }];
+      let sent = null;
+      let patched = null;
+      sandbox.prompt = () => '45';
+      sandbox.isServerModeEnabled = () => serverMode;
+      sandbox.apiMutateClothesOrder = async request => { sent = request; return {}; };
+      sandbox.applyClothesOrderMutationResponse = () => {};
+      sandbox.updateRecord = async (array, id, updates) => { patched = updates; return true; };
+      await sandbox.setClothesOrderPayment('o1', 'Partially Paid');
+      if (serverMode) {
+        assert.equal(sent.paymentStatus, 'Partially Paid', 'the amount the user typed is sent; the server makes it Paid');
+        near(sent.data.amountPaidLYD, 45);
+      } else {
+        assert.equal(patched.paymentStatus, 'Paid');
+        near(patched.amountPaidLYD, 45);
+        assert.ok(patched.paidAt);
+      }
+      assert.ok(notes.some(note => note.message === 'Payment status is now: Paid'), JSON.stringify(notes));
+    }
+    // The order form (local mode): Partially Paid with the whole total is saved as Paid with its date.
+    const { sandbox, state, run } = clothesFixture();
+    state.clothesProducts = [{ id: 'p1', name: 'Shirt', costUSD: 5, priceLYD: 20, variants: [{ color: 'Red', size: 'M', qty: 5 }], createdBy: 'admin' }];
+    state.clothesOrders = [];
+    const fields = { 'clothes-order-customer': 'Sara', 'clothes-order-fee': '5', 'clothes-order-paystatus': 'Partially Paid', 'clothes-order-paid': '45' };
+    sandbox.document.getElementById = id => (id in fields ? { value: fields[id] } : null);
+    run("_clothesTempOrderLines = [{ productId: 'p1', color: 'Red', size: 'M', qty: 2, priceLYD: 20 }];");
+    let added = null;
+    sandbox.isServerModeEnabled = () => false;
+    sandbox.applyClothesOrderStockDelta = async () => true;
+    sandbox.addRecord = async (array, record) => { added = record; return record; };
+    assert.equal(await sandbox.saveClothesOrderFromModal(), true);
+    assert.equal(added.paymentStatus, 'Paid');
+    near(added.amountPaidLYD, 45);
+    assert.ok(added.paidAt, 'a paid order carries its paid date');
+  });
+
+  await test('r7 K n=22: Clothes order and shipment refusals speak Arabic and name the product, never its internal id', async () => {
+    const { sandbox, state, notes } = clothesFixture();
+    state.clothesProducts = [{ id: 'clothesProducts_x1', name: 'قميص', variants: [], createdBy: 'admin' }];
+    const cases = [
+      ['order', 'Product variant is unavailable: clothesProducts_x1', true],
+      ['order', 'Insufficient stock for clothesProducts_x1: 1 available, 2 requested', true],
+      ['shipment', 'Cannot un-receive clothesProducts_x1: 1 available, 3 required', true],
+      ['shipment', 'Cannot un-receive missing product variant: clothesProducts_x1', true],
+      ['shipment', 'Shipment product is missing: clothesProducts_gone', false],
+      ['order', 'Product not found: clothesProducts_gone', false],
+      ['order', 'Conflict: order has changed', false],
+      ['shipment', 'Conflict: shipment has changed', false],
+      ['order', 'An active clothes_system subscription is required', false],
+      ['order', 'Returned/Canceled orders cannot be edited', false]
+    ];
+    const show = (kind, message) => {
+      notes.length = 0;
+      const error = Object.assign(new Error(message), { status: 409 });
+      if (kind === 'order') sandbox.showClothesOrderMutationError(error);
+      else sandbox.showClothesShipmentMutationError(error);
+      return notes[0].message;
+    };
+    state.language = 'ar';
+    for (const [kind, message, named] of cases) {
+      const text = show(kind, message);
+      assert.ok(!/clothesProducts_|[A-Za-z]{3,}/.test(text), `${message} -> ${text}`);
+      if (named) assert.ok(text.includes('"قميص"'), `${message} -> ${text}`);
+    }
+    state.language = 'en';
+    state.clothesProducts[0].name = 'Shirt $1';
+    const english = show('order', 'Product variant is unavailable: clothesProducts_x1');
+    assert.ok(english.includes('"Shirt $1"') && !english.includes('clothesProducts_'), english);
+    assert.equal(show('order', 'Some new server rule'), 'Some new server rule', 'an unknown refusal is still shown as sent');
+  });
+
+  await test('r7 K n=22: a new order line whose product has no stock at all is refused before sending, in Arabic', async () => {
+    const { sandbox, state, run, notes } = clothesFixture();
+    state.language = 'ar';
+    state.clothesProducts = [{ id: 'p1', name: 'قميص', costUSD: 5, priceLYD: 20, variants: [], createdBy: 'admin' }];
+    state.clothesOrders = [];
+    const fields = { 'clothes-order-customer': 'Sara', 'clothes-order-fee': '0', 'clothes-order-paystatus': 'Not Paid', 'clothes-order-paid': '0' };
+    sandbox.document.getElementById = id => (id in fields ? { value: fields[id] } : null);
+    run("_clothesTempOrderLines = [{ productId: 'p1', color: '', size: '', qty: 1, priceLYD: 20 }];");
+    let calls = 0;
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.apiMutateClothesOrder = async () => { calls += 1; return {}; };
+    assert.equal(await sandbox.saveClothesOrderFromModal(), false);
+    assert.equal(calls, 0, 'before: the request went out and the English server refusal came back');
+    assert.ok(notes.some(note => note.message.includes('"قميص"') && !/[A-Za-z]{3,}/.test(note.message)), JSON.stringify(notes));
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }

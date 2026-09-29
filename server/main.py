@@ -5315,6 +5315,8 @@ def _clothes_normalize_order_payload(
         amount_paid = 0.0
     elif amount_paid > total and not (old_data and recorded_paid >= amount_paid):
         raise HTTPException(status_code=400, detail="amountPaidLYD cannot exceed the order total")
+    elif total > 0 and amount_paid >= total - 0.005:
+        payment_status = "Paid"  # the whole total (or more) is collected: nothing is left to collect
     refund_due = round(max(0.0, amount_paid - total), 2)  # once, after every branch
 
     paid_at = (old_data or {}).get("paidAt")
@@ -5586,6 +5588,9 @@ def _clothes_order_mutation_atomic(
                     if partial > total:
                         raise HTTPException(status_code=400, detail="amountPaidLYD cannot exceed the order total")
                     next_order["amountPaidLYD"] = partial
+                if next_payment == "Partially Paid" and total > 0 and float(next_order.get("amountPaidLYD") or 0) >= total - 0.005:
+                    next_order["paymentStatus"] = "Paid"  # the whole total is collected: not a partial payment
+                    next_order["paidAt"] = next_order.get("paidAt") or _iso_utc()
                 next_order["refundDueLYD"] = round(max(0.0, float(next_order.get("amountPaidLYD") or 0) - total), 2)
                 order = _clothes_write_row(conn, order_row, next_order)
             else:

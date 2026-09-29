@@ -112,9 +112,48 @@ function applyClothesShipmentMutationResponse(response) {
   return savedShipment;
 }
 
+// The server's order/shipment refusals are English and some carry internal
+// product ids: say the known ones in the user's language, naming the product.
+// Any other text is still shown as sent (never hidden).
+const CLOTHES_SERVER_TEXTS = [
+  [/^Insufficient stock for (\S+): (\d+) available, (\d+) requested/,
+    'المخزون غير كافٍ لـ $P: المتاح $2 والمطلوب $3.', 'Not enough stock for $P: $2 available, $3 requested.'],
+  [/^Cannot un-receive (\S+): (\d+) available, (\d+) required/,
+    'لا يمكن إرجاع الشحنة: المتبقي من $P في المخزون $2 والمطلوب خصمه $3. ألغِ/أرجِع الطلبات التي باعت قطعها أولاً.',
+    'Cannot un-receive: only $2 of $P are left in stock and $3 must be removed. Cancel/return the orders that sold its pieces first.'],
+  [/^Cannot un-receive missing product variant: (\S+)/,
+    'لا يمكن إرجاع الشحنة: أحد ألوان/مقاسات $P لم يعد موجوداً في المخزون.', 'Cannot un-receive: a color/size of $P no longer exists in stock.'],
+  [/^Product variant is unavailable: (\S+)/,
+    'اللون/المقاس المختار غير موجود في مخزون $P. استلم شحنة له أولاً أو اختر لوناً ومقاساً آخر.',
+    'The chosen color/size is not in stock for $P. Receive a shipment for it first, or choose another color/size.'],
+  [/^(?:Product not found|Shipment product is missing): (\S+)/, 'لم يعد $P موجوداً (محذوف). أزله من القائمة ثم أعد المحاولة.', '$P no longer exists (deleted). Remove it from the list, then try again.'],
+  [/^Invalid stock quantity: (\S+)/, 'كمية المخزون المسجّلة لـ $P غير صالحة. عدّل المنتج وصحّح الكمية.', 'The stored stock of $P is invalid. Edit the product and correct the quantity.'],
+  [/^Conflict: \w+ has changed/, 'تم تغييره من جهاز آخر. راجع أحدث نسخة ثم أعد المحاولة.', 'It was changed on another device. Check the latest version, then try again.'],
+  [/clothes_system subscription is required/, 'اشتراك نظام الملابس غير نشط أو انتهى. جدّد الاشتراك ثم أعد المحاولة.', 'Your Clothes System subscription is not active or has ended. Renew it, then try again.'],
+  [/^Returned\/Canceled orders cannot be edited/, 'لا يمكن تعديل طلب مرتجع أو ملغى.', 'Cannot edit a Returned/Canceled order.'],
+  [/^A received shipment cannot be edited/, 'لا يمكن تعديل شحنة مستلمة.', 'A received shipment cannot be edited.'],
+  [/^amountPaidLYD cannot exceed the order total/, 'المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الطلب.', 'The paid amount cannot exceed the order total.'],
+  [/^(Order|Shipment) not found/, 'هذا السجل محذوف أو غير موجود.', 'This $1 was deleted or does not exist.']
+];
+
+function clothesServerDetailText(detail) {
+  const isAr = clothesIsAr();
+  const text = String(detail || '').trim();
+  for (const [pattern, ar, en] of CLOTHES_SERVER_TEXTS) {
+    const m = text.match(pattern);
+    if (!m) continue;
+    const found = m[1] && (state.clothesProducts || []).find(p => p && p.id === m[1]);
+    const product = found && found.name ? `"${found.name}"` : (isAr ? 'هذا المنتج' : 'this product');
+    // One pass, so a "$" inside a product name is never read as a placeholder.
+    const out = (isAr ? ar : en).replace(/\$(P|\d)/g, (_, key) => (key === 'P' ? product : String(m[key] || '').toLowerCase()));
+    return out.charAt(0).toUpperCase() + out.slice(1);
+  }
+  return typeof _serverRefusalText === 'function' ? _serverRefusalText(text) : text;
+}
+
 function showClothesShipmentMutationError(error) {
   const isAr = clothesIsAr();
-  const detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
+  const detail = clothesServerDetailText(Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 }));
   showNotification(
     isAr ? 'تعذّر حفظ الشحنة' : 'Shipment Not Saved',
     detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
@@ -124,12 +163,7 @@ function showClothesShipmentMutationError(error) {
 
 function showClothesOrderMutationError(error) {
   const isAr = clothesIsAr();
-  let detail = Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 });
-  const stock = detail.match(/^Insufficient stock for (\S+): (\d+) available, (\d+) requested/);
-  if (stock) {
-    const name = clothesProductNameById(stock[1]) || stock[1];
-    detail = isAr ? `المخزون غير كافٍ لـ "${name}": المتاح ${stock[2]} والمطلوب ${stock[3]}.` : `Not enough stock for "${name}": ${stock[2]} available, ${stock[3]} requested.`;
-  }
+  const detail = clothesServerDetailText(Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 }));
   showNotification(
     isAr ? 'تعذّر حفظ الطلب' : 'Order Not Saved',
     detail || (isAr ? 'تحقق من الاتصال والمخزون ثم حاول مرة أخرى.' : 'Check your connection and stock, then try again.'),
@@ -2307,6 +2341,10 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
       return;
     }
     updates.amountPaidLYD = partial;
+    if (totals.totalLYD > 0 && partial >= totals.totalLYD - 0.005) {  // the whole total is not a partial payment (the server promotes it too)
+      updates.paymentStatus = 'Paid';
+      updates.paidAt = order.paidAt || new Date().toISOString();
+    }
   }
 
   if (isServerModeEnabled()) {
@@ -2333,7 +2371,7 @@ async function setClothesOrderPayment(orderId, newPaymentStatus) {
     const saved = await updateRecord(state.clothesOrders, orderId, updates);
     if (!saved) return;
   }
-  const meta = clothesPaymentStatusMeta(newPaymentStatus);
+  const meta = clothesPaymentStatusMeta(updates.paymentStatus);
   showNotification(
     isAr ? 'تم التحديث' : 'Updated',
     isAr ? `حالة الدفع الآن: ${meta.labelAr}` : `Payment status is now: ${meta.label}`,
@@ -3105,6 +3143,18 @@ async function saveClothesOrderFromModal() {
     showNotification(isAr ? 'غير ممكن' : 'Not allowed', isAr ? 'لا يمكن تعديل طلب مرتجع أو ملغى.' : 'Cannot edit a Returned/Canceled order.', 'error');
     return false;
   }
+  // The server refuses a product with no color/size in stock at all; say so before sending.
+  // (An edited order's own products are exempt: their pieces come back first.)
+  if (isServerModeEnabled()) {
+    const oldLines = Array.isArray(editTarget?.lines) ? editTarget.lines : [];
+    for (const line of lines) {
+      const product = getVisibleClothesProducts().find(p => p.id === line.productId);
+      if (product && !(Array.isArray(product.variants) && product.variants.length) && !oldLines.some(old => old && old.productId === line.productId)) {
+        showNotification(isAr ? 'لا يوجد مخزون' : 'No stock', isAr ? `لا يوجد مخزون للمنتج "${product.name}". استلم شحنة له أولاً.` : `"${product.name}" has no stock. Receive a shipment for it first.`, 'error');
+        return false;
+      }
+    }
+  }
 
   const totalsProbe = { lines, deliveryFeeLYD };
   const total = getClothesOrderTotals(totalsProbe).totalLYD;
@@ -3167,6 +3217,8 @@ async function saveClothesOrderFromModal() {
       return false;
     }
   }
+  // Local mode, as the server does: a "partial" payment covering the whole total is Paid.
+  if (paymentStatus === 'Partially Paid' && total > 0 && amountPaidLYD >= total - 0.005) payload.paymentStatus = paymentStatus = 'Paid';
 
   // For stock checking on edit: the old pieces come back first, so check
   // against stock as it would be AFTER restoring them.
