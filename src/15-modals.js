@@ -1127,7 +1127,7 @@ function renderModal() {
                 <div>
                   <div class="text-sm font-bold text-blue-700 dark:text-blue-300">${isArU ? 'إعداد الصلاحيات' : 'Permissions Setup'}</div>
                   <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
-                    ${isArU ? 'بعد إنشاء هذا المستخدم، يمكنك ضبط صلاحياته التفصيلية. سيتم تعيين صلاحيات افتراضية حسب دوره.' : `After creating this user, you'll be able to configure their detailed permissions. Default permissions will be assigned based on their role.`}
+                    ${!canOpenPerms ? (isArU ? 'يبدأ الحساب الجديد بلا صلاحيات؛ يمنحها الأدمن.' : 'The new account starts with no permissions; an Admin grants them.') : isArU ? 'بعد إنشاء هذا المستخدم، يمكنك ضبط صلاحياته التفصيلية. سيتم تعيين صلاحيات افتراضية حسب دوره.' : `After creating this user, you'll be able to configure their detailed permissions. Default permissions will be assigned based on their role.`}
                   </p>
                 </div>
               </div>

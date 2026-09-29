@@ -2004,6 +2004,53 @@ async function main() {
     sandbox.showUserModal();
     assert.equal(state.activeModal, null);
   });
+  await test('r6 U review: local-mode Add User stays Admin only at open; a users.add-only editor is told the account starts with no permissions', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");   // the fake document has no real innerHTML
+    const notes = [];
+    sandbox.showNotification = (title, message) => notes.push(`${title}: ${message}`);
+    sandbox.updateUrlParams = () => {};
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    const modalHtml = () => made.map(el => String(el.innerHTML || '')).join('\n');
+    state.activeModal = null;
+    state.currentUser = { id: 'mgr', role: 'Employee', permissions: { users: ['view', 'add'] } };
+    state.users = [state.currentUser];
+    // Local mode: the create is Admin only (handleModalSubmit), so the form must not open.
+    state.serverMode = false;
+    sandbox.showUserModal();
+    assert.equal(state.activeModal, null, 'before: the form opened and refused only on Save');
+    assert.deepEqual(notes, ['Access Denied: Admin only']);
+    // Server mode: the users.add holder gets the form, with a true line about permissions.
+    state.serverMode = true;
+    notes.length = 0;
+    sandbox.showUserModal();
+    assert.equal(state.activeModal, 'user', notes.join(' | '));
+    let html = modalHtml();
+    assert.ok(html.includes('The new account starts with no permissions; an Admin grants them.'), html.slice(0, 200));
+    assert.ok(!html.includes('Default permissions will be assigned'), 'before: promised default permissions it never sends');
+    state.language = 'ar';
+    made.length = 0;
+    sandbox.renderModal();
+    html = modalHtml();
+    assert.ok(html.includes('يبدأ الحساب الجديد بلا صلاحيات؛ يمنحها الأدمن.') && !html.includes('سيتم تعيين صلاحيات افتراضية'));
+    // A managePermissions holder (and the Admin) keeps the permissions-step text.
+    state.language = 'en';
+    state.currentUser.permissions = { users: ['view', 'add', 'managePermissions'] };
+    made.length = 0;
+    sandbox.renderModal();
+    html = modalHtml();
+    assert.ok(html.includes('Default permissions will be assigned') && !html.includes('starts with no permissions'));
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    state.serverMode = false;
+    state.activeModal = null;
+    notes.length = 0;
+    made.length = 0;
+    sandbox.showUserModal();
+    assert.equal(state.activeModal, 'user', notes.join(' | '));
+    assert.ok(modalHtml().includes('Default permissions will be assigned'));
+  });
   await test('r6 U n=35: the audit log names deleted staff from the deleted-users directory (list, CSV)', async () => {
     const { sandbox, state, run } = loadBrowserSource();
     state.serverMode = true;

@@ -5833,8 +5833,9 @@ function showAdModal() {
 }
 
 function showUserModal() {
-  if (!canManageUsersAction('add')) {  // the Add User button's rule and the server's (users.add)
-    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا تملك صلاحية إضافة المستخدمين' : 'Requires the Add Users permission', 'error');
+  const local = !isServerModeEnabled() && !isCurrentUserAdmin();  // local-mode create stays Admin only
+  if (local || !canManageUsersAction('add')) {  // the Add User button's rule and the server's (users.add)
+    showNotification(state.language === 'ar' ? 'رفض الوصول' : 'Access Denied', state.language === 'ar' ? (local ? 'هذه الميزة للأدمن فقط' : 'لا تملك صلاحية إضافة المستخدمين') : (local ? 'Admin only' : 'Requires the Add Users permission'), 'error');
     return;
   }
   state.activeModal = 'user';
