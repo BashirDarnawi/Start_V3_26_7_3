@@ -52,7 +52,7 @@ STAFF_ONLY): counts only, ``{waitingReview, stopRequests, openTickets, stopTicke
 paymentsWaiting, alerts, updatedAt}``. waitingReview = live Submitted requests (a reviewer's own
 left out: no self-review; PostgreSQL answers it from the status index); stopRequests = open queue
 rows; openTickets = tickets waiting for the team (status ``open``; reviewers count only tickets
-whose audience is not ``admin``), the stop requests' own urgent tickets INCLUDED;
+whose audience is not ``admin`` and that are not about a payment), the stop requests' own urgent tickets INCLUDED;
 stopTicketsOpen = the overlap, the open tickets of kind ``stop_request`` (a stop request opens a
 queue row AND a ticket, so the desk badge adds ``openTickets + (stopRequests - stopTicketsOpen)``
 and counts one stop request once); alerts = studio alerts of the last 24 hours nobody
@@ -718,6 +718,12 @@ def whatsapp_link(number: str, reference: str) -> str:
     return f"https://wa.me/{number.lstrip('+')}?text={quote(greeting)}"
 
 
+def _admin_only_ticket(row: Any) -> bool:
+    """A ticket row (f_ fields) a reviewer never reaches: audience 'admin', or about a payment (an older
+    payment ticket may still say 'staff'; studio_support.reviewer_may_see)."""
+    return str(row.get("f_audience") or "") == "admin" or str(row.get("f_relatedtype") or "") == "payment"
+
+
 def _reviewer_can_reach(conn: Any, customer_id: str) -> bool:
     statuses = ", ".join(f"'{status}'" for status in sorted(REVIEWER_VISIBLE_STATUSES))
     visible = conn.execute(
@@ -728,10 +734,10 @@ def _reviewer_can_reach(conn: Any, customer_id: str) -> bool:
     if visible is not None:
         return True
     rows = conn.execute(
-        text(json_fields_select_sql(("audience",), ("id",), "type = :type AND deleted = false AND created_by = :cid")),
+        text(json_fields_select_sql(("audience", "relatedType"), ("id",), "type = :type AND deleted = false AND created_by = :cid")),
         {"type": TICKETS_TYPE, "cid": customer_id},
     ).mappings().all()
-    return any(str(row.get("f_audience") or "") != "admin" for row in rows)
+    return any(not _admin_only_ticket(row) for row in rows)
 
 
 def _related_reference(conn: Any, customer_id: str, related_type: str, related_id: str, admin: bool) -> str:
@@ -748,12 +754,12 @@ def _related_reference(conn: Any, customer_id: str, related_type: str, related_i
             studio_error(404, "UNKNOWN_CUSTOMER", "No such customer item for the team")
         return str(row.get("f_studioref") or "")
     row = conn.execute(
-        text(json_fields_select_sql(("audience", "number", "ownerId"), ("created_by",),
+        text(json_fields_select_sql(("audience", "relatedType", "number", "ownerId"), ("created_by",),
                                     "type = :type AND id = :id AND deleted = false")),
         {"type": TICKETS_TYPE, "id": related_id},
     ).mappings().first()
     owner = str((row or {}).get("created_by") or (row or {}).get("f_ownerid") or "")
-    if not row or owner != customer_id or (not admin and str(row.get("f_audience") or "") == "admin"):
+    if not row or owner != customer_id or (not admin and _admin_only_ticket(row)):
         studio_error(404, "UNKNOWN_CUSTOMER", "No such customer item for the team")
     return str(row.get("f_number") or "")
 

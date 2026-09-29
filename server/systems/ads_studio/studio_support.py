@@ -23,7 +23,8 @@ customers too; always the caller's own tickets: another owner's ticket is 404, n
 reviewers see only ``audience: 'staff'`` tickets; payment and account tickets (``audience:
 'admin'``) are admin-only and answer 404 UNKNOWN_TICKET to a reviewer, exactly like a ticket that
 does not exist (PLAN.md §7.5). A ticket about a payment (``relatedType: 'payment'``) is admin-only
-too, whatever category the customer chose (audience_for).
+too, whatever category the customer chose (audience_for), and every staff read checks it again
+(reviewer_may_see), so an older payment ticket saved as 'staff' stays hidden as well.
 
 * ``GET /staff/tickets?status=&priority=&cursor=&limit=`` -> ``{tickets, nextCursor}``: unresolved
   urgent tickets (stop requests) pinned on top, then newest first.
@@ -315,6 +316,12 @@ def audience_for(category: str, related_type: str | None = None) -> str:
     return AUDIENCE_ADMIN if category in ADMIN_CATEGORIES or related_type == "payment" else AUDIENCE_STAFF
 
 
+def reviewer_may_see(data: dict[str, Any]) -> bool:
+    """A stored ticket a reviewer may see: audience 'staff' and not about a payment. The read checks
+    relatedType too: a payment ticket saved before audience_for took it still says 'staff'."""
+    return data.get("audience") == AUDIENCE_STAFF and data.get("relatedType") != "payment"
+
+
 def clean_text(raw: Any, *, multiline: bool) -> str | None:
     """Plain text as stored: no angle brackets (as every stored text), no control characters, no
     lone surrogates; one line collapsed to single spaces, or several lines with at most one blank
@@ -457,7 +464,7 @@ def ticket_view(data: dict[str, Any], *, staff: bool = False, now: datetime | No
         "subject": data.get("subject") if isinstance(data.get("subject"), str) else "",
         "category": category,
         "status": status,
-        "audience": AUDIENCE_ADMIN if data.get("audience") == AUDIENCE_ADMIN else AUDIENCE_STAFF,
+        "audience": AUDIENCE_ADMIN if data.get("audience") == AUDIENCE_ADMIN or related_type == "payment" else AUDIENCE_STAFF,
         "priority": _one_of(data.get("priority"), PRIORITIES, "normal"),
         "kind": _one_of(data.get("kind"), KINDS, "question"),
         "relatedType": related_type or None,
@@ -552,7 +559,7 @@ def load_ticket(conn: Any, row_id: str, *, owner_id: str | None = None, admin: b
     if visible and owner_id is not None:
         visible = bool(owner_id) and str(row["created_by"] or "") == owner_id
     elif visible and not admin:
-        visible = data.get("audience") == AUDIENCE_STAFF
+        visible = reviewer_may_see(data)
     if not visible:
         studio_error(404, "UNKNOWN_TICKET", "Ticket not found")
     data["id"] = str(row["id"])
@@ -591,8 +598,9 @@ def list_tickets_page(
     if not staff:
         where.append("created_by = :uid")
         params["uid"] = owner_id
-    elif not admin:
+    elif not admin:  # reviewer_may_see in SQL
         where.append(f"{json_field_sql('audience')} = 'staff'")
+        where.append(f"COALESCE({json_field_sql('relatedType')}, '') <> 'payment'")
     if status == "active":
         where.append(f"COALESCE({status_sql}, '') <> 'resolved'")
     elif status:
@@ -685,12 +693,12 @@ def staff_ticket_counts(conn: Any | None = None, *, include_admin: bool, now: da
     now = now or utc_now()
     unresolved = f"type = :type AND deleted = false AND COALESCE({json_field_sql('status')}, '') <> 'resolved'"  # resolved rows only grow
     rows = conn.execute(
-        text(json_fields_select_sql(("status", "audience", "priority", "dueAt", "kind"), ("id",), unresolved)),
+        text(json_fields_select_sql(("status", "audience", "priority", "dueAt", "kind", "relatedType"), ("id",), unresolved)),
         {"type": SUPPORT_TICKETS_TYPE},
     ).mappings().all()
     counts = {"open": 0, "overdue": 0, "urgent": 0, "active": 0, "stopOpen": 0}
     for row in rows:
-        if not include_admin and row.get("f_audience") != AUDIENCE_STAFF:
+        if not include_admin and not reviewer_may_see({"audience": row.get("f_audience"), "relatedType": row.get("f_relatedtype")}):
             continue
         status = str(row.get("f_status") or "")
         if status == "resolved":

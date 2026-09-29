@@ -3,7 +3,8 @@ failed before its fix.
 
 * n12: a customer who tapped the "Ad" (or "Other") chip first and then picked "Payment: PAY-..." in the
   related-item picker opened a STAFF-audience ticket: every reviewer saw the payment question. A ticket
-  about a payment is admin-only whatever its category.
+  about a payment is admin-only whatever its category, and an older one still SAVED as 'staff' stays
+  hidden from reviewers too (every staff read checks relatedType: ticket, queue, pulse, contact link).
 * n14: POST /api/ad-studio/campaigns/{id}/review answered 409 "Only Submitted campaigns can be reviewed"
   for another customer's private Draft / Changes Requested request, where an unknown id answers 404:
   the reviewer learned the draft exists. Now 404 like the link, stop and single-GET routes; the
@@ -37,7 +38,7 @@ from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.main import app
 from server.rate_limiter import reset_rate_limit
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
-from server.systems.ads_studio import studio_settings, studio_support
+from server.systems.ads_studio import studio_settings, studio_stop, studio_support
 from server.systems.ads_studio.studio_hours import target_due_at
 
 TAG = secrets.token_hex(4)
@@ -172,6 +173,46 @@ def test_n12_a_ticket_about_a_payment_is_admin_only_whatever_the_category(people
         hidden = client.get(f"/api/studio/staff/tickets/{ticket['id']}", cookies=reviewer["cookies"])
         assert hidden.status_code == 404 and hidden.json()["detail"]["code"] == "UNKNOWN_TICKET", hidden.text
         assert client.get(f"/api/studio/staff/tickets/{ticket['id']}", cookies=admin["cookies"]).status_code == 200
+
+
+def test_n12_an_older_payment_ticket_saved_as_staff_stays_admin_only(people, monkeypatch):
+    """A payment ticket opened before audience_for took relatedType was SAVED with audience 'staff'
+    (category 'ad'). Every staff read checks relatedType too, so a reviewer never reaches it: not the
+    ticket, not the queue, not the pulse count, not the customer's contact link through it."""
+    monkeypatch.setattr(studio_stop, "check_rate_limit", lambda *a, **k: (True, 1, 0))
+    reviewer, admin = people["reviewer"], people["admin"]
+    customer = _insert_user("oldpay", "Employee", CUSTOMER_PERMISSIONS)  # nothing else a reviewer could reach
+
+    def pulse(person: dict) -> int:
+        response = client.get("/api/studio/staff/pulse", cookies=person["cookies"])
+        assert response.status_code == 200, response.text
+        return response.json()["openTickets"]
+
+    before = {"reviewer": pulse(reviewer), "admin": pulse(admin)}
+    at = "2026-09-20T10:00:00.000Z"
+    old = _insert_entity(studio_support.SUPPORT_TICKETS_TYPE, customer["id"], {
+        "number": f"T-9{secrets.randbelow(10**5):05d}", "seq": 1, "ownerId": customer["id"], "subject": "Where is my charge?",
+        "category": "ad", "audience": "staff", "priority": "normal", "kind": "question", "relatedType": "payment",
+        "relatedId": "PAY-R3STOLD1", "status": "open", "createdAt": at, "updatedAt": at, "dueAt": None, "lastMessageAt": at,
+        "lastCustomerAt": at, "lastStaffAt": None, "firstStaffAt": None, "resolvedAt": None, "messageCount": 1,
+    }, row_id="tkt_" + secrets.token_hex(20))
+
+    hidden = client.get(f"/api/studio/staff/tickets/{old}", cookies=reviewer["cookies"])
+    assert hidden.status_code == 404 and hidden.json()["detail"]["code"] == "UNKNOWN_TICKET", hidden.text  # before: 200
+    shown = client.get(f"/api/studio/staff/tickets/{old}", cookies=admin["cookies"])
+    assert shown.status_code == 200, shown.text
+    assert shown.json()["ticket"]["audience"] == "admin"  # read as what it is, whatever the stored field says
+    assert old not in _staff_ids(reviewer) and old in _staff_ids(admin)  # before: in the reviewers' queue
+    assert pulse(reviewer) == before["reviewer"]  # before: +1
+    assert pulse(admin) == before["admin"] + 1
+    by_ticket = client.get(f"/api/studio/staff/customers/{customer['id']}/contact", cookies=reviewer["cookies"],
+                           params={"relatedType": "ticket", "relatedId": old})
+    assert by_ticket.status_code == 404 and by_ticket.json()["detail"]["code"] == "UNKNOWN_CUSTOMER", by_ticket.text  # before: 409
+    plain = client.get(f"/api/studio/staff/customers/{customer['id']}/contact", cookies=reviewer["cookies"])
+    assert plain.status_code == 404 and plain.json()["detail"]["code"] == "UNKNOWN_CUSTOMER", plain.text  # before: 409
+    # An admin still reaches the customer (no number saved, so the consent refusal, not a 404).
+    reached = client.get(f"/api/studio/staff/customers/{customer['id']}/contact", cookies=admin["cookies"])
+    assert reached.status_code == 409 and reached.json()["detail"]["code"] == "NO_CONSENT", reached.text
 
 
 # ------------------------------------------------------------------ n14: a private draft answers 404 on review
