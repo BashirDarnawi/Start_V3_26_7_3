@@ -8094,9 +8094,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
               if (collectionName) markCollectionDirty(collectionName);
               saveState();
             }
-            const reason = typeof describe409 === 'function'
+            const reason = typeof describe409 === 'function' && !/^clothes/.test(collectionName)
               ? describe409(e, String(e?.message || ''))
-              : String(e?.message || '');
+              : _collectionRefusalText(collectionName, e?.message);
             showNotification(
               state.language === 'ar' ? 'غير مسموح' : 'Not Allowed',
               reason || (state.language === 'ar' ? 'رفض الخادم هذا التعديل.' : 'The server refused this change.'),
@@ -8918,6 +8918,10 @@ function _serverRefusalText(raw) {
   const out = hit?.[state.language === 'ar' ? 1 : 2];
   return out ? (hit[0].test ? raw.replace(hit[0], out) : out) : raw;
 }
+// Clothes refusals read the Clothes map (lazy clothes.js) first: it names the product, never its id.
+function _collectionRefusalText(collectionName, raw) {
+  return /^clothes/.test(collectionName) && typeof clothesServerDetailText === 'function' ? clothesServerDetailText(raw) : _serverRefusalText(raw);
+}
 function _serverRefusalNoun(collectionName) {
   const isAr = state.language === 'ar';
   const nouns = {
@@ -8933,7 +8937,7 @@ function _serverRefusalToast(action, collectionName, error) {
   const raw = String(error?.message || '').trim();
   const status = Number(error?.status) || 0;
   if (status === 403 && (!raw || /^forbidden$/i.test(raw))) return [isAr ? 'غير مسموح' : 'Not allowed', isAr ? 'ليس لديك صلاحية لهذا الإجراء.' : "You don't have permission for this action."];
-  const detail = _serverRefusalText(raw);
+  const detail = _collectionRefusalText(collectionName, raw);
   const noun = _serverRefusalNoun(collectionName);
   const verbs = { save: ['فشل حفظ', 'Failed to save'], create: ['فشل إنشاء', 'Failed to create'], delete: ['فشل حذف', 'Failed to delete'] };
   const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];

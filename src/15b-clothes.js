@@ -112,9 +112,10 @@ function applyClothesShipmentMutationResponse(response) {
   return savedShipment;
 }
 
-// The server's order/shipment refusals are English and some carry internal
-// product ids: say the known ones in the user's language, naming the product.
-// Any other text is still shown as sent (never hidden).
+// The server's Clothes refusals are English and some carry internal product
+// ids: say the known ones in the user's language, naming the product. Product,
+// shipment and order saves through addRecord/updateRecord/deleteRecord read
+// this map too (_collectionRefusalText). Any other text is still shown as sent.
 const CLOTHES_SERVER_TEXTS = [
   [/^Insufficient stock for (\S+): (\d+) available, (\d+) requested/,
     'المخزون غير كافٍ لـ $P: المتاح $2 والمطلوب $3.', 'Not enough stock for $P: $2 available, $3 requested.'],
@@ -132,8 +133,12 @@ const CLOTHES_SERVER_TEXTS = [
   [/clothes_system subscription is required/, 'اشتراك نظام الملابس غير نشط أو انتهى. جدّد الاشتراك ثم أعد المحاولة.', 'Your Clothes System subscription is not active or has ended. Renew it, then try again.'],
   [/^Returned\/Canceled orders cannot be edited/, 'لا يمكن تعديل طلب مرتجع أو ملغى.', 'Cannot edit a Returned/Canceled order.'],
   [/^A received shipment cannot be edited/, 'لا يمكن تعديل شحنة مستلمة.', 'A received shipment cannot be edited.'],
+  [/^A referenced product variant cannot be removed/,
+    'هذا اللون/المقاس مستخدم في طلبات أو شحنات سابقة فلا يمكن حذفه أو تغيير اسمه؛ أضف لوناً/مقاساً جديداً بدلاً منه.',
+    'This color/size is used by past orders or shipments, so it cannot be removed or renamed; add a new color/size instead.'],
+  [/^A referenced product cannot be deleted/, 'هذا المنتج مستخدم في طلبات أو شحنات سابقة فلا يمكن حذفه.', 'This product is used by past orders or shipments, so it cannot be deleted.'],
   [/^amountPaidLYD cannot exceed the order total/, 'المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الطلب.', 'The paid amount cannot exceed the order total.'],
-  [/^(Order|Shipment) not found/, 'هذا السجل محذوف أو غير موجود.', 'This $1 was deleted or does not exist.']
+  [/^(Order|Shipment|Product) not found/, 'هذا السجل محذوف أو غير موجود.', 'This $1 was deleted or does not exist.']
 ];
 
 function clothesServerDetailText(detail) {

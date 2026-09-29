@@ -206,6 +206,18 @@ function metaAdsErrorMessage(error) {
   return raw || (isAr ? 'تعذّر الاتصال بـ Meta. حاول مرة أخرى.' : 'Could not connect to Meta. Please try again.');
 }
 
+// The automatic-import status line: the server stores an English sentence. In Arabic say the known
+// ones exactly and any other one in general words; the dialog keeps the server's words in a tooltip.
+function metaAdsImportErrorText(raw) {
+  raw = String(raw || '').trim();
+  if (!raw || !metaAdsIsArabic()) return raw;
+  const retry = /will retry/i.test(raw) ? ' سيحاول Albayan مرة أخرى تلقائياً.' : '';
+  if (/could not be imported/i.test(raw)) return `تعذّر استيراد إعلان Meta واحد.${retry}`;
+  if (/campaign name before importing/i.test(raw)) return 'ينتظر Albayan قراءة اسم حملة Meta لإعلان جديد قبل استيراده.';
+  if (/authorization failed|reconnect the access token/i.test(raw)) return 'رفضت Meta صلاحية الدخول. أعد ربط رمز الدخول (access token).';
+  return `حدثت مشكلة أثناء فحص إعلانات Meta.${retry}`;
+}
+
 function metaAdsOperationId(action, adId, value = '') {
   const key = `${action}:${adId}:${value}`;
   if (!metaAdsUi.pendingOperations.has(key)) {
@@ -334,7 +346,7 @@ function metaAdsRenderModal() {
           <div class="flex items-center gap-2 font-black text-emerald-800 dark:text-emerald-200"><i data-lucide="sparkles" class="h-4 w-4"></i>${isAr ? 'الاستيراد التلقائي للإعلانات والصفحات' : 'Automatic ad and page import'}</div>
           <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">${status.autoImport ? (isAr ? `يعمل كل ${Number(status.discoveryIntervalSeconds) || 60} ثانية` : `Runs every ${Number(status.discoveryIntervalSeconds) || 60} seconds`) : (isAr ? 'متوقف' : 'Off')} · ${isAr ? 'الحسابات' : 'Accounts'}: ${Number(importState.accountCount || status.allowedAccountCount) || 0}</div>
           <div class="mt-1 text-xs text-slate-500">${lastDiscoveryText ? `${isAr ? 'آخر فحص' : 'Last check'}: ${Security.escapeHtml(lastDiscoveryText)} · ` : ''}${isAr ? 'تم استيراد' : 'Imported'}: ${Number(importState.totalImported) || 0}${Number(importState.lastImportedCount) ? ` (${isAr ? 'آخر فحص' : 'last check'}: ${Number(importState.lastImportedCount)})` : ''}</div>
-          ${importError ? `<div class="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300">${Security.escapeHtml(importError)}</div>` : ''}
+          ${importError ? `<div class="mt-1 text-xs font-medium text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(importError)}">${Security.escapeHtml(metaAdsImportErrorText(importError))}</div>` : ''}
         </div>
         <button type="button" onclick="metaAdsCheckForNewAds()" ${metaAdsUi.busyAction || providerPaused ? 'disabled' : ''} class="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-60"><i data-lucide="${metaAdsUi.busyAction === 'discover' ? 'loader-circle' : 'radar'}" class="h-4 w-4 ${metaAdsUi.busyAction === 'discover' ? 'animate-spin' : ''}"></i>${providerPaused ? (isAr ? 'سيستأنف تلقائياً' : 'Resumes automatically') : (isAr ? 'فحص الإعلانات الجديدة الآن' : 'Check for new ads now')}</button>
       </div>

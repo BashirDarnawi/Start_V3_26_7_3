@@ -2089,9 +2089,16 @@ async function runAdMerge(keepAdId, draftAdId) {
         );
       }
     }
+    // The link/unlink refusals are English server texts: say the known ones in the user's language
+    // (a version conflict, the Meta link rules, then the shared map, e.g. a closed month).
+    const raw = String(error?.message || '').trim();
+    const metaText = raw && typeof metaAdsErrorMessage === 'function' ? metaAdsErrorMessage(error) : raw;
+    const text = Number(error?.status) === 409 && /^conflict\b/i.test(raw)
+      ? (isAr ? 'تغيّر الإعلان أثناء الدمج. حدّث البيانات ثم أعد المحاولة.' : 'The ad changed during the merge. Refresh and try again.')
+      : (metaText !== raw ? metaText : _serverRefusalText(raw));
     showNotification(
       isAr ? 'تعذّر الدمج' : 'Merge failed',
-      error?.message || (isAr ? 'حدث خطأ أثناء الدمج. أعد المحاولة.' : 'Something went wrong during the merge. Try again.'),
+      text || (isAr ? 'حدث خطأ أثناء الدمج. أعد المحاولة.' : 'Something went wrong during the merge. Try again.'),
       'error'
     );
   } finally {

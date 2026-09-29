@@ -3418,6 +3418,135 @@ async function main() {
     state.language = 'en';
     assert.equal(sandbox._serverRefusalText(message), message);
   });
+  // ---- Review loop r9, batch A: server refusals said in Arabic (Clothes saves, the Meta Sync import line, the ad merge) ----
+  // True when no English word is left once the brand names are taken out.
+  const r9NoEnglish = text => !/[A-Za-z]{3,}/.test(String(text).replace(/Albayan|Studio|Meta|access token/g, ''));
+  await test('r9 A n=6: Clothes product, stock, shipment and delete refusals from the generic save path are said in Arabic, without the product id', async () => {
+    const refuse = (message, status) => async () => { throw Object.assign(new Error(message), { status }); };
+    const clothesArabic = () => {
+      const fixture = clothesFixture();
+      const { sandbox, state } = fixture;
+      state.language = 'ar';
+      state.clothesProducts = [{ id: 'p1', name: 'قميص', createdBy: 'admin', _lastModified: 100, variants: [{ color: 'Blck', size: 'M', qty: 2 }] }];
+      state.clothesShipments = [{ id: 's1', ref: 'S-1', status: 'Received', lines: [], createdBy: 'admin', _lastModified: 50 }];
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.updateClothesProductsFiltered = () => {};
+      sandbox.apiGetEntity = refuse('offline', 0);
+      return fixture;
+    };
+    // 1. Renaming a colour that a shipment received: the rule-refusal (409) branch of updateRecord.
+    {
+      const { sandbox, state, notes } = clothesArabic();
+      sandbox.apiPatchEntity = refuse('A referenced product variant cannot be removed', 409);
+      assert.equal(await sandbox.updateRecord(state.clothesProducts, 'p1', { variants: [{ color: 'Black', size: 'M', qty: 2 }] }, 100), false);
+      const note = notes.at(-1);
+      assert.ok(/اللون\/المقاس مستخدم/.test(note.message) && r9NoEnglish(note.message), `before: raw English - ${note.message}`);
+      assert.equal(state.clothesProducts[0].variants[0].color, 'Blck', 'the refused rename is rolled back');
+    }
+    // 2. A stock +/- tap after the subscription lapsed (403, the generic failure toast).
+    {
+      const { sandbox, state, notes } = clothesArabic();
+      sandbox.apiPatchEntity = refuse('An active clothes_system subscription is required', 403);
+      await sandbox.adjustClothesVariantQty('p1', 0, 1);
+      await settle();
+      const note = notes.at(-1);
+      assert.ok(/اشتراك نظام الملابس/.test(note.message) && r9NoEnglish(note.message), `before: raw English - ${note.message}`);
+    }
+    // 3. A new shipment whose product was deleted on another device: no internal id, and it says deleted.
+    {
+      const { sandbox, state, notes } = clothesArabic();
+      state.clothesProducts = [];
+      sandbox.apiCreateEntity = refuse('Shipment product is missing: prod_abc123', 409);
+      assert.equal(await sandbox.addRecord(state.clothesShipments, { ref: 'S-2', status: 'Ordered', lines: [{ productId: 'prod_abc123', qty: 1 }] }), false);
+      const note = notes.at(-1);
+      assert.ok(!note.message.includes('prod_abc123') && /محذوف/.test(note.message) && r9NoEnglish(note.message), `before: raw English with the id - ${note.message}`);
+    }
+    // 4. Editing a shipment another device received, and deleting a product that orders use.
+    {
+      const { sandbox, state, notes } = clothesArabic();
+      sandbox.apiPatchEntity = refuse('A received shipment cannot be edited', 409);
+      await sandbox.updateRecord(state.clothesShipments, 's1', { note: 'x' }, 50);
+      assert.ok(/شحنة مستلمة/.test(notes.at(-1).message) && r9NoEnglish(notes.at(-1).message), notes.at(-1).message);
+      sandbox.apiDeleteEntity = refuse('A referenced product cannot be deleted', 409);
+      assert.equal(await sandbox.deleteRecord(state.clothesProducts, 'p1'), false);
+      assert.ok(/المنتج مستخدم/.test(notes.at(-1).message) && r9NoEnglish(notes.at(-1).message), notes.at(-1).message);
+    }
+    // English keeps a readable sentence; other collections keep the shared map (unchanged).
+    {
+      const { sandbox, state, notes } = clothesArabic();
+      state.language = 'en';
+      sandbox.apiPatchEntity = refuse('A referenced product variant cannot be removed', 409);
+      await sandbox.updateRecord(state.clothesProducts, 'p1', { variants: [] }, 100);
+      assert.ok(/cannot be removed or renamed; add a new color\/size instead/.test(notes.at(-1).message), notes.at(-1).message);
+      state.language = 'ar';
+      assert.equal(sandbox._collectionRefusalText('ads', 'Financial period 2026-08 is closed. An Admin must unlock it before editing.'),
+        'الشهر 2026-08 مُقفل مالياً؛ اطلب من المدير فتحه قبل التعديل.');
+    }
+  });
+  await test('r9 A n=7: the Meta Sync import-status line is Arabic in the Arabic dialog; the server words stay in its tooltip', async () => {
+    const cases = [
+      ['One Meta ad could not be imported. Albayan will retry.', /تعذّر استيراد إعلان Meta واحد\. سيحاول Albayan/],
+      ["Albayan is waiting to read a new ad's Meta campaign name before importing it.", /اسم حملة Meta/],
+      ['Meta authorization failed. Reconnect the access token.', /أعد ربط رمز الدخول/],
+      ['Meta returned an invalid response.', /حدثت مشكلة أثناء فحص إعلانات Meta\.$/]
+    ];
+    for (const language of ['ar', 'en']) {
+      for (const [raw, arabic] of cases) {
+        const fixture = metaToolsFixture();
+        const { sandbox, state, run } = fixture;
+        const nodes = metaDialogDom(fixture);
+        state.language = language;
+        run(`metaAdsUi.open = true; metaAdsUi.loading = false; metaAdsUi.error = ''; metaAdsUi.status = ${JSON.stringify({ configured: true, autoImport: true, importState: { lastError: raw } })};`);
+        sandbox.metaAdsRenderModal();
+        const html = nodes.get('meta-ads-modal').innerHTML;
+        const line = html.match(/text-rose-600 dark:text-rose-300"(?: title="([^"]*)")?>([^<]*)</);
+        assert.ok(line, 'the import-status line is drawn');
+        if (language === 'en') {
+          assert.equal(line[2], raw);
+        } else {
+          assert.ok(arabic.test(line[2]) && r9NoEnglish(line[2]), `before: raw English - ${line[2]}`);
+          assert.ok(!html.replace(/<[^>]*>/g, ' ').includes(raw), 'no raw English sentence is visible in the Arabic dialog');
+        }
+        assert.equal(line[1], raw, 'the server words stay in the tooltip');
+      }
+    }
+  });
+  await test('r9 A n=8: the ad merge says a closed month, a version conflict and a Studio claim in Arabic, and still restores the draft link', async () => {
+    const mergeFails = async (error, { language = 'ar', metaTools = false } = {}) => {
+      const fixture = metaTools ? metaToolsFixture() : loadBrowserSource();
+      const { sandbox, state, run } = fixture;
+      run(fs.readFileSync(path.join(__dirname, '..', 'src', '13b-merge-tools.js'), 'utf8'));
+      state.language = language;
+      const keepAd = { id: 'keep', _lastModified: 5 };
+      const draftAd = { id: 'draft', metaAdId: '123456789', _lastModified: 6 };
+      state.ads = [keepAd, draftAd];
+      sandbox.isMergeToolsAdmin = () => true;
+      sandbox.getAdMergePlan = () => ({ keepAd, draftAd, metaAdId: '123456789', blocked: '' });
+      sandbox.applyValidatedServerEntityBatch = () => {};
+      sandbox.apiUnlinkMetaAd = async () => ({ ad: { ...draftAd, metaAdId: '' } });
+      const links = [];
+      sandbox.apiLinkMetaAd = async adId => { links.push(adId); if (adId === 'keep') throw error; return { ad: draftAd }; };
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+      await sandbox.runAdMerge('keep', 'draft');
+      assert.deepEqual(links, ['keep', 'draft'], 'the draft gets its Meta link back');
+      const failed = notes.filter(note => note.type === 'error');
+      assert.equal(failed.length, 1);
+      return failed[0].message;
+    };
+    const closed = 'Financial period 2026-08 is closed. An Admin must unlock it before editing.';
+    const closedAr = await mergeFails(Object.assign(new Error(closed), { status: 423 }));
+    assert.ok(/مُقفل مالياً/.test(closedAr) && closedAr.includes('2026-08') && r9NoEnglish(closedAr), `before: raw English - ${closedAr}`);
+    const conflictAr = await mergeFails(Object.assign(new Error('Conflict: ad has changed'), { status: 409 }));
+    assert.ok(/تغيّر الإعلان أثناء الدمج/.test(conflictAr) && r9NoEnglish(conflictAr), `before: raw English - ${conflictAr}`);
+    const studio = 'This Meta ad belongs to Albayan Studio (a studio request linked its campaign). It cannot be linked to an Albayan Manager ad.';
+    const studioAr = await mergeFails(Object.assign(new Error(studio), { status: 409 }), { metaTools: true });
+    assert.ok(/تابع لـ Albayan Studio/.test(studioAr) && r9NoEnglish(studioAr), `before: raw English - ${studioAr}`);
+    // English keeps the server's sentence; a conflict gets the merge wording in both languages.
+    assert.equal(await mergeFails(Object.assign(new Error(closed), { status: 423 }), { language: 'en' }), closed);
+    assert.equal(await mergeFails(Object.assign(new Error('Conflict: ad has changed'), { status: 409 }), { language: 'en' }),
+      'The ad changed during the merge. Refresh and try again.');
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }
