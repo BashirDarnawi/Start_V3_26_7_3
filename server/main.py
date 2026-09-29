@@ -231,7 +231,7 @@ from .schemas import (
     WalletTransferRequest,
 )
 from .security import (
-    PBKDF2_ITERATIONS_DEFAULT, hash_password, hash_token, new_id,
+    PBKDF2_ITERATIONS_DEFAULT, constant_time_equal, hash_password, hash_token, new_id,
     new_session_cookie_value, parse_session_cookie_value, verify_password,
 )
 from .auth_security import upgrade_password_hash_after_login
@@ -781,8 +781,8 @@ def validate_relationship_ids(value: Any, path: str = "data", depth: int = 0) ->
     if not isinstance(value, dict):
         return
 
-    for key, child in value.items():
-        child_path = f"{path}.{key}"
+    for key, child in value.items():  # the path text echoes client keys: a lone surrogate cannot be sent back (500)
+        child_path = f"{path}.{key}" if str(key).isascii() else f"{path}.{str(key).encode('utf-8', 'replace').decode('utf-8')}"
         if key in RELATIONSHIP_ID_FIELDS:
             blank = child is None or (isinstance(child, str) and child.strip() == "")
             if not blank and (not isinstance(child, str) or not SAFE_ENTITY_ID_RE.fullmatch(child)):
@@ -1187,10 +1187,12 @@ def audit(user_id: Optional[str], action: str, resource_type: str, resource_id: 
             {
                 "id": new_id("audit"),
                 "ts": now_ms(),
-                "user_id": user_id,
-                "action": action,
-                "resource_type": resource_type,
-                "resource_id": resource_id,
+                # Cut to the column widths (db.py): PostgreSQL refuses a longer value (an unknown
+                # 81+ character e-mail as a reset request's resource id was a 500).
+                "user_id": str(user_id)[:80] if user_id is not None else None,
+                "action": str(action or "")[:64],
+                "resource_type": str(resource_type or "")[:64],
+                "resource_id": str(resource_id or "")[:80],
                 "message": message,
                 "metadata_json": meta,
             },
@@ -1304,7 +1306,7 @@ def list_entities(
     # Keep the per-request payload bounded to avoid memory spikes on small containers (ECS/Fargate).
     # Clients should paginate with offset.
     requested_limit = max(1, min(int(limit), 1000))
-    requested_offset = max(0, int(offset))
+    requested_offset = max(0, min(int(offset), 10_000_000))  # a huge OFFSET overflows the database's bigint (500)
     limit = requested_limit
     offset = requested_offset
 
@@ -2250,7 +2252,7 @@ from .startup_support import init_db_with_retry as _init_db_with_retry_impl
 from .health import build_health_router
 from .startup_support import install_validation_handler as _install_validation_handler
 from .startup_support import refuse_sqlite_in_production as _refuse_sqlite_in_production
-from .startup_support import request_size_refusal as _request_size_refusal, request_size_needs_session as _request_size_needs_session
+from .startup_support import request_size_refusal as _request_size_refusal, request_size_needs_session as _request_size_needs_session, request_nul_refusal as _request_nul_refusal
 from .startup_support import safe_exception_text as _safe_exception_text
 
 _install_validation_handler(app)
@@ -2511,8 +2513,8 @@ def _shutdown():
 # SECURITY FIX: Request size limiting to prevent DoS attacks
 @app.middleware("http")
 async def limit_request_size(request: Request, call_next):
-    """Refuse oversized or unsized write bodies before they are read (startup_support)."""
-    refusal = _request_size_refusal(request, cookie_name=COOKIE_NAME)
+    """Refuse a NUL in the address, and oversized or unsized write bodies before they are read (startup_support)."""
+    refusal = _request_nul_refusal(request) or _request_size_refusal(request, cookie_name=COOKIE_NAME)
     if refusal is not None:
         return refusal
     if _request_size_needs_session(request, cookie_name=COOKIE_NAME):
@@ -7022,6 +7024,7 @@ def _financial_topups(raw: Any) -> tuple[list[dict[str, Any]], int]:
         raise HTTPException(status_code=400, detail="topUps must be a list")
     result: list[dict[str, Any]] = []
     total = 0
+    total_days = 0
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
             raise HTTPException(status_code=400, detail=f"Invalid topUps[{index}]")
@@ -7030,7 +7033,8 @@ def _financial_topups(raw: Any) -> tuple[list[dict[str, Any]], int]:
             days = int(entry.get("extendDays", 0) or 0)
         except (TypeError, ValueError, OverflowError):
             raise HTTPException(status_code=400, detail="Invalid top-up extension")
-        if days < 0 or days > 36500:
+        total_days += days
+        if days < 0 or days > 36500 or total_days > 36500:  # the total too: 80 x 36,500 days overflowed the end date (500)
             raise HTTPException(status_code=400, detail="Invalid top-up extension")
         if amount == 0 and days == 0:
             raise HTTPException(status_code=400, detail="A top-up must add money or time")
@@ -8386,9 +8390,10 @@ def _ad_mutation_atomic(
                             base_end = base_end.replace(tzinfo=timezone.utc)
                         extension_days = sum(int(row.get("extendDays") or 0) for row in topups)
                         prepared_request["initialEndDate"] = _iso_utc(base_end)
-                        prepared_request["endDate"] = _iso_utc(
-                            base_end + timedelta(days=extension_days)
-                        )
+                        try:  # a stored end date near year 9999 cannot move further
+                            prepared_request["endDate"] = _iso_utc(base_end + timedelta(days=extension_days))
+                        except (OverflowError, ValueError):
+                            raise HTTPException(status_code=400, detail="Invalid top-up extension")
                 saved_data = _financial_derive_ad(
                     actor,
                     prepared_request,
@@ -9700,9 +9705,13 @@ def _receipt_payments_credit_minor(payments: Any) -> int | None:
         saw_line = True
         if rate2 <= 0:
             continue
+        if not MIN_EXCHANGE_RATE <= rate2 <= MAX_EXCHANGE_RATE:
+            return None  # a microscopic rate2 made the credit infinite: round(inf) was a 500
         r1 = amount * rate
         base = (r1 / rate2) if str(entry.get("method") or "") in _USD_BASED_PAYMENT_METHODS else (amount / rate2)
         cents = base * 100
+        if not math.isfinite(cents):
+            return None
         nearest = round(cents)
         total += int(nearest) if abs(cents - nearest) < 1e-6 else int(math.ceil(cents))
     return total if saw_line else None
@@ -13408,6 +13417,14 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     require_same_origin(request)
     user_id = sanitize_str(user_id)[:80]
     now = now_ms()
+    _actor_is_admin = str(admin.get("role") or "").lower() == "admin"
+    _is_self = str(admin.get("id") or "") == user_id
+    # Another account is edited only with a users.* write grant: without one, nothing (not even
+    # whether the id exists) comes back. The reply carries the target's e-mail and permissions.
+    if not _actor_is_admin and not _is_self and not any(
+        user_has_permission(admin, "users", perm) for perm in ("edit", "resetPassword", "changeRole", "managePermissions", "delete")
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     existing = _get_user_by_id(user_id)
     if not existing:
@@ -13424,17 +13441,17 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     # user_has_permission); non-admins need the matching users.* permission
     # per field, may self-edit name/email, and can NEVER touch an Admin
     # account, grant the Admin role, or delete themselves.
-    _actor_is_admin = str(admin.get("role") or "").lower() == "admin"
-    _is_self = str(admin.get("id") or "") == user_id
     if not _actor_is_admin:
         if str(existing.get("role") or "").lower() == "admin":
             raise HTTPException(status_code=403, detail="Only an Admin can modify an Admin account")
         if requested_role == "Admin":
             raise HTTPException(status_code=403, detail="Only an Admin can grant the Admin role")
+        _granted: list[str] = []
 
         def _need(perm: str) -> None:
             if not user_has_permission(admin, "users", perm):
                 raise HTTPException(status_code=403, detail="Forbidden")
+            _granted.append(perm)
 
         if (body.name is not None or body.email is not None) and not _is_self:
             _need("edit")
@@ -13465,6 +13482,8 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
             if body.deleted is True and _is_self:
                 raise HTTPException(status_code=400, detail="You cannot delete your own account")
             _need("delete")
+        if not _is_self and not _granted:  # {} or the same role changes nothing: no reply with another account's details
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     # SECURITY: Whitelist allowed fields to prevent SQL injection
     update_fields: dict[str, Any] = {}
@@ -13498,10 +13517,9 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
                         audit(str(admin.get("id") or ""), "wallet_release", AD_CAMPAIGN_COLLECTION, str(_row["id"]), f"Returned an orphan capture for {_row['id']}", {"transactionId": _tx, "source": "account_delete"}, conn=conn)
         update_fields["deleted"] = bool(body.deleted)
 
-    update_fields["last_modified"] = now
-
-    if not update_fields:
+    if not update_fields:  # a no-op body writes nothing and audits nothing
         return user_row_to_public(existing)
+    update_fields["last_modified"] = now
 
     # SECURITY: Validate all keys are in whitelist before building SQL
     invalid_fields = [k for k in update_fields.keys() if k not in ALLOWED_USER_UPDATE_FIELDS]
@@ -13560,7 +13578,7 @@ def privacy_anonymize_user(
 
     expected_confirmation = f"ANONYMIZE {user_id}"
     supplied_confirmation = str((body or {}).get("confirmation") or "").strip()
-    if not secrets.compare_digest(supplied_confirmation, expected_confirmation):
+    if not constant_time_equal(supplied_confirmation, expected_confirmation):  # bytes: a non-ASCII paste was a TypeError (500)
         raise HTTPException(
             status_code=400,
             detail=f'Type "{expected_confirmation}" to confirm privacy anonymization',

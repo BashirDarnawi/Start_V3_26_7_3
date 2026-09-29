@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 import secrets
 from dataclasses import dataclass
 
@@ -79,11 +80,16 @@ def new_session_cookie_value(session_id: str, token: str) -> str:
     return f"{session_id}.{token}"
 
 
+# Real parts are new_id() values ("sess_<hex>", "tok_<hex>"). Anything else (a NUL from a quoted
+# "\000" cookie, which PostgreSQL cannot bind: HTTP 500 on every signed-in route) is no session.
+_SESSION_PART_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
 def parse_session_cookie_value(value: str) -> tuple[str, str] | None:
     if not value or "." not in value:
         return None
     session_id, token = value.split(".", 1)
-    if not session_id or not token:
+    if not _SESSION_PART_RE.fullmatch(session_id) or not _SESSION_PART_RE.fullmatch(token):
         return None
     return session_id, token
 
@@ -95,10 +101,11 @@ def constant_time_equal(provided: str | None, expected: str | None) -> bool:
     characters (TypeError), so a garbage signature, verify token or origin
     header sent by an anonymous caller became an unhandled 500 instead of a
     clean refusal. Comparing the UTF-8 bytes keeps the timing guarantee for
-    every input. An empty expected value never matches anything.
+    every input (a lone surrogate from JSON too: surrogatepass). An empty expected value never
+    matches anything.
     """
-    left = str(provided or "").encode("utf-8")
-    right = str(expected or "").encode("utf-8")
+    left = str(provided or "").encode("utf-8", "surrogatepass")
+    right = str(expected or "").encode("utf-8", "surrogatepass")
     if not left or not right:
         return False
     return hmac.compare_digest(left, right)

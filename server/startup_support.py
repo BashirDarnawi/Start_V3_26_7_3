@@ -74,6 +74,22 @@ def request_size_refusal(request: Any, cookie_name: str = "albayan_session") -> 
     return None
 
 
+def request_nul_refusal(request: Any) -> Any:
+    """400 for a NUL character in the address (a %00 in the path or the query), or None.
+
+    PostgreSQL cannot bind a NUL, so an id carrying one reached a route's first query and became an
+    unhandled 500 (SQLite stores it, so the tests never saw it). No real id or value holds one."""
+    from fastapi.responses import JSONResponse
+
+    scope = getattr(request, "scope", None) or {}
+    query = bytes(scope.get("query_string") or b"")
+    if "\x00" in str(scope.get("path") or "") or b"%00" in query or b"\x00" in query:
+        return JSONResponse(
+            {"detail": "Invalid entity id (use 1-80 letters, numbers, dot, underscore, colon or hyphen)"}, status_code=400,
+        )
+    return None
+
+
 def request_size_needs_session(request: Any, cookie_name: str = "albayan_session") -> bool:
     """True when a write body is over the anonymous allowance: a cookie's PRESENCE is not a
     session, so the caller must confirm the session (off the event loop) before parsing it."""

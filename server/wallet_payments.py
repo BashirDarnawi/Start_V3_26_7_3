@@ -708,6 +708,10 @@ def create_wallet_payments_router(
             if guard is not None:
                 guard.acquire()
             with db_conn() as conn:
+                # The owner's users row first, as submit and confirm do: an account delete locks it and
+                # counts pending requests, so a create racing the delete waits, then finds the account
+                # gone (404) instead of leaving a payable PAY- request on a deleted account.
+                ctx["lock_and_validate_wallet_users"](conn, [uid], postgres=postgres)
                 # Owner first, then the key (the same order on every create): the open-request count
                 # below and the insert are one step per customer on PostgreSQL, so parallel creates
                 # with different keys cannot all pass the cap (SQLite: the wallet lock above).

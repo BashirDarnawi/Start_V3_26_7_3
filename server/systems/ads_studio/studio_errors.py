@@ -58,7 +58,10 @@ def studio_error(status: int, code: str, message: str, headers: dict[str, str] |
     """Raise the /api/studio error ``{code, message}`` with this HTTP status."""
     if STUDIO_ERROR_CODES.get(code) != int(status):
         raise StudioErrorCodeUnknown(f"{code} is not a studio error code for HTTP {status}")
-    raise HTTPException(status_code=int(status), detail={"code": code, "message": str(message)}, headers=headers)
+    # A message that repeats a client key may hold a lone surrogate (valid JSON), which the JSON
+    # reply cannot encode (HTTP 500): it becomes "?".
+    message = str(message).encode("utf-8", "replace").decode("utf-8")
+    raise HTTPException(status_code=int(status), detail={"code": code, "message": message}, headers=headers)
 
 
 def error_code(detail: Any) -> str:

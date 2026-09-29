@@ -84,7 +84,8 @@ def normalize_phone(raw: Any) -> str:
     if raw is None or not isinstance(raw, str):
         return ""
     typed = _JS_TRIM_RE.sub("", raw.translate(_DIGITS))
-    if not typed or len(typed.encode("utf-16-le")) // 2 > PHONE_MAX_TYPED:
+    # surrogatepass: a lone surrogate (valid JSON) counts as one JS code unit, then fails _TYPED_RE.
+    if not typed or len(typed.encode("utf-16-le", "surrogatepass")) // 2 > PHONE_MAX_TYPED:
         return ""
     typed = _PHONE_SEPARATORS_RE.sub("", typed)
     if typed.startswith("00"):

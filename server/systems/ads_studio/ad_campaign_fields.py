@@ -517,7 +517,8 @@ def prepare_ad_campaign_fields(
         if unknown:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported campaign field: {sorted(unknown)[0]}",
+                # the key as a JSON reply can carry it (a lone surrogate was a 500)
+                detail=f"Unsupported campaign field: {str(sorted(unknown)[0]).encode('utf-8', 'replace').decode('utf-8')[:40]}",
             )
     sanitized = sanitize_json(raw_data) or {}
     data = {key: sanitized[key] for key in allowed_fields if key in sanitized}
