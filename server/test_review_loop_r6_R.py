@@ -2,7 +2,8 @@
 
 Behaviour tests for the server half of the batch; each one failed before its fix:
 
-* 1  a delivery completion stores payment rows whose Rate 2 reproduces the credited dollars, so
+* 1  a delivery completion stores payment rows whose Rate 2 reproduces the credited dollars (per row:
+     a Libyana / Madar Rate 1 and a Rate 1 of 0 included), so
      a later no-op office edit (the form re-derives amountUSD from those rows) can no longer
      raise the customer's USD credit through /settle;
 * 3  a writer without customers.viewContacts (who never receives phoneNumber / deliveryPlaceName)
@@ -167,6 +168,46 @@ def test_1_a_no_op_office_edit_after_completion_cannot_raise_the_credit(actors):
     assert edit.status_code == 409, edit.text  # before: 200 and $2.12 of credit nobody paid for
     assert "cannot be increased" in edit.text
     assert _get(actors, receipt["id"])["data"]["amountUSD"] == 100.0
+
+
+def test_1_a_libyana_or_zero_rate_row_backs_only_the_dollars_credited_for_it():
+    # Libyana 1000 at Rate 1 0.70 = 700 LYD, credited 700 / 9.7 = $72.16. The form and the server's
+    # credit cap read a non-dollar row as amount / Rate 2, so Rate 2 = 9.7 backed ceil(1000 / 9.7) = $103.10.
+    merged = _complete_unit([{"method": "Libyana", "amount": 1000, "rate": 0.7, "rate2": 9.7, "collectionType": "delivery"}], 700)
+    assert merged["amountUSD"] == 72.16
+    backed = main._receipt_payments_credit_minor(merged["payments"])
+    assert abs(backed - 7216) <= 1, backed  # before: 10310
+    # A Rate 1 of 0 adds no LYD, so the row backs no dollars (before: 500 / 9.7 = $51.55).
+    zero = _complete_unit([{"method": "Cash (LYD)", "amount": 970, "rate": 1, "rate2": 9.7},
+                           {"method": "Bank Transfer (LYD)", "amount": 500, "rate": 0, "rate2": 9.7}], 970)
+    assert zero["payments"][1]["rate2"] == 0.0
+    assert main._receipt_payments_credit_minor(zero["payments"]) in {10000, 10001}  # before: 15155
+    # Madar at 0.75 and a dollar row mixed with it still add up to the credited dollars.
+    mixed = _complete_unit([{"method": "Madar", "amount": 400, "rate": 0.75, "rate2": 9.7},
+                            {"method": "USDT", "amount": 50, "rate": 9.7, "rate2": 9.7}], 300 + 485)
+    assert abs(main._receipt_payments_credit_minor(mixed["payments"]) - round(mixed["amountUSD"] * 100)) <= 2
+
+
+def test_1_a_libyana_completion_cannot_be_re_derived_into_more_credit(actors):
+    receipt = _create(actors, status="Not Paid", isPaid=False, amountUSD=72.16, amountLocal=700, exchangeRate=9.7,
+                      debtAmountLocal=700, debtAmountUSD=72.16, tempReceiptNo="D" + _number(), deliveryStatus="Needs Delivery",
+                      deliveryPersonId=actors["driver"]["id"], isReceivedInOffice=False, deliveryPlaceName="Tripoli",
+                      statusDetail={"notPaidCollection": "delivery"})
+    assert _patch(actors, "driver", receipt["id"], {"deliveryStatus": "In Progress"}).status_code == 200
+    done = _patch(actors, "driver", receipt["id"], {
+        "deliveryStatus": "Delivered", "finalReceiptNo": _number(), "receiptImage": PROOF,
+        "amountCollectedFromCustomer": 700, "actualDeliveryFeeCollected": 0,
+        "payments": [{"method": "Libyana", "amount": 1000, "rate": 0.7, "rate2": 9.7, "collectionType": "delivery"}],
+    })
+    assert done.status_code == 200, done.text
+    stored = done.json()
+    assert stored["data"]["status"] == "Paid" and stored["data"]["amountUSD"] == 72.16
+    # A Save Split Payments that re-derives the money from rows at Rate 2 9.7 (ceil(1000 / 9.7) + the house cent).
+    edit = _patch(actors, "admin", receipt["id"], {"amountUSD": 103.11, "amountLocal": 700, "exchangeRate": 9.7,
+                                                  "payments": stored["data"]["payments"]}, stored["lastModified"])
+    assert edit.status_code == 409, edit.text  # before: 200 and about $31 of credit nobody paid for
+    assert "cannot be increased" in edit.text
+    assert _get(actors, receipt["id"])["data"]["amountUSD"] == 72.16
 
 
 # ---- n=3: hidden contact fields survive an edit ------------------------------------------------

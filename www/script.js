@@ -30972,7 +30972,9 @@ async function saveSplitPayments() {
   if (totalR2 % 1 !== 0) totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   // Same rule as the receipt form: a single payment stores the rate the user
   // typed; a split stores the effective average.
-  const avgRate = receiptExchangeRate(payments, totalR1, totalR2);
+  const _keep = _keepsStoredMoney(_permReceipt, payments) && _permReceipt;
+  if (_keep) { totalR1 = +_keep.amountLocal || 0; totalR2 = +_keep.amountUSD || 0; }
+  const avgRate = _keep ? +_keep.exchangeRate : receiptExchangeRate(payments, totalR1, totalR2);
 
   // Money already committed cannot be edited away: ads funded from this
   // receipt plus money transferred to other customers set the floor for the
@@ -32933,6 +32935,13 @@ function receiptExchangeRate(payments, totalLYD, totalUSD) {
   return state.defaultExchangeRate;
 }
 
+// A delivered receipt with unedited rows keeps its stored money (old driver rows may carry another Rate 2).
+function _keepsStoredMoney(r, payments) {
+  return r?.status === 'Paid' && r.deliveryStatus === 'Delivered' && r.exchangeRate > 0
+    && payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + ''
+      === (r.payments || []).filter(p => p.amount > 0).map(p => [p.method, +p.amount, +p.rate, +p.rate2]) + '';
+}
+
 // A Not Paid receipt may intentionally have no money rows yet. Keep payments[]
 // empty (so it never invents received cash), while still preserving the Rate 2
 // the user entered for the debt and any ads linked to it.
@@ -33405,10 +33414,7 @@ async function _saveReceiptFromModalInner() {
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
   const status = document.getElementById('receipt-status').value || 'Paid';
-  // A delivered receipt with unedited rows keeps its stored money (old driver rows may carry another Rate 2).
-  const _keepMoney = status === 'Paid' && editTarget?.status === 'Paid' && editTarget.deliveryStatus === 'Delivered'
-    && editTarget.exchangeRate > 0 && payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + ''
-      === (editTarget.payments || []).filter(p => p.amount > 0).map(p => [p.method, +p.amount, +p.rate, +p.rate2]) + '';
+  const _keepMoney = status === 'Paid' && _keepsStoredMoney(editTarget, payments);
   const totalLYD = _keepMoney ? +editTarget.amountLocal || 0 : totalR1;
   const totalUSD = _keepMoney ? +editTarget.amountUSD || 0 : totalR2;
   // Not Paid rows are a collection plan for customer debt, not money already
@@ -33658,7 +33664,8 @@ async function _saveReceiptFromModalInner() {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'الرجاء تعيين سائق توصيل.' : 'Please assign a delivery person.', 'error');
       return;
     }
-    if (!deliveryPlaceName && !_hideContacts) {
+    // An office -> delivery switch still needs a place.
+    if (!deliveryPlaceName && !(_hideContacts && (isTempDeliveryReceiptNo(editTarget.tempReceiptNo) || editTarget.statusDetail?.notPaidCollection === 'delivery'))) {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اسم مكان التوصيل مطلوب.' : 'Delivery place name is required.', 'error');
       return;
     }

@@ -25,6 +25,27 @@ from fastapi import HTTPException
 
 from .financial_core import _financial_minor, _financial_usd
 
+# Same set as main._USD_BASED_PAYMENT_METHODS (this module cannot import main).
+_USD_ROW_METHODS = frozenset({"USDT", "Bank Transfer (USD)", "Cash (USD)"})
+
+
+def _row_rate2_at(row: dict[str, Any], trusted_rate: Decimal) -> float:
+    """Rate 2 that makes one completion row back the dollars credited for it.
+
+    The server credits amount x Rate 1 / trusted_rate. The client form and
+    main._receipt_payments_credit_minor read a dollar row as amount x Rate 1 /
+    Rate 2 but any other row as amount / Rate 2, so a Libyana row at Rate 1
+    0.70 needs Rate 2 = trusted_rate / 0.70, and a row whose Rate 1 adds no
+    LYD (0 or unreadable) backs no dollars (Rate 2 = 0).
+    """
+    if str(row.get("method") or "") in _USD_ROW_METHODS:
+        return float(trusted_rate)
+    try:
+        rate1 = Decimal(str(row.get("rate") or 0))
+    except ArithmeticError:  # decimal.InvalidOperation: not a number
+        return 0.0
+    return float(trusted_rate / rate1) if rate1.is_finite() and rate1 > 0 else 0.0
+
 
 def apply_delivery_completion_truth(
     receipt_id: str,
@@ -145,7 +166,7 @@ def apply_delivery_completion_truth(
         # at the driver's default rate re-derived other money on the next
         # office edit (a no-op save raised or cut the customer's USD credit).
         merged["payments"] = [
-            {**row, "rate2": float(trusted_rate)} if isinstance(row, dict) else row
+            {**row, "rate2": _row_rate2_at(row, trusted_rate)} if isinstance(row, dict) else row
             for row in merged["payments"]
         ]
     if target["source"] == "linked_ads" and trusted_rate:

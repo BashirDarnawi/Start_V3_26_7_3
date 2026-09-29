@@ -2178,6 +2178,44 @@ async function main() {
     near(edited.saved[0].amountUSD, 110);
   });
 
+  // The Manage Split Payments editor opened on stored receipt r1; `cells` override the one row's DOM values.
+  async function splitSave(stored, cells = {}) {
+    const fixture = loadBrowserSource();
+    const { sandbox, state, run } = fixture;
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', createdBy: 'admin', _lastModified: 1, ...stored }];
+    const values = { '.split-method': 'Cash (LYD)', '.split-amount': '970', '.split-rate': '1', '.split-rate2': '9.5',
+      '.split-collection': 'delivery', '.split-delivery-person': '', ...cells };
+    const row = { querySelector: sel => (sel in values ? { value: values[sel] } : null) };
+    sandbox.document.getElementById = id => (id === 'split-payments-receipt-id' ? { value: 'r1' } : null);
+    sandbox.document.querySelectorAll = sel => (sel === '.split-payment-item' ? [row] : []);
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.closeModal = () => {};
+    const saved = [];
+    sandbox.updateRecord = async (array, id, record) => { saved.push(record); return true; };
+    await run('saveSplitPayments()');
+    return { saved, notes };
+  }
+
+  await test('r6 R n=1 (Split): a no-op Save Split Payments on a delivered receipt keeps its credited $100; edited rows still recompute', async () => {
+    const delivered = { status: 'Paid', isPaid: true, deliveryStatus: 'Delivered', tempReceiptNo: 'D5', serialNumber: '777', finalReceiptNo: '777',
+      amountUSD: 100, amountLocal: 970, exchangeRate: 9.7,
+      payments: [{ method: 'Cash (LYD)', amount: 970, rate: 1, rate2: 9.5, collectionType: 'delivery' }] };
+    const same = await splitSave(delivered);
+    assert.equal(same.saved.length, 1, JSON.stringify(same.notes));
+    assert.equal(same.saved[0].amountUSD, 100, 'before: 102.12 (970 / 9.5 + the house cent) minted $2.12');
+    assert.equal(same.saved[0].amountLocal, 970);
+    assert.equal(same.saved[0].exchangeRate, 9.7);
+    // A server-credited HALF_UP amount survives too (the client re-derivation adds the ceil + house cent).
+    const halfUp = await splitSave({ ...delivered, amountUSD: 103.09, amountLocal: 1000, payments: [{ method: 'Cash (LYD)', amount: 1000, rate: 1, rate2: 9.7 }] },
+      { '.split-amount': '1000', '.split-rate2': '9.7' });
+    assert.equal(halfUp.saved[0].amountUSD, 103.09, 'before: 103.11');
+    // Rows the office really edited still recompute the money.
+    const edited = await splitSave(delivered, { '.split-amount': '1067', '.split-rate2': '9.7' });
+    assert.equal(edited.saved[0].amountLocal, 1067);
+    near(edited.saved[0].amountUSD, 110);
+  });
+
   await test('r6 R n=2: in server mode an unfunded Paid receipt changed to Not Paid goes through /unsettle, never the refused PATCH', async () => {
     const { sandbox, state, run } = loadBrowserSource();
     sandbox.isServerModeEnabled = () => true;
@@ -2221,6 +2259,20 @@ async function main() {
     await pending.run('_saveReceiptFromModalInner()');
     assert.equal(pending.saved.length, 1, JSON.stringify(pending.notes));
     assert.ok(!('deliveryPlaceName' in pending.saved[0]));
+    // An office Not Paid receipt they switch to Delivery becomes a new job: its place is still required.
+    const office = { status: 'Not Paid', isPaid: false, deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' },
+      amountUSD: 100, amountLocal: 500, exchangeRate: 5 };
+    const toDelivery = { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'driver1', 'receipt-serial': 'D10' };
+    const switched = receiptEditFixture(office, toDelivery);
+    switched.state.currentUser = accountant;
+    await switched.run('_saveReceiptFromModalInner()');
+    assert.equal(switched.saved.length, 0, 'before: a live delivery job saved with no place');
+    assert.ok(switched.notes.some(n => n.message === 'Delivery place name is required.'), JSON.stringify(switched.notes));
+    const placed = receiptEditFixture(office, { ...toDelivery, 'receipt-delivery-place': 'Tripoli' });
+    placed.state.currentUser = accountant;
+    await placed.run('_saveReceiptFromModalInner()');
+    assert.equal(placed.saved.length, 1, JSON.stringify(placed.notes));
+    assert.equal(placed.saved[0].deliveryPlaceName, 'Tripoli');
     // A user who can see contacts still saves what the form shows.
     const admin = receiptEditFixture(paidReceipt, { 'receipt-phone-search': '0911111111' });
     await admin.run('_saveReceiptFromModalInner()');
