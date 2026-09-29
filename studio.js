@@ -3349,7 +3349,12 @@ function sanitizedAdsStudioDraft() {
   const d = _adsStudioDraft || newAdsStudioDraft();
   const text = (value, max) => Security.sanitizeInput(String(value || ''), { maxLength: max }).trim();
   // The ad's words are plain text, escaped wherever drawn: never "data:" or "on…=" stripped (r8 #15).
-  const copy = (value, max) => String(value || '').replace(/\0/g, '').replace(/[<>]/g, '').trim().slice(0, max).trim();
+  // A leading "javascript:"/"vbscript:" goes too: the server saves such a field empty.
+  const copy = (value, max) => {
+    let s = String(value || '').replace(/\0/g, '').replace(/[<>]/g, '').trim();
+    while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
+    return s.slice(0, max).trim();
+  };
   const list = (values, maxItems = 30) => Array.from(new Set((Array.isArray(values) ? values : []).map(value => text(value, 80)).filter(Boolean))).slice(0, maxItems);
   const boostType = ['boost_post', 'boost_page'].includes(String(d.boostType || '')) ? String(d.boostType) : '';
   // A half-typed post link must never brick "Save draft": only a link the
@@ -8965,8 +8970,11 @@ function studioBuilderConvert(session, kind) {
 // ------------------------------------------------------------------ what is sent (client limits = server limits)
 
 // Plain text, escaped where drawn: only NUL, < and > go (as on the server), never "data:" or "on…=" (r8 #15).
+// A leading "javascript:"/"vbscript:" goes too: the server saves such a field empty.
 function studioBuilderText(value, max) {
-  return String(value === null || value === undefined ? '' : value).replace(/\0/g, '').replace(/[<>]/g, '').trim().slice(0, max).trim();
+  let s = String(value === null || value === undefined ? '' : value).replace(/\0/g, '').replace(/[<>]/g, '').trim();
+  while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
+  return s.slice(0, max).trim();
 }
 
 // '' (empty), the cleaned value (an https link, or a phone number as +E.164: 09x becomes +2189x), or

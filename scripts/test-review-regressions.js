@@ -3282,6 +3282,13 @@ async function main() {
     run("__r8Draft.primaryText = '<b>Hi</b>'; _adsStudioDraft.primaryText = '<b>Hi</b>';");
     assert.equal(run('studioBuilderPayload(__r8Draft, null).primaryText'), 'bHi/b');
     assert.equal(run('sanitizedAdsStudioDraft().primaryText'), 'bHi/b');
+    // A leading "javascript:"/"vbscript:" goes (the server would save the whole field empty), the rest stays.
+    run("__r8Draft.headline = 'JavaScript: a course for kids'; _adsStudioDraft.headline = 'JavaScript: a course for kids';");
+    run("__r8Draft.notes = ' vbscript:JAVASCRIPT: <x>hi'; _adsStudioDraft.notes = ' vbscript:JAVASCRIPT: <x>hi';");
+    assert.equal(run('studioBuilderPayload(__r8Draft, null).headline'), 'a course for kids');
+    assert.equal(run('sanitizedAdsStudioDraft().headline'), 'a course for kids');
+    assert.equal(run('studioBuilderPayload(__r8Draft, null).notes'), 'xhi');
+    assert.equal(run('sanitizedAdsStudioDraft().notes'), 'xhi');
   });
 
   console.log(`\n${passed} review behavior regressions passed.`);

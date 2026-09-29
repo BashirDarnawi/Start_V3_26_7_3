@@ -570,8 +570,11 @@ function studioBuilderConvert(session, kind) {
 // ------------------------------------------------------------------ what is sent (client limits = server limits)
 
 // Plain text, escaped where drawn: only NUL, < and > go (as on the server), never "data:" or "on…=" (r8 #15).
+// A leading "javascript:"/"vbscript:" goes too: the server saves such a field empty.
 function studioBuilderText(value, max) {
-  return String(value === null || value === undefined ? '' : value).replace(/\0/g, '').replace(/[<>]/g, '').trim().slice(0, max).trim();
+  let s = String(value === null || value === undefined ? '' : value).replace(/\0/g, '').replace(/[<>]/g, '').trim();
+  while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
+  return s.slice(0, max).trim();
 }
 
 // '' (empty), the cleaned value (an https link, or a phone number as +E.164: 09x becomes +2189x), or
