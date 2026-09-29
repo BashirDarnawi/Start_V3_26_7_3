@@ -872,7 +872,7 @@ function renderStudioV2CustomerScreen(route) {
   } else if (body === null) {
     body = renderStudioV2Soon(adsStudioText(info[2], info[3]), info[1]);
     // A customer without an active plan still needs the way to activate it (the classic card).
-    if (route.tab === 'home' && !adsStudioCanUse()) body += `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>`;
+    if (route.tab === 'home' && !adsStudioCanUse() && !adsStudioStartupLoading()) body +=`<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>`;
     if (route.tab === 'account') body += renderStudioV2Basics();
   }
   const attrs = (route.section ? ` data-section="${studioEsc(route.section)}"` : '') + (route.id ? ` data-id="${studioEsc(route.id)}"` : '');

@@ -6979,7 +6979,7 @@ function renderStudioV2CustomerScreen(route) {
   } else if (body === null) {
     body = renderStudioV2Soon(adsStudioText(info[2], info[3]), info[1]);
     // A customer without an active plan still needs the way to activate it (the classic card).
-    if (route.tab === 'home' && !adsStudioCanUse()) body += `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>`;
+    if (route.tab === 'home' && !adsStudioCanUse() && !adsStudioStartupLoading()) body +=`<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>`;
     if (route.tab === 'account') body += renderStudioV2Basics();
   }
   const attrs = (route.section ? ` data-section="${studioEsc(route.section)}"` : '') + (route.id ? ` data-id="${studioEsc(route.id)}"` : '');
@@ -7646,7 +7646,7 @@ function renderStudioHomeGoals(paused) {
               </li>`;
   }).join('');
   let note = '';
-  if (!canAsk && adsStudioCanCreate()) note = adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
+  if (!canAsk && adsStudioCanCreate() && !adsStudioStartupLoading()) note =adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
   else if (paused) note = adsStudioText('Sending is paused for now: your request is saved as a draft until we open again.', 'الإرسال متوقف مؤقتاً: يُحفظ طلبك مسودةً حتى نستأنف.');
   return `
           <section class="studio-home-block" data-testid="studio-home-goals" aria-labelledby="studio-home-goals-title">
@@ -7682,7 +7682,8 @@ function renderStudioHomeBody() {
           </div>` : '';
   const firstRun = !studioHomeEverSent(wallet);
   const needs = studioHomeNeeds(requests, wallet);
-  const gate = !adsStudioCanUse() ? `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>` : '';
+  // A renewed plan may not be in an old cache yet: no activate card until the start-up load settles.
+  const gate = (!adsStudioCanUse() && !adsStudioStartupLoading()) ? `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>` : '';
   return `
         <div class="studio-home" data-testid="studio-home">${banner}
           ${firstRun ? renderStudioHomeStart(requests, wallet) : ''}
@@ -10607,7 +10608,7 @@ function studioBuilderBanners(session) {
     out.push(`<div class="studio-b-banner" data-testid="studio-builder-resumed" role="status">${studioV2Icon('history')}<span>${studioEsc(studioBuilderT('You are continuing your saved draft.', 'أنت تكمل مسودتك المحفوظة.'))}</span>
             <button type="button" class="studio-b-link is-strong" onclick="studioBuilderStartOver()">${studioEsc(studioBuilderT('Start a new request', 'ابدأ طلباً جديداً'))}</button></div>`);
   }
-  if (!adsStudioCanUse()) {
+  if (!adsStudioCanUse() && !adsStudioStartupLoading()) {  // a renewed plan may not be in the cache yet
     out.push(`<div class="studio-b-banner is-warn" role="status">${studioV2Icon('badge-alert')}<span>${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept; activate the plan to save changes and send.', 'اشتراكك غير نشط. مسودتك محفوظة؛ فعّل الاشتراك لحفظ التعديلات والإرسال.'))}</span>
             <button type="button" class="studio-b-link is-strong" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioEsc(studioBuilderT('Activate the plan', 'فعّل الاشتراك'))}</button></div>`);
   }

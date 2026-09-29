@@ -2215,7 +2215,7 @@ function studioBuilderBanners(session) {
     out.push(`<div class="studio-b-banner" data-testid="studio-builder-resumed" role="status">${studioV2Icon('history')}<span>${studioEsc(studioBuilderT('You are continuing your saved draft.', 'أنت تكمل مسودتك المحفوظة.'))}</span>
             <button type="button" class="studio-b-link is-strong" onclick="studioBuilderStartOver()">${studioEsc(studioBuilderT('Start a new request', 'ابدأ طلباً جديداً'))}</button></div>`);
   }
-  if (!adsStudioCanUse()) {
+  if (!adsStudioCanUse() && !adsStudioStartupLoading()) {  // a renewed plan may not be in the cache yet
     out.push(`<div class="studio-b-banner is-warn" role="status">${studioV2Icon('badge-alert')}<span>${studioEsc(studioBuilderT('Your plan is not active. Your draft is kept; activate the plan to save changes and send.', 'اشتراكك غير نشط. مسودتك محفوظة؛ فعّل الاشتراك لحفظ التعديلات والإرسال.'))}</span>
             <button type="button" class="studio-b-link is-strong" onclick="showSubscriptionModal('ad_maker', 'ad_maker')">${studioEsc(studioBuilderT('Activate the plan', 'فعّل الاشتراك'))}</button></div>`);
   }

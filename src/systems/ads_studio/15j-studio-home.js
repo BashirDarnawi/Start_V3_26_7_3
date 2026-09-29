@@ -604,7 +604,7 @@ function renderStudioHomeGoals(paused) {
               </li>`;
   }).join('');
   let note = '';
-  if (!canAsk && adsStudioCanCreate()) note = adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
+  if (!canAsk && adsStudioCanCreate() && !adsStudioStartupLoading()) note =adsStudioText('Activate your plan to start a new ad request.', 'فعّل اشتراكك لتبدأ طلب إعلان جديد.');
   else if (paused) note = adsStudioText('Sending is paused for now: your request is saved as a draft until we open again.', 'الإرسال متوقف مؤقتاً: يُحفظ طلبك مسودةً حتى نستأنف.');
   return `
           <section class="studio-home-block" data-testid="studio-home-goals" aria-labelledby="studio-home-goals-title">
@@ -640,7 +640,8 @@ function renderStudioHomeBody() {
           </div>` : '';
   const firstRun = !studioHomeEverSent(wallet);
   const needs = studioHomeNeeds(requests, wallet);
-  const gate = !adsStudioCanUse() ? `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>` : '';
+  // A renewed plan may not be in an old cache yet: no activate card until the start-up load settles.
+  const gate = (!adsStudioCanUse() && !adsStudioStartupLoading()) ? `<div class="studio-v2-gate">${renderAdsStudioSubscriptionGate()}</div>` : '';
   return `
         <div class="studio-home" data-testid="studio-home">${banner}
           ${firstRun ? renderStudioHomeStart(requests, wallet) : ''}

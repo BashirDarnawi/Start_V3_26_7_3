@@ -2889,7 +2889,11 @@ async function main() {
       list: String(run("renderStudioAdsList({ tab: 'campaigns', section: '', id: '', step: 0 })")),
       classic: String(run('renderAdsStudioView()')),
       needs: JSON.parse(run('JSON.stringify(studioHomeNeeds([], null).map(item => item.key))')),
-      pages: String(run("renderStudioPagesBody({ tab: 'replies', section: 'pages', id: '', step: 0 })"))
+      pages: String(run("renderStudioPagesBody({ tab: 'replies', section: 'pages', id: '', step: 0 })")),
+      // The v2 Home a v2 customer lands on, its placeholder (no Home screen registered) and the builder's banners.
+      home: String(run('renderStudioHomeBody()')),
+      placeholder: String(run("(() => { const draw = _studioV2Screens.get('home'); _studioV2Screens.delete('home'); try { return renderStudioV2CustomerScreen({ tab: 'home', section: '', id: '', step: 0 }); } finally { _studioV2Screens.set('home', draw); } })()")),
+      builder: String(run("studioBuilderBanners({ status: 'ready' })"))
     });
     run('_serverLiveSync.startupLoadPending = true;');
     const loading = screens();
@@ -2899,6 +2903,9 @@ async function main() {
     assert.ok(!loading.classic.includes('Activate Ads Studio') && !loading.classic.includes('Your subscription has ended'), loading.classic);
     assert.ok(!loading.needs.includes('plan'), 'no "Your plan has ended" on Home yet');
     assert.ok(!loading.pages.includes('studio-pg-plan-ended') && loading.pages.includes('data-testid="studio-pg-loading"'), loading.pages);
+    assert.ok(loading.home.includes('data-testid="studio-home"') && !loading.home.includes('Activate Ads Studio') && !loading.home.includes('Activate your plan to start'), loading.home);
+    assert.ok(loading.placeholder.includes('data-testid="studio-screen-home"') && !loading.placeholder.includes('Activate Ads Studio'), loading.placeholder);
+    assert.ok(!loading.builder.includes('Your plan is not active'), loading.builder);
     // The load settled and the rows still say so: the real wording.
     run('_serverLiveSync.startupLoadPending = false;');
     const settled = screens();
@@ -2907,6 +2914,9 @@ async function main() {
     assert.ok(settled.classic.includes('Activate Ads Studio'), settled.classic);
     assert.ok(settled.needs.includes('plan'));
     assert.ok(settled.pages.includes('data-testid="studio-pg-plan-ended"'));
+    assert.ok(settled.home.includes('Activate Ads Studio') && settled.home.includes('Activate your plan to start'), settled.home);
+    assert.ok(settled.placeholder.includes('Activate Ads Studio'), settled.placeholder);
+    assert.ok(settled.builder.includes('Your plan is not active'), settled.builder);
     // A new sign-in (a new session) is never left "loading".
     run('_serverLiveSync.startupLoadPending = true; advanceServerSessionEpoch();');
     assert.equal(run('adsStudioStartupLoading()'), false);
