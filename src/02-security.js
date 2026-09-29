@@ -175,17 +175,16 @@ const Security = {
   sanitizeInput: (input, options = {}) => {
     if (input === null || input === undefined) return '';
     let str = String(input);
-    
-    // Remove null bytes
+
     str = str.replace(/\0/g, '');
-    
+
     // Remove script tags and event handlers if not allowed
     if (!options.allowHtml) {
-      // Strip until stable: one pass let "oonclick=nclick=" reassemble itself.
+      // Strip until stable. \b: whole words, so phone= and utm_content= in links survive.
       for (let pass = 0; pass < 8; pass++) {
         const before = str;
         str = str.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-        str = str.replace(/on\w+\s*=/gi, '');
+        str = str.replace(/\bon\w+\s*=/gi, '');
         str = str.replace(/javascript:/gi, '');
         str = str.replace(/vbscript:/gi, '');
         if (str === before) break;

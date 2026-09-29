@@ -37,6 +37,13 @@ const adEditHistoryViewer = helpers.slice(
 );
 const clothes = read('src/15b-clothes.js');
 const adsStudio = read('src/systems/ads_studio/15c-ads-studio.js');
+// studioParsePhone (15g): the classic destination check (15c adsStudioDestinationPhone) reads a phone
+// number with it, so the classic-only sandboxes below load it next to normalizeDigitsAscii.
+const studioParsePhoneSrc = (() => {
+  const core = read('src/systems/ads_studio/15g-studio-core.js');
+  const at = core.indexOf('function studioParsePhone(');
+  return core.slice(at, core.indexOf('\n}\n', at) + 2);
+})();
 const metaAds = read('src/15d-meta-ads.js');
 const photoPaste = read('src/15e-photo-paste.js');
 const actionsIo = read('src/16-actions-io.js');
@@ -1549,6 +1556,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   let studioLoadError = '';
   try {
     vm.runInContext((forms.match(/function normalizeDigitsAscii\(value\) \{[\s\S]*?\n\}/) || [''])[0], studioBox);
+    vm.runInContext(studioParsePhoneSrc, studioBox);
     vm.runInContext(adsStudio, studioBox);
   } catch (error) { studioLoadError = String(error && error.message || error); }
   const inStudio = code => { try { return vm.runInContext(code, studioBox); } catch (error) { return `THREW ${error && error.message}`; } };
@@ -1669,8 +1677,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     && parsed('٥٠') === 5000 && parsed('١٢٫٥') === 1250 && parsed('۷۵') === 7500 && parsed('1,250') === 125000 && parsed('12،5') === 1250
     && Number.isNaN(parsed('abc')) && studioFn('adsStudioParseMoneyMinor').includes('normalizeDigitsAscii(')
     && moneyBox(budgetInput) && moneyBox(chargeInput)
-    && studioFn('adsStudioUpdateLydPreview').includes('adsStudioParseMoneyMinor(') && studioFn('adsStudioCreateWalletCharge').includes('adsStudioParseMoneyMinor(')
-    && !/parseFloat\(/.test(studioFn('adsStudioUpdateLydPreview') + studioFn('adsStudioCreateWalletCharge') + studioFn('adsStudioSetDraftField')),
+    && studioFn('adsStudioUpdateLydPreview').includes('adsStudioLydPreviewText(') && studioFn('adsStudioLydPreviewText').includes('adsStudioParseMoneyMinor(') && studioFn('adsStudioCreateWalletCharge').includes('adsStudioParseMoneyMinor(')
+    && !/parseFloat\(/.test(studioFn('adsStudioUpdateLydPreview') + studioFn('adsStudioLydPreviewText') + studioFn('adsStudioCreateWalletCharge') + studioFn('adsStudioSetDraftField')),
   studioLoadError || `typed '٥٠' became ${typedBudget}`);
 }
 
@@ -1720,6 +1728,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       if (at < 0) throw new Error(`${name} is missing from src/14-forms.js`);
       vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
     }
+    vm.runInContext(studioParsePhoneSrc, box);
     vm.runInContext(adsStudio, box);
   } catch (error) { loadError = String(error && error.message || error); }
   const run = code => { try { return vm.runInContext(code, box); } catch (error) { return `THREW ${error && error.message}`; } };
@@ -2248,6 +2257,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   try {
     const at = forms.indexOf('function normalizeDigitsAscii(');
     vm.runInContext(forms.slice(at, forms.indexOf('\n}\n', at) + 2), box);
+    vm.runInContext(studioParsePhoneSrc, box);
     vm.runInContext(adsStudio, box);
     vm.runInContext(`
       var __calls = [];
@@ -7946,6 +7956,10 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     loginHelp.includes('data-testid="studio-login-help"') && loginHelp.includes(`<a ${termsLink} data-testid="studio-login-terms" class="font-bold text-indigo-600 dark:text-indigo-300 hover:underline" target="_blank" rel="noopener noreferrer">Customer terms</a>`)
       && loginHelpAr.includes('data-testid="studio-login-terms"') && loginHelpAr.includes('>شروط العملاء</a>'),
     read('privacy.html').includes('<h2 id="terms">'),
+    // Review loop r4 BP n=43: an Arabic reader lands on the Arabic terms (#terms-ar), never the English section
+    read('privacy.html').includes('<h2 id="terms-ar">')
+      && [accountAr, helpContactAr, loginHelpAr].every(out => out.includes('href="/privacy#terms-ar"') && !out.includes(termsLink))
+      && [accountEn, helpContact, loginHelp].every(out => !out.includes('#terms-ar')),
     // the login help line is drawn by 15r (lazy studio.js), so the link costs no startup bytes: the budget holds and 12-views only keeps its hook
     fs.statSync(path.join(ROOT, 'script.js')).size <= 2516582 && !views.includes('/privacy#terms') && views.includes(`<div id="studio-login-help">\${typeof renderStudioLoginHelp === 'function' ? renderStudioLoginHelp() : ''}</div>`),
     ['studio.js', 'www/studio.js'].every(file => { const built = read(file); return built.includes('data-testid="studio-account-terms"') && built.includes('data-testid="studio-login-terms"') && built.includes('data-testid="studio-help-terms-link"'); })
@@ -8152,6 +8166,18 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     && privacy.includes('including wallet top-ups, payment confirmations and receipt settlements, follow the retention setting')
     && privacy.includes('ومنها شحن المحفظة وتأكيد المدفوعات وتسوية الإيصالات، لمدة الاحتفاظ نفسها'), keptProblems.join('; '));
   check('privacy page covers Ads Studio comment processing', privacy.includes('Ads Studio') && privacy.includes('comment text'));
+  // Review loop r4 BP n=42 (TASKS.md P0-12): "Information we collect" itself (not the draft terms after it) names the
+  // optional WhatsApp number with its consent and removal, the help tickets with the team's answers and the TikTok handle,
+  // in English and in Arabic.
+  const collectedEn = privacy.slice(privacy.indexOf('<h2>Information we collect</h2>'), privacy.indexOf('<h2>How your information is used</h2>'));
+  const collectedAr = privacy.slice(privacy.indexOf('<h2>المعلومات التي نجمعها</h2>'), privacy.indexOf('<h2>كيف نستخدم معلوماتك</h2>'));
+  check('privacy page names the WhatsApp number, help tickets and TikTok handles where it lists what is collected (EN and AR)',
+    collectedEn.length > 200 && collectedAr.length > 200
+      && ['optional WhatsApp number', 'agree', 'remove it at any time', 'anonymised', 'Help tickets', "team's answers", 'TikTok handle']
+        .every(words => collectedEn.includes(words))
+      && ['رقم واتساب الاختياري', 'ووافقت', 'حذفه متى شئت', 'إخفاء هوية الحساب', 'تذاكر المساعدة', 'ردود الفريق', 'تيك توك']
+        .every(words => collectedAr.includes(words)),
+    `en ${collectedEn.length} ar ${collectedAr.length}`);
 }
 
 if (failures.length) {

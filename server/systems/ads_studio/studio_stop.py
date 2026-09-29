@@ -68,6 +68,9 @@ given), only when the customer saved it with consent (studio_profile.py), else 4
 reviewer reaches only a customer with a request the team can see or a ticket that is not admin-only,
 and never an admin-only ticket (404 UNKNOWN_CUSTOMER, as for an unknown id); admins reach every
 customer. Each number handed out is audited ``contact_link`` (kept forever) without the number.
+``DELETE`` on the same path (admins only, from the Albayan site itself) removes the customer's number
+and consent when they ask in a ticket (the Account screen that removes it is v2 only), audited
+``studio_profile`` "removed" without the number.
 
 **Team desk in use (P3-20).** ``desk_counts(conn)`` is the ONE source of the desk's numbers: open
 queue rows (``stopRequests``), tickets waiting for the team (``openTickets``, status open, with
@@ -115,7 +118,8 @@ from .studio_diagnostics import parse_time
 from .studio_errors import error_code, studio_error
 from .studio_jobs import ALERTS_TYPE, _day_hours, _zone, raise_alert
 from .studio_privacy import redact_staff_identity
-from .studio_profile import profile_id, profile_view
+from .studio_profile import AUDIT_ACTION as PROFILE_AUDIT_ACTION
+from .studio_profile import profile_id, profile_view, save_profile
 from .studio_results import (
     PAUSED_STATUSES,
     REVIEW_STATUSES,
@@ -144,6 +148,7 @@ AUDIT_STOP_REQUEST = "stop_request"
 AUDIT_CONTACT_LINK = "contact_link"
 PULSE_READS_PER_MINUTE = 30
 CONTACT_READS_PER_MINUTE = 20
+CONTACT_REMOVALS_PER_MINUTE = 10
 PAYMENTS_CACHE_SECONDS = 60
 ALERTS_WINDOW = timedelta(hours=24)
 # Meta statuses that mean "not delivering, and not about to": every ad paused, deleted or archived.
@@ -861,5 +866,37 @@ def create_studio_desk_router(
             "relatedType": related_type or None,
             "relatedId": related_id or None,
         }
+
+    @router.delete("/staff/customers/{customer_id}/contact")
+    def remove_customer_contact(
+        customer_id: str,
+        request: Request,
+        user: dict[str, Any] = Depends(current_user_dependency),
+    ):
+        """Admins only: removes a customer's WhatsApp number and its consent when the customer asks (a
+        ticket), for example a customer back on the classic layout. The same write as the owner's
+        removal (studio_profile.save_profile), audited ``studio_profile`` "removed" by the admin,
+        never with the number. Repeating it changes nothing."""
+        same_origin(request)
+        if not require_staff(user):
+            studio_error(403, "ADMIN_ONLY", "Only an admin can use this")
+        rate_limit(user, "staff-contact-remove", CONTACT_REMOVALS_PER_MINUTE)
+        try:
+            customer_id = ctx["validate_entity_id"](customer_id)
+        except HTTPException:
+            studio_error(404, "UNKNOWN_CUSTOMER", "No such customer for the team")
+        with db_conn() as conn:
+            if not user_exists(conn, customer_id):
+                studio_error(404, "UNKNOWN_CUSTOMER", "No such customer for the team")
+        actor_id = str(user.get("id") or "")
+
+        def audit_removal(conn: Any, row_id: str, change: str) -> None:
+            ctx["audit"](
+                actor_id, PROFILE_AUDIT_ACTION, STUDIO_PROFILES_TYPE, row_id,
+                f"WhatsApp number {change} by the team", {"whatsapp": change, "customerId": customer_id}, conn=conn,
+            )
+
+        view = save_profile(customer_id, None, audit=audit_removal)
+        return {"customerId": customer_id, "whatsapp": view["whatsappNumber"]}
 
     return router

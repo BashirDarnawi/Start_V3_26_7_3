@@ -1115,10 +1115,10 @@ function renderStudioHelpContact() {
 }
 
 // The customer terms (P5-07): the terms section of the privacy page, at the end of the contact card
-// in the v2 Help screen and the classic help tab alike.
+// in the v2 Help screen and the classic help tab alike (an Arabic reader gets the Arabic terms, #terms-ar).
 function renderStudioHelpTerms() {
   return `
-            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#terms" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
+            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
 }
 
 function studioHelpRenderView(view) {
@@ -1142,8 +1142,32 @@ function renderStudioHelpClassic() {
   studioHelpScope();
   const view = studioHelpViewOf(null);
   return `
-    <div class="studio-help studio-help-classic" data-testid="studio-help" data-view="${studioEsc(view.view)}" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">${studioHelpRenderView(view)}
+    <div class="studio-help studio-help-classic" data-testid="studio-help" data-view="${studioEsc(view.view)}" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">${studioHelpRenderView(view)}${view.view === 'list' ? renderStudioHelpClassicWhatsapp() : ''}
     </div>`;
+}
+
+// The Account screen is v2 only: a customer back on the classic layout still sees the WhatsApp number
+// saved there with consent and can remove it (the Account screen's own read, sheet and PUT, 15m).
+function renderStudioHelpClassicWhatsapp() {
+  if (typeof studioAccountLoad !== 'function' || !studioHelpServer()) return '';
+  studioAccountScope();
+  const account = _studioAccount;
+  if (!account.profile && !account.error && !account.loading) studioAccountLoad().then(() => studioHelpRedraw());
+  const number = account.profile ? account.profile.whatsappNumber : '';
+  if (!number) return '';
+  return `
+          <section class="studio-help-card" data-testid="studio-help-whatsapp" aria-labelledby="studio-help-whatsapp-title">
+            <h2 id="studio-help-whatsapp-title" class="studio-help-h2">${studioEsc(adsStudioText('Your WhatsApp number', 'رقم واتساب الخاص بك'))}</h2>
+            <p class="studio-help-note" data-testid="studio-help-whatsapp-number">${studioLtr(number)}</p>
+            <p class="studio-help-note">${studioEsc(adsStudioText('You allowed our team to contact you on this number about your requests and payments. You can remove it at any time.', 'سمحت لفريقنا بالتواصل معك على هذا الرقم بشأن طلباتك ودفعاتك. يمكنك حذفه في أي وقت.'))}</p>
+            <div class="studio-help-actions">
+              <button type="button" class="studio-v2-action studio-help-small studio-v2-wallet-danger" data-testid="studio-help-whatsapp-remove" onclick="studioHelpWhatsappRemove()"${account.saving ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('trash-2')}<span>${studioEsc(adsStudioText('Remove the number', 'احذف الرقم'))}</span></button>
+            </div>
+          </section>`;
+}
+
+function studioHelpWhatsappRemove() {
+  if (typeof studioAccountAskRemove === 'function') studioAccountAskRemove(() => studioHelpRedraw());
 }
 
 if (typeof studioV2RegisterScreen === 'function') studioV2RegisterScreen('help', renderStudioHelpBody);
@@ -1783,6 +1807,41 @@ function studioStaffContact(id) {
   return promise;
 }
 
+// Admins only: remove the customer's WhatsApp number when they ask in the ticket (DELETE on the same
+// contact route, audited; the customer's Account screen is v2 only). Confirmed in an in-page sheet.
+function studioStaffRemoveContact(id) {
+  const ticketId = String(id || '');
+  const ticket = studioStaffThreadSlot(ticketId).ticket;
+  const entry = _studioStaff.contacts.get(ticketId);
+  if (!ticket || !ticket.ownerId || !entry || !entry.url || entry.loading || typeof studioWalletSheet !== 'function'
+    || typeof isCurrentUserAdmin !== 'function' || !isCurrentUserAdmin()) return;
+  studioWalletSheet({
+    testid: 'studio-staff-whatsapp-remove-sheet',
+    title: adsStudioText("Remove the customer's WhatsApp number?", 'حذف رقم واتساب العميل؟'),
+    text: adsStudioText('Do this only when the customer asks. The team can no longer message them there; they can add it again themselves.', 'افعل ذلك فقط عندما يطلبه العميل. لن يتمكن الفريق من مراسلته عليه بعد الآن، ويمكنه إضافته مجدداً بنفسه.'),
+    confirm: adsStudioText('Remove the number', 'احذف الرقم'),
+    cancel: adsStudioText('Keep it', 'أبقِه'),
+    danger: true,
+    onConfirm: () => {
+      const generation = _studioStaff.generation;
+      entry.loading = studioApi(`/api/studio/staff/customers/${encodeURIComponent(ticket.ownerId)}/contact`, { method: 'DELETE' }).then(() => {
+        if (generation !== _studioStaff.generation) return;
+        entry.url = '';
+        entry.error = adsStudioText('The number was removed.', 'حُذف الرقم.');
+        studioHelpNotify(true, adsStudioText('WhatsApp number removed', 'حُذف رقم واتساب'), adsStudioText('The team can no longer message this customer there.', 'لن يراسل الفريق هذا العميل عليه بعد الآن.'));
+      }, error => {
+        if (generation !== _studioStaff.generation) return;
+        studioHelpNotify(false, adsStudioText('Not done', 'لم يتم'), studioHelpErrorText(error, 'action'));
+      }).finally(() => {
+        if (generation !== _studioStaff.generation) return;
+        entry.loading = null;
+        studioHelpRedraw();
+      });
+      studioHelpRedraw();
+    }
+  });
+}
+
 function renderStudioStaffThread(id) {
   const slot = studioStaffThreadSlot(id);
   const ticket = slot.ticket;
@@ -1797,6 +1856,9 @@ function renderStudioStaffThread(id) {
   const statusButton = (status, label, testId) => (ticket.status === status ? '' : `<button type="button" class="studio-v2-action studio-help-small" data-testid="${testId}" onclick="studioStaffStatus('${id}', '${status}')"${busy ? ' disabled aria-busy="true"' : ''}>${studioEsc(label)}</button>`);
   const contactHtml = contact.url
     ? `<a class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp-link" href="${studioEsc(contact.url)}" target="_blank" rel="noopener noreferrer">${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Open WhatsApp', 'افتح واتساب'))}</span></a>`
+      + (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin()
+        ? `<button type="button" class="studio-v2-action studio-help-small studio-v2-wallet-danger" data-testid="studio-staff-whatsapp-remove" onclick="studioStaffRemoveContact('${id}')"${contact.loading ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('trash-2')}<span>${studioEsc(adsStudioText('Remove the number', 'احذف الرقم'))}</span></button>`
+        : '')
     : `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp" onclick="studioStaffContact('${id}')"${contact.loading ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Message on WhatsApp', 'راسل على واتساب'))}</span></button>`;
   // A TikTok request (P5-02) moves through the team's steps (Start / Done / Decline, each with a note for the
   // customer, 15r). While it is open or in progress the plain Resolve is hidden: the server would end the

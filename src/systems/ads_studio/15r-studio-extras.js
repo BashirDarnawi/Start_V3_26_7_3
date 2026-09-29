@@ -839,7 +839,8 @@ function renderStudioLoginHelp() {
   const lead = isAr ? 'عميل جديد أو نسيت كلمة المرور؟' : 'New customer or forgot your password?';
   const tail = parts.length ? `${parts.join(' ')}.` : studioEsc(isAr ? 'تواصل مع فريق البيان.' : 'Contact the Albayan team.');
   // The customer terms (P5-07): the terms section of the privacy page, on the same line (no startup bytes: this file draws the line).
-  const terms = `<a href="/privacy#terms" data-testid="studio-login-terms" class="font-bold text-indigo-600 dark:text-indigo-300 hover:underline" target="_blank" rel="noopener noreferrer">${studioEsc(isAr ? 'شروط العملاء' : 'Customer terms')}</a>`;
+  // An Arabic reader lands on the Arabic terms (#terms-ar), not the English ones.
+  const terms = `<a href="/privacy#${isAr ? 'terms-ar' : 'terms'}" data-testid="studio-login-terms" class="font-bold text-indigo-600 dark:text-indigo-300 hover:underline" target="_blank" rel="noopener noreferrer">${studioEsc(isAr ? 'شروط العملاء' : 'Customer terms')}</a>`;
   return `<p class="mt-3 text-sm leading-relaxed text-slate-500 dark:text-slate-400" data-testid="studio-login-help" data-contact="${contact && (contact.whatsapp || contact.phone) ? '1' : '0'}">${studioEsc(lead)} ${tail} ${terms}</p>`;
 }
 

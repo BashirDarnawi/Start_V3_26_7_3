@@ -1290,7 +1290,7 @@ function renderStudioAccountScreen() {
                 ${studioWalletIcon('shield-check')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Privacy', 'الخصوصية'))}</span>
               </a>
-              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#terms" target="_blank" rel="noopener">
+              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
                 ${studioWalletIcon('scroll-text')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
               </a>
@@ -1427,7 +1427,8 @@ function studioAccountSave() {
   studioAccountPut(number);
 }
 
-function studioAccountAskRemove() {
+// afterRemove: the classic help tab (15n) draws itself again when the removal is done.
+function studioAccountAskRemove(afterRemove) {
   const account = _studioAccount;
   if (account.saving || !account.profile || !account.profile.whatsappNumber) return;
   studioWalletSheet({
@@ -1437,6 +1438,6 @@ function studioAccountAskRemove() {
     confirm: adsStudioText('Remove the number', 'احذف الرقم'),
     cancel: adsStudioText('Keep it', 'أبقِه'),
     danger: true,
-    onConfirm: () => studioAccountPut(null)
+    onConfirm: () => studioAccountPut(null).then(ok => { if (typeof afterRemove === 'function') afterRemove(ok); })
   });
 }

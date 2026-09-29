@@ -25,7 +25,7 @@
 1. **حسابك:** اسمك وبريدك الإلكتروني (ينشئهما موظف البيان لك).
 2. **طلبات الإعلان:** النصوص والصور والرابط والاستهداف والميزانية والتواريخ وملاحظاتك. تبقى في سجلاتنا مع أرقام الصرف بعد انتهاء الإعلان.
 3. **المحفظة:** حركات الرصيد وطلبات الشحن، بما فيها **صورة إيصال التحويل** التي ترفقها.
-4. **رقم واتساب (اختياري):** يُحفظ **فقط إذا كتبته أنت ووافقت** صراحة داخل التطبيق، ولا يراه الفريق إلا عبر رابط مسجَّل؛ يمكنك حذفه متى شئت من شاشة «حسابي».
+4. **رقم واتساب (اختياري):** يُحفظ **فقط إذا كتبته أنت ووافقت** صراحة داخل التطبيق، ولا يراه الفريق إلا عبر رابط مسجَّل؛ يمكنك حذفه متى شئت من شاشة «حسابي» (وفي الشكل القديم للاستوديو من تبويب «المساعدة»)، أو اطلب حذفه في تذكرة.
 5. **تذاكر المساعدة:** ما تكتبه فيها وردود الفريق، ومعرّف حساب تيك توك إن طلبت خدمة تيك توك.
 6. **صفحاتك المرتبطة:** إذا فعّلت الردود التلقائية، يعالج البيان التعليقات المكتوبة على صفحتك: معرّف صاحب التعليق ونص تعليقه لاختيار الرد وإرساله، ويُحفظ سجل بالردود (معرّف صاحب التعليق ورقم التعليق، لا نص التعليق).
 7. **أرقام للتشغيل:** يرى المالك أعداداً وأوقاتاً فقط (كم طلباً ينتظر، كم استغرق الرد) بلا أسماء.
@@ -102,7 +102,7 @@ We use the data of your existing Albayan account and ask for nothing new except 
 1. **Your account:** your name and e-mail address (an Albayan staff member creates them for you).
 2. **Ad requests:** texts, photos, link, targeting, budget, dates and your notes. They stay in our records with the spend figures after the ad ends.
 3. **Wallet:** balance movements and top-up requests, including the **transfer-receipt photo** you attach.
-4. **WhatsApp number (optional):** stored **only if you type it and explicitly agree** inside the app; the team reaches it only through an audited link; you can remove it at any time from the Account screen.
+4. **WhatsApp number (optional):** stored **only if you type it and explicitly agree** inside the app; the team reaches it only through an audited link; you can remove it at any time from the Account screen (in the classic layout, from the Help tab), or ask us to remove it in a ticket.
 5. **Help tickets:** what you write and the team's answers, and your TikTok handle if you ask for the TikTok service.
 6. **Your linked pages:** if you switch on automatic replies, Albayan processes the comments written on your page: the commenter's identifier and the comment text are used to choose and send the reply, and a reply log is kept (commenter identifier and comment id, not the comment text).
 7. **Operating numbers:** the owner sees counts and times only (how many requests are waiting, how long an answer took), without names.

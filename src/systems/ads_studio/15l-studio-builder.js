@@ -583,7 +583,7 @@ function studioBuilderDestination(raw) {
     const phone = studioParsePhone(text);
     return phone || null;
   }
-  return !/\s/.test(text) && text.length <= 500 && adsStudioIsValidDestination(text) ? text : null;
+  return !/\s/.test(text) && text.length <= ADS_STUDIO_DESTINATION_MAX && adsStudioIsValidDestination(text) ? text : null;
 }
 
 function studioBuilderWhole(raw, min, max) {
@@ -1053,7 +1053,7 @@ function studioBuilderInput(field, input) {
     case 'pageName': d.pageName = value.slice(0, 160); break;
     case 'text': d.primaryText = value.slice(0, 2200); studioBuilderPaintCount(); break;
     case 'headline': d.headline = value.slice(0, 255); break;
-    case 'destination': d.destination = value.slice(0, 500); break;
+    case 'destination': d.destination = value.slice(0, ADS_STUDIO_DESTINATION_MAX); break;  // the server's 2048, never 500
     case 'postLink': d.sourcePostRef = value.slice(0, 500); d.sourcePostId = ''; d.sourcePostPlatform = ''; break;
     case 'name': d.name = value.slice(0, 120); session.nameTouched = true; break;
     case 'notes': d.notes = value.slice(0, 1000); break;
@@ -1822,7 +1822,7 @@ function studioBuilderTextField(session, key, label, required) {
 function studioBuilderDestinationField(session, key) {
   const d = session.draft;
   return studioBuilderField(session, key, 'destination', studioBuilderT('Where should people go?', 'إلى أين يذهب الناس؟'),
-    studioBuilderInputHtml('studio-b-destination', 'destination', d.destination || '', { maxlength: 500, dir: 'ltr', inputmode: 'url', placeholder: 'https://… · 091 234 5678' }),
+    studioBuilderInputHtml('studio-b-destination', 'destination', d.destination || '', { maxlength: ADS_STUDIO_DESTINATION_MAX, dir: 'ltr', inputmode: 'url', placeholder: 'https://… · 091 234 5678' }),
     { forId: 'studio-b-destination', hint: studioBuilderT('A website, WhatsApp or Messenger link (https://…), or a phone number.', 'رابط موقع أو واتساب أو ماسنجر (https://…) أو رقم هاتف.') });
 }
 

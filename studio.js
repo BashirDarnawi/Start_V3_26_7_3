@@ -78,6 +78,7 @@ function resetAdsStudioSessionState() {
   _adsStudioMetaAccounts.state = '';
   _adsStudioMetaAccounts.list = [];
   _adsStudioBudgetTyped = '';
+  _adsStudioChargeDraft = { forUser: '', currency: 'USD', amount: '' };
   resetAdsStudioResults();
   if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
   resetAdsStudioLimits();
@@ -2377,7 +2378,7 @@ function renderAdsStudioBoostBasicsStep() {
     <div id="ads-studio-post-picker" class="space-y-3" aria-live="polite">${renderAdsStudioPostPickerBody()}</div>
     <div id="ads-studio-post-link" class="${adsStudioShowPostLinkField(d) ? '' : 'hidden'}"><label class="block text-sm font-bold mb-2">${isAr ? 'رابط المنشور' : 'Link to your post'}</label><input type="url" maxlength="500" value="${Security.escapeHtml(d.sourcePostRef || '')}" id="ads-studio-field-sourcePostRef" oninput="adsStudioSetDraftField(\'sourcePostRef\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://www.facebook.com/..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'افتح المنشور على فيسبوك أو إنستغرام وانسخ رابطه هنا.' : 'Open the post on Facebook or Instagram and copy its link here.'}</p></div>
     <label class="touch-target flex items-start gap-3 rounded-2xl border border-slate-200 dark:border-slate-700 p-4"><input type="checkbox" ${d.autoReply ? 'checked' : ''} onchange="adsStudioToggleDraftFlag('autoReply', this.checked)" class="mt-0.5 w-5 h-5 accent-blue-600" /><span><span class="block font-bold text-slate-800 dark:text-slate-100">${isAr ? 'الرد التلقائي على الرسائل' : 'Auto-reply to messages'}</span><span class="block text-xs text-slate-500 mt-0.5">${isAr ? 'نرد تلقائياً على من يراسلك من الإعلان — اكتب نص الرد في الملاحظات.' : 'We reply automatically to people who message from this ad — put the reply text in the notes.'}</span></span></label>` : `
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'رابط صفحتك *' : 'Your Page link *'}</label><input type="url" maxlength="500" value="${Security.escapeHtml(d.destination || '')}" id="ads-studio-field-destination" oninput="adsStudioSetDraftField(\'destination\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://www.facebook.com/yourpage" /></div>`}
+    <div><label class="block text-sm font-bold mb-2">${isAr ? 'رابط صفحتك *' : 'Your Page link *'}</label><input type="url" maxlength="${ADS_STUDIO_DESTINATION_MAX}" value="${Security.escapeHtml(d.destination || '')}" id="ads-studio-field-destination" oninput="adsStudioSetDraftField(\'destination\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://www.facebook.com/yourpage" /></div>`}
     <div><label class="block text-sm font-bold mb-2">${isPost ? (isAr ? 'نص قصير للإعلان (اختياري)' : 'Short ad text (optional)') : (isAr ? 'نص قصير للإعلان *' : 'Short ad text *')}</label><textarea rows="3" maxlength="2200" id="ads-studio-field-primaryText" oninput="adsStudioSetDraftField(\'primaryText\', this.value)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اكتب الرسالة التي سيقرأها العميل...' : 'Write the message customers will see...'}">${Security.escapeHtml(d.primaryText || '')}</textarea></div>
     <div data-photo-paste-target="ads-studio" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-blue-500">
       <div class="flex flex-wrap items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isPost ? (isAr ? 'صورة من المنشور (اختياري، حتى 3)' : 'A picture of the post (optional, up to 3)') : (isAr ? 'الصور (حتى 3) *' : 'Images (up to 3) *')}</label><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span></div>
@@ -2740,7 +2741,7 @@ function renderAdsStudioCreativeStep() {
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'النص الأساسي *' : 'Primary text *'}</label><textarea rows="5" maxlength="2200" id="ads-studio-field-primaryText" oninput="adsStudioSetDraftField(\'primaryText\', this.value); updateAdsStudioCreativeCount(this)" class="glass-input w-full rounded-xl px-4 py-3" placeholder="${isAr ? 'اكتب الرسالة التي سيقرأها العميل...' : 'Write the message customers will see...'}">${Security.escapeHtml(d.primaryText || '')}</textarea><div id="ads-studio-copy-count" class="text-end text-xs text-slate-400">${String(d.primaryText || '').length}/2200</div></div>
     <div class="grid gap-4 sm:grid-cols-2"><div><label class="block text-sm font-bold mb-2">${isAr ? 'العنوان' : 'Headline'}</label><input type="text" maxlength="255" value="${Security.escapeHtml(d.headline || '')}" id="ads-studio-field-headline" oninput="adsStudioSetDraftField(\'headline\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div><div><label class="block text-sm font-bold mb-2">${isAr ? 'زر الدعوة' : 'Call-to-action'}</label><select onchange="adsStudioSetDraftField('callToAction', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4">${ADS_STUDIO_CTA.map(([en, ar]) => `<option value="${en}" ${d.callToAction === en ? 'selected' : ''}>${isAr ? ar : en}</option>`).join('')}</select></div></div>
     <div><label class="block text-sm font-bold mb-2">${isAr ? 'الوصف القصير' : 'Short description'}</label><input type="text" maxlength="500" value="${Security.escapeHtml(d.description || '')}" id="ads-studio-field-description" oninput="adsStudioSetDraftField(\'description\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" /></div>
-    <div><label class="block text-sm font-bold mb-2">${isAr ? 'الرابط أو رقم واتساب *' : 'Website, WhatsApp or Messenger destination *'}</label><input type="text" maxlength="500" value="${Security.escapeHtml(d.destination || '')}" id="ads-studio-field-destination" oninput="adsStudioSetDraftField(\'destination\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://... or +218..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'سنراجع الرابط قبل إطلاق الإعلان.' : 'The destination is checked during review.'}</p></div>
+    <div><label class="block text-sm font-bold mb-2">${isAr ? 'الرابط أو رقم واتساب *' : 'Website, WhatsApp or Messenger destination *'}</label><input type="text" maxlength="${ADS_STUDIO_DESTINATION_MAX}" value="${Security.escapeHtml(d.destination || '')}" id="ads-studio-field-destination" oninput="adsStudioSetDraftField(\'destination\', this.value)" class="glass-input min-h-12 w-full rounded-xl px-4" placeholder="https://... or +218..." /><p class="mt-2 text-xs text-slate-500">${isAr ? 'سنراجع الرابط قبل إطلاق الإعلان.' : 'The destination is checked during review.'}</p></div>
     <div data-photo-paste-target="ads-studio" tabindex="0" class="rounded-2xl border border-slate-200 dark:border-slate-700 p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"><div class="flex flex-wrap items-center justify-between gap-3 mb-2"><label class="block text-sm font-bold">${isAr ? 'الصور (حتى 3)' : 'Images (up to 3)'}</label><div class="flex flex-wrap items-center gap-2"><span class="text-xs text-slate-500">${(d.creativeImages || []).length}/3</span><button type="button" onclick="takeNativePhoto('ads-studio')" class="min-h-11 px-3 rounded-xl border border-blue-200 dark:border-blue-800 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 flex items-center gap-1.5"><i data-lucide="camera" class="w-3.5 h-3.5"></i>${isAr ? 'الكاميرا' : 'Camera'}</button><button type="button" onclick="pastePhotoFromClipboard('ads-studio')" class="min-h-11 px-3 rounded-xl border border-blue-200 dark:border-blue-800 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 flex items-center gap-1.5"><i data-lucide="clipboard-paste" class="w-3.5 h-3.5"></i>${isAr ? 'لصق صورة' : 'Paste photo'}</button></div></div><div id="ads-studio-creative-preview">${renderAdsStudioCreativePreview()}</div><p class="mt-2 text-xs text-slate-500">${isAr ? 'انسخ صورة واضغط Ctrl+V هنا. على iPhone اختر JPEG أو إعداد «الأكثر توافقاً»؛ صور HEIC غير مدعومة حالياً.' : 'Copy an image and press Ctrl+V here. On iPhone, choose JPEG / Most Compatible; HEIC is not supported yet.'}</p><input id="ads-studio-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple class="hidden" onchange="onAdsStudioCreativeSelected(this)" /></div>
   </div>`;
 }
@@ -2838,11 +2839,24 @@ function adsStudioDataUrlDecodedBytes(value) {
   return Math.max(0, Math.floor(payload.length * 3 / 4) - padding);
 }
 
+// The server's length limit for a destination (ad_campaign_fields.py): a longer link is never cut at 500.
+const ADS_STUDIO_DESTINATION_MAX = 2048;
+
+// A phone-shaped destination read with the ONE phone rule (studioParsePhone, 15g), as the v2 builder
+// and the server read it: '91 234 5678' is +218912345678, never +912345678, and other countries need
+// their + code. '' = phone-shaped but not a phone number; null = not phone-shaped (a link).
+function adsStudioDestinationPhone(value) {
+  const digits = normalizeDigitsAscii(String(value || '')).replace(/[\s().\-\u200e\u200f]/g, '');
+  return /^(\+|00)?\d{6,20}$/.test(digits) ? studioParsePhone(String(value || '')) : null;
+}
+
 function adsStudioIsValidDestination(value) {
   const raw = String(value || '').trim();
-  const compactPhone = raw.replace(/[\s().-]/g, '');
-  if (/^\+?[1-9][0-9]{7,14}$/.test(compactPhone)) return true;
-  if (!raw || /\s/.test(raw) || raw.includes('@')) return false;
+  const phone = adsStudioDestinationPhone(raw);
+  if (phone !== null) return !!phone;
+  // No '@' test: the anchored host below already refuses userinfo (https://a.com@evil.com), and a
+  // Google Maps place or a TikTok/YouTube profile (https://www.tiktok.com/@shop) is a real link.
+  if (!raw || /\s/.test(raw)) return false;
   const match = raw.match(/^https:\/\/([A-Za-z0-9.-]+)(?::[0-9]{1,5})?(?:[/?#].*)?$/i);
   return !!match && match[1].includes('.');
 }
@@ -3319,8 +3333,11 @@ function sanitizedAdsStudioDraft() {
   const boostType = ['boost_post', 'boost_page'].includes(String(d.boostType || '')) ? String(d.boostType) : '';
   // A half-typed post link must never brick "Save draft": only a link the
   // server would accept is sent; anything else stays local until fixed.
-  const sourcePostRef = adsStudioIsValidBoostRef(d.sourcePostRef) ? text(d.sourcePostRef, 500) : '';
-  let destination = text(d.destination, 500);
+  // Links go trimmed, never through text(): its event-handler strip ate "phone=" and "utm_content="
+  // (the server removes < and > itself). A phone number goes as +E.164 by the one phone rule, like v2.
+  const sourcePostRef = adsStudioIsValidBoostRef(d.sourcePostRef) ? String(d.sourcePostRef).trim().slice(0, 500) : '';
+  const typedDestination = String(d.destination || '').trim().slice(0, ADS_STUDIO_DESTINATION_MAX);
+  let destination = adsStudioDestinationPhone(typedDestination) || typedDestination;
   // Boosted posts open the post itself unless a destination was typed.
   if (!destination && boostType === 'boost_post' && sourcePostRef) destination = sourcePostRef;
   // durationDays (P1-11) only when it is a whole number within the limits: a half-typed box never
@@ -3334,12 +3351,17 @@ function sanitizedAdsStudioDraft() {
     ? { sourcePostId: postId, sourcePostPlatform: postId && ['fb', 'ig'].includes(String(d.sourcePostPlatform || '')) ? String(d.sourcePostPlatform) : '' }
     : {};
   const connectedAssetId = text(d.connectedAssetId, 80);
+  // A request made in the new studio keeps its goal (goalDetail), which the server checks against the
+  // objective (T9). These screens have no goal control: another objective picked here clears the goal.
+  const objective = text(d.objective, 40);
+  const goal = d.goalDetail && typeof studioBuilderGoal === 'function' ? studioBuilderGoal(String(d.goalDetail)) : null;
   return {
     ...durationDays,
     ...pickedPost,
     ...(connectedAssetId ? { connectedAssetId } : {}),
+    ...(goal && goal.objective !== objective ? { goalDetail: '' } : {}),
     name: text(d.name, 120),
-    objective: text(d.objective, 40),
+    objective,
     platforms: list(d.platforms, 3),
     pageName: text(d.pageName, 160),
     primaryText: text(d.primaryText, 2200),
@@ -3788,6 +3810,16 @@ let _adsStudioPayMethods = null;
 let _adsStudioPayRate = null;
 // Which method the customer tapped — survives background re-renders.
 let _adsStudioChargeMethodSel = '';
+// The Add-money currency and typed amount of one user: the form is drawn from them, so a full render
+// (the language switch skips the partial render's typed-field restore) keeps 500 LYD instead of
+// silently showing an empty box on USD.
+let _adsStudioChargeDraft = { forUser: '', currency: 'USD', amount: '' };
+
+function adsStudioChargeDraft() {
+  const uid = String(state.currentUser?.id || '');
+  if (_adsStudioChargeDraft.forUser !== uid) _adsStudioChargeDraft = { forUser: uid, currency: 'USD', amount: '' };
+  return _adsStudioChargeDraft;
+}
 
 function resetAdsStudioWalletCache() {
   _adsStudioWalletMine = null;
@@ -3813,12 +3845,19 @@ function _adsStudioUsdToLydRate() {
 // Runs on every key with the raw text; the charge box is cleaned (sanitizeMoneyInput) only on change,
 // so "1,500" typed key by key stays fifteen hundred (see adsStudioOnBudgetInput).
 function adsStudioUpdateLydPreview() {
+  const draft = adsStudioChargeDraft();
+  const amountBox = document.getElementById('ads-studio-charge-amount');
+  const currencyBox = document.getElementById('ads-studio-charge-currency');
+  if (amountBox) draft.amount = String(amountBox.value || '').slice(0, 40);
+  if (currencyBox) draft.currency = String(currencyBox.value || 'USD') === 'LYD' ? 'LYD' : 'USD';
   const el = document.getElementById('ads-studio-lyd-preview');
-  if (!el) return;
-  const usd = adsStudioParseMoneyMinor(document.getElementById('ads-studio-charge-amount')?.value || '') / 100;  // '٥٠' is 50
+  if (el) el.textContent = adsStudioLydPreviewText(draft.amount, draft.currency);
+}
+
+function adsStudioLydPreviewText(amount, currency) {
+  const usd = adsStudioParseMoneyMinor(amount || '') / 100;  // '٥٠' is 50
   const rate = _adsStudioUsdToLydRate();
-  const lydMode = String(document.getElementById('ads-studio-charge-currency')?.value || 'USD') === 'LYD';
-  el.textContent = (!lydMode && Number.isFinite(usd) && usd > 0 && rate > 0)
+  return (currency !== 'LYD' && Number.isFinite(usd) && usd > 0 && rate > 0)
     ? `≈ ${(Math.ceil(Math.round(usd * 100) * Math.round(rate * 10000) / 10000) / 100).toFixed(2)} LYD @ ${rate}`
     : '';
 }
@@ -3897,6 +3936,7 @@ async function adsStudioCreateWalletCharge() {
   try {
     const created = await apiWalletPaymentRequestCreate(amountMinor, method, adsStudioChargeIdemKey(amountMinor, `${method}|${currency}`), currency);
     _adsStudioChargeIdem = { fingerprint: '', key: '' };
+    adsStudioChargeDraft().amount = '';  // a later redraw never offers the same amount again
     const d = created?.data || {};
     const entry = _adsStudioPayMethod(d.method);
     const template = entry && entry.instructions ? String(adsStudioIsAr() ? entry.instructions.ar : entry.instructions.en) : '';
@@ -4070,6 +4110,7 @@ function renderAdsStudioWallet() {
   const mine = Array.isArray(_adsStudioWalletMine) ? _adsStudioWalletMine : [];
   const pendingAll = Array.isArray(_adsStudioWalletPendingAll) ? _adsStudioWalletPendingAll : [];
   const uid = String(state.currentUser?.id || '');
+  const charge = adsStudioChargeDraft();
   const history = (Array.isArray(state.walletTransactions) ? state.walletTransactions : [])
     .filter(tx => tx && !tx._deleted && String(tx.currency || '').toUpperCase() === 'USD'
       && (String(tx.toUserId || '') === uid || String(tx.fromUserId || '') === uid))
@@ -4087,12 +4128,12 @@ function renderAdsStudioWallet() {
         <p class="text-xs text-slate-500 mb-4">${adsStudioText('Choose how you pay. You get a reference code; the wallet fills up the moment the payment is confirmed — automatically once the payment company is connected.', 'اختر طريقة الدفع. ستحصل على رمز مرجعي، وتتعبأ المحفظة فور تأكيد الدفع — تلقائياً بعد ربط شركة الدفع.')}</p>
         <div class="mb-4">
           <label class="text-xs text-slate-500 block mb-1">${adsStudioText('Amount', 'المبلغ')}
-            <select id="ads-studio-charge-currency" onchange="adsStudioUpdateLydPreview()" class="ml-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200"><option value="USD">${adsStudioText('USD (campaigns)', 'دولار (الحملات)')}</option><option value="LYD">${adsStudioText('LYD (subscription plans)', 'دينار (باقات الاشتراك)')}</option></select>
+            <select id="ads-studio-charge-currency" onchange="adsStudioUpdateLydPreview()" class="ml-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-xs font-bold text-slate-700 dark:text-slate-200"><option value="USD">${adsStudioText('USD (campaigns)', 'دولار (الحملات)')}</option><option value="LYD"${charge.currency === 'LYD' ? ' selected' : ''}>${adsStudioText('LYD (subscription plans)', 'دينار (باقات الاشتراك)')}</option></select>
           </label>
           <div class="studio-wallet-charge-preview flex flex-wrap items-center gap-3">
-            <input id="ads-studio-charge-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="50.00" oninput="adsStudioUpdateLydPreview()" onchange="sanitizeMoneyInput(this); adsStudioUpdateLydPreview()"
+            <input id="ads-studio-charge-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="50.00" value="${Security.escapeHtml(charge.amount)}" oninput="adsStudioUpdateLydPreview()" onchange="sanitizeMoneyInput(this); adsStudioUpdateLydPreview()"
               class="w-36 px-3 py-2.5 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-white font-mono" />
-            <span id="ads-studio-lyd-preview" class="text-sm font-bold text-blue-700 dark:text-blue-300"></span>
+            <span id="ads-studio-lyd-preview" class="text-sm font-bold text-blue-700 dark:text-blue-300">${Security.escapeHtml(adsStudioLydPreviewText(charge.amount, charge.currency))}</span>
           </div>
         </div>
         ${Array.isArray(_adsStudioPayMethods) && _adsStudioPayMethods.length ? `
@@ -8874,7 +8915,7 @@ function studioBuilderDestination(raw) {
     const phone = studioParsePhone(text);
     return phone || null;
   }
-  return !/\s/.test(text) && text.length <= 500 && adsStudioIsValidDestination(text) ? text : null;
+  return !/\s/.test(text) && text.length <= ADS_STUDIO_DESTINATION_MAX && adsStudioIsValidDestination(text) ? text : null;
 }
 
 function studioBuilderWhole(raw, min, max) {
@@ -9344,7 +9385,7 @@ function studioBuilderInput(field, input) {
     case 'pageName': d.pageName = value.slice(0, 160); break;
     case 'text': d.primaryText = value.slice(0, 2200); studioBuilderPaintCount(); break;
     case 'headline': d.headline = value.slice(0, 255); break;
-    case 'destination': d.destination = value.slice(0, 500); break;
+    case 'destination': d.destination = value.slice(0, ADS_STUDIO_DESTINATION_MAX); break;  // the server's 2048, never 500
     case 'postLink': d.sourcePostRef = value.slice(0, 500); d.sourcePostId = ''; d.sourcePostPlatform = ''; break;
     case 'name': d.name = value.slice(0, 120); session.nameTouched = true; break;
     case 'notes': d.notes = value.slice(0, 1000); break;
@@ -10113,7 +10154,7 @@ function studioBuilderTextField(session, key, label, required) {
 function studioBuilderDestinationField(session, key) {
   const d = session.draft;
   return studioBuilderField(session, key, 'destination', studioBuilderT('Where should people go?', 'إلى أين يذهب الناس؟'),
-    studioBuilderInputHtml('studio-b-destination', 'destination', d.destination || '', { maxlength: 500, dir: 'ltr', inputmode: 'url', placeholder: 'https://… · 091 234 5678' }),
+    studioBuilderInputHtml('studio-b-destination', 'destination', d.destination || '', { maxlength: ADS_STUDIO_DESTINATION_MAX, dir: 'ltr', inputmode: 'url', placeholder: 'https://… · 091 234 5678' }),
     { forId: 'studio-b-destination', hint: studioBuilderT('A website, WhatsApp or Messenger link (https://…), or a phone number.', 'رابط موقع أو واتساب أو ماسنجر (https://…) أو رقم هاتف.') });
 }
 
@@ -12010,7 +12051,7 @@ function renderStudioAccountScreen() {
                 ${studioWalletIcon('shield-check')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Privacy', 'الخصوصية'))}</span>
               </a>
-              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#terms" target="_blank" rel="noopener">
+              <a class="studio-v2-row" data-testid="studio-account-terms" href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
                 ${studioWalletIcon('scroll-text')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
               </a>
@@ -12147,7 +12188,8 @@ function studioAccountSave() {
   studioAccountPut(number);
 }
 
-function studioAccountAskRemove() {
+// afterRemove: the classic help tab (15n) draws itself again when the removal is done.
+function studioAccountAskRemove(afterRemove) {
   const account = _studioAccount;
   if (account.saving || !account.profile || !account.profile.whatsappNumber) return;
   studioWalletSheet({
@@ -12157,7 +12199,7 @@ function studioAccountAskRemove() {
     confirm: adsStudioText('Remove the number', 'احذف الرقم'),
     cancel: adsStudioText('Keep it', 'أبقِه'),
     danger: true,
-    onConfirm: () => studioAccountPut(null)
+    onConfirm: () => studioAccountPut(null).then(ok => { if (typeof afterRemove === 'function') afterRemove(ok); })
   });
 }
 // ==========================================
@@ -13277,10 +13319,10 @@ function renderStudioHelpContact() {
 }
 
 // The customer terms (P5-07): the terms section of the privacy page, at the end of the contact card
-// in the v2 Help screen and the classic help tab alike.
+// in the v2 Help screen and the classic help tab alike (an Arabic reader gets the Arabic terms, #terms-ar).
 function renderStudioHelpTerms() {
   return `
-            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#terms" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
+            <p class="studio-help-note studio-help-terms" data-testid="studio-help-terms">${studioEsc(adsStudioText('The rules of the service are in the ', 'قواعد الخدمة في '))}<a href="/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener noreferrer" data-testid="studio-help-terms-link">${studioEsc(adsStudioText('customer terms', 'شروط العملاء'))}</a>${studioEsc(adsStudioText(' (privacy page).', ' (صفحة الخصوصية).'))}</p>`;
 }
 
 function studioHelpRenderView(view) {
@@ -13304,8 +13346,32 @@ function renderStudioHelpClassic() {
   studioHelpScope();
   const view = studioHelpViewOf(null);
   return `
-    <div class="studio-help studio-help-classic" data-testid="studio-help" data-view="${studioEsc(view.view)}" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">${studioHelpRenderView(view)}
+    <div class="studio-help studio-help-classic" data-testid="studio-help" data-view="${studioEsc(view.view)}" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">${studioHelpRenderView(view)}${view.view === 'list' ? renderStudioHelpClassicWhatsapp() : ''}
     </div>`;
+}
+
+// The Account screen is v2 only: a customer back on the classic layout still sees the WhatsApp number
+// saved there with consent and can remove it (the Account screen's own read, sheet and PUT, 15m).
+function renderStudioHelpClassicWhatsapp() {
+  if (typeof studioAccountLoad !== 'function' || !studioHelpServer()) return '';
+  studioAccountScope();
+  const account = _studioAccount;
+  if (!account.profile && !account.error && !account.loading) studioAccountLoad().then(() => studioHelpRedraw());
+  const number = account.profile ? account.profile.whatsappNumber : '';
+  if (!number) return '';
+  return `
+          <section class="studio-help-card" data-testid="studio-help-whatsapp" aria-labelledby="studio-help-whatsapp-title">
+            <h2 id="studio-help-whatsapp-title" class="studio-help-h2">${studioEsc(adsStudioText('Your WhatsApp number', 'رقم واتساب الخاص بك'))}</h2>
+            <p class="studio-help-note" data-testid="studio-help-whatsapp-number">${studioLtr(number)}</p>
+            <p class="studio-help-note">${studioEsc(adsStudioText('You allowed our team to contact you on this number about your requests and payments. You can remove it at any time.', 'سمحت لفريقنا بالتواصل معك على هذا الرقم بشأن طلباتك ودفعاتك. يمكنك حذفه في أي وقت.'))}</p>
+            <div class="studio-help-actions">
+              <button type="button" class="studio-v2-action studio-help-small studio-v2-wallet-danger" data-testid="studio-help-whatsapp-remove" onclick="studioHelpWhatsappRemove()"${account.saving ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('trash-2')}<span>${studioEsc(adsStudioText('Remove the number', 'احذف الرقم'))}</span></button>
+            </div>
+          </section>`;
+}
+
+function studioHelpWhatsappRemove() {
+  if (typeof studioAccountAskRemove === 'function') studioAccountAskRemove(() => studioHelpRedraw());
 }
 
 if (typeof studioV2RegisterScreen === 'function') studioV2RegisterScreen('help', renderStudioHelpBody);
@@ -13945,6 +14011,41 @@ function studioStaffContact(id) {
   return promise;
 }
 
+// Admins only: remove the customer's WhatsApp number when they ask in the ticket (DELETE on the same
+// contact route, audited; the customer's Account screen is v2 only). Confirmed in an in-page sheet.
+function studioStaffRemoveContact(id) {
+  const ticketId = String(id || '');
+  const ticket = studioStaffThreadSlot(ticketId).ticket;
+  const entry = _studioStaff.contacts.get(ticketId);
+  if (!ticket || !ticket.ownerId || !entry || !entry.url || entry.loading || typeof studioWalletSheet !== 'function'
+    || typeof isCurrentUserAdmin !== 'function' || !isCurrentUserAdmin()) return;
+  studioWalletSheet({
+    testid: 'studio-staff-whatsapp-remove-sheet',
+    title: adsStudioText("Remove the customer's WhatsApp number?", 'حذف رقم واتساب العميل؟'),
+    text: adsStudioText('Do this only when the customer asks. The team can no longer message them there; they can add it again themselves.', 'افعل ذلك فقط عندما يطلبه العميل. لن يتمكن الفريق من مراسلته عليه بعد الآن، ويمكنه إضافته مجدداً بنفسه.'),
+    confirm: adsStudioText('Remove the number', 'احذف الرقم'),
+    cancel: adsStudioText('Keep it', 'أبقِه'),
+    danger: true,
+    onConfirm: () => {
+      const generation = _studioStaff.generation;
+      entry.loading = studioApi(`/api/studio/staff/customers/${encodeURIComponent(ticket.ownerId)}/contact`, { method: 'DELETE' }).then(() => {
+        if (generation !== _studioStaff.generation) return;
+        entry.url = '';
+        entry.error = adsStudioText('The number was removed.', 'حُذف الرقم.');
+        studioHelpNotify(true, adsStudioText('WhatsApp number removed', 'حُذف رقم واتساب'), adsStudioText('The team can no longer message this customer there.', 'لن يراسل الفريق هذا العميل عليه بعد الآن.'));
+      }, error => {
+        if (generation !== _studioStaff.generation) return;
+        studioHelpNotify(false, adsStudioText('Not done', 'لم يتم'), studioHelpErrorText(error, 'action'));
+      }).finally(() => {
+        if (generation !== _studioStaff.generation) return;
+        entry.loading = null;
+        studioHelpRedraw();
+      });
+      studioHelpRedraw();
+    }
+  });
+}
+
 function renderStudioStaffThread(id) {
   const slot = studioStaffThreadSlot(id);
   const ticket = slot.ticket;
@@ -13959,6 +14060,9 @@ function renderStudioStaffThread(id) {
   const statusButton = (status, label, testId) => (ticket.status === status ? '' : `<button type="button" class="studio-v2-action studio-help-small" data-testid="${testId}" onclick="studioStaffStatus('${id}', '${status}')"${busy ? ' disabled aria-busy="true"' : ''}>${studioEsc(label)}</button>`);
   const contactHtml = contact.url
     ? `<a class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp-link" href="${studioEsc(contact.url)}" target="_blank" rel="noopener noreferrer">${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Open WhatsApp', 'افتح واتساب'))}</span></a>`
+      + (typeof isCurrentUserAdmin === 'function' && isCurrentUserAdmin()
+        ? `<button type="button" class="studio-v2-action studio-help-small studio-v2-wallet-danger" data-testid="studio-staff-whatsapp-remove" onclick="studioStaffRemoveContact('${id}')"${contact.loading ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('trash-2')}<span>${studioEsc(adsStudioText('Remove the number', 'احذف الرقم'))}</span></button>`
+        : '')
     : `<button type="button" class="studio-v2-action studio-help-small" data-testid="studio-staff-whatsapp" onclick="studioStaffContact('${id}')"${contact.loading ? ' disabled aria-busy="true"' : ''}>${studioHelpIcon('message-circle')}<span>${studioEsc(adsStudioText('Message on WhatsApp', 'راسل على واتساب'))}</span></button>`;
   // A TikTok request (P5-02) moves through the team's steps (Start / Done / Decline, each with a note for the
   // customer, 15r). While it is open or in progress the plain Resolve is hidden: the server would end the
@@ -15075,7 +15179,8 @@ function renderStudioLoginHelp() {
   const lead = isAr ? 'عميل جديد أو نسيت كلمة المرور؟' : 'New customer or forgot your password?';
   const tail = parts.length ? `${parts.join(' ')}.` : studioEsc(isAr ? 'تواصل مع فريق البيان.' : 'Contact the Albayan team.');
   // The customer terms (P5-07): the terms section of the privacy page, on the same line (no startup bytes: this file draws the line).
-  const terms = `<a href="/privacy#terms" data-testid="studio-login-terms" class="font-bold text-indigo-600 dark:text-indigo-300 hover:underline" target="_blank" rel="noopener noreferrer">${studioEsc(isAr ? 'شروط العملاء' : 'Customer terms')}</a>`;
+  // An Arabic reader lands on the Arabic terms (#terms-ar), not the English ones.
+  const terms = `<a href="/privacy#${isAr ? 'terms-ar' : 'terms'}" data-testid="studio-login-terms" class="font-bold text-indigo-600 dark:text-indigo-300 hover:underline" target="_blank" rel="noopener noreferrer">${studioEsc(isAr ? 'شروط العملاء' : 'Customer terms')}</a>`;
   return `<p class="mt-3 text-sm leading-relaxed text-slate-500 dark:text-slate-400" data-testid="studio-login-help" data-contact="${contact && (contact.whatsapp || contact.phone) ? '1' : '0'}">${studioEsc(lead)} ${tail} ${terms}</p>`;
 }
 

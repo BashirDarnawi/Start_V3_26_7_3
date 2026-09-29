@@ -87,6 +87,35 @@ async function scopeFixture(nextRole = 'Employee', nextPermissions = { receipts:
   return { ...fixture, writes, events };
 }
 
+// Albayan Studio: the lazy studio.js sources (manifest order) on top of the startup files, signed in
+// as a customer with the Ads Studio plan, server mode on and a scripted apiJson (no network).
+function studioFixture() {
+  const fixture = loadBrowserSource();
+  const { sandbox, state, run } = fixture;
+  const root = path.join(__dirname, '..');
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'src', 'manifest.json'), 'utf8'));
+  for (const file of manifest.lazy['studio.js']) run(fs.readFileSync(path.join(root, 'src', file), 'utf8'));
+  // The browser's textContent -> innerHTML escaping (this fake document has no innerHTML).
+  run('Security').escapeHtml = value => (value === null || value === undefined ? '' : String(value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'));
+  state.currentUser = { id: 'cust1', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn'] }, subscriptions: ['ad_maker'] };
+  state.users = [state.currentUser];
+  state.currentView = 'ads-studio';
+  sandbox.isServerModeEnabled = () => true;
+  const calls = [];
+  const renders = [];
+  const replies = Object.create(null);
+  sandbox.render = () => { renders.push(Date.now()); };
+  sandbox.apiJson = async (url, options = {}) => {
+    calls.push({ url, method: String(options.method || 'GET'), body: options.body });
+    const reply = replies[url];
+    if (typeof reply === 'function') return reply(options);
+    if (reply !== undefined) return reply;
+    throw new Error(`Unexpected call ${url}`);
+  };
+  return { ...fixture, calls, renders, replies };
+}
+
 async function main() {
   await test('rejected biometric challenge survives Home and immediate reopen', async () => {
     const { sandbox, native } = await nativeFixture();
@@ -1044,6 +1073,141 @@ async function main() {
       assert.deepEqual(overlays, [expected[language][0]]);
     }
   });
+  // ---- Review loop r4, batch BP: ad request form parity and the studio account
+
+  await test('r4 BP n=27: the sanitizer keeps phone= and utm_content= in links, and still strips event handlers', async () => {
+    const { run } = studioFixture();
+    const wa = 'https://api.whatsapp.com/send?phone=218912345678&utm_content=spring&conversion=1';
+    assert.equal(run(`Security.sanitizeInput(${JSON.stringify(wa)})`), wa);
+    for (const attack of ['a onclick=b', 'x" onmouseover=alert(1)', '?onerror=x', 'oonclick=nclick=']) {
+      const out = String(run(`Security.sanitizeInput(${JSON.stringify(attack)})`));
+      assert.ok(!/(^|[^A-Za-z0-9_])on[a-z]+\s*=/i.test(out), `${attack} -> ${out}`);
+    }
+    // The classic save sends the link as typed, and a stored request read back through sanitizeObject keeps it.
+    run(`_adsStudioDraft = { ...newAdsStudioDraft(), name: 'Offer', destination: ${JSON.stringify(wa)} };`);
+    assert.equal(run('sanitizedAdsStudioDraft().destination'), wa);
+    assert.equal(run(`Security.sanitizeObject({ destination: ${JSON.stringify(wa)} }).destination`), wa);
+    const post = 'https://www.facebook.com/shop/posts/1?utm_content=boost';
+    run(`_adsStudioDraft = { ...newAdsStudioDraft(), name: 'Boost', boostType: 'boost_post', destination: '', sourcePostRef: ${JSON.stringify(post)} };`);
+    const boost = JSON.parse(run('JSON.stringify(sanitizedAdsStudioDraft())'));
+    assert.equal(boost.sourcePostRef, post);
+    assert.equal(boost.destination, post);
+  });
+
+  await test('r4 BP n=28: an https link with @ in its path is a destination (the host check still refuses userinfo)', async () => {
+    const { run } = studioFixture();
+    for (const link of ['https://www.tiktok.com/@myshop', 'https://www.google.com/maps/place/Shop/@32.8872,13.1913,17z', 'https://www.youtube.com/@channel']) {
+      assert.equal(run(`adsStudioIsValidDestination(${JSON.stringify(link)})`), true, link);
+      assert.equal(run(`studioBuilderDestination(${JSON.stringify(link)})`), link, link);
+    }
+    for (const bad of ['https://a.com@evil.com', 'https://user:pw@evil.com', 'https://a.com:1@evil.com', 'http://www.tiktok.com/@shop']) {
+      assert.equal(run(`adsStudioIsValidDestination(${JSON.stringify(bad)})`), false, bad);
+    }
+  });
+
+  await test('r4 BP n=29: an objective changed in classic clears the goal of a v2 request (never refused as T9)', async () => {
+    const { run } = studioFixture();
+    run("_adsStudioDraft = { ...newAdsStudioDraft(), name: 'From v2', goalDetail: 'messages', objective: 'traffic' };");
+    const changed = JSON.parse(run('JSON.stringify(sanitizedAdsStudioDraft())'));
+    assert.equal(changed.goalDetail, '');
+    assert.equal(changed.objective, 'traffic');
+    run("_adsStudioDraft.objective = 'messages';");
+    assert.equal(run("Object.prototype.hasOwnProperty.call(sanitizedAdsStudioDraft(), 'goalDetail')"), false);
+    run("_adsStudioDraft = { ...newAdsStudioDraft(), name: 'Classic', objective: 'traffic' };");
+    assert.equal(run("Object.prototype.hasOwnProperty.call(sanitizedAdsStudioDraft(), 'goalDetail')"), false);
+  });
+
+  await test('r4 BP n=30: a link longer than 500 characters is kept whole up to the server limit (2048)', async () => {
+    const { run } = studioFixture();
+    const long = `https://shop.example.com/p?x=${'a'.repeat(600)}`;
+    assert.equal(run(`studioBuilderDestination(${JSON.stringify(long)})`), long);
+    run(`_adsStudioDraft = { ...newAdsStudioDraft(), name: 'Long', destination: ${JSON.stringify(long)} };`);
+    assert.equal(run('sanitizedAdsStudioDraft().destination'), long);
+    assert.ok(String(run('renderAdsStudioCreativeStep()')).includes('maxlength="2048" value="https://shop.example.com/p?x='));
+    const field = String(run("studioBuilderDestinationField({ draft: { destination: '' }, shown: {} }, 'content')"));
+    assert.ok(field.includes('maxlength="2048"'), field);
+    assert.equal(run(`studioBuilderDestination(${JSON.stringify(`https://shop.example.com/p?x=${'a'.repeat(2048)}`)})`), null);
+  });
+
+  await test('r4 BP n=40: a Libyan number typed without its 0 is +218 in the classic payload, and a foreign-looking one is refused', async () => {
+    const { run } = studioFixture();
+    for (const [typed, expected] of [['91 234 5678', '+218912345678'], ['92-123-4567', '+218921234567'], ['0912345678', '+218912345678'], ['+44 20 7946 0958', '+442079460958']]) {
+      assert.equal(run(`adsStudioIsValidDestination(${JSON.stringify(typed)})`), true, typed);
+      run(`_adsStudioDraft = { ...newAdsStudioDraft(), name: 'Phone', destination: ${JSON.stringify(typed)} };`);
+      assert.equal(run('sanitizedAdsStudioDraft().destination'), expected, typed);
+      assert.equal(run(`studioBuilderDestination(${JSON.stringify(typed)})`), expected, typed);
+    }
+    for (const typed of ['21 333 3333', '12345678', '9123456789']) {
+      assert.equal(run(`adsStudioIsValidDestination(${JSON.stringify(typed)})`), false, typed);
+    }
+  });
+
+  await test('r4 BP n=41: a WhatsApp number saved in v2 is shown in the classic help tab and removed there; an admin can remove it from a ticket', async () => {
+    const { sandbox, run, calls, renders, replies } = studioFixture();
+    replies['/api/studio/profile'] = options => (String(options.method || 'GET') === 'PUT'
+      ? { whatsappNumber: null, whatsappConsentAt: null, updatedAt: '2026-09-29T10:00:00Z' }
+      : { whatsappNumber: '+218912345678', whatsappConsentAt: '2026-09-01T10:00:00Z', updatedAt: '2026-09-01T10:00:00Z' });
+    let sheet = null;
+    sandbox.studioWalletSheet = options => { sheet = options; };
+    let html = String(run('renderStudioHelpClassic()'));
+    assert.ok(!html.includes('studio-help-whatsapp-remove'), 'the number is not known before the read');
+    await settle();
+    assert.equal(calls.filter(call => call.url === '/api/studio/profile' && call.method === 'GET').length, 1);
+    assert.ok(renders.length >= 1, 'the classic tab is drawn again when the read is done');
+    html = String(run('renderStudioHelpClassic()'));
+    assert.ok(html.includes('data-testid="studio-help-whatsapp-number"') && html.includes('+218912345678'), html);
+    assert.ok(html.includes('onclick="studioHelpWhatsappRemove()"'));
+    assert.equal(calls.filter(call => call.url === '/api/studio/profile' && call.method === 'GET').length, 1, 'one read per session');
+    const before = renders.length;
+    run('studioHelpWhatsappRemove()');
+    assert.ok(sheet && sheet.danger === true, 'an in-page sheet confirms (never a native dialog)');
+    sheet.onConfirm();
+    await settle(); await settle();
+    const put = calls.find(call => call.method === 'PUT');
+    assert.deepEqual(JSON.parse(JSON.stringify(put.body)), { whatsappNumber: null, whatsappConsent: false });
+    assert.ok(renders.length > before, 'the classic tab is drawn again after the removal');
+    assert.ok(!String(run('renderStudioHelpClassic()')).includes('studio-help-whatsapp-remove'));
+
+    // The staff side (classic review tab): an admin who opened the contact link can remove the number.
+    sandbox.isCurrentUserAdmin = () => true;
+    run("_studioStaff.forUser = studioHelpUserId(); studioStaffThreadSlot('tkt_1').ticket = { id: 'tkt_1', ownerId: 'cust9', status: 'open' }; _studioStaff.contacts.set('tkt_1', { url: 'https://wa.me/218912345678', error: '', loading: null });");
+    const thread = String(run("renderStudioStaffThread('tkt_1')"));
+    assert.ok(thread.includes('data-testid="studio-staff-whatsapp-remove"') && thread.includes("studioStaffRemoveContact('tkt_1')"), thread);
+    replies['/api/studio/staff/customers/cust9/contact'] = { customerId: 'cust9', whatsapp: null };
+    sheet = null;
+    run("studioStaffRemoveContact('tkt_1')");
+    assert.ok(sheet && sheet.danger === true);
+    sheet.onConfirm();
+    await settle(); await settle();
+    assert.ok(calls.some(call => call.url === '/api/studio/staff/customers/cust9/contact' && call.method === 'DELETE'));
+    assert.equal(run("_studioStaff.contacts.get('tkt_1').url"), '');
+    sandbox.isCurrentUserAdmin = () => false;
+    run("_studioStaff.contacts.set('tkt_1', { url: 'https://wa.me/218912345678', error: '', loading: null });");
+    assert.ok(!String(run("renderStudioStaffThread('tkt_1')")).includes('studio-staff-whatsapp-remove'), 'a reviewer gets no remove button');
+  });
+
+  await test('r4 BP n=44: the classic Add-money amount and currency survive a full render such as the language switch', async () => {
+    const { sandbox, state, run } = studioFixture();
+    const nodes = { 'ads-studio-charge-amount': { value: '500' }, 'ads-studio-charge-currency': { value: 'LYD' }, 'ads-studio-lyd-preview': { textContent: '' } };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    run("_adsStudioWalletForUser = String(state.currentUser.id); _adsStudioWalletMine = []; _adsStudioWalletPendingAll = []; _adsStudioPayMethods = [{ id: 'bank_transfer', name: { en: 'Bank', ar: 'مصرف' } }]; _adsStudioPayRate = { usdToLyd: 5 };");
+    run('adsStudioUpdateLydPreview()');
+    state.language = 'ar';
+    let html = String(run('renderAdsStudioWallet()'));
+    assert.ok(html.includes('<option value="LYD" selected>'), 'the currency stays LYD');
+    assert.ok(/id="ads-studio-charge-amount"[^>]*value="500"/.test(html), 'the amount stays 500');
+    // USD shows its LYD preview straight away; another user starts empty on USD.
+    nodes['ads-studio-charge-currency'].value = 'USD';
+    run('adsStudioUpdateLydPreview()');
+    assert.equal(nodes['ads-studio-lyd-preview'].textContent, '≈ 2500.00 LYD @ 5');
+    html = String(run('renderAdsStudioWallet()'));
+    assert.ok(html.includes('≈ 2500.00 LYD @ 5</span>') && !html.includes('<option value="LYD" selected>'));
+    state.currentUser = { id: 'cust2', role: 'Employee', permissions: {} };
+    html = String(run('renderAdsStudioWallet()'));
+    assert.ok(!/id="ads-studio-charge-amount"[^>]*value="500"/.test(html) && !html.includes('<option value="LYD" selected>'));
+    state.language = 'en';
+  });
+
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

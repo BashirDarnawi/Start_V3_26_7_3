@@ -166,6 +166,7 @@ from ...wallet_payments import (
     release_orphan_campaign_payment,
 )
 from . import studio_types
+from .studio_profile import normalize_phone
 from .studio_types import is_studio_ref, studio_campaign_name
 
 AD_CAMPAIGN_COLLECTION = "adCampaignRequests"
@@ -487,9 +488,13 @@ def normalize_ad_campaign_destination(value: Any, string_fn: Callable[..., str])
     raw = string_fn(value, "destination", 2048)
     if not raw:
         return ""
-    compact_phone = re.sub(r"[\s().-]", "", raw)
-    if re.fullmatch(r"\+?[1-9][0-9]{7,14}", compact_phone):
-        return compact_phone if compact_phone.startswith("+") else f"+{compact_phone}"
+    # A phone number is read with the ONE phone rule (studio_profile.normalize_phone = the screens'
+    # studioParsePhone, phone_cases.json): 91 234 5678 is +218912345678, never +912345678; another
+    # country needs its + (or 00) code. Phone-shaped text the rule refuses is no https link either,
+    # so it gets the 400 below.
+    phone = normalize_phone(raw)
+    if phone:
+        return phone
     try:
         parsed = urlparse(raw)
     except ValueError:

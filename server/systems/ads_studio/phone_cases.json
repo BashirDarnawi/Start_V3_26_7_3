@@ -1,5 +1,5 @@
 {
-  "about": "Typed phone numbers and the E.164 number both readers must give ('' = not a phone number): studio_profile.normalize_phone (server/test_studio_profile.py) and studioParsePhone in 15g-studio-core.js (scripts/test-mobile-ui.js). Only text inputs and null: the server refuses any other JSON type before reading it.",
+  "about": "Typed phone numbers and the E.164 number both readers must give ('' = not a phone number): studio_profile.normalize_phone (server/test_studio_profile.py) and studioParsePhone in 15g-studio-core.js (scripts/test-mobile-ui.js). The ad destination's phone numbers use the same rule on both sides (normalize_ad_campaign_destination, the builders' studioBuilderDestination and adsStudioDestinationPhone). Only text inputs and null: the server refuses any other JSON type before reading it.",
   "cases": [
     ["0912345678", "+218912345678"],
     ["٠٩١٢٣٤٥٦٧٨", "+218912345678"],
@@ -9,6 +9,9 @@
     ["00218912345678", "+218912345678"],
     ["218912345678", "+218912345678"],
     ["912345678", "+218912345678"],
+    ["91 234 5678", "+218912345678"],
+    ["92-123-4567", "+218921234567"],
+    ["21 333 3333", ""],
     ["+2180912345678", "+218912345678"],
     ["+218 0 91 234 5678", "+218912345678"],
     ["(091) 234-5678", "+218912345678"],
