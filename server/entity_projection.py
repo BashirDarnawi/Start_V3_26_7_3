@@ -82,6 +82,19 @@ def project_entity_contacts(entity: dict[str, Any], can_view_contacts: bool) -> 
     return projected
 
 
+def drop_hidden_contact_writes(entity_type: str, data: Any, can_view_contacts: bool) -> Any:
+    """Write-side twin of project_entity_contacts: a writer who never received
+    the contact fields (no customers.viewContacts) cannot BLANK them, so an edit
+    form's empty phone / delivery place keeps the stored values. A value they
+    actually typed is still written."""
+    if can_view_contacts or entity_type not in CONTACT_REDACTED_ENTITY_TYPES or not isinstance(data, dict):
+        return data
+    return {
+        key: value for key, value in data.items()
+        if not (_is_customer_contact_field(key) and (value is None or value == [] or value == {} or not str(value).strip()))
+    }
+
+
 def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, Any]:
     """Return a lightweight response copy plus a trustworthy photo count."""
     fields = INLINE_MEDIA_FIELDS.get(entity_type)

@@ -7818,17 +7818,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
       ? Security.generateSecureId('receipt-settlement')
       : '';
     // The REVERSE transition: an edit that explicitly flips a PAID receipt to
-    // Not Paid while its PAID pool funds ads. That funding must migrate into
-    // the ads' due pool in the SAME commit (server: /unsettle cascade; local:
-    // planLocalReceiptDebtAdUpdates), conserved to the cent. Unfunded
-    // paid -> not-paid edits keep the ordinary PATCH path.
+    // Not Paid. Any funding must migrate into the ads' due pool in the SAME
+    // commit (server: /unsettle cascade; local: planLocalReceiptDebtAdUpdates),
+    // conserved to the cent. The server refuses a paid -> not-paid PATCH even
+    // when unfunded; only local mode keeps the ordinary path for those.
     const _convertsReceipt = collectionName === 'receipts'
       && !_settlesReceipt
       && (_oldReceiptStatus === 'paid' || old.isPaid === true)
       && (_nextReceiptStatus === 'not paid' || _nextReceiptStatus === 'not_paid')
-      && (state.ads || []).some(ad => ad && !ad._deleted
+      && (isServerModeEnabled() || (state.ads || []).some(ad => ad && !ad._deleted
           && String(ad.recordType || '') !== 'receipt'
-          && (_localFundingMap(ad.receiptAllocations).get(String(id)) || 0) > 0);
+          && (_localFundingMap(ad.receiptAllocations).get(String(id)) || 0) > 0));
     const _receiptConversionKey = _convertsReceipt
       ? Security.generateSecureId('receipt-unsettle')
       : '';
@@ -8853,7 +8853,11 @@ const _SERVER_REFUSAL_AR = [
   ['A user with this email already exists', 'يوجد مستخدم بهذا البريد الإلكتروني بالفعل.'],
   ['Cannot remove the last remaining admin', 'لا يمكن إزالة آخر مدير؛ رقِّ مستخدماً آخر إلى مدير أولاً.'],
   ['Cannot change the role of a user who holds permissions you do not', 'لا يمكنك تغيير دور مستخدم يملك صلاحيات لا تملكها.'],
-  ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.']
+  ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.'],
+  ["Reassign a paid receipt's customer", 'وصل له رصيد أو إعلانات لا يتغير عميله بالتعديل؛ استخدم تحويل رصيد الوصل.', 'A receipt with money or ads keeps its customer; use a receipt balance transfer.'],
+  ['A canceled receipt the company already covered', 'غطّت الشركة هذا الوصل الملغى فلا يُعاد فتحه؛ سجّل وصلاً جديداً.'],
+  ['Insufficient available receipt balance', 'رصيد الوصل المتاح لا يكفي.'],
+  ['A Paid receipt cannot be changed to Not Paid with a normal', 'حدّث الصفحة ثم أعد المحاولة.', 'Refresh the page and try again.']
 ];
 function _serverRefusalText(raw) {
   raw = String(raw || '').trim();
@@ -18150,7 +18154,7 @@ function renderReceiptsView() {
             && _isReceiptEligibleForCompanyCoverage(receipt, collectionTarget);
 
           // Calculate total paid as sum of R1 values (amount × rate)
-          const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
+          const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (Number(paymentRate1Value(p)) || 0)), 0) || receipt.amountLocal;
           const usage = getReceiptUsageStats(receipt, receiptUsageAdIndex);
           // A Not Paid receipt is customer debt, not paid credit. Use debt
           // language so mixed paid + unpaid funding is not shown as if both
@@ -18319,8 +18323,8 @@ function renderReceiptsView() {
                   </h4>
                   <div class="space-y-2">
                     ${payments.map((payment, idx) => {
-                      // Calculate R1 = amount × rate
-                      const r1 = (payment.amount || 0) * (payment.rate || 1);
+                      // R1 = amount × Rate 1 (0 is a real rate)
+                      const r1 = (payment.amount || 0) * (Number(paymentRate1Value(payment)) || 0);
                       return `
                       <div class="split-payment-item flex justify-between items-center">
                         <div>
@@ -25310,7 +25314,8 @@ function getCustomerStats(customerId, statsIndex = null) {
   const balance = balanceLYD;
   
   // Get last ad date
-  const allCustomerAds = [...customerAds, ...customerReceipts];
+  // A receipt's day is createdAt (old edits rewrote startDate).
+  const allCustomerAds = [...customerAds, ...customerReceipts.map(r => ({ startDate: r.createdAt || r.startDate || r.date }))];
   const customerActivityDates = allCustomerAds
     .map(ad => new Date(ad.startDate || ad.date || ad.createdAt || '').getTime())
     .filter(Number.isFinite);
@@ -27719,11 +27724,15 @@ function _deliveryDefaultRate1(method) {
   // The server judges the collected LYD against the receipt's OWN rate. A
   // customer paying exactly the dollar debt must not read as over- or
   // under-paid because today's default rate differs from the receipt's.
+  return _deliveryReceiptRate() || 1;
+}
+
+// The open receipt's own rate (the server credits at it), else today's.
+function _deliveryReceiptRate() {
   const openId = String(_deliveryCompletionOpen?.id || '');
   const open = openId ? (state.receipts || []).find(r => r && String(r.id) === openId) : null;
   const receiptRate = Number(open?.exchangeRate);
-  if (Number.isFinite(receiptRate) && receiptRate > 0) return receiptRate;
-  return Number(state.defaultExchangeRate) || 1;
+  return Number.isFinite(receiptRate) && receiptRate > 0 ? receiptRate : (Number(state.defaultExchangeRate) || 0);
 }
 
 function _deliveryPaymentRowHtml(payment, opts = {}) {
@@ -27735,7 +27744,7 @@ function _deliveryPaymentRowHtml(payment, opts = {}) {
   // Rate 2 turns the amount into USD. Always seed it with the exchange rate (never 0) so
   // the USD value is computed for every method — a delivery always has a USD equivalent.
   const rate2 = (p.rate2 === undefined || p.rate2 === null || p.rate2 === '')
-    ? (Number(state.defaultExchangeRate) || 0)
+    ? _deliveryReceiptRate()
     : p.rate2;
   return `
     <div class="payment-split-item p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
@@ -27769,7 +27778,7 @@ function onDeliveryPaymentMethodChange(sel) {
   const r2 = item.querySelector('.payment-rate2');
   // Never leave a rate at 0 — that would record 0 LYD / 0 USD for the collection.
   if (r1) r1.value = _deliveryDefaultRate1(method).toFixed(2);
-  if (r2 && (parseFloat(r2.value) === 0 || !r2.value)) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
+  if (r2 && (parseFloat(r2.value) === 0 || !r2.value)) r2.value = String(_deliveryReceiptRate());
   updateReceiptDeliveryCompletionComputed();
 }
 
@@ -27892,8 +27901,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
   // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
   // the driver types what they actually collected) and one for the fee (pre-filled with
-  // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the default exchange rate.
-  const _dRate = Number(state.defaultExchangeRate) || 0;
+  // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the receipt's own rate.
+  const _dRate = _deliveryReceiptRate();
   const _cashLyd = PAYMENT_METHODS.includes('Cash (LYD)') ? 'Cash (LYD)' : PAYMENT_METHODS[0];
   let _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
     ? receipt.payments.map(p => ({ method: p.method, amount: p.amount, rate1: p.rate, rate2: p.rate2 }))
@@ -29694,12 +29703,10 @@ function _receiptCashCollectionTargetLocal(receipt) {
 // and to seed the "No" editor). Each split's LYD value is amount × rate1.
 function _receiptCollectionBreakdown(receipt) {
   const target = _receiptCashCollectionTargetLocal(receipt);
-  if (Array.isArray(receipt.payments) && receipt.payments.length) {
-    return receipt.payments
-      .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(p.rate) || 1) * 100) / 100 }))
-      .filter(p => p.amount > 0);
-  }
-  return [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
+  const rows = (Array.isArray(receipt.payments) ? receipt.payments : [])
+    .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(paymentRate1Value(p)) || 0) * 100) / 100 }))
+    .filter(p => p.amount > 0);
+  return rows.length ? rows : [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
 }
 
 // Every edit door on a destroyed receipt shows the same bilingual message.
@@ -30839,7 +30846,7 @@ function addSplitPayment() {
     <div class="grid grid-cols-2 gap-3">
       <div>
         <label class="block text-xs font-medium mb-1">${isArSp ? 'طريقة الدفع' : 'Payment Method'}</label>
-        <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
+        <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm" onchange="onSplitMethodChange(this)">
           ${PAYMENT_METHODS.map(m => `<option value="${m}">${trMethod(m)}</option>`).join('')}
         </select>
       </div>
@@ -30881,7 +30888,16 @@ function addSplitPayment() {
     </div>
   `;
   container.appendChild(div);
+  onSplitMethodChange(div.querySelector('.split-method'));
   lucide.createIcons();
+}
+
+// A split row's rates follow its method as in the receipt form (Cash (LYD) Rate 1 = 1).
+function onSplitMethodChange(sel) {
+  const row = sel.closest('.split-payment-item'), r2 = row.querySelector('.split-rate2');
+  row.querySelector('.split-rate').value = getDefaultRate1(sel.value).toFixed(2);
+  if (['USDT', 'Bank Transfer (USD)', 'Cash (USD)'].includes(sel.value)) r2.value = '0';
+  else if (!(parseFloat(r2.value) > 0)) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
 }
 
 async function saveSplitPayments() {
@@ -33382,8 +33398,6 @@ async function _saveReceiptFromModalInner() {
     totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
-  const totalLYD = totalR1;
-  const totalUSD = totalR2;
   // BUG FIX: Prevent division by zero (defense in depth, already checked totalUSD > 0)
   // The receipt's exchange rate. With a SINGLE payment, store exactly the rate
   // the user typed — deriving it as LYD/USD made the card show 9.69 for a rate
@@ -33391,6 +33405,12 @@ async function _saveReceiptFromModalInner() {
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
   const status = document.getElementById('receipt-status').value || 'Paid';
+  // A delivered receipt with unedited rows keeps its stored money (old driver rows may carry another Rate 2).
+  const _keepMoney = status === 'Paid' && editTarget?.status === 'Paid' && editTarget.deliveryStatus === 'Delivered'
+    && editTarget.exchangeRate > 0 && payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + ''
+      === (editTarget.payments || []).filter(p => p.amount > 0).map(p => [p.method, +p.amount, +p.rate, +p.rate2]) + '';
+  const totalLYD = _keepMoney ? +editTarget.amountLocal || 0 : totalR1;
+  const totalUSD = _keepMoney ? +editTarget.amountUSD || 0 : totalR2;
   // Not Paid rows are a collection plan for customer debt, not money already
   // received. Keeping them separate prevents the ad picker and receipt balance
   // logic from treating an unpaid bank transfer as collected cash.
@@ -33398,7 +33418,7 @@ async function _saveReceiptFromModalInner() {
     ? payments.map(payment => ({ ...payment }))
     : [];
   const persistedPayments = status === 'Not Paid' ? [] : payments;
-  const avgRate = receiptExchangeRateForSave(
+  const avgRate = _keepMoney ? +editTarget.exchangeRate : receiptExchangeRateForSave(
     payments,
     enteredPaymentRows,
     totalLYD,
@@ -33631,12 +33651,14 @@ async function _saveReceiptFromModalInner() {
   const deliveryPlaceName = String(document.getElementById('receipt-delivery-place')?.value || '').trim();
   const quotedDeliveryFee = parseFloat(String(document.getElementById('receipt-quoted-delivery-fee')?.value || '').trim()) || 0;
   const deliveryInstructions = String(document.getElementById('receipt-delivery-instructions')?.value || '').trim();
+  // No customers.viewContacts: the phone/place were never received, so a blank one keeps the stored value.
+  const _hideContacts = !!editTarget && !can('customers', 'viewContacts');
   if (isTempDelivery) {
     if (!receiptDeliveryPersonId) {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'الرجاء تعيين سائق توصيل.' : 'Please assign a delivery person.', 'error');
       return;
     }
-    if (!deliveryPlaceName) {
+    if (!deliveryPlaceName && !_hideContacts) {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اسم مكان التوصيل مطلوب.' : 'Delivery place name is required.', 'error');
       return;
     }
@@ -33703,8 +33725,9 @@ async function _saveReceiptFromModalInner() {
     deliveryStatus: receiptDeliveryStatus,
     deliveryPersonId: receiptDeliveryPersonId,
     isReceivedInOffice: receiptIsReceivedInOffice,
-    startDate: new Date().toISOString(),
-    endDate: new Date().toISOString(),
+    // An edit keeps the dates (the customer card's "Last ad" reads startDate).
+    startDate: editTarget?.startDate || editTarget?.createdAt || new Date().toISOString(),
+    endDate: editTarget?.endDate || editTarget?.createdAt || new Date().toISOString(),
     createdAt: editTarget ? editTarget.createdAt : new Date().toISOString(),
     // CRITICAL: temp delivery receipts must NOT send serialNumber=D# (server rejects non-digit serial).
     // Only send serialNumber for normal receipts; temp receipts use tempReceiptNo.
@@ -33736,13 +33759,15 @@ async function _saveReceiptFromModalInner() {
     // newly collected, poisoning the liquidity window), an unpaid receipt
     // carries no arrival date at all, and the save that turns it Paid stamps
     // the true payment moment — matching the edit-modal rule in 15-modals.js.
+    // Only a receipt that was already paid keeps it (old Not Paid rows carry a stale date).
     collectionDate: status === 'Not Paid'
       ? ''
-      : ((editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
+      : (((editTarget?.isPaid === true || editTarget?.status === 'Paid') ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
     plannedPayments: plannedPayments,
     payments: persistedPayments,
     photos
   };
+  if (_hideContacts) ['phoneNumber', 'deliveryPlaceName'].forEach(k => { if (!receipt[k]) delete receipt[k]; });
 
   // Denormalize the customer's display NAME (never phone/contact) so a role
   // that can view receipts but not load the customers collection still sees who
@@ -39247,7 +39272,7 @@ function renderModal() {
                 <div class="grid grid-cols-2 gap-3">
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'طريقة الدفع' : 'Payment Method'}</label>
-                    <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
+                    <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm" onchange="onSplitMethodChange(this)">
                       ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                     </select>
                   </div>

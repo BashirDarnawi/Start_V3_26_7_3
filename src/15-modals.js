@@ -1791,7 +1791,7 @@ function renderModal() {
                 <div class="grid grid-cols-2 gap-3">
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'طريقة الدفع' : 'Payment Method'}</label>
-                    <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
+                    <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm" onchange="onSplitMethodChange(this)">
                       ${PAYMENT_METHODS.map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
                     </select>
                   </div>

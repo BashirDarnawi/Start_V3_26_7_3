@@ -140,6 +140,14 @@ def apply_delivery_completion_truth(
     merged["debtAmountLocal"] = _financial_usd(debt_local)
     merged["amountUSD"] = _financial_usd(collected_usd)
     merged["amountLocal"] = _financial_usd(collected_local)
+    if trusted_rate and isinstance(merged.get("payments"), list):
+        # The stored rows must reproduce the dollars credited above. A row kept
+        # at the driver's default rate re-derived other money on the next
+        # office edit (a no-op save raised or cut the customer's USD credit).
+        merged["payments"] = [
+            {**row, "rate2": float(trusted_rate)} if isinstance(row, dict) else row
+            for row in merged["payments"]
+        ]
     if target["source"] == "linked_ads" and trusted_rate:
         merged["exchangeRate"] = float(trusted_rate)
     merged["paymentResult"] = payment_result

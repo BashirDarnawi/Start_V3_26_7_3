@@ -685,17 +685,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
       ? Security.generateSecureId('receipt-settlement')
       : '';
     // The REVERSE transition: an edit that explicitly flips a PAID receipt to
-    // Not Paid while its PAID pool funds ads. That funding must migrate into
-    // the ads' due pool in the SAME commit (server: /unsettle cascade; local:
-    // planLocalReceiptDebtAdUpdates), conserved to the cent. Unfunded
-    // paid -> not-paid edits keep the ordinary PATCH path.
+    // Not Paid. Any funding must migrate into the ads' due pool in the SAME
+    // commit (server: /unsettle cascade; local: planLocalReceiptDebtAdUpdates),
+    // conserved to the cent. The server refuses a paid -> not-paid PATCH even
+    // when unfunded; only local mode keeps the ordinary path for those.
     const _convertsReceipt = collectionName === 'receipts'
       && !_settlesReceipt
       && (_oldReceiptStatus === 'paid' || old.isPaid === true)
       && (_nextReceiptStatus === 'not paid' || _nextReceiptStatus === 'not_paid')
-      && (state.ads || []).some(ad => ad && !ad._deleted
+      && (isServerModeEnabled() || (state.ads || []).some(ad => ad && !ad._deleted
           && String(ad.recordType || '') !== 'receipt'
-          && (_localFundingMap(ad.receiptAllocations).get(String(id)) || 0) > 0);
+          && (_localFundingMap(ad.receiptAllocations).get(String(id)) || 0) > 0));
     const _receiptConversionKey = _convertsReceipt
       ? Security.generateSecureId('receipt-unsettle')
       : '';
@@ -1720,7 +1720,11 @@ const _SERVER_REFUSAL_AR = [
   ['A user with this email already exists', 'يوجد مستخدم بهذا البريد الإلكتروني بالفعل.'],
   ['Cannot remove the last remaining admin', 'لا يمكن إزالة آخر مدير؛ رقِّ مستخدماً آخر إلى مدير أولاً.'],
   ['Cannot change the role of a user who holds permissions you do not', 'لا يمكنك تغيير دور مستخدم يملك صلاحيات لا تملكها.'],
-  ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.']
+  ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.'],
+  ["Reassign a paid receipt's customer", 'وصل له رصيد أو إعلانات لا يتغير عميله بالتعديل؛ استخدم تحويل رصيد الوصل.', 'A receipt with money or ads keeps its customer; use a receipt balance transfer.'],
+  ['A canceled receipt the company already covered', 'غطّت الشركة هذا الوصل الملغى فلا يُعاد فتحه؛ سجّل وصلاً جديداً.'],
+  ['Insufficient available receipt balance', 'رصيد الوصل المتاح لا يكفي.'],
+  ['A Paid receipt cannot be changed to Not Paid with a normal', 'حدّث الصفحة ثم أعد المحاولة.', 'Refresh the page and try again.']
 ];
 function _serverRefusalText(raw) {
   raw = String(raw || '').trim();

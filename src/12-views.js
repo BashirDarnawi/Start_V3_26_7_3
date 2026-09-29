@@ -3033,7 +3033,7 @@ function renderReceiptsView() {
             && _isReceiptEligibleForCompanyCoverage(receipt, collectionTarget);
 
           // Calculate total paid as sum of R1 values (amount × rate)
-          const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (p.rate || 1)), 0) || receipt.amountLocal;
+          const totalPaid = payments.reduce((sum, p) => sum + ((p.amount || 0) * (Number(paymentRate1Value(p)) || 0)), 0) || receipt.amountLocal;
           const usage = getReceiptUsageStats(receipt, receiptUsageAdIndex);
           // A Not Paid receipt is customer debt, not paid credit. Use debt
           // language so mixed paid + unpaid funding is not shown as if both
@@ -3202,8 +3202,8 @@ function renderReceiptsView() {
                   </h4>
                   <div class="space-y-2">
                     ${payments.map((payment, idx) => {
-                      // Calculate R1 = amount × rate
-                      const r1 = (payment.amount || 0) * (payment.rate || 1);
+                      // R1 = amount × Rate 1 (0 is a real rate)
+                      const r1 = (payment.amount || 0) * (Number(paymentRate1Value(payment)) || 0);
                       return `
                       <div class="split-payment-item flex justify-between items-center">
                         <div>

@@ -177,6 +177,7 @@ from .entity_projection import (
     _without_inline_media,
     can_include_entity_media,
     can_read_related_receipt,
+    drop_hidden_contact_writes,
     project_entity_contacts,
 )
 from .meta_ads import (
@@ -9861,7 +9862,7 @@ def settle_receipt_and_linked_ads(
     ):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    updates = sanitize_json(body.data or {}) or {}
+    updates = drop_hidden_contact_writes("receipts", sanitize_json(body.data or {}) or {}, user_has_permission(user, "customers", "viewContacts"))
     current_delivery_status = str(existing_data.get("deliveryStatus") or "").strip()
     requested_delivery_status = str(updates.get("deliveryStatus") or "").strip()
     delivery_workflow.refuse_regression(existing_data, updates, str(user.get("role") or "").lower(), active_driver=_active_delivery_user)  # same rules as PATCH
@@ -9964,7 +9965,7 @@ def unsettle_receipt_and_linked_ads(
     ):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    updates = sanitize_json(body.data or {}) or {}
+    updates = drop_hidden_contact_writes("receipts", sanitize_json(body.data or {}) or {}, user_has_permission(user, "customers", "viewContacts"))
     if "status" in updates and str(updates.get("status") or "") != "Not Paid":
         raise HTTPException(
             status_code=400, detail="Receipt debt conversion status must be Not Paid"
@@ -11495,6 +11496,7 @@ def update_collection_item(
         _require_clothes_subscription(user)
     if collection == AD_CAMPAIGN_COLLECTION:
         _require_ad_maker_subscription(user)
+    body.data = drop_hidden_contact_writes(collection, body.data, user_has_permission(user, "customers", "viewContacts"))
     validate_relationship_ids(sanitize_json(body.data or {}) or {})  # validate what will be stored (sanitising rewrites keys)
     if collection == "walletPaymentRequests":
         raise HTTPException(status_code=405, detail="Use /api/wallet/payment-requests")
@@ -12161,6 +12163,14 @@ def update_collection_item(
                 raise HTTPException(status_code=400, detail="Invalid tempReceiptNo (expected D{n})")
             if _temp_receipt_no_exists(temp_in, exclude_id=entity_id):
                 raise HTTPException(status_code=409, detail="tempReceiptNo already exists")
+        # An office Not Paid receipt switched to Delivery becomes a live job: give it its
+        # D-number here (as create and /unsettle do), or the verified-completion guards
+        # keyed on tempReceiptNo never see it.
+        _d0, _sd = existing.get("data") or {}, updates_in.get("statusDetail")
+        if (not delivery_grant_patch and not temp_in and not _canonical_receipt_number(_d0.get("tempReceiptNo"))
+                and str(updates_in.get("status", _d0.get("status")) or "") == "Not Paid" and isinstance(_sd, dict)
+                and str(_sd.get("notPaidCollection") or "").strip().lower() == "delivery"):
+            body.data["tempReceiptNo"] = _next_temp_delivery_receipt_no(str(user.get("id") or "system"))
 
         # Validate finalReceiptNo AND serialNumber independently (see create path).
         _final_no = _canonical_receipt_number(updates_in.get("finalReceiptNo"))

@@ -1828,8 +1828,6 @@ async function _saveReceiptFromModalInner() {
     totalR2 = Math.round((totalR2 + 0.01) * 100) / 100;
   }
   
-  const totalLYD = totalR1;
-  const totalUSD = totalR2;
   // BUG FIX: Prevent division by zero (defense in depth, already checked totalUSD > 0)
   // The receipt's exchange rate. With a SINGLE payment, store exactly the rate
   // the user typed — deriving it as LYD/USD made the card show 9.69 for a rate
@@ -1837,6 +1835,12 @@ async function _saveReceiptFromModalInner() {
   // With a split (different rates per row) the effective average is the only
   // meaningful figure, so keep deriving it there.
   const status = document.getElementById('receipt-status').value || 'Paid';
+  // A delivered receipt with unedited rows keeps its stored money (old driver rows may carry another Rate 2).
+  const _keepMoney = status === 'Paid' && editTarget?.status === 'Paid' && editTarget.deliveryStatus === 'Delivered'
+    && editTarget.exchangeRate > 0 && payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + ''
+      === (editTarget.payments || []).filter(p => p.amount > 0).map(p => [p.method, +p.amount, +p.rate, +p.rate2]) + '';
+  const totalLYD = _keepMoney ? +editTarget.amountLocal || 0 : totalR1;
+  const totalUSD = _keepMoney ? +editTarget.amountUSD || 0 : totalR2;
   // Not Paid rows are a collection plan for customer debt, not money already
   // received. Keeping them separate prevents the ad picker and receipt balance
   // logic from treating an unpaid bank transfer as collected cash.
@@ -1844,7 +1848,7 @@ async function _saveReceiptFromModalInner() {
     ? payments.map(payment => ({ ...payment }))
     : [];
   const persistedPayments = status === 'Not Paid' ? [] : payments;
-  const avgRate = receiptExchangeRateForSave(
+  const avgRate = _keepMoney ? +editTarget.exchangeRate : receiptExchangeRateForSave(
     payments,
     enteredPaymentRows,
     totalLYD,
@@ -2077,12 +2081,14 @@ async function _saveReceiptFromModalInner() {
   const deliveryPlaceName = String(document.getElementById('receipt-delivery-place')?.value || '').trim();
   const quotedDeliveryFee = parseFloat(String(document.getElementById('receipt-quoted-delivery-fee')?.value || '').trim()) || 0;
   const deliveryInstructions = String(document.getElementById('receipt-delivery-instructions')?.value || '').trim();
+  // No customers.viewContacts: the phone/place were never received, so a blank one keeps the stored value.
+  const _hideContacts = !!editTarget && !can('customers', 'viewContacts');
   if (isTempDelivery) {
     if (!receiptDeliveryPersonId) {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'الرجاء تعيين سائق توصيل.' : 'Please assign a delivery person.', 'error');
       return;
     }
-    if (!deliveryPlaceName) {
+    if (!deliveryPlaceName && !_hideContacts) {
       showNotification(isArV ? 'تحقق' : 'Validation', isArV ? 'اسم مكان التوصيل مطلوب.' : 'Delivery place name is required.', 'error');
       return;
     }
@@ -2149,8 +2155,9 @@ async function _saveReceiptFromModalInner() {
     deliveryStatus: receiptDeliveryStatus,
     deliveryPersonId: receiptDeliveryPersonId,
     isReceivedInOffice: receiptIsReceivedInOffice,
-    startDate: new Date().toISOString(),
-    endDate: new Date().toISOString(),
+    // An edit keeps the dates (the customer card's "Last ad" reads startDate).
+    startDate: editTarget?.startDate || editTarget?.createdAt || new Date().toISOString(),
+    endDate: editTarget?.endDate || editTarget?.createdAt || new Date().toISOString(),
     createdAt: editTarget ? editTarget.createdAt : new Date().toISOString(),
     // CRITICAL: temp delivery receipts must NOT send serialNumber=D# (server rejects non-digit serial).
     // Only send serialNumber for normal receipts; temp receipts use tempReceiptNo.
@@ -2182,13 +2189,15 @@ async function _saveReceiptFromModalInner() {
     // newly collected, poisoning the liquidity window), an unpaid receipt
     // carries no arrival date at all, and the save that turns it Paid stamps
     // the true payment moment — matching the edit-modal rule in 15-modals.js.
+    // Only a receipt that was already paid keeps it (old Not Paid rows carry a stale date).
     collectionDate: status === 'Not Paid'
       ? ''
-      : ((editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
+      : (((editTarget?.isPaid === true || editTarget?.status === 'Paid') ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : '')),
     plannedPayments: plannedPayments,
     payments: persistedPayments,
     photos
   };
+  if (_hideContacts) ['phoneNumber', 'deliveryPlaceName'].forEach(k => { if (!receipt[k]) delete receipt[k]; });
 
   // Denormalize the customer's display NAME (never phone/contact) so a role
   // that can view receipts but not load the customers collection still sees who

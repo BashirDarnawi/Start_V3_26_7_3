@@ -851,7 +851,7 @@ check('Ads Studio dates and destinations are validated for the phone timezone',
 
 check('receipt edits preserve the saved collection date (liquidity window integrity)',
   forms.includes("collectionDate: status === 'Not Paid'") &&
-  forms.includes("((editTarget ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''))") &&
+  forms.includes("(((editTarget?.isPaid === true || editTarget?.status === 'Paid') ? editTarget.collectionDate : '') || (receiptIsPaid ? new Date().toISOString() : ''))") &&
   helpers.includes('function getReceiptPaidDate(r)') &&
   helpers.includes('function getLiquiditySnapshot()') &&
   helpers.includes("const paidAt = r?.deliveredAt || r?.collectionDate || r?.createdAt || null;") &&

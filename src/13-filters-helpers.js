@@ -1279,7 +1279,8 @@ function getCustomerStats(customerId, statsIndex = null) {
   const balance = balanceLYD;
   
   // Get last ad date
-  const allCustomerAds = [...customerAds, ...customerReceipts];
+  // A receipt's day is createdAt (old edits rewrote startDate).
+  const allCustomerAds = [...customerAds, ...customerReceipts.map(r => ({ startDate: r.createdAt || r.startDate || r.date }))];
   const customerActivityDates = allCustomerAds
     .map(ad => new Date(ad.startDate || ad.date || ad.createdAt || '').getTime())
     .filter(Number.isFinite);
@@ -3688,11 +3689,15 @@ function _deliveryDefaultRate1(method) {
   // The server judges the collected LYD against the receipt's OWN rate. A
   // customer paying exactly the dollar debt must not read as over- or
   // under-paid because today's default rate differs from the receipt's.
+  return _deliveryReceiptRate() || 1;
+}
+
+// The open receipt's own rate (the server credits at it), else today's.
+function _deliveryReceiptRate() {
   const openId = String(_deliveryCompletionOpen?.id || '');
   const open = openId ? (state.receipts || []).find(r => r && String(r.id) === openId) : null;
   const receiptRate = Number(open?.exchangeRate);
-  if (Number.isFinite(receiptRate) && receiptRate > 0) return receiptRate;
-  return Number(state.defaultExchangeRate) || 1;
+  return Number.isFinite(receiptRate) && receiptRate > 0 ? receiptRate : (Number(state.defaultExchangeRate) || 0);
 }
 
 function _deliveryPaymentRowHtml(payment, opts = {}) {
@@ -3704,7 +3709,7 @@ function _deliveryPaymentRowHtml(payment, opts = {}) {
   // Rate 2 turns the amount into USD. Always seed it with the exchange rate (never 0) so
   // the USD value is computed for every method — a delivery always has a USD equivalent.
   const rate2 = (p.rate2 === undefined || p.rate2 === null || p.rate2 === '')
-    ? (Number(state.defaultExchangeRate) || 0)
+    ? _deliveryReceiptRate()
     : p.rate2;
   return `
     <div class="payment-split-item p-2.5 rounded-lg bg-white/70 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700">
@@ -3738,7 +3743,7 @@ function onDeliveryPaymentMethodChange(sel) {
   const r2 = item.querySelector('.payment-rate2');
   // Never leave a rate at 0 — that would record 0 LYD / 0 USD for the collection.
   if (r1) r1.value = _deliveryDefaultRate1(method).toFixed(2);
-  if (r2 && (parseFloat(r2.value) === 0 || !r2.value)) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
+  if (r2 && (parseFloat(r2.value) === 0 || !r2.value)) r2.value = String(_deliveryReceiptRate());
   updateReceiptDeliveryCompletionComputed();
 }
 
@@ -3861,8 +3866,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
   // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
   // the driver types what they actually collected) and one for the fee (pre-filled with
-  // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the default exchange rate.
-  const _dRate = Number(state.defaultExchangeRate) || 0;
+  // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the receipt's own rate.
+  const _dRate = _deliveryReceiptRate();
   const _cashLyd = PAYMENT_METHODS.includes('Cash (LYD)') ? 'Cash (LYD)' : PAYMENT_METHODS[0];
   let _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
     ? receipt.payments.map(p => ({ method: p.method, amount: p.amount, rate1: p.rate, rate2: p.rate2 }))
@@ -5663,12 +5668,10 @@ function _receiptCashCollectionTargetLocal(receipt) {
 // and to seed the "No" editor). Each split's LYD value is amount × rate1.
 function _receiptCollectionBreakdown(receipt) {
   const target = _receiptCashCollectionTargetLocal(receipt);
-  if (Array.isArray(receipt.payments) && receipt.payments.length) {
-    return receipt.payments
-      .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(p.rate) || 1) * 100) / 100 }))
-      .filter(p => p.amount > 0);
-  }
-  return [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
+  const rows = (Array.isArray(receipt.payments) ? receipt.payments : [])
+    .map(p => ({ method: p.method || 'Cash (LYD)', amount: Math.round((Number(p.amount) || 0) * (Number(paymentRate1Value(p)) || 0) * 100) / 100 }))
+    .filter(p => p.amount > 0);
+  return rows.length ? rows : [{ method: receipt.paymentMethod || 'Cash (LYD)', amount: target }];
 }
 
 // Every edit door on a destroyed receipt shows the same bilingual message.
@@ -6808,7 +6811,7 @@ function addSplitPayment() {
     <div class="grid grid-cols-2 gap-3">
       <div>
         <label class="block text-xs font-medium mb-1">${isArSp ? 'طريقة الدفع' : 'Payment Method'}</label>
-        <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm">
+        <select class="split-method w-full glass-input px-3 py-2 rounded-lg text-sm" onchange="onSplitMethodChange(this)">
           ${PAYMENT_METHODS.map(m => `<option value="${m}">${trMethod(m)}</option>`).join('')}
         </select>
       </div>
@@ -6850,7 +6853,16 @@ function addSplitPayment() {
     </div>
   `;
   container.appendChild(div);
+  onSplitMethodChange(div.querySelector('.split-method'));
   lucide.createIcons();
+}
+
+// A split row's rates follow its method as in the receipt form (Cash (LYD) Rate 1 = 1).
+function onSplitMethodChange(sel) {
+  const row = sel.closest('.split-payment-item'), r2 = row.querySelector('.split-rate2');
+  row.querySelector('.split-rate').value = getDefaultRate1(sel.value).toFixed(2);
+  if (['USDT', 'Bank Transfer (USD)', 'Cash (USD)'].includes(sel.value)) r2.value = '0';
+  else if (!(parseFloat(r2.value) > 0)) r2.value = (Number(state.defaultExchangeRate) || 0).toFixed(2);
 }
 
 async function saveSplitPayments() {

@@ -2124,6 +2124,173 @@ async function main() {
     assert.equal(state.ads[0].deliveryPersonId, '');
     assert.equal(state.receipts[1].deliveryPersonId, 'd1', 'delivered history keeps the driver');
   });
+  // ---- r6 R: receipt screens ----
+  // The receipt form opened on stored receipt r1; `form` / `cells` override the DOM values.
+  function receiptEditFixture(stored, form = {}, cells = {}) {
+    const fixture = loadBrowserSource();
+    const { sandbox, state } = fixture;
+    realRandom(fixture);
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', _lastModified: 1, ...stored }];
+    const nodes = Object.fromEntries(Object.entries({ 'receipt-editing-id': 'r1', 'receipt-customer-id': 'c1', 'receipt-status': 'Paid',
+      'paid-collection-value': 'office', 'notpaid-collection-value': 'office', 'receipt-serial': '123', 'receipt-delivery-place': '',
+      'receipt-quoted-delivery-fee': '0', 'receipt-phone-search': '', ...form }).map(([id, value]) => [id, formField(value)]));
+    const values = { '.payment-method': 'Cash (LYD)', '.payment-amount': '500', '.payment-rate1': '1', '.payment-rate2': '5',
+      '.collection-type': 'office', ...cells };
+    const row = { querySelector: sel => (sel in values ? { value: values[sel] } : null) };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? [row] : []);
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    const saved = [];
+    sandbox.updateRecord = async (array, id, record) => { saved.push(record); return true; };
+    return { ...fixture, notes, saved };
+  }
+  const paidReceipt = { status: 'Paid', isPaid: true, serialNumber: '123', finalReceiptNo: '123', amountUSD: 100, amountLocal: 500, exchangeRate: 5,
+    payments: [{ method: 'Cash (LYD)', amount: 500, rate: 1, rate2: 5, collectionType: 'office' }] };
+
+  await test('r6 R n=1: the delivery completion row seeds Rate 2 (and a USD row\'s Rate 1) with the receipt\'s own rate, not today\'s', async () => {
+    const { state, run } = loadBrowserSource();
+    run(realEscape);
+    state.defaultExchangeRate = 9.5;
+    state.receipts = [{ id: 'd1', exchangeRate: 9.7 }];
+    run("_deliveryCompletionOpen = { id: 'd1', lastMod: 0 }");
+    const cash = String(run("_deliveryPaymentRowHtml({ method: 'Cash (LYD)', amount: 970 })"));
+    assert.ok(/payment-rate2[^>]*value="9\.7"/.test(cash), 'the collected row must credit at the receipt rate 9.7, not the default 9.5');
+    const usd = String(run("_deliveryPaymentRowHtml({ method: 'Cash (USD)', amount: 100 })"));
+    assert.ok(/payment-rate1[^>]*value="9\.7"/.test(usd) && /payment-rate2[^>]*value="9\.7"/.test(usd));
+  });
+
+  await test('r6 R n=1: a no-op office edit of a delivered receipt keeps its credited $100 although the driver row carries Rate 2 9.5', async () => {
+    const delivered = { status: 'Paid', isPaid: true, deliveryStatus: 'Delivered', tempReceiptNo: 'D5', serialNumber: '777', finalReceiptNo: '777',
+      amountUSD: 100, amountLocal: 970, exchangeRate: 9.7, statusDetail: { paidCollection: 'delivery' },
+      payments: [{ method: 'Cash (LYD)', amount: 970, rate: 1, rate2: 9.5, collectionType: 'delivery' }] };
+    const form = { 'receipt-serial': '777', 'paid-collection-value': 'delivery' };
+    const same = receiptEditFixture(delivered, form, { '.payment-amount': '970', '.payment-rate2': '9.5', '.collection-type': 'delivery' });
+    await same.run('_saveReceiptFromModalInner()');
+    assert.equal(same.saved.length, 1, JSON.stringify(same.notes));
+    assert.equal(same.saved[0].amountUSD, 100, 'before: 102.12 (970 / 9.5 + the house cent)');
+    assert.equal(same.saved[0].amountLocal, 970);
+    assert.equal(same.saved[0].exchangeRate, 9.7);
+    // Rows the office really edited still recompute the money.
+    const edited = receiptEditFixture(delivered, form, { '.payment-amount': '1067', '.payment-rate2': '9.7', '.collection-type': 'delivery' });
+    await edited.run('_saveReceiptFromModalInner()');
+    assert.equal(edited.saved[0].amountLocal, 1067);
+    near(edited.saved[0].amountUSD, 110);
+  });
+
+  await test('r6 R n=2: in server mode an unfunded Paid receipt changed to Not Paid goes through /unsettle, never the refused PATCH', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.isServerModeEnabled = () => true;
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', status: 'Paid', isPaid: true, amountUSD: 100, _lastModified: 1 }];
+    const calls = [];
+    const refuse = where => async () => { calls.push(where); throw Object.assign(new Error('stop'), { status: 409 }); };
+    sandbox.apiPatchEntity = refuse('patch');
+    sandbox.apiUnsettleReceipt = refuse('unsettle');
+    await run("updateRecord(state.receipts, 'r1', { status: 'Not Paid', isPaid: false }, 1)");
+    assert.deepEqual(calls, ['unsettle']);
+  });
+
+  await test('r6 R n=2/7: the receipt-form refusals the form invites read as plain Arabic / English, never "endpoint" or a missing action', async () => {
+    const { state, run } = loadBrowserSource();
+    const say = text => String(run('describe409')({ status: 409, message: text }, 'conflict'));
+    const texts = ["Reassign a paid receipt's customer through the receipt transfer endpoint",
+      'A canceled receipt the company already covered cannot be reopened; record a new receipt',
+      'Insufficient available receipt balance',
+      'A Paid receipt cannot be changed to Not Paid with a normal edit. Use the dedicated receipt debt-conversion action.'];
+    state.language = 'ar';
+    for (const text of texts) {
+      const out = say(text);
+      assert.ok(/[؀-ۿ]/.test(out) && !/[A-Za-z]{4}/.test(out), `${text} -> ${out}`);
+    }
+    state.language = 'en';
+    assert.ok(!/endpoint/.test(say(texts[0])) && !/debt-conversion/.test(say(texts[3])));
+  });
+
+  await test('r6 R n=3: staff without customers.viewContacts keep the stored phone and delivery place when they edit a receipt', async () => {
+    const accountant = { id: 'acc', name: 'Accountant', role: 'Employee', permissions: { receipts: ['view', 'add', 'edit'], customers: ['view', 'viewBalance'] } };
+    const paid = receiptEditFixture(paidReceipt);
+    paid.state.currentUser = accountant;
+    await paid.run('_saveReceiptFromModalInner()');
+    assert.equal(paid.saved.length, 1, JSON.stringify(paid.notes));
+    assert.ok(!('phoneNumber' in paid.saved[0]) && !('deliveryPlaceName' in paid.saved[0]), 'the blank hidden fields would overwrite the stored ones');
+    // A pending D-receipt: its place is hidden from them, and the edit still saves.
+    const pending = receiptEditFixture({ status: 'Not Paid', isPaid: false, tempReceiptNo: 'D9', deliveryStatus: 'Needs Delivery',
+      deliveryPersonId: 'driver1', statusDetail: { notPaidCollection: 'delivery' }, amountUSD: 100, amountLocal: 500, exchangeRate: 5 },
+    { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'driver1', 'receipt-serial': 'D9' });
+    pending.state.currentUser = accountant;
+    await pending.run('_saveReceiptFromModalInner()');
+    assert.equal(pending.saved.length, 1, JSON.stringify(pending.notes));
+    assert.ok(!('deliveryPlaceName' in pending.saved[0]));
+    // A user who can see contacts still saves what the form shows.
+    const admin = receiptEditFixture(paidReceipt, { 'receipt-phone-search': '0911111111' });
+    await admin.run('_saveReceiptFromModalInner()');
+    assert.equal(admin.saved[0].phoneNumber, '0911111111');
+  });
+
+  await test('r6 R n=4: a new Cash (LYD) split row starts at Rate 1 = 1 and every row\'s rates follow its method', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.defaultExchangeRate = 9.7;
+    const fields = { '.split-method': { value: 'Cash (LYD)' }, '.split-rate': { value: '9.7' }, '.split-rate2': { value: '9.7' } };
+    const div = { innerHTML: '', querySelector: sel => fields[sel] || null };
+    fields['.split-method'].closest = () => div;
+    sandbox.document.createElement = () => div;
+    sandbox.document.getElementById = id => (id === 'split-payments-container' ? { appendChild() {} } : null);
+    run('addSplitPayment()');
+    assert.equal(fields['.split-rate'].value, '1.00', 'before: the market rate 9.7 multiplied the LYD amount');
+    assert.equal(fields['.split-rate2'].value, '9.7');
+    assert.ok(div.innerHTML.includes('onchange="onSplitMethodChange(this)"'));
+    fields['.split-method'].value = 'USDT';
+    run('onSplitMethodChange')(fields['.split-method']);
+    assert.equal(fields['.split-rate'].value, '0.00');
+    assert.equal(fields['.split-rate2'].value, '0');
+    fields['.split-method'].value = 'Libyana';
+    run('onSplitMethodChange')(fields['.split-method']);
+    assert.equal(fields['.split-rate'].value, '0.70');
+    assert.equal(fields['.split-rate2'].value, '9.70');
+  });
+
+  await test('r6 R n=5: a Rate 1 of 0 counts as 0 on the receipt card and in Mark Collected, as in the form', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    state.customers = [{ id: 'c1', name: 'Ali' }];
+    const receipt = { id: 'z1', recordType: 'receipt', customerId: 'c1', status: 'Paid', isPaid: true, serialNumber: '55', amountLocal: 500,
+      amountUSD: 100, exchangeRate: 5, transfers: [], createdAt: '2026-09-01',
+      payments: [{ method: 'Cash (LYD)', amount: 500, rate: 1, rate2: 5 }, { method: 'Bank Transfer (LYD)', amount: 1000, rate: 0, rate2: 0 }] };
+    state.receipts = [receipt];
+    const rows = run('_receiptCollectionBreakdown')(receipt);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].amount, 500, 'before: [500, 1000] = 1500 LYD against a 500 LYD receipt');
+    const html = String(sandbox.renderReceiptsView());
+    assert.ok(/Total Paid:<\/span><span>500\.00 LYD/.test(html), 'Total Paid must match the receipt');
+    assert.ok(!html.includes('1000.00 LYD') && !html.includes('1500.00 LYD'));
+  });
+
+  await test('r6 R n=13: editing an old receipt keeps its dates, and the customer card reads a receipt by its own day', async () => {
+    const old = '2025-01-01T00:00:00.000Z';
+    const { saved, notes, run } = receiptEditFixture({ ...paidReceipt, startDate: old, endDate: old, createdAt: old });
+    await run('_saveReceiptFromModalInner()');
+    assert.equal(saved.length, 1, JSON.stringify(notes));
+    assert.equal(saved[0].startDate, old);
+    assert.equal(saved[0].endDate, old);
+    // Receipts an earlier edit already rewrote still show their real day.
+    const { sandbox, state } = loadBrowserSource();
+    state.receipts = [{ id: 'x', recordType: 'receipt', customerId: 'c1', status: 'Paid', isPaid: true, amountUSD: 10, amountLocal: 50,
+      exchangeRate: 5, createdAt: old, startDate: '2026-09-20T00:00:00.000Z' }];
+    assert.equal(sandbox.getCustomerStats('c1').lastAdDate, Date.parse(old));
+  });
+
+  await test('r6 R n=20: settling an old Not Paid receipt dates the payment today; a paid receipt keeps its date', async () => {
+    const stale = '2026-07-10T00:00:00.000Z';
+    const start = Date.now();
+    const settle = receiptEditFixture({ status: 'Not Paid', isPaid: false, deliveryStatus: 'Office', collectionDate: stale,
+      statusDetail: { notPaidCollection: 'office' }, amountUSD: 100, amountLocal: 500, exchangeRate: 5 });
+    await settle.run('_saveReceiptFromModalInner()');
+    assert.equal(settle.saved.length, 1, JSON.stringify(settle.notes));
+    assert.ok(Date.parse(settle.saved[0].collectionDate) >= start - 1000, `before: kept the stale ${stale}`);
+    const kept = receiptEditFixture({ ...paidReceipt, collectionDate: stale });
+    await kept.run('_saveReceiptFromModalInner()');
+    assert.equal(kept.saved[0].collectionDate, stale);
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }
