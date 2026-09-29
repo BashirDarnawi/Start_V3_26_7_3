@@ -3409,6 +3409,16 @@ async function main() {
     assert.equal(sandbox._serverRefusalText(message), message);
   });
 
+  // ---- r9 M review corrections ----
+  await test('r9 M: the partly-covered receipt refusal reads in Arabic', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const message = "This receipt is partly covered by the company: record the full receipt amount or the customer's net cash";
+    state.language = 'ar';
+    assert.ok(!/[A-Za-z]{3,}/.test(sandbox._serverRefusalText(message)), sandbox._serverRefusalText(message));
+    state.language = 'en';
+    assert.equal(sandbox._serverRefusalText(message), message);
+  });
+
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

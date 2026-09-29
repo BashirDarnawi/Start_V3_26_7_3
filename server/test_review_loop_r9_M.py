@@ -48,6 +48,7 @@ def _apply(old, merged):
     apply_coverage_settlement_truth(
         old, merged, due_total=_financial_due_total,
         old_rows_minor=main._receipt_payments_credit_minor(old.get("payments")),
+        new_rows_minor=main._receipt_payments_credit_minor(merged.get("payments")),
     )
     return merged
 
@@ -142,7 +143,9 @@ def test_3_the_exact_net_cash_with_the_house_cent_settles():
     old = _office_receipt(100, 30.5)
     # 486.5 LYD at 7 = 69.50; the form sends 69.51 (its house cent).
     kept = _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.51, "amountLocal": 486.5})
-    assert kept["amountUSD"] == 69.51                      # before: 409
+    assert kept["amountUSD"] == 69.5                       # before: 409; the house cent is not cash
+    assert kept["amountLocal"] == 486.5
+    assert _financial_due_total(kept) == 10000             # never above the gross
     assert kept["customerOutstandingUSD"] == 0
     assert _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 69.5})["amountUSD"] == 69.5
     assert _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 100})["amountUSD"] == 69.5
@@ -175,6 +178,69 @@ def test_5_a_rate_1_of_zero_or_a_microscopic_rate_1_backs_no_dollars():
     assert _row_rate2_at({"method": "Libyana", "rate": "1e-400"}, Decimal("7")) == 0.0   # before: inf
     assert _row_rate2_at({"method": "Libyana", "rate": 0.7}, Decimal("7")) == 10.0
     assert _row_rate2_at({"method": "Cash (USD)", "rate": 7}, Decimal("7")) == 7.0
+
+
+# ---------------------------------------------------------------- review corrections (unit)
+
+@pytest.mark.parametrize("delivery", ["Office", "Delivered"])
+@pytest.mark.parametrize("rows,amount_usd", [
+    ([_row(665)], 95), ([_row(700, 7.4)], 94.6), ([_row(560)], 80),
+])
+def test_c1_rows_first_then_the_amount_in_a_second_patch_is_refused(delivery, rows, amount_usd):
+    settled = {**_paid_in_office_with_gross_rows(), "deliveryStatus": delivery}
+    step1 = _apply(settled, {**settled, "payments": rows})
+    assert step1["amountUSD"] == 70.0
+    with pytest.raises(HTTPException) as refused:           # before: cash 95 / 94.6 / 80 kept
+        _apply(step1, {**step1, "amountUSD": amount_usd, "amountLocal": sum(r["amount"] for r in rows)})
+    assert refused.value.status_code == 409
+
+
+def test_c1_a_real_top_up_still_grows_the_cash_by_the_rows_growth():
+    settled = {**_paid_in_office_with_gross_rows(), "deliveryStatus": "Delivered"}
+    lowered = _apply(settled, {**settled, "payments": [_row(560)]})
+    topped = _apply(lowered, {**lowered, "payments": [_row(560), _row(70)], "amountUSD": 80, "amountLocal": 630})
+    assert topped["amountUSD"] == 80                       # 70 + the $10 the rows grew
+    with pytest.raises(HTTPException):                     # more than the rows grew
+        _apply(lowered, {**lowered, "payments": [_row(560), _row(70)], "amountUSD": 90, "amountLocal": 630})
+    # Driver rows a cent or two above the cash (per-row rounding) keep their top-ups.
+    driver = {**_covered_delivery_receipt(), "status": "Paid", "isPaid": True, "deliveryStatus": "Delivered",
+              "amountUSD": 70, "amountLocal": 490, "payments": [_row(163.33), _row(163.33), _row(163.34)]}
+    assert main._receipt_payments_credit_minor(driver["payments"]) == 7002
+    rows = driver["payments"] + [_row(70)]
+    assert _apply(driver, {**driver, "payments": rows, "amountUSD": 80.02, "amountLocal": 560})["amountUSD"] == 80.02
+
+
+def test_c2_the_house_cent_never_puts_cash_plus_covered_above_the_gross():
+    old = _office_receipt(100, 30.5)
+    gross_settled = _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 100, "amountLocal": 700,
+                                 "payments": [_row(700)]})
+    assert gross_settled["amountUSD"] == 69.5
+    retyped = _apply(gross_settled, {**gross_settled, "amountUSD": 69.51, "amountLocal": 486.5,
+                                     "payments": [_row(486.5)]})
+    assert retyped["amountUSD"] == 69.5                    # before: 69.51 (pot 100.01)
+    at_coverage = {**_office_receipt(30.5, 30.5)}
+    settled = _apply(at_coverage, {**at_coverage, "status": "Paid", "isPaid": True, "amountUSD": 0.01})
+    assert _financial_due_total(settled) == 3050           # before: 3051
+
+
+def test_c3_a_receipt_already_under_its_coverage_still_takes_the_driver_accept():
+    old = {**_covered_delivery_receipt(), "amountUSD": 20, "amountLocal": 140, "debtAmountUSD": 20,
+           "debtAmountLocal": 140, "deliveryStatus": "Needs Delivery"}
+    accepted = _apply(old, {**old, "deliveryStatus": "In Progress"})   # before: 409
+    assert accepted["deliveryStatus"] == "In Progress"
+    with pytest.raises(HTTPException):                     # lowering it further is still refused
+        _apply(old, {**old, "debtAmountUSD": 10, "debtAmountLocal": 70, "amountUSD": 10, "amountLocal": 70})
+
+
+def test_c4_gross_rows_retyped_as_net_cash_in_two_rows_are_kept():
+    old = _office_receipt(100, 30.5)
+    settled = _apply(old, {**old, "status": "Paid", "isPaid": True, "amountUSD": 100, "amountLocal": 513,
+                           "payments": [_row(513, 5.13)]})
+    assert settled["amountUSD"] == 69.5
+    rows = [_row(178.27, 5.13), _row(178.27, 5.13)]
+    assert main._receipt_payments_credit_minor(rows) == 6952
+    kept = _apply(settled, {**settled, "payments": rows, "amountUSD": 69.52, "amountLocal": 356.54})
+    assert kept["amountUSD"] == 69.52                      # before: 409
 
 
 # ---------------------------------------------------------------- API
@@ -310,3 +376,25 @@ def test_5_api_a_zero_rate_completion_row_stores_rate_2_of_zero(actors):
     payments = _get(actors, receipt["id"])["data"]["payments"]
     assert payments[1]["rate2"] == 0.0                     # before: 9700.0
     assert main._receipt_payments_credit_minor(payments) in {10000, 10001}  # before: None
+
+
+def test_c1_api_rows_first_then_the_amount_cannot_mint_the_company_share(actors):
+    receipt = _create(actors, status="Not Paid", isPaid=False, amountUSD=100, amountLocal=700, exchangeRate=7,
+                      deliveryStatus="Office", statusDetail={"notPaidCollection": "office"})
+    _cover(actors, receipt["id"], 3000)
+    stored = _get(actors, receipt["id"])
+    settled = client.post(f"/api/receipts/{receipt['id']}/settle", json={
+        "expectedLastModified": stored["lastModified"], "idempotencyKey": "r9m-" + secrets.token_hex(8),
+        "data": {"status": "Paid", "isPaid": True, "amountUSD": 100, "amountLocal": 700,
+                 "payments": [{**_row(700), "collectionType": "office", "deliveryPersonId": ""}]},
+    }, cookies=actors["admin"]["cookies"])
+    assert settled.status_code == 200, settled.text
+    assert _get(actors, receipt["id"])["data"]["amountUSD"] == 70.0
+    rows = [{**_row(665), "collectionType": "office", "deliveryPersonId": ""}]
+    step1 = _patch(actors, "admin", receipt["id"], {"payments": rows})
+    assert step1.status_code == 200, step1.text
+    step2 = _patch(actors, "admin", receipt["id"], {"amountUSD": 95, "amountLocal": 665})
+    assert step2.status_code == 409, step2.text            # before: 200, cash 95, pot $125 on a $100 receipt
+    data = _get(actors, receipt["id"])["data"]
+    assert data["amountUSD"] == 70.0
+    assert _financial_due_total(data) == 10000

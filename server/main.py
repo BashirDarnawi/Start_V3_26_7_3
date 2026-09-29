@@ -9535,7 +9535,8 @@ def _financial_patch_receipt_atomic(
             if _truth_allowed:
                 _financial_apply_delivery_completion_truth(receipt_id, old, merged, ad_rows)
             _apply_coverage_settlement_truth(old, merged, due_total=_financial_due_total, delivery_truth_allowed=_truth_allowed,
-                                             old_rows_minor=_receipt_payments_credit_minor(old.get("payments")))
+                                             old_rows_minor=_receipt_payments_credit_minor(old.get("payments")),
+                                             new_rows_minor=_receipt_payments_credit_minor(merged.get("payments")))
             canceled_due_source = (
                 (
                     str(merged.get("deliveryStatus") or "") == "Canceled"

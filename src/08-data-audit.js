@@ -1757,6 +1757,7 @@ const _SERVER_REFUSAL_AR = [
   ["Reassign a paid receipt's customer", 'وصل له رصيد أو إعلانات لا يتغير عميله بالتعديل؛ استخدم تحويل رصيد الوصل.', 'A receipt with money or ads keeps its customer; use a receipt balance transfer.'],
   ['A canceled receipt the company already covered', 'غطّت الشركة هذا الوصل الملغى فلا يُعاد فتحه؛ سجّل وصلاً جديداً.'],
   ['The company already covered', 'لا يمكن أن يقل مبلغ الوصل عن المبلغ الذي غطّته الشركة منه.'],
+  ['This receipt is partly covered by the company', 'هذا الوصل مغطّى جزئياً من الشركة: سجّل مبلغ الوصل الكامل أو المبلغ الصافي الذي دفعه العميل فعلاً.'],
   ['Insufficient available receipt balance', 'رصيد الوصل المتاح لا يكفي.'],
   ['A Paid receipt cannot be changed to Not Paid with a normal', 'حدّث الصفحة ثم أعد المحاولة.', 'Refresh the page and try again.'],
   ["Paid receipt funding must exactly settle the customer's share", 'يجب أن يساوي تمويل الوصولات حصة العميل غير المدفوعة بالضبط.'],

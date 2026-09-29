@@ -220,11 +220,24 @@ def _reads_as_gross(amount_minor: int, gross_minor: int, net_minor: int) -> bool
     return amount_minor >= gross_floor and amount_minor > net_minor + 1
 
 
+def _row_cent_drift(payments: Any) -> int:
+    """Cents a rows total can sit above the cash it records: the credit reader
+    (and the client) round every positive row UP to the cent."""
+    count = 0
+    for entry in payments if isinstance(payments, list) else []:
+        try:
+            count += isinstance(entry, dict) and float(entry.get("amount") or 0) > 0
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return max(1, count)
+
+
 def apply_coverage_settlement_truth(
     old: dict[str, Any], merged: dict[str, Any], *,
     due_total: Callable[[dict[str, Any]], int],
     delivery_truth_allowed: bool | None = None,
     old_rows_minor: int | None = None,
+    new_rows_minor: int | None = None,
 ) -> None:
     """Keep amountUSD = CUSTOMER cash across settle/unsettle of a covered receipt.
 
@@ -237,6 +250,8 @@ def apply_coverage_settlement_truth(
     ``old_rows_minor`` is the ads credit the STORED payment rows back (main.py's
     _receipt_payments_credit_minor of old["payments"]; None = no usable rows).
     It tells a re-save of net-cash rows from one of gross-prefilled rows.
+    ``new_rows_minor`` is the same reader over merged["payments"]: on a settled
+    receipt the cash may grow only by what the rows grew.
     """
     covered_minor = (
         _financial_minor(old.get("companyCoveredUSD"), "stored companyCoveredUSD")
@@ -277,7 +292,11 @@ def apply_coverage_settlement_truth(
             # The gross can never go under what the company already covered
             # (unassigned coverage sits on no ad row, so no capacity check sees
             # it): settling that later gave more credit than the gross.
-            if due_total(merged) < covered_minor:
+            # Only an edit that LOWERS the gross is refused: a receipt the old
+            # bug already left under its coverage must still take unrelated
+            # edits (the driver accepting the job); the settle check stops it.
+            new_due = due_total(merged)
+            if new_due < covered_minor and new_due < due_total(old):
                 raise HTTPException(
                     status_code=409,
                     detail=f"The company already covered ${_financial_usd(covered_minor):.2f} of this receipt; its amount cannot go below that",
@@ -306,21 +325,43 @@ def apply_coverage_settlement_truth(
             return
         gross_minor = old_minor + covered_minor
         rows_are_gross = old_rows_minor is not None and abs(old_rows_minor - gross_minor) <= 1
-        if already_delivered and not rows_are_gross:
-            # Driver-collected cash (its rows back the cash, or a legacy receipt
-            # has no rows): only the office's gross rows are netted here.
-            return
-        if rows_are_gross and old_minor + 1 < amount_minor < gross_minor - max(100, gross_minor // 100):
-            # The stored rows are the gross, so a lower or re-rated total built
-            # from them is not the customer's cash: keeping it minted up to the
-            # company share as free credit.
-            raise HTTPException(
-                status_code=409,
-                detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
-            )
-        if not _reads_as_gross(amount_minor, gross_minor, old_minor):
-            return
-        new_amount_minor = max(amount_minor - covered_minor, 0)
+        drift = _row_cent_drift(merged.get("payments"))
+        capped_minor = None
+        if old_rows_minor is not None and new_rows_minor is not None and amount_minor > old_minor + drift:
+            # The cash grows only by what the rows grew. A rows-only PATCH
+            # first (amount unchanged) and the re-derived amount second made
+            # the stored rows neither net nor gross, and skipped every check.
+            allowed_minor = old_minor + max(new_rows_minor - old_rows_minor, 0) + drift
+            if amount_minor > allowed_minor:
+                if not _reads_as_gross(amount_minor, gross_minor, old_minor):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
+                    )
+                capped_minor = min(max(amount_minor - covered_minor, 0), allowed_minor)
+        if capped_minor is not None:
+            new_amount_minor = capped_minor
+        else:
+            if already_delivered and not rows_are_gross:
+                # Driver-collected cash (its rows back the cash, or a legacy receipt
+                # has no rows): only the office's gross rows are netted here.
+                return
+            if rows_are_gross and old_minor + drift < amount_minor < gross_minor - max(100, gross_minor // 100):
+                # The stored rows are the gross, so a lower or re-rated total built
+                # from them is not the customer's cash: keeping it minted up to the
+                # company share as free credit. (Each net row adds up to a cent.)
+                raise HTTPException(
+                    status_code=409,
+                    detail="This receipt is partly covered by the company: record the full receipt amount or the customer's net cash",
+                )
+            if rows_are_gross and amount_minor == old_minor + 1 and new_rows_minor != amount_minor:
+                # The net cash plus the form's house cent: the rows do not back
+                # that cent, so cash + covered would pass the gross.
+                merged["amountUSD"] = _financial_usd(old_minor)
+                return
+            if not _reads_as_gross(amount_minor, gross_minor, old_minor):
+                return
+            new_amount_minor = max(amount_minor - covered_minor, 0)
     elif not old_paid and new_paid:
         if already_delivered:
             # amountUSD is the driver's real collected cash — leave it alone;
@@ -351,6 +392,12 @@ def apply_coverage_settlement_truth(
         treat_as_gross = _reads_as_gross(amount_minor, gross_minor, net_expected)
         new_amount_minor = max(amount_minor - covered_minor, 0) if treat_as_gross else amount_minor
         merged["customerOutstandingUSD"] = 0.0
+        if amount_minor == net_expected + 1 and new_rows_minor != amount_minor:
+            # The house cent is not customer cash unless the rows back it:
+            # keeping it stored cash + covered one cent above the gross. The
+            # LYD amount is the real cash, so it is kept as typed.
+            merged["amountUSD"] = _financial_usd(net_expected)
+            return
     else:
         if already_delivered:
             # Unsettling a completed delivery keeps its collected cash; the
