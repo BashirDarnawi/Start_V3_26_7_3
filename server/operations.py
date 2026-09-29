@@ -325,6 +325,82 @@ def lock_financial_period_for_redaction(collection: str, data: dict[str, Any] | 
             _lock_financial_period(conn, period)
 
 
+DELETED_USER_NAME = "Deleted user"
+_HISTORY_LISTS = ("editHistory", "metaChangeHistory")
+_HISTORY_ACTOR_KEYS = ("editedBy", "userName", "actorName")  # what the history viewer shows as "by"
+# Labels the system writes as editedBy; a person whose name is one of these keeps them untouched.
+_SYSTEM_ACTOR_NAMES = frozenset({"deleted user", "unknown", "system", "meta"})
+
+
+def _like_text(value: str) -> str:
+    return re.sub(r"([!%_])", r"!\1", value)  # a LIKE literal for ESCAPE '!'
+
+
+def scrub_actor_name_stamps_conn(conn: Any, user_id: str, old_name: str, now: int, *, lock_suffix: str = "") -> int:
+    """Privacy anonymisation: replace the person's name where receipts and ads copied it as text.
+
+    Every edit-history entry (``editHistory[]``, ``metaChangeHistory[]``) stores the editor's display
+    name and no id, and a completed Meta import stores ``metaImportCompletedByName`` next to the
+    ``metaImportCompletedBy`` id. Those rows usually belong to someone else, so main.py's
+    createdByName scrub (rows the person created) never sees them. Entries are matched by the exact
+    former name (the only key they carry; a same-named colleague's entries cannot be told apart),
+    the completion stamp by the id. Both become "Deleted user", and last_modified moves on so synced
+    clients take the scrubbed copy. Runs in main.py's anonymisation transaction; idempotent.
+    Returns the number of rows rewritten.
+    """
+    name = str(old_name or "").strip()
+    lowered = name.casefold()
+    if lowered in _SYSTEM_ACTOR_NAMES or lowered.startswith(("meta automatic", "system ")):
+        name = ""
+    patterns = {"by_id": f"%{_like_text(str(user_id))}%"}
+    if name:
+        patterns["by_name"] = f"%{_like_text(json_dumps(name)[1:-1])}%"
+    where = " OR ".join(f"data_json LIKE :{key} ESCAPE '!'" for key in patterns)
+    rows = conn.execute(
+        text(
+            "SELECT type, id, data_json, last_modified FROM entities "
+            f"WHERE type IN ('receipts', 'ads') AND ({where}) ORDER BY type, id" + lock_suffix
+        ),
+        patterns,
+    ).mappings().all()
+    changed = 0
+    for row in rows:
+        try:
+            data = json_loads(row.get("data_json") or "{}")
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        dirty = False
+        if str(data.get("metaImportCompletedBy") or "") == str(user_id) and data.get("metaImportCompletedByName") not in (
+            None, "", DELETED_USER_NAME,
+        ):
+            data["metaImportCompletedByName"] = DELETED_USER_NAME
+            dirty = True
+        for list_key in _HISTORY_LISTS if name else ():
+            for entry in data.get(list_key) if isinstance(data.get(list_key), list) else ():
+                if not isinstance(entry, dict):
+                    continue
+                for actor_key in _HISTORY_ACTOR_KEYS:
+                    if isinstance(entry.get(actor_key), str) and entry[actor_key].strip() == name:
+                        entry[actor_key] = DELETED_USER_NAME
+                        dirty = True
+        if not dirty:
+            continue
+        lock_financial_period_for_redaction(str(row["type"]), data, conn=conn)
+        conn.execute(
+            text("UPDATE entities SET data_json = :data_json, last_modified = :stamp WHERE type = :type AND id = :id"),
+            {
+                "data_json": json_dumps(data),
+                "stamp": max(int(now), int(row.get("last_modified") or 0) + 1),
+                "type": row["type"],
+                "id": row["id"],
+            },
+        )
+        changed += 1
+    return changed
+
+
 def assert_financial_bulk_import_open(
     collection: str,
     existing_rows: list[Any],

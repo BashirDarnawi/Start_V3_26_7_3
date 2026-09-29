@@ -237,7 +237,7 @@ from .security import (
 from .auth_security import upgrade_password_hash_after_login
 from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
-from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, stop_operations_worker
+from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, scrub_actor_name_stamps_conn, stop_operations_worker
 register_redacted_type("exchangeRateHistory", ("userId",))  # P1-05: every account reads the Manager's rates; data.userId = who set one
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
 # for an unknown email as for a known one. Without it, the known-email path runs
@@ -13050,6 +13050,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
                 status_code=409,
                 detail="Disable this account first, then run privacy anonymization",
             )
+        old_name = str(existing.get("name") or "").strip()  # history entries carry only the name
 
         conn.execute(
             text(
@@ -13087,11 +13088,14 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
         # Keep action/resource/user identifiers for accountability and financial
         # referential integrity, but remove free-text and metadata that may
         # contain the person's former name, email address, IP, or user agent.
+        # collision_repair rows keep their metadata (ad/page ids, stamps and hashes only): the
+        # studio Unlink reads its reversal record back (meta_collisions.reverse_link_removal).
         conn.execute(
             text(
                 """
                 UPDATE audit_logs
-                SET message=:message, metadata_json=:metadata_json
+                SET message=:message,
+                    metadata_json=CASE WHEN action='collision_repair' THEN metadata_json ELSE :metadata_json END
                 WHERE user_id=:id
                    OR (resource_type='users' AND resource_id=:id)
                 """
@@ -13141,6 +13145,7 @@ def _privacy_anonymize_deleted_user_atomic(user_id: str) -> dict[str, Any]:
                     "id": row["id"],
                 },
             )
+        scrub_actor_name_stamps_conn(conn, user_id, old_name, now, lock_suffix=suffix)  # editedBy / metaImportCompletedByName
         scrub_studio_personal_data_conn(conn, user_id)  # P1-16: studio WhatsApp number, reply-log commenter data; never the ledger
 
         updated = conn.execute(

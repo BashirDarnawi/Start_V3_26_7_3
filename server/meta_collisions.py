@@ -30,6 +30,8 @@ the doors below, in the link's own transaction:
   the transaction that writes the claim, soft-deletes Manager's copies of that campaign that are still exactly as the automatic
   import wrote them (the report's ``untouched`` rule: no money, no customer, no edit). Rows with
   money, edits, a closed month or the owner's keep decision are never removed; they are reported.
+  The owner-less page the import made for a removed copy goes too, while nothing but the import
+  touched it and no other live ad uses it (``removedPages`` of the reversal record).
   Audited as ``collision_repair`` with a reversal record (``reverse_repair`` can restore them). It
   takes the import's lock first, so an import running now either finished (its copy is removed
   here) or sees the claim (``campaign_claimed_by``, read by meta_ads.import_meta_ad_draft).
@@ -63,6 +65,7 @@ from .rate_limiter import check_rate_limit
 from .security import new_id
 
 ADS_TYPE = "ads"
+PAGES_TYPE = "pages"
 STUDIO_REQUEST_TYPE = "adCampaignRequests"
 # Server-only platform state (never served by /api/collections): the owner's keep decisions.
 DECISIONS_STATE_TYPE = "metaHealthState"
@@ -259,7 +262,7 @@ def _colliding(conn: Any, studio: Mapping[str, list[str]]) -> dict[str, str]:
     return found
 
 
-def _load_ads(conn: Any, ad_ids: Iterable[str], *, lock: bool) -> dict[str, dict[str, Any]]:
+def _load_ads(conn: Any, ad_ids: Iterable[str], *, lock: bool, entity_type: str = ADS_TYPE) -> dict[str, dict[str, Any]]:
     ids = sorted(set(ad_ids))
     columns = "SELECT id, data_json, deleted, created_at, created_by, last_modified FROM entities "
     rows: dict[str, dict[str, Any]] = {}
@@ -268,16 +271,62 @@ def _load_ads(conn: Any, ad_ids: Iterable[str], *, lock: bool) -> dict[str, dict
         suffix = " FOR UPDATE" if _postgres(conn) else ""
         for ad_id in ids:
             row = conn.execute(
-                text(columns + "WHERE type = :type AND id = :id" + suffix), {"type": ADS_TYPE, "id": ad_id}
+                text(columns + "WHERE type = :type AND id = :id" + suffix), {"type": entity_type, "id": ad_id}
             ).mappings().first()
             if row:
                 rows[ad_id] = dict(row)
         return rows
     for start in range(0, len(ids), 200):
         query = text(columns + "WHERE type = :type AND id IN :ids").bindparams(bindparam("ids", expanding=True))
-        for row in conn.execute(query, {"type": ADS_TYPE, "ids": ids[start:start + 200]}).mappings():
+        for row in conn.execute(query, {"type": entity_type, "ids": ids[start:start + 200]}).mappings():
             rows[str(row["id"])] = dict(row)
     return rows
+
+
+def _lock_page_rows(conn: Any, page_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Manager ``pages`` rows locked for a removal or its reversal. On PostgreSQL the per-Facebook-page
+    advisory lock of meta_ads._ensure_import_page comes first (an enrichment creating or linking that
+    page has finished, or waits for this transaction), then the rows in id order."""
+    ids = sorted({str(page_id) for page_id in page_ids if _ID_RE.fullmatch(str(page_id or ""))})
+    if _postgres(conn):
+        meta_ids = sorted({
+            str(_data(row).get("metaPageId") or "").strip() for row in _load_ads(conn, ids, lock=False, entity_type=PAGES_TYPE).values()
+        } - {""})
+        for meta_id in meta_ids:
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": f"albayan_meta_page:{meta_id}"})
+    return _load_ads(conn, ids, lock=True, entity_type=PAGES_TYPE)
+
+
+def _untouched_import_page(conn: Any, row: Mapping[str, Any] | None) -> bool:
+    """True for a live Manager page that is still only what Meta's automatic import made of a
+    Facebook page: imported by it (an audit ``meta_import`` row), never touched by a person (no
+    audit row but the import's and this module's), no owner, and no other live Manager ad on it."""
+    if not row or bool(row["deleted"]):
+        return False
+    data, page_id = _data(row), str(row["id"])
+    owners = data.get("customerIds")
+    if (
+        data.get("metaImportSource") != "meta_ads" or data.get("metaImportState") != "needs_owner"
+        or _listed(owners) or (bool(owners) and not isinstance(owners, list))
+    ):
+        return False
+    actions = set(conn.execute(
+        text("SELECT DISTINCT action FROM audit_logs WHERE resource_type = :type AND resource_id = :id"),
+        {"type": PAGES_TYPE, "id": page_id},
+    ).scalars().all())
+    if "meta_import" not in actions or not actions <= {"meta_import", AUDIT_ACTION}:
+        return False
+    sql = json_fields_select_sql(("pageId",), ("id",), "type = :type AND deleted = false AND data_json LIKE :pattern ESCAPE '!'")
+    others = conn.execute(text(sql), {"type": ADS_TYPE, "pattern": f"%{_like_literal(json_dumps(page_id))}%"}).mappings()
+    return not any(str(other.get("f_pageid") or "").strip() == page_id for other in others)
+
+
+def _live_page_holds(conn: Any, meta_page_id: str) -> bool:
+    """True when a live Manager page carries this Facebook page id (the import's own lookup)."""
+    if not meta_page_id:
+        return False
+    sql = f"SELECT id FROM entities WHERE type = :type AND deleted = false AND COALESCE({json_field_sql('metaPageId')}, '') = :value LIMIT 1"
+    return conn.execute(text(sql), {"type": PAGES_TYPE, "value": meta_page_id}).first() is not None
 
 
 def _like_literal(value: str) -> str:
@@ -584,11 +633,14 @@ def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> 
 
     All or nothing: if any row or decision changed after the repair, or a removed row's financial month
     was closed since, nothing is changed. A month being closed or unlocked right now raises 409.
+    A page a studio link removed with its copy (``removedPages``) comes back too, unless it is already
+    back, gone, or a newer page now holds its Facebook page id (restoring it would duplicate that page).
     """
     if not isinstance(reversal, dict) or reversal.get("kind") != REVERSAL_KIND or reversal.get("version") != 1:
         raise CollisionRepairError("This is not a collision repair reversal file.")
     repair_id = str(reversal.get("repairId") or "")
     removed, kept = reversal.get("removed"), reversal.get("kept")
+    removed_pages = reversal.get("removedPages", [])
     if not _REPAIR_ID_RE.fullmatch(repair_id) or not isinstance(removed, list) or not isinstance(kept, list):
         raise CollisionRepairError("The reversal file is damaged (repairId, removed or kept).")
     for item in [*removed, *kept]:
@@ -598,6 +650,13 @@ def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> 
         stamp = item.get("lastModifiedAfter")
         if isinstance(stamp, bool) or not isinstance(stamp, int) or not isinstance(item.get("dataSha256"), str):
             raise CollisionRepairError(f"The reversal file is damaged ({item['adId']} without its stamp or hash).")
+    if not isinstance(removed_pages, list) or not all(
+        isinstance(item, dict) and _ID_RE.fullmatch(str(item.get("pageId") or ""))
+        and isinstance(item.get("lastModifiedAfter"), int) and not isinstance(item.get("lastModifiedAfter"), bool)
+        and isinstance(item.get("dataSha256"), str)
+        for item in removed_pages
+    ):
+        raise CollisionRepairError("The reversal file is damaged (a removed page without its id, stamp or hash).")
     _serialize(conn)
     rows = _load_ads(conn, (str(item["adId"]) for item in removed), lock=True)
     problems = []
@@ -619,19 +678,30 @@ def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> 
         current = state["kept"].get(str(item["adId"]))
         if not isinstance(current, dict) or current.get("repairId") != repair_id:
             problems.append(f"the keep decision for {item['adId']} changed after the repair")
+    page_rows = _lock_page_rows(conn, (str(item["pageId"]) for item in removed_pages)) if removed_pages else {}
+    pages_back: list[dict[str, Any]] = []
+    for item in removed_pages:
+        row = page_rows.get(str(item["pageId"]))
+        if row is None or not bool(row["deleted"]):
+            continue  # gone, or already back: nothing to restore
+        if int(row["last_modified"] or 0) != item["lastModifiedAfter"] or _sha256(row["data_json"]) != item["dataSha256"]:
+            problems.append(f"page {item['pageId']} changed after the repair")
+        elif not _live_page_holds(conn, str(_data(row).get("metaPageId") or "").strip()):
+            pages_back.append(item)
     if problems:
         raise CollisionRepairError("The reversal was refused: " + "; ".join(problems) + ".")
-    for item in removed:
-        after = int(item["lastModifiedAfter"])
-        result = conn.execute(
-            text(
-                "UPDATE entities SET deleted = false, last_modified = :stamp "
-                "WHERE type = :type AND id = :id AND deleted = true AND last_modified = :after"
-            ),
-            {"type": ADS_TYPE, "id": str(item["adId"]), "after": after, "stamp": max(now_ms(), after + 1)},
-        )
-        if result.rowcount != 1:
-            raise CollisionRepairError(f"{item['adId']} changed while the reversal ran.")
+    for entity_type, key, items in ((ADS_TYPE, "adId", removed), (PAGES_TYPE, "pageId", pages_back)):
+        for item in items:
+            after = int(item["lastModifiedAfter"])
+            result = conn.execute(
+                text(
+                    "UPDATE entities SET deleted = false, last_modified = :stamp "
+                    "WHERE type = :type AND id = :id AND deleted = true AND last_modified = :after"
+                ),
+                {"type": entity_type, "id": str(item[key]), "after": after, "stamp": max(now_ms(), after + 1)},
+            )
+            if result.rowcount != 1:
+                raise CollisionRepairError(f"{item[key]} changed while the reversal ran.")
     if kept:
         for item in kept:
             if isinstance(item.get("previous"), dict):
@@ -644,11 +714,16 @@ def reverse_repair(conn: Any, reversal: Any, *, actor_id: str | None = None) -> 
         "restored": [str(item["adId"]) for item in removed],
         "keepDecisionsUndone": [str(item["adId"]) for item in kept],
     }
+    if removed_pages:
+        summary["restoredPages"] = [str(item["pageId"]) for item in pages_back]
     _audit(conn, actor_id, ADS_TYPE, repair_id,
            f"Studio collision repair reversed: restored {len(removed)} core ads, undid {len(kept)} keep decisions",
            {**summary, "reversed": True})
     for ad_id in summary["restored"]:
         _audit(conn, actor_id, ADS_TYPE, ad_id, "Restored to Albayan Manager (collision repair reversed)",
+               {"repairId": repair_id, "reversed": True})
+    for page_id in summary.get("restoredPages", []):
+        _audit(conn, actor_id, PAGES_TYPE, page_id, "Restored to Albayan Manager (collision repair reversed)",
                {"repairId": repair_id, "reversed": True})
     return summary
 
@@ -706,10 +781,13 @@ def remove_untouched_copies(
     ``needs_completion``, no edit, no customer, no money flag or money record), its month is open
     and the owner did not choose to keep it. Every other copy stays and is reported with its reason
     (``kept_by_owner``, ``has_money`` + the money kinds, ``edited``, ``closed_period``, ``changed``).
+    A removed copy's page goes too when the import made it and it is still untouched
+    (_untouched_import_page): otherwise the studio customer's Facebook page stays in Manager's Pages
+    list as an owner-less "Needs owner" page.
     Audited as ``collision_repair``: one summary row holding a reversal record (reverse_repair can
-    restore the removed rows) and one row per removed copy.
+    restore the removed rows) and one row per removed copy or page.
 
-    Returns ``{"repairId", "removed": [ad ids], "kept": [{"adId", "reason", "money"?}]}``.
+    Returns ``{"repairId", "removed": [ad ids], "kept": [{"adId", "reason", "money"?}], "removedPages"?: [page ids]}``.
     """
     campaign = str(campaign_id or "").strip()
     result: dict[str, Any] = {"repairId": "", "removed": [], "kept": []}
@@ -771,10 +849,32 @@ def remove_untouched_copies(
             })
     if not removed and not kept:
         return result
+    # The owner-less page the import made for a removed copy goes with it (the studio customer's
+    # Facebook page must not stay in Manager's Pages list as "Needs owner"); only an untouched one.
+    removed_pages: list[dict[str, Any]] = []
+    pages = _lock_page_rows(conn, (str(_data(live[item["adId"]]).get("pageId") or "").strip() for item in removed))
+    for page_id, page in sorted(pages.items()):
+        if not _untouched_import_page(conn, page):
+            continue
+        before = int(page["last_modified"] or 0)
+        after = max(now_ms(), before + 1)
+        done = conn.execute(
+            text(
+                "UPDATE entities SET deleted = true, last_modified = :after "
+                "WHERE type = :type AND id = :id AND deleted = false AND last_modified = :before"
+            ),
+            {"type": PAGES_TYPE, "id": page_id, "before": before, "after": after},
+        )
+        if done.rowcount == 1:
+            removed_pages.append({
+                "pageId": page_id, "lastModifiedBefore": before, "lastModifiedAfter": after,
+                "dataSha256": _sha256(page["data_json"]),
+            })
     applied_at = _iso_now()
     reversal = {
         "kind": REVERSAL_KIND, "version": 1, "repairId": repair_id, "appliedAt": applied_at, "database": "",
         "signedBy": LINK_REMOVAL_SIGNER, "signedAt": applied_at, "choicesSha256": "", "removed": removed, "kept": [],
+        "removedPages": removed_pages,
     }
     _audit(
         conn, actor_id, ADS_TYPE, repair_id,
@@ -787,7 +887,12 @@ def remove_untouched_copies(
         _audit(conn, actor_id, ADS_TYPE, item["adId"],
                "Removed from Albayan Manager: an untouched copy of a campaign Albayan Studio linked",
                {"repairId": repair_id, "lastModifiedBefore": item["lastModifiedBefore"], "trigger": "studio_link"})
-    return {"repairId": repair_id, "removed": [item["adId"] for item in removed], "kept": kept}
+    for item in removed_pages:
+        _audit(conn, actor_id, PAGES_TYPE, item["pageId"],
+               "Removed from Albayan Manager: the owner-less page an untouched copy of a campaign Albayan Studio linked brought in",
+               {"repairId": repair_id, "lastModifiedBefore": item["lastModifiedBefore"], "trigger": "studio_link"})
+    return {"repairId": repair_id, "removed": [item["adId"] for item in removed], "kept": kept,
+            "removedPages": [item["pageId"] for item in removed_pages]}
 
 
 def reverse_link_removal(conn: Any, repair_id: Any, actor_id: str | None = None) -> list[str]:
