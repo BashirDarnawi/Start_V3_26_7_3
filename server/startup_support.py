@@ -139,6 +139,30 @@ def read_env_int(name: str, default: int, *, lo: int | None = None, hi: int | No
     return value
 
 
+def read_env_float(name: str, default: float, *, lo: float | None = None, hi: float | None = None) -> float:
+    """A decimal setting that logs and falls back instead of crashing the boot.
+    nan and inf are refused too: float() accepts them, and the money maths
+    then failed on every call that used the setting."""
+    import math
+    import os
+
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        print(f"[albayan] CONFIG {name}={raw!r} is not a finite number; using {default}")
+        return default
+    if lo is not None and value < lo:
+        return lo
+    if hi is not None and value > hi:
+        return hi
+    return value
+
+
 def init_db_with_retry(init_db: Callable[[], object], *, attempts: int = 10, delay_seconds: float = 3.0) -> None:
     """A database that is briefly unreachable at boot must not kill the container.
 

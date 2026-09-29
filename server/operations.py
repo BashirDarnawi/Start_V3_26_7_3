@@ -68,7 +68,11 @@ _status: dict[str, Any] = {
     "lastOffsiteAt": None,
     "lastOffsiteError": "",
     "lastAlertAt": None,
+    "backupFailureCount": 0,  # scheduled backups failed in a row
+    "nextBackupAttemptAt": None,  # the worker waits until then after a failure (the manual button never waits)
 }
+_BACKUP_RETRY_BASE_MS = 15 * 60 * 1000  # 15, 30, 60 ... minutes after 1, 2, 3 ... failures, never beyond one interval
+_alert_min_clamp_logged = False
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -116,6 +120,13 @@ def _backup_key() -> bytes | None:
     except Exception:
         return None
     return decoded if len(decoded) == 32 else None
+
+
+def backup_key_state() -> str:
+    """For the boot line: ok (usable), INVALID (set, but not a URL-safe base64 32-byte key) or MISSING."""
+    if _backup_key() is not None:
+        return "ok"
+    return "INVALID" if (os.getenv("ALBAYAN_BACKUP_KEY") or "").strip() else "MISSING"
 
 
 def _backup_config() -> dict[str, Any]:
@@ -1020,6 +1031,22 @@ class BackupAlreadyRunning(RuntimeError):
 _BACKUP_BUSY_TEXT = "A backup is already running; it will appear under Last backup when it finishes"
 
 
+def _release_backup_lock(conn: Any, lock_key: int) -> None:
+    """Unlock and close; a failure is a log line, never a failed backup. A broken
+    connection is closed for good, and its session lock ends with it."""
+    try:
+        conn.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key})
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        print(f"[albayan] Backup lease release failed ({type(exc).__name__}); the lock ends with its connection")
+        for step in (conn.invalidate, conn.close):
+            try:
+                step()
+            except Exception:
+                pass
+
+
 @contextmanager
 def _backup_lease():
     if not _backup_process_lock.acquire(blocking=False):
@@ -1027,14 +1054,26 @@ def _backup_lease():
     try:
         if str(get_engine().dialect.name or "") == "postgresql":
             lock_key = _financial_period_lock_key("backup-v1")
-            with db_conn() as conn:
+            # A session lock on a committed (idle) connection, not a transaction held open for the
+            # whole dump: a dropped connection or an idle-in-transaction timeout failed the COMMIT
+            # after the file was written, and a finished backup was recorded as failed.
+            conn = get_engine().connect()
+            try:
                 acquired = conn.execute(
-                    text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+                    text("SELECT pg_try_advisory_lock(:lock_key)"),
                     {"lock_key": lock_key},
                 ).scalar()
-                if not acquired:
-                    raise BackupAlreadyRunning("A backup is already running on another application worker")
+                conn.commit()
+            except Exception:
+                conn.close()
+                raise
+            if not acquired:
+                conn.close()
+                raise BackupAlreadyRunning("A backup is already running on another application worker")
+            try:
                 yield
+            finally:
+                _release_backup_lock(conn, lock_key)
         else:
             yield
     finally:
@@ -1070,7 +1109,8 @@ def create_encrypted_backup() -> dict[str, Any]:
         pass
     result = {"createdAt": now_ms(), "file": target.name, "bytes": size, "offsite": False}
     with _state_lock:
-        _status.update({"lastBackupAt": result["createdAt"], "lastBackupFile": target.name, "lastBackupBytes": size, "lastBackupError": ""})
+        _status.update({"lastBackupAt": result["createdAt"], "lastBackupFile": target.name, "lastBackupBytes": size, "lastBackupError": "",
+                        "backupFailureCount": 0, "nextBackupAttemptAt": None})
     _cleanup_old_backups(directory, config["retentionDays"])
     if config["offsiteConfigured"]:
         try:
@@ -1109,6 +1149,20 @@ def _seed_last_backup_from_disk() -> None:
         _status.update({"lastBackupAt": newest[0], "lastBackupFile": newest[1]})
 
 
+def _alert_minimum_requests(metrics: dict[str, Any]) -> int:
+    """ALBAYAN_ALERT_MIN_REQUESTS, never above the requests the monitor keeps:
+    a larger value silently switched the rate and latency alerts off."""
+    global _alert_min_clamp_logged
+    wanted = _env_int("ALBAYAN_ALERT_MIN_REQUESTS", 50, 10, 1000000)
+    capacity = max(10, int(metrics.get("recent_capacity") or 1000))
+    if wanted <= capacity:
+        return wanted
+    if not _alert_min_clamp_logged:
+        _alert_min_clamp_logged = True
+        print(f"[albayan] CONFIG ALBAYAN_ALERT_MIN_REQUESTS={wanted} is above the {capacity} requests the monitor keeps; using {capacity}")
+    return capacity
+
+
 def _backup_worker() -> None:
     with _state_lock:
         _status["workerRunning"] = True
@@ -1123,23 +1177,31 @@ def _backup_worker() -> None:
         while not _worker_stop.is_set():
             config = _backup_config()
             if config["enabled"]:
+                interval_ms = config["intervalHours"] * 3600 * 1000
                 with _state_lock:
                     last = int(_status.get("lastBackupAt") or 0)
-                due = now_ms() - last >= config["intervalHours"] * 3600 * 1000
+                    retry_at = int(_status.get("nextBackupAttemptAt") or 0)
+                # After a failure the next try waits (backoff): a full disk used to cost a full pg_dump every 5 minutes.
+                due = now_ms() - last >= interval_ms and now_ms() >= retry_at
                 if due:
                     try:
                         create_encrypted_backup()
                     except Exception as exc:
                         with _state_lock:
                             _status["lastBackupError"] = safe_exception_text(exc, 500)
+                            if not isinstance(exc, BackupAlreadyRunning):  # busy is not failed
+                                failures = int(_status.get("backupFailureCount") or 0) + 1
+                                _status["backupFailureCount"] = failures
+                                _status["nextBackupAttemptAt"] = now_ms() + min(interval_ms, _BACKUP_RETRY_BASE_MS * 2 ** min(failures - 1, 20))
                         _send_alert("backup_failed", "critical", "Albayan encrypted backup failed", {"error": safe_exception_text(exc, 300)})
             metrics = get_metrics()
-            minimum_requests = _env_int("ALBAYAN_ALERT_MIN_REQUESTS", 50, 10, 1000000)
+            minimum_requests = _alert_minimum_requests(metrics)
             error_rate_limit = _env_float("ALBAYAN_ALERT_ERROR_RATE", 0.05, 0.001, 1.0)
             p95_limit_ms = _env_int("ALBAYAN_ALERT_P95_MS", 3000, 250, 120000)
-            # Judge the recent window, not the ratio since boot: an old
-            # incident must stop alerting once it is over, and a fresh burst
-            # must alert even after millions of good requests.
+            # Judge the recent window (the last ALBAYAN_ALERT_WINDOW_SECONDS,
+            # monitoring.py), not the ratio since boot: an old incident must
+            # stop alerting once it is over, and a fresh burst must alert even
+            # after millions of good requests.
             recent_sample = int(metrics.get("recent_sample_size") or 0)
             recent_rate = float(metrics.get("recent_error_rate") or 0)
             if recent_sample >= minimum_requests:
@@ -1150,7 +1212,7 @@ def _backup_worker() -> None:
                         "Albayan server error rate is above the configured limit",
                         metrics,
                     )
-                if float(metrics.get("response_ms_p95") or 0) >= p95_limit_ms:
+                if float(metrics.get("recent_response_ms_p95") or 0) >= p95_limit_ms:
                     _send_alert(
                         "slow_responses",
                         "medium",

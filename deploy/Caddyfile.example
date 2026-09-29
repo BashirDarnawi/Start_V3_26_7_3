@@ -1,8 +1,14 @@
 yourdomain.com {
   encode gzip
 
-  # Reverse proxy to the FastAPI app
-  reverse_proxy 127.0.0.1:8000
+  # Reverse proxy to the FastAPI app. Caddy passes a CF-Connecting-IP header the
+  # visitor sent through unchanged, and with ALBAYAN_TRUST_PROXY_HEADERS=true the
+  # app believes it (a fresh login allowance per request): drop it here. Caddy
+  # writes X-Forwarded-For itself. (With Cloudflare in front of this server,
+  # remove that line and set ALBAYAN_ORIGIN_SECRET: docs/OPERATIONS_SAFETY.md 7.)
+  reverse_proxy 127.0.0.1:8000 {
+    header_up -CF-Connecting-IP
+  }
 
   # Security headers (defense-in-depth)
   header {

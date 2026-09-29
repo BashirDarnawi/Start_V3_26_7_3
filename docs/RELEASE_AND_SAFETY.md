@@ -69,7 +69,7 @@ on its own node) and the backup volume /var/lib/albayan. Lost: anything
 written inside the container outside that volume. If the container does not
 come up, open its log: the line "Refusing to serve on SQLite" means the
 DATABASE_URL variable is missing or wrong; "[albayan] boot:" shows the release,
-database type and whether the backup key is set.
+database type and whether the backup key is usable (backup_key=ok).
 
 Never assume that pushing Git, pushing an image, or a healthy HTTP response
 proves the new version was deployed. A failed push may have partially updated

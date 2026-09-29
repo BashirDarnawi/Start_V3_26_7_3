@@ -65,7 +65,7 @@ ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().low
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
 from .db import db_conn, get_database_url, get_engine, init_db, json_dumps, json_field_sql, json_loads, json_loads_or_raw, now_ms
-from .startup_support import read_env_int
+from .startup_support import read_env_float, read_env_int
 from . import delivery_workflow
 from .meta_ads import stop_meta_ads_worker
 from .systems.ads_studio.social_studio import stop_social_studio_worker
@@ -238,7 +238,7 @@ from .security import (
 from .auth_security import upgrade_password_hash_after_login
 from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
-from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, scrub_actor_name_stamps_conn, stop_operations_worker
+from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, backup_key_state, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, scrub_actor_name_stamps_conn, stop_operations_worker
 register_redacted_type("exchangeRateHistory", ("userId",))  # P1-05: every account reads the Manager's rates; data.userId = who set one
 # A throwaway PBKDF2 hash used to spend the SAME ~verify time on a login attempt
 # for an unknown email as for a known one. Without it, the known-email path runs
@@ -554,9 +554,7 @@ APP_LOGIN_CODE_TTL_MS = read_env_int("ALBAYAN_APP_LOGIN_CODE_MS", 2 * 60 * 1000)
 # lifetime: a packaged phone app is a personal device, and re-driving the
 # whole browser round-trip every 8 hours would be hostile. Operators can
 # shorten it independently of the web remember-me lifetime.
-APP_LOGIN_SESSION_MS = int(
-    os.getenv("ALBAYAN_APP_SESSION_MS", str(SESSION_REMEMBER_DURATION_MS))
-)
+APP_LOGIN_SESSION_MS = read_env_int("ALBAYAN_APP_SESSION_MS", SESSION_REMEMBER_DURATION_MS, lo=60_000)
 # SECURITY: Default to secure cookies in production (HTTPS only)
 # In development, can be set to False via environment variable.
 # Tri-state: if the env var is set, honor its boolean value (so testing over
@@ -641,8 +639,8 @@ MAX_JSON_DEPTH = 20  # Maximum nesting depth for JSON
 # or an attempt to mint spendable ad credit — must be refused and handled by the
 # office. Blocked only when BOTH the ratio and the absolute overage are exceeded,
 # so ordinary tips and legitimately large deliveries still complete.
-_DELIVERY_OVERPAY_RATIO = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_RATIO", "3.0"))
-_DELIVERY_OVERPAY_ABS_LOCAL = float(os.getenv("ALBAYAN_DELIVERY_OVERPAY_ABS_LOCAL", "10000"))
+_DELIVERY_OVERPAY_RATIO = read_env_float("ALBAYAN_DELIVERY_OVERPAY_RATIO", 3.0, lo=0.0, hi=1_000_000.0)  # nan/inf 500ed every completion
+_DELIVERY_OVERPAY_ABS_LOCAL = read_env_float("ALBAYAN_DELIVERY_OVERPAY_ABS_LOCAL", 10000.0, lo=0.0, hi=1_000_000_000.0)
 MIN_FINANCIAL_AMOUNT = 0  # No negative amounts allowed
 
 # Fields that should be validated as financial amounts (no negatives, reasonable max)
@@ -2419,7 +2417,7 @@ def _startup():
     _refuse_sqlite_in_production(str(get_database_url()), debug_mode=DEBUG_MODE)  # before any database work
     _init_db_with_retry()
     print(f"[albayan] boot: release={RELEASE_SHA} dialect={get_engine().dialect.name} trust_proxy={os.getenv('ALBAYAN_TRUST_PROXY_HEADERS', '')!r} "
-          f"cookie_secure={os.getenv('ALBAYAN_COOKIE_SECURE', 'auto')!r} debug={DEBUG_MODE} backup_key={'set' if os.getenv('ALBAYAN_BACKUP_KEY') else 'MISSING'}")
+          f"cookie_secure={os.getenv('ALBAYAN_COOKIE_SECURE', 'auto')!r} debug={DEBUG_MODE} backup_key={backup_key_state()}")
     _bootstrap_first_admin_if_empty()
 
     # Ensure query indexes exist (Postgres only; both are idempotent via

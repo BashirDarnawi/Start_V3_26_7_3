@@ -29,13 +29,20 @@ the container's Volumes tab.
 
 After applying the variables, Redeploy or Restart the application container.
 The container log then prints a line starting with "[albayan] boot:" - it must
-say backup_key=set. Use **Control Center > Create encrypted backup now** once
-to verify the setup (this button allows 6 runs per hour per admin).
+say backup_key=ok. backup_key=INVALID means the variable is set but is not a
+URL-safe base64 32-byte key (make one again with the command above);
+backup_key=MISSING means the variable is not set. Use **Control Center >
+Create encrypted backup now** once to verify the setup (this button allows 6
+runs per hour per admin).
 
 How cleaning works: files older than ALBAYAN_BACKUP_RETENTION_DAYS are
 deleted before each new backup, but the newest three files are always kept,
 even if they are old. A backup more than two intervals late shows up as a
 task in Control Center.
+
+When a scheduled backup fails, the next try waits 15 minutes, then 30, 60 and
+so on, never longer than ALBAYAN_BACKUP_INTERVAL_HOURS; one success resets
+this. **Create encrypted backup now** never waits.
 
 ## 2. Private off-site backup copy
 
@@ -96,10 +103,17 @@ ALBAYAN_ALERT_COOLDOWN_SECONDS=1800
 ALBAYAN_ALERT_MIN_REQUESTS=50
 ALBAYAN_ALERT_ERROR_RATE=0.05
 ALBAYAN_ALERT_P95_MS=3000
+ALBAYAN_ALERT_WINDOW_SECONDS=900
 ```
 
 Alerts cover failed backups, failed off-site copies, high server error rate, and
 slow server responses. The cooldown prevents repeated alert spam.
+
+The error-rate and slow-response alerts judge only the requests of the last
+ALBAYAN_ALERT_WINDOW_SECONDS (15 minutes; at most the latest 1000 requests,
+health checks not counted), and only when at least ALBAYAN_ALERT_MIN_REQUESTS
+of them arrived. A value above 1000 counts as 1000 (the log says so once). An
+incident that is over stops alerting within one window, even at night.
 
 ## 6. Monthly financial close
 

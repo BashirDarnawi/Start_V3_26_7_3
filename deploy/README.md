@@ -12,7 +12,8 @@
 This folder contains **example** deployment files for self-hosting Albayan on a plain Linux server.
 
 Files:
-- `Caddyfile.example` — HTTPS reverse proxy → `127.0.0.1:8000`
+- `Caddyfile.example` — HTTPS reverse proxy → `127.0.0.1:8000` (it drops a
+  visitor-sent `CF-Connecting-IP`; see `ALBAYAN_TRUST_PROXY_HEADERS` in the env example)
 - `albayan.env.example` — environment variables (DATABASE_URL, cookie secure, etc.)
 - `albayan.service` — systemd unit (reads env file, runs uvicorn)
 
