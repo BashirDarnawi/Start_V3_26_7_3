@@ -178,7 +178,17 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
         - is_allowed: True if request should proceed
         - wait_ms: Milliseconds to wait if rate limited
     """
-    from .rate_limiter import check_rate_limit
+    from .rate_limiter import check_rate_limit, get_rate_limit_status
+
+    # An address already over its ceiling is refused BEFORE a new
+    # (ip,email) bucket exists: otherwise each made-up email still minted a
+    # key and the flood filled the limiter store. Read-only, so a blocked
+    # account's retries still never spend the office's shared allowance.
+    ip_key = f"login:ip:{_client_ip(request)}"
+    if get_rate_limit_status(ip_key, _LOGIN_WINDOW_MS) >= _LOGIN_IP_MAX_ATTEMPTS:
+        ok_ip, _left_ip, retry_ip = check_rate_limit(ip_key, _LOGIN_IP_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
+        if not ok_ip:
+            return False, int(retry_ip or 0)
 
     key = f"login:{_rate_key(request, email)}"
     is_allowed, attempts_left, retry_after_ms = check_rate_limit(key, _LOGIN_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
@@ -189,7 +199,6 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
     # Global per-IP ceiling across all emails: stops one IP from spreading a
     # single password guess over many accounts (horizontal credential stuffing),
     # which the per-(ip,email) bucket alone does not cover.
-    ip_key = f"login:ip:{_client_ip(request)}"
     ok_ip, _left_ip, retry_ip = check_rate_limit(ip_key, _LOGIN_IP_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
     if not ok_ip:
         return False, int(retry_ip or 0)

@@ -9,6 +9,7 @@ Security notes:
 - Call reset_rate_limit() on successful login to clear the user's failed attempts
 - In-memory store is cleaned up periodically to prevent memory leaks
 """
+import heapq
 import os
 import secrets
 import threading
@@ -21,8 +22,11 @@ _MEMORY_STORE: dict[str, list[int]] = {}
 # cannot expire a long-window bucket early (a 15-minute check used to shrink
 # the full backup's 3-per-day cap to 3 per 15 minutes).
 _MEMORY_WINDOWS: dict[str, int] = {}
+# Each bucket's own limit, so a flood evicts the buckets furthest from theirs.
+_MEMORY_LIMITS: dict[str, int] = {}
 # Buckets that exist to STOP an attacker. When the store is flooded these are
-# evicted last, so cheap throwaway keys cannot wash out a real lockout.
+# evicted after any other bucket equally far from its limit, so cheap
+# throwaway keys cannot wash out a real lockout.
 _PROTECTED_KEY_PREFIXES = frozenset(
     {"login:", "reset:", "reset-confirm:", "setup:", "applogin-exchange:", "full-backup:"}
 )
@@ -150,25 +154,32 @@ def _cleanup_memory_store(window_ms: int = 15 * 60 * 1000, force: bool = False):
         for key in keys_to_delete:
             del _MEMORY_STORE[key]
             _MEMORY_WINDOWS.pop(key, None)
+            _MEMORY_LIMITS.pop(key, None)
 
         # SECURITY: if the store is STILL too large, something is flooding it.
         # Evicting oldest-first deleted exactly the buckets worth keeping: an
         # attacker could fill the store with cheap throwaway keys (one per
         # made-up email on an unauthenticated endpoint) and wash out the
-        # lockout protecting a real account. Protected prefixes are evicted
-        # last, and within a group the LEAST-used bucket goes first, so a
-        # bucket holding many recent failures is the last thing dropped.
+        # lockout protecting a real account. Ranking every unprotected bucket
+        # below every protected one was the same hole the other way round: an
+        # anonymous login flood evicted every per-account quota (tickets,
+        # Meta-calling buttons, image checks) on every call. So a bucket that
+        # is BLOCKING right now goes last, then the one furthest from its own
+        # limit goes first, then unprotected before protected, then oldest.
         if len(_MEMORY_STORE) > _MAX_MEMORY_STORE_KEYS:
-            def _evict_rank(k: str) -> tuple[int, int, int]:
+            def _evict_rank(k: str) -> tuple[int, float, int, int]:
                 attempts = _MEMORY_STORE.get(k) or []
+                limit = int(_MEMORY_LIMITS.get(k) or 0)
+                blocking = 1 if limit > 0 and len(attempts) >= limit else 0
+                fill = len(attempts) / limit if limit > 0 else float(len(attempts))
                 protected = 1 if k.split(":", 1)[0] + ":" in _PROTECTED_KEY_PREFIXES else 0
-                return (protected, len(attempts), max(attempts) if attempts else 0)
+                return (blocking, fill, protected, max(attempts) if attempts else 0)
 
-            sorted_keys = sorted(_MEMORY_STORE.keys(), key=_evict_rank)
             excess_count = len(_MEMORY_STORE) - _MAX_MEMORY_STORE_KEYS
-            for k in sorted_keys[:excess_count]:
+            for k in heapq.nsmallest(excess_count, list(_MEMORY_STORE), key=_evict_rank):
                 del _MEMORY_STORE[k]
                 _MEMORY_WINDOWS.pop(k, None)
+                _MEMORY_LIMITS.pop(k, None)
             print(f"[rate_limiter] Memory store exceeded limit, removed {excess_count} least-active entries")
 
         if keys_to_delete:
@@ -232,6 +243,7 @@ def check_rate_limit(key: str, max_attempts: int, window_ms: int) -> tuple[bool,
             _MEMORY_STORE[key] = []
         # Remember this bucket's window so cleanup expires it correctly.
         _MEMORY_WINDOWS[key] = int(window_ms)
+        _MEMORY_LIMITS[key] = int(max_attempts)
 
         attempts = _MEMORY_STORE[key]
         
@@ -277,6 +289,7 @@ def reset_rate_limit(key: str):
         if key in _MEMORY_STORE:
             del _MEMORY_STORE[key]
         _MEMORY_WINDOWS.pop(key, None)
+        _MEMORY_LIMITS.pop(key, None)
 
 
 def get_rate_limit_status(key: str, window_ms: int) -> int:

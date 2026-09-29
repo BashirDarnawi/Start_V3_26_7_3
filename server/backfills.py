@@ -226,6 +226,20 @@ def _retarget_relink_data(data: dict[str, Any]) -> bool:
     if len(live_ids) != 1:
         return False
     replacement = next(iter(live_ids))
+    # A receipt the ad still links to was never vacated. A mixed paid+debt
+    # In-Shop stop that spent only the paid slice has live rows on P alone
+    # while its baseline rightly keeps the debt on U (still its receiptId);
+    # moving that baseline onto P made every later spend correction a 400.
+    # Company-covered rows are live money on their receipt too.
+    still_linked = {replacement} | {
+        str(data.get(field) or "")
+        for field in ("receiptId", "fundingReceiptId", "linkedDeliveryReceiptId")
+    } | {
+        str(entry.get("receiptId") or "")
+        for entry in (data.get("companyFundingAllocations") or [])
+        if isinstance(entry, dict)
+    }
+    still_linked.discard("")
     changed = False
 
     def retarget(rows_value: Any) -> Any:
@@ -237,7 +251,7 @@ def _retarget_relink_data(data: dict[str, Any]) -> bool:
             if (
                 isinstance(entry, dict)
                 and entry.get("receiptId")
-                and str(entry["receiptId"]) != replacement
+                and str(entry["receiptId"]) not in still_linked
             ):
                 changed = True
                 result.append({**entry, "receiptId": replacement})
@@ -260,7 +274,7 @@ def _retarget_relink_data(data: dict[str, Any]) -> bool:
             if isinstance(value, list):
                 next_baseline[key] = retarget(value)
         legacy_id = str(next_baseline.get("dueLegacyReceiptId") or "")
-        if legacy_id and legacy_id != replacement:
+        if legacy_id and legacy_id not in still_linked:
             next_baseline["dueLegacyReceiptId"] = replacement
             changed = True
         data["stopAllocationBaseline"] = next_baseline
@@ -278,7 +292,9 @@ def backfill_relink_baselines(sqlite_financial_lock=None) -> int:
       (a) the ad has no active refund (refundType empty/None — refund undo
           restores from baselines, so refunded ads keep theirs untouched), and
       (b) its LIVE allocations reference exactly ONE receipt R, and
-      (c) a baseline names some other receipt X != R  ->  rewrite X to R.
+      (c) a baseline names some other receipt X that the ad no longer links
+          to (not its receiptId/fundingReceiptId/linkedDeliveryReceiptId nor
+          a company-covered row)  ->  rewrite X to R.
     Amounts are never changed; modification cursors advance so open clients
     receive repaired linkage metadata. Idempotent: after
     the first pass no baseline names a non-live receipt, so it is a no-op on

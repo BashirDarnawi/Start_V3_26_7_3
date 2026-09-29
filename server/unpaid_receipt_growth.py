@@ -37,50 +37,102 @@ def _history_money_minor(raw: Any) -> int | None:
     if not text:
         return None
     try:
-        value = (Decimal(text) * Decimal("100")).quantize(
-            Decimal("1"), rounding=ROUND_HALF_UP
+        amount = Decimal(text)
+        if not amount.is_finite():
+            # 'NaN' survives quantize and int() of it raised outside the try:
+            # one bad history row turned every ad save into a 500 and aborted
+            # the whole startup repair.
+            return None
+        minor = int(
+            (amount * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         )
     except Exception:
         return None
-    minor = int(value)
     return minor if minor >= 0 else None
 
 
-def _proven_manual_debt_base_minor(receipt: dict[str, Any]) -> int | None:
-    """Return the debt that predates managed growth, when history proves it.
+def _server_amount_change(
+    event: Any, *, growth_seen: bool
+) -> tuple[int, int | None] | None:
+    """(from, to) cents of an amount change the SERVER wrote, else None.
 
-    ``None`` is intentionally different from zero: without a matching history
+    Only ``Funding Ad`` growth/release and, once growth exists, the startup
+    ``Debt Reconciliation`` are managed writes. Every other amount change on
+    the receipt was made by a person.
+    """
+    changes = event.get("changes") if isinstance(event, dict) else None
+    if not isinstance(changes, list):
+        return None
+    fields = {change.get("field") for change in changes if isinstance(change, dict)}
+    if "Funding Ad" not in fields and not (
+        growth_seen and "Debt Reconciliation" in fields
+    ):
+        return None
+    for change in changes:
+        if isinstance(change, dict) and change.get("field") == "Amount (USD)":
+            parsed = _history_money_minor(change.get("from"))
+            if parsed is not None:
+                return parsed, _history_money_minor(change.get("to"))
+    return None
+
+
+def _proven_manual_debt_base_minor(
+    receipt: dict[str, Any], current_minor: int | None = None
+) -> int | None:
+    """Return the debt a PERSON set on this receipt, when history proves it.
+
+    ``None`` is intentionally different from zero: without a server growth
     event there is no safe way to distinguish genuine manual debt from a
     server-managed total, so startup repair must leave the receipt untouched.
+
+    The first server growth's ``from`` is the pre-growth base. The server's
+    own writes chain (each ``from`` is the previous ``to``); an amount that
+    moved BETWEEN two server writes, or after the last one (``current_minor``
+    differs from its ``to``), was set by staff, and that figure becomes the
+    base. Freezing the first ``from`` forever erased a later manual raise at
+    every restart and every save of the ad. Client history rows are not
+    needed to see the manual change.
     """
     history = receipt.get("editHistory")
     if not isinstance(history, list):
         return None
+    base: int | None = None
+    running: int | None = None
     for event in history:
-        changes = event.get("changes") if isinstance(event, dict) else None
-        if not isinstance(changes, list) or not any(
-            isinstance(change, dict) and change.get("field") == "Funding Ad"
-            for change in changes
-        ):
+        change = _server_amount_change(event, growth_seen=base is not None)
+        if change is None:
             continue
-        for change in changes:
-            if isinstance(change, dict) and change.get("field") == "Amount (USD)":
-                parsed = _history_money_minor(change.get("from"))
-                if parsed is not None:
-                    return parsed
-    return None
+        from_minor, to_minor = change
+        if base is None:
+            base = from_minor
+        else:
+            if running is not None and from_minor != running:
+                base = from_minor
+            if to_minor is not None:
+                # A write that already went below the base (older releases
+                # froze the first base) stays; re-growing needs a user action.
+                base = min(base, to_minor)
+        running = to_minor
+    if (
+        base is not None
+        and current_minor is not None
+        and running is not None
+        and current_minor != running
+    ):
+        base = current_minor
+    return base
 
 
 def _manual_debt_base_minor(receipt: dict[str, Any], current_minor: int) -> int:
-    """Recover debt that existed before the server first grew this receipt.
+    """Recover the manual debt that server growth sits on top of.
 
     Earlier releases did not persist a dedicated managed/base split, but every
-    server growth appended a ``Funding Ad`` history change.  The first such
-    entry's USD ``from`` value is therefore the genuine manual baseline.  A
-    receipt with no server-growth history is entirely manual and must never be
-    erased merely because no ad currently points at it.
+    server growth appended a ``Funding Ad`` history change (see
+    ``_proven_manual_debt_base_minor``). A receipt with no server-growth
+    history is entirely manual and must never be erased merely because no ad
+    currently points at it.
     """
-    proven = _proven_manual_debt_base_minor(receipt)
+    proven = _proven_manual_debt_base_minor(receipt, current_minor)
     return current_minor if proven is None else proven
 
 
@@ -91,9 +143,12 @@ def repair_legacy_unpaid_receipt_overgrowth(
 
     This startup pass is deliberately one-way. It never grows a receipt and it
     never touches a receipt whose history cannot prove the manual pre-growth
-    baseline. Candidate rows are re-read under the same financial row lock used
-    by ordinary mutations, and the caller-provided writer adds an optimistic
-    ``last_modified`` condition as a second race check.
+    baseline. The floor is the manual base (including a later staff change),
+    the live due AND company-covered rows, and the covered amount itself, so
+    a second run is a no-op and a closed month is refused. Candidate rows are
+    re-read under the same financial row lock used by ordinary mutations, and
+    the caller-provided writer adds an optimistic ``last_modified`` condition
+    as a second race check.
     """
     stats = {"scanned": 0, "repaired": 0, "skipped": 0, "failed": 0}
     financial_active_rows = ctx["financial_active_rows"]
@@ -122,9 +177,10 @@ def repair_legacy_unpaid_receipt_overgrowth(
             for discovery_row in discovery_rows:
                 try:
                     discovery = financial_row_data(discovery_row)
+                    proven = _proven_manual_debt_base_minor(discovery)
                 except Exception:
-                    continue
-                if _proven_manual_debt_base_minor(discovery) is not None:
+                    continue  # one bad row must not stop every other repair
+                if proven is not None:
                     receipt_id = str(discovery_row.get("id") or "")
                     if receipt_id:
                         candidate_ids.add(receipt_id)
@@ -158,6 +214,15 @@ def repair_legacy_unpaid_receipt_overgrowth(
                     ad = financial_row_data(ad_row)
                     if str(ad.get("recordType") or "") == "receipt":
                         continue
+                    # Company-covered rows are still money the receipt
+                    # promises (coverage moves due rows here, the same rule as
+                    # reconcile_unpaid_receipt_debt). Skipping them shrank a
+                    # covered receipt at every restart.
+                    for receipt_id, amount in _financial_allocation_map(
+                        ad.get("companyFundingAllocations")
+                    ).items():
+                        if receipt_id in selected_ids and amount > 0:
+                            outstanding_by_receipt[receipt_id] += amount
                     due_map = _financial_allocation_map(
                         ad.get("dueAllocations")
                     )
@@ -194,18 +259,23 @@ def repair_legacy_unpaid_receipt_overgrowth(
                 stats["skipped"] += 1
                 continue
             receipt = financial_row_data(row)
-            manual_base_minor = _proven_manual_debt_base_minor(receipt)
-            if manual_base_minor is None:
+            if _proven_manual_debt_base_minor(receipt) is None:
                 stats["skipped"] += 1
                 continue
 
             current_minor = financial_due_total(receipt)
+            manual_base_minor = _proven_manual_debt_base_minor(receipt, current_minor)
             if ad_scan_error is not None:
                 raise ad_scan_error
             if receipt_id in legacy_due_errors:
                 raise legacy_due_errors[receipt_id]
             outstanding_minor = outstanding_by_receipt.get(receipt_id, 0)
-            target_minor = max(manual_base_minor, outstanding_minor)
+            covered_minor = _financial_minor(
+                receipt.get("companyCoveredUSD"), "stored company coverage"
+            )
+            # Never below what the company covered: the gross under the
+            # covered share breaks every later settle and capacity check.
+            target_minor = max(manual_base_minor, outstanding_minor, covered_minor)
             if target_minor >= current_minor:
                 # Equality is already healed. A larger target needs a normal
                 # user-authorized mutation; startup is never allowed to grow
@@ -231,10 +301,11 @@ def repair_legacy_unpaid_receipt_overgrowth(
                 or receipt_type in {"DELIVERY_TEMP", "TRANSFER_IN"}
                 or bool(str(receipt.get("tempReceiptNo") or "").strip())
             ):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Stored receipt is not a Not Paid In-Shop receipt",
-                )
+                # A grown receipt that was later settled (or converted) is
+                # simply not unpaid debt any more: skip it quietly instead of
+                # logging a failure for it on every boot.
+                stats["skipped"] += 1
+                continue
             payments = receipt.get("payments")
             transfers = receipt.get("transfers")
             if payments is not None and (
@@ -277,6 +348,18 @@ def repair_legacy_unpaid_receipt_overgrowth(
             repaired = dict(receipt)
             repaired["amountUSD"] = _financial_usd(target_minor)
             repaired["amountLocal"] = _financial_usd(new_local_minor)
+            # Same summaries the live reconcile keeps in step, so collection
+            # and coverage never offer the former liability.
+            for field, value in (
+                ("debtAmountUSD", target_minor),
+                ("debtAmountLocal", new_local_minor),
+            ):
+                if field in repaired:
+                    repaired[field] = _financial_usd(value)
+            if covered_minor > 0 or receipt.get("customerOutstandingUSD") is not None:
+                repaired["customerOutstandingUSD"] = _financial_usd(
+                    max(target_minor - covered_minor, 0)
+                )
             repaired_at = iso_utc()
             repaired["updatedAt"] = repaired_at
             history = (
