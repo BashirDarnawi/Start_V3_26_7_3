@@ -6851,6 +6851,44 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Admin payments waiting (review loop r8 n5): a new pulse count reads the list again on its own (3 rows, as the badge says); the same count never reads it again',
     payCases8.every(Boolean), `cases ${failed(payCases8)}; reads ${readsOne}/${readsThree}/${readsSame} rows ${rowsOf(payOne)}/${rowsOf(payThree)}`);
 
+  // n5 follow-up: Refresh (or a draw) while another wallet read runs starts no read, so the new count is not recorded
+  // as read. The running read began before the new requests existed (1 row); once it ends the next draw reads once more.
+  run(`var __walletHoldNext = false; var __walletHold = null; __pendingReads = 0; __pendingRows = ${JSON.stringify([payRow('first0001', hours(-1))])};
+    apiWalletPaymentRequestList = function (scope) {
+      if (scope !== 'pending') return Promise.resolve({ requests: [] });
+      __pendingReads++;
+      const rows = __pendingRows.slice();
+      if (!__walletHoldNext) return Promise.resolve({ requests: rows });
+      __walletHoldNext = false;
+      return new Promise(resolve => { __walletHold = () => resolve({ requests: rows }); });
+    };
+    resetAdsStudioWalletCache(); _studioAdmin.paymentsSeen = null; _studioAdmin.reads.paymentDue = null;
+    _studioDesk.pulse.value = studioDeskCleanPulse(${JSON.stringify({ ...pulse, paymentsWaiting: 1 })});`);
+  reply('/api/studio/admin/payments/due', { dueAt: {} });
+  reply('/api/studio/admin/payments/due', { dueAt: {} });
+  openAt('/studio?tab=review&section=more&id=payments');
+  run('render();');
+  const busyPayBefore = json('__pendingReads');
+  run('__walletHoldNext = true; refreshAdsStudioWallet();');  // a local confirm or cancel re-reads: still running
+  run(`__pendingRows = ${JSON.stringify([payRow('first0001', hours(-1)), payRow('second001', hours(-0.2)), payRow('third0001', hours(-0.1))])};
+    _studioDesk.pulse.value = studioDeskCleanPulse(${JSON.stringify({ ...pulse, paymentsWaiting: 3 })});
+    studioAdminPaymentsRefresh(); render();`);
+  const busyPaySeen = json('_studioAdmin.paymentsSeen');
+  const busyPayDuring = json('__pendingReads');
+  run('__walletHold(); render();');
+  const busyPayAfter = html();
+  const busyPayReads = json('__pendingReads');
+  run('render(); render();');
+  const busyPaySettled = json('__pendingReads');
+  const busyPayCases = [
+    busyPayBefore === 1,
+    busyPaySeen === 1 && busyPayDuring === 2,
+    busyPayReads === 3 && rowsOf(busyPayAfter) === 3 && busyPayAfter.includes('PAY-THIRD0001'),
+    busyPaySettled === 3
+  ];
+  check('Admin payments waiting (review loop r8 n5 follow-up): Refresh while another wallet read runs does not mark the new count as read; after that read ends the list is read once more (3 rows, as the badge says)',
+    busyPayCases.every(Boolean), `cases ${failed(busyPayCases)}; reads ${busyPayBefore}/${busyPayDuring}/${busyPayReads}/${busyPaySettled} seen ${busyPaySeen} rows ${rowsOf(busyPayAfter)}`);
+
   // n7: "Show older alerts" never repeats a page. The next page adds below; a failed read of an older page takes the
   // page on screen back and says so (the button works again); while a read runs the page on screen is drawn once.
   run("_studioAdmin.alertsPages = []; delete _studioAdmin.reads.alerts; __replies['/api/studio/admin/alerts?limit=20'] = [];");

@@ -2428,20 +2428,23 @@ function renderStudioAdminMenu() {
 // ------------------------------------------------------------------ payments waiting
 
 // The list is read again when the pulse's paymentsWaiting moves (the badge and the menu follow the pulse):
-// once per new count, never while a read runs (a count seen during a read is compared again after it).
+// once per new count, never while a read runs (a count seen during a read is compared again after it). The count
+// is recorded only when a read starts here: refreshAdsStudioWallet returns at once while another read runs, and
+// that read may have begun before the new requests existed.
 function studioAdminPaymentsWant(force = false) {
   const uid = studioAdminUserId();
   if (typeof refreshAdsStudioWallet !== 'function') return;
   const pulse = typeof _studioDesk !== 'undefined' && _studioDesk.pulse && _studioDesk.pulse.value ? _studioDesk.pulse.value.paymentsWaiting : null;
   const counted = Number.isSafeInteger(pulse) ? pulse : null;
+  const busy = typeof _adsStudioWalletBusy !== 'undefined' && _adsStudioWalletBusy;
   if (force || _adsStudioWalletForUser !== uid) {
-    _studioAdmin.paymentsSeen = counted;
+    if (!busy) _studioAdmin.paymentsSeen = counted;
     if (typeof resetAdsStudioWalletCache === 'function') resetAdsStudioWalletCache();
     refreshAdsStudioWallet();
   } else if (_adsStudioWalletMine === null) {
-    _studioAdmin.paymentsSeen = counted;
+    if (!busy) _studioAdmin.paymentsSeen = counted;
     refreshAdsStudioWallet();
-  } else if (counted !== null && counted !== _studioAdmin.paymentsSeen && !(typeof _adsStudioWalletBusy !== 'undefined' && _adsStudioWalletBusy)) {
+  } else if (counted !== null && counted !== _studioAdmin.paymentsSeen && !busy) {
     _studioAdmin.paymentsSeen = counted;
     refreshAdsStudioWallet();
   }
