@@ -18,7 +18,7 @@ import secrets
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -149,13 +149,16 @@ def _data(campaign_id: str) -> dict:
 
 
 def _create(staff, name: str, budget: int = 2500, budget_type: str = "lifetime", campaign_id: str = "") -> str:
+    from server.operations import _business_today  # review loop r3 n24: a fixed date expires; the submit refuses a past start
+
     campaign_id = campaign_id or _uid("lcmp")
+    start = _business_today() + timedelta(days=60)
     body = {
         "name": name, "objective": "messages", "platforms": ["facebook", "instagram"], "pageName": "Link Test Page",
         "primaryText": "Message us for this week's offer.", "headline": "Weekly offer", "description": "Link test.",
         "callToAction": "Send Message", "destination": "https://wa.me/218910000000", "locations": ["Tripoli, Libya"],
         "ageMin": 18, "ageMax": 55, "genders": ["all"], "languages": ["Arabic"], "interests": ["Shopping"],
-        "startDate": "2027-01-10", "endDate": "2027-01-19", "budgetMinorUSD": budget, "budgetType": budget_type,
+        "startDate": start.isoformat(), "endDate": (start + timedelta(days=9)).isoformat(), "budgetMinorUSD": budget, "budgetType": budget_type,
         "notes": "", "specialAdCategories": ["none"], "creativeImages": [PNG], "creativeAssetIds": [],
     }
     response = client.post(f"/api/collections/{CAMPAIGNS}", json={"id": campaign_id, "data": body},

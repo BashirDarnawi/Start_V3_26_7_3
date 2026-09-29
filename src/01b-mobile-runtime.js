@@ -173,9 +173,8 @@ async function retryMobileConnection() {
       showMobileConnectivityNotice({ serverReachable: false });
       return false;
     }
-  } else {
-    // A cold start while offline cannot restore the server session. Reload
-    // only from the logged-out state so unsaved forms are never discarded.
+  } else if (_mobileColdStartBlocked || (typeof state !== 'undefined' && !state.serverMode)) {
+    // Only a blocked cold start or local fallback: never each resume's "connected"
     window.location.reload();
   }
   return true;
@@ -344,8 +343,7 @@ async function setupMobileRuntime() {
 
   window.addEventListener('offline', () => showMobileConnectivityNotice({ serverReachable: false }));
   window.addEventListener('online', () => {
-    // Browser connectivity returned; verify Albayan itself before hiding the
-    // warning. This also restores a cold-start session when appropriate.
+    // Verify Albayan itself before hiding the warning (a blocked cold start reloads).
     retryMobileConnection().catch(() => showMobileConnectivityNotice({ serverReachable: false }));
   });
   showMobileConnectivityNotice({ serverReachable: navigator.onLine !== false });

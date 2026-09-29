@@ -5441,9 +5441,7 @@ function getAdReconciliationTriggerDay(ad) {
   const status = String(ad?.status || '').trim().toLowerCase();
   const endDay = getAdReconciliationEndDay(ad);
   const stoppedDay = status === 'stopped' ? getAdReconciliationStoppedDay(ad) : null;
-  // Reconciliation itself changes an ended ad to Stopped and may add a new
-  // stoppedAt timestamp. Keep the earlier real terminal day so saving spend
-  // cannot hide an already-eligible ad for another day.
+  // Saving spend makes an ended ad Stopped (new stoppedAt): keep the earlier real day.
   if (endDay && stoppedDay) {
     return endDay.getTime() <= stoppedDay.getTime() ? endDay : stoppedDay;
   }
@@ -5458,12 +5456,16 @@ function getAdReconciliationAvailableDay(ad) {
   return available;
 }
 
-function isAdReadyForReconciliation(ad, now = new Date()) {
+function isAdReconciliationEligible(ad) {
   if (!ad || ad._deleted || ad.recordType === 'receipt' || !Security.isValidRecordId(ad.id)) return false;
   const status = String(ad.status || '').trim().toLowerCase();
   if (status === 'canceled' || status === 'cancelled' || status === 'lost') return false;
   const refundType = String(ad.refundType || '').trim().toLowerCase();
-  if (refundType && refundType !== 'none') return false;
+  return !refundType || refundType === 'none';
+}
+
+function isAdReadyForReconciliation(ad, now = new Date()) {
+  if (!isAdReconciliationEligible(ad)) return false;
   const available = getAdReconciliationAvailableDay(ad);
   const current = new Date(now);
   if (!available || !Number.isFinite(current.getTime())) return false;

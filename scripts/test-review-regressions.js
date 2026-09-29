@@ -129,6 +129,109 @@ async function main() {
     assert.equal(native.locked, true);
     assert.equal(native.authCalls, 2);
   });
+  // Review loop r3 n27: Android sends isActive:true on EVERY onResume (the translucent biometric
+  // prompt closing too) but isActive:false only on onStop. A lone resume must not prompt again.
+  await test('Android resume after a successful unlock does not prompt again (cold start)', async () => {
+    const { sandbox, native } = await nativeFixture();
+    native.allow = true;
+    assert.equal(await sandbox.unlockNativeApp(), true);
+    native.foreground({ isActive: true });
+    await native.flush();
+    assert.equal(native.locked, false);
+    assert.equal(native.authCalls, 1);
+  });
+  await test('Android resume after a cancelled prompt keeps the lock without reopening the prompt', async () => {
+    const { sandbox, native } = await nativeFixture();
+    assert.equal(await sandbox.unlockNativeApp(), false);
+    native.foreground({ isActive: true });
+    await native.flush();
+    assert.equal(native.locked, true);
+    assert.equal(native.authCalls, 1);
+  });
+  await test('Android resume of the prompt after a long background does not loop', async () => {
+    const { native } = await nativeFixture();
+    native.allow = true;
+    native.foreground({ isActive: false });
+    native.backgroundLong();
+    native.foreground({ isActive: true });  // the real return: one prompt
+    await native.flush();
+    assert.equal(native.authCalls, 1);
+    assert.equal(native.locked, false);
+    native.foreground({ isActive: true });  // the prompt's own onResume, the stop time still old
+    await native.flush();
+    assert.equal(native.authCalls, 1);
+    assert.equal(native.locked, false);
+  });
+  // Review loop r3 n29: with the phone's screen lock removed the lock cannot open; it offers sign-out.
+  async function lockFixture(info, authenticate) {
+    const fixture = loadBrowserSource();
+    const { sandbox, state } = fixture;
+    const nodes = new Map();
+    const doc = sandbox.document;
+    const make = doc.createElement;
+    doc.getElementById = id => nodes.get(id) || null;
+    doc.createElement = tag => { const el = make(tag); el.remove = () => { if (nodes.get(el.id) === el) nodes.delete(el.id); }; return el; };
+    doc.body.appendChild = el => { if (el.id) nodes.set(el.id, el); };
+    const secure = { biometric_lock_enabled: true };
+    const calls = { auth: 0, logout: 0 };
+    sandbox.isPackagedMobileApp = () => true;
+    sandbox.setupAdaptiveViewport = () => {};
+    sandbox.nativeSecureGet = async key => (key in secure ? secure[key] : null);
+    sandbox.nativeSecureSet = async (key, value) => { secure[key] = value; return true; };
+    sandbox.hydrateAppLoginPendingFromSecureStorage = async () => {};
+    sandbox.getCapacitorAppPlugin = () => null;
+    sandbox.syncNativeSystemBarsTheme = async () => {};
+    sandbox.getCapacitorPlugin = name => (name === 'BiometricAuthNative'
+      ? { checkBiometry: async () => info, internalAuthenticate: async () => { calls.auth += 1; return authenticate(); } }
+      : null);
+    sandbox.handleLogout = async () => { calls.logout += 1; state.currentUser = null; return true; };
+    await sandbox.setupNativeServices();
+    return { ...fixture, nodes, secure, calls };
+  }
+  await test('app lock offers sign-out when the phone no longer has a screen lock', async () => {
+    const { sandbox, run, nodes, secure, calls } = await lockFixture({ isAvailable: false, deviceIsSecure: false }, () => {});
+    assert.equal(await sandbox.unlockNativeApp(), false);
+    const lock = nodes.get('native-app-lock');
+    assert.ok(lock && lock.innerHTML.includes('onclick="nativeLockSignOut()"'), 'the lock offers sign-out');
+    assert.ok(lock.innerHTML.includes('No screen lock'), 'the lock says why it cannot open');
+    assert.equal(calls.auth, 0);
+    assert.equal(typeof sandbox.nativeLockSignOut, 'function');
+    await sandbox.nativeLockSignOut();
+    assert.equal(secure.biometric_lock_enabled, false);
+    assert.equal(calls.logout, 1);
+    assert.equal(nodes.has('native-app-lock'), false);
+    assert.equal(run('_nativePrefs.biometricEnabled'), false);
+  });
+  await test('a phone with a screen lock keeps the plain lock (no sign-out shortcut)', async () => {
+    const { sandbox, nodes, calls } = await lockFixture({ isAvailable: true, deviceIsSecure: true }, () => { throw new Error('userCancel'); });
+    assert.equal(await sandbox.unlockNativeApp(), false);
+    const lock = nodes.get('native-app-lock');
+    assert.ok(lock && lock.innerHTML.includes('onclick="unlockNativeApp()"'));
+    assert.ok(!lock.innerHTML.includes('nativeLockSignOut'));
+    assert.equal(calls.auth, 1);
+    assert.equal(calls.logout, 0);
+  });
+  // Review loop r3 n28: Android's Network plugin re-registers on every onResume and reports
+  // connected:true, so retryMobileConnection runs on every return to the app.
+  await test('a resume network event on the signed-out screen does not reload the page', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    let reloads = 0;
+    sandbox.window.location.reload = () => { reloads += 1; };
+    sandbox.isPackagedMobileApp = () => true;
+    sandbox.apiHealthCheck = async () => true;
+    state.currentUser = null;
+    state.serverMode = true;
+    run('setMobileColdStartBlocked(false)');
+    assert.equal(await sandbox.retryMobileConnection(), true);
+    assert.equal(reloads, 0, 'the login form must survive an app switch');
+    run('setMobileColdStartBlocked(true)');
+    assert.equal(await sandbox.retryMobileConnection(), true);
+    assert.equal(reloads, 1, 'a blocked cold start still reloads to restore the session');
+    run('setMobileColdStartBlocked(false)');
+    state.serverMode = false;  // a phone browser that fell into local mode on a failed first probe
+    assert.equal(await sandbox.retryMobileConnection(), true);
+    assert.equal(reloads, 2);
+  });
   for (const [paidRate, debtRate] of [[5, 10], [10, 5]]) {
     await test(`full company coverage settles USD and LYD at different rates ${paidRate}/${debtRate}`, () => {
       const { sandbox } = moneyFixture(paidRate, debtRate);

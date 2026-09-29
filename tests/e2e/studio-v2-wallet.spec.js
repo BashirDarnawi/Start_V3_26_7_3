@@ -38,6 +38,11 @@ const usd = minor => (minor < 0 ? `-$${grouped(minor)}` : `$${grouped(minor)}`);
 const lyd = (minor, language = 'en') => `${minor < 0 ? '-' : ''}${grouped(minor)} ${language === 'ar' ? 'د.ل' : 'LYD'}`;
 // wallet_payments.lyd_minor_for: ceil(amount x rate), the rate rounded to 4 places.
 const lydFor = (minor, rate) => Math.floor((minor * Math.floor(rate * 10000 + 0.5) + 9999) / 10000);
+// A day counted from today's Tripoli day (review loop r3 n24): the submit refuses a past start, so a fixed date expires.
+function libyaDay(offsetDays) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Tripoli', year: 'numeric', month: '2-digit', day: '2-digit' })
+    .format(new Date(Date.now() + offsetDays * 86400000));
+}
 
 let setup = null;
 let addedRateId = '';
@@ -237,7 +242,7 @@ test.describe('Albayan Studio v2 wallet and account (pilot)', () => {
       primaryText: 'Message us for this week\'s offer.', headline: 'Weekly offer', description: 'Wallet e2e.',
       callToAction: 'Send Message', destination: 'https://wa.me/218910000000', locations: ['Tripoli, Libya'],
       ageMin: 18, ageMax: 55, genders: ['all'], languages: ['Arabic'], interests: ['Shopping'],
-      startDate: '2027-01-10', endDate: '2027-01-14', budgetMinorUSD: 2000, budgetType: 'lifetime',
+      startDate: libyaDay(60), endDate: libyaDay(64), budgetMinorUSD: 2000, budgetType: 'lifetime',
       notes: '', specialAdCategories: ['none'], creativeImages: [PNG], creativeAssetIds: []
     } } });
     const submitted = await pageApi(page, `/api/ad-studio/campaigns/${encodeURIComponent(created.id)}/submit`, {

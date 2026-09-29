@@ -329,9 +329,15 @@ def _prepare(data: dict, **kwargs) -> dict:
 
 def _boost(name: str, **extra) -> dict:
     """A quick-boost request: no objective, text, button, link or photo of its own."""
+    from datetime import timedelta
+
+    from server.operations import _business_today  # review loop r3 n24: a fixed date expires; the submit refuses a past start
+
+    start = _business_today() + timedelta(days=60)
     return {
         "name": name, "boostType": "boost_post", "platforms": ["facebook"], "pageName": "Owner Shop",
-        "locationKeys": ["tripoli", "benghazi"], "startDate": "2027-01-10", "endDate": "2027-01-20",
+        "locationKeys": ["tripoli", "benghazi"], "startDate": start.isoformat(),
+        "endDate": (start + timedelta(days=10)).isoformat(),
         "durationDays": 11, "budgetMinorUSD": 2500, "budgetType": "lifetime", **extra,
     }
 

@@ -69,10 +69,23 @@ def test_reconciliation_readiness_uses_the_business_day(monkeypatch):
 
 
 def test_campaign_start_check_uses_the_business_day(monkeypatch):
-    from server.systems.ads_studio import ad_campaign_fields
+    # Review loop r3 n26: the real rule under a fixed Libya day, not a search of the source text (a
+    # UTC-day or date.today() regression kept passing that one for 22 hours a day).
     monkeypatch.setattr(operations, "_business_today", lambda: date(2030, 3, 10))
-    src = open(ad_campaign_fields.__file__, encoding="utf-8").read()
-    assert "_business_today" in src and "datetime.now(timezone.utc).date()" not in src.split("startDate cannot be in the past")[0][-400:]
+    png = ("data:image/png;base64,"
+           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4//8/AAX+Av4zEpUUAAAAAElFTkSuQmCC")
+
+    def request(start: str) -> dict:
+        return {"name": "Business day", "objective": "messages", "platforms": ["facebook"], "pageName": "Day Page",
+                "primaryText": "Message us.", "callToAction": "Send Message", "destination": "https://wa.me/218910000000",
+                "locations": ["Tripoli, Libya"], "startDate": start, "endDate": "2030-03-20", "budgetMinorUSD": 2500,
+                "budgetType": "lifetime", "creativeImages": [png]}
+
+    with pytest.raises(HTTPException) as past:
+        main._prepare_ad_campaign_fields(request("2030-03-09"), strict=True)
+    assert past.value.status_code == 400 and past.value.detail == "startDate cannot be in the past"
+    clean = main._prepare_ad_campaign_fields(request("2030-03-10"), strict=True)  # today in Libya is not the past
+    assert clean["startDate"] == "2030-03-10" and clean["endDate"] == "2030-03-20"
 
 
 # ---------------------------------------------------------------- a tab must not act under another account

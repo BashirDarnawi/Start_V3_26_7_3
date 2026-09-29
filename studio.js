@@ -13722,7 +13722,9 @@ function studioStopSend() {
     if (_studioStop.id !== id) return null;
     _studioStop.sending = false;
     _studioStop.error = studioHelpErrorText(error, 'action');
-    studioStopSheetRedraw();
+    // Android Back (or the phone browser's Back) may have removed the sheet meanwhile: say it here then.
+    if (_studioStop.el && _studioStop.el.isConnected) studioStopSheetRedraw();
+    else studioHelpNotify(false, adsStudioText('Stop request not sent', 'لم يُرسل طلب الإيقاف'), _studioStop.error);
     return null;
   });
 }

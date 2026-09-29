@@ -211,13 +211,17 @@ def _force(campaign_id: str, **fields) -> None:
 
 
 def _create(user: dict, budget: int) -> str:
+    from server.operations import _business_today  # review loop r3 n24: a fixed date expires; the submit refuses a past start
+
     campaign_id = _uid("a1cmp")
+    start = _business_today() + timedelta(days=60)
     body = {
         "name": f"A1 offer {campaign_id}", "objective": "messages", "platforms": ["facebook", "instagram"],
         "pageName": "A1 Test Page", "primaryText": "Message us for this week's offer.", "headline": "Weekly offer",
         "description": "A1 test.", "callToAction": "Send Message", "destination": "https://wa.me/218910000000",
         "locations": ["Tripoli, Libya"], "ageMin": 18, "ageMax": 55, "genders": ["all"], "languages": ["Arabic"],
-        "interests": ["Shopping"], "startDate": "2027-01-10", "endDate": "2027-01-20", "budgetMinorUSD": budget,
+        "interests": ["Shopping"], "startDate": start.isoformat(), "endDate": (start + timedelta(days=10)).isoformat(),
+        "budgetMinorUSD": budget,
         "budgetType": "lifetime", "notes": "", "specialAdCategories": ["none"], "creativeImages": [PNG], "creativeAssetIds": [],
     }
     response = client.post(f"/api/collections/{CAMPAIGNS}", json={"id": campaign_id, "data": body}, cookies=user["cookies"])

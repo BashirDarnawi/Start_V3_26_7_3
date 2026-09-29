@@ -1,9 +1,7 @@
 // ==========================================
 // NATIVE DEVICE SERVICES
 // ==========================================
-// This module is the single bridge between Albayan's shared web code and the
-// iOS/Android shell. Every feature has a browser fallback, so the website and
-// PWA remain fully usable without Capacitor plugins.
+// The one bridge to the iOS/Android shell; every feature has a browser fallback.
 
 const NATIVE_SECURE_PREFIX = 'albayan_secure_v1_';
 const NATIVE_PHOTO_PENDING_KEY = 'albayan_native_photo_pending';
@@ -14,17 +12,15 @@ const NATIVE_REMINDER_LIMIT = 50;
 let _nativeServicesPromise = null;
 let _nativeViewportFrame = 0;
 let _nativeBackgroundedAt = 0;
+let _nativeWentBackground = false, _nativeNoDeviceLock = false;
 let _nativeUnlockBusy = false;
-// A privacy overlay during a short app switch is not the same as an unmet
-// authentication challenge. Background events must never clear the latter.
+// An unmet challenge; a background event (privacy overlay) never clears it.
 let _nativeAuthenticationRequired = false;
 let _nativeReminderTimer = null;
 let _nativeReminderGeneration = 0;
 let _nativeReminderWork = Promise.resolve();
 let _nativeReminderSettingsWork = Promise.resolve();
-// Device preference remains the last successfully saved value. This separate
-// fence honors an immediate disable request even while secure storage waits
-// or fails; only a successful explicit re-enable may lift it in this session.
+// A disable wins at once, even while secure storage waits or fails; only a saved re-enable lifts it.
 let _nativeReminderSchedulingSuppressed = false;
 let _nativePrefs = {
   ready: false,
@@ -54,9 +50,7 @@ async function _addNativeListener(plugin, eventName, handler) {
   }
 }
 
-// Raw bridge calls are intentional here. The app is vanilla JS (not bundled
-// ESM), while the plugin's JavaScript wrapper normally performs these same
-// calls. ThisDeviceOnly prevents secrets migrating to a different iPhone.
+// Raw bridge calls on purpose (vanilla JS, no ESM wrapper). ThisDeviceOnly: never to another iPhone.
 async function nativeSecureGet(key) {
   const plugin = getCapacitorPlugin('SecureStorage');
   if (!plugin?.internalGetItem) return null;
@@ -276,8 +270,7 @@ function _nativePhotoContextIsCurrent(context) {
 
 async function _deliverNativeCameraResult(result, target, context, attempts = 0) {
   const resolvedTarget = String(target || '');
-  // Accept the old paste-context argument from callers, but immediately bind it
-  // to the current user/form. All retries retain this exact immutable identity.
+  // An old paste-context argument is bound to the current user/form once; retries keep it.
   const guard = context?.version === 2 ? context : _captureNativePhotoContext(resolvedTarget);
   if (context != null && context?.version !== 2 && context !== guard.pasteContext) return false;
   if (!_nativePhotoContextIsCurrent(guard)) return false;
@@ -294,8 +287,7 @@ async function _deliverNativeCameraResult(result, target, context, attempts = 0)
     return false;
   }
   const file = await _nativeCameraResultToFile(result);
-  // Reading a native URI can await an OS/cloud download. The user may already
-  // have logged out or opened another receipt by the time that read finishes.
+  // The read may wait on an OS/cloud download; the user may have moved on by then.
   if (!file || !_nativePhotoContextIsCurrent(guard)) return false;
   const routed = typeof _routePastedPhotoFiles === 'function' && _routePastedPhotoFiles(resolvedTarget, [file]);
   if (routed) {
@@ -310,9 +302,7 @@ async function _restoreNativeCameraResult(result, pending, attempts = 0) {
   if (pending?.version !== 2 || !pending.operationId || !pending.userId || !pending.entityId
       || !Number.isFinite(age) || age < 0 || age > NATIVE_PHOTO_MAX_AGE_MS
       || _readNativePhotoPending()?.operationId !== pending.operationId) return false;
-  // After Android restores a killed WebView, auth and the original delivery
-  // dialog can take a moment to return. Wait only for the saved owner and record,
-  // never attach to an arbitrary newly opened/unsaved form of the same type.
+  // A restored WebView: wait only for the saved owner and record, never another open form.
   const currentId = String(state.currentUser?.id || '');
   if (currentId && currentId !== pending.userId) return false;
   const ready = currentId === pending.userId
@@ -425,7 +415,7 @@ async function authenticateNativeDevice(reason = '') {
   const biometric = getCapacitorPlugin('BiometricAuthNative');
   if (!biometric?.internalAuthenticate) return false;
   const info = await getNativeBiometricInfo(true);
-  if (!info?.isAvailable && !info?.deviceIsSecure) return false;
+  if ((_nativeNoDeviceLock = !info?.isAvailable && !info?.deviceIsSecure)) return false;
   try {
     await biometric.internalAuthenticate({
       reason: reason || (state.language === 'ar' ? 'افتح تطبيق البيان' : 'Unlock Albayan'),
@@ -463,10 +453,11 @@ function renderNativeAppLock() {
     <div class="native-app-lock-card">
       <div class="native-app-lock-icon"><i data-lucide="scan-face" class="h-9 w-9"></i></div>
       <h1>${isAr ? 'البيان مقفل' : 'Albayan is locked'}</h1>
-      <p>${isAr ? 'استخدم البصمة أو Face ID أو رمز قفل الهاتف لحماية بيانات العمل.' : 'Use biometrics or your phone passcode to protect business data.'}</p>
+      <p>${_nativeNoDeviceLock ? (isAr ? 'لا قفل شاشة للهاتف: أعد ضبطه أو سجّل الخروج.' : 'No screen lock on this phone: set one again or sign out.') : isAr ? 'استخدم البصمة أو Face ID أو رمز قفل الهاتف لحماية بيانات العمل.' : 'Use biometrics or your phone passcode to protect business data.'}</p>
       <button type="button" onclick="unlockNativeApp()" class="native-app-lock-button" ${_nativeUnlockBusy ? 'disabled' : ''}>
         ${_nativeUnlockBusy ? (isAr ? 'جارٍ التحقق...' : 'Checking...') : (isAr ? 'فتح التطبيق' : 'Unlock app')}
       </button>
+      ${_nativeNoDeviceLock ? `<button type="button" onclick="nativeLockSignOut()" class="native-app-lock-button">${t('logout')}</button>` : ''}
     </div>`;
   try { IconQueue.schedule(lock); } catch (_) {}
   document.body.classList.add('native-app-locked');
@@ -475,6 +466,13 @@ function renderNativeAppLock() {
 function removeNativeAppLock() {
   document.getElementById('native-app-lock')?.remove();
   document.body.classList.remove('native-app-locked');
+}
+
+async function nativeLockSignOut() {
+  await nativeSecureSet('biometric_lock_enabled', false);
+  _nativePrefs.biometricEnabled = _nativeAuthenticationRequired = false;
+  await handleLogout();
+  removeNativeAppLock();
 }
 
 async function unlockNativeApp() {
@@ -596,7 +594,7 @@ async function _syncNativeReconciliationRemindersOnce(context) {
   if (!notifications?.schedule || !notifications?.getPending) return false;
   const now = new Date();
   const candidates = (Array.isArray(state.ads) ? state.ads : [])
-    .filter(ad => ad && !ad._deleted && typeof getAdReconciliationAvailableDay === 'function')
+    .filter(ad => typeof getAdReconciliationAvailableDay === 'function' && isAdReconciliationEligible(ad))
     .map(ad => { const at = getAdReconciliationAvailableDay(ad); if (at instanceof Date) at.setHours(9, 0, 0, 0); return { ad, at }; })
     .filter(item => item.at instanceof Date && Number.isFinite(item.at.getTime()) && item.at.getTime() > now.getTime())
     .sort((a, b) => a.at - b.at)
@@ -623,8 +621,7 @@ async function _syncNativeReconciliationRemindersOnce(context) {
     if (!isCurrent()) return false;
     if (desired.size) await notifications.schedule({ notifications: Array.from(desired.values()) });
     if (!isCurrent()) {
-      // Calls are serialized, so no newer user's schedule can have reused these
-      // ids yet. Clean up a schedule that finished after disable/logout.
+      // Serialized: no newer schedule reused these ids; undo one finished after disable/logout.
       if (desired.size && notifications.cancel) await notifications.cancel({ notifications: Array.from(desired.keys(), id => ({ id })) });
       return false;
     }
@@ -761,17 +758,19 @@ async function setupNativeServices() {
     await _addNativeListener(app, 'appStateChange', event => {
       if (!event?.isActive) {
         _nativeBackgroundedAt = Date.now();
+        _nativeWentBackground = true;
         if (_nativePrefs.biometricEnabled && state?.currentUser) renderNativeAppLock();
         return;
       }
+      if (!_nativeWentBackground) return queueNativeReminderSync(); // Android: a closing prompt resumes too
+      _nativeWentBackground = false;
       const protectedSession = _nativePrefs.biometricEnabled && state?.currentUser;
       if (protectedSession && (_nativeAuthenticationRequired || Date.now() - _nativeBackgroundedAt >= NATIVE_APP_LOCK_AFTER_MS)) {
         _nativeAuthenticationRequired = true;
         renderNativeAppLock();
         unlockNativeApp();
       } else {
-        // Keep private data hidden in the app-switcher snapshot, but do not
-        // make a quick return wait for biometrics before the lock timeout.
+        // A quick return needs no biometrics: only the snapshot's privacy overlay goes.
         removeNativeAppLock();
       }
       queueNativeReminderSync();

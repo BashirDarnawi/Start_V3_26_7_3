@@ -183,6 +183,15 @@ async function main() {
     const f = nativeFixture(); assert.equal(await f.sandbox.syncNativeReconciliationReminders(), true);
     assert.equal(f.notes.size, 1); assert.equal([...f.notes.values()][0].extra.adId, 'ad_a');
   });
+  // Review loop r3 n30: the phone reminds only about ads the Reconciliation screen will show.
+  await test('reminders skip canceled, lost and refunded ads and receipt rows', async () => {
+    const f = nativeFixture();
+    f.state.ads = [{ id: 'ad_ok', status: 'Active' }, { id: 'ad_cancel', status: 'Canceled' }, { id: 'ad_lost', status: ' lost ' },
+      { id: 'ad_refund', status: 'Active', refundType: 'full' }, { id: 'ad_none', status: 'Active', refundType: 'none' },
+      { id: 'rc_1', recordType: 'receipt', status: 'Paid' }, { id: 'ad_gone', status: 'Active', _deleted: true }];
+    assert.equal(await f.sandbox.syncNativeReconciliationReminders(), true);
+    assert.deepEqual([...f.notes.values()].map(n => n.extra.adId).sort(), ['ad_none', 'ad_ok']);
+  });
   for (const boundary of ['getPending', 'schedule']) {
     for (const change of ['disable', 'logout']) {
       await test(`native ${change} wins over an old in-flight ${boundary}`, async () => {

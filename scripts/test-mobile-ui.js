@@ -5521,6 +5521,21 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   check('Studio Ask to stop (P3-10): the sheet explains, one operationId per ad is replayed after a lost answer, the answer shows the ticket number, the due time and the after-hours urgent line',
     !loadError && stopCases.every(Boolean), loadError || `cases ${failed(stopCases)}`);
 
+  // Review loop r3 n31: Android Back removed the sheet while it showed "Sending…"; a failed stop request
+  // must still say so (the sheet cannot show its error any more), and nothing throws on the gone sheet.
+  const stopNotesAt = json('__notes.length');
+  replyError('/api/ad-studio/campaigns/r_new/stop-request', { name: 'TypeError', message: 'Failed to fetch' });
+  run("_studioStop.requested.clear(); _studioStop.attempts.clear(); studioStopScope(); Object.assign(_studioStop, { id: 'r_new', note: '', sending: false, error: '', result: null, el: { isConnected: false } }); studioStopSend();");
+  const backNotes = (json('__notes') || []).slice(stopNotesAt);
+  const backCases = [
+    backNotes.length === 1 && backNotes[0].title === 'Stop request not sent' && backNotes[0].type === 'error' && !!backNotes[0].message,
+    json('_studioStop.sending') === false && !!json('_studioStop.error'),
+    inLanguage('ar', "adsStudioText('Stop request not sent', 'لم يُرسل طلب الإيقاف')") === 'لم يُرسل طلب الإيقاف' && helpSrc.includes("adsStudioText('Stop request not sent', 'لم يُرسل طلب الإيقاف')")
+  ];
+  run("_studioStop.attempts.clear(); studioStopSheetClose(); __replies['/api/ad-studio/campaigns/r_new/stop-request'] = [];");
+  check('Studio Ask to stop: a stop request that fails after Back closed the sheet shows an error toast (review loop r3 n31)',
+    !loadError && backCases.every(Boolean), loadError || `cases ${failed(backCases)} notes ${JSON.stringify(backNotes)}`);
+
   // Classic: the help tab exists only while the service is on, the tab fix keeps it, the classic card offers the sheet and "Ask about this".
   const meClassic = Object.assign({}, meV2, { ui: 'classic' });
   meReply(meClassic);

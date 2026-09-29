@@ -159,6 +159,11 @@ def actors():
 
 
 def _complete_campaign(name: str = "Tripoli Messages Campaign") -> dict:
+    from datetime import timedelta as _days
+
+    from server.operations import _business_today  # review loop r3 n24: a fixed date expires; the submit refuses a past start
+
+    start = _business_today() + _days(days=60)
     return {
         "name": name,
         "objective": "messages",
@@ -175,8 +180,8 @@ def _complete_campaign(name: str = "Tripoli Messages Campaign") -> dict:
         "genders": ["all"],
         "languages": ["Arabic"],
         "interests": ["Shopping"],
-        "startDate": "2027-01-10",
-        "endDate": "2027-01-20",
+        "startDate": start.isoformat(),
+        "endDate": (start + _days(days=10)).isoformat(),
         "budgetMinorUSD": 2500,
         "budgetType": "lifetime",
         "notes": "Please review before launch.",
@@ -2283,10 +2288,11 @@ class TestStudioBudgetsLimitsIntake:
     def test_new_daily_submit_holds_daily_times_days(self, actors):
         _reset_reviewer_limits(actors)
         user, cookies = _fresh_funded_customer(actors, "daily7", 6999)
+        start = _business_day() + timedelta(days=60)  # review loop r3 n24: never a fixed calendar date
         created, short = _draft_and_submit(
-            cookies, "daily7", budgetType="daily", budgetMinorUSD=1000, durationDays=7, startDate="2027-01-10",
+            cookies, "daily7", budgetType="daily", budgetMinorUSD=1000, durationDays=7, startDate=start.isoformat(),
         )
-        assert created.json()["data"]["endDate"] == "2027-01-16"  # 7 days, both ends counted
+        assert created.json()["data"]["endDate"] == (start + timedelta(days=6)).isoformat()  # 7 days, both ends counted
         # The wallet check uses the TOTAL (7 x $10 = $70), not one day.
         assert short.status_code == 409 and "Insufficient wallet balance" in short.text, short.text
         topped = client.post(
@@ -2361,7 +2367,8 @@ class TestStudioBudgetsLimitsIntake:
         today = _business_day()
         for tag, start_offset in (("late2", -2), ("latepast", -10)):
             user, cookies = _fresh_funded_customer(actors, tag, 2500)
-            created, submitted = _draft_and_submit(cookies, tag, durationDays=7, startDate="2027-01-10")
+            created, submitted = _draft_and_submit(cookies, tag, durationDays=7,
+                                                   startDate=(today + timedelta(days=60)).isoformat())
             assert submitted.status_code == 200, submitted.text
             # The request waited: approved 2 days after its start (then long after its end).
             start = today + timedelta(days=start_offset)
@@ -2378,6 +2385,7 @@ class TestStudioBudgetsLimitsIntake:
     def test_budget_limits_enforced_for_new_rows(self, actors, studio_setting):
         _reset_reviewer_limits(actors)
         user, cookies = _fresh_funded_customer(actors, "limits", 1000)
+        start = _business_day() + timedelta(days=60)  # review loop r3 n24: a past start is refused before the 90-day rule
         cases = (
             ("lowtotal", {"budgetMinorUSD": 499}, "The total budget must be at least $5.00"),
             ("hightotal", {"budgetMinorUSD": 200_001}, "The total budget must be at most $2,000.00"),
@@ -2386,7 +2394,8 @@ class TestStudioBudgetsLimitsIntake:
             ("thinlife", {"budgetMinorUSD": 500}, "Budget per day is below the minimum"),  # $5 over 11 days
             ("thindaily", {"budgetType": "daily", "budgetMinorUSD": 99, "durationDays": 7},
              "Budget per day is below the minimum"),
-            ("toolong", {"budgetMinorUSD": 50_000, "startDate": "2027-01-01", "endDate": "2027-04-01"},
+            ("toolong", {"budgetMinorUSD": 50_000, "startDate": start.isoformat(),
+                         "endDate": (start + timedelta(days=90)).isoformat()},
              "The ad can run for at most 90 days"),  # 91 days from the dates
         )
         for tag, fields, prefix in cases:

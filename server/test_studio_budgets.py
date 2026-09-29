@@ -273,9 +273,12 @@ def _captures(user_id: str) -> list[int]:
 def test_daily_request_holds_charges_and_returns_the_total(staff):
     user = _customer("daily")
     _credit(staff, user["id"], 10_000)
+    from server.operations import _business_today  # review loop r3 n24: never a fixed calendar date
+
+    start = _business_today() + timedelta(days=60)
     campaign_id = _create(user, "Daily offer", budgetType="daily", budgetMinorUSD=1_000, durationDays=7,
-                          startDate="2027-01-10", endDate="")
-    assert _row(campaign_id)["endDate"] == "2027-01-16"
+                          startDate=start.isoformat(), endDate="")
+    assert _row(campaign_id)["endDate"] == (start + timedelta(days=6)).isoformat()
     sent = _send(user, campaign_id)
     assert sent.status_code == 200, sent.text
     held = _summary(user)

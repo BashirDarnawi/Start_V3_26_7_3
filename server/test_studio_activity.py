@@ -295,12 +295,15 @@ def _subscribe_and_fund(user: dict, admin: dict) -> None:
 
 
 def _campaign_body(name: str) -> dict:
+    from server.operations import _business_today  # review loop r3 n24: a fixed date expires; the submit refuses a past start
+
+    start = _business_today() + timedelta(days=60)
     return {
         "name": name, "objective": "messages", "platforms": ["facebook", "instagram"], "pageName": "Test Page",
         "primaryText": "Message us for this week's offer.", "headline": "Weekly offer", "description": "A request.",
         "callToAction": "Send Message", "destination": "https://wa.me/218910000000", "locations": ["Tripoli, Libya"],
         "ageMin": 18, "ageMax": 55, "genders": ["all"], "languages": ["Arabic"], "interests": ["Shopping"],
-        "startDate": "2027-01-10", "endDate": "2027-01-20", "budgetMinorUSD": 2500, "budgetType": "lifetime",
+        "startDate": start.isoformat(), "endDate": (start + timedelta(days=10)).isoformat(), "budgetMinorUSD": 2500, "budgetType": "lifetime",
         "notes": "", "specialAdCategories": ["none"], "creativeImages": [PNG], "creativeAssetIds": [],
     }
 
