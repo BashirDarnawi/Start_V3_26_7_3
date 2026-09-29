@@ -28,7 +28,7 @@ only the last run.
 | 6 | Receipt, customer and ad screens, reconciliation, old data, server helpers, user management | 35 | Released |
 | 7 | Startup split review, deep-link reload, dead wiring, rounds 3–4 changes, settings, Clothes | 22 | Released |
 | 8 | Round 5 changes, staff desk, Social Studio, Meta worker, request wizard, new routes, sign-out | 21 | Released (`release-82be09348da1`) |
-| 9 | Receipt money, Arabic coverage (3 other lenses cut by the weekly limit) | 8 | **Open — not fixed** |
+| 9 | Receipt money, Arabic coverage (3 other lenses cut by the weekly limit) | 8 | Released (`release-d6e2a57f46fc`) |
 
 About 260 confirmed problems fixed in 73 commits; 34 new backend test files
 (`server/test_review_loop_*.py`) plus about 70 new client checks.
@@ -60,28 +60,20 @@ lazy `meta-tools.js` (the startup budget had ~0.4 KB left; it now has ~21 KB).
   left.
 - Closing a month froze ads still running — now a blocker unless forced.
 
-## Open — for the next session
+## Round 9 — fixed after the loop (owner asked for it)
 
-Round 9 findings (verified, not fixed):
+All 8 round-9 findings were fixed and released as `release-d6e2a57f46fc`
+(commits 76fbfa5, 138ed3b, 9c5ec7e, d6e2a57). A final replay of every
+covered-receipt money scenario with real numbers found 4 more problems (two
+caused by the first fix): net cash in several rows refused, unsettle of a
+cent-net receipt refused, an office-paid delivered receipt re-settled after an
+unsettle minting the company share, and an echo re-save putting back the trimmed
+house cent. All four are fixed and pinned by `server/test_review_loop_r9_M.py`
+(28 tests).
 
-1. HIGH — a covered receipt paid at the office and then delivered or
-   delivery-canceled: a later edit stores the gross as customer cash
-   (`server/settlement_truth.py` ~272, paid→paid early return).
-2. MEDIUM — gross-settled covered Paid receipt: lowering/re-rating a payment row
-   keeps the new rows total as cash (~289).
-3. MEDIUM — settling a covered receipt with the exact net cash is refused when the
-   net has cents (house cent vs the 409 band, ~306).
-4. MEDIUM — a Not Paid receipt can be lowered below its unassigned company
-   coverage; settling then gives more credit than the gross (~270).
-5. LOW — a delivery completion row with Rate 1 "1e-400" makes Rate 2 infinite
-   (500 on PostgreSQL, ~47).
-6. LOW — Clothes product/shipment refusals bypass the Clothes Arabic map.
-7. LOW — Meta Sync dialog discovery error line in English inside the Arabic dialog.
-8. LOW — ad-merge tool link/unlink refusals in raw English.
-
-Round 9 lenses that never ran (weekly limit): review of the rounds 6–7 changes,
-Studio money second pass, health of the new tests; the docs-vs-code findings were
-not verified.
+Still not done from round 9: the three lenses that never ran (review of the
+rounds 6–7 changes, Studio money second pass, health of the new tests) and the
+unverified docs-vs-code findings.
 
 ## Owner decisions (not changed without you)
 
