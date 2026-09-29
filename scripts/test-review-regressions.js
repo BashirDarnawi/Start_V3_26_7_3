@@ -1014,6 +1014,36 @@ async function main() {
     assert.ok(orders.includes('"00218 91 234 5678"') && orders.includes('"092 3456789"'), orders);
     assert.ok(!orders.includes(`"'+`), 'a literal apostrophe reached the clothes CSV');
   });
+  await test('password change signs this device out saying "sign in with your new password", never "Session Expired"', async () => {
+    const expected = {
+      en: ['Password changed successfully', 'Sign in with your new password.'],
+      ar: ['تم تغيير كلمة المرور بنجاح', 'سجّل الدخول بكلمة المرور الجديدة.']
+    };
+    for (const language of ['en', 'ar']) {
+      const { sandbox, state } = loadBrowserSource();
+      const notes = [];
+      sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+      const overlays = [];
+      sandbox.showSessionTransitionOverlay = message => { overlays.push(message); return { remove() {} }; };
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.URLSearchParams = URLSearchParams;  // closeModal clears ?modal= from the address bar
+      const fields ={ 'cp-current': 'OldPassword1!', 'cp-new': 'NewPassword1!', 'cp-confirm': 'NewPassword1!' };
+      sandbox.document.getElementById = id => (id in fields ? { value: fields[id] } : null);
+      const calls = [];
+      sandbox.apiChangePassword = async (current, next) => { calls.push([current, next]); return { ok: true, requires_reauth: true }; };
+      state.language = language;
+      state.currentUser = { id: 'u1', role: 'Employee', permissions: {} };
+      state.activeModal = 'change-password';
+      await sandbox.handleModalSubmit();
+      await settle();
+      assert.deepEqual(calls, [['OldPassword1!', 'NewPassword1!']]);
+      // Before: the workspace stayed on screen until a later request got 401 and said "Session Expired".
+      assert.equal(state.currentUser, null, 'the server ended every session, so this device signs out at once');
+      assert.equal(state.activeModal, null);
+      assert.deepEqual(notes.map(note => [note.title, note.message, note.type]), [[...expected[language], 'success']]);
+      assert.deepEqual(overlays, [expected[language][0]]);
+    }
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

@@ -12830,10 +12830,7 @@ async function serverLiveSyncOnce() {
   // namespace before anything can render it again.
   const forbiddenCollections = deltaResults.filter(result => result.forbidden).map(result => result.collection);
   if (!(_serverLiveSync.purgedForbidden instanceof Set)) _serverLiveSync.purgedForbidden = new Set();
-  // Only act on collections NOT already purged. A revoked collection keeps
-  // returning 403 every 3s until the current user's permissions refresh; without
-  // this guard each identical 403 would re-clear state, re-write IndexedDB, and
-  // force a full re-render every tick for ~30s.
+  // Only act on collections NOT already purged (see purgedForbidden above).
   const newlyForbidden = forbiddenCollections.filter(name => !_serverLiveSync.purgedForbidden.has(name));
   // ROOT CAUSE: the first time a previously-authorized collection returns 403,
   // collapse the usersSyncInterval wait so refreshCurrentUserPermissions runs
@@ -14013,13 +14010,13 @@ function handleLogout() {
   return promise;
 }
 
-function handleServerAuthExpired(requestIdentity) {
+function handleServerAuthExpired(requestIdentity, done) {  // done: [title, text] of an expected sign-out
   if (!state.currentUser || serverSessionIdentityChanged(requestIdentity)) return Promise.resolve(false);
   if (_logoutInFlight) return _logoutInFlight;
   if (_serverAuthExpiryInFlight) return _serverAuthExpiryInFlight;
   _loginGeneration += 1;
   const promise = Promise.resolve().then(async () => {
-    const overlay = showSessionTransitionOverlay(state.language === 'ar' ? 'انتهت الجلسة. جارٍ تأمين البيانات...' : 'Session expired. Securing local data...');
+    const overlay = showSessionTransitionOverlay(done ? done[0] : state.language === 'ar' ? 'انتهت الجلسة. جارٍ تأمين البيانات...' : 'Session expired. Securing local data...');
     try {
       stopServerLiveSync();
       advanceServerSessionEpoch();
@@ -14035,9 +14032,9 @@ function handleServerAuthExpired(requestIdentity) {
       state.currentView = 'analytics';
       saveState();
       showNotification(
-        state.language === 'ar' ? 'انتهت الجلسة' : 'Session Expired',
-        state.language === 'ar' ? 'سجّل الدخول مرة أخرى للمتابعة.' : 'Please sign in again to continue.',
-        'warning'
+        done ? done[0] : state.language === 'ar' ? 'انتهت الجلسة' : 'Session Expired',
+        done ? done[1] : state.language === 'ar' ? 'سجّل الدخول مرة أخرى للمتابعة.' : 'Please sign in again to continue.',
+        done ? 'success' : 'warning'
       );
       render();
       return true;
@@ -40532,12 +40529,12 @@ async function handleModalSubmit() {
       if (isServerModeEnabled()) {
         try {
           await apiChangePassword(currentPw, newPw);
-          showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
         } catch (e) {
           showNotification(isArCP ? 'خطأ' : 'Error', e.message || (isArCP ? 'فشل تغيير كلمة المرور' : 'Failed to change password'), 'error');
           return;
         }
-        break;
+        closeModal();  // the server signed every device out, this one too
+        return handleServerAuthExpired(getServerSessionIdentity(), isArCP ? ['تم تغيير كلمة المرور بنجاح', 'سجّل الدخول بكلمة المرور الجديدة.'] : ['Password changed successfully', 'Sign in with your new password.']);
       }
 
       // Local mode

@@ -3077,12 +3077,12 @@ async function handleModalSubmit() {
       if (isServerModeEnabled()) {
         try {
           await apiChangePassword(currentPw, newPw);
-          showNotification(isArCP ? 'نجاح' : 'Success', isArCP ? 'تم تغيير كلمة المرور بنجاح' : 'Password changed successfully', 'success');
         } catch (e) {
           showNotification(isArCP ? 'خطأ' : 'Error', e.message || (isArCP ? 'فشل تغيير كلمة المرور' : 'Failed to change password'), 'error');
           return;
         }
-        break;
+        closeModal();  // the server signed every device out, this one too
+        return handleServerAuthExpired(getServerSessionIdentity(), isArCP ? ['تم تغيير كلمة المرور بنجاح', 'سجّل الدخول بكلمة المرور الجديدة.'] : ['Password changed successfully', 'Sign in with your new password.']);
       }
 
       // Local mode

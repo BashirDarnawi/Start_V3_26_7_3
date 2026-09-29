@@ -1050,7 +1050,7 @@ def _insert_session_conn(
     # (SESSION_DURATION_MS / SESSION_REMEMBER_DURATION_MS) — never client input.
     lifetime_ms = SESSION_DURATION_MS if duration_ms is None else max(60_000, int(duration_ms))
     expires = now + lifetime_ms
-    ip = _client_ip(request)
+    ip = _client_ip(request)[:80]  # VARCHAR(80)
     ua = request.headers.get("user-agent")
 
     conn.execute(
@@ -3115,7 +3115,7 @@ def login(payload: LoginRequest, request: Request):
         "auth",
         user["id"],
         f"User {user['email']} logged in",
-        {"rememberMe": remember_me, "sessionLifetimeMs": session_lifetime_ms},
+        {"rememberMe": remember_me, "sessionLifetimeMs": session_lifetime_ms, "ip": _client_ip(request)},  # a known address (auth_limits)
     )
     return resp
 
@@ -3390,7 +3390,7 @@ def password_reset_request(body: PasswordResetRequest, request: Request):
     token_hash = hash_token(token)
     now = now_ms()
     expires = now + PASSWORD_RESET_TOKEN_MS
-    ip = _client_ip(request)
+    ip = _client_ip(request)[:80]  # VARCHAR(80)
     ua = request.headers.get("user-agent")
 
     with _auth_mutation_guard(), db_conn() as conn:
@@ -3589,7 +3589,7 @@ def app_login_handoff(
     code = secrets.token_urlsafe(32)
     code_hash = hash_token(code)
     now = now_ms()
-    ip = _client_ip(request)
+    ip = _client_ip(request)[:80]  # VARCHAR(80)
     ua = request.headers.get("user-agent")
 
     with _auth_mutation_guard(), db_conn() as conn:

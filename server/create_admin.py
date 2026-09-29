@@ -2,7 +2,7 @@ import argparse
 import json
 from getpass import getpass
 
-from server.db import db_conn, init_db, json_dumps, now_ms
+from server.db import db_conn, get_engine, init_db, json_dumps, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from sqlalchemy import text
 
@@ -25,10 +25,13 @@ def main():
     pw = hash_password(password, iterations=PBKDF2_ITERATIONS_DEFAULT)
     now = now_ms()
 
+    # Lock the row (PostgreSQL) so a login that verified the OLD password at this
+    # moment fails its password-snapshot check instead of minting a new session.
+    lock = " FOR UPDATE" if str(get_engine().dialect.name or "") == "postgresql" else ""
     with db_conn() as conn:
         row = (
             conn.execute(
-                text("SELECT id FROM users WHERE lower(email)=lower(:email) LIMIT 1"),
+                text(f"SELECT id FROM users WHERE lower(email)=lower(:email) LIMIT 1{lock}"),
                 {"email": email},
             )
             .mappings()
@@ -64,7 +67,13 @@ def main():
                     "id": user_id,
                 },
             )
+            # A password reset here is the recovery path after a leak or takeover:
+            # every proof of access made with the old password must stop working,
+            # exactly like the in-app paths (main._revoke_user_credentials_conn).
+            for table in ("sessions", "app_logins", "password_resets"):
+                conn.execute(text(f"DELETE FROM {table} WHERE user_id=:uid"), {"uid": user_id})
             print(f"Updated existing admin: {email} (id={user_id})")
+            print("All existing sessions and app sign-ins for this user were signed out.")
         else:
             user_id = new_id("user")
             conn.execute(

@@ -37,6 +37,9 @@ _LOGIN_EMAIL_MAX_ATTEMPTS = read_env_int("ALBAYAN_LOGIN_EMAIL_MAX_ATTEMPTS", 60)
 # (horizontal credential stuffing). Set well above a shared office's honest
 # traffic but far below a stuffing run.
 _LOGIN_IP_MAX_ATTEMPTS = read_env_int("ALBAYAN_LOGIN_IP_MAX_ATTEMPTS", 120)
+# While the per-account bucket is full, an address this account signed in from
+# within this window may still try (see _login_address_known).
+_LOGIN_KNOWN_ADDRESS_MS = read_env_int("ALBAYAN_LOGIN_KNOWN_ADDRESS_MS", 30 * 24 * 60 * 60 * 1000)
 
 _RESET_WINDOW_MS = read_env_int("ALBAYAN_RESET_WINDOW_MS", 15 * 60 * 1000)
 _RESET_MAX_ATTEMPTS = read_env_int("ALBAYAN_RESET_MAX_ATTEMPTS", 5)
@@ -58,6 +61,19 @@ _SETUP_GLOBAL_MAX_ATTEMPTS = read_env_int("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", 1
 _APP_LOGIN_WINDOW_MS = read_env_int("ALBAYAN_APP_LOGIN_WINDOW_MS", 15 * 60 * 1000)
 _APP_LOGIN_HANDOFF_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", 10)
 _APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", 30)
+
+
+def _header_ip(value) -> str | None:
+    """A forwarded address, only when it really is one. The sessions,
+    password_resets and app_logins ip columns are VARCHAR(80): an unchecked
+    header of any length made those inserts fail on PostgreSQL (HTTP 500)."""
+    candidate = str(value or "").strip()
+    if not candidate or len(candidate) > 64:
+        return None
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
 
 
 def _is_loopback_peer(value: str) -> bool:
@@ -106,22 +122,23 @@ def _client_ip(request: Request) -> str:
     """
     if TRUST_PROXY_HEADERS:
         try:
-            cf = request.headers.get("cf-connecting-ip")
+            # Header values that are not an IP address are ignored (_header_ip).
+            cf = _header_ip(request.headers.get("cf-connecting-ip"))
             # A request that reached the load balancer WITHOUT passing Cloudflare
             # can carry any CF-Connecting-IP. When an origin secret is configured
             # only requests that presented it (the Cloudflare edge) may name the
             # client; the rest fall back to the unforgeable rightmost hop.
             secret_configured = bool((os.getenv("ALBAYAN_ORIGIN_SECRET") or "").strip())
-            cf_trusted = bool(cf and cf.strip()) and (
+            cf_trusted = bool(cf) and (
                 not secret_configured or bool(getattr(getattr(request, "state", None), "origin_secret_ok", False))
             )
             if cf_trusted:
-                return cf.strip()
+                return cf
             xff = request.headers.get("x-forwarded-for")
             if xff:
                 parts = [p.strip() for p in xff.split(",") if p.strip()]
-                if parts:
-                    return parts[-1]
+                if parts and _header_ip(parts[-1]):
+                    return _header_ip(parts[-1])
         except Exception:
             pass
     peer = request.client.host if request.client else "unknown"
@@ -138,13 +155,13 @@ def _client_ip(request: Request) -> str:
                 # RIGHTMOST entry: appended by the closest proxy, unforgeable
                 # by the client (which can only control the leftmost values).
                 parts = [p.strip() for p in xff.split(",") if p.strip()]
-                if parts:
-                    return parts[-1]
+                if parts and _header_ip(parts[-1]):
+                    return _header_ip(parts[-1])
         except Exception:
             pass
     if not TRUST_PROXY_HEADERS:
         _warn_untrusted_proxy_once(request)
-    return peer
+    return str(peer)[:80]  # the ip columns are VARCHAR(80)
 
 
 def _rate_key(request: Request, email: str) -> str:
@@ -184,10 +201,59 @@ def _rate_check(request: Request, email: str) -> tuple[bool, int]:
     # out a legitimate user's honest mistakes across a shared office IP.
     email_key = f"login:email:{email.lower()}"
     ok2, _left2, retry2 = check_rate_limit(email_key, _LOGIN_EMAIL_MAX_ATTEMPTS, _LOGIN_WINDOW_MS)
-    if not ok2:
+    if not ok2 and not _login_address_known(email, _client_ip(request)):
         return False, int(retry2 or 0)
 
     return True, 0
+
+
+def _login_address_known(email: str, ip: str) -> bool:
+    """Did this account sign in from this address within the last 30 days?
+
+    Anyone who knows an email can fill its per-account bucket from a few
+    addresses and keep the real person out, correct password or not. Past
+    that bucket, an address the account already signed in from may still try:
+    a wrong password from it still gets 401 and its own (ip,email) bucket still
+    caps it, while new addresses stay blocked (the IP-rotation defence). An
+    unknown email and an unknown address get the same 429.
+    """
+    try:
+        from sqlalchemy import text
+
+        from .db import db_conn, json_loads, now_ms
+
+        since = now_ms() - _LOGIN_KNOWN_ADDRESS_MS
+        with db_conn() as conn:
+            user_id = conn.execute(
+                text("SELECT id FROM users WHERE lower(email)=lower(:email) AND deleted = false LIMIT 1"),
+                {"email": email},
+            ).scalar()
+            if not user_id or not ip:
+                return False
+            if conn.execute(
+                text("SELECT 1 FROM sessions WHERE user_id=:uid AND ip=:ip AND created_at>=:since LIMIT 1"),
+                {"uid": user_id, "ip": ip, "since": since},
+            ).first():
+                return True
+            # Expired sessions are deleted, so a daily sign-in is also known
+            # from the address its login audit row recorded.
+            rows = conn.execute(
+                text(
+                    "SELECT metadata_json FROM audit_logs WHERE user_id=:uid AND action='login' "
+                    "AND ts>=:since ORDER BY ts DESC LIMIT 50"
+                ),
+                {"uid": user_id, "since": since},
+            ).scalars().all()
+        for raw in rows:
+            try:
+                meta = json_loads(raw or "")
+            except ValueError:
+                continue
+            if isinstance(meta, dict) and meta.get("ip") == ip:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _reset_rate_check(request: Request, email: str) -> tuple[bool, int]:
