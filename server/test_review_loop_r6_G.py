@@ -7,7 +7,9 @@
        second time (or the gross dropped below what the company covered).
 27/31. The manual base was frozen at the first "Funding Ad" growth, so a
        later staff raise of the receipt was erased at the next restart and by
-       any later save of the ad.
+       any later save of the ad. Follow-up: a staff change is an ADDED delta,
+       not a new absolute base, so a 1-cent form re-save no longer locks the
+       ad's growth and a stop still releases the ad's unspent money.
 28.    The relink-baseline backfill read a normal mixed paid+debt In-Shop stop
        (live rows on the paid receipt only) as a stale relink and moved the
        debt baseline onto the paid receipt; a later spend correction was a 400.
@@ -42,7 +44,8 @@ from server.financial_core import _financial_due_total
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 from server.unpaid_receipt_growth import (
     _history_money_minor,
-    _proven_manual_debt_base_minor,
+    _manual_debt_target_minor,
+    _proven_manual_debt_split_minor,
     repair_legacy_unpaid_receipt_overgrowth,
 )
 
@@ -239,26 +242,51 @@ def test_restart_keeps_a_staff_raise_that_wrote_no_history_row():
     assert store.data("raise-bare")["amountUSD"] == 150
 
 
-def test_restart_heals_growth_above_a_staff_raise_only_down_to_that_raise():
-    # Staff raise to $150, then the ad grew it to $200; the ad now needs only
-    # $120. The managed $50 goes; the staff's $150 stays. Before: $120.
+def test_restart_heals_growth_above_a_staff_raise_keeping_the_raise_on_top():
+    # Staff raise $100 -> $150 (+$50), then the ad grew it to $200; the ad now
+    # needs only $120. The ad's unneeded $80 goes; the staff's +$50 stays on
+    # top of what the ad needs: $170.
     store = _Store(
         [_receipt_row("raise-grow", 200, [_growth(20, 100), _staff_edit(100, 150), _growth(150, 200)])],
         [_in_shop_ad("raise-grow-ad", "raise-grow", due=120)],
     )
     stats = store.run_twice()
     assert stats["repaired"] == 1, stats
-    assert store.data("raise-grow")["amountUSD"] == 150
+    assert store.data("raise-grow")["amountUSD"] == 170
 
 
-def test_manual_base_unit_readings():
+def test_a_one_cent_resave_locks_only_that_cent():
+    # Grown $0 -> $50.52 by the ad; a form re-save stored $50.53; the ad now
+    # needs $10. Before: the whole $50.53 became manual debt and stayed.
+    store = _Store(
+        [_receipt_row("cent", 50.53, [_growth(0, 50.52)])],
+        [_in_shop_ad("cent-ad", "cent", due=10)],
+    )
+    stats = store.run_twice()
+    assert stats["repaired"] == 1, stats
+    assert store.data("cent")["amountUSD"] == 10.01
+
+
+def test_manual_split_unit_readings():
     grown = {"editHistory": [_growth(20, 100)]}
-    assert _proven_manual_debt_base_minor(grown) == 2000
-    assert _proven_manual_debt_base_minor(grown, 10000) == 2000
-    assert _proven_manual_debt_base_minor(grown, 15000) == 15000
+    assert _proven_manual_debt_split_minor(grown) == (2000, 0)
+    assert _proven_manual_debt_split_minor(grown, 10000) == (2000, 0)
+    assert _proven_manual_debt_split_minor(grown, 15000) == (2000, 5000)
+    assert _proven_manual_debt_split_minor({"editHistory": [_growth(0, 50.52)]}, 5053) == (0, 1)
     raised = {"editHistory": [_growth(20, 100), _staff_edit(100, 150), _growth(150, 200)]}
-    assert _proven_manual_debt_base_minor(raised, 20000) == 15000
-    assert _proven_manual_debt_base_minor({"editHistory": [_staff_edit(10, 20)]}, 2000) is None
+    assert _proven_manual_debt_split_minor(raised, 20000) == (2000, 5000)
+    # An older release's write below the manual floor erased the raise: the
+    # split follows it down instead of re-growing the receipt later.
+    erased = {"editHistory": [_growth(20, 100), _growth(150, 20)]}
+    assert _proven_manual_debt_split_minor(erased, 2000) == (2000, 0)
+    assert _proven_manual_debt_split_minor({"editHistory": [_staff_edit(10, 20)]}, 2000) is None
+    # The target: max(first base, ad needs) + staff delta, never above what
+    # is stored unless the ads need more, never below what the ads need.
+    assert _manual_debt_target_minor(grown, 15000, 6000) == 11000
+    assert _manual_debt_target_minor(grown, 15000, 13000) == 15000
+    assert _manual_debt_target_minor(grown, 15000, 20000) == 20000
+    assert _manual_debt_target_minor({"editHistory": [_growth(20, 20)]}, 1500, 1000) == 1500
+    assert _manual_debt_target_minor({"editHistory": []}, 1500, 1000) == 1500
 
 
 # ------------------------------------------------------------ 32: NaN history amount
@@ -478,6 +506,89 @@ def test_api_staff_raise_after_growth_survives_restart_and_ad_saves(admin, with_
     assert saved.status_code == 200, saved.text
     assert saved.json()["updatedReceipts"] == []
     assert _entity("receipts", rid, admin)["data"]["amountUSD"] == 150
+
+
+def _staff_set_amount(rid, amount, cookies):
+    receipt = _entity("receipts", rid, cookies)
+    data = dict(receipt["data"])
+    data.update({"amountUSD": amount, "amountLocal": round(amount * 5, 2)})
+    patched = client.patch(f"/api/collections/receipts/{rid}", json={
+        "data": data, "expectedLastModified": receipt["lastModified"],
+    }, cookies=cookies)
+    assert patched.status_code == 200, patched.text
+    return patched.json()
+
+
+def _stop(aid, spent_minor, ad_last_modified, key, cookies):
+    stopped = client.post(f"/api/ads/{aid}/stop", json={
+        "spentMinorUSD": spent_minor, "customerInformed": True, "idempotencyKey": key,
+        "expectedLastModified": ad_last_modified,
+    }, cookies=cookies)
+    assert stopped.status_code == 200, stopped.text
+    return stopped.json()["ad"]
+
+
+def test_api_a_one_cent_resave_then_stop_releases_the_unspent_ad_money(admin):
+    # Grown $0 -> $50.52; the receipt form's rounding re-saves it as $50.53.
+    # Stopping the ad at $10 must release the ad's unspent money: the
+    # customer owes $10 + the stray cent, not $50.53.
+    cid, rid, aid = f"r6g_c_cent_{TAG}", f"r6g_r_cent_{TAG}", f"r6g_a_cent_{TAG}"
+    _customer(cid, admin)
+    receipt = _unpaid(rid, cid, 0, admin)
+    created = _mutate(aid, f"r6g-cent-create-{TAG}",
+                      _in_shop_data(cid, rid, 50.52, growth=50.52, expected=receipt["lastModified"]), admin)
+    assert created.status_code == 200, created.text
+    _staff_set_amount(rid, 50.53, admin)
+
+    _stop(aid, 1000, created.json()["ad"]["lastModified"], f"r6g-cent-stop-{TAG}", admin)
+    assert _entity("receipts", rid, admin)["data"]["amountUSD"] == 10.01   # before: 50.53
+
+    stopped = _stored_receipt(rid)
+    _run_startup_repair_twice(rid)
+    assert _stored_receipt(rid)["last_modified"] == stopped["last_modified"]
+
+
+def test_api_staff_raise_then_stop_keeps_only_the_staff_raise(admin):
+    # $20 grown to $100 by the ad, staff +$50 for another service -> $150.
+    # A stop at $60 releases the ad's unspent $40 and keeps the staff's $50.
+    _cid, rid, aid, ad = _grow_to_100("raisestop", admin)
+    _staff_set_amount(rid, 150, admin)
+
+    _stop(aid, 6000, ad["lastModified"], f"r6g-raisestop-stop-{TAG}", admin)
+    assert _entity("receipts", rid, admin)["data"]["amountUSD"] == 110   # before: 150
+
+    stopped = _stored_receipt(rid)
+    _run_startup_repair_twice(rid)
+    assert _stored_receipt(rid)["last_modified"] == stopped["last_modified"]
+
+
+def test_api_ad_growth_after_a_staff_raise_still_matches_the_form_instruction(admin):
+    # The ad form treats the staff's +$50 as free room on the receipt: using
+    # it needs no growth, and growing past it asks for exactly the shortfall.
+    _cid, rid, aid, ad = _grow_to_100("raisegrow", admin)
+    _staff_set_amount(rid, 150, admin)
+    ad_data = {k: v for k, v in ad["data"].items() if not k.startswith("_")}
+
+    ad_data["dueAllocations"] = [{"receiptId": rid, "amountUSD": 130}]
+    saved = _mutate(aid, f"r6g-raisegrow-130-{TAG}", ad_data, admin,
+                    action="update", expectedLastModified=ad["lastModified"])
+    assert saved.status_code == 200, saved.text
+    assert _entity("receipts", rid, admin)["data"]["amountUSD"] == 150
+
+    receipt = _entity("receipts", rid, admin)
+    ad_data = {k: v for k, v in saved.json()["ad"]["data"].items() if not k.startswith("_")}
+    ad_data["dueAllocations"] = [{"receiptId": rid, "amountUSD": 200}]
+    ad_data["unpaidReceiptDebtIncrease"] = {
+        "receiptId": rid, "amountUSD": 50, "expectedLastModified": receipt["lastModified"],
+    }
+    grown = _mutate(aid, f"r6g-raisegrow-200-{TAG}", ad_data, admin,
+                    action="update", expectedLastModified=saved.json()["ad"]["lastModified"])
+    assert grown.status_code == 200, grown.text
+    assert _entity("receipts", rid, admin)["data"]["amountUSD"] == 200
+
+    # The ad then spends only $60: its unspent money goes, the staff's $50 stays.
+    _stop(aid, 6000, grown.json()["ad"]["lastModified"], f"r6g-raisegrow-stop-{TAG}", admin)
+    assert _entity("receipts", rid, admin)["data"]["amountUSD"] == 110   # before: 150
 
 
 # ------------------------------------------------------------ API: 32

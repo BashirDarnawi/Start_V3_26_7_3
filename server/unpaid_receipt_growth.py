@@ -76,10 +76,10 @@ def _server_amount_change(
     return None
 
 
-def _proven_manual_debt_base_minor(
+def _proven_manual_debt_split_minor(
     receipt: dict[str, Any], current_minor: int | None = None
-) -> int | None:
-    """Return the debt a PERSON set on this receipt, when history proves it.
+) -> tuple[int, int] | None:
+    """(pre-growth base, staff delta) cents, when history proves them.
 
     ``None`` is intentionally different from zero: without a server growth
     event there is no safe way to distinguish genuine manual debt from a
@@ -88,15 +88,16 @@ def _proven_manual_debt_base_minor(
     The first server growth's ``from`` is the pre-growth base. The server's
     own writes chain (each ``from`` is the previous ``to``); an amount that
     moved BETWEEN two server writes, or after the last one (``current_minor``
-    differs from its ``to``), was set by staff, and that figure becomes the
-    base. Freezing the first ``from`` forever erased a later manual raise at
-    every restart and every save of the ad. Client history rows are not
-    needed to see the manual change.
+    differs from its ``to``), was moved by staff, and only that MOVE is
+    manual: it adds to the delta. Making the whole new amount the base let a
+    1-cent form re-save lock every ad-grown dollar, so a stop released
+    nothing. Client history rows are not needed to see the manual change.
     """
     history = receipt.get("editHistory")
     if not isinstance(history, list):
         return None
     base: int | None = None
+    extra = 0
     running: int | None = None
     for event in history:
         change = _server_amount_change(event, growth_seen=base is not None)
@@ -105,35 +106,46 @@ def _proven_manual_debt_base_minor(
         from_minor, to_minor = change
         if base is None:
             base = from_minor
-        else:
-            if running is not None and from_minor != running:
-                base = from_minor
-            if to_minor is not None:
-                # A write that already went below the base (older releases
-                # froze the first base) stays; re-growing needs a user action.
-                base = min(base, to_minor)
+        elif running is not None:
+            extra += from_minor - running
+        if to_minor is not None and to_minor < base + extra:
+            # A write already below the manual floor (older releases froze
+            # the first base) stays; re-growing needs a user action.
+            if to_minor >= base:
+                extra = to_minor - base
+            else:
+                base, extra = to_minor, 0
         running = to_minor
-    if (
-        base is not None
-        and current_minor is not None
-        and running is not None
-        and current_minor != running
-    ):
-        base = current_minor
-    return base
+    if base is None:
+        return None
+    if current_minor is not None and running is not None:
+        extra += current_minor - running
+    return base, extra
 
 
-def _manual_debt_base_minor(receipt: dict[str, Any], current_minor: int) -> int:
-    """Recover the manual debt that server growth sits on top of.
+def _manual_debt_target_minor(
+    receipt: dict[str, Any], current_minor: int, outstanding_minor: int
+) -> int:
+    """The receipt amount the manual debt and the live ad money call for.
 
-    Earlier releases did not persist a dedicated managed/base split, but every
-    server growth appended a ``Funding Ad`` history change (see
-    ``_proven_manual_debt_base_minor``). A receipt with no server-growth
-    history is entirely manual and must never be erased merely because no ad
-    currently points at it.
+    ``max(pre-growth base, ads' money) + staff delta``: a stop releases the
+    ad's unspent money and keeps what staff added. Never below the ads'
+    money, and never above the stored amount unless the ads need more, so a
+    growth still equals the shortfall the ad form asks for. A receipt with
+    no server-growth history is entirely manual and must never be erased
+    merely because no ad currently points at it.
     """
-    proven = _proven_manual_debt_base_minor(receipt, current_minor)
-    return current_minor if proven is None else proven
+    split = _proven_manual_debt_split_minor(receipt, current_minor)
+    if split is None:
+        return max(current_minor, outstanding_minor)
+    base, extra = split
+    return max(
+        outstanding_minor,
+        min(
+            max(base, outstanding_minor) + extra,
+            max(current_minor, outstanding_minor),
+        ),
+    )
 
 
 def repair_legacy_unpaid_receipt_overgrowth(
@@ -143,9 +155,10 @@ def repair_legacy_unpaid_receipt_overgrowth(
 
     This startup pass is deliberately one-way. It never grows a receipt and it
     never touches a receipt whose history cannot prove the manual pre-growth
-    baseline. The floor is the manual base (including a later staff change),
-    the live due AND company-covered rows, and the covered amount itself, so
-    a second run is a no-op and a closed month is refused. Candidate rows are
+    baseline. The target is ``_manual_debt_target_minor`` (manual base, live
+    due AND company-covered rows, plus a later staff change), never below
+    the covered amount itself, so a second run is a no-op and a closed month
+    is refused. Candidate rows are
     re-read under the same financial row lock used by ordinary mutations, and
     the caller-provided writer adds an optimistic ``last_modified`` condition
     as a second race check.
@@ -177,7 +190,7 @@ def repair_legacy_unpaid_receipt_overgrowth(
             for discovery_row in discovery_rows:
                 try:
                     discovery = financial_row_data(discovery_row)
-                    proven = _proven_manual_debt_base_minor(discovery)
+                    proven = _proven_manual_debt_split_minor(discovery)
                 except Exception:
                     continue  # one bad row must not stop every other repair
                 if proven is not None:
@@ -259,12 +272,11 @@ def repair_legacy_unpaid_receipt_overgrowth(
                 stats["skipped"] += 1
                 continue
             receipt = financial_row_data(row)
-            if _proven_manual_debt_base_minor(receipt) is None:
+            if _proven_manual_debt_split_minor(receipt) is None:
                 stats["skipped"] += 1
                 continue
 
             current_minor = financial_due_total(receipt)
-            manual_base_minor = _proven_manual_debt_base_minor(receipt, current_minor)
             if ad_scan_error is not None:
                 raise ad_scan_error
             if receipt_id in legacy_due_errors:
@@ -275,7 +287,10 @@ def repair_legacy_unpaid_receipt_overgrowth(
             )
             # Never below what the company covered: the gross under the
             # covered share breaks every later settle and capacity check.
-            target_minor = max(manual_base_minor, outstanding_minor, covered_minor)
+            target_minor = max(
+                _manual_debt_target_minor(receipt, current_minor, outstanding_minor),
+                covered_minor,
+            )
             if target_minor >= current_minor:
                 # Equality is already healed. A larger target needs a normal
                 # user-authorized mutation; startup is never allowed to grow
@@ -491,7 +506,8 @@ def reconcile_unpaid_receipt_debt(
     """Prepare exact managed debt while preserving the receipt's manual base.
 
     The target is the larger of the pre-growth manual receipt amount and all
-    live due allocations after this mutation. Positive deltas require the
+    live due allocations after this mutation, plus any amount staff added
+    (``_manual_debt_target_minor``). Positive deltas require the
     client's exact, stale-protected growth instruction. Negative deltas are
     derived from the locked old ad and the proposed replacement and are
     released automatically. The caller uses the replacement rows for ad
@@ -588,8 +604,8 @@ def reconcile_unpaid_receipt_debt(
             due=True,
             exclude_ad_id=ad_id if existing_ad is not None else None,
         ) + proposed_due_by_receipt.get(receipt_id, 0) + company_minor
-        target_minor = max(
-            _manual_debt_base_minor(receipt, current_minor), outstanding_minor
+        target_minor = _manual_debt_target_minor(
+            receipt, current_minor, outstanding_minor
         )
         plans.append((receipt_id, row, receipt, current_minor, target_minor))
         if target_minor > current_minor:
@@ -761,7 +777,7 @@ def reconcile_stopped_unpaid_receipt_debt(
     server-derived consequence of the immutable funding baseline and confirmed
     final spend, not a free-form receipt edit.  Controlled re-growth is allowed
     only when a later re-stop raises that same ad's due slice; genuine manual
-    debt remains protected by ``_manual_debt_base_minor``.
+    debt remains protected by ``_manual_debt_target_minor``.
     """
     prepared = reconcile_unpaid_receipt_debt(
         conn,
