@@ -3348,6 +3348,8 @@ function moveAdsStudioWizard(delta) {
 function sanitizedAdsStudioDraft() {
   const d = _adsStudioDraft || newAdsStudioDraft();
   const text = (value, max) => Security.sanitizeInput(String(value || ''), { maxLength: max }).trim();
+  // The ad's words are plain text, escaped wherever drawn: never "data:" or "on…=" stripped (r8 #15).
+  const copy = (value, max) => String(value || '').replace(/\0/g, '').replace(/[<>]/g, '').trim().slice(0, max).trim();
   const list = (values, maxItems = 30) => Array.from(new Set((Array.isArray(values) ? values : []).map(value => text(value, 80)).filter(Boolean))).slice(0, maxItems);
   const boostType = ['boost_post', 'boost_page'].includes(String(d.boostType || '')) ? String(d.boostType) : '';
   // A half-typed post link must never brick "Save draft": only a link the
@@ -3379,13 +3381,13 @@ function sanitizedAdsStudioDraft() {
     ...pickedPost,
     ...(connectedAssetId ? { connectedAssetId } : {}),
     ...(goal && goal.objective !== objective ? { goalDetail: '' } : {}),
-    name: text(d.name, 120),
+    name: copy(d.name, 120),
     objective,
     platforms: list(d.platforms, 3),
-    pageName: text(d.pageName, 160),
-    primaryText: text(d.primaryText, 2200),
-    headline: text(d.headline, 255),
-    description: text(d.description, 500),
+    pageName: copy(d.pageName, 160),
+    primaryText: copy(d.primaryText, 2200),
+    headline: copy(d.headline, 255),
+    description: copy(d.description, 500),
     callToAction: text(d.callToAction, 80),
     destination,
     locations: list(d.locations),
@@ -3398,7 +3400,7 @@ function sanitizedAdsStudioDraft() {
     endDate: text(d.endDate, 10),
     budgetMinorUSD: Math.max(0, Math.min(100000000, Math.trunc(Number(d.budgetMinorUSD) || 0))),
     budgetType: d.budgetType === 'daily' ? 'daily' : 'lifetime',
-    notes: text(d.notes, 1000),
+    notes: copy(d.notes, 1000),
     creativeImages: (Array.isArray(d.creativeImages) ? d.creativeImages : []).filter(isSafeAdsStudioCreativeSource).slice(0, 3),
     creativeAssetIds: list(d.creativeAssetIds, 20),
     specialAdCategories: list(d.specialAdCategories, 4),

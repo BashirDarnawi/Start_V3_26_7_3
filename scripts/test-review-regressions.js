@@ -3264,6 +3264,25 @@ async function main() {
     assert.equal(calls, 0, 'before: the request went out and the English server refusal came back');
     assert.ok(notes.some(note => note.message.includes('"قميص"') && !/[A-Za-z]{3,}/.test(note.message)), JSON.stringify(notes));
   });
+  // ---- Review loop r8, batch B: the v2 request builder (and the classic save, for the same sanitizer)
+
+  await test('r8 B n=15: ad words are saved as typed ("data:" and "on…=" kept) by the v2 builder and the classic form', async () => {
+    const { run } = studioFixture();
+    const words = { name: 'Only = 5 LYD', pageName: 'Data: Shop', primaryText: 'Mobile data: 10GB for 30 LYD', headline: 'Buy one = get one free', notes: 'data: plan, onsale=yes' };
+    run(`var __r8Draft = { ...newAdsStudioDraft(), ...${JSON.stringify(words)} };`);
+    const v2 = JSON.parse(run('JSON.stringify(studioBuilderPayload(__r8Draft, null))'));
+    run(`_adsStudioDraft = { ...newAdsStudioDraft(), ...${JSON.stringify(words)}, description: 'onboard = free' };`);
+    const classic = JSON.parse(run('JSON.stringify(sanitizedAdsStudioDraft())'));
+    for (const [field, value] of Object.entries(words)) {
+      assert.equal(v2[field], value, `v2 ${field}`);
+      assert.equal(classic[field], value, `classic ${field}`);
+    }
+    assert.equal(classic.description, 'onboard = free');
+    // What the server strips itself still goes before the save: < and >.
+    run("__r8Draft.primaryText = '<b>Hi</b>'; _adsStudioDraft.primaryText = '<b>Hi</b>';");
+    assert.equal(run('studioBuilderPayload(__r8Draft, null).primaryText'), 'bHi/b');
+    assert.equal(run('sanitizedAdsStudioDraft().primaryText'), 'bHi/b');
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }

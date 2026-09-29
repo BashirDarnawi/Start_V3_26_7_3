@@ -3348,6 +3348,8 @@ function moveAdsStudioWizard(delta) {
 function sanitizedAdsStudioDraft() {
   const d = _adsStudioDraft || newAdsStudioDraft();
   const text = (value, max) => Security.sanitizeInput(String(value || ''), { maxLength: max }).trim();
+  // The ad's words are plain text, escaped wherever drawn: never "data:" or "on…=" stripped (r8 #15).
+  const copy = (value, max) => String(value || '').replace(/\0/g, '').replace(/[<>]/g, '').trim().slice(0, max).trim();
   const list = (values, maxItems = 30) => Array.from(new Set((Array.isArray(values) ? values : []).map(value => text(value, 80)).filter(Boolean))).slice(0, maxItems);
   const boostType = ['boost_post', 'boost_page'].includes(String(d.boostType || '')) ? String(d.boostType) : '';
   // A half-typed post link must never brick "Save draft": only a link the
@@ -3379,13 +3381,13 @@ function sanitizedAdsStudioDraft() {
     ...pickedPost,
     ...(connectedAssetId ? { connectedAssetId } : {}),
     ...(goal && goal.objective !== objective ? { goalDetail: '' } : {}),
-    name: text(d.name, 120),
+    name: copy(d.name, 120),
     objective,
     platforms: list(d.platforms, 3),
-    pageName: text(d.pageName, 160),
-    primaryText: text(d.primaryText, 2200),
-    headline: text(d.headline, 255),
-    description: text(d.description, 500),
+    pageName: copy(d.pageName, 160),
+    primaryText: copy(d.primaryText, 2200),
+    headline: copy(d.headline, 255),
+    description: copy(d.description, 500),
     callToAction: text(d.callToAction, 80),
     destination,
     locations: list(d.locations),
@@ -3398,7 +3400,7 @@ function sanitizedAdsStudioDraft() {
     endDate: text(d.endDate, 10),
     budgetMinorUSD: Math.max(0, Math.min(100000000, Math.trunc(Number(d.budgetMinorUSD) || 0))),
     budgetType: d.budgetType === 'daily' ? 'daily' : 'lifetime',
-    notes: text(d.notes, 1000),
+    notes: copy(d.notes, 1000),
     creativeImages: (Array.isArray(d.creativeImages) ? d.creativeImages : []).filter(isSafeAdsStudioCreativeSource).slice(0, 3),
     creativeAssetIds: list(d.creativeAssetIds, 20),
     specialAdCategories: list(d.specialAdCategories, 4),
@@ -8962,8 +8964,9 @@ function studioBuilderConvert(session, kind) {
 
 // ------------------------------------------------------------------ what is sent (client limits = server limits)
 
+// Plain text, escaped where drawn: only NUL, < and > go (as on the server), never "data:" or "on…=" (r8 #15).
 function studioBuilderText(value, max) {
-  return Security.sanitizeInput(String(value === null || value === undefined ? '' : value), { maxLength: max }).trim();
+  return String(value === null || value === undefined ? '' : value).replace(/\0/g, '').replace(/[<>]/g, '').trim().slice(0, max).trim();
 }
 
 // '' (empty), the cleaned value (an https link, or a phone number as +E.164: 09x becomes +2189x), or
@@ -9447,7 +9450,10 @@ function studioBuilderInput(field, input) {
     case 'text': d.primaryText = value.slice(0, 2200); studioBuilderPaintCount(); break;
     case 'headline': d.headline = value.slice(0, 255); break;
     case 'destination': d.destination = value.slice(0, ADS_STUDIO_DESTINATION_MAX); break;  // the server's 2048, never 500
-    case 'postLink': d.sourcePostRef = value.slice(0, 500); d.sourcePostId = ''; d.sourcePostPlatform = ''; break;
+    case 'postLink':
+      // The old post's link was only its destination: the new link becomes it (r8 #16, as ChoosePost).
+      if (String(d.destination || '') && String(d.destination) === String(d.sourcePostRef || '')) d.destination = '';
+      d.sourcePostRef = value.slice(0, 500); d.sourcePostId = ''; d.sourcePostPlatform = ''; break;
     case 'name': d.name = value.slice(0, 120); session.nameTouched = true; break;
     case 'notes': d.notes = value.slice(0, 1000); break;
     case 'cta': if (ADS_STUDIO_CTA.some(([en]) => en === value)) { d.callToAction = value; session.ctaTouched = true; } break;
@@ -9785,7 +9791,10 @@ async function studioBuilderEdit(campaignId, options = {}) {
     return studioV2Go({ tab: 'builder', section: session.kind, step });
   };
   const current = _studioBuilder.session;
-  if (current && current.id === id && current.created && current.status !== 'locked') return open(current);
+  // Reused unless the stored request moved past it with nothing waiting here (withdrawn after a lost send answer, r8 #14).
+  const stored = current && current.id === id ? findVisibleAdsStudioCampaign(id) : null;
+  const moved = !!stored && Number(stored._lastModified) > current.baseline && current.status === 'saved' && !current.dirty && !current.inFlight;
+  if (current && current.id === id && current.created && current.status !== 'locked' && !moved) return open(current);
   if (_studioBuilder.opening) return false;
   const token = {};
   const generation = _studioBuilder.generation;
@@ -9950,6 +9959,10 @@ function studioBuilderSend(button) {
   const cleanup = () => {
     if (_studioBuilder.submit === operation) _studioBuilder.submit = null;
     setAdsStudioActionButtonBusy(button, false);
+    // A failure's redraw drew Send while this send still counted as running: set it again (r8 #12).
+    const live = studioBuilderEl('studio-b-send');
+    const session = _studioBuilder.session;
+    if (live && session && !_studioBuilder.submit && live.getAttribute('aria-busy') !== 'true') live.disabled = studioBuilderSendBlocked(session);
   };
   operation.then(cleanup, cleanup);
   return operation;
@@ -9997,24 +10010,41 @@ async function studioBuilderSendOnce() {
   if (session.kind === 'boost' || session.startMode === 'asap') studioBuilderSetStart(session, studioBuilderToday());
   session.dirty = true;
   session.touched = true;
+  // Send tries a refused save again (the plan renewed, a slot freed), never repeats the old refusal (r8 #13).
+  if (session.status === 'error' && (typeof adsStudioCanCreate !== 'function' || adsStudioCanCreate())) {
+    session.retries = 0;
+    session.quota = false;
+    studioBuilderSetStatus(session, 'saved');
+  }
   const saved = await studioBuilderSettle(session);
   if (!studioBuilderCurrent(generation) || session !== _studioBuilder.session) return false;
   if (!saved) {
-    session.sendError = session.status === 'error' && session.statusText
-      ? session.statusText
-      : studioBuilderT('Your latest changes are not saved yet, so nothing was sent. Check the connection and try again.', 'لم تُحفظ تعديلاتك الأخيرة بعد، لذلك لم يُرسل شيء. تحقّق من الاتصال وأعد المحاولة.');
+    if (session.status === 'locked') {
+      // Sent already (an earlier tap whose answer was lost): the money is held, this change did not go (r8 #17).
+      session.sendError = session.campaignStatus === 'Submitted'
+        ? studioBuilderT('This request was already sent and its money is held. Your last change was not included; open My ads to see it.', 'أُرسل هذا الطلب من قبل والمبلغ محجوز. لم يُضمَّن تعديلك الأخير؛ افتح «إعلاناتي» لتراه.')
+        : '';
+    } else {
+      session.sendError = session.status === 'error' && session.statusText
+        ? session.statusText
+        : studioBuilderT('Your latest changes are not saved yet, so nothing was sent. Check the connection and try again.', 'لم تُحفظ تعديلاتك الأخيرة بعد، لذلك لم يُرسل شيء. تحقّق من الاتصال وأعد المحاولة.');
+    }
     studioBuilderRedraw();
     return false;
   }
   let entity;
+  let attempt = null;
+  const editable = row => ['Draft', 'Changes Requested'].includes(String((row && row.data && row.data.status) || ''));
   try {
-    const attempt = adsStudioActionAttempt('submit', session.id, session.baseline);
+    attempt = adsStudioActionAttempt('submit', session.id, session.baseline);
     try {
       entity = await apiSubmitAdCampaignRequest(session.id, attempt.expectedLastModified, attempt.operationId);
     } catch (error) {
       const fresh = error && error.status === 409 ? await adsStudioReloadCampaign(session.id) : null;
-      if (!fresh || String((fresh.data && fresh.data.status) || '') !== 'Submitted') throw error;
-      entity = fresh;  // the first tap already sent it
+      // Sent by the first tap; or a Draft changed since this copy opened (handled below as a conflict).
+      const moved = editable(fresh) && Number(fresh.data._lastModified || fresh.lastModified) !== session.baseline;
+      if (!fresh || !(moved || String((fresh.data && fresh.data.status) || '') === 'Submitted')) throw error;
+      entity = fresh;
     }
   } catch (error) {
     if (!studioBuilderCurrent(generation) || session !== _studioBuilder.session) return false;
@@ -10028,6 +10058,15 @@ async function studioBuilderSendOnce() {
   if (!studioBuilderCurrent(generation)) return false;
   try { upsertAdsStudioEntity(entity); } catch (_) {}
   const data = entity && entity.data ? entity.data : {};
+  if (editable(entity)) {
+    // Not sent (an old send replayed after a withdraw, or changed elsewhere): offer the other version (r8 #14).
+    _adsStudioActionAttempts.delete(attempt.key);
+    if (session !== _studioBuilder.session) return false;
+    session.conflict = { version: Number(data._lastModified || entity.lastModified) || 0 };
+    studioBuilderSetStatus(session, 'conflict');
+    studioBuilderRedraw();
+    return false;
+  }
   const total = Number.isSafeInteger(data.totalBudgetMinorUSD) && data.totalBudgetMinorUSD > 0 ? data.totalBudgetMinorUSD : studioBuilderTotalMinor(session.draft);
   // A newer request opened while this one was on its way stays open (with its reload memory). This
   // request opened again from My ads meanwhile (a new copy of the same id) is the sent one: it closes.

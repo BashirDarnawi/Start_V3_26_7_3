@@ -4746,6 +4746,146 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 builder: a request opened again from My ads while its send was on its way closes with the "Sent" screen when the send finishes (reload memory gone, the copy\'s pending save never goes)',
     !loadError && reopenCases.every(Boolean), loadError || `cases ${failed(reopenCases)}; ${JSON.stringify({ reopenHeld, reopenBefore, reopenAfter, patchesBefore, patchesAfter })}`);
+
+  // Review loop r8 batch B: Send after a refusal (#12, #13), a copy older than the server's (#14), a new
+  // post link on a re-opened boost (#16), and a lost send answer followed by an edit (#17). Every draw
+  // replaces the Send button (as innerHTML does), and the submit answers are scripted one by one.
+  run(`studioResetMe(); __replies['/api/studio/me'] = [${openMe}]; studioLoadMe();`);
+  run(`var __r8Submit = []; var __r8SubmitNow = apiSubmitAdCampaignRequest; var __r8ProblemsNow = studioBuilderAllProblems; var __r8RenderNow = render; var __r8Send = null;
+    studioBuilderAllProblems = () => [];  // these checks are about sending, not the form
+    apiSubmitAdCampaignRequest = function (id, expected, operationId) {
+      __calls.push({ path: 'submit:' + id, method: 'POST', expected, operationId });
+      const next = __r8Submit.shift();
+      if (next && next.error) return Promise.reject(Object.assign(new Error(next.error.message), next.error));
+      if (next && next.value) return Promise.resolve(__entity(next.value));
+      return Promise.resolve(__entity({ ...(state.adCampaignRequests.find(item => item.id === id) || {}), status: 'Submitted', totalBudgetMinorUSD: 5000, _lastModified: Number(expected) + 1 }));
+    };
+    render = function () {
+      __r8RenderNow();
+      const m = __html.match(/<button[^>]*id="studio-b-send"[^>]*>/);
+      __r8Send = m ? { disabled: /\\sdisabled[\\s>]/.test(m[0]), attrs: {}, getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+        setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; } } : null;
+    };
+    document.getElementById = id => (id === 'studio-b-send' ? __r8Send : null);
+    function __r8Ready() {
+      studioBuilderSetRights({ checked: true });
+      Object.assign(studioDataSlot('wallet'), { value: { usd: { availableMinor: 900000, reservedMinor: 0 }, pendingPayments: [] }, loadedAt: Date.now(), promise: null });
+    }
+    function __r8Row(id) { return state.adCampaignRequests.find(item => item.id === id) || {}; }
+    function __r8Count(prefix, id) { return __calls.filter(call => call.path === prefix + id).length; }`);
+  const r8NewBoost = () => {
+    run("studioBuilderStart('boost'); studioBuilderInput('budget', { value: '50' }); __runTimers(); __r8Ready();");
+    openAt('/studio?tab=builder&section=boost&step=3');
+    return String(run('_studioBuilder.session.id'));
+  };
+  const r8Send = () => { run('var __r8Ok = null; studioBuilderSend(__r8Send).then(ok => { __r8Ok = ok; });'); run('__runTimers();'); };
+  const r8State = () => json(`{ ok: __r8Ok, disabled: __r8Send ? __r8Send.disabled : null, error: _studioBuilder.session ? _studioBuilder.session.sendError : '',
+    status: _studioBuilder.session ? _studioBuilder.session.status : '', conflict: _studioBuilder.session && _studioBuilder.session.conflict, sent: _studioBuilder.sent && _studioBuilder.sent.id }`) || {};
+
+  // #12: a send the server refused (503) redraws Send while the send still counts; it works again after.
+  const busyId = r8NewBoost();
+  const busyDrawn = json('__r8Send && __r8Send.disabled');
+  run("__r8Submit.push({ error: { status: 503, message: 'Meta is busy right now, so the chosen post could not be checked. Try again in a minute.' } });");
+  r8Send();
+  const busyFailed = r8State();
+  r8Send();
+  const busyRetried = r8State();
+
+  // #13: Send tries again a save the server refused (413 on a change), and a create refused by the limit
+  // of open requests, instead of repeating the old refusal.
+  const refusedId = r8NewBoost();
+  run(`__patchReply = { error: { status: 413, message: ${JSON.stringify(storageFull)} } }; studioBuilderInput('notes', { value: 'Kept note' }); __runTimers();`);
+  const refusedStatus = String(run('_studioBuilder.session.status'));
+  const refusedPatches = json(`__r8Count('patch:', ${JSON.stringify(refusedId)})`);
+  r8Send();
+  const refusedSent = r8State();
+  const refusedLast = json(`__calls.filter(call => call.path === 'patch:' + ${JSON.stringify(refusedId)}).slice(-1)[0].body`) || {};
+  const refusedCases = [refusedStatus === 'error', json(`__r8Count('patch:', ${JSON.stringify(refusedId)})`) === refusedPatches + 1 && refusedLast.notes === 'Kept note',
+    refusedSent.ok === true && refusedSent.sent === refusedId && json(`__r8Count('submit:', ${JSON.stringify(refusedId)})`) === 1];
+  run("studioBuilderStart('full'); __timers.clear(); __r8Ready();");
+  const quotaId = String(run('_studioBuilder.session.id'));
+  run(`__createReply = { error: { status: 409, message: ${JSON.stringify(openLimit)}, payload: { detail: ${JSON.stringify(openLimit)} } } };
+    __replies['/api/collections/adCampaignRequests/' + encodeURIComponent(${JSON.stringify(quotaId)})] = [{ error: { status: 404, message: 'Not Found', payload: { detail: 'Not Found' } } }];
+    studioBuilderInput('notes', { value: 'Waiting for a slot' }); __runTimers();`);
+  const quotaBefore = json('{ status: _studioBuilder.session.status, quota: _studioBuilder.session.quota, created: _studioBuilder.session.created }') || {};
+  openAt('/studio?tab=builder&section=full&step=6');
+  r8Send();
+  const quotaSent = r8State();
+  refusedCases.push(quotaBefore.status === 'error' && quotaBefore.quota === true && quotaBefore.created === false,
+    json(`__r8Count('create:', 'adCampaignRequests')`) >= 2 && json(`__calls.filter(call => call.path === 'create:adCampaignRequests' && call.body.id === ${JSON.stringify(quotaId)}).length`) === 2,
+    quotaSent.ok === true && quotaSent.sent === quotaId);
+
+  // #14: a copy older than the server's. (a) The answer of an earlier send, replayed for a request withdrawn
+  // since, is a Draft: never "Sent", the other version is offered. (b) A 409 whose request changed is a
+  // conflict, not the same 409 again; a 409 whose request did not change stays the refusal. (c) Continue
+  // opens the stored version when it moved past the open copy (the same version reuses the copy).
+  const replayId = r8NewBoost();
+  run(`__r8Submit.push({ value: { ...__r8Row(${JSON.stringify(replayId)}), status: 'Draft', _lastModified: 1500 } });`);
+  r8Send();
+  const replayed = r8State();
+  const replayHtml = html();
+  const replayKey = json(`_adsStudioActionAttempts.has('submit:' + ${JSON.stringify(replayId)})`);
+  const changedId = r8NewBoost();
+  run(`__r8Submit.push({ error: { status: 409, message: 'Conflict: record has changed' } });
+    __replies['/api/collections/adCampaignRequests/' + encodeURIComponent(${JSON.stringify(changedId)})] = [{ value: { id: ${JSON.stringify(changedId)}, lastModified: 1700,
+      data: { ...__r8Row(${JSON.stringify(changedId)}), status: 'Draft', _lastModified: 1700 } } }];`);
+  r8Send();
+  const changed = r8State();
+  const walletId = r8NewBoost();
+  const noFunds = 'Insufficient wallet balance for this budget — charge the wallet first';
+  run(`__r8Submit.push({ error: { status: 409, message: ${JSON.stringify(noFunds)}, payload: { detail: ${JSON.stringify(noFunds)} } } });
+    __replies['/api/collections/adCampaignRequests/' + encodeURIComponent(${JSON.stringify(walletId)})] = [{ value: { id: ${JSON.stringify(walletId)}, lastModified: 1000,
+      data: { ...__r8Row(${JSON.stringify(walletId)}), status: 'Draft', _lastModified: 1000 } } }];
+    __replies['/api/studio/wallet/summary'] = [{ value: { usd: { availableMinor: 900000, reservedMinor: 0 }, pendingPayments: [] } }];`);
+  r8Send();
+  const noMoney = r8State();
+  const reopenedId = r8NewBoost();
+  run(`var __r8Copy = _studioBuilder.session; studioBuilderEdit(${JSON.stringify(reopenedId)});`);
+  const sameCopy = json('_studioBuilder.session === __r8Copy');
+  run(`__r8Row(${JSON.stringify(reopenedId)})._lastModified = 1900;
+    __replies['/api/collections/adCampaignRequests/' + encodeURIComponent(${JSON.stringify(reopenedId)}) + '?include_media=false'] = [{ value: { id: ${JSON.stringify(reopenedId)}, lastModified: 1900,
+      data: { ...__r8Row(${JSON.stringify(reopenedId)}), status: 'Draft', _lastModified: 1900 } } }];
+    studioBuilderEdit(${JSON.stringify(reopenedId)});`);
+  run('__runTimers();');
+  const reopened = json('{ copy: _studioBuilder.session === __r8Copy, id: _studioBuilder.session && _studioBuilder.session.id, baseline: _studioBuilder.session && _studioBuilder.session.baseline }') || {};
+  const staleCases = [
+    replayed.ok === false && !replayed.sent && replayed.status === 'conflict' && replayed.conflict && replayed.conflict.version === 1500
+      && replayHtml.includes('data-testid="studio-builder-conflict"') && !replayHtml.includes('data-testid="studio-builder-sent"') && replayKey === false,
+    changed.ok === false && !changed.sent && changed.status === 'conflict' && changed.conflict && changed.conflict.version === 1700,
+    noMoney.ok === false && !noMoney.sent && noMoney.status === 'saved' && !noMoney.conflict && String(noMoney.error || '').length > 0,
+    sameCopy === true && reopened.copy === false && reopened.id === reopenedId && reopened.baseline === 1900
+  ];
+
+  // #16: a re-opened quick boost whose post link is replaced sends the new post as its destination too.
+  const postA = 'https://www.facebook.com/shop/posts/1';
+  const postB = 'https://www.facebook.com/shop/posts/2';
+  run(`studioBuilderOpenSession('boost', Object.assign(newAdsStudioDraft(), { id: 'r8_boost_1', status: 'Draft', boostType: 'boost_post', goalDetail: 'post_engagement', objective: 'engagement',
+    platforms: ['facebook'], sourcePostRef: ${JSON.stringify(postA)}, destination: ${JSON.stringify(postA)} }), { created: true, baseline: 5 });
+    studioBuilderInput('postLink', { value: ${JSON.stringify(postB)} }); __timers.clear();`);
+  const relinked = json('studioBuilderPayload(_adsStudioDraft)') || {};
+
+  // #17: the first send reached the server but its answer was lost; an edit and a second Send meet a
+  // request already sent: never "nothing was sent" beside the banner that says it was.
+  const lostId = r8NewBoost();
+  run("__r8Submit.push({ error: { status: 0, name: 'TypeError', message: 'Failed to fetch' } });");
+  r8Send();
+  run(`__patchReply = { error: { status: 409, message: 'Only Draft or Changes Requested campaigns can be edited' } };
+    __replies['/api/collections/adCampaignRequests/' + encodeURIComponent(${JSON.stringify(lostId)})] = [{ value: { id: ${JSON.stringify(lostId)}, lastModified: 1001,
+      data: { ...__r8Row(${JSON.stringify(lostId)}), status: 'Submitted', _lastModified: 1001 } } }];
+    studioBuilderInput('name', { value: 'Fixed typo' });`);
+  r8Send();
+  const lost = r8State();
+  run('apiSubmitAdCampaignRequest = __r8SubmitNow; studioBuilderAllProblems = __r8ProblemsNow; render = __r8RenderNow; document.getElementById = () => null; __timers.clear();');
+  const r8Cases = [
+    busyDrawn === false && busyFailed.ok === false && String(busyFailed.error || '').length > 0 && busyFailed.disabled === false,
+    busyRetried.ok === true && busyRetried.sent === busyId,
+    ...refusedCases,
+    ...staleCases,
+    relinked.sourcePostRef === postB && relinked.destination === postB,
+    lost.ok === false && lost.status === 'locked' && String(lost.error).includes('already sent') && !/nothing was sent/.test(String(lost.error))
+  ];
+  check('Studio v2 builder (review loop r8 B): Send works again after a refusal and retries a refused save; an older copy is reconciled with the server (never a false "Sent", never the same 409); a new post link is the destination; a lost send answer is never "nothing was sent"',
+    !loadError && r8Cases.every(Boolean), loadError || `cases ${failed(r8Cases)}; ${JSON.stringify({ busyDrawn, busyFailed, busyRetried, refusedStatus, refusedSent, quotaBefore, quotaSent, replayed, replayKey, changed, noMoney, sameCopy, reopened, relinked: [relinked.sourcePostRef, relinked.destination], lost })}`);
 }
 
 {
