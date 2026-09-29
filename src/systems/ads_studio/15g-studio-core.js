@@ -158,6 +158,10 @@ function studioErrorInfo(error, kind = 'action') {
     if (own) text = pair(own);
     else if (adsStudioIsAr()) text = mapped && mapped !== message ? mapped : '';
     else if (status === 400 || status === 403 || status === 409 || status === 413 || status === 423) text = mapped;
+  } else if (status >= 500 && message && !/^\s*[[{]/.test(message) && adsStudioRefusalEntry(message)) {
+    // A 5xx plain refusal the map knows (Meta busy while checking a picked post, no studio code free):
+    // refused for certain before anything moved, so never "we could not confirm whether this went through".
+    text = adsStudioRefusalText(message);
   }
   if (!text && studioKnownErrorCode(code)) text = pair(STUDIO_ERROR_TEXTS[code]);
   if (!text) {

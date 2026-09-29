@@ -1552,6 +1552,28 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     && studioFn('_adsStudioWalletRequestRow').includes('adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)'),
   studioLoadError || `LYD row: ${lydEn.replace(/\s+/g, ' ').slice(0, 300)}`);
 
+  // Review loop r2 #21: the classic wallet speaks the reader's language. A charge row's status is a word, never the raw
+  // code ('pending' / 'confirmed' / 'canceled'); a refusal of create / confirm-cancel / attach goes through the ONE
+  // Arabic map (never raw English in Arabic, never a bare "Request failed").
+  const statusWord = page => (String(page).match(/data-status="[^"]*">([^<]*)</) || [])[1] || '';
+  const rowIn = (language, status) => String(inLanguage(language, chargeRow({ ...usdRow, status })));
+  const walletRefusal = (language, detail) => String(inLanguage(language, `adsStudioWalletRefusal(${detail === undefined ? "new Error('Failed to fetch')" : JSON.stringify({ status: 409, payload: { detail } })})`));
+  const walletCases = [
+    statusWord(rowIn('en', 'pending')) === 'Waiting for payment' && statusWord(rowIn('ar', 'pending')) === 'بانتظار الدفع'
+      && statusWord(rowIn('en', 'confirmed')) === 'Confirmed' && statusWord(rowIn('ar', 'confirmed')) === 'مؤكد' && statusWord(rowIn('ar', 'canceled')) === 'ملغى'
+      && !/>\s*(pending|confirmed|canceled)\s*</.test(rowIn('ar', 'pending') + rowIn('ar', 'confirmed') + rowIn('ar', 'canceled')) && statusWord(rowIn('en', 'odd<b>')) === 'odd&lt;b&gt;',
+    walletRefusal('ar', 'Too many unpaid charge requests — pay or cancel one first').includes('لديك طلبات شحن غير مدفوعة كثيرة')
+      && walletRefusal('ar', 'The receipt photo is invalid or too large — use a clear JPG/PNG under 4 MB').includes('صورة الإيصال غير مقبولة')
+      && walletRefusal('ar', 'Unknown payment method').includes('اختر عملة'),
+    walletRefusal('en', 'Too many unpaid charge requests — pay or cancel one first') === 'You have too many unpaid top-up requests. Pay or cancel one first.',
+    /[؀-ۿ]/.test(walletRefusal('ar', 'A brand new English refusal')) && !/brand new/.test(walletRefusal('ar', 'A brand new English refusal'))
+      && walletRefusal('en', 'A brand new English refusal') === 'A brand new English refusal'
+      && walletRefusal('en', undefined) === 'The request could not be completed. Refresh and try again.',
+    ['adsStudioCreateWalletCharge', 'adsStudioDecideWalletCharge', 'adsStudioAttachReceipt'].every(name => studioFn(name).includes('adsStudioWalletRefusal(e)') && !studioFn(name).includes('String(detail)'))
+  ];
+  check('Classic wallet (review loop r2 #21): charge rows show the status in words (EN/AR), refusals of create, confirm/cancel and attach go through the one Arabic map',
+    !studioLoadError && walletCases.every(Boolean), studioLoadError || `cases ${walletCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}; ar ${statusWord(rowIn('ar', 'pending'))}`);
+
   // P1-08a: /studio has no 'ads' view, so the Connections card explains instead of a dead button.
   const studioSources = fs.readdirSync(path.join(ROOT, 'src/systems/ads_studio')).filter(file => file.endsWith('.js'))
     .map(file => read(`src/systems/ads_studio/${file}`)).concat([read('studio.js'), read('www/studio.js')]);
@@ -2247,6 +2269,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const values = ['', 'meta_review', 'live', 'paused', 'mystery<b>'];
   const staffReview = card({ id: 'p9-l1', status: 'Approved', createdBy: 'c-1', publishStatus: 'meta_review', metaCampaignId: '120', name: 'Linked' });
   const staffReviewAr = card({ id: 'p9-l1', status: 'Approved', createdBy: 'c-1', publishStatus: 'meta_review', metaCampaignId: '120', name: 'Linked' }, 'ar');
+  const staffReviewNoId = card({ id: 'p9-l0', status: 'Approved', createdBy: 'c-1', publishStatus: 'meta_review', name: 'Review, no id' });
+  const staffReviewNoIdAr = card({ id: 'p9-l0', status: 'Approved', createdBy: 'c-1', publishStatus: 'meta_review', name: 'Review, no id' }, 'ar');
   const staffOdd = card({ id: 'p9-l2', status: 'Approved', createdBy: 'c-1', publishStatus: 'mystery<b>', name: 'Odd' });
   const staffStopped = card({ id: 'p9-l3', status: 'Stopped', createdBy: 'c-1', publishStatus: '', metaCampaignId: '121', name: 'Stopped' });
   as('customer', 'p9-customer');
@@ -2262,7 +2286,11 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       const ar = labelOf(c, 'ar');
       return en && ar && en !== ar && en !== value && ar !== value && !en.includes('mystery') && /[؀-ۿ]/.test(ar);
     })),
-    text(staffReview).includes('Meta is reviewing the ad') && !text(staffReview).includes('meta_review') && text(staffReviewAr).includes('ميتا تراجع الإعلان'),
+    // Review loop r2 #28: the link writes 'meta_review' once and nothing moves it on, so a LINKED card leaves the chip out (its
+    // Meta results card header carries the server's stage: running, paused, ended); the label stays where no results show.
+    !text(staffReview).includes('Meta is reviewing the ad') && !staffReview.includes('data-ads-studio-publish-status') && staffReview.includes('data-ads-studio-results="p9-l1"')
+      && !text(staffReviewAr).includes('ميتا تراجع الإعلان') && !text(staffReview).includes('meta_review')
+      && text(staffReviewNoId).includes('Meta is reviewing the ad') && text(staffReviewNoIdAr).includes('ميتا تراجع الإعلان'),
     text(staffOdd).includes('Meta status unknown') && !staffOdd.includes('mystery'),
     text(staffStopped).includes('Not live on Meta'),
     text(customerSetup).includes('Being set up in Meta') && text(customerSetupAr).includes('نجهّزه في ميتا'),
@@ -2767,7 +2795,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     receiptBusyEn.message === 'Photos are being checked right now. Please try again in a moment.',
     receiptManyAr.message === 'فحوصات صور كثيرة. انتظر دقيقة ثم أعد المحاولة.',
     receiptOther.message === 'Something unusual went wrong',
-    fn('adsStudioAttachReceipt').includes('adsStudioRefusalText(detail)') && !fn('adsStudioAttachReceipt').includes('String(detail)')
+    fn('adsStudioAttachReceipt').includes('adsStudioWalletRefusal(e)') && !fn('adsStudioAttachReceipt').includes('String(detail)')
   ];
   check('Classic receipt upload (review loop r2 S): the photo-check 503/429 read through the Arabic map, never raw English', !loadError && receiptCases.every(Boolean),
     loadError || `cases ${receiptCases.map((ok, i) => ok ? '' : i).filter(String).join(',')} ${JSON.stringify([receiptBusyAr, receiptBusyEn, receiptManyAr, receiptOther])}`);
@@ -2986,6 +3014,17 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     info({ status: 401, message: 'Not authenticated' }).code === 'SESSION_ENDED' && info({ status: 401, message: 'x' }, 'read', 'ar').text === clientTexts.SESSION_ENDED[1],
     info({ status: 500, message: 'Internal Server Error' }).text.startsWith('We could not confirm whether this went through')
       && info({ status: 503, message: 'x' }, 'read').text === 'Albayan could not load this right now. Try again in a minute.',
+    // Review loop r2 #22: a 5xx plain refusal the map knows was refused for certain (Meta busy while checking a picked
+    // post, no studio code free): its own words (Arabic from the map), never "we could not confirm whether this went through".
+    (() => {
+      const busyText = 'Meta is busy right now, so the chosen post could not be checked. Try again in a minute.';
+      const busy = { status: 503, message: 'x', payload: { detail: busyText } };
+      const code = { status: 503, message: 'x', payload: { detail: 'Could not assign a studio code. Try again.' } };
+      return info(busy).text === busyText && info(busy, 'action', 'ar').text === inLanguage('ar', `adsStudioRefusalText(${JSON.stringify(busyText)})`)
+        && !latin.test(info(busy, 'action', 'ar').text) && /ميتا مشغولة/.test(info(busy, 'action', 'ar').text)
+        && info(code).text === 'Could not assign a studio code. Try again.' && /تعذر تخصيص رمز الاستوديو/.test(info(code, 'action', 'ar').text)
+        && info({ status: 503, message: 'Service Unavailable', payload: { detail: 'Service Unavailable' } }).text.startsWith('We could not confirm whether this went through');
+    })(),
     info({ name: 'TypeError', message: 'Failed to fetch' }).code === 'NETWORK' && info({ name: 'TypeError', message: 'Failed to fetch' }, 'read', 'ar').text === 'لا يوجد اتصال بالبيان. تحقّق من الإنترنت وأعد المحاولة.',
     info({ status: 422, message: 'body.amount: field required', payload: { detail: [{ loc: ['body', 'amount'], msg: 'field required' }] } }).code === 'INVALID_REQUEST',
     info({ status: 404, message: 'Not Found', payload: { detail: 'Not Found' } }).code === 'NOT_FOUND',
@@ -5414,6 +5453,14 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const cardEnded = run(`renderAdsStudioCampaignCard(${linkedNew})`);
   run("_adsStudioResults.byId.get('r_new').data = adsStudioCleanResults({ stage: { stage: 8, labels: { en: 'Running', ar: 'يعمل الآن' } }, results: {} });");
   const cardRunning = run(`renderAdsStudioCampaignCard(${linkedNew})`);
+  // Review loop r2 #23: the "Stop requested — we will pause it soon" chip goes once the kept Meta reading shows the ad
+  // ended (stage 10, like v2's stop overlay on stages 4-9 only); its ticket button stays; stage 8 still shows the chip.
+  const linkedAsked = `Object.assign({}, ${linkedNew}, { stopRequestedAt: '2026-09-25T10:00:00Z', stopRequestTicketId: '${T1}' })`;
+  const askedRunning = run(`renderAdsStudioCampaignCard(${linkedAsked})`);
+  run("_adsStudioResults.byId.get('r_new').data = adsStudioCleanResults({ stage: { stage: 10, labels: { en: 'Ended', ar: 'انتهى' } }, results: {} });");
+  const askedEnded = run(`renderAdsStudioCampaignCard(${linkedAsked})`);
+  run("_adsStudioResults.byId.delete('r_new');");
+  const askedUnread = run(`renderAdsStudioCampaignCard(${linkedAsked})`);  // no reading kept yet: the chip stays
   run("_adsStudioResults.byId.delete('r_new');");
   run("_adsStudioActiveTab = 'help'; studioHelpGo('new');");
   const classicNew = run("_studioHelp.classic.view + ':' + _adsStudioActiveTab");
@@ -5432,6 +5479,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     String(cardRequested).includes('data-ads-studio-stop-requested="1"') && String(cardRequested).includes('Stop requested') && String(cardRequested).includes(`studioHelpOpen('${T1}')`) && !String(cardRequested).includes('data-ads-studio-ask-stop'),
     String(cardEnded).includes('data-ads-studio-campaign="r_new"') && !String(cardEnded).includes('data-ads-studio-ask-stop') && !String(cardEnded).includes('Ask us to stop it')
       && String(cardRunning).includes('data-ads-studio-ask-stop="1"'),
+    String(askedRunning).includes('data-ads-studio-stop-requested="1"') && !String(askedEnded).includes('data-ads-studio-stop-requested') && !String(askedEnded).includes('we will pause it soon')
+      && String(askedEnded).includes(`studioHelpOpen('${T1}')`) && String(askedUnread).includes('data-ads-studio-stop-requested="1"'),
     classicNew === 'new:help' && String(classicForm).includes('data-testid="studio-help-form"'),
     JSON.stringify(offTabs) === JSON.stringify(['dashboard', 'campaigns', 'builder', 'posts', 'replies']) && offButton === '' && !String(cardOff).includes('data-ads-studio-ask-stop') && String(cardOff).includes('Ask us to stop it') === false,
     droppedHelp === 'dashboard',
@@ -5907,6 +5956,29 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   run("state.adCampaignRequests.splice(state.adCampaignRequests.findIndex(r => r.id === 'r_stp'), 1)");
   check('Team desk launch over a stop request (review loop r1): the chip, Stop & return all first (customer_stop, the whole payment), and the in-page "link anyway" sheet is the only way that sends stopRequestAcknowledged',
     !loadError && stopCases.every(Boolean), `cases ${failed(stopCases)}; queue ${JSON.stringify(stopQueued)} ack ${JSON.stringify(ackCall.body || null)} plain ${JSON.stringify(plainCall.body || null)}`);
+
+  // Review loop r2 #30: a never-linked Approved request with NO stop request (the customer asked in a ticket, or the
+  // ad cannot run) can be stopped from its launch card before its end date too: Stop & return all opens the same
+  // sheet (the whole payment) and posts /stop as the team's stop (staff_stop, stage 12 "Stopped"), never
+  // 'completed'. Not offered on a request linked before, marked launched by hand, or past its end (the settle list).
+  const plainStopCard = cardOf(stopLaunchHtml, 'r_app');
+  const wasLaunchCard = cardOf(stopLaunchHtml, 'r_was');
+  const oldLaunchCard = cardOf(stopLaunchHtml, 'r_old');
+  const plainStopSheet = String(run("renderStudioDeskSheet('settle', findVisibleAdsStudioCampaign('r_app'))"));
+  const handMarked = json("studioDeskStopBeforeRun(Object.assign({}, findVisibleAdsStudioCampaign('r_app'), { publishStatus: 'live' }))");
+  reply('/api/ad-studio/campaigns/r_app/stop', { id: 'r_app', data: { ...requestsRows()[3], status: 'Stopped', closeReason: 'staff_stop', refundMinorUSD: 5000, settleBasis: 'never_linked', _lastModified: 41 }, lastModified: 41 });
+  const plainStopped = outcome("studioDeskSettleRun('settle', 'r_app', 5000, '')");
+  const plainStopCall = calls('POST', '/api/ad-studio/campaigns/r_app/stop')[0] || {};
+  run(`state.adCampaignRequests.splice(state.adCampaignRequests.findIndex(r => r.id === 'r_app'), 1, ${JSON.stringify(requestsRows()[3])})`);
+  const stopBeforeRunCases = [
+    plainStopCard.includes(`class="studio-v2-action" data-testid="studio-desk-stop-return-r_app" onclick="studioDeskSheetOpen('settle', 'r_app', this)"`) && plainStopCard.includes('Stop &amp; return all')
+      && plainStopCard.includes(`data-testid="studio-desk-link-r_app"`) && !plainStopCard.includes('data-stop-asked'),
+    !!wasLaunchCard && !wasLaunchCard.includes('studio-desk-stop-return') && !oldLaunchCard.includes('studio-desk-stop-return') && handMarked === false,
+    plainStopSheet.includes('Stop this ad and return the payment') && plainStopSheet.includes('value="50.00"'),
+    !!plainStopped && plainStopped.ok === true && !!plainStopCall.body && plainStopCall.body.closeReason === 'staff_stop' && plainStopCall.body.refundMinorUSD === 5000
+  ];
+  check('Team desk launch (review loop r2 #30): a never-linked Approved request can be stopped before its end with the whole payment back (staff_stop), not only after a stop request; not on linked-before, hand-marked or ended rows',
+    !loadError && stopBeforeRunCases.every(Boolean), `cases ${failed(stopBeforeRunCases)}; call ${JSON.stringify(plainStopCall.body || null)} was ${wasLaunchCard.slice(0, 200)}`);
   reply('/api/studio/campaigns/r_was/results', wasResults);
   openAt('/studio?tab=review&section=settle');
   run('render()');  // the results read of the unlinked-after-link row answered
@@ -6221,6 +6293,54 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Classic staff Stop & refund: the typed amount is read strictly (Arabic digits and separators count; "1.234,56", "50abc", "12.5.3", "12.345" are refused, never a smaller refund)',
     classicStopCases.every(Boolean), `cases ${failed(classicStopCases)}; ${JSON.stringify({ refused, accepted })}`);
+
+  // Review loop r2 #26 / #29: the classic staff close of a LAUNCHED ad never pre-fills 0.00. A desk-linked ad whose
+  // card read Meta's confirmed spend pre-fills the server's cap (paid minus that spend) and says so; without it the
+  // field is empty and an empty answer is refused. One past its end date with no stop request closes as
+  // 'completed' (stage 11 "Finished"); a stop request or a future end keeps the server's staff_stop default.
+  run(`var __promptSeen = []; var __promptTake = null;
+    function prompt(message, value) { __promptSeen.push({ message: String(message), value: String(value) }); return __promptTake === null ? String(value) : __promptTake; }
+    function apiStopAdCampaignRequest(id, expected, operationId, reason, refundMinor, closeReason) { __stopCalls.push({ id, refundMinor, closeReason: closeReason === undefined ? '(none)' : closeReason }); return new Promise(() => {}); }
+    var __kept26 = state.adCampaignRequests;
+    var __lnk26 = { createdBy: 'c1', status: 'Approved', name: 'Linked close', paidMinorUSD: 10000, publishStatus: 'meta_review', metaCampaignId: '120200000000000026', metaAdAccountId: '111', startDate: '2025-01-01', endDate: '2025-01-05', _created: 60, _lastModified: 60 };
+    state.adCampaignRequests = __kept26.concat([
+      Object.assign({ id: 'r_c26' }, __lnk26),
+      Object.assign({ id: 'r_c26_unread' }, __lnk26),
+      Object.assign({ id: 'r_c26_asked' }, __lnk26, { stopRequestedAt: '2025-01-03T10:00:00Z' }),
+      Object.assign({ id: 'r_c26_future' }, __lnk26, { endDate: '2099-01-05' }),
+      { id: 'r_c26_hand', createdBy: 'c1', status: 'Approved', name: 'Hand marked', paidMinorUSD: 5000, publishStatus: 'live', endDate: '2025-01-05', _created: 61, _lastModified: 61 }]);
+    _adsStudioResults.forUser = String(state.currentUser.id);
+    ['r_c26', 'r_c26_asked', 'r_c26_future'].forEach(id => _adsStudioResults.byId.set(id, { state: 'done', at: Date.now(), promise: null, data: adsStudioCleanResults({
+      stage: { stage: 10 }, results: { metaUsedMinor: 3000, paidMinor: 10000 },
+      staff: { metaCampaignId: '120200000000000026', currency: 'USD', spendMinorUSD: 3000, spendConfirmedAt: '2025-01-08T00:00:00Z' } }) }));`);
+  const close26 = (id, take = null) => json(`(function () { __promptTake = ${JSON.stringify(take)}; __promptSeen.length = 0; __stopCalls.length = 0; __notes.length = 0; stopAdsStudioCampaignOnce('${id}');
+    return { prompt: __promptSeen[0] || null, call: __stopCalls[0] || null, invalid: __notes.some(note => note.title === 'Invalid amount') }; })()`) || {};
+  const linkedDefault = close26('r_c26');
+  const linkedAbove = close26('r_c26', '80.00');
+  const unreadDefault = close26('r_c26_unread');
+  const askedDefault = close26('r_c26_asked');
+  const futureDefault = close26('r_c26_future');
+  const handDefault = close26('r_c26_hand');
+  const handTyped = close26('r_c26_hand', '0');
+  run('state.adCampaignRequests = __kept26; ["r_c26", "r_c26_asked", "r_c26_future"].forEach(id => _adsStudioResults.byId.delete(id));');
+  const closeCases = [
+    // the server's cap pre-filled and named; OK sends it, completed (ended, no stop request)
+    !!linkedDefault.prompt && linkedDefault.prompt.value === '70.00' && linkedDefault.prompt.message.includes('Meta used $30.00 of $100.00') && linkedDefault.prompt.message.includes('(0 to 70.00)')
+      && !!linkedDefault.call && linkedDefault.call.refundMinor === 7000 && linkedDefault.call.closeReason === 'completed',
+    // above the cap: refused on the screen, nothing sent
+    linkedAbove.invalid === true && !linkedAbove.call,
+    // Meta's spend not read on this card: empty field, and OK on the empty field is refused (never 0 by default)
+    !!unreadDefault.prompt && unreadDefault.prompt.value === '' && unreadDefault.invalid === true && !unreadDefault.call,
+    // the owner's stop request, or an end date still ahead: no closeReason (the server's staff_stop)
+    !!askedDefault.call && askedDefault.call.refundMinor === 7000 && askedDefault.call.closeReason === '(none)',
+    !!futureDefault.call && futureDefault.call.closeReason === '(none)',
+    // hand-marked (nothing known of its Meta spend): empty, not 0.00; a typed 0 is still taken, as completed (ended)
+    !!handDefault.prompt && handDefault.prompt.value === '' && handDefault.invalid === true && !handDefault.call
+      && !!handTyped.call && handTyped.call.refundMinor === 0 && handTyped.call.closeReason === 'completed',
+    adsStudio.includes("attempt.operationId, null, refundMinor, closeReason") && read('src/09-api-auth.js').includes('reason: reason || null, closeReason };')
+  ];
+  check('Classic staff close of a launched ad (review loop r2 #26/#29): the cap (paid minus Meta\'s confirmed spend) is pre-filled and named, else the field is empty and required (never a silent 0.00); an ended ad with no stop request closes as completed',
+    closeCases.every(Boolean), `cases ${failed(closeCases)}; ${JSON.stringify({ linkedDefault, unreadDefault, askedDefault, futureDefault, handDefault, handTyped })}`);
 }
 
 {
@@ -6237,6 +6357,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const homeSrc = read('src/systems/ads_studio/15j-studio-home.js');
   const adsSrc = read('src/systems/ads_studio/15k-studio-ads.js');
   const helpSrc = read('src/systems/ads_studio/15n-studio-help.js');
+  // The five classes a failed post can carry (social_studio.POST_ERROR_CLASSES): both post screens map exactly these.
+  const serverPostClasses = ((read('server/systems/ads_studio/social_studio.py').match(/^POST_ERROR_CLASSES = \(([^)]*)\)/m) || ['', ''])[1])
+    .split(',').map(item => item.trim().replace(/^"|"$/g, '')).filter(Boolean);
   const win = {
     location: { pathname: '/studio', search: '', href: 'http://localhost/studio' },
     listeners: { popstate: [] },
@@ -6660,7 +6783,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
 
   // Posts as they are, the posts tab, the classic handover and the plan-ended state.
   reply(POSTS, { posts: [{ id: 'sp_1', status: 'scheduled', caption: 'Ramadan <offer>', pageIds: ['spg_fb'], scheduledAt: '2099-03-01T10:00:00Z', mediaCount: 2 }, { id: 'sp_2', status: 'failed', caption: 'Old', pageIds: ['spg_ig'], updatedAt: ago(500), lastError: 'Meta refused <it>' }, { id: 'sp_3', status: 'published', caption: 'Done', pageIds: [], publishedAt: ago(100) },
-    { id: 'sp_4', status: 'failed', caption: 'Late', pageIds: ['spg_fb'], updatedAt: ago(400), lastError: 'Meta did not answer in time; it may have published. Check the page before retrying.', errorClass: 'timeout' }] });
+    { id: 'sp_4', status: 'failed', caption: 'Late', pageIds: ['spg_fb'], updatedAt: ago(400), lastError: 'Meta did not answer in time; it may have published. Check the page before retrying.', errorClass: 'temporary' }] });
   openAt('/studio?tab=posts');
   const postsHtml = html();
   allHtml.push(postsHtml);
@@ -6684,16 +6807,64 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     between(postsHtml, 'studio-pg-post-sp_1').includes('data-status="scheduled"') && between(postsHtml, 'studio-pg-post-sp_1').includes('Ramadan &lt;offer&gt;') && between(postsHtml, 'studio-pg-post-sp_1').includes('2 photos') && between(postsHtml, 'studio-pg-post-sp_1').includes('Sara &lt;Shop&gt;') && !postsHtml.includes('studio-pg-post-sp_2'),
     postsHtml.includes('data-testid="studio-pg-posts-filter-failed"') && postsFailed.includes('data-testid="studio-pg-post-sp_2" data-status="failed"') && postsFailed.includes('Meta refused &lt;it&gt;'),
     // the failed reason: the server's errorClass in plain words (the neutral pair without one), Meta's raw text only in a details line, Arabic in Arabic
-    failedRow(postsFailed, 'sp_4').includes('data-testid="studio-pg-post-error" data-class="timeout">Meta did not answer in time; the post may have gone out.') && failedRow(postsFailed, 'sp_4').includes('data-testid="studio-pg-post-error-details"') && failedRow(postsFailed, 'sp_4').includes('<summary>Details from Meta</summary>')
-      && failedRow(postsFailed, 'sp_2').includes('data-class="">Meta refused this post; the team can see why.') && failedRow(postsFailed, 'sp_2').includes('<p class="studio-pg-note" dir="ltr">Meta refused &lt;it&gt;</p>')
+    failedRow(postsFailed, 'sp_4').includes('data-testid="studio-pg-post-error" data-class="temporary">Meta did not answer in time; the post may have gone out.') && failedRow(postsFailed, 'sp_4').includes('data-testid="studio-pg-post-error-details"') && failedRow(postsFailed, 'sp_4').includes('<summary>Details from Meta</summary>')
+      && failedRow(postsFailed, 'sp_2').includes('data-class="">This post could not be published; the team can see why.') && failedRow(postsFailed, 'sp_2').includes('<p class="studio-pg-note" dir="ltr">Meta refused &lt;it&gt;</p>')
       && arabicOnly((failedRow(postsFailedAr, 'sp_4').match(/data-testid="studio-pg-post-error"[^>]*>([^<]*)</) || [])[1] || '') && arabicOnly((failedRow(postsFailedAr, 'sp_2').match(/data-testid="studio-pg-post-error"[^>]*>([^<]*)</) || [])[1] || '')
-      && Object.values(json('STUDIO_PG_POST_ERRORS') || {}).length >= 7 && Object.values(json('STUDIO_PG_POST_ERRORS') || {}).every(pair => /[؀-ۿ]/.test(pair[1]) && !/[A-Za-z]{4}/.test(pair[1].replace(/Meta/g, ''))),
+      && Object.values(json('STUDIO_PG_POST_ERRORS') || {}).every(pair => /[؀-ۿ]/.test(pair[1]) && !/[A-Za-z]{4}/.test(pair[1].replace(/Meta/g, ''))),
+    // Review loop r2 #19: keyed on exactly the server's five classes (social_studio.POST_ERROR_CLASSES), each its own words
+    // (a lapsed plan, a timeout, a page to fix are never "Meta refused this post"); the classic 15f map says the same.
+    JSON.stringify(Object.keys(json('STUDIO_PG_POST_ERRORS') || {}).sort()) === JSON.stringify(serverPostClasses.slice().sort()) && serverPostClasses.length === 5
+      && new Set(serverPostClasses.map(c => run(`studioPgPostErrorText(${JSON.stringify(c)})`))).size === 5
+      && serverPostClasses.every(c => !/Meta refused this post/.test(String(run(`studioPgPostErrorText(${JSON.stringify(c)})`))))
+      && run("studioPgPostErrorText('no_such_class')") === run("studioPgPostErrorText('unknown')")
+      && JSON.stringify(json('STUDIO_PG_POST_ERRORS')) === JSON.stringify(json('SOCIAL_POST_ERROR_TEXTS')),
     String(classicV2).includes('data-testid="studio-pg-classic"') && String(classicV2).includes('data-testid="studio-pg" data-section="pages"') && String(classicPostsV2).includes('data-testid="studio-pg-posts-card"'),
     !String(classicPlain).includes('studio-pg') && (socialSrc.match(/apiJson\(/g) || []).length === 1 && socialSrc.includes("typeof studioPagesClassicHandover === 'function' ? studioPagesClassicHandover('replies') : ''") && socialSrc.includes("studioPagesClassicHandover('posts')"),
     ended.includes('data-testid="studio-pg-plan-ended"') && ended.includes('data-testid="studio-pg-renew" onclick="studioV2Open(\'wallet\')"') && !ended.includes('studio-pg-pages')
   ];
   check('Studio v2 posts as they are (statuses, pages, photos, the failed reason), the posts tab, the classic Replies / Posts tabs hand over to 15o only while /me says v2 (15f keeps exactly one apiJson), the plan-ended state',
     !loadError && postsCases.every(Boolean), loadError || `cases ${failed(postsCases)}`);
+
+  // Review loop r2 #20 / #36: the classic Social Studio (15f, the live default layout). A refusal goes through the ONE
+  // Arabic map (never raw English for an Arabic reader); a failed post shows the bilingual words of its errorClass with
+  // Meta's own sentence only in a details line; a failed read of a post WITH photos never opens the editor from the
+  // photo-less summary (a save from it replaced the stored photos), one without photos still does.
+  const socialDetail = (detail, language) => String(inLanguage(language, `socialErrorDetail(Object.assign(new Error('x'), { status: 409, payload: { detail: ${JSON.stringify(detail)} } }), 'Please try again.', 'حاول مرة أخرى.')`));
+  const privateAr = socialDetail('Private messages are not available for Facebook pages right now', 'ar');
+  const pageAr = socialDetail('Page spg_123 is not linked to this account', 'ar');
+  const unmappedAr = socialDetail('Some brand new server refusal', 'ar');
+  const unmappedEn = socialDetail('Some brand new server refusal', 'en');
+  const noDetailEn = String(run("socialErrorDetail(new Error('Failed to fetch'), 'Please try again.', 'حاول مرة أخرى.')"));
+  const timeoutPost = { id: 'sp_t', status: 'failed', caption: 'Late', pageIds: [], mediaCount: 0, lastError: 'Meta did not answer in time; it may have published. Check the page before retrying.', errorClass: 'temporary' };
+  const socialCardEn = String(run(`renderSocialPostCard(${JSON.stringify(timeoutPost)})`));
+  const socialCardAr = String(inLanguage('ar', `renderSocialPostCard(${JSON.stringify(timeoutPost)})`));
+  const outsideDetails = page => page.replace(/<details[\s\S]*?<\/details>/g, '').replace(/<[^>]+>/g, ' ');
+  run(`var __keptLastDone = _social.lastDone; _social.lastDone = { action: 'now', post: ${JSON.stringify(timeoutPost)}, pageNames: [] };`);
+  const socialDoneAr = String(inLanguage('ar', 'renderSocialPostDone()'));
+  run('_social.lastDone = __keptLastDone;');
+  run(`var __keptSocialPosts = _social.posts; _social.posts = [{ id: 'sp_media', status: 'draft', pageIds: [], caption: 'x', mediaCount: 3 }, { id: 'sp_plain', status: 'draft', pageIds: [], caption: 'y', mediaCount: 0 }];
+    _social.composer = null; _social.screen = ''; __notes.length = 0;`);
+  replyError('/api/social-studio/posts/sp_media', { status: 503, message: 'Service unavailable' });
+  run("socialEditPost('sp_media')");
+  const mediaEdit = json('{ screen: _social.screen, composer: _social.composer, notes: __notes.map(n => n.title) }') || {};
+  replyError('/api/social-studio/posts/sp_plain', { status: 503, message: 'Service unavailable' });
+  run("socialEditPost('sp_plain')");
+  const plainEdit = json('{ screen: _social.screen, unknown: _social.composer && _social.composer.mediaUnknown }') || {};
+  run("_social.posts = __keptSocialPosts; _social.composer = null; _social.screen = '';");
+  const classicSocialCases = [
+    privateAr.includes('الرسائل الخاصة غير متاحة لصفحات فيسبوك') && !/Private messages/.test(privateAr),
+    pageAr.includes('هذه الصفحة لم تعد مربوطة') && !pageAr.includes('spg_'),
+    unmappedAr === 'حاول مرة أخرى.' && unmappedEn === 'Some brand new server refusal' && noDetailEn === 'Please try again.',
+    socialCardEn.includes('data-social-post-error="temporary">Meta did not answer in time; the post may have gone out. Check the page before retrying.')
+      && socialCardEn.includes('<summary class="cursor-pointer">Details from Meta</summary><span dir="ltr">Meta did not answer in time; it may have published.'),
+    /لم تجب ميتا في الوقت المحدد/.test(outsideDetails(socialCardAr)) && !/Meta did not answer/.test(outsideDetails(socialCardAr)) && socialCardAr.includes('التفاصيل من ميتا'),
+    /لم تجب ميتا في الوقت المحدد/.test(outsideDetails(socialDoneAr)) && !/Meta did not answer/.test(outsideDetails(socialDoneAr)),
+    mediaEdit.screen !== 'compose' && mediaEdit.composer === null && (mediaEdit.notes || []).includes('Could not open the post'),
+    plainEdit.screen === 'compose' && plainEdit.unknown === true,
+    !/String\(res\.lastError/.test(socialSrc) && socialSrc.includes("failed ? socialPostErrorText(res.errorClass) : ''")
+  ];
+  check('Classic Social Studio (review loop r2 #20/#36): refusals through the one Arabic map (never raw English in Arabic), failed posts in the words of their errorClass with Meta\'s sentence in a details line, and no editor from the photo-less summary of a post with photos',
+    !loadError && classicSocialCases.every(Boolean), loadError || `cases ${failed(classicSocialCases)}; ${JSON.stringify({ privateAr, pageAr, unmappedAr, unmappedEn, noDetailEn, mediaEdit, plainEdit })}`);
 
   // Stage 15 hooks with the bundle here: the Help list draws the guides card right after the contact card (15n
   // renderStudioHelpExtras), the wallet's and the request detail's guide links come from the loader (15o0
@@ -6977,6 +7148,42 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio TikTok (P5-02): the section reads GET /tiktok/requests once, draws the server\'s state words and the team note escaped, validates the handle rule, POSTs one request with an operationId, refuses an invalid form without sending; the desk rows open, step and note with single flight; no native dialogs; every input has an id',
     !loadError && tiktokCases.every(Boolean), loadError || `cases ${failed(tiktokCases)} handlers ${onclicks.filter(attr => !safeHandler.test(attr)).slice(0, 3).join(' | ')}`);
+
+  // Review loop r2 #24: the TikTok refusals ride the general ticket codes, whose shared texts speak of tickets. The
+  // TikTok cap (TICKET_OPEN_LIMIT with the server's "TikTok requests in progress" words) says so and reads the count
+  // again; the 20-ticket cap keeps the ticket text; the desk's TICKET_CLOSED says the request is finished or cancelled
+  // (never "closed more than 7 days ago").
+  const TIKTOK_PATH = '/api/studio/tiktok/requests';
+  const tiktokCapMessage = 'You already have 3 TikTok requests in progress. Wait for the team, then send a new one.';
+  const tiktokSendRefused = (message, language = 'en') => {
+    run(`__replies[${JSON.stringify(TIKTOK_PATH)}] = []; _studioTikTok.draft = null; studioTikTokSet("handle", "shop.two"); studioTikTokToggleWant("advice", true);`);
+    replyError(TIKTOK_PATH, { status: 409, message: 'x', payload: { detail: { code: 'TICKET_OPEN_LIMIT', message } } });
+    reply(TIKTOK_PATH, { requests: [tiktokRequest(T1, 'T-000101', 'open'), tiktokRequest(T2, 'T-000102', 'in_progress')], nextCursor: null, openCount: 3, maxOpen: 3, service });  // the read again
+    const readsBefore = calls('GET', TIKTOK_PATH).length;
+    inLanguage(language, 'studioTikTokSend();');
+    const out = { error: String(json('_studioTikTok.draft && _studioTikTok.draft.error') || ''), reread: calls('GET', TIKTOK_PATH).length - readsBefore };
+    run(`__replies[${JSON.stringify(TIKTOK_PATH)}] = []; _studioTikTok.draft = null;`);
+    return out;
+  };
+  const capEn = tiktokSendRefused(tiktokCapMessage);
+  const capAr = tiktokSendRefused(tiktokCapMessage, 'ar');
+  const ticketsFull = tiktokSendRefused('You already have 20 open tickets. Resolve one, then open a new one.');
+  run(`studioTikTokDeskEdit('${T2}', 'done'); __dom.set('studio-tiktok-note-en-${T2}', { value: 'All done' }); __dom.set('studio-tiktok-note-ar-${T2}', { value: 'انتهينا' });`);
+  replyError(`/api/studio/staff/tiktok/${T2}/status`, { status: 409, message: 'x', payload: { detail: { code: 'TICKET_CLOSED', message: 'This TikTok request is already cancelled. Ask the customer for a new request.' } } });
+  run(`studioTikTokDeskSend('${T2}', 'done');`);
+  const deskFinished = String(run('_studioTikTokDesk.problem'));
+  run("_studioTikTokDesk.problem = ''; studioTikTokDeskEdit('', '');");
+  const supportPy = read('server/systems/ads_studio/studio_support.py');
+  const tiktokRefusalCases = [
+    capEn.error === 'You already have 3 TikTok requests in progress. Wait for the team, then send a new one.' && capEn.reread === 1,
+    capAr.error === 'لديك 3 طلبات تيك توك قيد العمل بالفعل. انتظر الفريق ثم أرسل طلباً جديداً.',
+    ticketsFull.error === 'You have too many open tickets. Mark one as solved, then open a new one.' && ticketsFull.reread === 0,
+    deskFinished === 'This TikTok request is already finished or was cancelled by the customer. Refresh the list.' && !deskFinished.includes('7 days'),
+    // the client tells the two caps apart by the server's own words: keep them in step
+    (supportPy.match(/TikTok requests in progress/g) || []).length >= 2 && supportPy.includes('open tickets. Resolve one, then open a new one.')
+  ];
+  check('Studio TikTok (review loop r2 #24): the TikTok cap and a finished request get their own words (EN/AR) instead of the ticket texts; the 20-ticket cap keeps the ticket text',
+    !loadError && tiktokRefusalCases.every(Boolean), loadError || `cases ${failed(tiktokRefusalCases)}; ${JSON.stringify({ capEn, capAr, ticketsFull, deskFinished })}`);
 
   // Stage 15 hooks (15n, 15j): the Help body draws the TikTok section for ?section=tiktok, the Help list its row
   // after the contact card, and Home shows the "TikTok help" goal (opening the section) only while /me says the

@@ -1015,6 +1015,13 @@ function studioDeskStopAsked(request) {
     && !String(request.metaCampaignId || '').trim() && request.everLinked !== true;
 }
 
+// Approved, never linked nor marked launched, and not past its end: the team may stop it now with the
+// whole payment back (the server's settle_plan never_linked branch, the same /stop as a stop request),
+// from its launch card, e.g. when the customer asked in a ticket instead of "Ask to stop".
+function studioDeskStopBeforeRun(request) {
+  return !studioDeskWasLinked(request) && !studioDeskHandMarked(request) && studioDeskStage(request).stage !== 10;
+}
+
 function studioDeskLinkedList() {
   return studioDeskApproved().filter(item => studioDeskLinked(item) && studioDeskStage(item).stage !== 10);
 }
@@ -1437,6 +1444,7 @@ function renderStudioDeskLaunchCard(request) {
                 <div class="studio-desk-actions">
                   <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-link-${id}" onclick="openAdsStudioLinkSheet('${id}')">${studioDeskIcon('link-2')}<span>${studioEsc(adsStudioText('Link Meta campaign', 'اربط حملة ميتا'))}</span></button>
                   <button type="button" class="studio-v2-action" onclick="studioDeskGo('requests', '${id}')">${studioDeskIcon('file-text')}<span>${studioEsc(adsStudioText('The request', 'تفاصيل الطلب'))}</span></button>
+                  ${studioDeskStopBeforeRun(request) ? `<button type="button" class="studio-v2-action" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>` : ''}
                 </div>
               </li>`;
 }
@@ -1599,7 +1607,7 @@ function studioDeskOverrideReasonInput(id, input) {
   studioDeskSettleEntry(id).reason = String((input && input.value) || '').slice(0, STUDIO_DESK_OVERRIDE_REASON[1]);
 }
 
-// POST …/stop (closeReason completed) or …/settle-override: one operationId per (action, version).
+// POST …/stop (closeReason below) or …/settle-override: one operationId per (action, version).
 async function studioDeskSettleOnce(requestId, kind, refundMinor, reason) {
   const request = findVisibleAdsStudioCampaign(requestId);
   if (!request || String(request.status || '') !== 'Approved') {
@@ -1608,8 +1616,10 @@ async function studioDeskSettleOnce(requestId, kind, refundMinor, reason) {
   const attempt = adsStudioActionAttempt(kind === 'override' ? 'settle-override' : 'stop', request.id, Number(request._lastModified));
   const identity = getServerSessionIdentity();
   const path = kind === 'override' ? 'settle-override' : 'stop';
-  // A stop the owner asked for before the ad ran closes as their stop (the server lets staff record it); else completed.
-  const closeReason = kind !== 'override' && studioDeskStopAsked(request) ? 'customer_stop' : 'completed';
+  // A stop the owner asked for before the ad ran closes as their stop (the server lets staff record it); a
+  // never-run ad the team stops before its end (its launch card) as the team's stop; else completed.
+  const closeReason = kind === 'override' ? 'completed' : studioDeskStopAsked(request) ? 'customer_stop'
+    : studioDeskStopBeforeRun(request) ? 'staff_stop' : 'completed';
   const body = { expectedLastModified: attempt.expectedLastModified, operationId: attempt.operationId, refundMinorUSD: refundMinor, closeReason };
   if (kind === 'override') body.reason = reason; else body.reason = null;
   let entity;
@@ -1673,7 +1683,7 @@ function renderStudioDeskSheet(kind, request) {
     const override = kind === 'override';
     const start = entry.refund !== '' ? entry.refund : (numbers.cap === null ? '' : (numbers.cap / 100).toFixed(2));
     title = override ? adsStudioText('Admin override: settle past the rules', 'تجاوز المدير: تسوية خارج القواعد')
-      : studioDeskStopAsked(request) ? adsStudioText('Stop this ad and return the payment', 'أوقف هذا الإعلان وأعد المبلغ') : adsStudioText('Finish & settle', 'إنهاء وتسوية');
+      : studioDeskStopAsked(request) || studioDeskStopBeforeRun(request) ? adsStudioText('Stop this ad and return the payment', 'أوقف هذا الإعلان وأعد المبلغ') : adsStudioText('Finish & settle', 'إنهاء وتسوية');
     const lines = [
       `${adsStudioText('Paid', 'مدفوع')} ${studioUsd(numbers.paid)}`,
       numbers.spend === null ? adsStudioText("Meta's spend is not confirmed yet", 'صرف ميتا غير مؤكد بعد') : `${adsStudioText('Meta used', 'صرف ميتا')} ${studioUsd(numbers.spend)}${numbers.confirmedAt ? ` (${adsStudioText('confirmed', 'أُكّد')} ${studioDeskWhen(numbers.confirmedAt)})` : ''}`,

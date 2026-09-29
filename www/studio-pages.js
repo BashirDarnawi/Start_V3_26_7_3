@@ -63,22 +63,16 @@ const STUDIO_PG_POST_STATUSES = Object.freeze([
   ['scheduled', 'clock', 'Scheduled', 'مجدولة', 'warn'], ['published', 'check', 'Published', 'منشورة', 'ok'],
   ['draft', 'pencil', 'Drafts', 'مسودات', 'slate'], ['failed', 'triangle-alert', 'Failed', 'فشلت', 'bad']
 ]);
-// A failed post's problem in plain words: the server's errorClass (social_studio publish: the class
-// of its lastError) -> [English, Arabic]. The raw Meta text stays in a details line; an unknown or
-// missing class gets the neutral pair (studioPgPostErrorText), never the raw English alone.
+// A failed post's problem in plain words: the server's errorClass (social_studio.POST_ERROR_CLASSES,
+// exactly these five) -> [English, Arabic]. The raw Meta text stays in a details line; a missing or
+// unknown class gets the neutral 'unknown' pair (studioPgPostErrorText), never the raw English alone.
+// The classic Posts tab keeps the same five pairs (15f SOCIAL_POST_ERROR_TEXTS; a check keeps them equal).
 const STUDIO_PG_POST_ERRORS = Object.freeze({
-  timeout: ['Meta did not answer in time; the post may have gone out. Check the page before retrying.', 'لم تجب ميتا في الوقت المحدد؛ ربما نُشر المنشور. تحقق من الصفحة قبل إعادة المحاولة.'],
-  access_paused: ['Publishing is paused: the account needs active Social Studio access.', 'النشر متوقف: يحتاج الحساب إلى اشتراك فعّال في استوديو التواصل.'],
-  page_unlinked: ['This page is no longer linked to the account.', 'هذه الصفحة لم تعد مربوطة بالحساب.'],
-  meta_paused: ['Meta asked Albayan to wait; the post is tried again later.', 'طلبت ميتا من البيان الانتظار؛ يُعاد نشر المنشور لاحقاً.'],
-  meta_not_configured: ["Albayan's Meta connection is not set up yet.", 'ربط البيان مع ميتا غير مُعدّ بعد.'],
-  meta_refused: ['Meta refused this post; the team can see why.', 'رفضت ميتا هذا المنشور؛ يمكن للفريق معرفة السبب.'],
-  publish_failed: ['Publishing failed on our side; the team can see why.', 'فشل النشر من جهتنا؛ يمكن للفريق معرفة السبب.']
-});
-const STUDIO_PG_POST_ERROR_ALIASES = Object.freeze({
-  meta_timeout: 'timeout', ambiguous: 'timeout', paused: 'access_paused', owner_paused: 'access_paused', subscription: 'access_paused',
-  unlinked: 'page_unlinked', page_removed: 'page_unlinked', page_missing: 'page_unlinked', meta_busy: 'meta_paused', rate_limited: 'meta_paused',
-  not_configured: 'meta_not_configured', refused: 'meta_refused', meta_error: 'meta_refused', meta: 'meta_refused', failed: 'publish_failed', exception: 'publish_failed'
+  authorization: ["Publishing is paused: the account's Social Studio access or Albayan's Meta connection needs attention.", 'النشر متوقف: يحتاج اشتراك الحساب في استوديو التواصل أو ربط البيان مع ميتا إلى مراجعة.'],
+  rate_limited: ['Meta asked Albayan to wait; publish it again a little later.', 'طلبت ميتا من البيان الانتظار؛ انشره مرة أخرى بعد قليل.'],
+  temporary: ['Meta did not answer in time; the post may have gone out. Check the page before retrying.', 'لم تجب ميتا في الوقت المحدد؛ ربما نُشر المنشور. تحقق من الصفحة قبل إعادة المحاولة.'],
+  invalid: ['This post or one of its pages needs a fix before it can be published.', 'يحتاج هذا المنشور أو إحدى صفحاته إلى تعديل قبل نشره.'],
+  unknown: ['This post could not be published; the team can see why.', 'تعذّر نشر هذا المنشور؛ يمكن للفريق معرفة السبب.']
 });
 const STUDIO_PG_LINK_QUESTIONS = Object.freeze([
   // [key, English, Arabic] — the Instagram pre-check (PLAN.md §5.5 J7)
@@ -283,11 +277,10 @@ function studioPgCleanPost(raw) {
   };
 }
 
-// The bilingual words for a failed post's class ('' or unknown: the neutral refusal words).
+// The bilingual words for a failed post's class ('' or a class this screen does not know: 'unknown').
 function studioPgPostErrorText(errorClass) {
   const key = String(errorClass || '');
-  const name = Object.prototype.hasOwnProperty.call(STUDIO_PG_POST_ERRORS, key) ? key : (STUDIO_PG_POST_ERROR_ALIASES[key] || 'meta_refused');
-  const pair = STUDIO_PG_POST_ERRORS[name];
+  const pair = STUDIO_PG_POST_ERRORS[Object.prototype.hasOwnProperty.call(STUDIO_PG_POST_ERRORS, key) ? key : 'unknown'];
   return studioPgText(pair[0], pair[1]);
 }
 

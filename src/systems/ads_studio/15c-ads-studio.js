@@ -643,7 +643,12 @@ function renderAdsStudioCampaignCard(campaign) {
   // the owner once the service is on; the old "message us" toast stays only while it is off. An ad
   // whose stop was already asked for shows the marker instead (the ticket, when Help is on).
   const stopRequestedAt = String(campaign.stopRequestedAt || '').trim() || (typeof studioStopRequestedAt === 'function' ? studioStopRequestedAt(campaign.id) : '');
-  const endedSettling = adsStudioKeptStage(campaign.id) === 10;  // ended: nothing left to stop (server 409)
+  // Ended: nothing left to stop (server 409), and no "we will pause it soon" chip once Meta shows it
+  // ended (the stop request's ticket button stays; v2 shows its stop overlay on stages 4-9 only).
+  const endedSettling = adsStudioKeptStage(campaign.id) === 10;
+  // The link writes 'meta_review' once and nothing moves it on: while the Meta results card is shown its
+  // header carries the server's stage (running, paused, ended), so the "Meta is reviewing" chip is left out.
+  const metaReviewStale = String(campaign.publishStatus || '').trim() === 'meta_review' && adsStudioShowsResults(campaign);
   const askStopSheet = statusValue === 'Approved' && !staffHere && mayStop && !stopRequestedAt && !endedSettling && typeof studioStopSheetAvailable === 'function' && studioStopSheetAvailable();
   const showAskStop = statusValue === 'Approved' && !staffHere && mayStop && !ownerCanInstantStop && !askStopSheet && !stopRequestedAt && !endedSettling;
   const stopTicketId = /^tkt_[0-9a-f]{40}$/.test(String(campaign.stopRequestTicketId || '')) ? String(campaign.stopRequestTicketId) : '';
@@ -682,7 +687,7 @@ function renderAdsStudioCampaignCard(campaign) {
               const extName = ext && String(ext.createdBy || '') === String(campaign.createdBy || '') ? String(ext.name || '') : '';
               return `<span class="inline-flex items-center gap-1 rounded-full bg-indigo-100 dark:bg-indigo-900/30 px-2.5 py-1 text-[11px] font-bold text-indigo-800 dark:text-indigo-200"><i data-lucide="calendar-plus" class="w-3.5 h-3.5"></i>${isAr ? 'تمديد لحملة' : 'Extension of'} ${Security.escapeHtml((extName || (isAr ? 'حملة سابقة' : 'a previous campaign')).slice(0, 40))}</span>`;
             })() : ''}
-            ${statusValue === 'Approved' || (isLaunched && adsStudioCanReview()) ? renderAdsStudioPublishChip(campaign) : ''}
+            ${(statusValue === 'Approved' || (isLaunched && adsStudioCanReview())) && !metaReviewStale ? renderAdsStudioPublishChip(campaign) : ''}
           </div>
           <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
             <span class="inline-flex items-center gap-1"><i data-lucide="target" class="w-3.5 h-3.5"></i>${Security.escapeHtml(adsStudioObjectiveLabel(campaign.objective))}</span>
@@ -698,7 +703,7 @@ function renderAdsStudioCampaignCard(campaign) {
           ${canWithdraw ? `<button type="button" data-ads-studio-withdraw="1" onclick="openAdsStudioWithdraw('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-amber-50 dark:bg-amber-900/20 px-3 text-sm font-bold text-amber-800 dark:text-amber-200 disabled:opacity-60"><i data-lucide="undo-2" class="w-4 h-4"></i>${isAr ? 'سحب الطلب' : 'Withdraw'}</button>` : ''}
           ${canStop ? `<button type="button" onclick="stopAdsStudioCampaign('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/30 px-3 text-sm font-bold text-rose-700 dark:text-rose-200 disabled:opacity-60"><i data-lucide="circle-stop" class="w-4 h-4"></i>${isLaunched ? (isAr ? 'إغلاق الحملة' : 'Close campaign') : (isAr ? 'إيقاف واسترداد' : 'Stop & refund')}</button>` : ''}
           ${askStopSheet ? `<button type="button" data-ads-studio-ask-stop="1" onclick="studioStopSheetOpen('${safeId}', this)" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="hand" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask to stop'}</button>` : ''}
-          ${stopRequestedAt && statusValue === 'Approved' ? `<span data-ads-studio-stop-requested="1" class="inline-flex items-center gap-1 rounded-full bg-amber-100 dark:bg-amber-900/30 px-2.5 py-1 text-[11px] font-bold text-amber-800 dark:text-amber-200"><i data-lucide="hand" class="w-3.5 h-3.5"></i>${isAr ? 'طُلب الإيقاف — سنوقفه قريباً' : 'Stop requested — we will pause it soon'}</span>${stopTicketId && typeof studioHelpClassicTab === 'function' && studioHelpClassicTab() ? `<button type="button" data-ads-studio-stop-ticket="1" onclick="studioHelpOpen('${stopTicketId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="ticket" class="w-4 h-4"></i>${isAr ? 'افتح التذكرة' : 'Open the ticket'}</button>` : ''}` : ''}
+          ${stopRequestedAt && statusValue === 'Approved' ? `${endedSettling ? '' : `<span data-ads-studio-stop-requested="1" class="inline-flex items-center gap-1 rounded-full bg-amber-100 dark:bg-amber-900/30 px-2.5 py-1 text-[11px] font-bold text-amber-800 dark:text-amber-200"><i data-lucide="hand" class="w-3.5 h-3.5"></i>${isAr ? 'طُلب الإيقاف — سنوقفه قريباً' : 'Stop requested — we will pause it soon'}</span>`}${stopTicketId && typeof studioHelpClassicTab === 'function' && studioHelpClassicTab() ? `<button type="button" data-ads-studio-stop-ticket="1" onclick="studioHelpOpen('${stopTicketId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="ticket" class="w-4 h-4"></i>${isAr ? 'افتح التذكرة' : 'Open the ticket'}</button>` : ''}` : ''}
           ${showAskStop ? `<button type="button" onclick="showNotification('${isAr ? 'الإعلان بدأ بالفعل' : 'This ad already started'}', '${isAr ? 'راسلنا لنوقفه ونعيد الجزء غير المصروف إلى محفظتك.' : 'Message us — we stop it and refund the unspent part to your wallet.'}', 'info')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 px-3 text-sm font-bold text-slate-600 dark:text-slate-300"><i data-lucide="circle-help" class="w-4 h-4"></i>${isAr ? 'اطلب الإيقاف' : 'Ask us to stop it'}</button>` : ''}
           ${askAboutThis}
           ${canLink ? `<button type="button" data-ads-studio-link="1" onclick="openAdsStudioLinkSheet('${safeId}')" class="touch-target min-h-11 inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 px-3 text-sm font-bold text-emerald-700 dark:text-emerald-300 disabled:opacity-60"><i data-lucide="link-2" class="w-4 h-4"></i>${isAr ? 'ربط حملة ميتا' : 'Link Meta campaign'}</button>` : ''}
@@ -794,7 +799,13 @@ function adsStudioCleanResults(body) {
     staff: staff ? {
       syncState: String(staff.syncState || ''),
       lastErrorCode: String(staff.lastErrorCode || '').slice(0, 60),
-      nextManualCheckAt: String(staff.nextManualCheckAt || '')
+      nextManualCheckAt: String(staff.nextManualCheckAt || ''),
+      // Meta's confirmed spend of THIS campaign (the staff close pre-fills paid minus it, as the server's cap).
+      metaCampaignId: String(staff.metaCampaignId || ''),
+      currency: String(staff.currency || ''),
+      spendMinorUSD: count(staff.spendMinorUSD),
+      spendConfirmedAt: String(staff.spendConfirmedAt || ''),
+      neverDelivered: staff.neverDelivered === true
     } : null
   };
 }
@@ -804,6 +815,19 @@ function adsStudioCleanResults(body) {
 function adsStudioKeptStage(campaignId) {
   const entry = _adsStudioResults.forUser === String(state.currentUser?.id || '') ? _adsStudioResults.byId.get(String(campaignId || '')) : null;
   return entry && entry.data ? entry.data.stage : 0;
+}
+
+// The most a staff close of a desk-linked request may return (the server's settle_plan cap), from the
+// card's kept staff read of THAT campaign: the whole payment when Meta never showed it (stage 10), else
+// paid minus Meta's confirmed USD spend. null while unknown (not read, not confirmed, another campaign).
+function adsStudioSettleCap(campaign, paid) {
+  const metaId = String(campaign?.metaCampaignId || '').trim();
+  const entry = metaId && _adsStudioResults.forUser === String(state.currentUser?.id || '') ? _adsStudioResults.byId.get(String(campaign.id || '')) : null;
+  const staff = entry && entry.data ? entry.data.staff : null;
+  if (!staff || staff.metaCampaignId !== metaId) return null;
+  if (entry.data.stage === 10 && staff.neverDelivered && staff.spendMinorUSD === 0) return paid;
+  if ((staff.currency || 'USD') !== 'USD' || !staff.spendConfirmedAt || staff.spendMinorUSD === null) return null;
+  return Math.max(paid - staff.spendMinorUSD, 0);
 }
 
 function adsStudioResultsEntry(campaignId) {
@@ -1247,27 +1271,38 @@ async function stopAdsStudioCampaignOnce(id) {
   const paid = Math.max(0, parseInt(campaign.paidMinorUSD, 10) || 0);
   const spent = Math.min(Math.max(0, parseInt(campaign.spendMinorUSD, 10) || 0), paid);
   let refundMinor = null;
+  let closeReason;
   if (staff) {
     const remaining = paid - spent;
     const launched = !!(String(campaign.publishStatus || '').trim() || String(campaign.metaCampaignId || '').trim());
-    // A launched campaign has spent on Meta and nothing records that spend: never
-    // pre-fill the whole budget (the server refuses a blind default too).
+    // A launched campaign has spent on Meta: pre-fill the server's cap (paid minus Meta's confirmed
+    // spend of the linked campaign) when this card knows it, else NOTHING — never a silent 0.00 that
+    // keeps the customer's unspent budget, nor the whole budget (the server refuses a blind default).
+    const cap = launched ? adsStudioSettleCap(campaign, paid) : null;
+    const most = cap === null ? remaining : Math.min(cap, remaining);
+    const used = cap === null ? ['', ''] : [`Meta used ${adsStudioMoney(paid - cap)} of ${adsStudioMoney(paid)}. `, `استخدمت ميتا ${adsStudioMoney(paid - cap)} من ${adsStudioMoney(paid)}. `];
     const answer = prompt(
       adsStudioText(
-        `${launched ? 'Close this campaign. Unspent budget to refund' : 'Refund amount'} in USD (0 to ${(remaining / 100).toFixed(2)}):`,
-        `${launched ? 'إغلاق هذه الحملة. المبلغ غير المصروف المراد استرداده' : 'مبلغ الاسترداد'} بالدولار (من 0 إلى ${(remaining / 100).toFixed(2)}):`
+        `${launched ? `Close this campaign. ${used[0]}Unspent budget to refund` : 'Refund amount'} in USD (0 to ${(most / 100).toFixed(2)}):`,
+        `${launched ? `إغلاق هذه الحملة. ${used[1]}المبلغ غير المصروف المراد استرداده` : 'مبلغ الاسترداد'} بالدولار (من 0 إلى ${(most / 100).toFixed(2)}):`
       ),
-      launched ? '0.00' : (remaining / 100).toFixed(2)
+      launched ? (cap === null ? '' : (most / 100).toFixed(2)) : (remaining / 100).toFixed(2)
     );
     if (answer === null) return false;
     // "1,000" is a thousand, "12,50" is a decimal — never silently under-refund: the strict studio
     // parser (15g, Arabic digits and separators) refuses "1.234,56", "50abc", "12.5.3" and "12.345".
+    // An empty answer is refused too: 0 is typed on purpose, never taken by default.
     const parsed = typeof studioParseAmount === 'function' ? studioParseAmount(answer) : NaN;
-    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > remaining) {
-      showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText(`Enter a number between 0 and ${(remaining / 100).toFixed(2)}.`, `أدخل رقماً بين 0 و${(remaining / 100).toFixed(2)}.`), 'error');
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > most) {
+      showNotification(adsStudioText('Invalid amount', 'مبلغ غير صالح'), adsStudioText(`Enter a number between 0 and ${(most / 100).toFixed(2)}.`, `أدخل رقماً بين 0 و${(most / 100).toFixed(2)}.`), 'error');
       return false;
     }
     refundMinor = parsed;
+    // A launched ad past its end date with no stop request from its owner simply finished (stage 11
+    // "Finished", as the Team desk records it); any other close stays the team's stop (server default).
+    const endDate = String(campaign.endDate || '');
+    const stopAsked = String(campaign.stopRequestedAt || '').trim();
+    if (launched && !stopAsked && /^\d{4}-\d{2}-\d{2}$/.test(endDate) && endDate < _adsStudioDateOffset(0)) closeReason = 'completed';
   } else if (!confirm(adsStudioText(
     `Stop this campaign? ${adsStudioMoneyWithLyd(paid)} returns to your wallet.`,
     `إيقاف هذه الحملة؟ سيعود ${adsStudioMoneyWithLyd(paid)} إلى محفظتك.`
@@ -1279,7 +1314,7 @@ async function stopAdsStudioCampaignOnce(id) {
     let entity;
     try {
       entity = await withRetry(() => apiStopAdCampaignRequest(
-        campaign.id, attempt.expectedLastModified, attempt.operationId, null, refundMinor
+        campaign.id, attempt.expectedLastModified, attempt.operationId, null, refundMinor, closeReason
       ), 2, 500);
     } catch (e) {
       const fresh = e?.status === 409 ? await adsStudioReloadCampaign(campaign.id) : null;
@@ -3843,8 +3878,7 @@ async function adsStudioCreateWalletCharge() {
     }
     showNotification(adsStudioText('Charge request created', 'تم إنشاء طلب الشحن'), message, 'success');
   } catch (e) {
-    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-    showNotification(adsStudioText('Could not create the charge', 'تعذر إنشاء طلب الشحن'), String(detail), 'error');
+    showNotification(adsStudioText('Could not create the charge', 'تعذر إنشاء طلب الشحن'), adsStudioWalletRefusal(e), 'error');
   } finally {
     _adsStudioChargeBusy = false;
   }
@@ -3878,11 +3912,27 @@ async function adsStudioDecideWalletCharge(requestId, action, overrideMissingRec
       'success'
     );
   } catch (e) {
-    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-    showNotification(adsStudioText('Action failed', 'فشل الإجراء'), String(detail), 'error');
+    showNotification(adsStudioText('Action failed', 'فشل الإجراء'), adsStudioWalletRefusal(e), 'error');
   }
   refreshAdsStudioWallet();
 }
+
+// A wallet refusal in the reader's language: the server's words through the ONE Arabic map; an
+// Arabic reader never gets raw English (a generic Arabic line instead), nor does anyone get a bare
+// "Request failed" when the server said nothing (a lost connection).
+function adsStudioWalletRefusal(e) {
+  const detail = e?.payload?.detail;
+  const text = detail ? String(adsStudioRefusalText(detail) || '').trim() : '';
+  if (!text || (adsStudioIsAr() && !/[؀-ۿ]/.test(text))) return adsStudioText('The request could not be completed. Refresh and try again.', 'تعذر إتمام الطلب. حدّث الصفحة وحاول مرة أخرى.');
+  return text;
+}
+
+// A charge request's status in words (wallet_payments.py: pending, confirmed, canceled).
+const ADS_STUDIO_PAY_STATUS = Object.freeze({
+  pending: ['Waiting for payment', 'بانتظار الدفع'],
+  confirmed: ['Confirmed', 'مؤكد'],
+  canceled: ['Canceled', 'ملغى']
+});
 
 // JS mirror of has-[:checked] for old WebViews without :has().
 function adsStudioMarkWalletMethod(input) {
@@ -3921,9 +3971,7 @@ async function adsStudioAttachReceipt(requestId, inputEl) {
       'success'
     );
   } catch (e) {
-    const detail = (e?.payload && e.payload.detail) ? e.payload.detail : (e?.message || 'Upload failed');
-    // Through the refusal map (the photo check's busy 503 / 429 among them), never the raw English.
-    showNotification(adsStudioText('Could not attach', 'تعذر الإرفاق'), adsStudioRefusalText(detail), 'error');
+    showNotification(adsStudioText('Could not attach', 'تعذر الإرفاق'), adsStudioWalletRefusal(e), 'error');
   } finally {
     // Clear the picker so choosing the same file again re-fires onchange.
     try { if (inputEl) inputEl.value = ''; } catch (_) {}
@@ -3961,7 +4009,7 @@ function _adsStudioWalletRequestRow(entity, adminView) {
         <div class="text-xs text-slate-500">${adsStudioMoneyIn(parseInt(d.amountMinor, 10) || 0, currency)}${lyd} • ${Security.escapeHtml(_adsStudioWalletMethodLabel(String(d.method || '')))}</div>
       </div>
       <div class="studio-wallet-request-actions flex flex-wrap items-center gap-2">
-        <span class="text-xs font-bold ${statusColor}">${Security.escapeHtml(String(d.status || ''))}</span>
+        <span class="text-xs font-bold ${statusColor}" data-status="${Security.escapeHtml(String(d.status || ''))}">${Security.escapeHtml(Object.prototype.hasOwnProperty.call(ADS_STUDIO_PAY_STATUS, String(d.status || '')) ? adsStudioText(...ADS_STUDIO_PAY_STATUS[String(d.status)]) : String(d.status || ''))}</span>
         ${isPending && !adminView && entry && entry.requiresReceiptPhoto ? `
           <label class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-100 hover:bg-blue-200 text-blue-700 cursor-pointer">
             <input type="file" accept="image/*" class="hidden" onchange="adsStudioAttachReceipt('${rid}', this)" />

@@ -119,6 +119,10 @@ const STUDIO_TIKTOK_TEXTS = Object.freeze({
   sent: ['We received your request. The team contacts you within one business day.', 'وصلنا طلبك. يتواصل معك الفريق خلال يوم عمل.'],
   off: ['The TikTok service is not open for your account yet. Ask us in a ticket if you would like it.', 'خدمة تيك توك غير مفتوحة لحسابك بعد. اطلبها منا في تذكرة إن رغبت.'],
   full: ['You already have {n} requests in progress. Wait for the team, then send a new one.', 'لديك {n} طلبات قيد العمل بالفعل. انتظر الفريق ثم أرسل طلباً جديداً.'],
+  // The server answers these two with the general ticket codes (TICKET_OPEN_LIMIT, TICKET_CLOSED), whose
+  // shared texts speak of tickets: the TikTok screens say what really happened.
+  errorFull: ['You already have {n} TikTok requests in progress. Wait for the team, then send a new one.', 'لديك {n} طلبات تيك توك قيد العمل بالفعل. انتظر الفريق ثم أرسل طلباً جديداً.'],
+  errorFinished: ['This TikTok request is already finished or was cancelled by the customer. Refresh the list.', 'طلب تيك توك هذا انتهى بالفعل أو ألغاه العميل. حدّث القائمة.'],
   yours: ['Your requests', 'طلباتك'],
   none: ['No TikTok requests yet.', 'لا توجد طلبات تيك توك بعد.'],
   reading: ['Reading your requests…', 'نقرأ طلباتك…'],
@@ -392,6 +396,11 @@ async function studioTikTokSend() {
     if (generation !== _studioTikTok.generation) return false;
     draft.error = studioExtrasErrorText(error, 'action');
     if (studioExtrasErrorCode(error) === 'IDEMPOTENCY_MISMATCH') draft.operationId = studioExtrasOperationId('tiktok');
+    if (studioExtrasErrorCode(error) === 'TICKET_OPEN_LIMIT' && /TikTok requests in progress/.test(String((error.studio && error.studio.message) || ''))) {
+      // The TikTok cap (not the 20-ticket one): this screen's count was stale, so read it again.
+      draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.errorFull).replace('{n}', String((_studioTikTok.service && _studioTikTok.service.maxOpen) || _studioTikTok.maxOpen || 3));
+      studioTikTokWant(true);
+    }
     return false;
   } finally {
     if (generation === _studioTikTok.generation) {
@@ -655,7 +664,8 @@ async function studioTikTokDeskSend(id, step, note = null) {
     return request;
   }, error => {
     if (uid !== studioExtrasUserId()) return null;
-    _studioTikTokDesk.problem = studioExtrasErrorText(error, 'action');
+    // TICKET_CLOSED here is a finished request (done, declined, or cancelled by the customer meanwhile).
+    _studioTikTokDesk.problem = studioExtrasErrorCode(error) === 'TICKET_CLOSED' ? studioTikTokText(STUDIO_TIKTOK_TEXTS.errorFinished) : studioExtrasErrorText(error, 'action');
     if (['IDEMPOTENCY_MISMATCH', 'TICKET_CLOSED', 'INVALID_VALUE'].includes(studioExtrasErrorCode(error))) _studioTikTokDesk.attempts.delete(attemptKey);
     return null;
   }).finally(() => {

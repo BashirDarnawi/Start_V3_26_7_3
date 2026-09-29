@@ -80,9 +80,36 @@ function socialUnwrap(payload, key) {
   return payload;
 }
 
+// A server refusal in the reader's language: the plain English through the ONE Arabic map (15c
+// adsStudioRefusalText); an Arabic reader never gets raw English, and a failure with no server words
+// (a lost connection) gets the fallback pair.
 function socialErrorDetail(error, fallbackEn, fallbackAr) {
-  const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || '');
-  return String(detail || socialText(fallbackEn, fallbackAr));
+  const detail = error?.payload?.detail;
+  const text = detail ? String(adsStudioRefusalText(detail) || '').trim() : '';
+  if (!text || (adsStudioIsAr() && !/[؀-ۿ]/.test(text))) return socialText(fallbackEn, fallbackAr);
+  return text;
+}
+
+// A failed post's problem in plain words, by the server's errorClass (social_studio.POST_ERROR_CLASSES);
+// Meta's raw lastError stays in a details line. Same five pairs as 15o STUDIO_PG_POST_ERRORS (checked).
+const SOCIAL_POST_ERROR_TEXTS = Object.freeze({
+  authorization: ["Publishing is paused: the account's Social Studio access or Albayan's Meta connection needs attention.", 'النشر متوقف: يحتاج اشتراك الحساب في استوديو التواصل أو ربط البيان مع ميتا إلى مراجعة.'],
+  rate_limited: ['Meta asked Albayan to wait; publish it again a little later.', 'طلبت ميتا من البيان الانتظار؛ انشره مرة أخرى بعد قليل.'],
+  temporary: ['Meta did not answer in time; the post may have gone out. Check the page before retrying.', 'لم تجب ميتا في الوقت المحدد؛ ربما نُشر المنشور. تحقق من الصفحة قبل إعادة المحاولة.'],
+  invalid: ['This post or one of its pages needs a fix before it can be published.', 'يحتاج هذا المنشور أو إحدى صفحاته إلى تعديل قبل نشره.'],
+  unknown: ['This post could not be published; the team can see why.', 'تعذّر نشر هذا المنشور؛ يمكن للفريق معرفة السبب.']
+});
+
+function socialPostErrorText(errorClass) {
+  const key = String(errorClass || '');
+  const pair = SOCIAL_POST_ERROR_TEXTS[Object.prototype.hasOwnProperty.call(SOCIAL_POST_ERROR_TEXTS, key) ? key : 'unknown'];
+  return socialText(pair[0], pair[1]);
+}
+
+// The class text, then Meta's own words (English, left to right) folded in a details line.
+function socialPostErrorHtml(po) {
+  const raw = String(po?.lastError || '');
+  return `<span data-social-post-error="${socialEsc(String(po?.errorClass || ''))}">${socialEsc(socialPostErrorText(po?.errorClass))}</span>${raw ? `<details class="mt-1"><summary class="cursor-pointer">${socialText('Details from Meta', 'التفاصيل من ميتا')}</summary><span dir="ltr">${socialEsc(raw)}</span></details>` : ''}`;
 }
 
 function resetSocialStudioState() {
@@ -505,8 +532,8 @@ function renderSocialPostCard(po) {
             ${po.autoReplyRuleId ? socialPill(socialText('Auto-reply', 'رد تلقائي'), 'blue') : ''}
             ${socialPill(meta.label, meta.tone)}
           </div>
-          ${status === 'failed' && po.lastError ? `<div class="mt-2 rounded-lg bg-rose-50 dark:bg-rose-900/20 p-2 text-[11px] text-rose-700 dark:text-rose-300">${socialEsc(po.lastError)}</div>` : ''}
-          ${status === 'scheduled' && po.lastError ? `<div class="mt-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 p-2 text-[11px] text-amber-700 dark:text-amber-300">${socialText('Retrying automatically', 'إعادة المحاولة تلقائياً')} · ${socialEsc(po.lastError)}</div>` : ''}
+          ${status === 'failed' && po.lastError ? `<div class="mt-2 rounded-lg bg-rose-50 dark:bg-rose-900/20 p-2 text-[11px] text-rose-700 dark:text-rose-300">${socialPostErrorHtml(po)}</div>` : ''}
+          ${status === 'scheduled' && po.lastError ? `<div class="mt-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 p-2 text-[11px] text-amber-700 dark:text-amber-300">${socialText('Retrying automatically', 'إعادة المحاولة تلقائياً')}<details class="mt-1"><summary class="cursor-pointer">${socialText('Details from Meta', 'التفاصيل من ميتا')}</summary><span dir="ltr">${socialEsc(po.lastError)}</span></details></div>` : ''}
           ${status === 'published' && okResults.length ? `<div class="mt-2 flex flex-wrap gap-2">${okResults.map(r => { const pg = socialPageById(r.pageId); return String(pg?.platform) === 'ig' ? '' : `<a href="https://www.facebook.com/${encodeURIComponent(String(r.metaPostId))}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-bold text-blue-600 underline">${socialText('View on Facebook', 'عرض على فيسبوك')}${pg ? ` · ${socialEsc(pg.name)}` : ''}</a>`; }).join('')}</div>` : ''}
         </div>
       </div>
@@ -545,6 +572,13 @@ async function socialEditPost(postId) {
     full = socialUnwrap(res, 'post') || summary;
   } catch (_) { mediaUnknown = true; /* Same-session network failure may use the lightweight summary. */ }
   if (!isCurrent()) return;
+  if (mediaUnknown && Number(summary.mediaCount) !== 0) {
+    // The summary has no photos: an editor opened from it would save the ones added over the stored
+    // ones (the Ads builder refuses the same way). Only a post with no photos opens from the summary.
+    showNotification(socialText('Could not open the post', 'تعذر فتح المنشور'),
+      socialText('Its photos could not be loaded. They are safe; check the connection and try again.', 'تعذر تحميل صوره. صوره محفوظة؛ تحقق من الاتصال ثم حاول مرة أخرى.'), 'warning');
+    return;
+  }
   const scheduled = String(full.status) === 'scheduled' && full.scheduledAt;
   _social.composer = {
     id: String(full.id),
@@ -825,7 +859,7 @@ function renderSocialPostDone() {
       <span class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full ${failed ? 'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-300' : 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300'}"><i data-lucide="${failed ? 'alert-triangle' : 'check'}" class="w-8 h-8"></i></span>
       <h2 class="text-2xl font-extrabold text-slate-900 dark:text-white">${title}</h2>
       <p class="mt-1 text-sm text-slate-500">${socialEsc((done.pageNames || []).join(', '))}</p>
-      ${failed && post.lastError ? `<p class="mt-3 rounded-xl bg-rose-50 dark:bg-rose-900/20 p-3 text-xs text-rose-700 dark:text-rose-300 text-start">${socialEsc(post.lastError)}</p>` : ''}
+      ${failed && post.lastError ? `<div class="mt-3 rounded-xl bg-rose-50 dark:bg-rose-900/20 p-3 text-xs text-rose-700 dark:text-rose-300 text-start">${socialPostErrorHtml(post)}</div>` : ''}
       <div class="mt-5 rounded-2xl border border-slate-200 dark:border-slate-700 divide-y divide-slate-200 dark:divide-slate-700 text-sm text-start">
         <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${socialText('When', 'التوقيت')}</span><span class="font-bold text-slate-900 dark:text-white">${status === 'scheduled' ? socialEsc(socialFormatWhen(post.scheduledAt)) : status === 'published' ? socialText('Now', 'الآن') : '—'}</span></div>
         <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${socialText('Auto-reply', 'رد تلقائي')}</span><span class="font-bold text-slate-900 dark:text-white">${done.ruleName ? socialEsc(done.ruleName) : socialText('Off', 'متوقف')}</span></div>
@@ -847,7 +881,7 @@ async function socialPublishPost(postId) {
     const res = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(postId)}/publish`, { method: 'POST', body: {} }, { timeoutMs: 120000 /* a multi-page publish under Meta pacing takes longer than 20 s */ }), 'post') || {};
     if (!socialStudioContextIsCurrent(context)) return;
     const failed = String(res.status) === 'failed';
-    showNotification(failed ? socialText('Publishing failed', 'فشل النشر') : socialText('Post published', 'تم نشر المنشور'), failed ? String(res.lastError || '') : '', failed ? 'error' : 'success');
+    showNotification(failed ? socialText('Publishing failed', 'فشل النشر') : socialText('Post published', 'تم نشر المنشور'), failed ? socialPostErrorText(res.errorClass) : '', failed ? 'error' : 'success');
     socialRefreshNow();
   } catch (e) {
     if (!socialStudioContextIsCurrent(context)) return;

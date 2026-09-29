@@ -2082,9 +2082,9 @@ async function apiReviewAdCampaignRequest(campaignId, expectedLastModified, deci
   return entity;
 }
 
-async function apiStopAdCampaignRequest(campaignId, expectedLastModified, operationId, reason, refundMinorUSD) {
+async function apiStopAdCampaignRequest(campaignId, expectedLastModified, operationId, reason, refundMinorUSD, closeReason) {
   const identity = getServerSessionIdentity();
-  const body = { expectedLastModified, operationId, reason: reason || null };
+  const body = { expectedLastModified, operationId, reason: reason || null, closeReason };
   // Absent = server decides (owner: full refund). Staff sends an explicit amount.
   if (refundMinorUSD !== undefined && refundMinorUSD !== null) body.refundMinorUSD = Number(refundMinorUSD);
   const entity = await requestValidatedServerEntity('adCampaignRequests', 'stop', () =>
