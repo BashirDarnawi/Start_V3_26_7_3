@@ -216,6 +216,7 @@ def apply_coverage_settlement_truth(
     old: dict[str, Any], merged: dict[str, Any], *,
     due_total: Callable[[dict[str, Any]], int],
     delivery_truth_allowed: bool | None = None,
+    old_rows_minor: int | None = None,
 ) -> None:
     """Keep amountUSD = CUSTOMER cash across settle/unsettle of a covered receipt.
 
@@ -224,6 +225,10 @@ def apply_coverage_settlement_truth(
     gross amount on settle, so customer 'Paid' totals inflated by exactly the
     covered dollars. The delivery completion truth already writes collected
     cash itself, so this only acts when that path did not run.
+
+    ``old_rows_minor`` is the ads credit the STORED payment rows back (main.py's
+    _receipt_payments_credit_minor of old["payments"]; None = no usable rows).
+    It tells a re-save of net-cash rows from one of gross-prefilled rows.
     """
     covered_minor = (
         _financial_minor(old.get("companyCoveredUSD"), "stored companyCoveredUSD")
@@ -275,6 +280,12 @@ def apply_coverage_settlement_truth(
         # next to companyCoveredUSD counted the company share twice as free
         # customer credit. Net it exactly like the settle branch below.
         old_minor = _financial_minor(old.get("amountUSD"), "stored receipt amount")
+        if old_rows_minor is not None and abs(old_rows_minor - old_minor) <= 1:
+            # The stored rows are the customer's NET cash (settled with net
+            # rows), so a total re-derived from them is cash too: a top-up is
+            # real money, and main.py's raise guard caps it at the rows.
+            # Netting it stripped the company share from the customer again.
+            return
         if not _reads_as_gross(amount_minor, old_minor + covered_minor, old_minor):
             return
         new_amount_minor = max(amount_minor - covered_minor, 0)
