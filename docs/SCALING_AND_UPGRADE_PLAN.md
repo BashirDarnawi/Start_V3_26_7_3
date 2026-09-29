@@ -15,8 +15,25 @@ Nothing here is built yet: each step is a proposal for the owner to approve.
 | Rate limits | In memory (Redis supported through `REDIS_URL` but not set) | Lost on restart; not shared between containers |
 | Sessions | In the database (good: already works with several containers) | — |
 | Browser app | Downloads every collection the user may see into IndexedDB, then syncs changes (offline-first) | First load and phone storage grow with the business; big tenants will feel it |
-| Code size | `server/main.py` 13.7k lines (cap 14.2k); startup bundle `script.js` has ~350 bytes of budget left | Every new Manager feature must first move code out |
-| Releases | Built and pushed from the owner's laptop (`npm run release:image:push`), Redeploy clicked by hand | Depends on one machine; no staging environment |
+| Code size | `server/main.py` 13.8k lines (cap 14.2k); startup bundle `script.js` has ~21 KB of budget left after the Meta dialogs moved to the lazy `meta-tools.js` (it had ~0.4 KB) | Every new Manager feature still eats the same small budget; `studio.js` is at 1,026 KB of its 1 MiB cap |
+| Locks | Several guards are process-local (`_SQLITE_WALLET_LOCK`, the Social Studio comment lock, the in-memory limiter) next to PostgreSQL row/advisory locks | Correct for one process only |
+| Releases | Built and pushed from the owner's laptop (`npm run release:image:push`, ~35 min: ~2,500 backend tests, 176 browser journeys, PostgreSQL races), Redeploy clicked by hand | Depends on one machine; the browser journeys flake when the laptop is overloaded; no staging environment |
+
+## What the 2026-09-29 review loop measured
+
+The speed reviewer and the fix batches found and fixed these hot spots (details in
+[REVIEW_LOOP_2026-09-29.md](REVIEW_LOOP_2026-09-29.md)):
+
+- The Meta worker loaded and parsed every Manager ad (photos included) to check one link, several times a minute: now an indexed SQL lookup (`idx_ads_meta_ad_id`) and JSON parsed once per row.
+- A closed-month ad was re-fetched from Meta every 20 seconds forever: now parked.
+- Social Studio parsed every post with its photos on every scheduler tick and every comment: now SQL projections; posts have a per-owner storage cap.
+- Driver phones' sync check parsed every ad and receipt with photos once a minute: now reads live rows through the partial indexes.
+- "Check Data Integrity" loaded every row into memory at once: now streamed.
+
+Still open (they are the reason for Step 1 below): Clothes product photos travel
+inside every list and sync answer; the once-per-person reply check still reads
+the owner's whole reply log inside one process-wide lock; every browser still
+downloads every collection it may see.
 
 ## Step 0 — this week, no code (settings only)
 
@@ -31,20 +48,22 @@ Nothing here is built yet: each step is a proposal for the owner to approve.
 1. **Move photos and videos out of the database** into object storage (S3-compatible: Libyan Spider object storage, Cloudflare R2 or AWS S3). Store only the file key in the JSON. Effect: rows shrink from hundreds of KB to a few hundred bytes, sync and backups become many times faster, the database stops growing with every picture. Serve through short-lived signed URLs (already used for media today).
 2. **Turn `data_json` into a real `JSONB` column** (one additive migration: new column, backfill in batches, switch reads, drop the text column later). PostgreSQL then stops parsing JSON text on every query and can use GIN / expression indexes directly.
 3. **Finish the module split (decision D36):** CL-01 (Clothes out of `main.py` into `server/systems/clothes/`), then the Manager core into `server/systems/manager/`. `main.py` becomes a thin app that mounts routers. This is what makes safe changes possible again; today every Manager change fights the 14,200-line cap.
-4. **Lazy-load more of the startup bundle** (forms/modals and import/export into their own bundles, like `admin-tools.js`). Frees budget and makes the first screen faster on phones.
-5. **Measure before tuning:** turn on `pg_stat_statements` and the slow-query log (for example over 500 ms), and add an error tracker (a self-hosted GlitchTip/Sentry) so real slow paths and errors are seen, not guessed.
+4. **Lazy-load more of the startup bundle** (forms/modals and import/export into their own bundles, like `admin-tools.js` and the new `meta-tools.js`). Frees budget and makes the first screen faster on phones. Split `studio.js` the same way before it reaches its 1 MiB cap.
+5. **Clothes photos out of the lists**: send a photo count in lists and sync, load the full photo by id when a product is opened (the same pattern ads already use). Plan it as its own change with a test that a save can never erase a stored photo.
+6. **Measure before tuning:** turn on `pg_stat_statements` and the slow-query log (for example over 500 ms), and add an error tracker (a self-hosted GlitchTip/Sentry) so real slow paths and errors are seen, not guessed.
 
 ## Step 2 — when one server is not enough (run two or more containers)
 
 Do these in this order; skipping the first one would double every background action.
 
-1. **One leader for background work.** Either
+1. **Replace process-local locks** (`_SQLITE_WALLET_LOCK`, the Social Studio comment lock) with PostgreSQL row/advisory locks or Redis locks. On one process they are correct; on two they protect nothing.
+2. **One leader for background work.** Either
    - a PostgreSQL advisory-lock lease per loop (`pg_try_advisory_lock`) so only one container runs the Meta sync, Social Studio scheduler, studio jobs, backups and alert sender, or
    - better: a separate **worker container** from the same image with a switch such as `ALBAYAN_ROLE=worker` (web containers set `ALBAYAN_ROLE=web` and start no threads).
    The ledger idempotency keys already stop double money moves, but double Meta calls and double alerts would still happen without this.
-2. **Redis for rate limits and short caches** (`REDIS_URL` is already supported by `server/rate_limiter.py`).
-3. **Two web containers behind the Jelastic load balancer**, health check `/api/health/live`, readiness `/api/health/ready`. Redeploys become zero-downtime (one container at a time).
-4. **PgBouncer** (transaction pooling) in front of PostgreSQL once there are several containers, so connections stay few and cheap.
+3. **Redis for rate limits and short caches** (`REDIS_URL` is already supported by `server/rate_limiter.py`).
+4. **Two web containers behind the Jelastic load balancer**, health check `/api/health/live`, readiness `/api/health/ready`. Redeploys become zero-downtime (one container at a time).
+5. **PgBouncer** (transaction pooling) in front of PostgreSQL once there are several containers, so connections stay few and cheap.
 
 ## Step 3 — growth (thousands of customers, years of data)
 
