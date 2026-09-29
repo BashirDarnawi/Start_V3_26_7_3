@@ -6393,13 +6393,20 @@ function _receiptCustomerOutstandingUSD(r) {
   return Math.max(0, ceiling - covered);
 }
 
+// The whole trail, not the viewer's page; null after an error toast, so a failed page never downloads a partial file.
+async function loadAuditLogsForExport() {
+  try { return isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs(); }
+  catch (error) { showNotification(state.language === 'ar' ? 'تعذر تحميل السجلات' : 'Could not load the logs', String(error?.message || error), 'error'); return null; }
+}
+
 async function exportAuditLogs(format) {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
     return;
   }
   // Scoped: a viewOwn-only user exports only their own entries.
-  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
+  const allLogs = await loadAuditLogsForExport();
+  if (!allLogs) return;
 
   let downloaded = false;
   if (format === 'csv') {
@@ -6435,8 +6442,6 @@ async function exportAuditLogs(format) {
     downloaded = downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   }
 
-  // Only claim success when the download actually started (downloadFile
-  // refuses inside FB/IG in-app browsers and shows its own warning).
   if (!downloaded) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
@@ -6467,14 +6472,14 @@ function downloadFile(content, filename, mimeType) {
   return true;
 }
 
-// Backup all audit logs for permanent storage
 async function backupAuditLogs() {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
     return;
   }
   // A backup is a full export — scope it exactly like the export above.
-  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
+  const allLogs = await loadAuditLogsForExport();
+  if (!allLogs) return;
 
   const backup = {
     version: '1.0',
@@ -6485,11 +6490,8 @@ async function backupAuditLogs() {
   };
   
   const json = JSON.stringify(backup, null, 2);
-  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
-  // don't log or toast a "backup complete" that never happened.
   if (!downloadFile(json, `audit-logs-backup-${new Date().toISOString().split('T')[0]}.json`, 'application/json')) return;
 
-  // Add backup log entry
   addAuditLog('backup', 'system', `Backed up ${allLogs.length} audit logs`, { backupSize: json.length });
 
   showNotification(state.language === 'ar' ? 'اكتمل النسخ الاحتياطي' : 'Backup Complete', state.language === 'ar' ? `تم نسخ ${allLogs.length} سجل احتياطياً بنجاح` : `${allLogs.length} logs backed up successfully`, 'success');

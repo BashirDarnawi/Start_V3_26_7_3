@@ -582,11 +582,20 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         return max(0.0, ceiling - covered)
     # Money the company already absorbed is not "still unpaid" (the receipt keeps its Not Paid status by design).
     unpaid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "not_paid" and _customer_outstanding(row) > 0.005]
+    # A Meta ad that is not stopped or completed keeps spending: once its month is closed every
+    # sync write is refused (423, parked for 30 days) and staff cannot finish it until an unlock.
+    running_ads = [
+        row for row in ads
+        if str(row.get("metaAdId") or "").strip()
+        and str(row.get("status") or "").strip().lower() not in _TERMINAL_AD_STATUSES
+    ]
     blockers = []
     if setup_ads:
         blockers.append({"code": "ads_need_setup", "count": len(setup_ads), "message": "Ads still need customer, amount, or payment setup"})
     if unpaid_receipts:
         blockers.append({"code": "unpaid_receipts", "count": len(unpaid_receipts), "message": "Receipts are still unpaid"})
+    if running_ads:
+        blockers.append({"code": "ads_still_running", "count": len(running_ads), "message": "Meta ads from this month are still running (not stopped or completed)"})
     return {
         "period": period,
         "generatedAt": now_ms(),
@@ -596,6 +605,7 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
             "unpaidReceipts": len(unpaid_receipts),
             "ads": len(ads),
             "adsNeedingSetup": len(setup_ads),
+            "adsStillRunning": len(running_ads),
             "dollarPurchases": len(purchases),
         },
         "totals": {
@@ -652,6 +662,43 @@ def _save_close_record(period: str, data: dict[str, Any], user_id: str, conn: An
     else:
         save(conn)
     return clean
+
+
+def _wake_parked_meta_ads(conn: Any, period: str) -> int:
+    """Let an unlocked month's Meta ads sync again now.
+
+    While the month was closed the sync worker parked them for 30 days
+    (meta_ads._defer_meta_sync_quietly); without this they stayed silent for
+    weeks after the unlock. Like the park, only the scheduling stamp changes:
+    no version bump, so delta sync does not see an edit.
+    """
+    current = now_ms()
+    projection = _inline_media_sql_projection("ads", str(conn.engine.dialect.name or ""))
+    data_expression = projection[0] if projection else "data_json"
+    rows = conn.execute(
+        text(f"SELECT id, {data_expression} AS data_json FROM entities WHERE type='ads' AND deleted=false")
+    ).mappings().all()
+    woken = 0
+    for row in rows:
+        lean = json_loads(row.get("data_json") or "{}") or {}
+        if not isinstance(lean, dict) or not str(lean.get("metaAdId") or "").strip():
+            continue
+        next_sync = _numeric_or_none(lean.get("metaNextSyncAt"))
+        if next_sync is None or next_sync <= current + 86_400_000 or _period_for_record("ads", lean) != period:
+            continue
+        full = conn.execute(
+            text("SELECT data_json, last_modified FROM entities WHERE type='ads' AND id=:id AND deleted=false"),
+            {"id": row["id"]},
+        ).mappings().first()
+        data = json_loads((full or {}).get("data_json") or "{}") or {}
+        if not full or not isinstance(data, dict):
+            continue
+        data["metaNextSyncAt"] = current
+        woken += conn.execute(
+            text("UPDATE entities SET data_json=:data WHERE type='ads' AND id=:id AND last_modified=:baseline"),
+            {"data": json_dumps(data), "id": row["id"], "baseline": int(full["last_modified"])},
+        ).rowcount or 0
+    return woken
 
 
 def _backup_temp_path(target: Path) -> Path:
@@ -966,10 +1013,17 @@ def _cleanup_old_backups(directory: Path, retention_days: int) -> None:
             continue
 
 
+class BackupAlreadyRunning(RuntimeError):
+    """Another backup holds the lease: busy, not failed."""
+
+
+_BACKUP_BUSY_TEXT = "A backup is already running; it will appear under Last backup when it finishes"
+
+
 @contextmanager
 def _backup_lease():
     if not _backup_process_lock.acquire(blocking=False):
-        raise RuntimeError("A backup is already running in this application process")
+        raise BackupAlreadyRunning("A backup is already running in this application process")
     try:
         if str(get_engine().dialect.name or "") == "postgresql":
             lock_key = _financial_period_lock_key("backup-v1")
@@ -979,7 +1033,7 @@ def _backup_lease():
                     {"lock_key": lock_key},
                 ).scalar()
                 if not acquired:
-                    raise RuntimeError("A backup is already running on another application worker")
+                    raise BackupAlreadyRunning("A backup is already running on another application worker")
                 yield
         else:
             yield
@@ -1157,6 +1211,8 @@ def _public_status() -> dict[str, Any]:
         setup_tasks.append("Add a permanent backup encryption key")
     if not config["offsiteConfigured"]:
         setup_tasks.append("Connect private S3-compatible off-site storage")
+    elif runtime.get("lastOffsiteError"):  # configured is not working: the last upload failed
+        setup_tasks.append("Off-site backup copy is failing - check the S3 bucket, keys and region")
     if not config["alertingConfigured"]:
         setup_tasks.append("Connect an operations alert webhook")
     return {
@@ -1205,14 +1261,20 @@ def create_operations_router(
     @router.post("/backups/run")
     def run_backup(request: Request, user: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
         require_same_origin(request)
+        if _backup_process_lock.locked():  # busy, not failed, and it costs none of the hourly attempts
+            raise HTTPException(status_code=409, detail=_BACKUP_BUSY_TEXT)
         from .rate_limiter import check_rate_limit
         _ok, _left, _retry_ms = check_rate_limit(f"backup-run:{str(user.get('id') or '')}", max_attempts=6, window_ms=60 * 60 * 1000)
         if not _ok:  # every call runs a full dump
             raise HTTPException(status_code=429, detail="Too many manual backups this hour", headers={"Retry-After": str(max(1, int((_retry_ms or 0) / 1000)))})
         try:
             result = create_encrypted_backup()
+        except BackupAlreadyRunning:  # lost the race, or another worker's dump holds the database lease
+            raise HTTPException(status_code=409, detail=_BACKUP_BUSY_TEXT)
         except Exception as exc:
-            print(f"[albayan] Manual backup failed: {safe_exception_text(exc, 500)}")  # the detail (host names) stays in the log
+            print(f"[albayan] Manual backup failed: {safe_exception_text(exc, 500)}")  # the detail (host names) stays out of this response
+            with _state_lock:  # the admin-only status card keeps it after the toast is gone, as for the worker's failures
+                _status["lastBackupError"] = safe_exception_text(exc, 500)
             raise HTTPException(status_code=503, detail="Backup failed; check the operations log")
         audit_fn(str(user.get("id") or ""), "backup", "operations", result["file"], "Created encrypted database backup", {"offsite": result["offsite"], "bytes": result["bytes"]})
         return {"ok": True, "backup": result, "status": _public_status()}
@@ -1265,7 +1327,7 @@ def create_operations_router(
             }, str(user.get("id") or ""), conn=conn)
         audit_fn(str(user.get("id") or ""), "close", FINANCIAL_CLOSE_COLLECTION, saved["id"], f"Closed financial period {period}",
                  {"blockers": snapshot["blockers"], "forced": bool(force_reason),
-                  "totals": {k: snapshot.get(k) for k in ("receiptVolumeUSD", "paidReceiptsUSD", "adSalesUSD", "adSpendUSD")}})
+                  "totals": {k: (snapshot.get("totals") or {}).get(k) for k in ("receiptVolumeUSD", "paidReceiptsUSD", "adSalesUSD", "adSpendUSD")}})
         return saved
 
     @router.post("/financial-periods/{period}/unlock")
@@ -1297,7 +1359,8 @@ def create_operations_router(
                 "unlockReason": reason,
                 "history": history[-50:],
             }, str(user.get("id") or ""), conn=conn)
-        audit_fn(str(user.get("id") or ""), "unlock", FINANCIAL_CLOSE_COLLECTION, saved["id"], f"Unlocked financial period {period}", {"reason": reason})
+            woken = _wake_parked_meta_ads(conn, period)
+        audit_fn(str(user.get("id") or ""), "unlock", FINANCIAL_CLOSE_COLLECTION, saved["id"], f"Unlocked financial period {period}", {"reason": reason, "metaAdsResynced": woken})
         return saved
 
     return router

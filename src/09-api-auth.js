@@ -744,17 +744,20 @@ function _auditCategoryFor(resourceType) {
   return t === 'auth' ? 'auth' : (_AUDIT_FINANCIAL_TYPES.has(t) ? 'financial' : (t ? 'data' : 'general'));
 }
 async function apiListAllAuditLogs(pageSize = 1000, maxPages = 1000) {  // 1M rows: above the 500k retention cap
-  // The viewer shows the newest 500; an export or backup pages the whole trail.
+  // The viewer shows the newest 500; an export or backup pages the whole trail
+  // after the last row's (ts, id): rows written meanwhile never repeat or skip one.
   const all = [];
-  for (let page = 0; page < maxPages; page++) {
-    const rows = await apiListAuditLogs(pageSize, page * pageSize);
+  for (let page = 0, after = ''; page < maxPages; page++) {
+    const rows = await apiListAuditLogs(pageSize, 0, after);
     all.push(...rows);
     if (rows.length < pageSize) break;
+    const last = rows[rows.length - 1];
+    after = `&before_ts=${Date.parse(last.date)}&before_id=${encodeURIComponent(last.id)}`;
   }
   return all;
 }
-async function apiListAuditLogs(limit = 500, offset = 0) {
-  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`, { method: 'GET' }, { timeoutMs: 15000 });
+async function apiListAuditLogs(limit = 500, offset = 0, after = '') {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}${after}`, { method: 'GET' }, { timeoutMs: 15000 });
   if (!Array.isArray(rows)) return [];
   return rows.map((r) => {
     const uid = String(r.user_id || '');
@@ -1504,8 +1507,7 @@ async function apiUnsettleReceipt(payload) {
   if (!body.idempotencyKey) throw new Error('Receipt conversion idempotency key is required');
 
   const identity = getServerSessionIdentity();
-  // A stable body/idempotency key makes a response-loss retry safe: the server
-  // replays the committed result instead of moving the same funding twice.
+  // Replay-safe retry, as in apiSettleReceipt.
   const response = await withRetry(() => apiJson(
     `/api/receipts/${encodeURIComponent(receiptId)}/unsettle?include_media=false`,
     { method: 'POST', body },

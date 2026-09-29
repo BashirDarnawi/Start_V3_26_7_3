@@ -33,6 +33,8 @@ def create_audit_router(
     def list_audit(
         limit: int = 200,
         offset: int = 0,
+        before_ts: int | None = None,
+        before_id: str | None = None,
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
         # auditLogs.view => full log; auditLogs.viewOwn => only own activity.
@@ -45,25 +47,24 @@ def create_audit_router(
         limit = max(1, min(int(limit), 1000))
         offset = max(0, min(int(offset), 10_000_000))  # a huge OFFSET overflows the database's bigint (500)
 
+        # Newest first, id breaks ts ties. An export pages with the previous
+        # page's last (ts, id) instead of OFFSET: rows written or deleted
+        # meanwhile can no longer repeat or skip entries between pages.
+        where: list[str] = []
+        params: dict[str, Any] = {"limit": limit}
+        if not can_view_all:
+            where.append("user_id = :uid")
+            params["uid"] = str(user.get("id") or "")
+        paging = ""
+        if before_ts is not None and before_id is not None:
+            where.append("(ts < :bts OR (ts = :bts AND id < :bid))")
+            params.update({"bts": max(0, min(int(before_ts), 2**62)), "bid": str(before_id)[:80]})
+        else:
+            paging = " OFFSET :offset"
+            params["offset"] = offset
+        sql = "SELECT * FROM audit_logs" + (f" WHERE {' AND '.join(where)}" if where else "")
         with db_conn() as conn:
-            if can_view_all:
-                rows = (
-                    conn.execute(
-                        text("SELECT * FROM audit_logs ORDER BY ts DESC LIMIT :limit OFFSET :offset"),
-                        {"limit": limit, "offset": offset},
-                    )
-                    .mappings()
-                    .all()
-                )
-            else:
-                rows = (
-                    conn.execute(
-                        text("SELECT * FROM audit_logs WHERE user_id = :uid ORDER BY ts DESC LIMIT :limit OFFSET :offset"),
-                        {"uid": str(user.get("id") or ""), "limit": limit, "offset": offset},
-                    )
-                    .mappings()
-                    .all()
-                )
+            rows = conn.execute(text(f"{sql} ORDER BY ts DESC, id DESC LIMIT :limit{paging}"), params).mappings().all()
             rows = [dict(r) for r in rows]
             for r in rows:
                 r["metadata"] = json_loads(r.get("metadata_json") or "{}") or {}

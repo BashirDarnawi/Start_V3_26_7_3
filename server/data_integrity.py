@@ -8,37 +8,33 @@ import math
 import unicodedata
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from sqlalchemy import text
 
 from .db import db_conn, json_loads, now_ms
+from .entity_projection import _inline_media_sql_projection
 
-
-def _digits(value: Any) -> str:
-    result: list[str] = []
-    for char in str(value or ""):
-        try:
-            result.append(str(unicodedata.digit(char)))
-        except (TypeError, ValueError):
-            continue
-    return "".join(result)
+# Live rows are read in bounded keyset pages with inline photos stripped by the
+# database, and only the fields the relationship checks read are kept: the
+# scan never holds every record (or a single base64 photo) in memory.
+_SCAN_PAGE_SIZE = 200
+_CHECKED_FIELDS: dict[str, tuple[str, ...]] = {
+    "customers": ("phone", "phoneNumber", "phones"),
+    "receipts": ("customerId", "serialNumber", "finalReceiptNo", "tempReceiptNo", "exchangeRate", "rate"),
+    "ads": (
+        "customerId", "receiptId", "mergedReceiptId", "dueReceiptId", "receiptAllocations",
+        "dueAllocations", "mergedPaidAllocations", "exchangeRate", "rate",
+    ),
+}
 
 
 def _phone_values(data: Mapping[str, Any]) -> set[str]:
-    raw: list[Any] = []
-    for field in ("phone", "phoneNumber"):
-        if data.get(field) is not None:
-            raw.append(data.get(field))
-    phones = data.get("phones")
-    if isinstance(phones, list):
-        for phone in phones:
-            if isinstance(phone, dict):
-                raw.append(phone.get("value") or phone.get("number") or phone.get("phone"))
-            else:
-                raw.append(phone)
-    normalized = {_digits(item) for item in raw}
-    return {item for item in normalized if len(item) >= 7}
+    # The server's own identity key: 0912345678 and +218 91 234 5678 are one
+    # customer here too, as for the create route and the merge tool.
+    from .main import _customer_phone_keys
+
+    return _customer_phone_keys(dict(data))
 
 
 def _receipt_numbers(data: Mapping[str, Any]) -> set[str]:
@@ -131,7 +127,9 @@ def scan_entity_rows(rows: Iterable[Mapping[str, Any]], issue_limit: int = 200) 
         if not isinstance(data, dict):
             issue("error", "invalid_shape", entity_type, entity_id, "Record data must be a JSON object")
             continue
-        records[entity_type][entity_id] = data
+        kept = _CHECKED_FIELDS.get(entity_type)
+        if kept is not None:
+            records[entity_type][entity_id] = {field: data[field] for field in kept if field in data}
         if _has_non_finite_number(data):
             issue("error", "non_finite_number", entity_type, entity_id, "Record contains NaN or an infinite number")
 
@@ -199,12 +197,47 @@ def scan_entity_rows(rows: Iterable[Mapping[str, Any]], issue_limit: int = 200) 
     }
 
 
-def scan_database(issue_limit: int = 200) -> dict[str, Any]:
+def _live_entity_rows(page_size: int = _SCAN_PAGE_SIZE) -> Iterator[dict[str, Any]]:
+    """Yield live rows type by type, one keyset page per short transaction.
+
+    A row the database cannot strip (text that is not valid JSON, or a NaN a
+    PostgreSQL jsonb cast refuses) fails its page; the scan then steps one
+    row at a time and reads only that row unstripped, so it is still reported
+    as invalid_json / non_finite_number instead of failing the whole scan.
+    """
     with db_conn() as conn:
-        rows = conn.execute(
-            text("SELECT type, id, data_json, deleted FROM entities")
-        ).mappings().all()
-    return scan_entity_rows(rows, issue_limit=issue_limit)
+        dialect = str(conn.engine.dialect.name or "")
+        types = sorted(str(row[0]) for row in conn.execute(text("SELECT DISTINCT type FROM entities WHERE deleted=false")))
+    for entity_type in types:
+        projection = _inline_media_sql_projection(entity_type, dialect)
+        stripped = projection[0] if projection else "data_json"
+        after_id, mode = "", "page"  # page -> one (stripped) -> raw after a failed read
+        while True:
+            expression = "data_json" if mode == "raw" else stripped
+            limit = page_size if mode == "page" else 1
+            try:
+                with db_conn() as conn:
+                    page = conn.execute(
+                        text(
+                            f"SELECT id, {expression} AS data_json FROM entities "
+                            "WHERE type=:type AND deleted=false AND id>:after_id ORDER BY id LIMIT :limit"
+                        ),
+                        {"type": entity_type, "after_id": after_id, "limit": limit},
+                    ).mappings().all()
+            except Exception:
+                if expression == "data_json":
+                    raise
+                mode = "one" if mode == "page" else "raw"
+                continue
+            for row in page:
+                yield {"type": entity_type, "id": row["id"], "data_json": row["data_json"], "deleted": False}
+            if not page or (mode == "page" and len(page) < limit):
+                break
+            after_id, mode = str(page[-1]["id"]), "page"
+
+
+def scan_database(issue_limit: int = 200) -> dict[str, Any]:
+    return scan_entity_rows(_live_entity_rows(), issue_limit=issue_limit)
 
 
 def main() -> int:

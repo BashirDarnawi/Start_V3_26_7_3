@@ -9772,17 +9772,20 @@ function _auditCategoryFor(resourceType) {
   return t === 'auth' ? 'auth' : (_AUDIT_FINANCIAL_TYPES.has(t) ? 'financial' : (t ? 'data' : 'general'));
 }
 async function apiListAllAuditLogs(pageSize = 1000, maxPages = 1000) {  // 1M rows: above the 500k retention cap
-  // The viewer shows the newest 500; an export or backup pages the whole trail.
+  // The viewer shows the newest 500; an export or backup pages the whole trail
+  // after the last row's (ts, id): rows written meanwhile never repeat or skip one.
   const all = [];
-  for (let page = 0; page < maxPages; page++) {
-    const rows = await apiListAuditLogs(pageSize, page * pageSize);
+  for (let page = 0, after = ''; page < maxPages; page++) {
+    const rows = await apiListAuditLogs(pageSize, 0, after);
     all.push(...rows);
     if (rows.length < pageSize) break;
+    const last = rows[rows.length - 1];
+    after = `&before_ts=${Date.parse(last.date)}&before_id=${encodeURIComponent(last.id)}`;
   }
   return all;
 }
-async function apiListAuditLogs(limit = 500, offset = 0) {
-  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`, { method: 'GET' }, { timeoutMs: 15000 });
+async function apiListAuditLogs(limit = 500, offset = 0, after = '') {
+  const rows = await apiJson(`/api/audit?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}${after}`, { method: 'GET' }, { timeoutMs: 15000 });
   if (!Array.isArray(rows)) return [];
   return rows.map((r) => {
     const uid = String(r.user_id || '');
@@ -10532,8 +10535,7 @@ async function apiUnsettleReceipt(payload) {
   if (!body.idempotencyKey) throw new Error('Receipt conversion idempotency key is required');
 
   const identity = getServerSessionIdentity();
-  // A stable body/idempotency key makes a response-loss retry safe: the server
-  // replays the committed result instead of moving the same funding twice.
+  // Replay-safe retry, as in apiSettleReceipt.
   const response = await withRetry(() => apiJson(
     `/api/receipts/${encodeURIComponent(receiptId)}/unsettle?include_media=false`,
     { method: 'POST', body },
@@ -21506,13 +21508,20 @@ function _receiptCustomerOutstandingUSD(r) {
   return Math.max(0, ceiling - covered);
 }
 
+// The whole trail, not the viewer's page; null after an error toast, so a failed page never downloads a partial file.
+async function loadAuditLogsForExport() {
+  try { return isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs(); }
+  catch (error) { showNotification(state.language === 'ar' ? 'تعذر تحميل السجلات' : 'Could not load the logs', String(error?.message || error), 'error'); return null; }
+}
+
 async function exportAuditLogs(format) {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
     return;
   }
   // Scoped: a viewOwn-only user exports only their own entries.
-  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
+  const allLogs = await loadAuditLogsForExport();
+  if (!allLogs) return;
 
   let downloaded = false;
   if (format === 'csv') {
@@ -21548,8 +21557,6 @@ async function exportAuditLogs(format) {
     downloaded = downloadFile(json, `audit-logs-${new Date().toISOString().split('T')[0]}.json`, 'application/json');
   }
 
-  // Only claim success when the download actually started (downloadFile
-  // refuses inside FB/IG in-app browsers and shows its own warning).
   if (!downloaded) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
@@ -21580,14 +21587,14 @@ function downloadFile(content, filename, mimeType) {
   return true;
 }
 
-// Backup all audit logs for permanent storage
 async function backupAuditLogs() {
   if (!can('auditLogs', 'export')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية تصدير السجلات' : 'Requires the Export Logs permission', 'error');
     return;
   }
   // A backup is a full export — scope it exactly like the export above.
-  const allLogs = isServerModeEnabled() ? await apiListAllAuditLogs() : getVisibleAuditLogs();  // the whole trail, not the viewer's page
+  const allLogs = await loadAuditLogsForExport();
+  if (!allLogs) return;
 
   const backup = {
     version: '1.0',
@@ -21598,11 +21605,8 @@ async function backupAuditLogs() {
   };
   
   const json = JSON.stringify(backup, null, 2);
-  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
-  // don't log or toast a "backup complete" that never happened.
   if (!downloadFile(json, `audit-logs-backup-${new Date().toISOString().split('T')[0]}.json`, 'application/json')) return;
 
-  // Add backup log entry
   addAuditLog('backup', 'system', `Backed up ${allLogs.length} audit logs`, { backupSize: json.length });
 
   showNotification(state.language === 'ar' ? 'اكتمل النسخ الاحتياطي' : 'Backup Complete', state.language === 'ar' ? `تم نسخ ${allLogs.length} سجل احتياطياً بنجاح` : `${allLogs.length} logs backed up successfully`, 'success');

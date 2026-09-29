@@ -68,7 +68,8 @@ def test_month_snapshot_uses_the_same_money_rules_as_the_analytics_screen(monkey
     assert totals["metaSpendUSD"] == totals["adSpendUSD"]
     assert counts["ads"] == 8                           # the legacy receipt row is not an ad
     blockers = {b["code"]: b["count"] for b in snapshot["blockers"]}
-    assert blockers == {"ads_need_setup": 1, "unpaid_receipts": 1}
+    # a5 and a8 are Active Meta ads (review loop r4 n=9); the Stopped Meta ad a2 is finished
+    assert blockers == {"ads_need_setup": 1, "unpaid_receipts": 1, "ads_still_running": 2}
 
 
 def test_record_date_uses_the_business_day_in_libya(monkeypatch):

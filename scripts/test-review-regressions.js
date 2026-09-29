@@ -537,6 +537,76 @@ async function main() {
     assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Employee', permissions: { customers: ['view'] } }), 'customers');
     assert.equal(sandbox.getAlbayanManagerLandingViewForUser({ role: 'Admin', permissions: {} }), 'control-center');
   });
+  // Review loop r4 batch OPS: the Control Center lives in the lazy admin-tools bundle.
+  const controlCenterFixture = () => {
+    const fixture = loadBrowserSource();
+    fixture.run(fs.readFileSync(path.join(__dirname, '..', 'src', '12b-control-center.js'), 'utf8'));
+    const notes = [];
+    fixture.sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+    fixture.sandbox.loadControlCenterStatus = async () => {};
+    fixture.run('_controlCenter.loadedAt = Date.now();');
+    // The harness's fake DOM has no innerHTML escaping; use a real escaper so the escaping assertions mean something.
+    fixture.run("Security.escapeHtml = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;')");
+    return { ...fixture, notes };
+  };
+  await test('Control Center: a debt the company covered in full is not an unpaid receipt (n=15)', async () => {
+    const { sandbox, state } = controlCenterFixture();
+    state.receipts = [
+      { id: 'covered', customerId: 'c1', status: 'Not Paid', isPaid: false, amountUSD: 50, debtAmountUSD: 50, companyCoveredUSD: 50, customerOutstandingUSD: 0 },
+      { id: 'owed', customerId: 'c1', status: 'Not Paid', isPaid: false, amountUSD: 20 },
+      { id: 'zero', customerId: 'c1', status: 'Not Paid', isPaid: false, amountUSD: 0 }  // no coverage fields: the status decides, as on the server
+    ];
+    const facts = sandbox.getControlCenterFacts();
+    assert.deepEqual(facts.unpaidReceipts.map(receipt => receipt.id), ['owed', 'zero']);
+    assert.equal(facts.attentionCount, 2);
+  });
+  await test('Control Center: a failing off-site copy, the rolling error rate and every closed month are shown (n=5, 11, 16, 13)', async () => {
+    const { sandbox, run } = controlCenterFixture();
+    run(`_controlCenter.operations = {
+      backup: { enabled: true, encryptionReady: true, offsiteConfigured: true, lastOffsiteError: '403 <b>InvalidAccessKeyId', lastOffsiteAt: 0, workerRunning: true },
+      monitoring: { total_requests: 2000000, error_rate: 0.0002, recent_error_rate: 0.3, recent_sample_size: 1000, response_ms_p95: 100 },
+      setupTasks: ['Off-site backup copy is failing - check the S3 bucket, keys and region'],
+      financialPeriods: ['2026-06', '2026-05', '2026-04', '2026-03', '2026-02', '2026-01'].map(period => ({ period, status: 'closed' }))
+    };`);
+    const html = sandbox.renderControlCenterView();
+    assert.ok(!html.includes('>Connected<') && html.includes('>Failing<'), 'a failed upload is not "Connected"');
+    assert.ok(html.includes('403 &lt;b&gt;InvalidAccessKeyId'), 'the upload error is shown, escaped');
+    assert.ok(!html.includes('>Configured<') && html.includes('>Setup needed<'), 'protection is not "Configured" without an off-site copy');
+    assert.ok(/text-rose-600">30\.0% errors/.test(html), 'the health tile uses the rolling window like the task');
+    assert.ok(html.includes("unlockControlCenterMonth('2026-01')"), 'the oldest closed month can be unlocked');
+    run('_controlCenter.operations.monitoring = { total_requests: 100, error_rate: 0.2, recent_error_rate: 0, recent_sample_size: 100 };');
+    assert.ok(/text-emerald-600">0\.0% errors/.test(sandbox.renderControlCenterView()), 'an old incident no longer paints the tile red');
+  });
+  await test('Control Center: Backup now warns when only the local copy was saved and reports a running backup as busy (n=5, 8)', async () => {
+    const { sandbox, notes } = controlCenterFixture();
+    sandbox.apiRunEncryptedBackup = async () => ({ ok: true, backup: { offsite: false, offsiteError: '403 InvalidAccessKeyId' } });
+    await sandbox.runControlCenterBackup();
+    assert.equal(notes[notes.length - 1].type, 'warning');
+    assert.ok(notes[notes.length - 1].message.includes('403 InvalidAccessKeyId'));
+    sandbox.apiRunEncryptedBackup = async () => { throw Object.assign(new Error('A backup is already running; it will appear under Last backup when it finishes'), { status: 409 }); };
+    await sandbox.runControlCenterBackup();
+    assert.equal(notes[notes.length - 1].type, 'info');
+    assert.ok(!notes.some(note => note.type === 'error' || note.type === 'success'), JSON.stringify(notes));
+  });
+  await test('audit export pages by the last row cursor and a failed page downloads nothing (n=7)', async () => {
+    const { sandbox } = loadBrowserSource();
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+    sandbox.isServerModeEnabled = () => true;
+    const page = (start, count) => Array.from({ length: count }, (_, i) => ({ id: `a${start + i}`, ts: 5000 - start - i, action: 'x', resource_type: 'auth', message: 'm' }));
+    const urls = [];
+    sandbox.apiJson = async url => { urls.push(url); return urls.length === 1 ? page(0, 1000) : page(1000, 3); };
+    assert.equal((await sandbox.apiListAllAuditLogs()).length, 1003);
+    assert.ok(urls[1].includes('&before_ts=4001&before_id=a999'), urls[1]);
+    let downloads = 0;
+    sandbox.downloadFile = () => { downloads += 1; return true; };
+    urls.length = 0;
+    sandbox.apiJson = async url => { urls.push(url); if (urls.length % 2 === 1) return page(0, 1000); throw new Error('Request timed out'); };
+    await sandbox.exportAuditLogs('csv');
+    await sandbox.backupAuditLogs();
+    assert.equal(downloads, 0, 'no partial file');
+    assert.equal(notes.filter(note => note.type === 'error' && /timed out/.test(note.message)).length, 2);
+  });
   await test('Meta Insights shows the money inside each ad account, escaped, with a failing account kept visible', async () => {
     const { sandbox, state, run } = loadBrowserSource();
     state.language = 'en';

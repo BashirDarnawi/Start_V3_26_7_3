@@ -630,6 +630,10 @@ function getControlCenterFacts() {
     // Canceled/Lost/Destroyed receipts are settled history, not money the
     // owner still needs to chase — they must not inflate the attention count.
     if (getReceiptPaymentState(receipt) !== 'not_paid') return false;
+    // Nor is a debt the company covered in full (it keeps Not Paid by design): the month
+    // close (operations.py _customer_outstanding) and the dashboard use the same rule.
+    // Without coverage fields the status alone decides, as on the server.
+    if ((receipt.companyCoveredUSD != null || receipt.customerOutstandingUSD != null) && typeof _receiptCustomerOutstandingUSD === 'function' && _receiptCustomerOutstandingUSD(receipt) <= 0.005) return false;
     return true;
   });
   const metaFailures = ads.filter(ad => { const code = String(ad.metaSyncErrorCode || ad.metaLastErrorCode || '').trim(); return code && !['pending_enrichment', 'insights_unavailable', 'duplicate_link'].includes(code); });  // informational states are not failures
@@ -755,10 +759,14 @@ async function runControlCenterBackup() {
   try {
     showNotification(ccText('Backup started', 'بدأ النسخ الاحتياطي'), ccText('Please keep this page open while the server creates the encrypted copy.', 'أبقِ هذه الصفحة مفتوحة بينما ينشئ الخادم النسخة المشفرة.'), 'info');
     const response = await apiRunEncryptedBackup();
-    showNotification(ccText('Backup complete', 'اكتمل النسخ الاحتياطي'), response?.backup?.offsite ? ccText('Encrypted backup saved locally and off-site.', 'حُفظت النسخة المشفرة محلياً وخارجياً.') : ccText('Encrypted backup saved.', 'حُفظت النسخة المشفرة.'), 'success');
+    // The server answers 200 when the local copy was saved but the off-site upload failed.
+    if (response?.backup?.offsiteError) showNotification(ccText('Saved on this server only', 'حُفظت على هذا الخادم فقط'), `${ccText('The off-site copy failed:', 'فشلت النسخة الخارجية:')} ${String(response.backup.offsiteError)}`, 'warning');
+    else showNotification(ccText('Backup complete', 'اكتمل النسخ الاحتياطي'), response?.backup?.offsite ? ccText('Encrypted backup saved locally and off-site.', 'حُفظت النسخة المشفرة محلياً وخارجياً.') : ccText('Encrypted backup saved.', 'حُفظت النسخة المشفرة.'), 'success');
     await loadControlCenterStatus(true);
   } catch (error) {
-    showNotification(ccText('Backup failed', 'فشل النسخ الاحتياطي'), String(error?.message || error), 'error');
+    // 409: a backup is already running (the daily one, or an earlier press) - busy, not failed.
+    if (error?.status === 409) showNotification(ccText('Backup already running', 'النسخ الاحتياطي يعمل الآن'), ccText('It will appear under Last backup when it finishes.', 'ستظهر تحت «آخر نسخة» عند انتهائه.'), 'info');
+    else showNotification(ccText('Backup failed', 'فشل النسخ الاحتياطي'), String(error?.message || error), 'error');
   }
 }
 
@@ -950,8 +958,13 @@ function renderControlCenterView() {
   const _recentRate = Number(monitoring.recent_error_rate ?? monitoring.error_rate ?? 0), _recentSample = Number(monitoring.recent_sample_size ?? monitoring.total_requests ?? 0);
   if (_recentRate >= 0.05 && _recentSample >= 50) systemTasks.push(renderControlCenterTask('server-crash', 'bg-rose-100 text-rose-700', 'Server errors need attention', `${(_recentRate * 100).toFixed(1)}% of recent requests failed. Check Jelastic logs.`));  // rolling window, not since-boot
   if (Number(monitoring.response_ms_p95 || 0) >= 3000 && Number(monitoring.total_requests || 0) >= 50) systemTasks.push(renderControlCenterTask('timer-off', 'bg-amber-100 text-amber-700', 'Server responses are slow', `The slowest normal requests take about ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms. Check database and container resources.`));
-  (operations.setupTasks || []).forEach(task => { const overdue = /overdue/i.test(String(task)); systemTasks.push(renderControlCenterTask(overdue ? 'alarm-clock' : 'shield-alert', overdue ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700', task, overdue ? 'The backup worker has not produced a file for two intervals. Check the operations log and the backup volume.' : 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.')); });
-  const backupConfigured = backup.enabled && backup.encryptionReady && backup.offsiteConfigured;
+  (operations.setupTasks || []).forEach(task => {
+    const overdue = /overdue/i.test(String(task)), failing = /failing/i.test(String(task));
+    systemTasks.push(renderControlCenterTask(overdue ? 'alarm-clock' : 'shield-alert', overdue || failing ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700', task, overdue ? 'The backup worker has not produced a file for two intervals. Check the operations log and the backup volume.' : failing ? 'Backups are saved on this server only until the upload works again. The error is shown under Encrypted backup.' : 'This protection needs one server setting in Jelastic. No secret is shown in Albayan.'));
+  });
+  // "Connected" only says the S3 settings exist; a failed last upload means no copy outside this server.
+  const offsiteFailed = !!(backup.offsiteConfigured && backup.lastOffsiteError);
+  const backupConfigured = backup.enabled && backup.encryptionReady && backup.offsiteConfigured && !offsiteFailed;
 
   return `
     <div class="management-workspace control-workspace" dir="${isAr ? 'rtl' : 'ltr'}">
@@ -975,8 +988,9 @@ function renderControlCenterView() {
       <aside class="management-protection-stack" aria-label="${text('Finance and protection', 'الأموال والحماية')}">
         <section class="management-card">
           <div class="management-section-heading"><span class="management-section-icon"><i data-lucide="archive-restore" class="h-5 w-5"></i></span><div><h2>${text('Encrypted backup', 'نسخة احتياطية مشفرة')}</h2><p>${text('Keep a recoverable copy of your work.', 'احتفظ بنسخة يمكن استعادة العمل منها.')}</p></div></div>
-          <dl class="management-facts"><div><dt>${text('Last backup', 'آخر نسخة')}</dt><dd>${Security.escapeHtml(controlCenterTimestamp(backup.lastBackupAt))}</dd></div><div><dt>${text('Off-site copy', 'النسخة الخارجية')}</dt><dd>${backup.offsiteConfigured ? text('Connected', 'متصلة') : text('Not connected', 'غير متصلة')}</dd></div></dl>
+          <dl class="management-facts"><div><dt>${text('Last backup', 'آخر نسخة')}</dt><dd>${Security.escapeHtml(controlCenterTimestamp(backup.lastBackupAt))}</dd></div><div><dt>${text('Off-site copy', 'النسخة الخارجية')}</dt><dd${offsiteFailed ? ' class="text-rose-600"' : ''}>${offsiteFailed ? text('Failing', 'متعطلة') : backup.offsiteConfigured ? text('Connected', 'متصلة') : text('Not connected', 'غير متصلة')}</dd></div>${backup.offsiteConfigured ? `<div><dt>${text('Last off-site copy', 'آخر نسخة خارجية')}</dt><dd>${Security.escapeHtml(controlCenterTimestamp(backup.lastOffsiteAt))}</dd></div>` : ''}</dl>
           ${backup.lastBackupError ? `<div class="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">${Security.escapeHtml(backup.lastBackupError)}</div>` : ''}
+          ${offsiteFailed ? `<div class="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700">${text('Off-site upload failed:', 'فشل رفع النسخة الخارجية:')} ${Security.escapeHtml(backup.lastOffsiteError)}</div>` : ''}
           <button type="button" onclick="runControlCenterBackup()" ${backup.enabled && backup.encryptionReady ? '' : 'disabled'} class="management-button is-primary management-full-button">${text('Create encrypted backup now', 'إنشاء نسخة مشفرة الآن')}</button>
         </section>
 
@@ -984,12 +998,12 @@ function renderControlCenterView() {
           <div class="management-section-heading"><span class="management-section-icon"><i data-lucide="lock-keyhole" class="h-5 w-5"></i></span><div><h2>${text('Monthly financial close', 'الإغلاق المالي الشهري')}</h2><p>${text('Review first, then protect the finished month from accidental edits.', 'راجع الشهر المنتهي ثم احمه من التعديلات غير المقصودة.')}</p></div></div>
           <label for="control-center-period" class="management-field-label">${text('Month', 'الشهر')}</label><input id="control-center-period" type="month" max="${controlCenterPreviousMonth()}" value="${Security.escapeHtml(_controlCenter.period)}" onchange="_controlCenter.period=this.value" class="management-input">
           <div class="management-button-row"><button type="button" onclick="previewControlCenterMonth()" class="management-button">${text('Check month', 'فحص الشهر')}</button><button type="button" onclick="closeControlCenterMonth()" class="management-button is-primary">${text('Close month', 'إغلاق الشهر')}</button></div>
-          <div class="management-closed-periods">${closedPeriods.slice(0, 4).map(row => `<div><span><strong>${Security.escapeHtml(row.period || '')}</strong> · ${text('Closed', 'مغلق')}</span><button type="button" onclick="unlockControlCenterMonth('${Security.escapeHtml(String(row.period || ''))}')" class="management-button is-warning">${text('Unlock', 'إعادة الفتح')}</button></div>`).join('') || `<p>${text('No months have been closed yet.', 'لم يُغلق أي شهر بعد.')}</p>`}</div>
+          <div class="management-closed-periods">${closedPeriods.map(row => `<div><span><strong>${Security.escapeHtml(row.period || '')}</strong> · ${text('Closed', 'مغلق')}</span><button type="button" onclick="unlockControlCenterMonth('${Security.escapeHtml(String(row.period || ''))}')" class="management-button is-warning">${text('Unlock', 'إعادة الفتح')}</button></div>`).join('') || `<p>${text('No months have been closed yet.', 'لم يُغلق أي شهر بعد.')}</p>`}</div>
         </section>
       </aside>
       </div>
 
-      <section class="management-card"><div class="management-section-heading"><span class="management-section-icon"><i data-lucide="network" class="h-5 w-5"></i></span><div><h2>${text('Live connections', 'الاتصالات المباشرة')}</h2><p>${text('Readiness of the services running behind your workspace.', 'جاهزية الخدمات التي تعمل خلف مساحة العمل.')}</p></div></div><div class="management-connection-grid"><div><span>${text('Meta read connection', 'اتصال قراءة ميتا')}</span><strong class="${meta.configured ? 'text-emerald-600' : 'text-amber-600'}">${meta.configured ? text('Ready', 'جاهز') : text('Needs setup', 'يحتاج إعداداً')}</strong></div><div><span>${text('Instant Meta webhook', 'إشعارات ميتا الفورية')}</span><strong class="${meta.webhookConfigured ? 'text-emerald-600' : 'text-amber-600'}">${meta.webhookConfigured ? text('Ready', 'جاهزة') : text('Polling fallback', 'الفحص الدوري')}</strong></div><div><span>${text('Backup worker', 'عامل النسخ الاحتياطي')}</span><strong class="${backup.workerRunning ? 'text-emerald-600' : 'text-amber-600'}">${backup.workerRunning ? text('Running', 'يعمل') : text('Not running', 'لا يعمل')}</strong></div><div><span>${text('Server health', 'حالة الخادم')}</span><strong class="${Number(monitoring.error_rate || 0) < 0.05 ? 'text-emerald-600' : 'text-rose-600'}">${Number(monitoring.total_requests || 0) ? `${(Number(monitoring.error_rate || 0) * 100).toFixed(1)}% ${text('errors', 'أخطاء')}` : text('Collecting data', 'جارٍ جمع البيانات')}</strong><small>P95 ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms</small></div></div>${systemTasks.length ? `<div class="management-system-tasks" role="list" aria-label="${text('Connection and protection tasks', 'مهام الاتصالات والحماية')}">${systemTasks.join('')}</div>` : ''}</section>
+      <section class="management-card"><div class="management-section-heading"><span class="management-section-icon"><i data-lucide="network" class="h-5 w-5"></i></span><div><h2>${text('Live connections', 'الاتصالات المباشرة')}</h2><p>${text('Readiness of the services running behind your workspace.', 'جاهزية الخدمات التي تعمل خلف مساحة العمل.')}</p></div></div><div class="management-connection-grid"><div><span>${text('Meta read connection', 'اتصال قراءة ميتا')}</span><strong class="${meta.configured ? 'text-emerald-600' : 'text-amber-600'}">${meta.configured ? text('Ready', 'جاهز') : text('Needs setup', 'يحتاج إعداداً')}</strong></div><div><span>${text('Instant Meta webhook', 'إشعارات ميتا الفورية')}</span><strong class="${meta.webhookConfigured ? 'text-emerald-600' : 'text-amber-600'}">${meta.webhookConfigured ? text('Ready', 'جاهزة') : text('Polling fallback', 'الفحص الدوري')}</strong></div><div><span>${text('Backup worker', 'عامل النسخ الاحتياطي')}</span><strong class="${backup.workerRunning ? 'text-emerald-600' : 'text-amber-600'}">${backup.workerRunning ? text('Running', 'يعمل') : text('Not running', 'لا يعمل')}</strong></div><div><span>${text('Server health', 'حالة الخادم')}</span><strong class="${_recentRate < 0.05 ? 'text-emerald-600' : 'text-rose-600'}">${_recentSample ? `${(_recentRate * 100).toFixed(1)}% ${text('errors', 'أخطاء')}` : text('Collecting data', 'جارٍ جمع البيانات')}</strong><small>P95 ${Math.round(Number(monitoring.response_ms_p95 || 0))} ms</small></div></div>${systemTasks.length ? `<div class="management-system-tasks" role="list" aria-label="${text('Connection and protection tasks', 'مهام الاتصالات والحماية')}">${systemTasks.join('')}</div>` : ''}</section>
 
       <div class="management-plan-workspace">${renderPlanManagerSection()}</div>
     </div>`;
