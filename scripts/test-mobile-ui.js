@@ -8090,6 +8090,25 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio Pages & replies (review loop r7 n7): the TikTok chip and ?tab=replies&section=tiktok open the TikTok section while the service is on (hidden, and the address falls back to Pages, while it is off); every typeof guard of a studio function names a defined function',
     !loadError && pagesTikTokCases.every(Boolean), pagesLoadError || `cases ${failed(pagesTikTokCases)}; view ${JSON.stringify(pgViewOn)} undefined guards ${undefinedGuards.join(', ')}`);
+
+  // Review loop r7 W fix: the TikTok service follows the rollout switch, not the Studio plan (the server gate is
+  // service_access()['tiktok'] and Help draws the section with no plan check). With the plan ended and the service on,
+  // the TikTok chip and ?tab=replies&section=tiktok draw the TikTok section, never "Your plan has ended"; Pages still does.
+  run(`_studioTikTok.forUser = '__none__'; studioTikTokScope(); __replies[${JSON.stringify(TIKTOK_PATH)}] = [];`);
+  reply(TIKTOK_PATH, { requests: [], nextCursor: null, openCount: 0, maxOpen: 3, service });
+  box.hasSubscription = () => false;
+  const pgCanUseEnded = run('studioPgCanUse()');
+  const pgChipsEnded = String(run("renderStudioPgSections({ section: 'pages', id: '' })"));
+  const pgBodyEnded = String(run("renderStudioPagesBody({ tab: 'replies', section: 'tiktok', id: '' })"));
+  const pgPagesEnded = String(run("renderStudioPagesBody({ tab: 'replies', section: 'pages', id: '' })"));
+  box.hasSubscription = id => id === 'ad_maker';
+  const pgPlanEndedCases = [
+    pgCanUseEnded === false && pgChipsEnded.includes('data-testid="studio-pg-section-tiktok"'),
+    pgBodyEnded.includes('data-testid="studio-pg" data-section="tiktok"') && pgBodyEnded.includes('data-testid="studio-tiktok"') && !pgBodyEnded.includes('studio-pg-plan-ended'),
+    pgPagesEnded.includes('data-testid="studio-pg-plan-ended"') && !pgPagesEnded.includes('data-testid="studio-tiktok"')
+  ];
+  check('Studio Pages & replies (review loop r7 W): with the plan ended and the TikTok service on, the TikTok chip opens the TikTok section (the plan does not gate it, as in Help and on the server), while Pages still says the plan has ended',
+    !loadError && !pagesLoadError && pgPlanEndedCases.every(Boolean), pagesLoadError || `cases ${failed(pgPlanEndedCases)}`);
 }
 
 {

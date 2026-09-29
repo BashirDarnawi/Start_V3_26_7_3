@@ -448,6 +448,8 @@ function renderStudioPagesBody(route) {
   let body = '';
   if (!studioPgServer()) {
     body = `<section class="studio-pg-card" data-testid="studio-pg-offline"><p class="studio-pg-note">${studioEsc(studioPgText('Pages and replies need the connection to Albayan. Sign in to the online workspace.', 'الصفحات والردود تحتاج الاتصال بالبيان. سجّل الدخول إلى مساحة العمل عبر الإنترنت.'))}</p></section>`;
+  } else if (view.section === 'tiktok') {
+    body = renderStudioTikTokSection();  // the rollout switch opens TikTok, not the plan (as in Help and on the server)
   } else if (!studioPgCanUse()) {
     // A renewed plan may not be in the device cache before the first load settles.
     body = typeof adsStudioStartupLoading === 'function' && adsStudioStartupLoading()
@@ -461,8 +463,6 @@ function renderStudioPagesBody(route) {
     body = renderStudioPgLog();
   } else if (view.section === 'posts') {
     body = renderStudioPgPosts(postsTab);
-  } else {
-    body = renderStudioTikTokSection();
   }
   const chips = view.id || postsTab ? '' : renderStudioPgSections(view);
   return `
