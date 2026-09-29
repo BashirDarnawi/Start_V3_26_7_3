@@ -850,7 +850,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
               </div>
             </div>
-            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="touch-target w-full min-h-12 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
+            <button id="wallet-transfer-submit" ${_walletUiOps.transfer.busy ? 'disabled ' : ''}onclick="walletTransferFromUi()" class="touch-target w-full min-h-12 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
               <i data-lucide="send" class="w-4 h-4 inline me-2"></i>${t('send')}
             </button>
             <div class="text-[11px] text-slate-400">

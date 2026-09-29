@@ -16786,6 +16786,24 @@ function findUserByEmailOrId(value) {
   return u || null;
 }
 
+// Retry key and busy flag per wallet form live here, not on the button: a
+// live-sync re-render swaps the button, and a fresh key moved the money twice.
+const _walletUiOps = { transfer: {}, topup: {} };
+async function walletUiSubmit(kind, fp, prefix, send) {
+  const op = _walletUiOps[kind];
+  if (op.busy) return false;
+  if (op.fp !== fp) Object.assign(op, { fp, key: `${prefix}:${Security.generateSecureId('idem')}` });
+  const btn = () => document.getElementById(`wallet-${kind}-submit`) || {};
+  op.busy = btn().disabled = true;
+  try {
+    await send(op.key);
+    op.fp = '';
+    return true;
+  } finally {
+    op.busy = btn().disabled = false;
+  }
+}
+
 async function walletTransferFromUi() {
   try {
     if (!state.currentUser?.id) return;
@@ -16808,24 +16826,8 @@ async function walletTransferFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    const submitBtn = document.getElementById('wallet-transfer-submit');
-    if (submitBtn?.disabled) return;
-    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
-    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `p2p:${Security.generateSecureId('idem')}`;
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.dataset.idempotencyKey = operationKey;
-      submitBtn.dataset.operationFingerprint = fingerprint;
-    }
-    try {
-      await WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: operationKey });
-      if (submitBtn) {
-        delete submitBtn.dataset.idempotencyKey;
-        delete submitBtn.dataset.operationFingerprint;
-      }
-    } finally {
-      if (submitBtn) submitBtn.disabled = false;
-    }
+    if (!await walletUiSubmit('transfer', fingerprint, 'p2p', idempotencyKey =>
+      WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey }))) return;
 
     const toEl = document.getElementById('wallet-transfer-to');
     const amtEl = document.getElementById('wallet-transfer-amount');
@@ -16867,24 +16869,8 @@ async function walletTopUpFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    const submitBtn = document.getElementById('wallet-topup-submit');
-    if (submitBtn?.disabled) return;
-    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
-    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `topup:${Security.generateSecureId('idem')}`;
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.dataset.idempotencyKey = operationKey;
-      submitBtn.dataset.operationFingerprint = fingerprint;
-    }
-    try {
-      await WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: operationKey });
-      if (submitBtn) {
-        delete submitBtn.dataset.idempotencyKey;
-        delete submitBtn.dataset.operationFingerprint;
-      }
-    } finally {
-      if (submitBtn) submitBtn.disabled = false;
-    }
+    if (!await walletUiSubmit('topup', fingerprint, 'topup', idempotencyKey =>
+      WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey }))) return;
 
     const toEl = document.getElementById('wallet-topup-to');
     const amtEl = document.getElementById('wallet-topup-amount');
@@ -22909,7 +22895,7 @@ function renderWalletView() {
                 <input id="wallet-transfer-memo" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isRTL ? 'اختياري' : 'Optional'}" maxlength="180" />
               </div>
             </div>
-            <button id="wallet-transfer-submit" onclick="walletTransferFromUi()" class="touch-target w-full min-h-12 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
+            <button id="wallet-transfer-submit" ${_walletUiOps.transfer.busy ? 'disabled ' : ''}onclick="walletTransferFromUi()" class="touch-target w-full min-h-12 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:opacity-50" type="button">
               <i data-lucide="send" class="w-4 h-4 inline me-2"></i>${t('send')}
             </button>
             <div class="text-[11px] text-slate-400">
@@ -30599,8 +30585,10 @@ function showMetaAdHistory(adId) {
 }
 
 // A response can be lost after the server commits. Keep the same target
-// receipt id and idempotency key for an identical retry, and clear them only
+// receipt id, key and version for an identical retry, and clear them only
 // after both authoritative receipt envelopes have been validated and applied.
+// The version stays out of the fingerprint: live sync of our own lost transfer
+// bumps it, and the server replays the key before it checks the version.
 const _pendingReceiptTransferAttempts = new Map();
 
 function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorUSD, note) {
@@ -30614,7 +30602,6 @@ function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorU
     sourceReceiptId,
     targetCustomerId: String(targetCustomerId || ''),
     amountMinorUSD,
-    expectedSourceLastModified,
     note: String(note || '')
   });
   const prior = _pendingReceiptTransferAttempts.get(slot);
@@ -30787,6 +30774,8 @@ async function saveReceiptTransfer() {
         render();
         return true;
       } catch (error) {
+        // A definite refusal committed nothing under this key: start afresh.
+        if ([400, 403, 404, 409, 422].includes(error?.status)) completeReceiptTransferAttempt(serverAttempt);
         const conflict = isVersionConflict409(error);
         showNotification(
           isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',
@@ -33264,6 +33253,13 @@ async function saveReceiptFromModal() {
   }
 }
 
+// The server fills an empty D-number and type and re-stamps the name; a manual retry re-stamps the dates.
+function receiptCreateRetryMatches(row, sent) {
+  const cmp = { ...sent, customerName: undefined, startDate: undefined, endDate: undefined, collectionDate: undefined };
+  if (!cmp.tempReceiptNo) cmp.tempReceiptNo = cmp.receiptType = undefined;
+  return serverRecordMatchesCreateRetry(row, cmp);
+}
+
 async function _saveReceiptFromModalInner() {
   const isArV = state.language === 'ar';
   // Filled only after a NEW delivery receipt is confirmed saved. The share
@@ -33285,7 +33281,8 @@ async function _saveReceiptFromModalInner() {
   // receipt. Empty id, or an id no longer present, means "create new".
   // (Bug: a new receipt was overwriting an old one because state.modalData had
   // been repointed at the old receipt after the form opened.)
-  const _editingId = (document.getElementById('receipt-editing-id')?.value || '').trim();
+  const _editEl = document.getElementById('receipt-editing-id');
+  const _editingId = (_editEl?.value || '').trim();
   const editTarget = _editingId
     ? (state.receipts.find(r => r && !r._deleted && String(r.id) === _editingId) || null)
     : null;
@@ -33672,7 +33669,8 @@ async function _saveReceiptFromModalInner() {
     : (serialFinal || '');
 
   const receipt = {
-    id: editTarget ? editTarget.id : generateId('receipt'),
+    // One id per open new-receipt form: a retry after a lost reply meets its own row (409).
+    id: editTarget ? editTarget.id : (_editEl?.dataset.draftId || generateId('receipt')),
     recordType: 'receipt',
     customerId: customerId,
     pageId: '',
@@ -33861,6 +33859,7 @@ async function _saveReceiptFromModalInner() {
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
+    if (_editEl) _editEl.dataset.draftId = receipt.id;
     if (isServerModeEnabled()) {
       // Server-confirmed create: do NOT show success until the server confirms.
       let saved = null;
@@ -33873,7 +33872,7 @@ async function _saveReceiptFromModalInner() {
         if (e?.status === 409) {
           try {
             const existing = await apiGetEntity('receipts', receipt.id);
-            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, receipt)) {
+            if (existing?.data && receiptCreateRetryMatches(existing.data, receipt)) {
               saved = Security.sanitizeObject(existing.data);
             }
           } catch (_) {}

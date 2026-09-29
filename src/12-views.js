@@ -1679,6 +1679,24 @@ function findUserByEmailOrId(value) {
   return u || null;
 }
 
+// Retry key and busy flag per wallet form live here, not on the button: a
+// live-sync re-render swaps the button, and a fresh key moved the money twice.
+const _walletUiOps = { transfer: {}, topup: {} };
+async function walletUiSubmit(kind, fp, prefix, send) {
+  const op = _walletUiOps[kind];
+  if (op.busy) return false;
+  if (op.fp !== fp) Object.assign(op, { fp, key: `${prefix}:${Security.generateSecureId('idem')}` });
+  const btn = () => document.getElementById(`wallet-${kind}-submit`) || {};
+  op.busy = btn().disabled = true;
+  try {
+    await send(op.key);
+    op.fp = '';
+    return true;
+  } finally {
+    op.busy = btn().disabled = false;
+  }
+}
+
 async function walletTransferFromUi() {
   try {
     if (!state.currentUser?.id) return;
@@ -1701,24 +1719,8 @@ async function walletTransferFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    const submitBtn = document.getElementById('wallet-transfer-submit');
-    if (submitBtn?.disabled) return;
-    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
-    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `p2p:${Security.generateSecureId('idem')}`;
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.dataset.idempotencyKey = operationKey;
-      submitBtn.dataset.operationFingerprint = fingerprint;
-    }
-    try {
-      await WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey: operationKey });
-      if (submitBtn) {
-        delete submitBtn.dataset.idempotencyKey;
-        delete submitBtn.dataset.operationFingerprint;
-      }
-    } finally {
-      if (submitBtn) submitBtn.disabled = false;
-    }
+    if (!await walletUiSubmit('transfer', fingerprint, 'p2p', idempotencyKey =>
+      WALLET.transfer(state.currentUser.id, toUser.id, 0, { memo: memoValue, currency, amountMinor, idempotencyKey }))) return;
 
     const toEl = document.getElementById('wallet-transfer-to');
     const amtEl = document.getElementById('wallet-transfer-amount');
@@ -1760,24 +1762,8 @@ async function walletTopUpFromUi() {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
     }
-    const submitBtn = document.getElementById('wallet-topup-submit');
-    if (submitBtn?.disabled) return;
-    const canReuseKey = String(submitBtn?.dataset.operationFingerprint || '') === fingerprint;
-    const operationKey = (canReuseKey ? String(submitBtn?.dataset.idempotencyKey || '') : '') || `topup:${Security.generateSecureId('idem')}`;
-    if (submitBtn) {
-      submitBtn.disabled = true;
-      submitBtn.dataset.idempotencyKey = operationKey;
-      submitBtn.dataset.operationFingerprint = fingerprint;
-    }
-    try {
-      await WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey: operationKey });
-      if (submitBtn) {
-        delete submitBtn.dataset.idempotencyKey;
-        delete submitBtn.dataset.operationFingerprint;
-      }
-    } finally {
-      if (submitBtn) submitBtn.disabled = false;
-    }
+    if (!await walletUiSubmit('topup', fingerprint, 'topup', idempotencyKey =>
+      WALLET.credit(toUser.id, 0, { memo: memoValue || 'Top-up', currency, amountMinor, idempotencyKey }))) return;
 
     const toEl = document.getElementById('wallet-topup-to');
     const amtEl = document.getElementById('wallet-topup-amount');

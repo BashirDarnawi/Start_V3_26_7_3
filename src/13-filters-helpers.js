@@ -6561,8 +6561,10 @@ function showMetaAdHistory(adId) {
 }
 
 // A response can be lost after the server commits. Keep the same target
-// receipt id and idempotency key for an identical retry, and clear them only
+// receipt id, key and version for an identical retry, and clear them only
 // after both authoritative receipt envelopes have been validated and applied.
+// The version stays out of the fingerprint: live sync of our own lost transfer
+// bumps it, and the server replays the key before it checks the version.
 const _pendingReceiptTransferAttempts = new Map();
 
 function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorUSD, note) {
@@ -6576,7 +6578,6 @@ function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorU
     sourceReceiptId,
     targetCustomerId: String(targetCustomerId || ''),
     amountMinorUSD,
-    expectedSourceLastModified,
     note: String(note || '')
   });
   const prior = _pendingReceiptTransferAttempts.get(slot);
@@ -6749,6 +6750,8 @@ async function saveReceiptTransfer() {
         render();
         return true;
       } catch (error) {
+        // A definite refusal committed nothing under this key: start afresh.
+        if ([400, 403, 404, 409, 422].includes(error?.status)) completeReceiptTransferAttempt(serverAttempt);
         const conflict = isVersionConflict409(error);
         showNotification(
           isArTr ? 'تعذر التحويل' : 'Transfer Not Saved',

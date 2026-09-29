@@ -1783,6 +1783,157 @@ async function main() {
     listeners.pointerdown();
     assert.ok(!sandbox.document.body.classList.contains('print-single') && !listeners.beforeprint, 'and it still ends the print mode');
   });
+  // ---- r5 DBL: double submission of money actions ----
+  const realRandom = fixture => { fixture.sandbox.crypto.getRandomValues = v => require('node:crypto').webcrypto.getRandomValues(v); };
+  const formField = value => ({ value, dataset: {}, classList: { add() {}, remove() {} }, focus() {} });
+
+  function receiptFormFixture() {
+    const fixture = loadBrowserSource();
+    const { sandbox } = fixture;
+    realRandom(fixture);
+    const nodes = {
+      'receipt-editing-id': formField(''), 'receipt-customer-id': formField('c1'), 'receipt-status': formField('Not Paid'),
+      'notpaid-collection-value': formField('delivery'), 'notpaid-delivery-person': formField('driver1'),
+      'receipt-serial': formField(''), 'receipt-delivery-place': formField('Tripoli'),
+      'receipt-quoted-delivery-fee': formField('10'), 'receipt-phone-search': formField('0911111111')
+    };
+    const cells = { '.payment-method': { value: 'Cash (LYD)' }, '.payment-amount': { value: '500' }, '.payment-rate1': { value: '1' },
+      '.payment-rate2': { value: '5' }, '.collection-type': { value: 'delivery' } };
+    const row = { querySelector: sel => cells[sel] || null };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? [row] : []);
+    sandbox.requireReceiptCustomerRiskAcknowledgement = () => false;
+    sandbox.isServerModeEnabled = () => true;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    const server = { posted: [], stored: null, lostReply: 'retry409' };
+    // The server stores the row with the D-number, type and name it assigns itself.
+    const commit = record => { server.stored = { ...record, tempReceiptNo: 'D57', receiptType: 'DELIVERY_TEMP', customerName: 'Customer', startDate: '2020-01-01T00:00:00.000Z' }; };
+    sandbox.apiCreateEntity = async (collection, record) => {
+      server.posted.push(record.id);
+      if (server.stored && server.stored.id === record.id) throw Object.assign(new Error('ID already exists'), { status: 409 });
+      commit(record);
+      // retry409: withRetry's second attempt met the committed row; network: every attempt was lost.
+      if (server.lostReply === 'retry409') throw Object.assign(new Error('ID already exists'), { status: 409 });
+      throw new TypeError('Failed to fetch');
+    };
+    sandbox.apiGetEntity = async (collection, id) => (server.stored && server.stored.id === id ? { id, data: server.stored } : null);
+    return { ...fixture, nodes, notes, server };
+  }
+
+  await test('r5 DBL n=30: a lost reply on a new delivery receipt is accepted as saved, not a 409 that invites a second job', async () => {
+    const { state, run, notes, server } = receiptFormFixture();
+    await run('_saveReceiptFromModalInner()');
+    assert.equal(server.posted.length, 1);
+    assert.ok(!notes.some(n => n.type === 'error'), JSON.stringify(notes));
+    assert.equal(state.receipts.length, 1);
+    assert.equal(state.receipts[0].id, server.posted[0]);
+    assert.equal(state.receipts[0].tempReceiptNo, 'D57');
+    // A different row under that id (another amount) is still refused.
+    assert.equal(run('receiptCreateRetryMatches')({ ...server.stored, amountLocal: 999 }, { ...server.stored, tempReceiptNo: '', receiptType: '' }), false);
+  });
+
+  await test('r5 DBL n=30: after every attempt is lost, pressing Create again reuses the same receipt id and makes no second receipt', async () => {
+    const { state, run, notes, server, nodes } = receiptFormFixture();
+    server.lostReply = 'network';
+    await run('_saveReceiptFromModalInner()');
+    assert.ok(notes.some(n => n.type === 'error'), 'the lost reply is reported');
+    assert.equal(state.receipts.length, 0);
+    await run('_saveReceiptFromModalInner()');
+    assert.equal(server.posted.length, 2);
+    assert.equal(server.posted[1], server.posted[0], 'the manual retry must hit the same id');
+    assert.equal(nodes['receipt-editing-id'].dataset.draftId, server.posted[0]);
+    assert.equal(state.receipts.length, 1);
+    assert.equal(state.receipts[0].tempReceiptNo, 'D57');
+    assert.equal(notes[notes.length - 1].type, 'success');
+  });
+
+  function receiptTransferFixture() {
+    const fixture = loadBrowserSource();
+    const { sandbox, state } = fixture;
+    realRandom(fixture);
+    state.customers.push({ id: 'c2', name: 'Other' });
+    state.receipts = [{ id: 'src', customerId: 'c1', amountUSD: 500, amountLocal: 2500, exchangeRate: 5, status: 'Paid', isPaid: true, payments: [], transfers: [], _lastModified: 1 }];
+    state.modalData = state.receipts[0];
+    const nodes = { 'transfer-target-customer': formField('c2'), 'transfer-amount-usd': formField('100'), 'transfer-note': formField('move'),
+      'receipt-transfer-submit': formField('') };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    sandbox.isServerModeEnabled = () => true;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    const payloads = [];
+    const answers = [];
+    sandbox.apiTransferReceipt = async payload => { payloads.push(payload); throw answers.shift(); };
+    return { ...fixture, payloads, answers, notes };
+  }
+
+  await test('r5 DBL n=31: a transfer retried after a lost reply and a live-sync update keeps its key, target id and version', async () => {
+    const { state, run, payloads, answers } = receiptTransferFixture();
+    answers.push(new TypeError('Failed to fetch'));
+    assert.equal(await run('saveReceiptTransfer()'), false);
+    // Live sync installs the source receipt with our own committed transfer.
+    state.receipts[0] = { ...state.receipts[0], _lastModified: 2, transfers: [{ id: 't1', toReceiptId: payloads[0].targetReceiptId, amountUSD: 100 }] };
+    answers.push(new TypeError('Failed to fetch'));
+    await run('saveReceiptTransfer()');
+    assert.equal(payloads.length, 2);
+    assert.equal(payloads[1].idempotencyKey, payloads[0].idempotencyKey);
+    assert.equal(payloads[1].targetReceiptId, payloads[0].targetReceiptId);
+    assert.equal(payloads[1].expectedSourceLastModified, 1, 'the retry keeps the version the server can replay');
+    // A definite refusal committed nothing: the next tap starts a fresh attempt on the live version.
+    answers.push(Object.assign(new Error('Conflict: source receipt has changed'), { status: 409 }));
+    await run('saveReceiptTransfer()');
+    answers.push(new TypeError('Failed to fetch'));
+    await run('saveReceiptTransfer()');
+    assert.equal(payloads.length, 4);
+    assert.notEqual(payloads[3].idempotencyKey, payloads[0].idempotencyKey);
+    assert.equal(payloads[3].expectedSourceLastModified, 2);
+  });
+
+  function walletFixture() {
+    const fixture = loadBrowserSource();
+    const { sandbox, state, run } = fixture;
+    realRandom(fixture);
+    state.users.push({ id: 'u2', name: 'Two', email: 'two@example.com', role: 'Employee' });
+    state.walletTransactions = [];
+    const nodes = { 'wallet-transfer-to': formField('u2'), 'wallet-transfer-amount': formField('200'), 'wallet-transfer-memo': formField(''),
+      'wallet-transfer-currency': formField('LYD'), 'wallet-transfer-submit': formField('') };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    sandbox.isServerModeEnabled = () => true;
+    const keys = [];
+    const replies = [];
+    sandbox.apiWalletTransfer = body => { keys.push(body.idempotencyKey); return replies.shift()(); };
+    // Past the 1.8 s WalletUiGuard window, and a live-sync render swaps the button.
+    const rerender = () => { run('WalletUiGuard._last.clear()'); nodes['wallet-transfer-submit'] = formField(''); };
+    return { ...fixture, nodes, keys, replies, rerender };
+  }
+
+  await test('r5 DBL n=32: a wallet transfer retried after a re-render swapped its button keeps the idempotency key', async () => {
+    const { run, keys, replies, rerender } = walletFixture();
+    replies.push(() => Promise.reject(new TypeError('Failed to fetch')));
+    await run('walletTransferFromUi()');
+    rerender();
+    replies.push(() => Promise.reject(new TypeError('Failed to fetch')));
+    await run('walletTransferFromUi()');
+    assert.equal(keys.length, 2);
+    assert.equal(keys[1], keys[0], 'the retry must replay the first transfer, not send a second one');
+  });
+
+  await test('r5 DBL n=32: while a wallet transfer is in flight a re-rendered button is disabled and a tap sends nothing', async () => {
+    const { run, nodes, keys, replies, rerender } = walletFixture();
+    let finish;
+    replies.push(() => new Promise(resolve => { finish = resolve; }));
+    const first = run('walletTransferFromUi()');
+    await settle();
+    rerender();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    assert.ok(/id="wallet-transfer-submit" disabled onclick/.test(String(run('renderWalletView()'))), 'the re-rendered button is disabled');
+    await run('walletTransferFromUi()');
+    assert.equal(keys.length, 1, 'no second request while the first is in flight');
+    finish({ id: 'wtx1', data: { id: 'wtx1', type: 'transfer', fromUserId: 'admin', toUserId: 'u2', amountMinor: 20000, currency: 'LYD', idempotencyKey: keys[0] } });
+    await first;
+    assert.ok(/id="wallet-transfer-submit" onclick/.test(String(run('renderWalletView()'))));
+    assert.equal(nodes['wallet-transfer-submit'].disabled, false);
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }

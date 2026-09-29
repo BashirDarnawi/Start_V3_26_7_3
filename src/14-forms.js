@@ -1709,6 +1709,13 @@ async function saveReceiptFromModal() {
   }
 }
 
+// The server fills an empty D-number and type and re-stamps the name; a manual retry re-stamps the dates.
+function receiptCreateRetryMatches(row, sent) {
+  const cmp = { ...sent, customerName: undefined, startDate: undefined, endDate: undefined, collectionDate: undefined };
+  if (!cmp.tempReceiptNo) cmp.tempReceiptNo = cmp.receiptType = undefined;
+  return serverRecordMatchesCreateRetry(row, cmp);
+}
+
 async function _saveReceiptFromModalInner() {
   const isArV = state.language === 'ar';
   // Filled only after a NEW delivery receipt is confirmed saved. The share
@@ -1730,7 +1737,8 @@ async function _saveReceiptFromModalInner() {
   // receipt. Empty id, or an id no longer present, means "create new".
   // (Bug: a new receipt was overwriting an old one because state.modalData had
   // been repointed at the old receipt after the form opened.)
-  const _editingId = (document.getElementById('receipt-editing-id')?.value || '').trim();
+  const _editEl = document.getElementById('receipt-editing-id');
+  const _editingId = (_editEl?.value || '').trim();
   const editTarget = _editingId
     ? (state.receipts.find(r => r && !r._deleted && String(r.id) === _editingId) || null)
     : null;
@@ -2117,7 +2125,8 @@ async function _saveReceiptFromModalInner() {
     : (serialFinal || '');
 
   const receipt = {
-    id: editTarget ? editTarget.id : generateId('receipt'),
+    // One id per open new-receipt form: a retry after a lost reply meets its own row (409).
+    id: editTarget ? editTarget.id : (_editEl?.dataset.draftId || generateId('receipt')),
     recordType: 'receipt',
     customerId: customerId,
     pageId: '',
@@ -2306,6 +2315,7 @@ async function _saveReceiptFromModalInner() {
     addLog('update', 'receipt', receipt.id, `Updated receipt${serialNumber ? ' #' + serialNumber : ''}`);
   } else {
     // Create new
+    if (_editEl) _editEl.dataset.draftId = receipt.id;
     if (isServerModeEnabled()) {
       // Server-confirmed create: do NOT show success until the server confirms.
       let saved = null;
@@ -2318,7 +2328,7 @@ async function _saveReceiptFromModalInner() {
         if (e?.status === 409) {
           try {
             const existing = await apiGetEntity('receipts', receipt.id);
-            if (existing?.data && serverRecordMatchesCreateRetry(existing.data, receipt)) {
+            if (existing?.data && receiptCreateRetryMatches(existing.data, receipt)) {
               saved = Security.sanitizeObject(existing.data);
             }
           } catch (_) {}
