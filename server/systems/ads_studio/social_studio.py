@@ -281,8 +281,11 @@ LOG_OUTCOME_LABELS: dict[str, dict[str, str]] = {
 _CURSOR_RE = re.compile(r"^(\d{1,15}):([A-Za-z0-9][A-Za-z0-9._:-]{0,79})$")
 # The reply-log row the actions sent inside a _reply_row() block are saved to as each one succeeds
 # (P4-02): a server killed mid-reply leaves the exact list behind, so nothing is ever replayed. The
-# tuple: (log id, owner, the actions already on the row before this attempt, the row's first sentAt).
-_REPLY_ROW: ContextVar[tuple[str, str, tuple[str, ...], str] | None] = ContextVar("albayan_social_reply_row", default=None)
+# tuple: (log id, owner, the actions already on the row before this attempt, the row's first sentAt,
+# the actions this attempt marked in flight on the row before its first Meta send (_mark_in_flight),
+# the actions Meta accepted in this attempt, kept in memory even when their save is lost).
+_REPLY_ROW: ContextVar[tuple[str, str, tuple[str, ...], str, list[str], list[str]] | None] = ContextVar(
+    "albayan_social_reply_row", default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -1702,38 +1705,56 @@ def _page_link_guard(platform: str, meta_page_id: str):
             yield
 
 
+_PERSON_HISTORY_PAGE = 100
+_PLAIN_ID_RE = re.compile(r"[A-Za-z0-9_.:-]+")  # an id every JSON writer stores verbatim
+
+
+def _person_history_sql(dialect: str | None = None) -> str:
+    """One page (``id > :after``, id order) of an owner's reply-log rows for the once-per-person check.
+    Only rows whose stored text holds ``:needle`` (a LIKE pattern escaped with ``!``) are parsed at all,
+    each ONCE (json_fields_select_sql); the exact owner / page / person match is made in Python (r8 #9)."""
+    return json_fields_select_sql(
+        ("ownerId", "pageId", "fromId", "actions", "processing", "ruleId", "retryAfter"), ("id",),
+        "type = :type AND deleted = false AND created_by = :owner AND data_json LIKE :needle ESCAPE '!' AND id > :after",
+        dialect) + f" ORDER BY id ASC LIMIT {_PERSON_HISTORY_PAGE}"
+
+
 def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[str]:
     """Rules that already answered this person on this page (full history).
 
     Only a sent DM or public reply (or a reply still in flight) counts; a
-    bare like is not an answer."""
+    bare like is not an answer. It runs inside the comment lock every owner
+    shares, so the database reads the owner's rows as text and parses only
+    those whose text holds the person's id (any id that is not a plain Meta
+    id: every row), each once; the exact match is made here (r8 #9)."""
     found: set[str] = set()
+    person = str(from_id)
+    needle = "%" + re.sub(r"([!%_])", r"!\1", person) + "%" if _PLAIN_ID_RE.fullmatch(person) else "%"
+    wanted = (("f_ownerid", str(owner_id)), ("f_pageid", str(page_id)), ("f_fromid", person))
+    params = {"type": LOG_TYPE, "owner": owner_id, "needle": needle, "after": ""}
+    query = text(_person_history_sql())
     with db_conn() as conn:
-        params = {"type": LOG_TYPE, "owner": owner_id, "page": page_id, "person": from_id, "after": ""}
-        query = text(
-            f"SELECT id, {_json_field('actions')} AS actions, {_json_field('processing')} AS processing, "
-            f"{_json_field('ruleId')} AS rule_id, {_json_field('retryAfter')} AS retry_after "
-            f"FROM entities WHERE type=:type AND deleted=false AND created_by=:owner "
-            f"AND {_json_field('ownerId')}=:owner AND {_json_field('pageId')}=:page "
-            f"AND {_json_field('fromId')}=:person AND id>:after ORDER BY id ASC LIMIT 100"
-        )
         # Bounded Python memory even for very old, busy accounts. The database
-        # returns only action metadata for the relevant person, never comments.
+        # returns only action metadata, never comments.
         while rows := conn.execute(query, params).mappings().all():
             for row in rows:
-                actions = row["actions"]
+                if not all(row[key] is not None and str(row[key]) == value for key, value in wanted):
+                    continue  # another person, page or owner whose text merely holds the id
+                actions = row["f_actions"]
                 if isinstance(actions, str):
                     try:
                         actions = json_loads(actions)
                     except ValueError:
                         actions = []
-                answered = _bool(row["processing"]) or bool(row["retry_after"]) or (
+                answered = _bool(row["f_processing"]) or bool(row["f_retryafter"]) or (
                     isinstance(actions, list) and any(str(a) in ("dm", "public") for a in actions)
                 )
                 if answered:
                     # History rows written before replies carried a rule id
                     # keep their old page-wide meaning ("*" = every rule).
-                    found.add(str(row["rule_id"] or "") or "*")
+                    found.add(str(row["f_ruleid"] or "") or "*")
+            if len(rows) < _PERSON_HISTORY_PAGE:
+                break  # the last page: no extra query that finds nothing
             params["after"] = rows[-1]["id"]
     return found
 
@@ -1786,10 +1807,14 @@ class _ReplyOutcome(tuple):
 def _reply_row(log_id: str, owner_id: str, saved: list[str] | None = None, sent_at: str = ""):
     """P4-02: the reply-log row the actions sent inside this block are saved to as each succeeds.
     A retry names the actions already on the row (``saved``) and its first ``sentAt``: what lands
-    now is added after them, and the time of the person's first answer is kept."""
-    marker = _REPLY_ROW.set((str(log_id or ""), str(owner_id or ""), tuple(saved or ()), str(sent_at or "")))
+    now is added after them, and the time of the person's first answer is kept. Yields (the actions the
+    block marked in flight (_mark_in_flight): when there are any, the attempt's final write clears them;
+    the actions Meta accepted in the block, even those whose save was lost: a release keeps them)."""
+    flight: list[str] = []
+    accepted: list[str] = []
+    marker = _REPLY_ROW.set((str(log_id or ""), str(owner_id or ""), tuple(saved or ()), str(sent_at or ""), flight, accepted))
     try:
-        yield
+        yield flight, accepted
     finally:
         _REPLY_ROW.reset(marker)
 
@@ -1807,11 +1832,25 @@ def _save_sent_actions(actions: list[str], sent_at: str) -> None:
     row = _REPLY_ROW.get()
     if not row or not row[0]:
         return
+    row[5][:] = actions  # in memory first: a release still knows it when this save is lost (r8 #10)
     try:
         _ctx()["patch_entity"](LOG_TYPE, row[0], {"actions": _merge_actions(row[2], actions), "sentAt": row[3] or sent_at},
                                row[1] or "system")
     except Exception:
         pass
+
+
+def _mark_in_flight(kinds: list[str]) -> None:
+    """r8 #10: before the first Meta send of an attempt, write the actions about to go out to the reply-log
+    row of the surrounding _reply_row() block as ``inFlight`` (no block: nothing to do). NOT best effort,
+    unlike _save_sent_actions: when this write fails the error propagates and nothing is sent. So a row
+    whose per-action saves were lost (the database dropped mid-reply) still shows that a send began, and
+    the stuck-claim pass never re-arms a reply Meta may already have accepted."""
+    row = _REPLY_ROW.get()
+    if not row or not row[0] or not kinds:
+        return
+    _ctx()["patch_entity"](LOG_TYPE, row[0], {"inFlight": list(kinds)}, row[1] or "system")
+    row[4].extend(kinds)
 
 
 def page_problem_reason(error: Any) -> str:
@@ -1978,9 +2017,13 @@ def _execute_rule_actions(
 ) -> tuple[list[str], list[str], bool]:
     """Send the DM / public reply / like for one comment.
 
-    Returns (actions, errors, retryable): retryable when nothing was sent and
-    every failure was a temporary Meta condition (pause, outage), so the
-    scheduler may try again instead of the comment being lost. The tuple also
+    Returns (actions, errors, retryable): retryable when every failure was a
+    temporary Meta condition (pause, outage), so the scheduler may try again
+    instead of the comment being lost, even when another action went out (r8
+    #8: a retry sends only what is missing, never an action saved on the row;
+    a timed-out send may have landed, so it never counts as temporary). Before
+    the first send the actions about to go out are marked in flight on the
+    row (_mark_in_flight: a failed mark raises, nothing is sent). The tuple also
     carries ``auth_codes``, ``auth_failed_at`` and ``timed_out`` (_ReplyOutcome)
     for the parking rule (P3-18b), ``skipped`` (P4-05: an action whose channel
     is gated, off or unavailable is never sent; nothing reaches Meta when every
@@ -2071,6 +2114,7 @@ def _execute_rule_actions(
         return f"{kind}: {error.public_message}{code}"
 
     if client is not None:
+        _mark_in_flight([kind for kind, wanted in (("dm", dm_wanted), ("public", public_wanted), ("like", like_wanted)) if wanted])
         if dm_wanted:
             try:
                 # One private reply per comment, within 7 days of the comment, through the
@@ -2110,7 +2154,7 @@ def _execute_rule_actions(
                 temporary += 1 if (error.retryable and error.code != "timeout") else 0  # a timed-out send may have landed: never resend blindly
     _page_health_after_meta(page, page_reasons[0] if page_reasons else "", succeeded=bool(actions),
                             failed_at=auth_failed[0] if auth_failed else None)
-    retryable = not actions and failures > 0 and temporary == failures
+    retryable = failures > 0 and temporary == failures  # r8 #8: also when another action went out
     return _ReplyOutcome.of(actions, errors, retryable, auth_codes, auth_failed[0] if auth_failed else None, timed_out,
                             skipped, sent_at)
 
@@ -2140,8 +2184,10 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     the row's first ``sentAt``). Like the webhook path, a row is claimed before
     the send (``processing`` true, ``retryAfter`` empty, checked against the
     row's version so two passes never send the same reply) and released when
-    the send crashes; unlike there the retry is re-armed even when part of the
-    rule went out, because the saved actions are never resent."""
+    the send crashes; unlike there the release re-arms the retry even when part
+    of the rule went out, because the saved actions are never resent. A claim
+    left stuck is re-armed only when nothing was sent AND no send began
+    (``inFlight``, r8 #10)."""
     from . import studio_alerts_meta  # late: it imports this module
 
     ctx = _ctx()
@@ -2190,8 +2236,13 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
     for row in stuck:
         data = json_loads(row.get("data_json") or "{}") or {}
         _release: dict[str, Any] = {"processing": False, "error": "interrupted"}
-        if not data.get("actions"):  # nothing was sent: the retry pass may answer; otherwise never resend blindly
+        # r8 #10: a send began (inFlight) and may have reached Meta even with no saved action (the
+        # database dropped mid-reply): never resent, like a timed-out one.
+        began = _skip_actions(data.get("inFlight"))
+        if not data.get("actions") and not began:  # nothing was sent: the retry pass may answer; otherwise never resend blindly
             _release.update({"retryAfter": now_iso, "attempts": int(data.get("attempts") or 0) + 1})
+        elif began:
+            _release["skipActions"] = sorted(_skip_actions(data.get("skipActions")) | began)
         try:
             ctx["patch_entity"](LOG_TYPE, str(row["id"]), _release, str(data.get("ownerId") or "system"))
         except Exception:
@@ -2262,23 +2313,29 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 # that was not sent or did not time out before (a retry killed after its last action).
                 patch = _missed_patch() if parked else {"retryAfter": ""}
             else:
+                claim: dict[str, Any] = {"processing": True, "retryAfter": ""}
+                if data.get("inFlight"):
+                    claim["inFlight"] = []  # an earlier attempt's mark: this attempt marks its own (r8 #10)
                 try:  # the claim: another pass (or process) that took the row first keeps it
-                    ctx["patch_entity"](LOG_TYPE, str(row["id"]), {"processing": True, "retryAfter": ""}, owner_id,
+                    ctx["patch_entity"](LOG_TYPE, str(row["id"]), claim, owner_id,
                                         expected_last_modified=int(row.get("last_modified") or 0))
                 except HTTPException:
                     continue
+                _sent_now: list[str] = []
                 try:
-                    with _reply_row(str(row["id"]), owner_id, saved, str(data.get("sentAt") or "")):  # P4-02: each action lands on the row as it succeeds
+                    with _reply_row(str(row["id"]), owner_id, saved, str(data.get("sentAt") or "")) as (flight, _sent_now):  # P4-02: each action lands on the row as it succeeds
                         outcome = _execute_rule_actions(
                             {**page_entity["data"], "id": str(page_entity["id"])}, rule,
                             str(data.get("platform") or ""), str(data.get("commentId") or ""),
                         )
                 except Exception:
                     # A non-Meta failure (database hiccup, transport edge case, shutdown): release the
-                    # claim and try again later. What Meta accepted is on the row (per-action save) and
-                    # is never resent, so the rest of the rule may still go out.
+                    # claim and try again later. What Meta accepted is on the row (per-action save, and
+                    # here again from memory in case that save was lost) and is never resent, so the
+                    # rest of the rule may still go out.
                     try:
                         ctx["patch_entity"](LOG_TYPE, str(row["id"]), {"processing": False, "error": "interrupted",
+                                                                      "actions": _merge_actions(saved, _sent_now),
                                                                       "retryAfter": _retry_after_iso(attempts + 1), "attempts": attempts + 1}, owner_id)
                     except Exception:
                         pass
@@ -2286,6 +2343,8 @@ def _retry_pending_replies(now: datetime, limit: int = 20) -> int:
                 actions, errors, retryable = outcome
                 patch = {"actions": _merge_actions(saved, actions), "error": "; ".join(errors)[:500], "attempts": attempts + 1,
                          "processing": False}
+                if flight:
+                    patch["inFlight"] = []  # the attempt finished: what landed is in actions (r8 #10)
                 patch.update(_outcome_patch(outcome))
                 if data.get("sentAt"):
                     patch.pop("sentAt", None)  # the person's first answer came in an earlier attempt (P4-02 latency)
@@ -2440,7 +2499,7 @@ def process_comment(
             raise
     _sent: list[str] = []
     try:
-        with _reply_row(log_id, owner_id):  # P4-02: each action lands on the row as it succeeds
+        with _reply_row(log_id, owner_id) as (flight, _accepted):  # P4-02: each action lands on the row as it succeeds
             outcome = _execute_rule_actions(page, rule, platform, str(comment_id), _actions_holder=_sent)
         actions, errors, retryable = outcome
     except Exception:
@@ -2461,6 +2520,8 @@ def process_comment(
     log_data["processing"] = False
     patch: dict[str, Any] = {"actions": actions, "error": log_data["error"], "processing": False}
     patch.update(_outcome_patch(outcome))  # P4-02 sentAt, P4-05 skipped actions and their reason
+    if flight:
+        patch["inFlight"] = []  # the attempt finished: what landed is in actions (r8 #10)
     log_data.update(patch)
     kept = _parked_patch(outcome, log_data, rule, datetime.now(timezone.utc))
     if kept:
@@ -2469,8 +2530,10 @@ def process_comment(
         patch.update(kept)
         patch["attempts"] = 1
     elif retryable:
-        # Nothing was sent and the cause is temporary: keep the claim and let
-        # the scheduler try again instead of losing the comment for good.
+        # Every failure was temporary: keep the claim and let the scheduler try
+        # again instead of losing the comment for good. What went out already
+        # is on the row and never resent (r8 #8: a private reply that hit a
+        # temporary error is still owed when the like or public reply landed).
         patch["retryAfter"] = _retry_after_iso(1)
         patch["attempts"] = 1
     try:
