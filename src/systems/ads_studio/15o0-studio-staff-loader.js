@@ -179,10 +179,12 @@ function studioGuideLinks(keys, testId = 'studio-guide-links') {
 }
 
 // The classic Replies / Posts tabs (15f) while /me says the v2 layout: the v2 screens of 15o once the
-// bundle is here, its card meanwhile; '' = the classic screens draw (classic layout, /me unknown).
+// bundle is here, its card meanwhile; '' = the classic screens draw (classic layout, /me unknown, or the
+// "Classic view" chosen for this tab: its composer, Edit, Cancel schedule and Delete, review loop r4 #34).
 function studioPagesClassicHandover(tab) {
   const me = typeof studioMe === 'function' ? studioMe() : null;
   if (!me || me.ui !== 'v2') return '';
+  if (typeof studioV2ClassicChosen === 'function' && studioV2ClassicChosen()) return '';
   if (studioBundleReady('studio-pages.js')) return studioPagesClassicDelegate(tab);
   ensureStudioBundle('studio-pages.js');
   return `<div class="studio-pg-classic" data-testid="studio-pg-classic" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">${renderStudioBundleCard('studio-pages.js')}</div>`;

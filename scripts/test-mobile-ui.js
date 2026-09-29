@@ -1448,7 +1448,7 @@ check('untrusted strings never sit inside inline handlers and the stripper canno
   modals.includes("const name = Security.escapeHtml(String(targetCustomer ? targetCustomer.name") &&
   securitySrc.includes('for (let pass = 0; pass < 8; pass++) {') &&
   securitySrc.includes("str = str.replace(/vbscript:/gi, '');") &&
-  socialStudio.includes("if (sameDraft()) showNotification(socialText('Saved as a draft'"));
+  socialStudio.includes("else showNotification(socialText('Saved as a draft', 'تم الحفظ كمسودة')"));
 
 check('a failed lazy bundle is not re-requested on every render and the shell recovers honestly',
   read('src/15b0-clothes-loader.js').includes("if (_clothesBundleState === 'failed' && Date.now() - _clothesLastFailureAt < _CLOTHES_RETRY_COOLDOWN_MS) return Promise.resolve();") &&
@@ -5786,6 +5786,14 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('the lazy bundle loader in a sandbox: one script request per bundle with the main bundle\'s ?v=, the bilingual card meanwhile, a failed request backs off 30 s (Retry asks again at once and redraws), the desk section and the pages screen draw once their functions are here, the classic handover shows the card only while /me says v2, guide links wait for the bundle',
     !loaderError && loaderCases.every(Boolean), loaderError || `cases ${loaderCases.map((ok, i) => ok ? '' : i).filter(String).join(',')}`);
+  // Review loop r4 #34: the handover gives way while "Classic view" is chosen in this tab (the classic tabs draw).
+  lrun('var __classicChosen = true; function studioV2ClassicChosen() { return __classicChosen; }');
+  const chosenPostsHandover = String(lrun("studioPagesClassicHandover('posts')"));
+  const chosenRepliesHandover = String(lrun("studioPagesClassicHandover('replies')"));
+  lrun('__classicChosen = false;');
+  const notChosenHandover = String(lrun("studioPagesClassicHandover('posts')"));
+  check('the classic handover (review loop r4 #34) draws nothing while "Classic view" is chosen, so the classic Posts / Replies tabs keep their composer and post actions; without the choice it still hands over',
+    !loaderError && chosenPostsHandover === '' && chosenRepliesHandover === '' && notChosenHandover === '<delegate posts>', loaderError || `${chosenPostsHandover} | ${chosenRepliesHandover} | ${notChosenHandover}`);
   // A bundle that executed but did not register its functions (a mismatched or truncated copy): the failed state with
   // the same cooldown as a lost request (the tag is removed, the promise freed), a later draw asks again after 30 s
   // and Retry asks again at once; never a resolved promise that every later draw returns without a request.
@@ -6721,6 +6729,12 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 Pages (P4-06): the server\'s health per page (state, reason, label, fix step, checked X ago), one fix with "I did it, tell the team", the team\'s fixes without it, no Check now for a customer, the link request and the guides; Arabic RTL',
     !loadError && pagesCases.every(Boolean), loadError || `cases ${failed(pagesCases)}`);
+  // Review loop r4 #39: the server checks each page daily, so a healthy page checked 12 hours ago is not marked old
+  // (the 6 h results threshold marked it about 75% of every day); a check older than a day and a margin still is.
+  const pageCheckedAt = hours => String(run(`renderStudioPgPage(studioPgCleanPage(${JSON.stringify({ ...pageFb, health: { ...pageFb.health, checkedAt: new Date(Date.now() - hours * 3600000).toISOString() } })}), false, false)`));
+  const pageCheckCases = [!pageCheckedAt(0.5).includes('is-stale'), !pageCheckedAt(12).includes('is-stale'), !pageCheckedAt(25).includes('is-stale'), pageCheckedAt(36).includes('is-stale')];
+  check('Studio v2 Pages (review loop r4 #39): a page checked by the daily pass is not shown as an old check until a day and a margin have passed',
+    !loadError && pageCheckCases.every(Boolean), loadError || `cases ${failed(pageCheckCases)}`);
 
   // Meta connection down: the neutral banner, per-page reasons give way (the server sends state 'connection').
   meReply({ ...meBase, metaConnection: { down: true, labels: { en: 'We are fixing the Albayan-Meta connection', ar: 'نعمل على إصلاح اتصال البيان بميتا' } } });
@@ -6847,7 +6861,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
     editorProblems.includes('data-testid="studio-pg-rule-problem-name"') && editorProblems.includes('data-testid="studio-pg-rule-problem-keywords"') && editorProblems.includes('data-testid="studio-pg-rule-problem-reply"') && !editorProblems.includes('id="studio-rule-dm"') && editorNoCall,
     editorFilled.includes('value="Prices"') && editorFilled.includes('data-testid="studio-pg-rule-keyword-remove-1"') && editorFilled.includes('>بكم<') && editorFilled.includes('data-testid="studio-pg-rule-page-spg_fb" aria-pressed="true"') && editorFilled.includes('The rule answers on the chosen pages only'),
     String(editorRefused).includes('data-testid="studio-pg-rule-error"') && String(editorRefused).includes('الردود العامة غير متاحة لصفحات فيسبوك حالياً') && !String(editorRefused).includes('right now'),
-    saveCalls.length === 2 && JSON.stringify(saveCalls[1].body) === JSON.stringify({ name: 'Prices', platform: 'fb', trigger: 'keywords', keywords: ['price', 'بكم'], pageRefs: ['spg_fb'], publicReply: 'See the price list', dmEnabled: false, dmText: '', likeComment: false, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false }),
+    saveCalls.length === 2 && JSON.stringify(saveCalls[1].body) === JSON.stringify({ name: 'Prices', platform: 'fb', trigger: 'keywords', keywords: ['price', 'بكم'], pageRefs: ['spg_fb'], publicReply: 'See the price list', dmEnabled: false, dmText: '', likeComment: false, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false, pauseDms: false }),
     afterSave.includes('data-testid="studio-pg" data-section="rules" data-id=""') && afterSave.includes('data-testid="studio-pg-rule-srule_3"') && calls('GET', RULES).length === 2 && (json('__notes') || []).some(note => note.title === 'Rule saved'),
     editorExisting.includes('data-rule="srule_1"') && editorExisting.includes('value="Price &lt;b&gt;questions&lt;/b&gt;"') && editorExisting.includes('data-testid="studio-pg-rule-delete" onclick="studioPgRuleDelete(this)"') && editorExisting.includes('id="studio-rule-dm"') && editorExisting.includes('data-testid="studio-pg-rule-back" onclick="studioPgGo(\'rules\')"') && run("studioPgRuleDelete()") === false
   ];
@@ -6951,6 +6965,53 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   reply(RULES, rules());
   run('_studioPg.slots.rules.loadedAt = 0; _studioPg.editor = null;');
 
+  // Review loop r4 #35 / #36 / #37 (v2 rules): a rule whose private replies were paused in the classic studio shows
+  // "paused" (never a working DM chip) and the editor can switch the pause off (the body carries pauseDms); a rule
+  // whose only page was removed never says it answers on every page, and tick + untick really sends "all pages";
+  // a save that lands after the owner opened another rule leaves that rule's editor and typing alone, and a Save
+  // there meanwhile says another rule is saving instead of doing nothing.
+  run(`__replies[${JSON.stringify(RULES)}] = [];`);
+  const pausedRule = { ...rules().rules[0], id: 'srule_p', name: 'Paused DM', pauseDms: true, pageRefs: ['spg_gone'], pages: [{ id: 'spg_gone', removed: true, name: '', platform: '' }], pageRemoved: true };
+  const withPaused = () => ({ ...rules(), rules: rules().rules.concat([pausedRule]) });
+  reply(RULES, withPaused());
+  openAt('/studio?tab=replies&section=rules');
+  const pausedRow = between(html(), 'studio-pg-rule-srule_p');
+  reply(RULES, withPaused());
+  openAt('/studio?tab=replies&section=rules&id=srule_p');
+  const pausedEditor = html();
+  allHtml.push(pausedEditor);
+  const pagesNote = (pausedEditor.match(/data-testid="studio-pg-rule-pages-note">([^<]*)</) || [])[1] || '';
+  run(`var __ruleGate = null; var __realApiJson = apiJson; apiJson = function (path, options) {
+    if (String(path) === ${JSON.stringify(`${RULES}/srule_p`)} && String((options && options.method) || '') === 'PATCH') {
+      __calls.push({ path: String(path), method: 'PATCH', body: JSON.parse(JSON.stringify(options.body)) });
+      return new Promise(resolve => { __ruleGate = resolve; });
+    }
+    return __realApiJson(path, options);
+  };`);
+  run("studioPgRuleFlip('pauseDms'); studioPgRulePage('spg_fb'); studioPgRulePage('spg_fb'); studioPgRuleSave();");
+  const pausedPatch = calls('PATCH', `${RULES}/srule_p`)[0];
+  openAt('/studio?tab=replies&section=rules&id=srule_2');  // the owner opens another rule while it saves
+  run("studioPgRuleSet('name', 'Typed in B'); studioPgRuleSave();");
+  const secondSave = json('{ error: _studioPg.editor && _studioPg.editor.error, patches: __calls.filter(c => c.path.endsWith("/srule_2") && c.method === "PATCH").length }') || {};
+  reply(RULES, { ...rules(), rules: rules().rules.concat([{ ...pausedRule, pauseDms: false, pageRefs: [], pages: [], pageRemoved: false }]) });
+  const savedBefore = json('__notes.filter(n => n.title === "Rule saved").length');
+  run(`__ruleGate(${JSON.stringify({ ...pausedRule, pauseDms: false, pageRefs: [], pages: [], pageRemoved: false })});`);
+  const afterLate = json('{ editorFor: _studioPg.editor && _studioPg.editor.for, name: _studioPg.editor && _studioPg.editor.name, search: window.location.search, saved: __notes.filter(n => n.title === "Rule saved").length }') || {};
+  run('apiJson = __realApiJson;');
+  const pauseCases = [
+    pausedRow.includes('data-action="dm" data-state="paused"') && pausedRow.includes('Private message — paused') && !pausedRow.includes('data-action="dm" data-state="gated"'),
+    /aria-checked="true" aria-label="Pause private replies" data-testid="studio-pg-rule-pause-dm" onclick="studioPgRuleFlip\('pauseDms'\)"/.test(pausedEditor) && pausedEditor.includes('No private message is sent while this is on.'),
+    pagesNote.includes('answers on no page now') && !pausedEditor.includes('the rule answers on all your linked pages'),
+    !!pausedPatch && pausedPatch.body.pauseDms === false && JSON.stringify(pausedPatch.body.pageRefs) === '[]',
+    String(secondSave.error || '').includes('Another rule is still saving') && secondSave.patches === 0,
+    afterLate.editorFor === 'srule_2' && afterLate.name === 'Typed in B' && String(afterLate.search).includes('id=srule_2') && afterLate.saved === savedBefore + 1
+  ];
+  check('Studio v2 rules (review loop r4 #35/#36/#37): a paused private reply shows as paused and can be switched off (pauseDms sent), a rule whose only page was removed says it answers nowhere and tick + untick sends every page, a late save leaves the other rule\'s editor alone and a second Save meanwhile says why it waits',
+    !loadError && pauseCases.every(Boolean), loadError || `cases ${failed(pauseCases)} patch ${JSON.stringify(pausedPatch && pausedPatch.body)} second ${JSON.stringify(secondSave)} late ${JSON.stringify(afterLate)} note ${pagesNote}`);
+  run(`__replies[${JSON.stringify(RULES)}] = [];`);
+  reply(RULES, rules());
+  run('_studioPg.slots.rules.loadedAt = 0; _studioPg.editor = null;');
+
   // Reply log: the server's outcome labels and counters, a problem in plain words, the filter and older rows.
   const logRow = (id, outcome, extra = {}) => ({ id, at: ago(90), commentAt: ago(91), platform: 'fb', pageId: 'spg_fb', pageName: 'Sara <Shop>', ruleId: 'srule_1', ruleName: 'Price questions', commentId: 'c1', postId: 'p1', actions: outcome === 'sent' ? ['public', 'like'] : [], skipped: [], outcome, problemCode: '', error: '', source: 'webhook', receivedAt: ago(91), sentAt: ago(90), latencySeconds: 42, attempts: 1, retryAfter: null, parkedReason: null, ...extra });
   const logLabels = { outcome: { sent: { en: 'Sent (server)', ar: 'أُرسل (الخادم)' }, failed: { en: 'Failed (server)', ar: 'فشل (الخادم)' }, skipped: { en: 'Not sent: channel not available', ar: 'لم يُرسل: القناة غير متاحة' }, missed: { en: 'Missed during the outage', ar: 'فات أثناء الانقطاع' } }, channelState: labels, problem: {}, pageRemoved: { en: 'Page removed', ar: 'الصفحة أُزيلت' } };
@@ -7020,6 +7081,31 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Studio v2 posts as they are (statuses, pages, photos, the failed reason), the posts tab, the classic Replies / Posts tabs hand over to 15o only while /me says v2 (15f keeps exactly one apiJson), the plan-ended state',
     !loadError && postsCases.every(Boolean), loadError || `cases ${failed(postsCases)}`);
+
+  // Review loop r4 #34: "Classic view" (P6-06) chosen in this tab gets the classic Posts and Replies tabs (the composer,
+  // Edit, Cancel schedule, Delete), never the read-only v2 list again; the v2 Posts screen leads there.
+  meReply(meBase);
+  openAt('/studio?tab=posts');
+  const v2PostsWay = html();
+  allHtml.push(v2PostsWay);
+  run("_adsStudioActiveTab = 'posts';");
+  const handedOver = String(run('renderSocialStudioPostsTab()'));
+  const choseClassic = run('studioPgPostsClassic()');
+  const classicChosen = run('studioV2ClassicChosen()');
+  const classicPostsTab = String(run('renderSocialStudioPostsTab()'));
+  const classicRepliesTab = String(run('renderSocialStudioRepliesTab()'));
+  const delegateWhenChosen = String(run("studioPagesClassicDelegate('posts')"));
+  run('studioV2ChooseClassic(false);');
+  const handedAgain = String(run('renderSocialStudioPostsTab()'));
+  const classicViewCases = [
+    v2PostsWay.includes('data-testid="studio-pg-posts-classic" onclick="studioPgPostsClassic()"') && v2PostsWay.includes('in the classic view'),
+    handedOver.includes('data-testid="studio-pg-classic"'),
+    choseClassic === true && classicChosen === true && run('_adsStudioActiveTab') === 'posts',
+    !classicPostsTab.includes('studio-pg') && classicPostsTab.includes('onclick="socialBeginCompose()"') && !classicRepliesTab.includes('studio-pg-classic') && delegateWhenChosen === '',
+    handedAgain.includes('data-testid="studio-pg-classic"')
+  ];
+  check('Studio v2 posts (review loop r4 #34): with "Classic view" chosen the classic Posts / Replies tabs draw (the composer and the post actions) instead of the read-only v2 list, and the v2 Posts screen has the way there',
+    !loadError && classicViewCases.every(Boolean), loadError || `cases ${failed(classicViewCases)} chose ${choseClassic} chosen ${classicChosen}`);
 
   // Review loop r2 #20 / #36: the classic Social Studio (15f, the live default layout). A refusal goes through the ONE
   // Arabic map (never raw English for an Arabic reader); a failed post shows the bilingual words of its errorClass with
@@ -7106,7 +7192,7 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   // Texts, handlers, the classic map and the styles.
   const textPairs = [...pagesSrc.matchAll(/(?:adsStudioText|studioPgText)\((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`),\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))\)/g)].map(m => m[1]);
   const onclicks = allHtml.join('\n').match(/\son[a-z]+="[^"]*"/g) || [];
-  const safeHandler = /^\son(?:click|input|change|submit|keydown)="(event\.preventDefault\(\); studioPg(LinkSend|RuleSave)\(\);|studioPg(Go|Retry|Refresh|LinkSend|LinkCancel|Master|KeywordAdd|RuleSave|DeleteConfirm|CloseSheet|LogMore)\((?:'[a-z]+'(?:, '(?:new|link|[A-Za-z0-9_.:-]+)')?)?\)|studioPg(Check|RuleDelete|RuleToggle|RulePage|LogFilter|PostsFilter|RuleFlip)\((?:'[A-Za-z0-9_.:-]*'(?:, this)?|this)?\)|studioPg(LinkSet|RuleSet)\('[A-Za-z]+', this\.value\)|studioPg(LinkPick|RulePick)\('[A-Za-z]+', '[a-z]+'\)|studioPgLinkShared\(this\.checked\)|studioPgKeywordRemove\(\d+\)|studioPgKeywordKey\(event\)|studioGuide(Open\('[a-z-]+', this\)|Close\(\))|studioHelp(AskAbout\('page', '[A-Za-z0-9_.:-]+'\)|Open\('tkt_[0-9a-f]{40}'\))|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|setAdsStudioTab\('[a-z]+'\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
+  const safeHandler = /^\son(?:click|input|change|submit|keydown)="(event\.preventDefault\(\); studioPg(LinkSend|RuleSave)\(\);|studioPg(Go|Retry|Refresh|LinkSend|LinkCancel|Master|KeywordAdd|RuleSave|DeleteConfirm|CloseSheet|LogMore|PostsClassic)\((?:'[a-z]+'(?:, '(?:new|link|[A-Za-z0-9_.:-]+)')?)?\)|studioPg(Check|RuleDelete|RuleToggle|RulePage|LogFilter|PostsFilter|RuleFlip)\((?:'[A-Za-z0-9_.:-]*'(?:, this)?|this)?\)|studioPg(LinkSet|RuleSet)\('[A-Za-z]+', this\.value\)|studioPg(LinkPick|RulePick)\('[A-Za-z]+', '[a-z]+'\)|studioPgLinkShared\(this\.checked\)|studioPgKeywordRemove\(\d+\)|studioPgKeywordKey\(event\)|studioGuide(Open\('[a-z-]+', this\)|Close\(\))|studioHelp(AskAbout\('page', '[A-Za-z0-9_.:-]+'\)|Open\('tkt_[0-9a-f]{40}'\))|studioV2(Open|OpenSection)\('[a-z]+'\)|studioV2Go\(\{ tab: 'campaigns', id: '[A-Za-z0-9_.:-]+' \}\)|studioV2(Back|CloseBuilder)\(\)|studioV2ChooseClassic\(true\)|setAdsStudioTab\('[a-z]+'\)|toggleLanguage\(\)|toggleTheme\(\)|handleLogout\(\))"$/;
   const workspaceCss = read('assets/ads-workspace.css');
   const pagesCss = workspaceCss.slice(workspaceCss.indexOf('/* Albayan Studio v2 Pages & replies'));
   const refusalMap = json('_ADS_STUDIO_REFUSAL_AR') || [];

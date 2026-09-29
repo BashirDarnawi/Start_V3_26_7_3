@@ -747,9 +747,17 @@ async function socialComposerSave(action) {
     if (draft.id) {
       saved = socialUnwrap(await socialApi(`/posts/${encodeURIComponent(draft.id)}`, { method: 'PATCH', body }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post');
     } else {
-      saved = socialUnwrap(await socialApi('/posts', { method: 'POST', body }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post');
+      // Review loop r4 #31: one operationId per new post until its first answer arrives, so a retry after
+      // a lost answer (the server saved it) saves that same post again instead of a second copy.
+      if (!draft.opId) draft.opId = Security.generateSecureId('spost');
+      saved = socialUnwrap(await socialApi('/posts', { method: 'POST', body: { ...body, operationId: draft.opId } }, { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }), 'post');
     }
-    if (!sameDraft()) return;
+    if (!sameDraft()) {
+      // Back (or a new post) while "Publish now" was saving: the post is kept as a draft and not published
+      // (review loop r4 #32); say so instead of leaving it unseen in Drafts.
+      if (action === 'now' && socialStudioContextIsCurrent(context)) showNotification(socialText('Saved as a draft, not published', 'حُفظ كمسودة ولم يُنشر'), socialText('You left before it was published. It is in Drafts: open it there to publish it.', 'غادرت قبل نشره. المنشور في المسودات: افتحه من هناك لنشره.'), 'warning');
+      return;
+    }
     const postId = String(saved?.id || draft.id || '');
     // If publishing fails after creation, retry the same saved post rather
     // than creating another copy from a draft that still has an empty id.
@@ -758,7 +766,9 @@ async function socialComposerSave(action) {
       // The user kept editing while the save was in flight. The server holds
       // the pre-edit body; say so instead of vanishing, and keep the newer
       // text in the editor so one more Save sends it (and publishes, if asked).
-      if (sameDraft()) showNotification(socialText('Saved as a draft', 'تم الحفظ كمسودة'), socialText('You kept typing while it was saving, so your newer edits are still here. Save again to send them.', 'واصلت الكتابة أثناء الحفظ، فبقيت تعديلاتك الأحدث هنا. احفظ مرة أخرى لإرسالها.'), 'info');
+      // A Schedule save is already scheduled with the earlier text (review loop r4 #33): never "a draft".
+      if (String(saved?.status || wanted) === 'scheduled') showNotification(socialText('Scheduled with the earlier text', 'جُدول بالنص السابق'), socialText('Your newer edits are still here and are not in the scheduled post yet. Schedule again to update it, or save it as a draft to stop it.', 'تعديلاتك الأحدث ما زالت هنا ولم تدخل المنشور المجدول بعد. جدوله مرة أخرى لتحديثه، أو احفظه كمسودة لإيقافه.'), 'warning');
+      else showNotification(socialText('Saved as a draft', 'تم الحفظ كمسودة'), socialText('You kept typing while it was saving, so your newer edits are still here. Save again to send them.', 'واصلت الكتابة أثناء الحفظ، فبقيت تعديلاتك الأحدث هنا. احفظ مرة أخرى لإرسالها.'), 'info');
       return;
     }
     if (action === 'now' && postId) {
@@ -772,7 +782,8 @@ async function socialComposerSave(action) {
     _social.screen = 'post-done';
     socialRefreshNow();
   } catch (e) {
-    if (!isCurrent()) return;
+    // Also after Back or a keystroke meanwhile (review loop r4 #32): nothing was saved, so it is said.
+    if (!socialStudioContextIsCurrent(context)) return;
     showNotification(socialText('Could not save the post', 'تعذر حفظ المنشور'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
     if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }
@@ -1120,7 +1131,7 @@ async function socialRuleSave() {
     _social.screen = '';
     socialRefreshNow();
   } catch (e) {
-    if (!isCurrent()) return;
+    if (!socialStudioContextIsCurrent(context)) return;  // after Back too (review loop r4 #32): nothing was saved
     showNotification(socialText('Could not save the rule', 'تعذر حفظ القاعدة'), socialErrorDetail(e, 'Please try again.', 'حاول مرة أخرى.'), 'error');
   } finally {
     if (socialStudioContextIsCurrent(context)) { _social.busy = false; render(); }

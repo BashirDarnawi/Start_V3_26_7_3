@@ -1209,6 +1209,8 @@ const _ADS_STUDIO_REFUSAL_AR = [
   [/^(media must be a list of images|A post supports at most \d+ photos|Photo \d+\b)/, 'صور المنشور غير مقبولة: PNG أو JPEG أو WebP، كل واحدة أقل من 3 ميغابايت، وبعدد معقول.', '',
     'The post photos are not accepted: PNG, JPEG or WebP, each under 3 MB, and not too many.'],
   [/^A post needs a caption or at least one photo/, 'يحتاج المنشور إلى نص أو صورة واحدة على الأقل.', '', 'A post needs a caption or at least one photo.'],
+  [/ cannot start with javascript: or vbscript: /, 'لا يمكن أن يبدأ النص أو الرد أو اسم القاعدة بعبارة برمجية مثل «جافاسكربت:». أضف كلمة قبلها.', '',
+    'A caption, reply or rule name cannot start with javascript: or vbscript:. Add a word before it.'],
   [/^scheduledAt /, 'اختر تاريخاً ووقتاً بعد دقيقة واحدة على الأقل من الآن.', '', 'Choose a date and time at least one minute in the future.'],
   [/^autoReplyRuleId is not one of your rules/, 'قاعدة الرد المختارة ليست من قواعدك.', '', 'The chosen reply rule is not one of yours.'],
   [/^Post is not claimed for publishing/, 'هذا المنشور ليس قيد النشر الآن. حدّث الصفحة وحاول مرة أخرى.', '', 'This post is not being published right now. Refresh and try again.'],

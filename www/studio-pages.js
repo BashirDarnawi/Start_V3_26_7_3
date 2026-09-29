@@ -38,6 +38,9 @@ const STUDIO_PG_READS = Object.freeze({
 });
 const STUDIO_PG_FRESH_MS = 30 * 1000;
 const STUDIO_PG_RETRY_MS = 30 * 1000;
+// A page check is old past a day and a margin (review loop r4 #39): the server checks each page daily
+// (social_studio.PAGE_HEALTH_EVERY), so the 6 h of the results data (studioDataIsStale) marked most healthy pages.
+const STUDIO_PG_HEALTH_STALE_MS = 30 * 60 * 60 * 1000;
 const STUDIO_PG_LOG_DAYS = 30;
 const STUDIO_PG_LOG_LIMIT = 50;
 const STUDIO_PG_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/;
@@ -244,6 +247,7 @@ function studioPgCleanRule(raw) {
     enabled: raw.enabled !== false, trigger: raw.trigger === 'every' ? 'every' : 'keywords', keywords: list(raw.keywords, STUDIO_PG_MAX.keywords, STUDIO_PG_MAX.keyword),
     publicReply: studioPgClean(raw.publicReply, STUDIO_PG_MAX.reply), dmEnabled: raw.dmEnabled === true, dmText: studioPgClean(raw.dmText, STUDIO_PG_MAX.reply),
     likeComment: raw.likeComment === true, oncePerPerson: raw.oncePerPerson === true, skipPublicAfterDm: raw.skipPublicAfterDm === true, quietHours: raw.quietHours === true,
+    pauseDms: raw.pauseDms === true,  // review loop r4 #35: the classic "Pause private replies" (the executor sends no DM)
     scope: raw.scope === 'chosen' ? 'chosen' : 'all', pageRefs: list(raw.pageRefs, STUDIO_PG_MAX.pages, 80).filter(ref => STUDIO_PG_ID_RE.test(ref)), pages,
     pageRemoved: raw.pageRemoved === true, pageRemovedLabels: studioPgPair(raw.pageRemovedLabel, 80)
   };
@@ -472,6 +476,7 @@ if (typeof studioV2RegisterScreen === 'function') {
 function studioPagesClassicDelegate(tab) {
   const me = studioPgMe();
   if (!me || me.ui !== 'v2') return '';
+  if (typeof studioV2ClassicChosen === 'function' && studioV2ClassicChosen()) return '';  // "Classic view" chosen: the classic tabs
   studioPgScope();
   const body = tab === 'posts' ? renderStudioPagesBody({ tab: 'posts', section: 'posts', id: '' }) : renderStudioPagesBody(null);
   return `<div class="studio-pg-classic" data-testid="studio-pg-classic" dir="${adsStudioIsAr() ? 'rtl' : 'ltr'}">${body}</div>`;
@@ -493,7 +498,8 @@ function renderStudioPgPage(page, admin, down) {
   const h = page.health;
   const label = studioPickText(h.labels, 200) || (h.state === 'ok' ? studioPgText('Working', 'يعمل') : studioPgText('Needs attention', 'يحتاج انتباهاً'));
   const checked = h.checkedAt && typeof studioDataCheckedAgo === 'function' ? studioDataCheckedAgo(h.checkedAt) : (h.checkedAt ? studioPgWhen(h.checkedAt) : studioPgText('not checked yet', 'لم يُفحص بعد'));
-  const stale = h.checkedAt && typeof studioDataIsStale === 'function' && studioDataIsStale(h.checkedAt);
+  const checkedMs = Date.parse(String(h.checkedAt || ''));
+  const stale = !!h.checkedAt && Number.isFinite(checkedMs) && Date.now() - checkedMs > STUDIO_PG_HEALTH_STALE_MS;
   let fix = '';
   if (h.state === 'attention' && !down) {
     const helpOn = typeof studioHelpOn === 'function' && studioHelpOn();
@@ -871,6 +877,7 @@ function renderStudioPgRuleRow(rule) {
   const actions = [['public', !!rule.publicReply], ['dm', rule.dmEnabled && !!rule.dmText], ['like', rule.likeComment && rule.platform === 'fb']]
     .filter(([, on]) => on).map(([kind]) => {
       const channel = studioPgChannel(rule.platform, kind);
+      if (kind === 'dm' && rule.pauseDms) return studioPgChip(`${studioPgActionWord(kind)} — ${studioPgText('paused', 'متوقفة')}`, 'slate', 'circle-pause', '', ' data-action="dm" data-state="paused"');
       return studioPgChip(channel.open ? studioPgActionWord(kind) : `${studioPgActionWord(kind)} — ${channel.label}`, channel.open ? 'ok' : studioPgStateTone(channel.state), channel.open ? 'check' : 'clock', '', ` data-action="${kind}" data-state="${studioEsc(channel.state)}"`);
     }).join('');
   const busy = _studioPg.busy.has(`toggle:${rule.id}`);
@@ -937,7 +944,7 @@ function studioPgNewRule(platform) {
   const kind = studioPgPlatform(platform) || 'fb';
   return {
     id: '', name: '', platform: kind, enabled: true, trigger: 'keywords', keywords: [], pageRefs: [], publicReply: '', dmEnabled: false, dmText: '',
-    likeComment: kind === 'fb' && !studioPgChannel('fb', 'like').refused, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false, scope: 'all',
+    likeComment: kind === 'fb' && !studioPgChannel('fb', 'like').refused, oncePerPerson: true, skipPublicAfterDm: false, quietHours: false, pauseDms: false, scope: 'all',
     keywordInput: '', sending: false, error: '', problems: {}, dirty: false
   };
 }
@@ -1025,7 +1032,7 @@ function studioPgRulePick(field, value) {
 // action; the executor withholds it anyway), never on.
 function studioPgRuleFlip(field) {
   const draft = studioPgEditor();
-  if (!draft || !['dmEnabled', 'likeComment', 'oncePerPerson', 'skipPublicAfterDm', 'quietHours'].includes(field)) return;
+  if (!draft || !['dmEnabled', 'likeComment', 'oncePerPerson', 'skipPublicAfterDm', 'quietHours', 'pauseDms'].includes(field)) return;
   if ((field === 'dmEnabled' && !draft.dmEnabled && studioPgChannel(draft.platform, 'dm').refused)
     || (field === 'likeComment' && !draft.likeComment && (draft.platform !== 'fb' || studioPgChannel('fb', 'like').refused))) return;
   draft[field] = !draft[field];
@@ -1044,7 +1051,9 @@ function studioPgRulePage(id) {
   const draft = studioPgEditor();
   const page = studioPgPage(id);
   if (!draft || !page || page.platform !== draft.platform) return;
-  const set = new Set(draft.pageRefs);
+  // From the live pages only (review loop r4 #36): the first chip drops a removed page's ref, so unticking
+  // every page really means all pages (the unchanged list [removed ref] was omitted and answered nowhere).
+  const set = new Set(studioPgRuleLiveRefs(draft));
   if (set.has(page.id)) set.delete(page.id);
   else if (set.size < STUDIO_PG_MAX.pages) set.add(page.id);
   draft.pageRefs = Array.from(set);
@@ -1106,7 +1115,7 @@ function studioPgRuleBody(draft) {
     trigger: draft.trigger, keywords: draft.trigger === 'keywords' ? draft.keywords : [], pageRefs: studioPgRuleLiveRefs(draft),
     publicReply: draft.publicReply.trim(), dmEnabled: draft.dmEnabled && !!draft.dmText.trim(), dmText: draft.dmEnabled ? draft.dmText.trim() : '',
     likeComment: draft.platform === 'fb' && !!draft.likeComment && !studioPgChannel('fb', 'like').refused,
-    oncePerPerson: !!draft.oncePerPerson, skipPublicAfterDm: !!draft.skipPublicAfterDm, quietHours: !!draft.quietHours
+    oncePerPerson: !!draft.oncePerPerson, skipPublicAfterDm: !!draft.skipPublicAfterDm, quietHours: !!draft.quietHours, pauseDms: !!draft.pauseDms
   };
   const stored = draft.id ? studioPgRule(draft.id) : null;
   const untouched = !!stored && stored.pageRefs.length === draft.pageRefs.length && stored.pageRefs.every((id, i) => draft.pageRefs[i] === id);
@@ -1116,7 +1125,12 @@ function studioPgRuleBody(draft) {
 
 function studioPgRuleSave() {
   const draft = _studioPg.editor;
-  if (!draft || draft.sending || _studioPg.busy.has('save')) return null;
+  if (!draft || draft.sending) return null;
+  if (_studioPg.busy.has('save')) {  // another rule's save is on its way (review loop r4 #37): said, not ignored
+    draft.error = studioPgText('Another rule is still saving. Try again in a moment.', 'قاعدة أخرى ما زالت قيد الحفظ. أعد المحاولة بعد لحظات.');
+    studioPgRedraw();
+    return null;
+  }
   const problems = studioPgRuleValidate(draft);
   if (Object.keys(problems).length) {
     draft.problems = problems;
@@ -1147,10 +1161,14 @@ function studioPgRuleSave() {
       const at = rules.value.rules.findIndex(rule => rule.id === saved.id);
       if (at >= 0) rules.value.rules[at] = saved; else rules.value.rules.push(saved);
     }
-    _studioPg.editor = null;
+    // Only this draft and its own editor (review loop r4 #37): the owner may have opened another rule
+    // (or another section) meanwhile; that draft and screen stay as they are.
+    const here = studioPgEditorOnScreen(draft);
+    draft.sending = false;
+    if (_studioPg.editor === draft) _studioPg.editor = null;
     studioPgNotify(true, studioPgText('Rule saved', 'حُفظت القاعدة'), body.name);
     studioPgWant('rules', true);
-    studioPgGo('rules');
+    if (here) studioPgGo('rules'); else studioPgRedraw();
     return saved;
   }, error => {
     if (generation !== _studioPg.generation) return null;
@@ -1205,10 +1223,11 @@ function studioPgDeleteConfirm() {
     if (generation !== _studioPg.generation) return null;
     const rules = studioPgSlot('rules');
     if (rules.value) rules.value.rules = rules.value.rules.filter(rule => rule.id !== id);
-    _studioPg.editor = null;
+    const here = studioPgEditorOnScreen(draft);  // as a save (review loop r4 #37): only its own editor
+    if (_studioPg.editor === draft) _studioPg.editor = null;
     studioPgNotify(true, studioPgText('Rule deleted', 'حُذفت القاعدة'), '');
     studioPgWant('rules', true);
-    studioPgGo('rules');
+    if (here) studioPgGo('rules'); else studioPgRedraw();
     return true;
   }, error => {
     if (generation !== _studioPg.generation) return null;
@@ -1247,7 +1266,9 @@ function renderStudioPgEditor(id) {
   const removedNote = removedRef ? `<p class="studio-pg-note" data-testid="studio-pg-rule-page-removed">${studioEsc(studioPgText('A page of this rule was removed. It stays on the rule until you choose the pages again; the rule can still be saved or switched off.', 'أُزيلت إحدى صفحات هذه القاعدة. تبقى على القاعدة حتى تختار الصفحات من جديد؛ ويمكن حفظ القاعدة أو إيقافها.'))}</p>` : '';
   const pageChips = pages.length
     ? `<div class="studio-pg-chips" role="group" aria-labelledby="studio-pg-rule-label-pages">${pages.map(page => chip(`studio-pg-rule-page-${page.id}`, page.name, draft.pageRefs.includes(page.id), `studioPgRulePage('${studioEsc(page.id)}')`)).join('')}</div>
-              <p class="studio-pg-note">${studioEsc(liveRefs.length ? studioPgText('The rule answers on the chosen pages only.', 'تردّ القاعدة على الصفحات المختارة فقط.') : studioPgText('Nothing chosen: the rule answers on all your linked pages of this platform.', 'لم تختر شيئاً: تردّ القاعدة على كل صفحاتك المربوطة على هذه المنصة.'))}</p>${removedNote}`
+              <p class="studio-pg-note" data-testid="studio-pg-rule-pages-note">${studioEsc(liveRefs.length ? studioPgText('The rule answers on the chosen pages only.', 'تردّ القاعدة على الصفحات المختارة فقط.')
+    : draft.pageRefs.length ? studioPgText('The pages chosen for this rule were removed, so it answers on no page now. Choose a page, or tick and untick one to answer on all your pages.', 'أُزيلت الصفحات المختارة لهذه القاعدة، فلا تردّ الآن على أي صفحة. اختر صفحة، أو اخترها ثم ألغِ اختيارها لتردّ على كل صفحاتك.')
+    : studioPgText('Nothing chosen: the rule answers on all your linked pages of this platform.', 'لم تختر شيئاً: تردّ القاعدة على كل صفحاتك المربوطة على هذه المنصة.'))}</p>${removedNote}`
     : `<p class="studio-pg-note" data-testid="studio-pg-rule-nopages">${studioEsc(studioPgText('No linked page on this platform yet. The rule is saved and starts once a page is linked.', 'لا توجد صفحة مربوطة على هذه المنصة بعد. تُحفظ القاعدة وتبدأ بعد ربط صفحة.'))}</p>${removedNote}`;
   const keywords = draft.trigger === 'keywords' ? `
               <div class="studio-pg-chips is-tight">${draft.keywords.map((keyword, index) => `<span class="studio-pg-chip" data-tone="slate"><span dir="auto">${studioEsc(keyword)}</span><button type="button" class="studio-pg-chip-remove" data-testid="studio-pg-rule-keyword-remove-${index}" onclick="studioPgKeywordRemove(${index})" aria-label="${studioEsc(studioPgText('Remove keyword', 'إزالة الكلمة'))}"${off}>${studioPgIcon('x', 'studio-pg-chip-icon')}</button></span>`).join('')}</div>
@@ -1312,6 +1333,7 @@ function renderStudioPgEditor(id) {
               </div>
               ${dmWhy}
               ${draft.dmEnabled ? `<textarea id="studio-rule-dm" class="studio-pg-input" rows="3" maxlength="${STUDIO_PG_MAX.reply}" oninput="studioPgRuleSet('dmText', this.value)" placeholder="${studioEsc(studioPgText('What only the commenter receives', 'ما يستلمه صاحب التعليق فقط'))}" aria-label="${studioEsc(studioPgText('Private message', 'رسالة خاصة'))}"${off}>${studioEsc(draft.dmText)}</textarea>` : ''}
+              ${draft.dmEnabled || draft.pauseDms ? behaviour('pauseDms', studioPgText('Pause private replies', 'إيقاف الردود الخاصة مؤقتاً'), 'studio-pg-rule-pause-dm', false, draft.pauseDms ? studioPgText('No private message is sent while this is on.', 'لا تُرسل أي رسالة خاصة ما دام هذا مفعّلاً.') : '') : ''}
               ${problem('reply')}
             </div>
             <div class="studio-pg-field">
@@ -1521,6 +1543,15 @@ function renderStudioPgPost(post) {
             </li>`;
 }
 
+// Review loop r4 #34: until this screen writes posts, its way to the classic Posts tab (the composer, Edit,
+// Cancel schedule, Publish now, Delete) through "Classic view" (P6-06; the handover gives way to it).
+function studioPgPostsClassic() {
+  if (typeof studioV2ChooseClassic !== 'function' || !studioV2ChooseClassic(true)) return false;
+  if (typeof socialOpenPostsTab === 'function') socialOpenPostsTab();
+  else if (typeof setAdsStudioTab === 'function') setAdsStudioTab('posts');
+  return true;
+}
+
 function renderStudioPgPosts(postsTab = false) {
   const slot = studioPgSlot('posts');
   studioPgWant('posts');
@@ -1538,13 +1569,14 @@ function renderStudioPgPosts(postsTab = false) {
   else if (!rows.length) list = `<p class="studio-pg-empty" data-testid="studio-pg-posts-empty">${studioEsc(studioPgText('Nothing here yet.', 'لا شيء هنا بعد.'))}</p>`;
   else list = `<ul class="studio-pg-list" data-testid="studio-pg-posts">${rows.map(renderStudioPgPost).join('')}</ul>`;
   const way = postsTab && studioPgInV2() ? `<button type="button" class="studio-pg-link" data-testid="studio-pg-posts-all" onclick="studioV2Open('replies')">${studioPgIcon('messages-square', 'studio-pg-chip-icon')}<span>${studioEsc(studioPgText('Pages & replies', 'الصفحات والردود'))}</span></button>` : '';
+  const manage = studioPgInV2() ? `<button type="button" class="studio-v2-action studio-pg-small" data-testid="studio-pg-posts-classic" onclick="studioPgPostsClassic()">${studioPgIcon('pencil')}<span>${studioEsc(studioPgText('Write, change or cancel posts in the classic view', 'اكتب المنشورات أو عدّلها أو ألغِها في العرض القديم'))}</span></button>` : '';
   return `
           <section class="studio-pg-card" data-testid="studio-pg-posts-card" aria-labelledby="studio-pg-posts-title">
             <div class="studio-pg-head">
               <h2 id="studio-pg-posts-title" class="studio-pg-h2">${studioEsc(studioPgText('Scheduled posts', 'المنشورات المجدولة'))}</h2>
               ${way}
             </div>
-            <p class="studio-pg-note">${studioEsc(studioPgText('Your posts as they stand: scheduled ones publish at their time. Writing and scheduling from the new studio comes in a later step.', 'منشوراتك كما هي: المجدولة تُنشر في وقتها. الكتابة والجدولة من الاستوديو الجديد تأتي في خطوة لاحقة.'))}</p>
+            <p class="studio-pg-note">${studioEsc(studioPgText('Your posts as they stand: scheduled ones publish at their time. Writing and scheduling from the new studio comes in a later step.', 'منشوراتك كما هي: المجدولة تُنشر في وقتها. الكتابة والجدولة من الاستوديو الجديد تأتي في خطوة لاحقة.'))}</p>${manage}
             <div class="studio-pg-chips" role="group" aria-label="${studioEsc(studioPgText('Show', 'اعرض'))}">${chips}</div>
             ${list}
           </section>`;

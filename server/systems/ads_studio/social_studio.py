@@ -122,6 +122,8 @@ DEFAULT_QUIET_HOURS = {"from": "22:00", "to": "08:00"}
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _DIGITS_RE = re.compile(r"^\d{1,40}$")
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
+# The composer's operationId on POST /posts (review loop r4 #31); the shape of the ad request's own.
+_POST_OPERATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,119}")
 _DATA_URL_RE = re.compile(
     r"^data:image/(png|jpe?g|webp);base64,([A-Za-z0-9+/]+={0,2})$", re.IGNORECASE
 )
@@ -790,6 +792,16 @@ def _has_new_photo(raw: Any, existing: dict[str, Any] | None) -> bool:
     return any(isinstance(item, str) and item not in known for item in media)
 
 
+def _client_post_id(owner_id: str, raw: Any) -> str:
+    """The id POST /posts gives the post of a composer's ``operationId`` (the same for every try of one
+    create, and only for this owner); '' without one."""
+    if raw is None or raw == "":
+        return ""
+    if not isinstance(raw, str) or not _POST_OPERATION_ID_RE.fullmatch(raw):
+        raise HTTPException(status_code=400, detail="Invalid operationId")
+    return "spost_" + hashlib.sha256(f"{owner_id}:{raw}".encode("utf-8")).hexdigest()[:32]
+
+
 @contextmanager
 def _post_quota_guard(owner_id: str):
     """Serialize a post quota check with the write it allows: in this process and, on PostgreSQL, across
@@ -939,13 +951,21 @@ def _load_owned(ctx: dict[str, Any], entity_type: str, entity_id: str, scope: _S
     return entity
 
 
-def _text_field(ctx: dict[str, Any], raw: Any, label: str, maximum: int, *, required: bool = False) -> str:
+def _text_field(ctx: dict[str, Any], raw: Any, label: str, maximum: int, *, required: bool = False,
+                plain_text: bool = False) -> str:
     value = str(raw or "").strip()
     if required and not value:
         raise HTTPException(status_code=400, detail=f"{label} is required")
     if len(value) > maximum:
         raise HTTPException(status_code=400, detail=f"{label} must be {maximum} characters or fewer")
-    return ctx["sanitize_str"](value, maximum + 1)[:maximum]
+    clean = ctx["sanitize_str"](value, maximum + 1)[:maximum]
+    # Review loop r4 #38: main.sanitize_str empties a text that starts with javascript: / vbscript: (and
+    # upsert_entity would empty it again on the write). A customer's words (a caption, a reply) are refused
+    # with the reason instead of being published or saved empty without a word.
+    if plain_text and not clean and value.replace("\x00", "").strip().replace("<", "").replace(">", "").lower().startswith(
+            ("javascript:", "vbscript:")):
+        raise HTTPException(status_code=400, detail=f"{label} cannot start with javascript: or vbscript: (add a word before it)")
+    return clean
 
 
 def _string_list(raw: Any, label: str, *, max_items: int, max_chars: int) -> list[str]:
@@ -1112,7 +1132,7 @@ def _clean_rule(
     ctx: dict[str, Any], owner_id: str, raw: dict[str, Any], *, stored_refs: list[str] | None = None,
     stored: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    name = _text_field(ctx, raw.get("name"), "Rule name", 80, required=True)
+    name = _text_field(ctx, raw.get("name"), "Rule name", 80, required=True, plain_text=True)
     platform = str(raw.get("platform") or "fb").strip().lower()
     if platform not in PLATFORMS:
         raise HTTPException(status_code=400, detail="platform must be fb or ig")
@@ -1131,8 +1151,8 @@ def _clean_rule(
         normalized = normalize_text(ctx["sanitize_str"](keyword, 40))
         if normalized and normalized not in keywords:
             keywords.append(normalized)
-    public_reply = _text_field(ctx, raw.get("publicReply"), "publicReply", 1000)
-    dm_text = _text_field(ctx, raw.get("dmText"), "dmText", 1000)
+    public_reply = _text_field(ctx, raw.get("publicReply"), "publicReply", 1000, plain_text=True)
+    dm_text = _text_field(ctx, raw.get("dmText"), "dmText", 1000, plain_text=True)
     dm_enabled = _bool(raw.get("dmEnabled"))
     like_comment = _bool(raw.get("likeComment"))
     if trigger == "keywords" and not keywords:
@@ -1198,7 +1218,7 @@ def _clean_post(
 ) -> dict[str, Any]:
     existing = existing or {}
     caption = _text_field(
-        ctx, raw.get("caption") if "caption" in raw else existing.get("caption"), "caption", MAX_CAPTION_CHARS
+        ctx, raw.get("caption") if "caption" in raw else existing.get("caption"), "caption", MAX_CAPTION_CHARS, plain_text=True
     )
     page_ids_raw = raw.get("pageIds") if "pageIds" in raw else existing.get("pageIds")
     page_ids = _string_list(page_ids_raw, "pageIds", max_items=MAX_POST_PAGES, max_chars=80)
@@ -3414,19 +3434,44 @@ def create_social_studio_router(
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
         scope = _mutation(request, user, ctx, ownerId)
+        body = dict(body or {})
+        # Review loop r4 #31: the composer's operationId names the post it creates, so a retry after a lost
+        # answer (the first try saved it) saves that post again as an edit, never a second copy (two scheduled
+        # copies both publish). A post of that name deleted since gives way to a new one.
+        post_id = _client_post_id(scope.owner, body.pop("operationId", None))
+        landed = _landed_post(scope, post_id)
+        if landed:
+            return _save_post_edit(scope, user, landed, body)
+        if post_id and ctx["get_entity"](POSTS_TYPE, post_id):
+            post_id = ""
+        from_client = bool(post_id)
         now = _iso_now()
         # A new photo is fully decoded: through main's 2-slot guard (503 while busy, 24 checks a minute).
-        with (ctx["media_validation_slot"](user) if _has_new_photo(body or {}, None) else nullcontext()):
+        with (ctx["media_validation_slot"](user) if _has_new_photo(body, None) else nullcontext()):
             clean = {
-                **_clean_post(ctx, scope.owner, body or {}, None),
+                **_clean_post(ctx, scope.owner, body, None),
                 "publishedAt": "", "results": [], "createdAt": now, "updatedAt": now,
             }
-        post_id = new_id("spost")
-        with _post_quota_guard(scope.owner) as quota_conn:
-            _enforce_post_quota(quota_conn, scope.owner, clean, creating=True)
-            saved = ctx["upsert_entity"](POSTS_TYPE, post_id, clean, scope.owner, reject_existing=True)
+        post_id = post_id or new_id("spost")
+        try:
+            with _post_quota_guard(scope.owner) as quota_conn:
+                _enforce_post_quota(quota_conn, scope.owner, clean, creating=True)
+                saved = ctx["upsert_entity"](POSTS_TYPE, post_id, clean, scope.owner, reject_existing=True)
+        except HTTPException:
+            landed = _landed_post(scope, post_id) if from_client else None  # the other try of this create won
+            if not landed:
+                raise
+            return _save_post_edit(scope, user, landed, body)
         ctx["audit"](scope.uid, "create", POSTS_TYPE, post_id, f"Created social post ({clean['status']})", {"ownerId": scope.owner})
         return _public(saved, user)
+
+    def _landed_post(scope: _Scope, post_id: str) -> dict[str, Any] | None:
+        """The live post of this owner an earlier try of the same create saved (``post_id`` from
+        _client_post_id), or None."""
+        entity = ctx["get_entity"](POSTS_TYPE, post_id) if post_id else None
+        if not entity or entity.get("deleted") or str((entity.get("data") or {}).get("ownerId") or "") != scope.owner:
+            return None
+        return entity
 
     def _editable(entity: dict[str, Any]) -> None:
         if str(entity["data"].get("status") or "") not in POST_EDITABLE_STATUSES:
@@ -3441,7 +3486,10 @@ def create_social_studio_router(
         user: dict[str, Any] = Depends(current_user_dependency),
     ):
         scope = _mutation(request, user, ctx, ownerId)
-        entity = _load_owned(ctx, POSTS_TYPE, post_id, scope)
+        return _save_post_edit(scope, user, _load_owned(ctx, POSTS_TYPE, post_id, scope), body or {})
+
+    def _save_post_edit(scope: _Scope, user: dict[str, Any], entity: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+        """PATCH /posts/{id} on a loaded post (also a create retried with its operationId)."""
         _editable(entity)
         _live = any(isinstance(r, dict) and r.get("metaPostId") for r in (entity["data"].get("results") or []))
         _body = body or {}

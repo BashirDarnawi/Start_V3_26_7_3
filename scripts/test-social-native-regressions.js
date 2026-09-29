@@ -23,7 +23,7 @@ function fixture() {
   f.sandbox.socialRefreshNow = () => {};
   const notices = [];
   f.sandbox.showNotification = (...args) => notices.push(args);
-  f.run("_social.forUser = 'admin'; _social.pages = [{ id: 'page_a', name: 'Page A', platform: 'fb' }]; _social.posts = [{ id: 'post_a', caption: 'A summary' }, { id: 'post_b', caption: 'B summary' }]; _social.rules = [{ id: 'rule_a', name: 'Rule A', enabled: true }]; _social.availablePages = [{ metaPageId: '123', platform: 'fb', name: 'Available page' }];");
+  f.run("_social.forUser = 'admin'; _social.pages = [{ id: 'page_a', name: 'Page A', platform: 'fb' }]; _social.posts = [{ id: 'post_a', caption: 'A summary', mediaCount: 0 }, { id: 'post_b', caption: 'B summary', mediaCount: 0 }]; _social.rules = [{ id: 'rule_a', name: 'Rule A', enabled: true }]; _social.availablePages = [{ metaPageId: '123', platform: 'fb', name: 'Available page' }];");
   const newComposer = () => f.run("_social.composer = { id: '', pageIds: ['page_a'], caption: 'A caption', media: [], mode: 'now', scheduledAt: '', autoReply: false, autoReplyRuleId: '' }; _social.screen = 'compose';");
   const newRule = () => f.run("_social.ruleDraft = { ...socialNewRule(), id: 'rule_a', name: 'Rule A', trigger: 'every', publicReply: 'Thank you' }; _social.screen = 'rule';");
   const switchSession = (kind = 'user') => {

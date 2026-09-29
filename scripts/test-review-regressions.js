@@ -116,7 +116,116 @@ function studioFixture() {
   return { ...fixture, calls, renders, replies };
 }
 
+// The classic Social Studio (15f, lazy studio.js) on top of the startup files, its API held by the test.
+function socialFixture() {
+  const fixture = loadBrowserSource();
+  for (const file of ['systems/ads_studio/15c-ads-studio.js', 'systems/ads_studio/15f-social-studio.js']) {
+    fixture.run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+  }
+  fixture.state.currentView = 'ads-studio';
+  fixture.sandbox.socialStudioAvailable = () => true;
+  fixture.sandbox.socialRefreshNow = () => {};
+  const notes = [];
+  fixture.sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+  const calls = [];
+  const gates = [];
+  fixture.sandbox.apiJson = (url, options = {}) => {
+    calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(JSON.stringify(options.body)) : null });
+    return new Promise((resolve, reject) => gates.push({ resolve, reject }));
+  };
+  fixture.run("_social.forUser = 'admin'; _social.pages = [{ id: 'page_a', name: 'Page A', platform: 'fb' }]; _social.posts = []; _social.rules = [];");
+  const compose = (mode = 'now') => fixture.run(`_social.composer = { id: '', pageIds: ['page_a'], caption: 'A caption', media: [], mode: '${mode}',
+    scheduledAt: ${mode === 'schedule' ? 'socialIsoToLocalInput(new Date(Date.now() + 3 * 3600000).toISOString())' : "''"}, autoReply: false, autoReplyRuleId: '' }; _social.screen = 'compose';`);
+  const refusal = detail => Object.assign(new Error(detail), { status: 400, payload: { detail } });
+  return { ...fixture, notes, calls, gates, compose, refusal };
+}
+
 async function main() {
+  await test('classic composer (review loop r4 #31): a retry after a lost answer sends the same operationId, so the server saves one post', async () => {
+    const { sandbox, run, calls, gates, compose } = socialFixture();
+    compose('schedule');
+    const first = sandbox.socialComposerSave('schedule');
+    gates[0].reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));  // the 20 s timeout
+    await first;
+    assert.equal(run('_social.composer.id'), '', 'no answer: the composer still has no post id');
+    const second = sandbox.socialComposerSave('schedule');
+    gates[1].resolve({ post: { id: 'spost_saved', status: 'scheduled' } });
+    await second;
+    const creates = calls.filter(c => c.url === '/api/social-studio/posts' && c.method === 'POST');
+    assert.equal(creates.length, 2);
+    assert.ok(creates[0].body.operationId, 'the create carries an operationId');  // before: none, a second post
+    assert.equal(creates[1].body.operationId, creates[0].body.operationId);
+    assert.match(creates[0].body.operationId, /^[A-Za-z0-9][A-Za-z0-9._:-]{7,119}$/);  // the server's shape
+    assert.equal(run('_social.screen'), 'post-done');
+  });
+  await test('classic composer (review loop r4 #33): a Schedule save that raced a keystroke says it was scheduled with the earlier text, never "Saved as a draft"', async () => {
+    for (const [action, status, title] of [['schedule', 'scheduled', 'Scheduled with the earlier text'], ['draft', 'draft', 'Saved as a draft']]) {
+      const { sandbox, run, notes, calls, gates, compose } = socialFixture();
+      compose('schedule');
+      const op = sandbox.socialComposerSave(action);
+      run("_social.composer.caption = 'A caption, fixed'");  // typed while the save was on its way
+      gates[0].resolve({ post: { id: 'spost_saved', status } });
+      await op;
+      assert.deepEqual(notes.map(n => n.title), [title], `${action}: ${JSON.stringify(notes)}`);
+      if (action === 'schedule') assert.equal(notes[0].type, 'warning');
+      assert.equal(run('_social.composer.caption'), 'A caption, fixed');
+      assert.equal(run('_social.composer.id'), 'spost_saved');
+      assert.equal(calls.length, 1);
+      // One more Schedule sends the newer text to the same post (an edit, no operationId).
+      const again = sandbox.socialComposerSave(action);
+      gates[1].resolve({ post: { id: 'spost_saved', status } });
+      await again;
+      assert.equal(calls[1].method, 'PATCH');
+      assert.equal(calls[1].url, '/api/social-studio/posts/spost_saved');
+      assert.equal(calls[1].body.caption, 'A caption, fixed');
+      assert.ok(!('operationId' in calls[1].body));
+    }
+  });
+  await test('classic composer and rule editor (review loop r4 #32): Back while saving is never silent', async () => {
+    // "Publish now", Back, the save lands: kept as a draft, not published (as before), and said.
+    let f = socialFixture();
+    f.compose('now');
+    let op = f.sandbox.socialComposerSave('now');
+    f.sandbox.socialComposerClose();
+    f.gates[0].resolve({ post: { id: 'spost_saved', status: 'draft' } });
+    await op;
+    assert.equal(f.calls.length, 1, 'no publish after Back');
+    assert.equal(f.run('_social.composer'), null);
+    assert.deepEqual(f.notes.map(n => [n.title, n.type]), [['Saved as a draft, not published', 'warning']]);
+    // Schedule, Back, the server refuses: nothing was saved, and it is said.
+    f = socialFixture();
+    f.compose('schedule');
+    op = f.sandbox.socialComposerSave('schedule');
+    f.sandbox.socialComposerClose();
+    f.gates[0].reject(f.refusal('scheduledAt must be at least one minute in the future'));
+    await op;
+    assert.deepEqual(f.notes.map(n => [n.title, n.type]), [['Could not save the post', 'error']]);
+    // A keystroke while the save failed is no reason to hide the failure either.
+    f = socialFixture();
+    f.compose('schedule');
+    op = f.sandbox.socialComposerSave('schedule');
+    f.run("_social.composer.caption = 'Typed meanwhile'");
+    f.gates[0].reject(f.refusal('Choose at least one page'));
+    await op;
+    assert.deepEqual(f.notes.map(n => n.title), ['Could not save the post']);
+    // A rule save refused after Back.
+    f = socialFixture();
+    f.run("_social.ruleDraft = { ...socialNewRule(), id: 'rule_a', name: 'Rule A', trigger: 'every', publicReply: 'Thank you' }; _social.screen = 'rule';");
+    op = f.sandbox.socialRuleSave();
+    f.sandbox.socialRuleClose();
+    f.gates[0].reject(f.refusal('publicReply must be 1000 characters or fewer'));
+    await op;
+    assert.deepEqual(f.notes.map(n => [n.title, n.type]), [['Could not save the rule', 'error']]);
+    // Another session meanwhile stays silent (the late-session rule).
+    f = socialFixture();
+    f.compose('now');
+    op = f.sandbox.socialComposerSave('now');
+    f.sandbox.resetAuthenticatedServerCaches();
+    f.state.currentUser = { id: 'customer_b', role: 'Customer', permissions: {} };
+    f.gates[0].reject(f.refusal('Choose at least one page'));
+    await op;
+    assert.deepEqual(f.notes, []);
+  });
   await test('rejected biometric challenge survives Home and immediate reopen', async () => {
     const { sandbox, native } = await nativeFixture();
     assert.equal(await sandbox.unlockNativeApp(), false);
