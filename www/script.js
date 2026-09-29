@@ -16782,6 +16782,8 @@ function renderView() {
   // Admin-only tools (Control Center, merge dialogs) live in admin-tools.js;
   // warm it on the first Admin render so it is ready before the first tap.
   if (typeof preloadAdminToolsForCurrentUser === 'function') preloadAdminToolsForCurrentUser();
+  // Leaving the Wallet page ends its forms' retry attempts (walletUiSubmit).
+  if (state.currentView !== 'wallet') _walletUiOps.transfer.fp = _walletUiOps.topup.fp = '';
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
     case 'control-center':
@@ -16871,6 +16873,14 @@ async function walletUiSubmit(kind, fp, prefix, send) {
   const op = _walletUiOps[kind];
   if (op.busy) return false;
   if (op.fp !== fp) Object.assign(op, { fp, key: `${prefix}:${Security.generateSecureId('idem')}` });
+  // The last press under this key already landed (sync brought its row): say
+  // so, never "completed", and let the next press be a new action.
+  if (walletFindByIdempotency(op.key)) {
+    op.fp = '';
+    const ar = state.language === 'ar';
+    showNotification(ar ? 'تم مسبقاً' : 'Already done', ar ? 'هذه العملية محفوظة من قبل ولم يُرسل شيء جديد. اضغط مرة أخرى لعملية جديدة.' : 'This was already saved earlier; nothing new was sent. Press again to make a new one.', 'info');
+    return false;
+  }
   const btn = () => document.getElementById(`wallet-${kind}-submit`) || {};
   op.busy = btn().disabled = true;
   try {
@@ -16942,7 +16952,7 @@ async function walletTopUpFromUi() {
     const amt = Number(amountValue);
     const amountMinor = walletToMinor(amt, currency);
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error(state.language === 'ar' ? 'المبلغ غير صالح' : 'Invalid amount');
-    const fingerprint = `${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
+    const fingerprint = `${state.currentUser.id}|${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;
@@ -30328,6 +30338,7 @@ function showReceiptTransferModal(receiptId) {
     );
     return;
   }
+  _receiptTransferOpens++;
   state.activeModal = 'receipt-transfer';
   state.modalData = receipt;
   updateUrlParams({ modal: 'receipt-transfer', id: receiptId }); // URL tracking
@@ -30706,7 +30717,9 @@ function showMetaAdHistory(adId) {
 // after both authoritative receipt envelopes have been validated and applied.
 // The version stays out of the fingerprint: live sync of our own lost transfer
 // bumps it, and the server replays the key before it checks the version.
+// Each open of the dialog is a new intent, so its count is in the fingerprint.
 const _pendingReceiptTransferAttempts = new Map();
+let _receiptTransferOpens = 0;
 
 function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorUSD, note) {
   const sourceReceiptId = String(sourceReceipt?.id || '');
@@ -30719,7 +30732,8 @@ function getReceiptTransferAttempt(sourceReceipt, targetCustomerId, amountMinorU
     sourceReceiptId,
     targetCustomerId: String(targetCustomerId || ''),
     amountMinorUSD,
-    note: String(note || '')
+    note: String(note || ''),
+    open: _receiptTransferOpens
   });
   const prior = _pendingReceiptTransferAttempts.get(slot);
   if (prior?.fingerprint === fingerprint) return prior;
@@ -30880,7 +30894,9 @@ async function saveReceiptTransfer() {
         completeReceiptTransferAttempt(serverAttempt);
         addLog('transfer', 'receipt', savedSource.id, `Transferred $${amountUSD.toFixed(2)} to customer (receipt ${savedTarget.id})`, { toCustomerId: targetCustomerId, toReceiptId: savedTarget.id });
         const targetName = state.customers.find(c => c.id === targetCustomerId)?.name || '';
-        showNotification(
+        // A replay is an earlier press that already landed: nothing new moved now.
+        if (response.replayed) showNotification(isArTr ? 'تم التحويل مسبقاً' : 'Already transferred', isArTr ? 'هذا التحويل محفوظ من قبل، ولم يُنقل أي مبلغ جديد.' : 'This transfer was already saved earlier; nothing new was moved.', 'info');
+        else showNotification(
           state.language === 'ar' ? 'تم التحويل' : 'Transferred',
           state.language === 'ar'
             ? `تم تحويل $${amountUSD.toFixed(2)} إلى ${targetName} — أُنشئ وصل تحويل جاهز للاستخدام.`

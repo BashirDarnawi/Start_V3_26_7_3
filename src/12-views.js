@@ -1597,6 +1597,8 @@ function renderView() {
   // Admin-only tools (Control Center, merge dialogs) live in admin-tools.js;
   // warm it on the first Admin render so it is ready before the first tap.
   if (typeof preloadAdminToolsForCurrentUser === 'function') preloadAdminToolsForCurrentUser();
+  // Leaving the Wallet page ends its forms' retry attempts (walletUiSubmit).
+  if (state.currentView !== 'wallet') _walletUiOps.transfer.fp = _walletUiOps.topup.fp = '';
   switch (state.currentView) {
     case 'services-hub': return renderServicesHub();
     case 'control-center':
@@ -1686,6 +1688,14 @@ async function walletUiSubmit(kind, fp, prefix, send) {
   const op = _walletUiOps[kind];
   if (op.busy) return false;
   if (op.fp !== fp) Object.assign(op, { fp, key: `${prefix}:${Security.generateSecureId('idem')}` });
+  // The last press under this key already landed (sync brought its row): say
+  // so, never "completed", and let the next press be a new action.
+  if (walletFindByIdempotency(op.key)) {
+    op.fp = '';
+    const ar = state.language === 'ar';
+    showNotification(ar ? 'تم مسبقاً' : 'Already done', ar ? 'هذه العملية محفوظة من قبل ولم يُرسل شيء جديد. اضغط مرة أخرى لعملية جديدة.' : 'This was already saved earlier; nothing new was sent. Press again to make a new one.', 'info');
+    return false;
+  }
   const btn = () => document.getElementById(`wallet-${kind}-submit`) || {};
   op.busy = btn().disabled = true;
   try {
@@ -1757,7 +1767,7 @@ async function walletTopUpFromUi() {
     const amt = Number(amountValue);
     const amountMinor = walletToMinor(amt, currency);
     if (!Number.isFinite(amountMinor) || amountMinor <= 0) throw new Error(state.language === 'ar' ? 'المبلغ غير صالح' : 'Invalid amount');
-    const fingerprint = `${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
+    const fingerprint = `${state.currentUser.id}|${toUser.id}|${currency}|${amountMinor}|${String(memoValue || '').trim()}`;
     if (WalletUiGuard.hit(fingerprint)) {
       showNotification(state.language === 'ar' ? 'يرجى الانتظار' : 'Please wait', state.language === 'ar' ? 'يرجى الانتظار... تم منع تكرار العملية' : 'Please wait... duplicate prevented', 'warning');
       return;

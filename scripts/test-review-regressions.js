@@ -2167,6 +2167,81 @@ async function main() {
     assert.equal(payloads[3].expectedSourceLastModified, 2);
   });
 
+  // r8 K n=1: a fake server that commits each new key once, replays a known key
+  // (replayed:true) and can lose the reply after it committed.
+  function receiptTransferServer(fixture) {
+    const { sandbox, state, payloads } = fixture;
+    const server = { moves: 0, targets: new Map(), loseReply: false };
+    sandbox.renderModal = () => {};
+    sandbox.updateUrlParams = () => {};
+    sandbox.closeModal = () => { state.activeModal = null; state.modalData = null; };
+    sandbox.apiTransferReceipt = async payload => {
+      payloads.push(payload);
+      const replayed = server.targets.has(payload.idempotencyKey);
+      if (!replayed) {
+        server.moves += 1;
+        server.targets.set(payload.idempotencyKey, payload.targetReceiptId);
+      }
+      if (server.loseReply) { server.loseReply = false; throw new TypeError('Failed to fetch'); }
+      const version = 1 + server.moves;
+      const tid = server.targets.get(payload.idempotencyKey);
+      return {
+        sourceReceipt: { id: 'src', lastModified: version, data: { ...state.receipts.find(r => r.id === 'src'), _lastModified: version } },
+        targetReceipt: { id: tid, lastModified: version, data: { id: tid, customerId: 'c2', amountUSD: 100, status: 'Paid', isPaid: true, receiptType: 'TRANSFER_IN', _lastModified: version } },
+        replayed
+      };
+    };
+    // Live sync shows the transfer the lost reply committed.
+    server.sync = () => { state.receipts[0] = { ...state.receipts[0], _lastModified: 2, transfers: [{ id: 't1', toReceiptId: payloads[0].targetReceiptId, amountUSD: 100 }] }; };
+    return server;
+  }
+
+  await test('r8 K n=1: after one lost reply, the next identical transfer from a newly opened dialog really moves the money', async () => {
+    const fixture = receiptTransferFixture();
+    const { run, payloads, notes } = fixture;
+    const server = receiptTransferServer(fixture);
+    run("showReceiptTransferModal('src')");
+    server.loseReply = true;
+    assert.equal(await run('saveReceiptTransfer()'), false);
+    server.sync();
+    run('closeModal()');
+    // Later the customer asks for another identical $100 to the same customer.
+    run("showReceiptTransferModal('src')");
+    assert.equal(await run('saveReceiptTransfer()'), true);
+    assert.equal(server.moves, 2, 'the second intended transfer must be a new transfer, not a replay of the first');
+    assert.notEqual(payloads[1].idempotencyKey, payloads[0].idempotencyKey);
+    assert.notEqual(payloads[1].targetReceiptId, payloads[0].targetReceiptId);
+    assert.equal(payloads[1].expectedSourceLastModified, 2, 'the new transfer is checked against the live version');
+    assert.equal(notes[notes.length - 1].title, 'Transferred');
+  });
+
+  await test('r8 K n=1: a retry in the same dialog after a lost reply still moves once and says it was already saved, never "Transferred"', async () => {
+    const fixture = receiptTransferFixture();
+    const { state, run, payloads, notes } = fixture;
+    const server = receiptTransferServer(fixture);
+    run("showReceiptTransferModal('src')");
+    server.loseReply = true;
+    assert.equal(await run('saveReceiptTransfer()'), false);
+    server.sync();
+    assert.equal(await run('saveReceiptTransfer()'), true);
+    assert.equal(server.moves, 1, 'the retry must replay the first transfer, not move the money twice');
+    assert.equal(payloads[1].idempotencyKey, payloads[0].idempotencyKey);
+    const last = notes[notes.length - 1];
+    assert.equal(last.title, 'Already transferred');
+    assert.equal(last.message, 'This transfer was already saved earlier; nothing new was moved.');
+    assert.equal(last.type, 'info');
+    assert.ok(!notes.some(n => n.title === 'Transferred'), JSON.stringify(notes));
+    assert.equal(state.activeModal, null, 'the dialog closes: that transfer is done');
+    // The attempt is finished: a later dialog is a new transfer (Arabic wording too).
+    state.language = 'ar';
+    run("showReceiptTransferModal('src')");
+    server.loseReply = true;
+    await run('saveReceiptTransfer()');
+    await run('saveReceiptTransfer()');
+    assert.equal(server.moves, 2);
+    assert.equal(notes[notes.length - 1].title, 'تم التحويل مسبقاً');
+  });
+
   function walletFixture() {
     const fixture = loadBrowserSource();
     const { sandbox, state, run } = fixture;
@@ -2194,6 +2269,71 @@ async function main() {
     await run('walletTransferFromUi()');
     assert.equal(keys.length, 2);
     assert.equal(keys[1], keys[0], 'the retry must replay the first transfer, not send a second one');
+  });
+
+  await test('r8 K n=2: after a lost wallet transfer reply that sync then shows, the next identical transfer is not faked as "completed"; it says already saved, then really goes', async () => {
+    const { sandbox, state, run, rerender } = walletFixture();
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    const rows = new Map();
+    const sent = [];
+    let loseReply = true;
+    sandbox.apiWalletTransfer = async body => {
+      sent.push(body.idempotencyKey);
+      if (!rows.has(body.idempotencyKey)) rows.set(body.idempotencyKey, { id: `wtx${rows.size + 1}`, type: 'transfer', fromUserId: 'admin', toUserId: body.toUserId, amountMinor: body.amountMinor, currency: body.currency, idempotencyKey: body.idempotencyKey });
+      if (loseReply) { loseReply = false; throw new TypeError('Failed to fetch'); }
+      const row = rows.get(body.idempotencyKey);
+      return { id: row.id, data: { ...row } };
+    };
+    await run('walletTransferFromUi()');
+    // Live sync brings the committed row: the sender can see it landed.
+    state.walletTransactions.push({ ...rows.get(sent[0]) });
+    rerender();
+    // Later the same person sends another identical 200 LYD.
+    state.language = 'ar';
+    await run('walletTransferFromUi()');
+    assert.equal(sent.length, 1);
+    assert.ok(!notes.some(n => n.type === 'success'), `nothing new was sent, so no success may show: ${JSON.stringify(notes)}`);
+    assert.equal(notes[notes.length - 1].title, 'تم مسبقاً');
+    state.language = 'en';
+    rerender();
+    await run('walletTransferFromUi()');
+    assert.equal(rows.size, 2, 'the second intended transfer reaches the server as a new one');
+    assert.notEqual(sent[1], sent[0]);
+    assert.equal(notes[notes.length - 1].message, 'Transfer completed');
+  });
+
+  await test('r8 K n=2: leaving the Wallet page or another admin signing in ends a lost top-up attempt; a same-page retry still replays', async () => {
+    const { sandbox, state, run, nodes } = walletFixture();
+    Object.assign(nodes, { 'wallet-topup-to': formField('u2'), 'wallet-topup-amount': formField('500'), 'wallet-topup-memo': formField(''),
+      'wallet-topup-currency': formField('LYD'), 'wallet-topup-submit': formField('') });
+    sandbox.preloadAdminToolsForCurrentUser = () => {};
+    const credits = new Map();
+    const sent = [];
+    sandbox.apiWalletTopUp = async body => {
+      sent.push(body.idempotencyKey);
+      if (!credits.has(body.idempotencyKey)) credits.set(body.idempotencyKey, { id: `wtx${credits.size + 1}` });
+      throw new TypeError('The request timed out');
+    };
+    const press = async () => { run('WalletUiGuard._last.clear()'); await run('walletTopUpFromUi()'); };
+    state.currentView = 'wallet';
+    run('Security.escapeHtml = s => String(s ?? "")');
+    await press();
+    run('renderView()');
+    await press();
+    assert.equal(credits.size, 1, 'a retry on the Wallet page keeps its key');
+    assert.equal(sent[1], sent[0]);
+    // The admin leaves the Wallet page and comes back for the next customer's payment.
+    state.currentView = 'no-access';
+    run('renderView()');
+    state.currentView = 'wallet';
+    await press();
+    assert.equal(credits.size, 2, 'a new visit to the page starts a new top-up');
+    // Another admin signs in on this tab and records an identical payment.
+    state.currentUser = { id: 'admin2', role: 'Admin', permissions: {} };
+    state.users.push(state.currentUser);
+    await press();
+    assert.equal(credits.size, 3, 'the next admin never inherits the previous key');
   });
 
   await test('r5 DBL n=32: while a wallet transfer is in flight a re-rendered button is disabled and a tap sends nothing', async () => {
