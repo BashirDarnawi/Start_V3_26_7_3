@@ -3290,6 +3290,114 @@ async function main() {
     assert.equal(run('studioBuilderPayload(__r8Draft, null).notes'), 'xhi');
     assert.equal(run('sanitizedAdsStudioDraft().notes'), 'xhi');
   });
+  // ---- r8 O: misc (retries across an account switch, per-user filters, a dead IndexedDB connection) ----
+  // Account A signs out and B signs in on the same tab (what _handleLogoutOnce + a login do to the identity).
+  const switchAccount = (run, state) => {
+    run('advanceServerSessionEpoch()');
+    state.currentUser = { id: 'userB', name: 'B', role: 'Employee', permissions: {} };
+  };
+
+  await test('r8 O n=19: a plan purchase retried after a sign-out and a sign-in as someone else is never sent as the new account', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.currentUser = { id: 'userA', role: 'Employee', permissions: {} };
+    sandbox.setTimeout = fn => { Promise.resolve().then(fn); return 1; };  // the retry back-off passes at once
+    const sent = [];
+    sandbox.apiJson = async path => {
+      sent.push(`${path}@${state.currentUser?.id}`);
+      if (sent.length === 1) {
+        switchAccount(run, state);  // while the first attempt times out
+        throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+      }
+      return { subscriptions: [] };
+    };
+    await assert.rejects(sandbox.apiPurchasePlan({ planId: 'p1', idempotencyKey: 'idem_12345678', expectedPriceMinor: 100 }),
+      error => error?.code === 'SERVER_SESSION_CHANGED');
+    assert.deepEqual(sent, ['/api/subscriptions/purchase-plan@userA'], 'the retry must not charge the new account');
+    // The same account keeps its retries.
+    sent.length = 0;
+    let failures = 1;
+    sandbox.apiJson = async path => { sent.push(path); if (failures-- > 0) throw new TypeError('Failed to fetch'); return { subscriptions: [] }; };
+    await sandbox.apiPurchasePlan({ planId: 'p1', idempotencyKey: 'idem_12345678', expectedPriceMinor: 100 });
+    assert.equal(sent.length, 2);
+  });
+
+  await test('r8 O n=19: an edit queued behind a slow save is dropped, not sent, once the account changed', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    sandbox.isServerModeEnabled = () => true;
+    state.customers = [{ id: 'c1', name: 'Customer', _lastModified: 1 }];
+    const sent = [];
+    let finishFirst;
+    sandbox.apiPatchEntity = (collection, id, updates) => {
+      sent.push(`${updates.name}@${state.currentUser?.id}`);
+      if (sent.length > 1) return Promise.resolve({ id, data: { id, name: updates.name, _lastModified: 3 }, lastModified: 3 });
+      return new Promise(resolve => { finishFirst = resolve; });
+    };
+    const first = run("updateRecord(state.customers, 'c1', { name: 'One' })");
+    const second = run("updateRecord(state.customers, 'c1', { name: 'Two' })");
+    await settle();
+    switchAccount(run, state);
+    finishFirst({ id: 'c1', data: { id: 'c1', name: 'One', _lastModified: 2 }, lastModified: 2 });
+    await first;
+    assert.equal(await second, false);
+    assert.deepEqual(sent, ['One@admin'], 'the queued edit must not go out as the next account');
+  });
+
+  const setPerUserFilters = state => Object.assign(state, {
+    customerSearch: '0912345678', receiptRecordFilter: 'receipt_of_a', adReceiptFilter: 'receipt_of_a',
+    adFilters: { status: 'all', payment: 'all', page: 'page_of_a' }, deliveryFilter: { search: 'Ali' }, auditUserFilter: 'userA'
+  });
+  const assertFiltersCleared = (state, where) => {
+    assert.equal(state.customerSearch, '', `${where}: typed search`);
+    assert.equal(state.receiptRecordFilter, '', `${where}: receipt record filter`);
+    assert.equal(state.adReceiptFilter, '', `${where}: ad receipt filter`);
+    assert.equal(state.adFilters.page, 'all', `${where}: ad page filter`);
+    assert.equal(state.deliveryFilter.search, undefined, `${where}: delivery search`);
+    assert.equal(state.auditUserFilter, 'all', `${where}: audit user filter`);
+  };
+
+  await test('r8 O n=20: sign-out clears the record filters, and a sign-in over a stale snapshot clears every per-user filter', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    setPerUserFilters(state);
+    sandbox.closeSensitiveAuthenticatedUi();
+    assertFiltersCleared(state, 'sign-out');
+    // The old session expired with no sign-out: the saved snapshot still carries A's filters.
+    setPerUserFilters(state);
+    state.currentUser = null;
+    sandbox.serverLoadAllData = async () => ({ failed: [] });
+    sandbox.startServerLiveSync = () => {};
+    run('Security.escapeHtml = s => String(s ?? "")');  // the fake document cannot escape
+    await run("_activateServerSession({ id: 'userB', name: 'B', role: 'Employee', permissions: {} }, _loginGeneration)");
+    assert.equal(state.currentUser.id, 'userB');
+    assertFiltersCleared(state, 'sign-in');
+  });
+
+  await test('r8 O n=21: local mode recovers from a dead IndexedDB connection instead of retrying it forever', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    state.serverMode = false;
+    sandbox.console = { ...sandbox.console, error() {}, warn() {} };  // the dead connection is logged on purpose
+    const deadConnection = () => { throw Object.assign(new Error('The database connection is closing.'), { name: 'InvalidStateError' }); };
+    sandbox.idbGet = async () => deadConnection();
+    const reopened = [];
+    sandbox.initIndexedDB = onLateOpen => { reopened.push(typeof onLateOpen); return Promise.resolve(null); };
+    const snapshots = [];
+    sandbox.saveState = () => snapshots.push(run('db'));
+    run('db = {}');
+    // Every other caller still gets a plain false (sign-out wipe, live sync, start-up load).
+    assert.equal(await sandbox.saveCollectionToIndexedDB('ads', []), false);
+    run("markCollectionDirty('ads')");
+    await sandbox.flushDirtyCollections();
+    assert.equal(run('db'), null, 'the dead handle is dropped');
+    assert.deepEqual(snapshots, [null], 'the snapshot is saved with the collections kept in it');
+    assert.deepEqual(reopened, ['function'], 'the connection is reopened');
+    // A refusal that is not a dead connection keeps the usual retry.
+    run('db = {}; _idbConnectionLost = false');
+    sandbox.idbGet = async () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }); };
+    run("markCollectionDirty('ads')");
+    await sandbox.flushDirtyCollections();
+    assert.notEqual(run('db'), null);
+    assert.ok(run("idbSync.dirty.has('ads')"));
+    assert.equal(reopened.length, 1);
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }

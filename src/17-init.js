@@ -307,6 +307,7 @@ async function init() {
     } else {
       advanceServerSessionEpoch();
       state.currentUser = null;
+      resetPerUserListFilters();  // the expired session's searches never reach the next sign-in
       stopServerLiveSync();
       // Fresh server with no admin yet? Surface the first-run setup option on
       // the login page directly, so the operator doesn't have to fail a login

@@ -181,7 +181,10 @@ function apiDetailMessage(data, fallback) {
 
 async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
   let lastError;
+  // A retry after a sign-out and a sign-in as someone else would go out (and charge) as the new account.
+  const identity = getServerSessionIdentity();
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt && serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
     try {
       return await fn();
     } catch (e) {

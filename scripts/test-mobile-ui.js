@@ -1568,7 +1568,10 @@ check('WhatsApp reminders use international digits and per-account logs; sign-ou
   managerShell.includes("const digits = typeof normalizeCustomerPhoneKey === 'function' ? String(normalizeCustomerPhoneKey(phone) || '') : '';") &&
   managerShell.includes('function shellReminderLogKey()') &&
   managerShell.includes('localStorage.getItem(shellReminderLogKey())') &&
-  liveSync.includes("for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {") &&
+  liveSync.includes("for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter', 'receiptRecordFilter', 'adReceiptFilter']) state[key] = '';") &&
+  liveSync.includes('  resetPerUserListFilters();\n  state.tempAdFunding = null;') &&
+  // r8 O n=20: a start-up whose old session expired (no sign-out ran) clears them too.
+  init.includes('      state.currentUser = null;\n      resetPerUserListFilters();') &&
   liveSync.includes("if (typeof _chargeWallet === 'object' && _chargeWallet) { _chargeWallet.created = null;") &&
   liveSync.includes("if (typeof _controlCenter === 'object' && _controlCenter) {") &&
   dataAudit.includes("const _deliveryExempt = (view === 'delivery-dashboard' || view === 'deliveries') && isDeliveryRole(state.currentUser?.role);"));

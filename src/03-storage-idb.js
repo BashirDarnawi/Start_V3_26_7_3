@@ -393,8 +393,9 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
   return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:chunk:${index}`;
 }
 
-// Set when a save is refused for lack of space (not a transient abort); read by flushDirtyCollections.
-let _idbQuotaHit = false;
+// Set when a save is refused for lack of space (not a transient abort), or by a dead
+// connection (iOS closed it without an onclose); read by flushDirtyCollections.
+let _idbQuotaHit = false, _idbConnectionLost = false;
 /** Save a collection (one record, or chunks + meta when large); resolves false when refused. */
 async function saveCollectionToIndexedDB(collectionName, data, { force = false } = {}) {
   if (!db) return false;
@@ -485,6 +486,7 @@ async function saveCollectionToIndexedDB(collectionName, data, { force = false }
   } catch (error) {
     console.error('Error saving collection to IndexedDB:', error);
     if (error?.name === 'QuotaExceededError') _idbQuotaHit = true;
+    if (error?.name === 'InvalidStateError') _idbConnectionLost = true;
     return false;
   }
 }

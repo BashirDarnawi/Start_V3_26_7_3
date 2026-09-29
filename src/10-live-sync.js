@@ -1303,6 +1303,7 @@ async function _activateServerSession(user, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      resetPerUserListFilters();
       // Device-local convenience list for the "choose an account" screen.
       rememberLoginAccount(user);
       // Switch from the unauthenticated namespace to this exact
@@ -1652,6 +1653,14 @@ const AUTHENTICATED_DIALOG_IDS = Object.freeze([
   'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning'
 ]);
 
+// Typed searches and record filters must not greet the next person on this device.
+function resetPerUserListFilters() {
+  for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter', 'receiptRecordFilter', 'adReceiptFilter']) state[key] = '';
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  state.deliveryFilter = {};
+  state.auditUserFilter = 'all';
+}
+
 function closeSensitiveAuthenticatedUi() {
   if (typeof resetNativeReminderSession === 'function') resetNativeReminderSession();
   _closeCustomerPagesDialogForStateChange();
@@ -1674,10 +1683,7 @@ function closeSensitiveAuthenticatedUi() {
   document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
   state.activeModal = null;
   state.modalData = null;
-  // Typed searches must not greet the next person on this device.
-  for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {
-    if (typeof state[key] === 'string') state[key] = '';
-  }
+  resetPerUserListFilters();
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
   state.tempMixedReceiptTargetUSD = null;

@@ -238,7 +238,10 @@ async function flushDirtyCollections() {
       // not after its await: edits during this write still need another pass.
       idbSync.dirty.delete(name);
       try {
+        _idbConnectionLost = false;
         const saved = await saveCollectionToIndexedDB(name, state[name]);
+        // The save reports a dead connection as a refusal: hand it to the recovery below.
+        if (saved === false && _idbConnectionLost) throw Object.assign(new Error('IndexedDB connection lost'), { name: 'InvalidStateError' });
         if (saved === false) failed.push(name);
       } catch (e) {
         // iOS force-closed the connection (dead but truthy handle): null it so

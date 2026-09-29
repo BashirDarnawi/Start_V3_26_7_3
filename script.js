@@ -2910,8 +2910,9 @@ function getCollectionChunkKey(collectionName, index, capturedScope = _collectio
   return `collection:${_scopedCollectionStorageName(collectionName, capturedScope)}:chunk:${index}`;
 }
 
-// Set when a save is refused for lack of space (not a transient abort); read by flushDirtyCollections.
-let _idbQuotaHit = false;
+// Set when a save is refused for lack of space (not a transient abort), or by a dead
+// connection (iOS closed it without an onclose); read by flushDirtyCollections.
+let _idbQuotaHit = false, _idbConnectionLost = false;
 /** Save a collection (one record, or chunks + meta when large); resolves false when refused. */
 async function saveCollectionToIndexedDB(collectionName, data, { force = false } = {}) {
   if (!db) return false;
@@ -3002,6 +3003,7 @@ async function saveCollectionToIndexedDB(collectionName, data, { force = false }
   } catch (error) {
     console.error('Error saving collection to IndexedDB:', error);
     if (error?.name === 'QuotaExceededError') _idbQuotaHit = true;
+    if (error?.name === 'InvalidStateError') _idbConnectionLost = true;
     return false;
   }
 }
@@ -5743,7 +5745,10 @@ async function flushDirtyCollections() {
       // not after its await: edits during this write still need another pass.
       idbSync.dirty.delete(name);
       try {
+        _idbConnectionLost = false;
         const saved = await saveCollectionToIndexedDB(name, state[name]);
+        // The save reports a dead connection as a refusal: hand it to the recovery below.
+        if (saved === false && _idbConnectionLost) throw Object.assign(new Error('IndexedDB connection lost'), { name: 'InvalidStateError' });
         if (saved === false) failed.push(name);
       } catch (e) {
         // iOS force-closed the connection (dead but truthy handle): null it so
@@ -7934,7 +7939,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const _providedExpected = Number.isFinite(Number(expectedLastModified))
         ? Number(expectedLastModified)
         : null;
+      const _patchIdentity = getServerSessionIdentity();
       const sendPatch = () => {
+        // Queued behind a slow PATCH while this account signed out: never send it as the next one.
+        if (serverSessionIdentityChanged(_patchIdentity)) return false;
         // Use the baseline the caller actually saw when supplied (e.g. the modal
         // snapshot the user edited), so a change committed by someone else in
         // between produces a 409 conflict instead of silently overwriting it.
@@ -9260,7 +9268,10 @@ function apiDetailMessage(data, fallback) {
 
 async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
   let lastError;
+  // A retry after a sign-out and a sign-in as someone else would go out (and charge) as the new account.
+  const identity = getServerSessionIdentity();
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt && serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
     try {
       return await fn();
     } catch (e) {
@@ -13502,6 +13513,7 @@ async function _activateServerSession(user, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      resetPerUserListFilters();
       // Device-local convenience list for the "choose an account" screen.
       rememberLoginAccount(user);
       // Switch from the unauthenticated namespace to this exact
@@ -13851,6 +13863,14 @@ const AUTHENTICATED_DIALOG_IDS = Object.freeze([
   'command-palette-modal', 'analytics-breakdown-dialog', 'dollar-purchase-dialog', 'receipt-customer-risk-warning'
 ]);
 
+// Typed searches and record filters must not greet the next person on this device.
+function resetPerUserListFilters() {
+  for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter', 'receiptRecordFilter', 'adReceiptFilter']) state[key] = '';
+  state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+  state.deliveryFilter = {};
+  state.auditUserFilter = 'all';
+}
+
 function closeSensitiveAuthenticatedUi() {
   if (typeof resetNativeReminderSession === 'function') resetNativeReminderSession();
   _closeCustomerPagesDialogForStateChange();
@@ -13873,10 +13893,7 @@ function closeSensitiveAuthenticatedUi() {
   document.querySelectorAll('.mobile-dialog-overlay').forEach(node => node.remove());
   state.activeModal = null;
   state.modalData = null;
-  // Typed searches must not greet the next person on this device.
-  for (const key of ['customerSearch', 'receiptSearch', 'adSearch', 'pageSearch', 'auditSearch', 'userSearch', 'receiptCustomerFilter']) {
-    if (typeof state[key] === 'string') state[key] = '';
-  }
+  resetPerUserListFilters();
   state.tempAdFunding = null;
   state.tempMergeFunding = null;
   state.tempMixedReceiptTargetUSD = null;
@@ -45606,6 +45623,7 @@ async function init() {
     } else {
       advanceServerSessionEpoch();
       state.currentUser = null;
+      resetPerUserListFilters();  // the expired session's searches never reach the next sign-in
       stopServerLiveSync();
       // Fresh server with no admin yet? Surface the first-run setup option on
       // the login page directly, so the operator doesn't have to fail a login

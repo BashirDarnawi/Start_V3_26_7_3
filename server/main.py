@@ -236,6 +236,7 @@ from .security import (
     new_session_cookie_value, parse_session_cookie_value, verify_password,
 )
 from .auth_security import upgrade_password_hash_after_login
+from .user_audit import user_create_audit_metadata, user_update_audit
 from .http_security import apply_security_headers, set_security_headers
 from .profitability import validate_dollar_purchase
 from .operations import _business_today, FINANCIAL_CLOSE_COLLECTION, backup_key_state, create_operations_router, assert_financial_bulk_import_open, assert_financial_period_open, financial_period_is_closed, lock_financial_period_for_redaction, scrub_actor_name_stamps_conn, stop_operations_worker
@@ -13443,7 +13444,7 @@ def create_user(body: CreateUserRequest, request: Request, admin: dict[str, Any]
         except IntegrityError:
             raise HTTPException(status_code=409, detail="A user with this email already exists")
 
-    audit(str(admin.get("id")), "create", "users", user_id, f"Created user {body.email}", {})
+    audit(str(admin.get("id")), "create", "users", user_id, f"Created user {body.email}", user_create_audit_metadata(requested_role, requested_permissions))
     created = _get_user_by_id(user_id)
     if not created:
         raise HTTPException(status_code=500, detail="Failed to create user")
@@ -13580,7 +13581,8 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
         except IntegrityError:
             raise HTTPException(status_code=409, detail="A user with this email already exists")
 
-    audit(str(admin.get("id")), "update", "users", user_id, f"Updated user {user_id}", {})
+    _action, _message, _meta = user_update_audit(existing, update_fields)  # which fields, role/permission diff, reset, delete (never a password)
+    audit(str(admin.get("id")), _action, "users", user_id, _message, _meta)
     # Use include-deleted fetch so "delete user" can return a response instead of 404
     # (the regular _get_user_by_id() filters deleted=false).
     updated = _get_user_by_id_any(user_id)

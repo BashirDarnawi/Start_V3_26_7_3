@@ -3147,6 +3147,14 @@ def _append_meta_activities(data: dict[str, Any], activities: list[dict[str, Any
     return appended
 
 
+class MetaDuplicateLinkError(HTTPException):
+    """The one 409 that means "two live ads share this Meta ad". The sync worker
+    tells it apart from the other 409s (a page or the ad changed mid-write)."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=409, detail="This Meta ad is already linked to another Albayan ad")
+
+
 def _ensure_unique_link(conn: Any, local_ad_id: str, meta_ad_id: str) -> None:
     # Runs on every sync under the ad's row lock: the database compares the one
     # field and returns at most one id (loading every ad, photos included, into
@@ -3161,7 +3169,7 @@ def _ensure_unique_link(conn: Any, local_ad_id: str, meta_ad_id: str) -> None:
         {"id": local_ad_id, "meta": meta_ad_id},
     ).first()
     if row:
-        raise HTTPException(status_code=409, detail="This Meta ad is already linked to another Albayan ad")
+        raise MetaDuplicateLinkError()
 
 
 def _write_ad_data(conn: Any, row: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -6517,9 +6525,14 @@ def _sync_due_meta_ads_unlocked(limit: int | None = None) -> list[dict[str, Any]
             elif error.status_code == 409:
                 # Two live rows share one Meta ad: park this one with a clear
                 # reason instead of retrying it (and its twin) first every pass.
+                # Any other 409 (the ad or its page changed mid-write) is a race,
+                # not a duplicate: say so and retry soon, never "unlink one".
+                duplicate = isinstance(error, MetaDuplicateLinkError)
                 failed = _record_meta_sync_failure_or_park(
                     ad_id,
-                    MetaAdsError("duplicate_link", "Another ad is already linked to this Meta ad. Unlink one of them.", retryable=False),
+                    MetaAdsError("duplicate_link", "Another ad is already linked to this Meta ad. Unlink one of them.", retryable=False)
+                    if duplicate else
+                    MetaAdsError("temporary", "Meta synchronization was interrupted by another change. Albayan will retry.", retryable=True),
                     version,
                 )
                 if failed:

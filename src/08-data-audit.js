@@ -790,7 +790,10 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const _providedExpected = Number.isFinite(Number(expectedLastModified))
         ? Number(expectedLastModified)
         : null;
+      const _patchIdentity = getServerSessionIdentity();
       const sendPatch = () => {
+        // Queued behind a slow PATCH while this account signed out: never send it as the next one.
+        if (serverSessionIdentityChanged(_patchIdentity)) return false;
         // Use the baseline the caller actually saw when supplied (e.g. the modal
         // snapshot the user edited), so a change committed by someone else in
         // between produces a 409 conflict instead of silently overwriting it.
