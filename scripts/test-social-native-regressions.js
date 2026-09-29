@@ -86,8 +86,15 @@ async function main() {
     assert.equal(f.run('_social.composer'), null); assert.equal(f.run('_social.screen'), '');
   });
   await test('same-session unavailable photo request still opens the existing summary', async () => {
+    // The server's list says how many photos a post has (mediaCount); only a photo-less post may open from the
+    // summary (review loop r2 #36) - an editor opened without the stored photos would save new ones over them.
     const f = fixture(); f.sandbox.apiJson = async () => { throw new Error('offline'); };
+    f.run('_social.posts[0].mediaCount = 0; _social.posts[1].mediaCount = 2;');
     await f.sandbox.socialEditPost('post_a'); assert.equal(f.run('_social.composer.caption'), 'A summary');
+    f.run("_social.composer = null; _social.screen = '';");
+    await f.sandbox.socialEditPost('post_b');
+    assert.equal(f.run('_social.composer'), null);
+    assert.ok(f.notices.some(n => /photos could not be loaded/.test(String(n.message || n[1] || JSON.stringify(n)))), JSON.stringify(f.notices));
   });
   await test('same-user auth reset invalidates the complete studio load', async () => {
     const f = fixture(), gate = deferred(); f.sandbox.apiJson = () => gate.promise;
