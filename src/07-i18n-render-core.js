@@ -395,34 +395,29 @@ const RenderQueue = {
 // NOTIFICATIONS
 // ==========================================
 
-// Shared bilingual warning for features that in-app browsers (Facebook/
-// Instagram/Messenger webviews, bare Android WebViews) silently swallow:
-// blob <a download> clicks and window.print() are no-ops there, with no
-// error and no UI. Callers gate on Platform.isInAppBrowser and show this
-// INSTEAD of attempting the action (and instead of a false success toast).
+// In-app browsers (Facebook/Instagram/Messenger webviews, bare Android
+// WebViews) and the packaged app (no print or download handler in its
+// shell) silently swallow blob <a download> clicks and window.print().
+// Callers gate on this and warn INSTEAD of trying (and of a false success toast).
+function cannotPrintOrDownload() {
+  return typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser);
+}
+
 // kind: 'download' | 'print'.
+function inAppLimitationText(kind) {
+  const app = isPackagedMobileApp();
+  return state.language === 'ar'
+    ? `${kind === 'print' ? 'الطباعة' : 'التنزيلات'} لا تعمل ${app ? 'داخل التطبيق — استخدم نسخة الويب في المتصفح' : 'داخل متصفح فيسبوك/إنستغرام المدمج — افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'} ثم أعد المحاولة.`
+    : `${kind === 'print' ? "Printing doesn't" : "Downloads don't"} work ${app ? 'inside the app — use the web version in a browser' : 'inside the Facebook/Instagram in-app browser — open this page in Safari or Chrome (menu -> "Open in browser")'}, then try again.`;
+}
+
 function notifyInAppBrowserLimitation(kind) {
   const isAr = state.language === 'ar';
-  const openHint = isAr
-    ? 'افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'
-    : 'open this page in Safari or Chrome (menu -> "Open in browser")';
-  if (kind === 'print') {
-    showNotification(
-      isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here',
-      isAr
-        ? `الطباعة لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
-        : `Printing doesn't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
-      'warning'
-    );
-  } else {
-    showNotification(
-      isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here',
-      isAr
-        ? `التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
-        : `Downloads don't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
-      'warning'
-    );
-  }
+  showNotification(
+    kind === 'print' ? (isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here') : (isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here'),
+    inAppLimitationText(kind),
+    'warning'
+  );
 }
 
 function showNotification(title, message, type = 'info') {

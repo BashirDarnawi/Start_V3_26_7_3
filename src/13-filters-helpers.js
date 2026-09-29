@@ -2699,7 +2699,8 @@ function _whatsAppShareField(value, maxLength = 350) {
     .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ')  // bidi controls could reorder the rest of the line
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, maxLength);
+    .slice(0, maxLength)
+    .replace(/[\uD800-\uDBFF]$/, '');  // a cut emoji half makes encodeURIComponent throw
 }
 
 function isPendingDeliveryReceiptForShare(receipt) {
@@ -2757,9 +2758,9 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
 
   const lines = isAr ? [
     '🚚 توصيل جديد - البيان',
-    `رقم الوصل: ${number}`,
+    `رقم الوصل: \u2066${number}\u2069`,
     `العميل: ${customerName}`,
-    `الهاتف: ${phone}`,
+    `الهاتف: \u2066${phone}\u2069`,  // LTR-isolated: RTL text moves the '+' and spaced groups
     `مكان التوصيل: ${place}`,
     `المندوب: ${driverName}`,
     `المبلغ المطلوب تحصيله: \u2068${money}\u2069`,  // isolated so the ')' stays put in RTL text
@@ -2780,7 +2781,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `Instructions: ${instructions}`,
     `Created by: ${creatorName}`
   ];
-  return lines.join('\n').slice(0, 1800);
+  return lines.join('\n').slice(0, 1800).replace(/[\uD800-\uDBFF]$/, '');
 }
 
 let _deliveryWhatsAppReturnFocus = null;

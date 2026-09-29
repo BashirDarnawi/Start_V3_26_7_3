@@ -861,11 +861,10 @@ async function updateLiquidityTrackingStart(value) {
 // paper handed to a single customer. Mark the clicked card and let the
 // @media print rules in style.css hide everything else.
 function printReceiptCard(btn) {
-  // FB/IG in-app browsers never implement window.print() (WKWebView shells
-  // and Facebook's Android WebView alike): the Print tap did NOTHING, with
-  // zero feedback. Guard at the top — before any listeners/timers are
-  // installed — and explain how to get a working browser instead.
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  // In-app browsers and the packaged app never implement window.print():
+  // the Print tap did NOTHING, with zero feedback. Guard before any
+  // listeners/timers are installed and say where printing works instead.
+  if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('print');
     return;
   }
@@ -889,14 +888,10 @@ function printReceiptCard(btn) {
       const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
       if (live) card = live;
     }
-    if (!card.isConnected) {
-      // Receipt no longer on screen (deleted/filtered out): printing the
-      // full page would be wrong and a detached mark prints blank — abort.
-      cleanup();
-      return;
-    }
-    card.classList.add('print-target');
+    // Receipt gone (deleted/filtered out): print-single stays on so the
+    // sheet prints blank, never the whole page; the usual cleanup ends it.
     document.body.classList.add('print-single');
+    if (card.isConnected) card.classList.add('print-target');
   };
   let cleanupTimer = 0;
   const cleanup = () => {
@@ -915,11 +910,10 @@ function printReceiptCard(btn) {
   window.print();
 }
 
-// Whole-page print for inline onclick handlers (ads list print button).
-// Same in-app-browser guard as printReceiptCard: window.print() is a silent
-// no-op inside FB/IG webviews, so warn instead of doing nothing.
+// Whole-page print for inline onclick handlers (ads list print button),
+// with printReceiptCard's guard.
 function printCurrentPage() {
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('print');
     return;
   }
@@ -1048,20 +1042,16 @@ function exportData() {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
   }
 
-  // FB/IG in-app browsers cannot download blob files AT ALL (their WKWebView/
-  // WebView shells wire no download handler), yet the old code "succeeded":
-  // it toasted 'Exported successfully' and snoozed the 5-day local-backup
-  // durability reminder while NO file was ever saved — a false safety signal
-  // in exactly the environment whose storage is most evictable. Warn BEFORE
-  // attempting, keep the local auto-backup, offer the clipboard as an escape
-  // hatch, and never claim success or silence the reminder here.
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  // In-app browsers and the packaged app cannot download blob files AT ALL
+  // (no download handler), yet the old code toasted 'Exported successfully'
+  // and snoozed the local-backup reminder while NO file was saved. Warn
+  // BEFORE attempting, keep the local auto-backup, offer the clipboard as an
+  // escape hatch, and never claim success or silence the reminder here.
+  if (cannotPrintOrDownload()) {
     createAutoBackup();
     const isAr = state.language === 'ar';
     const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
-      isAr
-        ? 'التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج. افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح») لتنزيل ملف النسخة الاحتياطية.\n\nهل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟'
-        : 'Downloads don\'t work inside the Facebook/Instagram in-app browser. Open this page in Safari or Chrome (menu -> "Open in browser") to download the backup file.\n\nCopy the backup to the clipboard instead?'
+      `${inAppLimitationText('download')}\n\n${isAr ? 'هل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟' : 'Copy the backup to the clipboard instead?'}`
     );
     if (wantsCopy) {
       copyTextToClipboard(dataStr).then((ok) => {
@@ -1621,9 +1611,7 @@ async function downloadFullServerBackup(button = null) {
   }
   // Packaged app buffers whole responses in memory, and FB/IG webviews cannot
   // download at all — both would fail confusingly on a huge file.
-  // isCapacitor, not isNative: Platform exposes no isNative getter, so the
-  // packaged-app half of this guard read undefined and never fired.
-  if (typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser)) {
+  if (cannotPrintOrDownload()) {
     if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('download');
     else showNotification(isAr ? 'افتح في المتصفح' : 'Open in a browser', isAr ? 'نزّل النسخة الكاملة من متصفح على الكمبيوتر.' : 'Download the full backup from a browser on a computer.', 'warning');
     return;

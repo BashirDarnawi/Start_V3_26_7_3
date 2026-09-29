@@ -388,7 +388,8 @@ studioV2RegisterScreen('campaigns', renderStudioAdsBody);
 function renderStudioAdsContact(request, purpose) {
   const me = studioMe();
   const contact = me && me.contact ? me.contact : {};
-  const name = studioDataName(request).slice(0, 80);
+  // Cuts drop a trailing half emoji: a lone surrogate makes encodeURIComponent throw and the sheet never opens.
+  const name = studioDataName(request).slice(0, 80).replace(/[\uD800-\uDBFF]$/, '');
   const ref = /^ALB-S-[A-Za-z0-9]{1,20}$/.test(String(request.studioRef || '')) ? ` (${request.studioRef})` : '';
   const message = purpose === 'stop'
     ? adsStudioText(`Hello Albayan team, please stop my ad "${name}"${ref}.`, `مرحباً فريق البيان، أرجو إيقاف إعلاني «${name}»${ref}.`)
@@ -399,7 +400,7 @@ function renderStudioAdsContact(request, purpose) {
   }
   if (contact.phone) links.push(['phone', `tel:${contact.phone}`, 'phone', adsStudioText('Call us', 'اتصل بنا'), false]);
   if (contact.email) {
-    links.push(['email', `mailto:${contact.email}?subject=${encodeURIComponent(message.slice(0, 120))}`, 'mail', adsStudioText('Email', 'البريد'), false]);
+    links.push(['email', `mailto:${contact.email}?subject=${encodeURIComponent(message.slice(0, 120).replace(/[\uD800-\uDBFF]$/, ''))}`, 'mail', adsStudioText('Email', 'البريد'), false]);
   }
   const open = me && me.serviceHours && typeof me.serviceHours.openNow === 'boolean' ? me.serviceHours.openNow : null;
   const hours = open === null ? '' : (open

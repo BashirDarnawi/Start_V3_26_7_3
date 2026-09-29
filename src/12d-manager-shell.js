@@ -441,16 +441,17 @@ function remindDebtor(customerId) {
 
 // Browsers only allow one new window per tap, so "Remind all" walks the
 // overdue list one tap at a time: each tap opens the next customer not
-// reminded in the last day.
+// reminded in the last day. No usable phone (remindDebtor's own
+// buildWhatsAppLink test): skipped, never stamped, and counted.
 function remindAllOverdue() {
   const log = shellReminderLog();
   const dayAgo = Date.now() - TIME_CONSTANTS.MILLISECONDS_PER_DAY;
-  const next = shellDebtorRows().filter(r => r.overdue).find(r => !(Number(log[String(r.customer.id)]) > dayAgo));
-  if (!next) {
-    showNotification(shellText('All reminded', 'تم تذكير الجميع'), shellText('Every overdue customer was reminded in the last day.', 'تم تذكير كل العملاء المتأخرين خلال اليوم الأخير.'), 'success');
-    return;
-  }
-  remindDebtor(next.customer.id);
+  const due = shellDebtorRows().filter(r => r.overdue && !(Number(log[String(r.customer.id)]) > dayAgo));
+  const next = due.filter(r => buildWhatsAppLink(getCustomerPhoneEntries(r.customer).map(entry => entry.value).find(Boolean) || ''));
+  const skipped = due.length - next.length;
+  if (next.length) remindDebtor(next[0].customer.id);
+  if (skipped) showNotification(shellText('No usable phone', 'لا يوجد رقم صالح'), shellText(`Skipped ${skipped} overdue customer(s) with no usable phone number.`, `تم تخطي ${skipped} من المتأخرين بلا رقم هاتف صالح.`), 'warning');
+  else if (!next.length) showNotification(shellText('All reminded', 'تم تذكير الجميع'), shellText('Every overdue customer was reminded in the last day.', 'تم تذكير كل العملاء المتأخرين خلال اليوم الأخير.'), 'success');
 }
 
 function renderRemindersView() {

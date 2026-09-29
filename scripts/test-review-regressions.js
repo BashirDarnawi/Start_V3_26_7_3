@@ -17,6 +17,40 @@ function clothesFixture() {
 // Let promise chains started inside the sandbox settle (it shares this microtask queue).
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+// A classList that remembers its classes (the fake document's one forgets them).
+function fakeClassList() {
+  const set = new Set();
+  return { add: (...names) => names.forEach(n => set.add(n)), remove: (...names) => names.forEach(n => set.delete(n)), contains: n => set.has(n), toggle() {} };
+}
+
+// Plain escaping for sandboxes that render whole views (the fake document has no innerHTML).
+const plainEscape = value => (value === null || value === undefined ? '' : String(value)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'));
+
+// True when every occurrence of text in the markup sits inside an element with the no-print class.
+function everyOccurrenceNoPrint(html, text) {
+  let found = 0;
+  for (let at = html.indexOf(text); at >= 0; at = html.indexOf(text, at + 1)) {
+    found += 1;
+    const stack = [];
+    const tags = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>/g;
+    let m;
+    while ((m = tags.exec(html)) && m.index < at) {
+      if (!m[2]) continue;
+      const tag = m[2].toLowerCase();
+      if (m[1]) {
+        const i = stack.map(e => e.tag).lastIndexOf(tag);
+        if (i >= 0) stack.length = i;
+      } else if (!/^(br|img|input|hr|meta|link|source)$/.test(tag) && !/\/\s*$/.test(m[3])) {
+        stack.push({ tag, cls: (m[3].match(/class="([^"]*)"/) || [])[1] || '' });
+      }
+    }
+    if (!stack.some(e => /(^|\s)no-print(\s|$)/.test(e.cls))) return false;
+  }
+  assert.ok(found > 0, `the markup never shows ${text}`);
+  return true;
+}
+
 let passed = 0;
 function near(actual, expected) {
   assert.ok(Math.abs(actual - expected) < 0.005, `expected ${expected}, received ${actual}`);
@@ -1587,6 +1621,167 @@ async function main() {
       collectedMatchesReceipt: false, collectedPayments: [{ method: 'Cash', amount: 100.25 }, { method: 'Bank Transfer', amount: 7 }] }];
     const card = String(sandbox.renderReceiptsView());
     assert.ok(/: 100\.25 LYD</.test(card) && /: 7\.00 LYD</.test(card) && !/: 100 LYD</.test(card), 'a collected-payment chip rounds to whole dinars');
+  });
+  await test('r5 PRN n=19: Remind all skips overdue customers with no usable phone, reaches the next one and says how many were skipped', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    const rows = [
+      { customer: { id: 'short', name: 'Short number', phone: '0912345' }, overdue: true, dueLyd: 100 },
+      { customer: { id: 'none', name: 'No phone' }, overdue: true, dueLyd: 50 },
+      { customer: { id: 'b', name: 'Reachable', phone: '0912345678' }, overdue: true, dueLyd: 200 },
+      { customer: { id: 'fresh', name: 'Not overdue', phone: '0923456789' }, overdue: false, dueLyd: 20 }
+    ];
+    sandbox.shellDebtorRows = () => rows;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+    const opens = [];
+    sandbox.window.open = url => { opens.push(url); return { opener: {} }; };
+    sandbox.remindAllOverdue();
+    // Before: the walk stopped on 'short' ("Phone number not readable") on every tap and never opened WhatsApp.
+    assert.equal(opens.length, 1);
+    assert.ok(opens[0].startsWith('https://wa.me/218912345678?text='), opens[0]);
+    assert.ok(notes.some(n => n.type === 'warning' && n.message.includes('Skipped 2 ')), JSON.stringify(notes));
+    assert.ok(!notes.some(n => /not readable|No phone number/.test(n.title)), 'no per-customer dead end');
+    // Next tap: the reachable one is stamped, the unreachable two are never stamped and still counted.
+    notes.length = 0;
+    sandbox.remindAllOverdue();
+    assert.equal(opens.length, 1, 'nobody else to open');
+    assert.ok(notes.length === 1 && notes[0].type === 'warning' && notes[0].message.includes('Skipped 2 '), JSON.stringify(notes));
+    const log = JSON.parse(sandbox.localStorage.getItem('albayan_debt_reminders_v1:admin') || '{}');
+    assert.deepEqual(Object.keys(log), ['b']);
+    // Everyone reachable reminded and nobody skipped: the old "All reminded".
+    rows.splice(0, 2);
+    notes.length = 0;
+    sandbox.remindAllOverdue();
+    assert.ok(notes.length === 1 && notes[0].type === 'success' && notes[0].title === 'All reminded', JSON.stringify(notes));
+  });
+
+  await test('r5 PRN n=20: in the packaged app Print, Print ads, the backup and every export say "use the web version" and never claim a download', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Platform.detect()').isCapacitor = true;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+    const clicks = [];
+    const prints = [];
+    sandbox.document.createElement = tag => ({ tag, style: {}, dataset: {}, setAttribute() {}, remove() {}, click() { clicks.push(tag); } });
+    sandbox.document.body.classList = fakeClassList();
+    sandbox.window.print = () => { prints.push('print'); };
+    assert.equal(run("downloadFile('a,b', 'report.csv', 'text/csv')"), false);
+    const card = { isConnected: true, classList: fakeClassList(), getAttribute: () => 'r1' };
+    run('printReceiptCard')({ closest: () => card });
+    run('printCurrentPage()');
+    const asked = [];
+    sandbox.confirm = text => { asked.push(text); return false; };
+    sandbox.createAutoBackup = () => {};
+    sandbox.addAuditLog = () => {};
+    run('exportData()');
+    const clothes = clothesFixture();
+    clothes.run('Platform.detect()').isCapacitor = true;
+    clothes.sandbox.document.createElement = tag => ({ tag, style: {}, dataset: {}, setAttribute() {}, remove() {}, click() { clicks.push(tag); } });
+    clothes.sandbox.window.print = () => { prints.push('slip'); };
+    clothes.sandbox.getVisibleClothesOrders = () => [{ id: 'o1', lines: [], status: 'New' }];
+    clothes.run("printClothesOrderSlip('o1')");
+    clothes.run("_clothesDownloadCsv([['Order'], ['1']], 'clothes-orders')");
+    assert.equal(clicks.length, 0, 'no <a download> was clicked');
+    assert.equal(prints.length, 0, 'window.print() never ran');
+    assert.ok(!sandbox.document.body.classList.contains('print-single') && !card.classList.contains('print-target'));
+    for (const list of [notes, clothes.notes]) assert.ok(!list.some(n => n.type === 'success'), JSON.stringify(list));
+    // download, receipt print, page print, and the backup after its clipboard offer was declined
+    assert.equal(notes.filter(n => n.type === 'warning' && n.message.includes('inside the app — use the web version in a browser')).length, 4, JSON.stringify(notes));
+    assert.equal(clothes.notes.filter(n => n.type === 'warning' && n.message.includes('use the web version')).length, 2, JSON.stringify(clothes.notes));
+    assert.ok(asked.length === 1 && asked[0].includes('inside the app') && asked[0].includes('Copy the backup to the clipboard instead?'), asked[0]);
+    state.language = 'ar';
+    run("notifyInAppBrowserLimitation('print')");
+    assert.ok(notes.at(-1).message.includes('داخل التطبيق — استخدم نسخة الويب في المتصفح'), notes.at(-1).message);
+    // A Facebook in-app browser keeps its own way out.
+    const web = loadBrowserSource();
+    Object.assign(web.run('Platform.detect()'), { isInAppBrowser: true });
+    const webNotes = [];
+    web.sandbox.showNotification = (title, message, type) => { webNotes.push({ title, message, type }); };
+    assert.equal(web.run("downloadFile('a', 'x.csv', 'text/csv')"), false);
+    assert.ok(webNotes[0].message.includes('Facebook/Instagram in-app browser — open this page in Safari or Chrome'), webNotes[0].message);
+  });
+
+  await test('r5 PRN n=21: the printed receipt hides company coverage, the shop-paid fee, the fee flag and staff names', async () => {
+    const { state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    state.customers = [{ id: 'c1', name: 'Customer', phones: [{ number: '0912345678' }] }];
+    state.users = [state.currentUser, { id: 'drv', name: 'Driver Salem', role: 'Delivery', permissions: {} }];
+    state.receipts = [{
+      id: 'r1', customerId: 'c1', recordType: 'receipt', amountUSD: 100, amountLocal: 500, exchangeRate: 5,
+      status: 'Not Paid', isPaid: false, createdAt: new Date().toISOString(), createdBy: 'admin',
+      feeDifferenceStatus: 'LOWER', deliveryStatus: 'Delivered', actualDeliveryFeeCollected: 10, deliveryFeePaidBy: 'shop',
+      collected: true, collectedAmount: 100, collectedBy: 'drv', companyCoveredUSD: 40
+    }];
+    state.currentView = 'receipts';
+    const html = String(run('renderReceiptsView()'));
+    for (const internal of ['Company funds debt coverage', 'Business expense only', 'paid by shop (loss)', 'Fee lower', 'Driver Salem']) {
+      assert.ok(everyOccurrenceNoPrint(html, internal), `${internal} would print on the customer's paper`);
+    }
+    // What the customer needs still prints.
+    for (const kept of ['Delivery fee', 'Exchange Rate', 'Created by']) assert.equal(everyOccurrenceNoPrint(html, kept), false, `${kept} must still print`);
+  });
+
+  await test('r5 PRN n=22/23: text cut through an emoji still opens WhatsApp and the Studio contact sheet; Arabic keeps the phone in reading order', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.customers = [{ id: 'c1', name: 'Amina', phones: [{ number: '+218 91 456 7890' }] }];
+    const receipt = {
+      id: 'r1', recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' },
+      receiptType: 'DELIVERY_TEMP', deliveryStatus: 'Needs Delivery', tempReceiptNo: 'D42', amountUSD: 25, amountLocal: 237.5,
+      debtAmountUSD: 25, debtAmountLocal: 237.5, exchangeRate: 9.5, quotedDeliveryFee: 15,
+      deliveryInstructions: 'a'.repeat(499) + '\u{1F600}' + 'tail'
+    };
+    const url = sandbox.buildWhatsAppShareLink(sandbox.buildDeliveryReceiptWhatsAppMessage(receipt));  // threw URIError: URI malformed
+    assert.ok(url.startsWith('https://wa.me/?text='));
+    assert.ok(decodeURIComponent(url.slice('https://wa.me/?text='.length)).includes(`Instructions: ${'a'.repeat(499)}\n`));
+    state.language = 'ar';
+    const lines = sandbox.buildDeliveryReceiptWhatsAppMessage(Object.assign({}, receipt, { phoneNumber: '+218‮ 91 456 7890' })).split('\n');
+    assert.ok(lines.includes('الهاتف: ⁦+218 91 456 7890⁩'), lines.join(' | '));
+    assert.ok(lines.includes('رقم الوصل: ⁦D42⁩'), lines.join(' | '));
+    const studio = studioFixture();
+    studio.sandbox.studioMe = () => ({ contact: { whatsapp: '+218912345678', email: 'help@albayan.example' } });
+    const contact = studio.run('renderStudioAdsContact');
+    const prefix = 'Hello Albayan team, I have a question about my request "'.length;
+    for (const name of ['b'.repeat(79) + '\u{1F600}' + 'c'.repeat(20), 'd'.repeat(119 - prefix) + '\u{1F600}' + 'e'.repeat(5)]) {
+      const sheet = String(contact({ name }, 'ask'));
+      assert.ok(sheet.includes('href="https://wa.me/218912345678?text=') && sheet.includes('href="mailto:help@albayan.example?subject='), sheet);
+    }
+  });
+
+  await test('r5 PRN n=24: the Clothes order slip prints "Owed back" when a Paid order total was lowered', async () => {
+    for (const language of ['en', 'ar']) {
+      const clothes = clothesFixture();
+      clothes.state.language = language;
+      clothes.run('Security').escapeHtml = plainEscape;
+      let slip = null;
+      clothes.sandbox.document.body.appendChild = node => { slip = node; };
+      clothes.sandbox.document.body.classList = fakeClassList();
+      clothes.sandbox.window.print = () => {};
+      clothes.sandbox.getVisibleClothesOrders = () => [{ id: 'o1', orderNo: 7, status: 'Delivered', paymentStatus: 'Paid', customerName: 'Mona',
+        lines: [{ productId: 'p1', qty: 1, priceLYD: 80 }], deliveryFeeLYD: 0, amountPaidLYD: 100, createdAt: '2026-09-01T10:00:00Z' }];
+      clothes.run("printClothesOrderSlip('o1')");
+      const text = String(slip && slip.innerHTML);
+      assert.ok(text.includes(language === 'ar' ? 'مستحق للإرجاع' : 'Owed back') && text.includes('20.00 LYD'), text);
+    }
+  });
+
+  await test('r5 PRN n=25: a receipt that leaves the list while the print sheet is open prints blank, never the whole Receipts page', async () => {
+    const { sandbox, run } = loadBrowserSource();
+    const listeners = {};
+    sandbox.window.addEventListener = (type, fn) => { listeners[type] = fn; };
+    sandbox.window.removeEventListener = (type, fn) => { if (listeners[type] === fn) delete listeners[type]; };
+    sandbox.window.print = () => { if (listeners.beforeprint) listeners.beforeprint(); };
+    sandbox.document.body.classList = fakeClassList();
+    sandbox.document.querySelector = () => null;
+    const card = { isConnected: true, classList: fakeClassList(), getAttribute: () => 'r1' };
+    run('printReceiptCard')({ closest: () => card });
+    assert.ok(card.classList.contains('print-target') && sandbox.document.body.classList.contains('print-single'));
+    card.isConnected = false;   // collected on another device: live sync drew it out of the Unpaid list
+    listeners.beforeprint();    // the phone's print sheet re-paginates
+    assert.ok(sandbox.document.body.classList.contains('print-single'), 'single-card print mode stays on (before: removed, so the whole page printed)');
+    assert.ok(typeof listeners.pointerdown === 'function', 'the usual first-interaction cleanup is still armed');
+    listeners.pointerdown();
+    assert.ok(!sandbox.document.body.classList.contains('print-single') && !listeners.beforeprint, 'and it still ends the print mode');
   });
 
   console.log(`\n${passed} review behavior regressions passed.`);

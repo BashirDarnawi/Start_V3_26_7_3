@@ -3182,7 +3182,7 @@ function renderReceiptsView() {
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
-                    <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'} font-bold">
+                    <div class="no-print text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'} font-bold">
                       ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
@@ -3195,7 +3195,7 @@ function renderReceiptsView() {
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
                     return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
-                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD • ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
                     </div>`;
                   })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
@@ -3223,7 +3223,7 @@ function renderReceiptsView() {
                         <div>
                           <span class="font-medium text-sm">${trMethod(payment.method)}</span>
                           ${payment.collectionType ? `<span class="text-xs text-slate-500 ml-2 px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded">${trStatus(payment.collectionType)}</span>` : ''}
-                          ${payment.deliveryPersonId ? `<div class="text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
+                          ${payment.deliveryPersonId ? `<div class="no-print text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
                         </div>
                         <div class="text-right">
                           <div class="font-bold text-indigo-600">${r1.toFixed(2)} LYD</div>
@@ -3299,7 +3299,7 @@ function renderReceiptsView() {
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
                     ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString(appDateLocale())}</span>` : ''}
-                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
+                    ${receipt.collectedBy ? `<span class="no-print text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
                     ${(isCurrentUserAdmin() && isTempDeliveryReceiptNo(receipt.tempReceiptNo) && receipt.deliveryStatus !== 'Delivered' && receipt.deliveryStatus !== 'Canceled') ? `<button onclick="openReceiptDeliveryCompletionModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-cyan-100 hover:bg-cyan-200 text-cyan-700 dark:bg-cyan-900/40 dark:hover:bg-cyan-900/60 dark:text-cyan-300">${isAr ? 'تم التوصيل' : 'Mark Delivered'}</button>` : ''}
@@ -3324,7 +3324,7 @@ function renderReceiptsView() {
               })()}
 
               ${(isCurrentUserAdmin() && (canCoverWithCompanyFunds || companyCoverageCount > 0 || companyCoveredUSD > 0.005)) ? `
-                <div class="mb-3 rounded-xl border border-violet-200 bg-violet-50/80 p-3 dark:border-violet-800 dark:bg-violet-900/20">
+                <div class="no-print mb-3 rounded-xl border border-violet-200 bg-violet-50/80 p-3 dark:border-violet-800 dark:bg-violet-900/20">
                   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div class="min-w-0">
                       <div class="flex items-center gap-2 text-sm font-bold text-violet-800 dark:text-violet-200">
@@ -6450,11 +6450,11 @@ async function exportAuditLogs(format) {
 }
 
 // Returns true when the download was actually started, false when it was
-// refused up-front (in-app browser). Callers must gate their success toasts
-// on the return value — FB/IG webviews swallow blob <a download> clicks as a
-// silent no-op on BOTH platforms, so an unconditional toast lies to the user.
+// refused up-front (in-app browser, packaged app). Callers must gate their
+// success toasts on the return value: those shells swallow blob
+// <a download> clicks silently, so an unconditional toast lies to the user.
 function downloadFile(content, filename, mimeType) {
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('download');
     return false;
   }

@@ -2894,9 +2894,9 @@ function printClothesOrderSlip(orderId) {
   const order = getVisibleClothesOrders().find(o => o.id === orderId);
   if (!order) return;
   const isAr = clothesIsAr();
-  // FB/IG in-app browsers silently no-op window.print(); warn instead of
-  // arming print listeners that will never fire (same guard as printReceiptCard).
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  // In-app browsers and the packaged app silently no-op window.print(); warn
+  // instead of arming print listeners that will never fire (same guard as printReceiptCard).
+  if (typeof cannotPrintOrDownload === 'function' ? cannotPrintOrDownload() : (typeof Platform !== 'undefined' && Platform.isInAppBrowser)) {
     if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('print');
     return;
   }
@@ -2958,6 +2958,7 @@ function printClothesOrderSlip(orderId) {
         ${moneyRow(isAr ? 'الإجمالي' : 'TOTAL', clothesFmtLYD(totals.totalLYD), true)}
         ${moneyRow(isAr ? 'المدفوع' : 'Paid', clothesFmtLYD(totals.paidLYD), false)}
         ${moneyRow(isAr ? 'المتبقي' : 'Remaining', clothesFmtLYD(totals.remainingLYD), false)}
+        ${totals.refundDueLYD > 0 ? moneyRow(isAr ? 'مستحق للإرجاع' : 'Owed back', clothesFmtLYD(totals.refundDueLYD), false) : ''}
         ${moneyRow(isAr ? 'حالة الدفع' : 'Payment', `${isAr ? payMeta.labelAr : payMeta.label}${order.paymentMethod ? ` (${Security.escapeHtml(order.paymentMethod)})` : ''}`, false)}
       </div>
       <div style="text-align:center;margin-top:16px;color:#64748b;">${isAr ? 'شكراً لتسوقكم معنا' : 'Thank you for your business'}</div>

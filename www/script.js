@@ -7028,34 +7028,29 @@ const RenderQueue = {
 // NOTIFICATIONS
 // ==========================================
 
-// Shared bilingual warning for features that in-app browsers (Facebook/
-// Instagram/Messenger webviews, bare Android WebViews) silently swallow:
-// blob <a download> clicks and window.print() are no-ops there, with no
-// error and no UI. Callers gate on Platform.isInAppBrowser and show this
-// INSTEAD of attempting the action (and instead of a false success toast).
+// In-app browsers (Facebook/Instagram/Messenger webviews, bare Android
+// WebViews) and the packaged app (no print or download handler in its
+// shell) silently swallow blob <a download> clicks and window.print().
+// Callers gate on this and warn INSTEAD of trying (and of a false success toast).
+function cannotPrintOrDownload() {
+  return typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser);
+}
+
 // kind: 'download' | 'print'.
+function inAppLimitationText(kind) {
+  const app = isPackagedMobileApp();
+  return state.language === 'ar'
+    ? `${kind === 'print' ? 'الطباعة' : 'التنزيلات'} لا تعمل ${app ? 'داخل التطبيق — استخدم نسخة الويب في المتصفح' : 'داخل متصفح فيسبوك/إنستغرام المدمج — افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'} ثم أعد المحاولة.`
+    : `${kind === 'print' ? "Printing doesn't" : "Downloads don't"} work ${app ? 'inside the app — use the web version in a browser' : 'inside the Facebook/Instagram in-app browser — open this page in Safari or Chrome (menu -> "Open in browser")'}, then try again.`;
+}
+
 function notifyInAppBrowserLimitation(kind) {
   const isAr = state.language === 'ar';
-  const openHint = isAr
-    ? 'افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'
-    : 'open this page in Safari or Chrome (menu -> "Open in browser")';
-  if (kind === 'print') {
-    showNotification(
-      isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here',
-      isAr
-        ? `الطباعة لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
-        : `Printing doesn't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
-      'warning'
-    );
-  } else {
-    showNotification(
-      isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here',
-      isAr
-        ? `التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — ${openHint} ثم أعد المحاولة.`
-        : `Downloads don't work inside the Facebook/Instagram in-app browser — ${openHint}, then try again.`,
-      'warning'
-    );
-  }
+  showNotification(
+    kind === 'print' ? (isAr ? 'الطباعة غير متاحة هنا' : 'Printing unavailable here') : (isAr ? 'التنزيل غير متاح هنا' : 'Download unavailable here'),
+    inAppLimitationText(kind),
+    'warning'
+  );
 }
 
 function showNotification(title, message, type = 'info') {
@@ -18294,7 +18289,7 @@ function renderReceiptsView() {
                     </div>
                   ` : ''}
                   ${receipt.feeDifferenceStatus ? `
-                    <div class="text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'} font-bold">
+                    <div class="no-print text-[10px] ${receipt.feeDifferenceStatus === 'SAME' ? 'text-slate-500' : receipt.feeDifferenceStatus === 'LOWER' ? 'text-amber-600' : 'text-purple-600 dark:text-purple-300'} font-bold">
                       ${isArV ? `العمولة ${({ SAME: 'مطابقة', LOWER: 'أقل', HIGHER: 'أعلى' })[receipt.feeDifferenceStatus] || receipt.feeDifferenceStatus}` : `Fee ${receipt.feeDifferenceStatus.toLowerCase()}`}
                     </div>
                   ` : ''}
@@ -18307,7 +18302,7 @@ function renderReceiptsView() {
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
                     return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
-                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD • ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
                     </div>`;
                   })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
@@ -18335,7 +18330,7 @@ function renderReceiptsView() {
                         <div>
                           <span class="font-medium text-sm">${trMethod(payment.method)}</span>
                           ${payment.collectionType ? `<span class="text-xs text-slate-500 ml-2 px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded">${trStatus(payment.collectionType)}</span>` : ''}
-                          ${payment.deliveryPersonId ? `<div class="text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
+                          ${payment.deliveryPersonId ? `<div class="no-print text-xs text-slate-500">${Security.escapeHtml(state.users.find(u => u.id === payment.deliveryPersonId)?.name || (isArV ? 'غير معروف' : 'Unknown'))}</div>` : ''}
                         </div>
                         <div class="text-right">
                           <div class="font-bold text-indigo-600">${r1.toFixed(2)} LYD</div>
@@ -18411,7 +18406,7 @@ function renderReceiptsView() {
                       ${!receipt.collected ? (isAr ? 'لم يُحصَّل' : 'Not Collected') : fully ? (isAr ? 'تم التحصيل' : 'Collected') : (isAr ? 'تحصيل جزئي' : 'Partially Collected')}
                     </span>
                     ${receipt.collectedAt ? `<span class="text-[10px] text-slate-500">${new Date(receipt.collectedAt).toLocaleDateString(appDateLocale())}</span>` : ''}
-                    ${receipt.collectedBy ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
+                    ${receipt.collectedBy ? `<span class="no-print text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400">${Security.escapeHtml(state.users.find(u => u.id === receipt.collectedBy)?.name || (isArV ? 'مدير' : 'Admin'))}</span>` : ''}
                   </div>
                   <div class="flex items-center gap-2 flex-shrink-0">
                     ${(isCurrentUserAdmin() && isTempDeliveryReceiptNo(receipt.tempReceiptNo) && receipt.deliveryStatus !== 'Delivered' && receipt.deliveryStatus !== 'Canceled') ? `<button onclick="openReceiptDeliveryCompletionModal('${receipt.id}')" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-cyan-100 hover:bg-cyan-200 text-cyan-700 dark:bg-cyan-900/40 dark:hover:bg-cyan-900/60 dark:text-cyan-300">${isAr ? 'تم التوصيل' : 'Mark Delivered'}</button>` : ''}
@@ -18436,7 +18431,7 @@ function renderReceiptsView() {
               })()}
 
               ${(isCurrentUserAdmin() && (canCoverWithCompanyFunds || companyCoverageCount > 0 || companyCoveredUSD > 0.005)) ? `
-                <div class="mb-3 rounded-xl border border-violet-200 bg-violet-50/80 p-3 dark:border-violet-800 dark:bg-violet-900/20">
+                <div class="no-print mb-3 rounded-xl border border-violet-200 bg-violet-50/80 p-3 dark:border-violet-800 dark:bg-violet-900/20">
                   <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div class="min-w-0">
                       <div class="flex items-center gap-2 text-sm font-bold text-violet-800 dark:text-violet-200">
@@ -21562,11 +21557,11 @@ async function exportAuditLogs(format) {
 }
 
 // Returns true when the download was actually started, false when it was
-// refused up-front (in-app browser). Callers must gate their success toasts
-// on the return value — FB/IG webviews swallow blob <a download> clicks as a
-// silent no-op on BOTH platforms, so an unconditional toast lies to the user.
+// refused up-front (in-app browser, packaged app). Callers must gate their
+// success toasts on the return value: those shells swallow blob
+// <a download> clicks silently, so an unconditional toast lies to the user.
 function downloadFile(content, filename, mimeType) {
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('download');
     return false;
   }
@@ -23605,16 +23600,17 @@ function remindDebtor(customerId) {
 
 // Browsers only allow one new window per tap, so "Remind all" walks the
 // overdue list one tap at a time: each tap opens the next customer not
-// reminded in the last day.
+// reminded in the last day. No usable phone (remindDebtor's own
+// buildWhatsAppLink test): skipped, never stamped, and counted.
 function remindAllOverdue() {
   const log = shellReminderLog();
   const dayAgo = Date.now() - TIME_CONSTANTS.MILLISECONDS_PER_DAY;
-  const next = shellDebtorRows().filter(r => r.overdue).find(r => !(Number(log[String(r.customer.id)]) > dayAgo));
-  if (!next) {
-    showNotification(shellText('All reminded', 'تم تذكير الجميع'), shellText('Every overdue customer was reminded in the last day.', 'تم تذكير كل العملاء المتأخرين خلال اليوم الأخير.'), 'success');
-    return;
-  }
-  remindDebtor(next.customer.id);
+  const due = shellDebtorRows().filter(r => r.overdue && !(Number(log[String(r.customer.id)]) > dayAgo));
+  const next = due.filter(r => buildWhatsAppLink(getCustomerPhoneEntries(r.customer).map(entry => entry.value).find(Boolean) || ''));
+  const skipped = due.length - next.length;
+  if (next.length) remindDebtor(next[0].customer.id);
+  if (skipped) showNotification(shellText('No usable phone', 'لا يوجد رقم صالح'), shellText(`Skipped ${skipped} overdue customer(s) with no usable phone number.`, `تم تخطي ${skipped} من المتأخرين بلا رقم هاتف صالح.`), 'warning');
+  else if (!next.length) showNotification(shellText('All reminded', 'تم تذكير الجميع'), shellText('Every overdue customer was reminded in the last day.', 'تم تذكير كل العملاء المتأخرين خلال اليوم الأخير.'), 'success');
 }
 
 function renderRemindersView() {
@@ -26741,7 +26737,8 @@ function _whatsAppShareField(value, maxLength = 350) {
     .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ')  // bidi controls could reorder the rest of the line
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, maxLength);
+    .slice(0, maxLength)
+    .replace(/[\uD800-\uDBFF]$/, '');  // a cut emoji half makes encodeURIComponent throw
 }
 
 function isPendingDeliveryReceiptForShare(receipt) {
@@ -26799,9 +26796,9 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
 
   const lines = isAr ? [
     '🚚 توصيل جديد - البيان',
-    `رقم الوصل: ${number}`,
+    `رقم الوصل: \u2066${number}\u2069`,
     `العميل: ${customerName}`,
-    `الهاتف: ${phone}`,
+    `الهاتف: \u2066${phone}\u2069`,  // LTR-isolated: RTL text moves the '+' and spaced groups
     `مكان التوصيل: ${place}`,
     `المندوب: ${driverName}`,
     `المبلغ المطلوب تحصيله: \u2068${money}\u2069`,  // isolated so the ')' stays put in RTL text
@@ -26822,7 +26819,7 @@ function buildDeliveryReceiptWhatsAppMessage(receipt) {
     `Instructions: ${instructions}`,
     `Created by: ${creatorName}`
   ];
-  return lines.join('\n').slice(0, 1800);
+  return lines.join('\n').slice(0, 1800).replace(/[\uD800-\uDBFF]$/, '');
 }
 
 let _deliveryWhatsAppReturnFocus = null;
@@ -44638,11 +44635,10 @@ async function updateLiquidityTrackingStart(value) {
 // paper handed to a single customer. Mark the clicked card and let the
 // @media print rules in style.css hide everything else.
 function printReceiptCard(btn) {
-  // FB/IG in-app browsers never implement window.print() (WKWebView shells
-  // and Facebook's Android WebView alike): the Print tap did NOTHING, with
-  // zero feedback. Guard at the top — before any listeners/timers are
-  // installed — and explain how to get a working browser instead.
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  // In-app browsers and the packaged app never implement window.print():
+  // the Print tap did NOTHING, with zero feedback. Guard before any
+  // listeners/timers are installed and say where printing works instead.
+  if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('print');
     return;
   }
@@ -44666,14 +44662,10 @@ function printReceiptCard(btn) {
       const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
       if (live) card = live;
     }
-    if (!card.isConnected) {
-      // Receipt no longer on screen (deleted/filtered out): printing the
-      // full page would be wrong and a detached mark prints blank — abort.
-      cleanup();
-      return;
-    }
-    card.classList.add('print-target');
+    // Receipt gone (deleted/filtered out): print-single stays on so the
+    // sheet prints blank, never the whole page; the usual cleanup ends it.
     document.body.classList.add('print-single');
+    if (card.isConnected) card.classList.add('print-target');
   };
   let cleanupTimer = 0;
   const cleanup = () => {
@@ -44692,11 +44684,10 @@ function printReceiptCard(btn) {
   window.print();
 }
 
-// Whole-page print for inline onclick handlers (ads list print button).
-// Same in-app-browser guard as printReceiptCard: window.print() is a silent
-// no-op inside FB/IG webviews, so warn instead of doing nothing.
+// Whole-page print for inline onclick handlers (ads list print button),
+// with printReceiptCard's guard.
 function printCurrentPage() {
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('print');
     return;
   }
@@ -44825,20 +44816,16 @@ function exportData() {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
   }
 
-  // FB/IG in-app browsers cannot download blob files AT ALL (their WKWebView/
-  // WebView shells wire no download handler), yet the old code "succeeded":
-  // it toasted 'Exported successfully' and snoozed the 5-day local-backup
-  // durability reminder while NO file was ever saved — a false safety signal
-  // in exactly the environment whose storage is most evictable. Warn BEFORE
-  // attempting, keep the local auto-backup, offer the clipboard as an escape
-  // hatch, and never claim success or silence the reminder here.
-  if (typeof Platform !== 'undefined' && Platform.isInAppBrowser) {
+  // In-app browsers and the packaged app cannot download blob files AT ALL
+  // (no download handler), yet the old code toasted 'Exported successfully'
+  // and snoozed the local-backup reminder while NO file was saved. Warn
+  // BEFORE attempting, keep the local auto-backup, offer the clipboard as an
+  // escape hatch, and never claim success or silence the reminder here.
+  if (cannotPrintOrDownload()) {
     createAutoBackup();
     const isAr = state.language === 'ar';
     const wantsCopy = typeof copyTextToClipboard === 'function' && confirm(
-      isAr
-        ? 'التنزيلات لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج. افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح») لتنزيل ملف النسخة الاحتياطية.\n\nهل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟'
-        : 'Downloads don\'t work inside the Facebook/Instagram in-app browser. Open this page in Safari or Chrome (menu -> "Open in browser") to download the backup file.\n\nCopy the backup to the clipboard instead?'
+      `${inAppLimitationText('download')}\n\n${isAr ? 'هل تريد نسخ النسخة الاحتياطية إلى الحافظة بدلاً من ذلك؟' : 'Copy the backup to the clipboard instead?'}`
     );
     if (wantsCopy) {
       copyTextToClipboard(dataStr).then((ok) => {
@@ -45398,9 +45385,7 @@ async function downloadFullServerBackup(button = null) {
   }
   // Packaged app buffers whole responses in memory, and FB/IG webviews cannot
   // download at all — both would fail confusingly on a huge file.
-  // isCapacitor, not isNative: Platform exposes no isNative getter, so the
-  // packaged-app half of this guard read undefined and never fired.
-  if (typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser)) {
+  if (cannotPrintOrDownload()) {
     if (typeof notifyInAppBrowserLimitation === 'function') notifyInAppBrowserLimitation('download');
     else showNotification(isAr ? 'افتح في المتصفح' : 'Open in a browser', isAr ? 'نزّل النسخة الكاملة من متصفح على الكمبيوتر.' : 'Download the full backup from a browser on a computer.', 'warning');
     return;
