@@ -16,6 +16,8 @@ function getMonotonicTime() {
 // concurrency baseline — instead of the first edit's client timestamp, which
 // the server never stored and which always produced a false 409.
 const _patchChains = new Map();
+// Optimistic copy -> the last server-confirmed copy behind it (see updateRecord).
+const _patchConfirmedBase = new WeakMap();
 
 function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
@@ -748,6 +750,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
     // snapshot would clobber a newer committed copy that the sync watermark
     // has already consumed.
     let _optimisticRecord = null;
+    // The last SAVED copy behind this edit: a slot still holding a pending
+    // PATCH's optimistic copy hands on that copy's own saved base.
+    const _confirmedBase = _patchConfirmedBase.get(array[index]) || old;
     // Ordinary records keep the established optimistic UX. Settlement and its
     // reverse (debt conversion) are the exceptions: do not paint the receipt
     // Paid/Not Paid before its linked ads are also committed, because that
@@ -758,6 +763,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
         array[index] = makeLightweightMediaRecord(collectionName, array[index]);
       }
       _optimisticRecord = array[index];
+      if (isServerModeEnabled()) _patchConfirmedBase.set(_optimisticRecord, _confirmedBase);
       // Keep currentUser in sync when updating own user record (important for profile changes)
       if (collectionName === 'users' && state.currentUser?.id === id) {
         state.currentUser = array[index];
@@ -816,6 +822,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
             : apiPatchEntity(collectionName, id, sanitizedUpdates, expected));
         return mutation
         .then((entityOrSettlement) => {
+          _patchConfirmedBase.delete(_optimisticRecord);
           if (_settlesReceipt || _convertsReceipt) {
             const settlement = entityOrSettlement;
             const [savedReceipt] = applyValidatedServerEntityBatch([
@@ -971,10 +978,12 @@ function updateRecord(array, id, updates, expectedLastModified) {
       // A queued edit whose predecessor FAILED is never sent: its payload was
       // built on that failed optimistic copy, and after a conflict reload it
       // would carry the fresh version and undo another device's change (fast
-      // stock +/- taps erasing a sale). A slot still holding our copy reloads.
+      // stock +/- taps erasing a sale). A slot still holding our copy reloads;
+      // offline it falls back to the last SAVED copy, never to `old` (for a
+      // queued edit that is the failed tap's unsaved optimistic copy).
       const abandonQueued = async () => {
         if (_optimisticRecord && array.includes(_optimisticRecord)) {
-          let fresh = old;
+          let fresh = _confirmedBase;
           try {
             const latest = await apiGetEntity(collectionName, id);
             if (latest?.data) fresh = Security.sanitizeObject(latest.data);

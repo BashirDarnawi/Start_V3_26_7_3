@@ -2970,10 +2970,13 @@ async function main() {
     const sent = [];
     sandbox.isServerModeEnabled = () => true;
     sandbox.updateClothesProductsFiltered = () => {};
-    sandbox.apiGetEntity = async () => ({ data: JSON.parse(JSON.stringify(server)) });
+    sandbox.apiGetEntity = async () => {
+      if (firstFails === 'offline') throw new TypeError('Failed to fetch');
+      return { data: JSON.parse(JSON.stringify(server)) };
+    };
     sandbox.apiPatchEntity = async (collection, id, updates, expected) => {
       sent.push({ qty: updates.variants[0].qty, expected });
-      if (sent.length === 1 && firstFails === 'network') throw new TypeError('Failed to fetch');
+      if (sent.length === 1 && (firstFails === 'network' || firstFails === 'offline')) throw new TypeError('Failed to fetch');
       if (Number(expected) !== server._lastModified) throw Object.assign(new Error('Conflict: product has changed'), { status: 409 });
       server = { ...server, ...JSON.parse(JSON.stringify(updates)), _lastModified: server._lastModified + 1 };
       return { data: JSON.parse(JSON.stringify(server)) };
@@ -2996,6 +2999,33 @@ async function main() {
     assert.deepEqual(network.sent.map(call => call.qty), [6]);
     assert.equal(network.server.variants[0].qty, 5);
     assert.equal(network.local.variants[0].qty, 5, 'the dropped taps\' optimistic count is replaced by the server copy');
+    // Fully offline: the reload fails too. The screen falls back to the last SAVED copy (5 at version
+    // 100), never to tap 2's unsaved optimistic copy (before: 7 with a client-clock version).
+    const offline = await stepperRun({ _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] },
+      { _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] }, 'offline');
+    assert.deepEqual(offline.sent.map(call => call.qty), [6]);
+    assert.equal(offline.local.variants[0].qty, 5, 'the last saved count, not the unsaved 7');
+    assert.equal(offline.local._lastModified, 100, 'the saved version, so the next tap does not 409');
+    // Offline, but live sync installed the other device's sale (3 at version 101) while tap 1 was in
+    // flight: the tap queued after it falls back to THAT saved copy, not to the older 5.
+    {
+      const { sandbox, state } = clothesFixture();
+      const product = (qty, version) => ({ id: 'p1', name: 'Shirt', createdBy: 'admin', _lastModified: version, variants: [{ color: 'Red', size: 'M', qty }] });
+      state.clothesProducts = [product(5, 100)];
+      const sent = [];
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.updateClothesProductsFiltered = () => {};
+      sandbox.apiGetEntity = async () => { throw new TypeError('Failed to fetch'); };
+      sandbox.apiPatchEntity = async (collection, id, updates) => { sent.push(updates.variants[0].qty); throw new TypeError('Failed to fetch'); };
+      const tap1 = sandbox.adjustClothesVariantQty('p1', 0, 1);
+      state.clothesProducts[0] = product(3, 101);
+      const tap2 = sandbox.adjustClothesVariantQty('p1', 0, 1);
+      await Promise.all([tap1, tap2]);
+      await settle();
+      assert.deepEqual(sent, [6]);
+      assert.equal(state.clothesProducts[0].variants[0].qty, 3);
+      assert.equal(state.clothesProducts[0]._lastModified, 101);
+    }
     // Control: in sync, all three taps still chain on each echoed version.
     const ok = await stepperRun({ _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] },
       { _lastModified: 100, variants: [{ color: 'Red', size: 'M', qty: 5 }] }, '');
