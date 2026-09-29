@@ -26,7 +26,7 @@
 // Every server string is escaped; every text is EN/AR; no native dialog; nothing wraps another file.
 
 const STUDIO_PG_SECTIONS = Object.freeze([
-  // [section, icon, English, Arabic]; 'tiktok' shows only when a later file draws it (renderStudioTiktokSection)
+  // [section, icon, English, Arabic]; 'tiktok' shows only when a later file draws it (renderStudioTikTokSection)
   ['pages', 'flag', 'Pages', 'الصفحات'],
   ['rules', 'message-circle-reply', 'Reply rules', 'قواعد الرد'],
   ['log', 'list-checks', 'Reply log', 'سجل الردود'],
@@ -380,7 +380,7 @@ function studioPgSectionKnown(section) {
 
 function studioPgTiktokOn() {
   const me = studioPgMe();
-  return !!(me && me.services && me.services.tiktok === true) && typeof renderStudioTiktokSection === 'function';
+  return !!(me && me.services && me.services.tiktok === true) && typeof renderStudioTikTokSection === 'function';
 }
 
 // The screen a route asks for: {section, id} (id: 'link' on pages, 'new' or a rule id on rules).
@@ -462,7 +462,7 @@ function renderStudioPagesBody(route) {
   } else if (view.section === 'posts') {
     body = renderStudioPgPosts(postsTab);
   } else {
-    body = renderStudioTiktokSection();
+    body = renderStudioTikTokSection();
   }
   const chips = view.id || postsTab ? '' : renderStudioPgSections(view);
   return `

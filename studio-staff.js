@@ -1449,10 +1449,11 @@ function renderStudioDeskLaunchCard(request) {
                 ${renderStudioDeskMeta(request)}
                 ${renderStudioDeskNameRow(request)}
                 <ol class="studio-desk-checklist">${checklist.map(item => `<li>${studioEsc(item)}</li>`).join('')}</ol>
+                ${studioDeskStopBeforeRun(request) && studioDeskOwnRequest(request) ? `<p class="studio-desk-note" data-testid="studio-desk-own-${id}">${studioEsc(adsStudioText('This is your own ad: another team member settles it.', 'هذا إعلانك أنت: يسوّيه عضو آخر من الفريق.'))}</p>` : ''}
                 <div class="studio-desk-actions">
                   <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-link-${id}" onclick="openAdsStudioLinkSheet('${id}')">${studioDeskIcon('link-2')}<span>${studioEsc(adsStudioText('Link Meta campaign', 'اربط حملة ميتا'))}</span></button>
                   <button type="button" class="studio-v2-action" onclick="studioDeskGo('requests', '${id}')">${studioDeskIcon('file-text')}<span>${studioEsc(adsStudioText('The request', 'تفاصيل الطلب'))}</span></button>
-                  ${studioDeskStopBeforeRun(request) ? `<button type="button" class="studio-v2-action" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>` : ''}
+                  ${studioDeskStopBeforeRun(request) && !studioDeskOwnRequest(request) ? `<button type="button" class="studio-v2-action" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>` : ''}
                 </div>
               </li>`;
 }
@@ -2121,10 +2122,10 @@ const STUDIO_ADMIN_SETTINGS = Object.freeze({
     about: ['Which customers see the new layout, which services are open and who uses this desk. A change applies at the next page load; services and the desk are independent of the layout.', 'من يرى واجهة العملاء الجديدة، وأي الخدمات مفتوحة، ومن يستخدم هذا المكتب. يسري التغيير عند تحميل الصفحة التالي؛ الخدمات والمكتب مستقلان عن الواجهة.'],
     fields: [
       ['ui', 'mode', ['Customer layout', 'واجهة العملاء'], STUDIO_ADMIN_MODE_HINT, STUDIO_ADMIN_MODES],
-      ['uiAllowlist', 'ids', ['Customer allowlist (user ids, one per line)', 'القائمة المسموحة للعملاء (معرّفات المستخدمين، واحد في كل سطر)'], ['Read only while the layout is "pilot". At most 200 ids.', 'تُقرأ فقط عندما تكون الواجهة "pilot". 200 معرّف كحد أقصى.']],
-      ['services.help', 'mode', ['Help tickets', 'تذاكر المساعدة'], ['Opens tickets in both layouts.', 'يفتح التذاكر في الواجهتين.'], STUDIO_ADMIN_MODES],
-      ['services.stopRequest', 'mode', ['Ask to stop', 'طلب الإيقاف'], ['The urgent stop request on a running ad, in both layouts.', 'طلب الإيقاف العاجل لإعلان يعمل، في الواجهتين.'], STUDIO_ADMIN_MODES],
-      ['services.tiktok', 'mode', ['TikTok service', 'خدمة تيك توك'], ['The managed TikTok help request.', 'طلب مساعدة تيك توك اليدوي.'], STUDIO_ADMIN_MODES],
+      ['uiAllowlist', 'ids', ['Customer allowlist (user ids, one per line)', 'القائمة المسموحة للعملاء (معرّفات المستخدمين، واحد في كل سطر)'], ['Read while the layout is "pilot" and for every service set to "pilot" (whatever the layout). At most 200 ids.', 'تُقرأ عندما تكون الواجهة "pilot"، ولكل خدمة مضبوطة على "pilot" (أياً كانت الواجهة). 200 معرّف كحد أقصى.']],
+      ['services.help', 'mode', ['Help tickets', 'تذاكر المساعدة'], ['Opens tickets in both layouts. pilot = only the customer allowlist above.', 'يفتح التذاكر في الواجهتين. pilot = القائمة المسموحة للعملاء أعلاه فقط.'], STUDIO_ADMIN_MODES],
+      ['services.stopRequest', 'mode', ['Ask to stop', 'طلب الإيقاف'], ['The urgent stop request on a running ad, in both layouts. pilot = only the customer allowlist above.', 'طلب الإيقاف العاجل لإعلان يعمل، في الواجهتين. pilot = القائمة المسموحة للعملاء أعلاه فقط.'], STUDIO_ADMIN_MODES],
+      ['services.tiktok', 'mode', ['TikTok service', 'خدمة تيك توك'], ['The managed TikTok help request. pilot = only the customer allowlist above.', 'طلب مساعدة تيك توك اليدوي. pilot = القائمة المسموحة للعملاء أعلاه فقط.'], STUDIO_ADMIN_MODES],
       ['staffDesk', 'mode', ['Team desk', 'مكتب الفريق'], ['This desk for the team. It cannot go off while open tickets or stop requests exist.', 'هذا المكتب للفريق. لا يمكن إيقافه ما دامت هناك تذاكر أو طلبات إيقاف مفتوحة.'], STUDIO_ADMIN_MODES],
       ['staffAllowlist', 'ids', ['Staff allowlist (user ids, one per line)', 'القائمة المسموحة للفريق (معرّفات المستخدمين، واحد في كل سطر)'], ['Read only while the desk is "pilot".', 'تُقرأ فقط عندما يكون المكتب "pilot".']]
     ]
@@ -2143,7 +2144,7 @@ const STUDIO_ADMIN_SETTINGS = Object.freeze({
       ['fbPrivateReply', 'select', ['Facebook private messages', 'رسائل فيسبوك الخاصة'], ['Needs Meta approval first.', 'تحتاج موافقة ميتا أولاً.'], STUDIO_ADMIN_CAPABILITY_STATES],
       ['igPublicReply', 'select', ['Instagram public replies', 'ردود إنستغرام العامة'], ['poll after the read test passed; on after Meta approval.', 'poll بعد نجاح اختبار القراءة؛ on بعد موافقة ميتا.'], ['on', 'poll', 'gated', 'off', 'unavailable']],
       ['igPrivateReply', 'select', ['Instagram private messages', 'رسائل إنستغرام الخاصة'], ['Needs Meta approval first.', 'تحتاج موافقة ميتا أولاً.'], STUDIO_ADMIN_CAPABILITY_STATES],
-      ['tiktokService', 'select', ['TikTok service label', 'تسمية خدمة تيك توك'], ['A manual service: on when the team offers it.', 'خدمة يدوية: on عندما يقدمها الفريق.'], STUDIO_ADMIN_CAPABILITY_STATES]
+      ['tiktokService', 'select', ['TikTok service label', 'تسمية خدمة تيك توك'], ['Not read by anything yet: the TikTok screens and requests follow "TikTok service" on the Rollout page. A value saved here changes nothing for customers.', 'لا يقرؤها شيء بعد: شاشات تيك توك وطلباتها تتبع «خدمة تيك توك» في صفحة الإطلاق التدريجي. القيمة المحفوظة هنا لا تغيّر شيئاً للعملاء.'], STUDIO_ADMIN_CAPABILITY_STATES]
     ]
   },
   limits: {

@@ -14887,6 +14887,13 @@ async function studioTikTokSend() {
       draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.errorFull).replace('{n}', String((_studioTikTok.service && _studioTikTok.service.maxOpen) || _studioTikTok.maxOpen || 3));
       studioTikTokWant(true);
     }
+    if (studioExtrasErrorCode(error) === 'SERVICE_OFF') {
+      // The TikTok service closed for this account meanwhile (the shared text speaks of Help): say so,
+      // and read the service state and /me again, so the section redraws closed.
+      draft.error = studioTikTokText(STUDIO_TIKTOK_TEXTS.off);
+      studioTikTokWant(true);
+      if (typeof studioLoadMe === 'function') studioLoadMe(0);
+    }
     return false;
   } finally {
     if (generation === _studioTikTok.generation) {

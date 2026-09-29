@@ -657,10 +657,11 @@ function renderStudioDeskLaunchCard(request) {
                 ${renderStudioDeskMeta(request)}
                 ${renderStudioDeskNameRow(request)}
                 <ol class="studio-desk-checklist">${checklist.map(item => `<li>${studioEsc(item)}</li>`).join('')}</ol>
+                ${studioDeskStopBeforeRun(request) && studioDeskOwnRequest(request) ? `<p class="studio-desk-note" data-testid="studio-desk-own-${id}">${studioEsc(adsStudioText('This is your own ad: another team member settles it.', 'هذا إعلانك أنت: يسوّيه عضو آخر من الفريق.'))}</p>` : ''}
                 <div class="studio-desk-actions">
                   <button type="button" class="studio-v2-action is-primary" data-testid="studio-desk-link-${id}" onclick="openAdsStudioLinkSheet('${id}')">${studioDeskIcon('link-2')}<span>${studioEsc(adsStudioText('Link Meta campaign', 'اربط حملة ميتا'))}</span></button>
                   <button type="button" class="studio-v2-action" onclick="studioDeskGo('requests', '${id}')">${studioDeskIcon('file-text')}<span>${studioEsc(adsStudioText('The request', 'تفاصيل الطلب'))}</span></button>
-                  ${studioDeskStopBeforeRun(request) ? `<button type="button" class="studio-v2-action" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>` : ''}
+                  ${studioDeskStopBeforeRun(request) && !studioDeskOwnRequest(request) ? `<button type="button" class="studio-v2-action" data-testid="studio-desk-stop-return-${id}" onclick="studioDeskSheetOpen('settle', '${id}', this)">${studioDeskIcon('hand')}<span>${studioEsc(adsStudioText('Stop & return all', 'أوقف وأعد المبلغ كاملاً'))}</span></button>` : ''}
                 </div>
               </li>`;
 }

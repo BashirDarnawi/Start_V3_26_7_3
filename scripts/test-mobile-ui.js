@@ -6357,6 +6357,24 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   run("state.adCampaignRequests = state.adCampaignRequests.filter(r => r.id !== 'r_mine' && r.id !== 'r_mstp')");
   check('Team desk (review loop r3 n13): one\'s own ended ad shows "another team member settles it" with no Finish & settle / Admin override (reviewer and admin), the settle and override sheets do not open for it, and one\'s own stop-asked ad has no Stop & return all',
     !loadError && ownCases.length === 5 && ownCases.every(Boolean), `cases ${failed(ownCases)}`);
+  // Review loop r7 n12: the plain Launch card (never linked, no stop asked) of one's OWN request has no Stop & return all
+  // (studioDeskSheetOpen refuses it, so the button did nothing) and says why; another member's request keeps the button.
+  box.state.adCampaignRequests.push({ id: 'r_mlnc', createdBy: 'u1', status: 'Approved', name: 'My own, to launch', paidMinorUSD: 700, budgetMinorUSD: 700, budgetType: 'lifetime', durationDays: 5, studioRef: 'ALB-S-MINE5678', startDate: '2099-05-01', endDate: '2099-05-05', _created: 1, _lastModified: 11 },
+    { id: 'r_olnc', createdBy: 'u2', status: 'Approved', name: 'Someone else, to launch', paidMinorUSD: 800, budgetMinorUSD: 800, budgetType: 'lifetime', durationDays: 5, studioRef: 'ALB-S-OTHR5678', startDate: '2099-05-01', endDate: '2099-05-05', _created: 1, _lastModified: 11 });
+  openAt('/studio?tab=review&section=launch');
+  const launchPage = html();
+  // a Launch card holds its checklist's <li> items: it ends at its actions' closing </div></li>
+  const launchCard = testId => launchPage.slice(launchPage.indexOf(`data-testid="${testId}"`), launchPage.indexOf('</div>\n              </li>', launchPage.indexOf(`data-testid="${testId}"`)));
+  const ownLaunchCard = launchCard('studio-desk-launch-r_mlnc');
+  const otherLaunchCard = launchCard('studio-desk-launch-r_olnc');
+  const ownLaunchCases = [
+    launchPage.includes('data-testid="studio-desk-launch-r_mlnc"') && !ownLaunchCard.includes('data-stop-asked') && !ownLaunchCard.includes('studio-desk-stop-return-r_mlnc'),
+    ownLaunchCard.includes('data-testid="studio-desk-own-r_mlnc"') && ownLaunchCard.includes('another team member settles it') && ownLaunchCard.includes('studio-desk-link-r_mlnc'),
+    launchPage.includes('data-testid="studio-desk-launch-r_olnc"') && otherLaunchCard.includes('data-testid="studio-desk-stop-return-r_olnc"') && !otherLaunchCard.includes('studio-desk-own-r_olnc')
+  ];
+  run("state.adCampaignRequests = state.adCampaignRequests.filter(r => r.id !== 'r_mlnc' && r.id !== 'r_olnc')");
+  check('Team desk (review loop r7 n12): one\'s own never-linked request on the Launch list has no Stop & return all (the sheet refuses it) and says another team member settles it; another member\'s request keeps the button',
+    !loadError && ownLaunchCases.every(Boolean), `cases ${failed(ownLaunchCases)}`);
 
   // The pulse: a new stop request rings (when the switch is on) and the title follows; leaving the desk stops the watch and restores the title.
   run("studioDeskToggleSound()");
@@ -6412,6 +6430,21 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       && refusedHtml.includes('data-testid="studio-admin-server-message"') && refusedHtml.includes('maxSubmissionsPerDay must be a whole number from 1 to 500')
       && savedHtml.includes('data-testid="studio-admin-saved" data-version="5"'),
     `badNumber ${badNumber} put ${JSON.stringify(putCall && putCall.body)}`);
+  // Review loop r7 n8, n9: the admin texts say what the server does. service_access() reads uiAllowlist for every service
+  // set to "pilot" whatever the layout; nothing reads capabilities.tiktokService (the rollout "TikTok service" decides).
+  const adminField = (key, field) => json(`STUDIO_ADMIN_SETTINGS.${key}.fields.find(f => f[0] === ${JSON.stringify(field)})`) || [];
+  const settingsPy = read('server/systems/ads_studio/studio_settings.py');
+  const supportPyForHints = read('server/systems/ads_studio/studio_support.py');
+  const adminHintCases = [
+    (() => { const [en, ar] = adminField('rollout', 'uiAllowlist')[3] || []; return /every service set to "pilot"/.test(String(en)) && !/Read only while/.test(String(en)) && String(ar).includes('ولكل خدمة') && !String(ar).includes('تُقرأ فقط'); })(),
+    ['services.help', 'services.stopRequest', 'services.tiktok'].every(field => { const [en, ar] = adminField('rollout', field)[3] || []; return String(en).includes('pilot = only the customer allowlist above') && String(ar).includes('القائمة المسموحة للعملاء أعلاه'); }),
+    /allowed = bool\(user_id\) and user_id in \(rollout\.get\("uiAllowlist"\) or \[\]\)/.test(settingsPy) && settingsPy.includes('Neither the env kill switch nor the customer layout is'),
+    (() => { const [en, ar] = adminField('capabilities', 'tiktokService')[3] || []; return /changes nothing/.test(String(en)) && String(en).includes('"TikTok service" on the Rollout page') && !/on when the team offers it/.test(String(en)) && String(ar).includes('لا تغيّر شيئاً') && String(ar).includes('«خدمة تيك توك»'); })(),
+    // the hint above is honest only while nothing reads the label: wire it and the hint must change with it
+    !supportPyForHints.includes('tiktokService') && !/capabilities\.tiktokService|tiktokService\s*[!=]==/.test(read('src/systems/ads_studio/15r-studio-extras.js') + read('src/systems/ads_studio/15j-studio-home.js') + read('src/systems/ads_studio/15n-studio-help.js'))
+  ];
+  check('Admin settings (review loop r7 n8, n9): the customer allowlist hint says it is read for every service set to "pilot" as well as the layout, each service names that list, and the TikTok service label says it changes nothing (the rollout switch decides), in both languages',
+    adminHintCases.every(Boolean), `cases ${failed(adminHintCases)}`);
   reply('/api/studio/admin/settings/hours', { key: 'hours', value: { timezone: 'Africa/Tripoli', week: { sun: { open: '09:00', close: '17:00' }, mon: { open: '09:00', close: '17:00' }, tue: null, wed: null, thu: null, fri: null, sat: null }, holidays: [{ date: '2026-12-24', labelEn: 'Independence Day', labelAr: 'عيد الاستقلال' }], ramadan: null, onDutyUntil: '23:00' }, version: 1, updatedAt: hours(-5) });
   openAt('/studio?tab=review&section=more&id=settings-hours');
   run('render()');
@@ -7988,6 +8021,75 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   ];
   check('Social Studio post quota (review loop r2 S): the 409/413 refusals and the photo-check guard texts read in Arabic and English, a 413 shows its own words in English',
     !loadError && quotaCases.every(Boolean), loadError || `cases ${failed(quotaCases)} ${JSON.stringify(quotaTexts.map(([message, status]) => [info(message, 'ar', status).text, info(message, 'en', status).text]))}`);
+
+  // Review loop r7 n10: a TikTok send refused with SERVICE_OFF (the service closed for this account meanwhile) says the
+  // TikTok service is not open (never the shared "Help is not open"), and reads the service state and /me again, so the
+  // section redraws closed instead of repeating the same refusal on every retry.
+  const meTikTokOff = { ...meV2, services: { ...meV2.services, tiktok: false } };
+  const tiktokServiceOff = (language = 'en') => {
+    meReply(meV2);
+    run(`_studioTikTok.forUser = '__none__'; studioTikTokScope(); __replies[${JSON.stringify(TIKTOK_PATH)}] = [];
+      _studioTikTok.service = studioTikTokCleanService(${JSON.stringify(service)}); _studioTikTok.loadedAt = Date.now();
+      studioTikTokSet("handle", "shop.five"); studioTikTokToggleWant("advice", true);`);
+    const formBefore = String(run('renderStudioTikTokSection()'));
+    replyError(TIKTOK_PATH, { status: 403, message: 'x', payload: { detail: { code: 'SERVICE_OFF', message: 'The TikTok service is not open for your account yet' } } });
+    reply(TIKTOK_PATH, { requests: [], nextCursor: null, openCount: 0, maxOpen: 3, service: { ...service, open: false } });  // the read again
+    run(`__replies['/api/studio/me'] = [{ value: ${JSON.stringify(meTikTokOff)} }];`);
+    const readsBefore = calls('GET', TIKTOK_PATH).length;
+    const meBefore = calls('GET', '/api/studio/me').length;
+    inLanguage(language, 'studioTikTokSend();');
+    const out = {
+      formBefore: formBefore.includes('data-testid="studio-tiktok-form"'),
+      error: String(json('_studioTikTok.draft && _studioTikTok.draft.error') || ''),
+      reread: calls('GET', TIKTOK_PATH).length - readsBefore,
+      meReread: calls('GET', '/api/studio/me').length - meBefore,
+      after: String(inLanguage(language, 'renderStudioTikTokSection()')),
+      entry: String(run('renderStudioTikTokEntry()'))
+    };
+    run(`__replies[${JSON.stringify(TIKTOK_PATH)}] = []; _studioTikTok.draft = null;`);
+    return out;
+  };
+  const serviceOffEn = tiktokServiceOff('en');
+  const serviceOffAr = tiktokServiceOff('ar');
+  const serviceOffCases = [
+    serviceOffEn.formBefore && serviceOffEn.error === 'The TikTok service is not open for your account yet. Ask us in a ticket if you would like it.' && !/Help is not open/.test(serviceOffEn.error),
+    serviceOffAr.error === 'خدمة تيك توك غير مفتوحة لحسابك بعد. اطلبها منا في تذكرة إن رغبت.' && !serviceOffAr.error.includes('خدمة المساعدة'),
+    serviceOffEn.reread === 1 && serviceOffEn.meReread === 1 && serviceOffAr.reread === 1,
+    serviceOffEn.after.includes('data-open="0"') && serviceOffEn.after.includes('data-testid="studio-tiktok-off"') && !serviceOffEn.after.includes('data-testid="studio-tiktok-form"') && serviceOffEn.entry === ''
+  ];
+  meReply(meV2);
+  check('Studio TikTok (review loop r7 n10): a SERVICE_OFF refusal says the TikTok service is not open (EN/AR, never "Help is not open") and reads the service and /me again, so the section redraws closed',
+    !loadError && serviceOffCases.every(Boolean), loadError || `cases ${failed(serviceOffCases)}; ${JSON.stringify({ en: { ...serviceOffEn, after: undefined, entry: serviceOffEn.entry.slice(0, 80) }, ar: { error: serviceOffAr.error, reread: serviceOffAr.reread } })}`);
+
+  // Review loop r7 n7: Pages & replies (15o, studio-pages.js, loaded after studio.js) offers its TikTok section while /me
+  // says the service is on: its guard names the real drawer of 15r (renderStudioTikTokSection). And every typeof guard
+  // of a studio function in the studio sources names a function some source defines (a misspelt guard is always false).
+  let pagesLoadError = '';
+  try { vm.runInContext(read('src/systems/ads_studio/15o-studio-pages.js'), box); } catch (error) { pagesLoadError = String(error && error.message || error); }
+  meReply(meV2);
+  run(`_studioTikTok.forUser = '__none__'; studioTikTokScope(); __replies[${JSON.stringify(TIKTOK_PATH)}] = [];`);
+  reply(TIKTOK_PATH, { requests: [], nextCursor: null, openCount: 0, maxOpen: 3, service });
+  const pgChipsOn = String(run("renderStudioPgSections({ section: 'pages', id: '' })"));
+  const pgViewOn = json("studioPgView({ tab: 'replies', section: 'tiktok', id: '' })") || {};
+  const pgBodyOn = String(run("renderStudioPagesBody({ tab: 'replies', section: 'tiktok', id: '' })"));
+  meReply(meTikTokOff);
+  const pgChipsOff = String(run("renderStudioPgSections({ section: 'pages', id: '' })"));
+  const pgViewOff = json("studioPgView({ tab: 'replies', section: 'tiktok', id: '' })") || {};
+  meReply(meV2);
+  const walkSources = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => (entry.isDirectory() ? walkSources(path.join(dir, entry.name)) : /\.js$/.test(entry.name) ? [path.join(dir, entry.name)] : []));
+  const everySource = walkSources(path.join(ROOT, 'src')).map(file => fs.readFileSync(file, 'utf8')).join('\n');
+  const studioSources = walkSources(path.join(ROOT, 'src', 'systems', 'ads_studio')).map(file => fs.readFileSync(file, 'utf8')).join('\n');
+  const definedNames = new Set([...everySource.matchAll(/(?:function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=)/g)].map(m => m[1] || m[2]));
+  const guardedStudio = [...new Set([...studioSources.matchAll(/typeof\s+((?:render)?[Ss]tudio[\w$]*)\s*===\s*'function'/g)].map(m => m[1]))];
+  const undefinedGuards = guardedStudio.filter(name => !definedNames.has(name));
+  const pagesTikTokCases = [
+    !pagesLoadError && pgChipsOn.includes('data-testid="studio-pg-section-tiktok" onclick="studioPgGo(\'tiktok\')"'),
+    pgViewOn.section === 'tiktok' && pgBodyOn.includes('data-testid="studio-pg" data-section="tiktok"') && pgBodyOn.includes('data-testid="studio-tiktok"'),
+    !pgChipsOff.includes('studio-pg-section-tiktok') && pgViewOff.section === 'pages',
+    guardedStudio.length > 50 && undefinedGuards.length === 0
+  ];
+  check('Studio Pages & replies (review loop r7 n7): the TikTok chip and ?tab=replies&section=tiktok open the TikTok section while the service is on (hidden, and the address falls back to Pages, while it is off); every typeof guard of a studio function names a defined function',
+    !loadError && pagesTikTokCases.every(Boolean), pagesLoadError || `cases ${failed(pagesTikTokCases)}; view ${JSON.stringify(pgViewOn)} undefined guards ${undefinedGuards.join(', ')}`);
 }
 
 {
