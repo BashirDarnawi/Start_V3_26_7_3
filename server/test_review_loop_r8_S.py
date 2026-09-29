@@ -11,7 +11,9 @@ Behaviour tests for the verified findings of the batch; each one failed before i
 * 10  a reply Meta accepted while the database dropped (every save and the final write lost) is
       never sent again by the stuck-claim sweep; when the database is down before the first send,
       nothing is sent and the sweep re-arms the reply, which then goes out exactly once; a retry
-      whose per-action save was lost records what went out when it is released.
+      whose per-action save was lost records what went out when it is released; a reply the sweep
+      closed because its send began (skipActions) still answers a once-per-person rule (no second
+      reply on the person's next comment).
 
 Users are made here with unique emails; every Meta call is faked (nothing reaches the network).
 Run: python -m pytest server/test_review_loop_r8_S.py -q
@@ -398,6 +400,27 @@ def test_a_reply_meta_accepted_while_the_database_dropped_is_never_sent_again(ac
     row = _log_row(owner, comment_id)
     assert row["processing"] is False and not row.get("retryAfter") and row["error"] == "interrupted"
     assert row["skipActions"] == ["public"]
+
+
+def test_a_reply_the_sweep_closed_after_its_send_began_still_answers_a_once_per_person_rule(actors, graph, monkeypatch):
+    a, owner = actors["a"]["cookies"], actors["a"]["id"]
+    meta = _meta_id()
+    _link(actors, "a", meta)
+    _rule(a, publicReply="Thanks for your comment", oncePerPerson=True)
+    state = {"db": "up"}
+    _flaky_log_writes(monkeypatch, lambda: state["db"] == "up" and bool(graph.calls))
+    comment_id = f"{meta}_6"
+    with pytest.raises(OperationalError):
+        _comment(meta, comment_id)
+    assert graph.mine(meta) == [f"{comment_id}/comments"]  # Meta accepted the public reply, every save was lost
+    state["db"] = "back"
+    _retry(datetime.now(timezone.utc) + timedelta(minutes=16))  # the stuck-claim sweep closes it (skipActions)
+    row = _log_row(owner, comment_id)
+    assert row["actions"] == [] and row["skipActions"] == ["public"] and not row.get("retryAfter")
+    # The public reply almost certainly went out: the person counts as answered by this rule.
+    assert row["ruleId"] in studio._person_replied_rule_ids(owner, row["pageId"], "9201")
+    _comment(meta, f"{meta}_7")  # the same person comments again on the same page
+    assert graph.mine(meta) == [f"{comment_id}/comments"]  # before the fix: answered a second time
 
 
 def test_database_down_before_the_first_send_sends_nothing_and_the_sweep_answers_once(actors, graph, monkeypatch):

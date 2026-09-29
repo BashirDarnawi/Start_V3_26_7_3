@@ -1714,7 +1714,7 @@ def _person_history_sql(dialect: str | None = None) -> str:
     Only rows whose stored text holds ``:needle`` (a LIKE pattern escaped with ``!``) are parsed at all,
     each ONCE (json_fields_select_sql); the exact owner / page / person match is made in Python (r8 #9)."""
     return json_fields_select_sql(
-        ("ownerId", "pageId", "fromId", "actions", "processing", "ruleId", "retryAfter"), ("id",),
+        ("ownerId", "pageId", "fromId", "actions", "processing", "ruleId", "retryAfter", "skipActions"), ("id",),
         "type = :type AND deleted = false AND created_by = :owner AND data_json LIKE :needle ESCAPE '!' AND id > :after",
         dialect) + f" ORDER BY id ASC LIMIT {_PERSON_HISTORY_PAGE}"
 
@@ -1722,9 +1722,10 @@ def _person_history_sql(dialect: str | None = None) -> str:
 def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[str]:
     """Rules that already answered this person on this page (full history).
 
-    Only a sent DM or public reply (or a reply still in flight) counts; a
-    bare like is not an answer. It runs inside the comment lock every owner
-    shares, so the database reads the owner's rows as text and parses only
+    Only a sent DM or public reply (or a reply still in flight, or one that
+    may have landed: in ``skipActions``, its send timed out or began before
+    the database dropped) counts; a bare like is not an answer. It runs
+    inside the comment lock every owner shares, so the database reads the owner's rows as text and parses only
     those whose text holds the person's id (any id that is not a plain Meta
     id: every row), each once; the exact match is made here (r8 #9)."""
     found: set[str] = set()
@@ -1740,15 +1741,20 @@ def _person_replied_rule_ids(owner_id: str, page_id: str, from_id: str) -> set[s
             for row in rows:
                 if not all(row[key] is not None and str(row[key]) == value for key, value in wanted):
                     continue  # another person, page or owner whose text merely holds the id
-                actions = row["f_actions"]
+                actions, maybe_sent = row["f_actions"], row["f_skipactions"]
                 if isinstance(actions, str):
                     try:
                         actions = json_loads(actions)
                     except ValueError:
                         actions = []
+                if isinstance(maybe_sent, str):
+                    try:
+                        maybe_sent = json_loads(maybe_sent)
+                    except ValueError:
+                        maybe_sent = []
                 answered = _bool(row["f_processing"]) or bool(row["f_retryafter"]) or (
                     isinstance(actions, list) and any(str(a) in ("dm", "public") for a in actions)
-                )
+                ) or bool(_skip_actions(maybe_sent) & {"dm", "public"})  # may have landed: never answered twice
                 if answered:
                     # History rows written before replies carried a rule id
                     # keep their old page-wide meaning ("*" = every rule).
