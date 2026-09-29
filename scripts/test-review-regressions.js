@@ -2343,6 +2343,209 @@ async function main() {
     await kept.run('_saveReceiptFromModalInner()');
     assert.equal(kept.saved[0].collectionDate, stale);
   });
+  // ---------- Review loop r6 batch C: customers, debts and reconciliation ----------
+  function debtFixture() {
+    const fixture = loadBrowserSource();
+    const { state } = fixture;
+    state.defaultExchangeRate = 10;
+    state.customers = [{ id: 'c1', name: 'Debtor', phones: ['0912345678'] }];
+    return fixture;
+  }
+  const receiptLessDebtAd = (id, usd, rate) => ({ id, recordType: 'ad', customerId: 'c1', amountUSD: usd, spentUSD: usd, exchangeRate: rate, amountLocal: usd * rate,
+    status: 'Active', paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop', receiptAllocations: [], dueAllocations: [], createdAt: new Date().toISOString() });
+  const customerIdsFor = (sandbox, state, filter) => {
+    state.customerSearch = ''; state.customerSort = 'newest'; state.customerFinancialFilter = filter;
+    return sandbox.getFilteredCustomers().map(c => c.id);
+  };
+
+  await test('r6 C n=8: a Rate 1 = 0 bank-transfer receipt pays its LYD on both sides of the balance (no fake debt, credit shown, reminder amount right)', async () => {
+    const { sandbox, state } = debtFixture();
+    state.defaultExchangeRate = 9.5;
+    // The receipt form saves Rate 1 = 0 methods with amountLocal 0 and amountUSD = amount / rate2.
+    state.receipts = [{ id: 'bt', recordType: 'receipt', customerId: 'c1', paymentMethod: 'Bank Transfer (LYD)', amountUSD: 105.28, amountLocal: 0, exchangeRate: 9.5,
+      status: 'Paid', isPaid: true, payments: [{ method: 'Bank Transfer (LYD)', amount: 1000, rate: 0, rate2: 9.5 }], transfers: [], createdAt: new Date().toISOString() }];
+    // Unspent: the $105.28 credit must show in LYD too.
+    let stats = sandbox.getCustomerStats('c1');
+    near(stats.totalPaidLYD, 1000.16);
+    assert.ok(stats.balanceLYD > 0, `an unspent transfer is credit, got ${stats.balanceLYD}`);
+    assert.deepEqual(customerIdsFor(sandbox, state, 'hasCredit'), ['c1']);
+    // Fully spent by one ad: settled, not "Owes 1,000.16 LYD".
+    state.ads = [{ id: 'a1', recordType: 'ad', customerId: 'c1', amountUSD: 105.28, spentUSD: 105.28, exchangeRate: 9.5, status: 'Active', paymentStatus: 'paid', isPaid: true,
+      receiptId: 'bt', receiptAllocations: [{ receiptId: 'bt', amountUSD: 105.28 }], dueAllocations: [] }];
+    stats = sandbox.getCustomerStats('c1');
+    near(stats.balanceUSD, 0);
+    near(stats.balanceLYD, 0);   // before: -1000.16
+    assert.deepEqual(customerIdsFor(sandbox, state, 'hasDebt'), []);
+    // A second, unpaid $10 ad: the reminder asks for about 95 LYD, not about 1,095.
+    state.ads.push(receiptLessDebtAd('a2', 10, 9.5));
+    const rows = sandbox.shellDebtorRows();
+    assert.equal(rows.length, 1);
+    near(rows[0].dueLyd, 95);
+    assert.ok(sandbox.shellReminderMessage(rows[0]).includes('95 LYD'));
+  });
+
+  await test('r6 C n=10: the customer list, debt filters, sort, pill, header tile and Home Owed pick debtors by the USD balance, like Collect', async () => {
+    const { sandbox, state, run } = debtFixture();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', amountUSD: 100, amountLocal: 1000, exchangeRate: 10, status: 'Paid', isPaid: true, payments: [], transfers: [] }];
+    state.ads = [receiptLessDebtAd('a1', 105, 9)];   // owes $5 while the unlinked LYD reads +55
+    let stats = sandbox.getCustomerStats('c1');
+    near(stats.balanceUSD, -5);
+    near(stats.balanceLYD, 55);
+    assert.equal(sandbox.shellDebtorRows().length, 1);
+    assert.deepEqual(customerIdsFor(sandbox, state, 'hasDebt'), ['c1']);    // before: hidden
+    assert.deepEqual(customerIdsFor(sandbox, state, 'hasCredit'), []);      // before: listed as credit
+    near(sandbox.getCustomerSortValue(state.customers[0], 'highestDebt'), 50);
+    const pill = sandbox.shellCustomerRow(state.customers[0], stats, '', { canSeeBalance: true });
+    assert.ok(pill.includes('Owes 50 LYD') && !pill.includes('Credit'), 'the pill must say Owes');
+    assert.ok(sandbox.renderManagerHomeHero([], [], true).includes('50 LYD'), 'Home Owed counts the debtor');
+    // The reverse: USD settled while the LYD mirror reads -100 — nobody owes.
+    state.ads = [receiptLessDebtAd('a1', 100, 11)];
+    stats = sandbox.getCustomerStats('c1');
+    near(stats.balanceUSD, 0);
+    near(stats.balanceLYD, -100);
+    assert.equal(sandbox.shellDebtorRows().length, 0);
+    assert.deepEqual(customerIdsFor(sandbox, state, 'hasDebt'), []);        // before: listed
+    assert.ok(sandbox.shellCustomerRow(state.customers[0], stats, '', { canSeeBalance: true }).includes('Settled'));
+    const hero = sandbox.renderManagerHomeHero([], [], true);
+    assert.ok(!hero.includes('100 LYD') && hero.includes('0 LYD'), 'Home Owed must not count a settled customer');
+  });
+
+  await test('r6 C n=9/19: Collect a debt opens the receipt form with Paid chosen (the real settle path), never the handover-only dialog', async () => {
+    const { sandbox, state } = debtFixture();
+    const receipt = { id: 'np', recordType: 'receipt', customerId: 'c1', amountUSD: 95, amountLocal: 950, exchangeRate: 10, status: 'Not Paid', isPaid: false,
+      deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [], createdBy: 'admin', createdAt: new Date().toISOString() };
+    state.receipts = [receipt];
+    const calls = [];
+    sandbox.openCollectReceiptModal = id => calls.push(['collectDialog', id]);
+    sandbox.editReceipt = async id => { calls.push(['edit', id]); state.activeModal = 'receipt'; state.modalData = receipt; };
+    sandbox.setReceiptStatus = (tab, status) => calls.push(['status', status]);
+    sandbox.openCustomerReceipts = cid => { calls.push(['list', cid]); return true; };
+    sandbox.document.querySelector = selector => (selector === '#receipt-status-tabs button[data-status="Paid"]' ? { dataset: { status: 'Paid' } } : null);
+    await sandbox.openDebtorCollection('c1');
+    assert.deepEqual(calls, [['edit', 'np'], ['status', 'Paid']]);
+    // Without receipts.edit (a collections clerk): the customer's unpaid receipts, not the handover dialog.
+    calls.length = 0;
+    state.currentUser = { id: 'clerk', role: 'Employee', permissions: { receipts: ['view', 'markCollected'], customers: ['view', 'viewBalance'] } };
+    await sandbox.openDebtorCollection('c1');
+    assert.deepEqual(calls, [['list', 'c1']]);
+    assert.equal(state.receiptStatusFilter, 'not_paid');
+    // A driver (D#) receipt settles through its delivery, so the list opens too.
+    calls.length = 0;
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    Object.assign(receipt, { tempReceiptNo: 'D7', deliveryStatus: 'Needs Delivery', statusDetail: { notPaidCollection: 'delivery' } });
+    await sandbox.openDebtorCollection('c1');
+    assert.deepEqual(calls, [['list', 'c1']]);
+  });
+
+  await test('r6 C n=9: the Record Collection dialog on an unpaid receipt says it does not mark the receipt Paid', async () => {
+    const { sandbox, state, run } = debtFixture();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    state.receipts = [{ id: 'np', recordType: 'receipt', customerId: 'c1', amountUSD: 95, amountLocal: 950, exchangeRate: 10, status: 'Not Paid', isPaid: false,
+      deliveryStatus: 'Office', statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [] },
+    { id: 'pd', recordType: 'receipt', customerId: 'c1', amountUSD: 10, amountLocal: 100, exchangeRate: 10, status: 'Paid', isPaid: true, payments: [], transfers: [] }];
+    let html = '';
+    sandbox.document.body.insertAdjacentHTML = (where, markup) => { html = markup; };
+    sandbox.updateUrlParams = () => {};
+    sandbox.openCollectReceiptModal('np');
+    assert.ok(html.includes('it does not mark the receipt Paid'));
+    sandbox.openCollectReceiptModal('pd');
+    assert.ok(html.includes('Record Collection') && !html.includes('does not mark the receipt Paid'));
+  });
+
+  await test('r6 C n=11: a refused server customer delete leaves the pages linked; a committed one unlinks them after', async () => {
+    const { sandbox, state } = debtFixture();
+    sandbox.isServerModeEnabled = () => true;
+    state.pages = [{ id: 'p1', name: 'Page', customerIds: ['c1', 'c2'] }];
+    const pageWrites = [];
+    sandbox.updateRecord = async (array, id, updates) => { pageWrites.push(id); Object.assign(array.find(x => x.id === id), updates); return true; };
+    sandbox.addAuditLog = () => {};
+    sandbox.apiBatchDeleteEntities = async () => { throw Object.assign(new Error('Customer cannot be deleted while linked records exist'), { status: 409 }); };
+    await sandbox.deleteCustomer('c1');
+    assert.deepEqual(pageWrites, [], 'no page PATCH may go out before the atomic delete');
+    assert.deepEqual(state.pages[0].customerIds, ['c1', 'c2']);
+    assert.ok(!state.customers[0]._deleted, 'the refused delete rolled back');
+    sandbox.apiBatchDeleteEntities = async () => ({ stamps: {} });
+    await sandbox.deleteCustomer('c1');
+    assert.deepEqual(pageWrites, ['p1']);
+    assert.deepEqual(state.pages[0].customerIds, ['c2']);
+    assert.ok(state.customers[0]._deleted);
+  });
+
+  await test('r6 C n=12: customer search finds a partly typed local number stored as +218', async () => {
+    const { sandbox, state } = debtFixture();
+    state.customers = [{ id: 'c9', name: 'X', phones: ['+218 91 234 5678'] }, { id: 'c8', name: 'Y', phones: ['+218 92 876 5432'] }];
+    const find = term => { state.customerSearch = term; state.customerSort = 'newest'; state.customerFinancialFilter = 'all'; return sandbox.getFilteredCustomers().map(c => c.id); };
+    assert.deepEqual(find('0912345'), ['c9']);      // before: []
+    assert.deepEqual(find('091234567'), ['c9']);    // before: []
+    assert.deepEqual(find('0912345678'), ['c9']);
+    assert.deepEqual(find('0000'), []);             // stripped to nothing: never matches everyone
+  });
+
+  await test('r6 C n=18: reconciliation shows a just-ended ad first, not after 200 old finished ones past the 150-card cap', async () => {
+    const { sandbox, state, run } = debtFixture();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    const day = n => new Date(Date.now() - n * 86400000).toISOString();
+    state.ads = [];
+    for (let i = 0; i < 200; i += 1) {
+      state.ads.push({ id: `old_${i}`, recordType: 'ad', customerId: 'c1', amountUSD: 50, spentUSD: 50, status: 'Stopped',
+        startDate: day(130), endDate: day(100 - (i % 30)), stoppedAt: day(100 - (i % 30)), createdAt: day(130) });
+    }
+    state.ads.push({ id: 'new_ad', recordType: 'ad', customerId: 'c1', amountUSD: 100, status: 'Active', startDate: day(20), endDate: day(3), createdAt: day(20) });
+    const html = String(sandbox.renderReconciliationView());
+    assert.ok(html.includes('data-reconciliation-card="new_ad"'), 'the just-ended ad is not drawn');   // before: index 200, cut
+    assert.ok(html.indexOf('data-reconciliation-card="new_ad"') < html.indexOf('data-reconciliation-card="old_'), 'pending comes first');
+    assert.ok(html.includes('<strong>1</strong>'), 'the header counts the one ad still to review');
+    assert.ok(html.includes('Showing 150 of 201'));
+  });
+
+  await test('r6 C n=22: the receipts "Not Collected" filter keeps a partly collected receipt; "Collected" keeps only full ones', async () => {
+    const { sandbox, state, run } = debtFixture();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    const base = { recordType: 'receipt', customerId: 'c1', exchangeRate: 10, status: 'Paid', isPaid: true, payments: [], transfers: [], createdAt: new Date().toISOString() };
+    const partial = { ...base, id: 'rcpt_partial_x', amountUSD: 100, amountLocal: 1000, collected: true, collectedAmount: 300 };
+    const full = { ...base, id: 'rcpt_full_x', amountUSD: 10, amountLocal: 100, collected: true, collectedAmount: 100 };
+    const legacy = { ...base, id: 'rcpt_legacy_x', amountUSD: 10, amountLocal: 100, collected: true };
+    near(sandbox._receiptCollectedFraction(partial), 0.3);
+    near(sandbox._receiptCollectedFraction(full), 1);
+    near(sandbox._receiptCollectedFraction(legacy), 1);
+    near(sandbox._receiptCollectedFraction({ ...full, collected: false }), 0);
+    state.receipts = [partial, full, legacy];
+    const listed = filter => { state.receiptCollectedFilter = filter; const html = String(sandbox.renderReceiptsView()); return state.receipts.map(r => r.id).filter(id => html.includes(id)); };
+    assert.deepEqual(listed('not-collected'), ['rcpt_partial_x']);   // before: [] — the 700 LYD still held was nowhere
+    assert.deepEqual(listed('collected'), ['rcpt_full_x', 'rcpt_legacy_x']);
+    // The analytics Collection Status card: $30 collected, $70 outstanding, 0 of 1 fully collected.
+    state.receipts = [partial];
+    const analytics = String(sandbox.renderAnalyticsView());
+    assert.ok(analytics.includes('✓ $30') && analytics.includes('○ $70') && analytics.includes('0/1'), 'Collection Status counts the partial receipt as fully collected');
+  });
+
+  await test('r6 C n=25: the home hero Receipts count leaves out canceled, lost and destroyed receipts', async () => {
+    const { sandbox, run } = debtFixture();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    const now = new Date().toISOString();
+    const r = (id, status, isPaid) => ({ id, recordType: 'receipt', customerId: 'c1', amountUSD: 10, amountLocal: 100, exchangeRate: 10, status, isPaid, createdAt: now, payments: [], transfers: [] });
+    const receipts = [r('a', 'Paid', true), r('b', 'Not Paid', false), r('c', 'Canceled', false), r('d', 'Lost', false), r('e', 'Destroyed', false)];
+    const html = String(sandbox.renderManagerHomeHero(receipts, [], false));
+    assert.ok(/shell-hero-value[^>]*>2</.test(html), 'the hero shows 2 live receipts');   // before: 5
+    assert.ok(/Receipts<\/span>\s*<span class="shell-kpi-value[^>]*>2</.test(html), 'the Receipts KPI shows 2');
+  });
+
+  await test('r6 C n=24: the Liquidity start-date picker shows the local start day, like its label', async () => {
+    const savedTZ = process.env.TZ;
+    process.env.TZ = 'Africa/Tripoli';
+    try {
+      const { sandbox, state, run } = debtFixture();
+      run('Security.escapeHtml = s => String(s ?? "")');
+      const start = new Date(2026, 8, 29).toISOString();   // local midnight = 2026-09-28T22:00:00.000Z
+      assert.equal(start, '2026-09-28T22:00:00.000Z');
+      state.appSettings = [{ id: 'lq', settingKey: 'liquidityTracking', startDate: start, setBy: 'admin', date: start }];
+      const html = String(sandbox.renderAnalyticsView());
+      assert.ok(html.includes('id="liquidity-start-date" value="2026-09-29"'), 'the picker must prefill 29 Sep');   // before: 2026-09-28
+    } finally {
+      if (savedTZ === undefined) delete process.env.TZ; else process.env.TZ = savedTZ;
+    }
+  });
 
   console.log(`\n${passed} review behavior regressions passed.`);
 }

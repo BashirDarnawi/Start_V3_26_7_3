@@ -3027,7 +3027,7 @@ check('a stale customer confirmation never looks current beside new Meta numbers
   // that its SORTING also uses (a stale ad must not sink to the bottom).
   const viewsSource = fs.readFileSync(path.join(__dirname, '..', 'src', '12-views.js'), 'utf8');
   assert(viewsSource.includes('function getAdReconciliationDisplayState(ad)'), 'the reconciliation display state helper is missing');
-  assert(viewsSource.includes('Number(getAdReconciliationDisplayState(a).informedApplies)'), 'reconciliation sorting still trusts the raw stored flag');
+  assert(viewsSource.includes('const st = getAdReconciliationDisplayState(ad);') && viewsSource.includes('done.set(ad, st.informedApplies ||'), 'reconciliation sorting still trusts the raw stored flag');
 
   // A confirmed $10 remainder, then Meta reports MORE spend => remainder $5:
   // the old confirmation must not render as checked/done.

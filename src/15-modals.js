@@ -4775,17 +4775,17 @@ async function deleteCustomer(id) {
       await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
       if (!await deleteRecord(state.receipts, receipt.id, batchDeleteOps)) return;
     }
-    // Unlink the customer from pages: page.customerIds kept the ghost id, so
-    // the Pages view still showed the deleted customer as owner and every
-    // page save re-persisted the dangling link.
-    for (const page of getVisibleRecords(state.pages)) {
-      if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
-        const pageSaved = await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
-        if (!pageSaved) return;
-      }
-    }
     if (!await deleteRecord(state.customers, id, batchDeleteOps)) return;
     if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
+    // Unlink the customer from pages: page.customerIds kept the ghost id, so
+    // the Pages view still showed the deleted customer as owner and every
+    // page save re-persisted the dangling link. Only after the delete stuck:
+    // a refused delete must leave the pages linked.
+    for (const page of getVisibleRecords(state.pages)) {
+      if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
+        await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
+      }
+    }
     const deletedCount = linkedReceipts.length + linkedAds.length;
     showNotification(
       isAr ? 'تم الحذف' : 'Deleted',

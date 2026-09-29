@@ -1848,10 +1848,11 @@ function renderAnalyticsView() {
 
   // Collection status (admin collected vs not collected) — real cash only:
   // the physical money of a transfer lives on the SOURCE receipt.
-  const collectedReceipts = revenueReceipts.filter(r => r.collected);
-  const notCollectedReceipts = revenueReceipts.filter(r => !r.collected);
-  const collectedUSD = collectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const notCollectedUSD = notCollectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  // A partly collected receipt counts only its collected share.
+  const share = new Map(revenueReceipts.map(r => [r, _receiptCollectedFraction(r)]));
+  const collectedReceipts = revenueReceipts.filter(r => share.get(r) >= 1);
+  const collectedUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0) * share.get(r), 0);
+  const notCollectedUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0) - collectedUSD;
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
   // Delivery tracking. Deliveries are tracked ONLY on receipts (ads are pinned to
@@ -2039,9 +2040,11 @@ function renderAnalyticsView() {
             ? (isAr ? 'تغطية جزئية — واصل التحصيل' : 'Partial cover — keep collecting')
             : (isAr ? 'خطر — النقد الجديد لا يغطي نصف المستحق' : 'Danger — new cash covers less than half');
         const startDisplay = liquidity.tracking ? new Date(liquidity.startDate).toLocaleDateString(isAr ? 'ar-LY' : 'en-GB') : '';
+        // Local day, like the label (a stored local midnight is the day before in UTC).
+        const startDay = liquidity.tracking ? (d => new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10))(new Date(liquidity.startDate)) : '';
         const dateControl = isCurrentUserAdmin() ? `
             <div class="flex items-center gap-2 flex-wrap">
-              <input type="date" id="liquidity-start-date" ${liquidity.tracking ? `value="${liquidity.startDate.slice(0, 10)}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
+              <input type="date" id="liquidity-start-date" ${startDay ? `value="${startDay}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
               <button onclick="updateLiquidityTrackingStart(document.getElementById('liquidity-start-date').value)"
                 class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
                 ${liquidity.tracking ? (isAr ? 'تغيير تاريخ البداية' : 'Change start date') : (isAr ? 'ابدأ التتبّع' : 'Start tracking')}
@@ -2605,9 +2608,8 @@ function renderCustomersView() {
   allCustomers.forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
     totalRevenue += stats.totalPaid;
-    if (stats.balance < 0) {
-      totalDebts += Math.abs(stats.balance);
-    }
+    const view = customerBalanceView(stats);  // debtors as Collect sees them
+    if (view.sign < 0) totalDebts += view.lyd;
   });
   // MONEY-MATH: getCustomerStats already subtracts each source customer's
   // transferred-OUT money from its totalPaid, and the recipient's TRANSFER_IN
@@ -2830,8 +2832,8 @@ function renderReceiptsView() {
     
     // Collected filter
     if (state.receiptCollectedFilter !== 'all') {
-      if (state.receiptCollectedFilter === 'collected' && !receipt.collected) return false;
-      if (state.receiptCollectedFilter === 'not-collected' && receipt.collected) return false;
+      // Partly collected = not collected yet.
+      if ((_receiptCollectedFraction(receipt) >= 1) !== (state.receiptCollectedFilter === 'collected')) return false;
     }
     
     return true;
@@ -5505,14 +5507,19 @@ function renderReconciliationView() {
   // millions of row visits); the list is capped at 150 cards per render.
   const _reconCustomersById = new Map((state.customers || []).map(c => [String(c.id), c]));
   const _reconPagesById = new Map((state.pages || []).map(p => [String(p.id), p]));
+  // Done = informed, or a saved spend left nothing to return. Pending first,
+  // newest-ended first: a just-ended ad must not sink past the 150-card cap.
+  const done = new Map();
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
-    .sort((a, b) => {
-      const informedOrder = Number(getAdReconciliationDisplayState(a).informedApplies)
-        - Number(getAdReconciliationDisplayState(b).informedApplies);
-      if (informedOrder !== 0) return informedOrder;
-      return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
-    });
+    .map(ad => {
+      const st = getAdReconciliationDisplayState(ad);
+      done.set(ad, st.informedApplies || ((st.finalSpendFrozen || st.hasSavedSpend) && st.remainingUSD <= 0.005));
+      return ad;
+    })
+    .sort((a, b) => (done.get(a) - done.get(b))
+      || ((getAdReconciliationTriggerDay(b)?.getTime() || 0) - (getAdReconciliationTriggerDay(a)?.getTime() || 0)));
+  const pendingCount = visibleAds.filter(ad => !done.get(ad)).length;
   return `
     <div class="ops-workspace ops-reconciliation">
       <header class="ops-hero">
@@ -5521,7 +5528,7 @@ function renderReconciliationView() {
           <h1>${t('jobReconciliation')}</h1>
           <p>${isAr ? 'تظهر الإعلانات في اليوم التالي لانتهائها، أو بعد يوم من إيقافها.' : 'Ads appear the day after their scheduled end, or one day after they are stopped.'}</p>
         </div>
-        <div class="ops-hero-count"><strong>${visibleAds.length}</strong><span>${isAr ? 'إعلانات جاهزة للمراجعة' : 'Ads ready for review'}</span></div>
+        <div class="ops-hero-count"><strong>${pendingCount}</strong><span>${isAr ? 'إعلانات جاهزة للمراجعة' : 'Ads ready for review'}</span></div>
       </header>
       <div class="ops-reconciliation-intro"><i data-lucide="list-checks" class="w-5 h-5"></i><p>${isAr ? 'راجع الميزانية والمصروف، أعد المتبقي للعميل، ثم سجّل تأكيد إبلاغه.' : 'Review budget and spend, return the remaining amount, then record your customer notification.'}</p></div>
       <div class="ops-reconciliation-records">
@@ -5628,6 +5635,7 @@ function renderReconciliationView() {
               </section>`;
             }).join('')}
           </div>
+          ${visibleAds.length > 150 ? `<p class="mt-3 text-center text-xs text-slate-500">${isAr ? `عرض 150 من ${visibleAds.length}` : `Showing 150 of ${visibleAds.length}`}</p>` : ''}
         `}
       </div>
     </div>

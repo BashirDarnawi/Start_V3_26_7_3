@@ -603,6 +603,26 @@ async function main() {
     S.customerFinancialFilter = 'all';
   });
 
+  await must('C6. a Rate 1 = 0 receipt (Bank Transfer LYD, Sadad, LTT) counts its LYD on BOTH sides: no fake LYD debt (r6 C n=8)', () => {
+    resetState();
+    // The receipt form stores these methods with amountLocal 0 and amountUSD = amount / rate2.
+    const r = paidReceipt('receipt_c6', 105.28, 9.5);
+    Object.assign(r, { amountLocal: 0, paymentMethod: 'Bank Transfer (LYD)', payments: [{ method: 'Bank Transfer (LYD)', amount: 1000, rate: 0, rate2: 9.5 }] });
+    let stats = getCustomerStats('c1');
+    assert(near(stats.totalPaidLYD, 1000.16), `Paid LYD must be $105.28 x 9.5, got ${stats.totalPaidLYD}`);
+    assert(stats.balanceLYD > 0, `an unspent transfer is LYD credit, got ${stats.balanceLYD}`);
+
+    makeAd({ id: 'ad_c6', amountUSD: 105.28, spentUSD: 105.28, exchangeRate: 9.5, receiptAllocations: [{ receiptId: r.id, amountUSD: 105.28 }] });
+    stats = getCustomerStats('c1');
+    assert(near(stats.balanceUSD, 0) && near(stats.balanceLYD, 0),
+      `a fully spent transfer is settled in both currencies, got ${usd(stats.balanceUSD)} / ${stats.balanceLYD} LYD`);
+    S.customerSearch = '';
+    S.customerSort = 'newest';
+    S.customerFinancialFilter = 'hasDebt';
+    assert(!sandbox.getFilteredCustomers().some(c => String(c.id) === 'c1'), 'a settled customer must not be under Has debt');
+    S.customerFinancialFilter = 'all';
+  });
+
   await must('A1. an ad funded $30 from a $100 paid receipt consumes exactly $30', () => {
     resetState();
     const r = paidReceipt('receipt_a1', 100);
@@ -1027,6 +1047,30 @@ async function main() {
     assert(near(snap.adSpendUSD, 30 + 20 + 10),
       `spend = new $30 + in-window top-up $20 + capped $10, got ${usd(snap.adSpendUSD)}`);
     assert(near(snap.netUSD, snap.collectedUSD - snap.adSpendUSD), 'net must equal collected minus spent');
+  });
+
+  await must('L3b. a Paused ad keeps counting its budget as new spending, exactly like while it was Active (r6 C n=21)', () => {
+    resetState();
+    S.appSettings = [];
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    const rNew = datedPaidReceipt('receipt_l3b', 500, '2026-07-03T10:00:00.000Z');
+    datedPaidReceipt('receipt_l3b_old', 200, '2026-06-01T10:00:00.000Z');
+    const ad = makeAd({ id: 'ad_l3b', amountUSD: 500, status: 'Paused', createdAt: '2026-07-03T12:00:00.000Z',
+      receiptAllocations: [{ receiptId: rNew.id, amountUSD: 500 }] });
+    // An OLD ad paused after an in-window $50 top-up still spent that new money.
+    makeAd({ id: 'ad_l3b_old', amountUSD: 150, status: 'Paused', createdAt: '2026-06-01T12:00:00.000Z',
+      topUps: [{ date: '2026-07-08T10:00:00.000Z', amount: 50 }] });
+
+    const paused = sandbox.getLiquiditySnapshot();
+    assert(near(paused.adSpendUSD, 550), `spend = paused new $500 + old ad's in-window $50, got ${usd(paused.adSpendUSD)}`);
+    assert(near(paused.netUSD, -50), `net = 500 - 550, got ${usd(paused.netUSD)}`);
+    assert(near(paused.shortfallUSD, 200), `the old $200 stays uncovered, got ${usd(paused.shortfallUSD)}`);
+
+    ad.status = 'Active';
+    S.ads.find(a => a.id === 'ad_l3b_old').status = 'Active';
+    const active = sandbox.getLiquiditySnapshot();
+    assert(near(active.adSpendUSD, paused.adSpendUSD) && near(active.netUSD, paused.netUSD) && near(active.shortfallUSD, paused.shortfallUSD),
+      'pausing an ad must not move the liquidity panel');
   });
 
   await must('L4. coverage and shortfall describe exactly how much customer money is still uncovered', () => {

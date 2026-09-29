@@ -196,7 +196,8 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
-  const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
+  // Live receipts only, like the analytics Receipts card.
+  const receiptsThisMonth = revenueReceipts.filter(r => !['canceled', 'lost'].includes(getReceiptPaymentState(r)) && inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
   // Same month rule as the analytics breakdown (start date first) and the
   // same "actual spend" as the profit panel when that bundle is loaded.
   const adActual = a => (typeof getAdActualSpendUSDLite === 'function' ? getAdActualSpendUSDLite(a) : getAdSpendUSD(a));
@@ -206,11 +207,10 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   if (canViewFinancials) {
     const statsIndex = buildCustomerStatsIndex();
     getCustomersVisibleToCurrentUser().forEach(c => {
-      const stats = getCustomerStats(c.id, statsIndex);
-      if (stats.balance < -0.005) {
+      const view = customerBalanceView(getCustomerStats(c.id, statsIndex));  // debtors as Collect sees them
+      if (view.sign < 0) {
         owedCount += 1;
-        const lyd = Number(stats.balanceLYD);
-        owedLyd += Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
+        owedLyd += view.lyd;
       }
     });
   }
@@ -299,15 +299,14 @@ function shellDebtorRows() {
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
-    if (!(stats.balanceUSD < -0.005)) return;  // the USD balance is the canonical one-pot value (printed below)
+    const view = customerBalanceView(stats);
+    if (view.sign >= 0) return;  // the USD balance is the canonical one-pot value (printed below)
     const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
     let oldest = null;
     unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
     const ageDays = oldest === null ? null : Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(oldest).setHours(0, 0, 0, 0)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
-    const lyd = Number(stats.balanceLYD);
-    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd < 0 ? lyd : stats.balanceUSD * (Number(state.defaultExchangeRate) || 0));
     rows.push({
-      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balanceUSD),
+      customer: c, stats, unpaid, oldest, ageDays, dueLyd: view.lyd, dueUsd: view.usd,
       overdue: ageDays !== null && ageDays > SHELL_OVERDUE_DAYS,
       number: unpaid.length ? shellReceiptNumber(unpaid.slice().sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0))[0]) : ''
     });
@@ -363,14 +362,18 @@ function renderCollectView() {
   `;
 }
 
-// One open receipt: go straight to the collect dialog. Several: show the
+// One open in-shop receipt: its form with Paid chosen, so Save settles the debt
+// ("Record Collection" only notes a cash handover). Otherwise show the
 // customer's unpaid receipts so the right one is picked.
-function openDebtorCollection(customerId) {
+async function openDebtorCollection(customerId) {
   const cid = String(customerId || '');
   const statsIndex = buildCustomerStatsIndex();
   const unpaid = (statsIndex.receiptsByCustomer.get(cid) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
-  if (unpaid.length === 1 && currentUserHasPermission('receipts', 'markCollected') && typeof openCollectReceiptModal === 'function') {
-    openCollectReceiptModal(unpaid[0].id);
+  const one = unpaid.length === 1 ? unpaid[0] : null;
+  if (one && isUnpaidShopReceipt(one) && canActOnRecord('receipts', 'edit', one.createdBy)) {
+    await editReceipt(one.id);
+    const paidTab = document.querySelector('#receipt-status-tabs button[data-status="Paid"]');
+    if (paidTab && state.activeModal === 'receipt' && state.modalData?.id === one.id) setReceiptStatus(paidTab, 'Paid');
     return;
   }
   if (openCustomerReceipts(cid)) {
@@ -814,13 +817,13 @@ function shellCustomerRow(customer, stats, card, meta = {}) {
   let trailing = shellPill(shellEsc(customer?.platform || ''), 'slate');
   let tone = 'blue';
   if (meta.canSeeBalance && stats) {
-    const bal = Number(stats.balanceLYD) || 0;
-    const balancePill = bal < -0.005
-      ? shellPill(`${isAr ? 'مدين' : 'Owes'} ${shellEsc(shellLyd(Math.abs(bal)))}`, 'rose')
-      : bal > 0.005
-        ? shellPill(`${isAr ? 'رصيد' : 'Credit'} ${shellEsc(shellLyd(bal))}`, 'blue')
+    const bal = customerBalanceView(stats);
+    const balancePill = bal.sign < 0
+      ? shellPill(`${isAr ? 'مدين' : 'Owes'} ${shellEsc(shellLyd(bal.lyd))}`, 'rose')
+      : bal.sign > 0
+        ? shellPill(`${isAr ? 'رصيد' : 'Credit'} ${shellEsc(shellLyd(bal.lyd))}`, 'blue')
         : shellPill(isAr ? 'مسدَّد' : 'Settled', 'slate');
-    tone = bal < -0.005 ? 'rose' : 'blue';
+    tone = bal.sign < 0 ? 'rose' : 'blue';
     trailing = balancePill;
   }
   const facts = meta.canSeeBalance && stats

@@ -723,7 +723,8 @@ function getLiquiditySnapshot() {
   if (tracking) {
     for (const a of getVisibleRecords(state.ads)) {
       if (!a || a.recordType === 'receipt') continue;
-      const spend = getAdSpendUSD(a);
+      // Paused has spent and holds its budget, like Active (Pending stays $0).
+      const spend = /^paused$/i.test(String(a.status || '').trim()) ? Math.max(parseFloat(a.amountUSD) || 0, getAdActualSpendUSDLite(a)) : getAdSpendUSD(a);
       if (spend <= 0) continue;
       const adDateMs = new Date(a.createdAt || a.startDate || 0).getTime();
       if (Number.isFinite(adDateMs) && adDateMs >= sinceMs) {
@@ -1088,6 +1089,9 @@ function getCustomerStats(customerId, statsIndex = null) {
     // collected: real customer cash (liquidity rule L8), whatever the status says.
     return st === 'Paid' || r.isPaid === true || (!!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID');
   });
+  // One LYD value per paid receipt, as receiptRateById prices its spend: Rate 1 = 0
+  // methods (Bank Transfer LYD, Sadad, LTT) store amountLocal 0.
+  const rateOf = r => Number(r.exchangeRate || state.defaultExchangeRate || 0);
   // Money transferred OUT is the recipient's credit (its transferred-in receipt), not this customer's.
   let transferredOutUSD = 0;
   let transferredOutLYD = 0;
@@ -1096,10 +1100,10 @@ function getCustomerStats(customerId, statsIndex = null) {
       const tUSD = parseFloat(tr?.amountUSD) || 0;
       const tLocal = parseFloat(tr?.amountLocal);
       transferredOutUSD += tUSD;
-      transferredOutLYD += Number.isFinite(tLocal) ? tLocal : tUSD * (receipt.exchangeRate || 0);
+      transferredOutLYD += tLocal > 0 ? tLocal : tUSD * rateOf(receipt);
     });
   });
-  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0) - transferredOutLYD;
+  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (Number(receipt.amountLocal) > 0 ? Number(receipt.amountLocal) : (Number(receipt.amountUSD) || 0) * rateOf(receipt)), 0) - transferredOutLYD;
   const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0) - transferredOutUSD;
   
   // Calculate total spent USD from ads (status-aware, shared with analytics)
@@ -1313,6 +1317,15 @@ function getCustomerStats(customerId, statsIndex = null) {
   };
   statsIndex?.statsByCustomer?.set(normalizedCustomerId, { ...stats });
   return stats;
+}
+
+// Owes (sign -1) / credit (+1) by the USD balance, as Collect decides. LYD is
+// only the amount shown: balanceLYD if its sign agrees, else |USD| x rate.
+function customerBalanceView(stats) {
+  const usd = Number(stats?.balanceUSD) || 0;
+  const sign = usd < -0.005 ? -1 : (usd > 0.005 ? 1 : 0);
+  const lyd = Number(stats?.balanceLYD);
+  return { sign, usd: Math.abs(usd), lyd: !sign ? 0 : (lyd * sign > 0.005 ? Math.abs(lyd) : Math.abs(usd) * (Number(state.defaultExchangeRate) || 0)) };
 }
 
 let _customerPagesReturnFocus = null;
@@ -1797,9 +1810,10 @@ function getCustomerSortValue(customer, sortType, statsIndex = null) {
     // -Infinity: two -Infinity values subtract to NaN in the comparator, which
     // makes the sort order undefined (and can throw in some engines).
     case 'biggestCredit':
-      return stats.balance > 0 ? stats.balance : -Number.MAX_VALUE;
-    case 'highestDebt':
-      return stats.balance < 0 ? -stats.balance : -Number.MAX_VALUE;
+    case 'highestDebt': {
+      const view = customerBalanceView(stats);
+      return view.sign === (sortType === 'highestDebt' ? -1 : 1) ? view.lyd : -Number.MAX_VALUE;
+    }
     default:
       return 0;
   }
@@ -1850,6 +1864,7 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
+  const searchPhoneTail = searchPhoneDigits.replace(/^0+/, '');  // "0912…" finds "+218 91…"
   // A typed local number must match the stored international one.
   const searchPhoneKey = searchPhoneDigits.length >= 9 && typeof normalizeCustomerPhoneKey === 'function'
     ? String(normalizeCustomerPhoneKey(searchTerm) || '')
@@ -1858,7 +1873,7 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   if (searchTerm) {
     filtered = filtered.filter(c =>
       foldSearchText(c.name).includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneTail.length >= 4 && entry.key.includes(searchPhoneTail)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
       foldSearchText(c.platform).includes(searchTerm)
     );
   }
@@ -1876,10 +1891,9 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const statsIndex = needsStats ? (sharedStatsIndex || buildCustomerStatsIndex()) : sharedStatsIndex;
 
   // Apply financial filter
-  if (financialFilter === 'hasCredit') {
-    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
-  } else if (financialFilter === 'hasDebt') {
-    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
+  if (financialFilter === 'hasCredit' || financialFilter === 'hasDebt') {
+    const wanted = financialFilter === 'hasDebt' ? -1 : 1;
+    filtered = filtered.filter(c => customerBalanceView(getCustomerStats(c.id, statsIndex)).sign === wanted);
   }
 
   // Apply sorting (decorate-sort-undecorate: compute each sort value once,
@@ -5664,6 +5678,15 @@ function _receiptCashCollectionTargetLocal(receipt) {
     : (Number(receipt?.amountLocal) || 0);
 }
 
+// Collected share (0..1) against the receipt card's target; a legacy
+// collection with no amount is full, as on the card.
+function _receiptCollectedFraction(r) {
+  if (!r?.collected) return 0;
+  const t = getReceiptDebtType(r) !== 'none' ? Number(getReceiptCollectionTarget(r).amountLocal) || 0 : Number(r.amountLocal) || 0;
+  const c = Number(r.collectedAmount) || 0;
+  return r.collectedAmount == null || t - c <= 0.01 ? 1 : Math.max(c / t, 0);
+}
+
 // The receipt's own payment breakdown in LYD (used for the "Yes = same" path
 // and to seed the "No" editor). Each split's LYD value is amount × rate1.
 function _receiptCollectionBreakdown(receipt) {
@@ -5730,6 +5753,7 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
     <div class="text-xs text-slate-500 mb-4">
       ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${p.amount.toFixed(2)} LYD`).join(' • ')}
     </div>
+    ${getReceiptPaymentState(receipt) === 'not_paid' ? `<p class="text-xs text-amber-700 mb-3">${isAr ? 'يسجّل التسليم فقط ولا يجعل الوصل مدفوعاً.' : 'This records the handover only; it does not mark the receipt Paid.'}</p>` : ''}
     <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
       ${isAr ? 'هل تم التحصيل بنفس بيانات الوصل الأصلية؟' : 'Did you collect exactly as shown on the receipt?'}
     </p>

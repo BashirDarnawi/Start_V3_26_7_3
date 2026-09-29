@@ -314,8 +314,10 @@ function buildAnalyticsBreakdown(metric, granularity, options = {}) {
       const amount = Math.max(0, analyticsNumber(receipt.amountUSD));
       period.count += 1;
       if (metric === 'collection-status') {
-        if (receipt.collected) period.primaryUSD += amount;
-        else period.secondaryUSD += amount;
+        // A partly collected receipt splits: its collected share and what is left.
+        const share = _receiptCollectedFraction(receipt);
+        period.primaryUSD += amount * share;
+        period.secondaryUSD += amount * (1 - share);
       } else period.primaryUSD += amount;
     }
   }

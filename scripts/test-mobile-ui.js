@@ -1457,7 +1457,10 @@ check('collect-a-debt and reminders delegate to the existing money flows and nev
   managerShell.includes('const statsIndex = buildCustomerStatsIndex();') &&
   managerShell.includes('const stats = getCustomerStats(c.id, statsIndex);') &&
   managerShell.includes("getReceiptPaymentState(r) === 'not_paid'") &&
-  managerShell.includes("if (unpaid.length === 1 && currentUserHasPermission('receipts', 'markCollected') && typeof openCollectReceiptModal === 'function') {") &&
+  // r6 C n=9/19: Collect a debt settles through the receipt form (Paid), never the handover-only dialog.
+  managerShell.includes("if (one && isUnpaidShopReceipt(one) && canActOnRecord('receipts', 'edit', one.createdBy)) {") &&
+  managerShell.includes("setReceiptStatus(paidTab, 'Paid');") &&
+  !managerShell.includes('openCollectReceiptModal(') &&
   managerShell.includes('if (openCustomerReceipts(cid)) {') &&
   managerShell.includes("return shellCanOpen('receipts') && (isCurrentUserAdmin() || can('customers', 'viewBalance'));") &&
   managerShell.includes("if (!can('customers', 'viewContacts')) return;") &&

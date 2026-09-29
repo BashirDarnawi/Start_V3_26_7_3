@@ -47,11 +47,16 @@ const sandbox = {
   deleteRecord: async () => true,
   RenderQueue: { schedule() {} },
   navigateTo() {},
+  getReceiptDebtType: receipt => (receipt.status === 'Not Paid' ? 'shop' : 'none'),
+  getReceiptCollectionTarget: receipt => ({ amountLocal: Number(receipt.amountLocal) || 0 }),
   setTimeout: fn => fn()
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(finalSpendSource, sandbox, { filename: 'src/11b-ad-final-spend.js' });
+// The collected-share helper lives in the startup bundle; load the REAL one.
+const helpersSource = fs.readFileSync(path.join(__dirname, '..', 'src', '13-filters-helpers.js'), 'utf8');
+vm.runInContext(helpersSource.match(/\nfunction _receiptCollectedFraction\(r\) \{[\s\S]*?\n\}\n/)[0], sandbox, { filename: 'src/13-filters-helpers.js' });
 vm.runInContext(source, sandbox, { filename: 'src/12a-analytics-profit.js' });
 
 let passed = 0;
@@ -184,6 +189,20 @@ test('weekly collection breakdown separates collected and outstanding cash', () 
   if (result.periods.length !== 12) throw new Error('weekly breakdown must contain 12 periods');
   near(result.periods.reduce((sum, row) => sum + row.primaryUSD, 0), 40);
   near(result.periods.reduce((sum, row) => sum + row.secondaryUSD, 0), 25);
+});
+
+test('r6 C n=22: a partly collected receipt splits into its collected share and what is still outstanding', () => {
+  const result = sandbox.buildAnalyticsBreakdown('collection-status', 'week', {
+    now: new Date('2026-03-30T12:00:00').getTime(), ads: [], purchases: [],
+    receipts: [
+      { id: 'p', date: '2026-03-30T10:00:00', amountUSD: 100, amountLocal: 1000, status: 'Paid', isPaid: true, collected: true, collectedAmount: 300 },
+      { id: 'full', date: '2026-03-30T10:30:00', amountUSD: 10, amountLocal: 100, status: 'Paid', isPaid: true, collected: true, collectedAmount: 100 },
+      { id: 'legacy', date: '2026-03-30T11:00:00', amountUSD: 5, amountLocal: 50, status: 'Paid', isPaid: true, collected: true }
+    ]
+  });
+  // Before: the whole $100 counted as collected and nothing as outstanding.
+  near(result.periods.reduce((sum, row) => sum + row.primaryUSD, 0), 30 + 10 + 5);
+  near(result.periods.reduce((sum, row) => sum + row.secondaryUSD, 0), 70);
 });
 
 test('profit controls render only for an Admin', () => {

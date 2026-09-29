@@ -16969,10 +16969,11 @@ function renderAnalyticsView() {
 
   // Collection status (admin collected vs not collected) — real cash only:
   // the physical money of a transfer lives on the SOURCE receipt.
-  const collectedReceipts = revenueReceipts.filter(r => r.collected);
-  const notCollectedReceipts = revenueReceipts.filter(r => !r.collected);
-  const collectedUSD = collectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
-  const notCollectedUSD = notCollectedReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0);
+  // A partly collected receipt counts only its collected share.
+  const share = new Map(revenueReceipts.map(r => [r, _receiptCollectedFraction(r)]));
+  const collectedReceipts = revenueReceipts.filter(r => share.get(r) >= 1);
+  const collectedUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0) * share.get(r), 0);
+  const notCollectedUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0) - collectedUSD;
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
   // Delivery tracking. Deliveries are tracked ONLY on receipts (ads are pinned to
@@ -17160,9 +17161,11 @@ function renderAnalyticsView() {
             ? (isAr ? 'تغطية جزئية — واصل التحصيل' : 'Partial cover — keep collecting')
             : (isAr ? 'خطر — النقد الجديد لا يغطي نصف المستحق' : 'Danger — new cash covers less than half');
         const startDisplay = liquidity.tracking ? new Date(liquidity.startDate).toLocaleDateString(isAr ? 'ar-LY' : 'en-GB') : '';
+        // Local day, like the label (a stored local midnight is the day before in UTC).
+        const startDay = liquidity.tracking ? (d => new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10))(new Date(liquidity.startDate)) : '';
         const dateControl = isCurrentUserAdmin() ? `
             <div class="flex items-center gap-2 flex-wrap">
-              <input type="date" id="liquidity-start-date" ${liquidity.tracking ? `value="${liquidity.startDate.slice(0, 10)}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
+              <input type="date" id="liquidity-start-date" ${startDay ? `value="${startDay}"` : ''} class="glass-input px-3 py-2 rounded-lg text-sm" />
               <button onclick="updateLiquidityTrackingStart(document.getElementById('liquidity-start-date').value)"
                 class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
                 ${liquidity.tracking ? (isAr ? 'تغيير تاريخ البداية' : 'Change start date') : (isAr ? 'ابدأ التتبّع' : 'Start tracking')}
@@ -17726,9 +17729,8 @@ function renderCustomersView() {
   allCustomers.forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
     totalRevenue += stats.totalPaid;
-    if (stats.balance < 0) {
-      totalDebts += Math.abs(stats.balance);
-    }
+    const view = customerBalanceView(stats);  // debtors as Collect sees them
+    if (view.sign < 0) totalDebts += view.lyd;
   });
   // MONEY-MATH: getCustomerStats already subtracts each source customer's
   // transferred-OUT money from its totalPaid, and the recipient's TRANSFER_IN
@@ -17951,8 +17953,8 @@ function renderReceiptsView() {
     
     // Collected filter
     if (state.receiptCollectedFilter !== 'all') {
-      if (state.receiptCollectedFilter === 'collected' && !receipt.collected) return false;
-      if (state.receiptCollectedFilter === 'not-collected' && receipt.collected) return false;
+      // Partly collected = not collected yet.
+      if ((_receiptCollectedFraction(receipt) >= 1) !== (state.receiptCollectedFilter === 'collected')) return false;
     }
     
     return true;
@@ -20626,14 +20628,19 @@ function renderReconciliationView() {
   // millions of row visits); the list is capped at 150 cards per render.
   const _reconCustomersById = new Map((state.customers || []).map(c => [String(c.id), c]));
   const _reconPagesById = new Map((state.pages || []).map(p => [String(p.id), p]));
+  // Done = informed, or a saved spend left nothing to return. Pending first,
+  // newest-ended first: a just-ended ad must not sink past the 150-card cap.
+  const done = new Map();
   const visibleAds = getVisibleRecords(state.ads)
     .filter(ad => isAdReadyForReconciliation(ad))
-    .sort((a, b) => {
-      const informedOrder = Number(getAdReconciliationDisplayState(a).informedApplies)
-        - Number(getAdReconciliationDisplayState(b).informedApplies);
-      if (informedOrder !== 0) return informedOrder;
-      return (getAdReconciliationTriggerDay(a)?.getTime() || 0) - (getAdReconciliationTriggerDay(b)?.getTime() || 0);
-    });
+    .map(ad => {
+      const st = getAdReconciliationDisplayState(ad);
+      done.set(ad, st.informedApplies || ((st.finalSpendFrozen || st.hasSavedSpend) && st.remainingUSD <= 0.005));
+      return ad;
+    })
+    .sort((a, b) => (done.get(a) - done.get(b))
+      || ((getAdReconciliationTriggerDay(b)?.getTime() || 0) - (getAdReconciliationTriggerDay(a)?.getTime() || 0)));
+  const pendingCount = visibleAds.filter(ad => !done.get(ad)).length;
   return `
     <div class="ops-workspace ops-reconciliation">
       <header class="ops-hero">
@@ -20642,7 +20649,7 @@ function renderReconciliationView() {
           <h1>${t('jobReconciliation')}</h1>
           <p>${isAr ? 'تظهر الإعلانات في اليوم التالي لانتهائها، أو بعد يوم من إيقافها.' : 'Ads appear the day after their scheduled end, or one day after they are stopped.'}</p>
         </div>
-        <div class="ops-hero-count"><strong>${visibleAds.length}</strong><span>${isAr ? 'إعلانات جاهزة للمراجعة' : 'Ads ready for review'}</span></div>
+        <div class="ops-hero-count"><strong>${pendingCount}</strong><span>${isAr ? 'إعلانات جاهزة للمراجعة' : 'Ads ready for review'}</span></div>
       </header>
       <div class="ops-reconciliation-intro"><i data-lucide="list-checks" class="w-5 h-5"></i><p>${isAr ? 'راجع الميزانية والمصروف، أعد المتبقي للعميل، ثم سجّل تأكيد إبلاغه.' : 'Review budget and spend, return the remaining amount, then record your customer notification.'}</p></div>
       <div class="ops-reconciliation-records">
@@ -20749,6 +20756,7 @@ function renderReconciliationView() {
               </section>`;
             }).join('')}
           </div>
+          ${visibleAds.length > 150 ? `<p class="mt-3 text-center text-xs text-slate-500">${isAr ? `عرض 150 من ${visibleAds.length}` : `Showing 150 of ${visibleAds.length}`}</p>` : ''}
         `}
       </div>
     </div>
@@ -23352,7 +23360,8 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const collectedUsd = paidThisMonth.reduce((sum, r) => sum + (Number(r.amountUSD) || 0), 0);
   const prevLyd = paidLastMonth.reduce((sum, r) => sum + shellReceiptLyd(r), 0);
   const pct = prevLyd > 0 ? Math.round(((collectedLyd - prevLyd) / prevLyd) * 100) : null;
-  const receiptsThisMonth = revenueReceipts.filter(r => inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
+  // Live receipts only, like the analytics Receipts card.
+  const receiptsThisMonth = revenueReceipts.filter(r => !['canceled', 'lost'].includes(getReceiptPaymentState(r)) && inWindow(r.createdAt || r.startDate, monthStart, Infinity)).length;
   // Same month rule as the analytics breakdown (start date first) and the
   // same "actual spend" as the profit panel when that bundle is loaded.
   const adActual = a => (typeof getAdActualSpendUSDLite === 'function' ? getAdActualSpendUSDLite(a) : getAdSpendUSD(a));
@@ -23362,11 +23371,10 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   if (canViewFinancials) {
     const statsIndex = buildCustomerStatsIndex();
     getCustomersVisibleToCurrentUser().forEach(c => {
-      const stats = getCustomerStats(c.id, statsIndex);
-      if (stats.balance < -0.005) {
+      const view = customerBalanceView(getCustomerStats(c.id, statsIndex));  // debtors as Collect sees them
+      if (view.sign < 0) {
         owedCount += 1;
-        const lyd = Number(stats.balanceLYD);
-        owedLyd += Math.abs(Number.isFinite(lyd) && lyd !== 0 ? lyd : stats.balance * (Number(state.defaultExchangeRate) || 0));
+        owedLyd += view.lyd;
       }
     });
   }
@@ -23455,15 +23463,14 @@ function shellDebtorRows() {
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {
     const stats = getCustomerStats(c.id, statsIndex);
-    if (!(stats.balanceUSD < -0.005)) return;  // the USD balance is the canonical one-pot value (printed below)
+    const view = customerBalanceView(stats);
+    if (view.sign >= 0) return;  // the USD balance is the canonical one-pot value (printed below)
     const unpaid = (statsIndex.receiptsByCustomer.get(String(c.id)) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
     let oldest = null;
     unpaid.forEach(r => { const ts = new Date(r.createdAt || r.startDate || 0).getTime(); if (Number.isFinite(ts) && ts > 0 && (oldest === null || ts < oldest)) oldest = ts; });
     const ageDays = oldest === null ? null : Math.max(0, Math.round((new Date(now).setHours(0, 0, 0, 0) - new Date(oldest).setHours(0, 0, 0, 0)) / TIME_CONSTANTS.MILLISECONDS_PER_DAY));
-    const lyd = Number(stats.balanceLYD);
-    const dueLyd = Math.abs(Number.isFinite(lyd) && lyd < 0 ? lyd : stats.balanceUSD * (Number(state.defaultExchangeRate) || 0));
     rows.push({
-      customer: c, stats, unpaid, oldest, ageDays, dueLyd, dueUsd: Math.abs(stats.balanceUSD),
+      customer: c, stats, unpaid, oldest, ageDays, dueLyd: view.lyd, dueUsd: view.usd,
       overdue: ageDays !== null && ageDays > SHELL_OVERDUE_DAYS,
       number: unpaid.length ? shellReceiptNumber(unpaid.slice().sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0))[0]) : ''
     });
@@ -23519,14 +23526,18 @@ function renderCollectView() {
   `;
 }
 
-// One open receipt: go straight to the collect dialog. Several: show the
+// One open in-shop receipt: its form with Paid chosen, so Save settles the debt
+// ("Record Collection" only notes a cash handover). Otherwise show the
 // customer's unpaid receipts so the right one is picked.
-function openDebtorCollection(customerId) {
+async function openDebtorCollection(customerId) {
   const cid = String(customerId || '');
   const statsIndex = buildCustomerStatsIndex();
   const unpaid = (statsIndex.receiptsByCustomer.get(cid) || []).filter(r => r && !r._deleted && getReceiptPaymentState(r) === 'not_paid');
-  if (unpaid.length === 1 && currentUserHasPermission('receipts', 'markCollected') && typeof openCollectReceiptModal === 'function') {
-    openCollectReceiptModal(unpaid[0].id);
+  const one = unpaid.length === 1 ? unpaid[0] : null;
+  if (one && isUnpaidShopReceipt(one) && canActOnRecord('receipts', 'edit', one.createdBy)) {
+    await editReceipt(one.id);
+    const paidTab = document.querySelector('#receipt-status-tabs button[data-status="Paid"]');
+    if (paidTab && state.activeModal === 'receipt' && state.modalData?.id === one.id) setReceiptStatus(paidTab, 'Paid');
     return;
   }
   if (openCustomerReceipts(cid)) {
@@ -23970,13 +23981,13 @@ function shellCustomerRow(customer, stats, card, meta = {}) {
   let trailing = shellPill(shellEsc(customer?.platform || ''), 'slate');
   let tone = 'blue';
   if (meta.canSeeBalance && stats) {
-    const bal = Number(stats.balanceLYD) || 0;
-    const balancePill = bal < -0.005
-      ? shellPill(`${isAr ? 'مدين' : 'Owes'} ${shellEsc(shellLyd(Math.abs(bal)))}`, 'rose')
-      : bal > 0.005
-        ? shellPill(`${isAr ? 'رصيد' : 'Credit'} ${shellEsc(shellLyd(bal))}`, 'blue')
+    const bal = customerBalanceView(stats);
+    const balancePill = bal.sign < 0
+      ? shellPill(`${isAr ? 'مدين' : 'Owes'} ${shellEsc(shellLyd(bal.lyd))}`, 'rose')
+      : bal.sign > 0
+        ? shellPill(`${isAr ? 'رصيد' : 'Credit'} ${shellEsc(shellLyd(bal.lyd))}`, 'blue')
         : shellPill(isAr ? 'مسدَّد' : 'Settled', 'slate');
-    tone = bal < -0.005 ? 'rose' : 'blue';
+    tone = bal.sign < 0 ? 'rose' : 'blue';
     trailing = balancePill;
   }
   const facts = meta.canSeeBalance && stats
@@ -24758,7 +24769,8 @@ function getLiquiditySnapshot() {
   if (tracking) {
     for (const a of getVisibleRecords(state.ads)) {
       if (!a || a.recordType === 'receipt') continue;
-      const spend = getAdSpendUSD(a);
+      // Paused has spent and holds its budget, like Active (Pending stays $0).
+      const spend = /^paused$/i.test(String(a.status || '').trim()) ? Math.max(parseFloat(a.amountUSD) || 0, getAdActualSpendUSDLite(a)) : getAdSpendUSD(a);
       if (spend <= 0) continue;
       const adDateMs = new Date(a.createdAt || a.startDate || 0).getTime();
       if (Number.isFinite(adDateMs) && adDateMs >= sinceMs) {
@@ -25123,6 +25135,9 @@ function getCustomerStats(customerId, statsIndex = null) {
     // collected: real customer cash (liquidity rule L8), whatever the status says.
     return st === 'Paid' || r.isPaid === true || (!!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID');
   });
+  // One LYD value per paid receipt, as receiptRateById prices its spend: Rate 1 = 0
+  // methods (Bank Transfer LYD, Sadad, LTT) store amountLocal 0.
+  const rateOf = r => Number(r.exchangeRate || state.defaultExchangeRate || 0);
   // Money transferred OUT is the recipient's credit (its transferred-in receipt), not this customer's.
   let transferredOutUSD = 0;
   let transferredOutLYD = 0;
@@ -25131,10 +25146,10 @@ function getCustomerStats(customerId, statsIndex = null) {
       const tUSD = parseFloat(tr?.amountUSD) || 0;
       const tLocal = parseFloat(tr?.amountLocal);
       transferredOutUSD += tUSD;
-      transferredOutLYD += Number.isFinite(tLocal) ? tLocal : tUSD * (receipt.exchangeRate || 0);
+      transferredOutLYD += tLocal > 0 ? tLocal : tUSD * rateOf(receipt);
     });
   });
-  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountLocal || 0), 0) - transferredOutLYD;
+  const totalPaidLYD = paidReceipts.reduce((sum, receipt) => sum + (Number(receipt.amountLocal) > 0 ? Number(receipt.amountLocal) : (Number(receipt.amountUSD) || 0) * rateOf(receipt)), 0) - transferredOutLYD;
   const totalPaidUSD = paidReceipts.reduce((sum, receipt) => sum + (receipt.amountUSD || 0), 0) - transferredOutUSD;
   
   // Calculate total spent USD from ads (status-aware, shared with analytics)
@@ -25348,6 +25363,15 @@ function getCustomerStats(customerId, statsIndex = null) {
   };
   statsIndex?.statsByCustomer?.set(normalizedCustomerId, { ...stats });
   return stats;
+}
+
+// Owes (sign -1) / credit (+1) by the USD balance, as Collect decides. LYD is
+// only the amount shown: balanceLYD if its sign agrees, else |USD| x rate.
+function customerBalanceView(stats) {
+  const usd = Number(stats?.balanceUSD) || 0;
+  const sign = usd < -0.005 ? -1 : (usd > 0.005 ? 1 : 0);
+  const lyd = Number(stats?.balanceLYD);
+  return { sign, usd: Math.abs(usd), lyd: !sign ? 0 : (lyd * sign > 0.005 ? Math.abs(lyd) : Math.abs(usd) * (Number(state.defaultExchangeRate) || 0)) };
 }
 
 let _customerPagesReturnFocus = null;
@@ -25832,9 +25856,10 @@ function getCustomerSortValue(customer, sortType, statsIndex = null) {
     // -Infinity: two -Infinity values subtract to NaN in the comparator, which
     // makes the sort order undefined (and can throw in some engines).
     case 'biggestCredit':
-      return stats.balance > 0 ? stats.balance : -Number.MAX_VALUE;
-    case 'highestDebt':
-      return stats.balance < 0 ? -stats.balance : -Number.MAX_VALUE;
+    case 'highestDebt': {
+      const view = customerBalanceView(stats);
+      return view.sign === (sortType === 'highestDebt' ? -1 : 1) ? view.lyd : -Number.MAX_VALUE;
+    }
     default:
       return 0;
   }
@@ -25885,6 +25910,7 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const nonFinancialSorts = new Set(['newest', 'oldest', 'lastActive']);
   const effectiveSort = canViewBalance || nonFinancialSorts.has(requestedSort) ? requestedSort : 'newest';
   const searchPhoneDigits = searchTerm.replace(/\D/g, '');
+  const searchPhoneTail = searchPhoneDigits.replace(/^0+/, '');  // "0912…" finds "+218 91…"
   // A typed local number must match the stored international one.
   const searchPhoneKey = searchPhoneDigits.length >= 9 && typeof normalizeCustomerPhoneKey === 'function'
     ? String(normalizeCustomerPhoneKey(searchTerm) || '')
@@ -25893,7 +25919,7 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   if (searchTerm) {
     filtered = filtered.filter(c =>
       foldSearchText(c.name).includes(searchTerm) ||
-      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
+      (canViewContacts && getCustomerPhoneEntries(c).some(entry => foldSearchText(entry.value).includes(searchTerm) || (searchPhoneDigits && entry.key.includes(searchPhoneDigits)) || (searchPhoneTail.length >= 4 && entry.key.includes(searchPhoneTail)) || (searchPhoneKey && entry.key === searchPhoneKey))) ||
       foldSearchText(c.platform).includes(searchTerm)
     );
   }
@@ -25911,10 +25937,9 @@ function getFilteredCustomers(sharedStatsIndex = null) {
   const statsIndex = needsStats ? (sharedStatsIndex || buildCustomerStatsIndex()) : sharedStatsIndex;
 
   // Apply financial filter
-  if (financialFilter === 'hasCredit') {
-    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance > 0);
-  } else if (financialFilter === 'hasDebt') {
-    filtered = filtered.filter(c => getCustomerStats(c.id, statsIndex).balance < 0);
+  if (financialFilter === 'hasCredit' || financialFilter === 'hasDebt') {
+    const wanted = financialFilter === 'hasDebt' ? -1 : 1;
+    filtered = filtered.filter(c => customerBalanceView(getCustomerStats(c.id, statsIndex)).sign === wanted);
   }
 
   // Apply sorting (decorate-sort-undecorate: compute each sort value once,
@@ -29699,6 +29724,15 @@ function _receiptCashCollectionTargetLocal(receipt) {
     : (Number(receipt?.amountLocal) || 0);
 }
 
+// Collected share (0..1) against the receipt card's target; a legacy
+// collection with no amount is full, as on the card.
+function _receiptCollectedFraction(r) {
+  if (!r?.collected) return 0;
+  const t = getReceiptDebtType(r) !== 'none' ? Number(getReceiptCollectionTarget(r).amountLocal) || 0 : Number(r.amountLocal) || 0;
+  const c = Number(r.collectedAmount) || 0;
+  return r.collectedAmount == null || t - c <= 0.01 ? 1 : Math.max(c / t, 0);
+}
+
 // The receipt's own payment breakdown in LYD (used for the "Yes = same" path
 // and to seed the "No" editor). Each split's LYD value is amount × rate1.
 function _receiptCollectionBreakdown(receipt) {
@@ -29765,6 +29799,7 @@ function _collectAskView(receiptId, receipt, isAr, targetLYD, serialTxt) {
     <div class="text-xs text-slate-500 mb-4">
       ${isAr ? 'حسب الوصل' : 'As on the receipt'}: ${breakdown.map(p => `${Security.escapeHtml(trMethod(p.method))} ${p.amount.toFixed(2)} LYD`).join(' • ')}
     </div>
+    ${getReceiptPaymentState(receipt) === 'not_paid' ? `<p class="text-xs text-amber-700 mb-3">${isAr ? 'يسجّل التسليم فقط ولا يجعل الوصل مدفوعاً.' : 'This records the handover only; it does not mark the receipt Paid.'}</p>` : ''}
     <p class="text-sm font-medium text-slate-700 dark:text-slate-300 mb-3">
       ${isAr ? 'هل تم التحصيل بنفس بيانات الوصل الأصلية؟' : 'Did you collect exactly as shown on the receipt?'}
     </p>
@@ -42263,17 +42298,17 @@ async function deleteCustomer(id) {
       await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
       if (!await deleteRecord(state.receipts, receipt.id, batchDeleteOps)) return;
     }
-    // Unlink the customer from pages: page.customerIds kept the ghost id, so
-    // the Pages view still showed the deleted customer as owner and every
-    // page save re-persisted the dangling link.
-    for (const page of getVisibleRecords(state.pages)) {
-      if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
-        const pageSaved = await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
-        if (!pageSaved) return;
-      }
-    }
     if (!await deleteRecord(state.customers, id, batchDeleteOps)) return;
     if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
+    // Unlink the customer from pages: page.customerIds kept the ghost id, so
+    // the Pages view still showed the deleted customer as owner and every
+    // page save re-persisted the dangling link. Only after the delete stuck:
+    // a refused delete must leave the pages linked.
+    for (const page of getVisibleRecords(state.pages)) {
+      if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
+        await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
+      }
+    }
     const deletedCount = linkedReceipts.length + linkedAds.length;
     showNotification(
       isAr ? 'تم الحذف' : 'Deleted',
