@@ -132,6 +132,20 @@ then release again. The workflow needs the repository secrets
 Read & Write, never the account password). The "Run workflow" button on that
 page builds a branch by hand and moves `latest` only when its option is ticked.
 
+Good to know about the proof:
+
+- Only the branch push run of the exact commit counts. A pull-request run
+  tests a merge, not the commit, so it neither proves nor blocks a release.
+- Pushing more commits to the branch while a release waits cancels that
+  commit's CI run (CI keeps only the newest push). Release the newest commit
+  then, or open the cancelled run and click "Re-run all jobs".
+- When a release run is red, its red step says what to do; the usual fix is
+  the "Re-run failed jobs" button on that run once CI is green. Re-running
+  never moves `latest` unless every step is green.
+- The dependency audits (`npm audit`, `pip-audit` on the packages inside the
+  image) run again at release time, so a commit proved weeks ago cannot be
+  released with an advisory published since.
+
 Fallback on your computer (same checks, builds and pushes locally):
 
 ```
