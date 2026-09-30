@@ -369,3 +369,14 @@ jobs:
           -destination 'generic/platform=iOS Simulator'
           CODE_SIGNING_ALLOWED=NO
           build
+      - name: Release configuration must also compile for a real device
+        # An App Store archive uses Release; catch Release-only failures here,
+        # not in the owner's Xcode. Signing is skipped (no certificates in CI).
+        run: >-
+          xcodebuild
+          -project ios/App/App.xcodeproj
+          -scheme App
+          -configuration Release
+          -destination 'generic/platform=iOS'
+          CODE_SIGNING_ALLOWED=NO
+          build

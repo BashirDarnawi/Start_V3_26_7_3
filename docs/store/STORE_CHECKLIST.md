@@ -181,7 +181,10 @@ Never reuse an old `versionCode`, even if its release was rejected or removed.
 
 ## iOS notes
 
-The Google Play workflow does not publish the iOS app. For a later Apple
-release, register `com.albayan.app` in the Apple Developer portal, create its
-App Store Connect entry, complete Apple's privacy labels, and increment the
-iOS build number for every upload.
+The Google Play workflow does not publish the iOS app. The Apple sequence,
+step by step for a beginner, is in
+[IOS_APP_STORE_RELEASE.md](IOS_APP_STORE_RELEASE.md): Apple account, iPad
+decision, App Store Connect record and privacy answers, version numbers (kept
+in step with Android by `npm run test:mobile-config`), the exact build and
+upload commands, screenshots, the App Review demo account and notes,
+TestFlight, submission.
