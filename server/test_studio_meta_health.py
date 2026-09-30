@@ -15,6 +15,7 @@ the reply calls through test_social_studio's FakeGraph, the funds through the st
 
 import json
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -108,8 +109,14 @@ def token(monkeypatch):
 
 
 def _ten_minutes_pass() -> None:
-    """check_token_now reaches Meta at most once per 10 minutes (monotonic clock): let that pass."""
-    token_health._LAST_CHECK["at"] = 0.0
+    """check_token_now reaches Meta at most once per 10 minutes (monotonic clock): let that pass.
+
+    Age the last check relative to NOW, never reset it to 0.0: the monotonic clock
+    counts from machine boot, so on a freshly booted CI runner 0.0 is still
+    "less than ten minutes ago" and the check is skipped (six red tests on
+    GitHub, green on any laptop that had been up longer than ten minutes).
+    """
+    token_health._LAST_CHECK["at"] = time.monotonic() - 601
 
 
 def _alerts(kind: str) -> list[dict]:
