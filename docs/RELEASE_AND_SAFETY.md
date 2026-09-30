@@ -42,12 +42,18 @@ npm run release:github
 This pushes the committed source and a `release-<git-revision>-<timestamp>`
 tag; the tag starts the GitHub workflow **Publish verified Docker image**,
 which builds on GitHub's Intel machines (no laptop translation or upload). The
-workflow runs the same gates as the local publisher: frontend build, generated
-assets, every test suite, browser flows, high-severity npm findings, the
-PostgreSQL money scenarios, and a smoke test of the exact image. It publishes
-a single Linux/amd64 Docker manifest compatible with the existing Jelastic
-workflow and fails the run if Docker Hub received anything else. Watch the run
-at https://github.com/BashirDarnawi/Start_V3_26_7_3/actions/workflows/publish-image.yml.
+proof is the commit's CI run, which every push starts automatically: frontend
+build, generated assets, every test suite, browser flows on three device
+sizes, high-severity npm findings, the PostgreSQL money scenarios, and a
+Docker smoke test. The release workflow waits for that run and refuses unless
+every server-relevant job is green for the exact commit
+(`scripts/ci-status-for-sha.js`); it never re-runs the tests. In parallel it
+builds the image, smoke-tests it (the running image must report the release
+name), then publishes that same image as a single Linux/amd64 Docker manifest
+compatible with the existing Jelastic workflow and fails the run if Docker Hub
+received anything else. A release of a commit CI already proved takes a few
+minutes; one started right after a push takes CI's time plus a few minutes.
+Watch the run at https://github.com/BashirDarnawi/Start_V3_26_7_3/actions/workflows/publish-image.yml.
 
 The local fallback does the same work on your computer:
 

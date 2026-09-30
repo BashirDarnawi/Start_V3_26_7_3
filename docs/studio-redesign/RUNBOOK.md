@@ -400,8 +400,8 @@ The page's health chip in Pages & replies, and for admins `GET /api/social-studi
 
 ### 3.11 التراجع عن إصدار / Rolling back a release
 
-**الوسوم / The tags:** كل نشر (`npm run release:image:push`, `scripts/publish-image.js`) يدفع `bashird/albayan:latest` ووسم تراجع فريداً `bashird/albayan:release-<12 من SHA>-<الوقت>` (يُطبع في نهاية السكربت ويظهر على Docker Hub). `/api/health/ready` → `release` يقول أي وسم يعمل الآن. النشر البديل من GitHub («Publish verified Docker image») يدفع `bashird/albayan:<SHA الكامل>`.
-Every release pushes `latest` and a unique rollback tag `release-<sha>-<time>` (printed by the script; listed on Docker Hub). `/api/health/ready` → `release` says which tag runs now. The GitHub workflow pushes `bashird/albayan:<full sha>`.
+**الوسوم / The tags:** كل نشر (`npm run release:image:push`, `scripts/publish-image.js`) يدفع `bashird/albayan:latest` ووسم تراجع فريداً `bashird/albayan:release-<12 من SHA>-<الوقت>` (يُطبع في نهاية السكربت ويظهر على Docker Hub). `/api/health/ready` → `release` يقول أي وسم يعمل الآن. النشر من GitHub (`npm run release:github`، سير العمل «Publish verified Docker image») يدفع الوسمين نفسيهما بعد أن يثبت تشغيل CI لنفس الالتزام أن كل شيء أخضر.
+Every release pushes `latest` and a unique rollback tag `release-<sha>-<time>` (printed by the script; listed on Docker Hub). `/api/health/ready` → `release` says which tag runs now. `npm run release:github` (the "Publish verified Docker image" workflow) pushes the same two tags once the commit's CI run is green; it does not re-run the tests.
 
 **قاعدتا الصور (PLAN §12.5) / The two image rules (PLAN §12.5):**
 - **لا تعُد أبداً إلى وسم أقدم من إصدار P0-09** (المرحلة 3، الالتزام `34c495e`) ما دام على الحسابات الإعلانية حملات استوديو مربوطة: صورة أقدم لا تعرف تخطّي `ALB-S-` والحملات المدّعاة، والاستيراد الآلي (مفعّل افتراضياً) يحوّل إعلانات الاستوديو إلى إعلانات «تحتاج إعداداً» غير مدفوعة في دفاتر المدير. إن كان ذلك حتمياً: أولاً `ALBAYAN_META_AUTO_IMPORT=false` في Jelastic (يتوقف الاستيراد الآلي للمدير أيضاً)، ثم التراجع، ثم `GET /api/meta-ads/collisions` بعده، والتقدم إلى إصدار جديد بأسرع وقت، ثم أعد تفعيل الاستيراد.

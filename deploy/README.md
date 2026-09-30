@@ -115,14 +115,22 @@ npm run release:github
 
 It refuses uncommitted changes, pushes the branch, then pushes a
 `release-<git-sha>-<time>` tag. That tag starts the GitHub workflow **Publish
-verified Docker image** (`.github/workflows/publish-image.yml`), which runs
-every check, the browser flows, the PostgreSQL money scenarios and a smoke test
-of the exact image, then pushes two tags: `bashird/albayan:latest` and the
-rollback tag `bashird/albayan:<release name>`. A red run pushes nothing. The
-workflow needs the repository secrets `DOCKERHUB_USERNAME` and
-`DOCKERHUB_TOKEN` (a Docker Hub access token with Read & Write, never the
-account password). The "Run workflow" button on that page builds a branch by
-hand and moves `latest` only when its option is ticked.
+verified Docker image** (`.github/workflows/publish-image.yml`).
+
+The tests are not run twice. Every push already runs the CI workflow (every
+test suite, the browser flows on three device sizes, the PostgreSQL money
+scenarios, the dependency audit, a Docker smoke test). The release workflow
+waits for that run of the exact commit and refuses unless every
+server-relevant job is green (`scripts/ci-status-for-sha.js`; the phone-app
+builds do not count). In parallel it builds the image, starts it and checks it
+reports the release name, then pushes two tags: `bashird/albayan:latest` and
+the rollback tag `bashird/albayan:<release name>`. Expect a few minutes for a
+commit CI already proved, or CI's time plus a few minutes when released right
+after a push. A red CI run pushes nothing: fix or re-run the job on GitHub,
+then release again. The workflow needs the repository secrets
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub access token with
+Read & Write, never the account password). The "Run workflow" button on that
+page builds a branch by hand and moves `latest` only when its option is ticked.
 
 Fallback on your computer (same checks, builds and pushes locally):
 

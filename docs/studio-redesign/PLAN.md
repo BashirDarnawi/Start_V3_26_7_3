@@ -144,7 +144,7 @@
 33. **[VERIFIED, new] CI is fast (≈8 min) but is not yet the release gate.**
     - The CI run for `d7d627e` took 7m58s (run 35995177433).
     - `ci.yml` never runs `npm test`. The frontend job lists individual scripts and leaves out `test:architecture` (main.py line cap, script.js byte budget), `test:mobile-config` and `test:profitability` (`.github/workflows/ci.yml:14-45`; `package.json:34`).
-    - A "Publish verified Docker image" workflow (npm test, e2e, image smoke test, immutable SHA push) exists (`.github/workflows/publish-image.yml:1-95`) but has never been run (`gh run list` returned no runs).
+    - A "Publish verified Docker image" workflow (npm test, e2e, image smoke test, immutable SHA push) exists (`.github/workflows/publish-image.yml:1-95`) but had never been run when this was written (first run 2026-09-30; since then it is the normal release path via `npm run release:github`, gated on the commit's CI run).
     - The CI PostgreSQL job also proves a `pg_dump`/`pg_restore` round trip, but on CI data, not production (`ci.yml:130-160`).
     - Fix: P0-11, §11.3.
 34. **[VERIFIED, new] Meta documents the usage-header types.**
@@ -1259,7 +1259,7 @@ Moved to [TASKS.md](TASKS.md).
 
 ### 11.3 Per-stage gate
 - **Before P0-11 lands** (the first P0 release): the local `npm run release:quality` green **and** CI green on the pushed commit.
-- **From P0-11 on, every release is published through the "Publish verified Docker image" GitHub workflow on the exact commit.** It runs `npm test` (incl. the architecture test), e2e on three projects, the PostgreSQL financial scenarios, the image smoke test, and then pushes `bashird/albayan:<sha>`. That SHA tag is what Jelastic deploys and what §14 records. CI on push remains the early warning; the local `release:quality` is optional before pushing.
+- **From P0-11 on, every release is published through the "Publish verified Docker image" GitHub workflow on the exact commit.** Since 2026-09-30 it reuses the commit's CI run as the proof (`npm test` incl. the architecture test, e2e on three device sizes, the PostgreSQL financial scenarios, the Docker smoke test; `scripts/ci-status-for-sha.js` refuses unless every server-relevant job is green), smoke-tests the exact image, and then pushes `bashird/albayan:release-<sha>-<time>` plus `latest`. That release tag is what Jelastic deploys and what §14 records. CI on push remains the early warning; the local `release:quality` is optional before pushing.
 - **Every money-touching release additionally needs a backup-and-restore proof of the production backup** by the named person (≈30 min, counted in §9). CI's restore step covers CI data only.
 - The owner gets a 5-line plain-language note ("what changed / how to check / what to do if it breaks") plus Arabic screenshots at 390 px.
 
@@ -1297,7 +1297,7 @@ Moved to [TASKS.md](TASKS.md).
 
 ### 12.5 Rollback
 - **Customer layout:** set rollout `off` → classic within one refresh. Services and the staff desk keep working. **Before switching off:** list open urgent stop requests in the desk and make sure each has an owner.
-- **Server image:** redeploy the previous SHA tag (`bashird/albayan:<sha>`) in Jelastic (`docs/RELEASE_AND_SAFETY.md:55-58`), with this rule:
+- **Server image:** redeploy the previous release tag (`bashird/albayan:release-<sha>-<time>`) in Jelastic (`docs/RELEASE_AND_SAFETY.md:55-58`), with this rule:
   - **Once the Studio account carries live campaigns, never redeploy a tag older than the P0-09 release** (its SHA is recorded in §14). An older image ignores `ALBAYAN_STUDIO_AD_ACCOUNT_IDS` and the `ALB-S-` skip, and the core auto-import (on by default, `meta_ads.py:1020-1021`) would turn studio ads into unpaid "needs setup" core ads.
   - If it is truly unavoidable: first set `ALBAYAN_META_AUTO_IMPORT=false` (accepting that core auto-import pauses), then redeploy, run the integrity check, roll forward as soon as possible, then re-enable auto-import. The daily check raises `studio_core_collision` if any core row appears.
   - **Once P1 daily requests hold their full total, never roll back to an image older than the P1 budgets release** (such an image reads `budgetMinorUSD` as one day and would charge only one day at approval); if that is truly unavoidable, pause intake first and approve no daily requests until the release is rolled forward.
@@ -1416,7 +1416,7 @@ Moved to [DECISIONS.md](DECISIONS.md).
     - Whether the alert channel accepts the payload (P0-01(u)).
     - Whether the Docker Hub secrets exist for the publish workflow (P0-11).
     - TikTok in-app auto-messages in Libya (P0-01(e)); the `min_daily_budget` value and unit (P0-01(f)); legal reviews and the trademark search (D18).
-  - **Release tags to record when shipped:** P0-09 release SHA tag (`bashird/albayan:<sha>`): _to be filled_; P1 cutover time (`adLimits.p1CutoverAt`): _to be filled_; App Review submission date and ID: _to be filled_; P0-01 fact results (a)–(w) with dates: _to be filled_.
+  - **Release tags to record when shipped:** P0-09 release tag (`bashird/albayan:release-<sha>-<time>`): _to be filled_; P1 cutover time (`adLimits.p1CutoverAt`): _to be filled_; App Review submission date and ID: _to be filled_; P0-01 fact results (a)–(w) with dates: _to be filled_.
 
 ---
 

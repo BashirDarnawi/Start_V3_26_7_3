@@ -1,15 +1,23 @@
 name: Publish verified Docker image
 
-# Two ways to start a release build on GitHub's Intel (linux/amd64) machines,
-# so no laptop has to translate the image:
+# Builds the production image on GitHub's Intel (linux/amd64) machines, so no
+# laptop has to translate or upload it, and publishes it only for a commit
+# that CI has already proved.
 #
 #  1. `npm run release:github` on your computer pushes a `release-<sha>-<time>`
 #     tag; that tag push starts this workflow and always moves `latest`.
 #  2. The "Run workflow" button (workflow_dispatch) builds the chosen branch and
 #     moves `latest` only when its option is ticked.
 #
-# Either way the image is only pushed after the full test suite, the browser
-# flows, the PostgreSQL money scenarios, and a smoke test of the exact image.
+# Every push already runs the full CI workflow (.github/workflows/ci.yml): all
+# test suites, the browser flows on three device sizes, the PostgreSQL money
+# scenarios, the dependency audit and a Docker smoke test. This workflow does
+# NOT run those again. Its gate job waits for the commit's CI run and refuses
+# to publish unless every server-relevant CI job succeeded for this exact
+# commit (scripts/ci-status-for-sha.js). Meanwhile the image is built and
+# smoke-tested in parallel, then handed to the publish job as an artifact so
+# the image that reaches Docker Hub is the one that was smoke-tested.
+#
 # Jelastic (Libyan Spider) is never touched: redeploy there by hand, then check
 # https://albayanhub.com/api/health/ready shows the release name printed here.
 on:
@@ -26,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  actions: read   # the gate reads this commit's CI run
 
 concurrency:
   group: publish-production-image
@@ -35,49 +44,101 @@ env:
   IMAGE: bashird/albayan
 
 jobs:
-  verify-and-publish:
-    name: Test, smoke-check, and publish
+  release:
+    name: Name the release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    environment: production
-    # A throwaway PostgreSQL 16 (production's database) for the money race
-    # scenarios; same as CI's postgres-migration job and `npm run test:postgres`.
-    # "5432/tcp" publishes it on a random runner port.
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: albayan_test_release
-          POSTGRES_USER: albayan
-          POSTGRES_PASSWORD: release-check-only-password
-        ports:
-          - 5432/tcp
-        options: >-
-          --health-cmd "pg_isready -U albayan -d albayan_test_release"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.name.outputs.release }}
+      sha: ${{ steps.name.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - name: Name the release
-        id: release
+        id: name
         shell: bash
         # A tag push uses the tag itself (npm run release:github made it from
         # the exact commit being built). A manual run gets the same shape the
         # laptop publisher used: release-<12-char sha>-<UTC time>.
         run: |
           set -euo pipefail
+          sha="$(git rev-parse 'HEAD^{commit}')"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "::error::Run workflow on a branch, not on an existing release tag: rollback tags are immutable. Nothing is built."
+            exit 1
+          fi
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             release="${GITHUB_REF_NAME}"
           else
-            release="release-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ)"
+            release="release-${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
           fi
           if [[ ! "$release" =~ ^release-[a-f0-9]{7,40}-[0-9TZ]+$ ]]; then
             echo "::error::Unexpected release name '$release'; nothing is built."
             exit 1
           fi
+          # The name carries the commit it was cut from; a tag moved to another
+          # commit would publish code under the wrong name.
+          named="${release#release-}"; named="${named%%-*}"
+          if [[ "$sha" != "$named"* ]]; then
+            echo "::error::Release $release does not match commit $sha; nothing is built."
+            exit 1
+          fi
           echo "release=$release" >> "$GITHUB_OUTPUT"
-          echo "Release: $release (commit $(git rev-parse HEAD))"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release: $release (commit $sha)"
+
+  ci-gate:
+    name: Wait for CI to prove this commit
+    runs-on: ubuntu-latest
+    needs: release
+    timeout-minutes: 40
+    outputs:
+      ci_url: ${{ steps.gate.outputs.ci_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require a green CI run for this exact commit
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Waits up to 30 minutes for the required CI jobs of this commit (a
+        # release started right after a push), tolerating a run that GitHub
+        # has not created yet and short API blips. --require-passed makes the
+        # checker's exit code the verdict: anything but a green run fails this
+        # step, and the publish job needs it. The case below only explains.
+        run: |
+          set -uo pipefail
+          status=0
+          node scripts/ci-status-for-sha.js --repo "$GITHUB_REPOSITORY" --sha "${{ needs.release.outputs.sha }}" \
+            --wait 1800 --grace 300 --interval 30 --require-passed | tee "$RUNNER_TEMP/ci-status.log" || status=$?
+          state="$(grep -E '^ci=' "$RUNNER_TEMP/ci-status.log" | tail -n 1 || true)"
+          url="$(grep -E '^url=' "$RUNNER_TEMP/ci-status.log" | tail -n 1 | cut -c5- || true)"
+          echo "ci_url=${url}" >> "$GITHUB_OUTPUT"
+          case "$state" in
+            ci=passed)
+              echo "CI proved commit ${{ needs.release.outputs.sha }}: $url" ;;
+            ci=failed)
+              echo "::error::GitHub's tests are red for this commit ($url). Fix the failing job, or open that run and click 'Re-run failed jobs' if it was a one-off; then run npm run release:github again. Nothing was published." ;;
+            ci=running)
+              echo "::error::GitHub's tests are still running for this commit after 30 minutes ($url). When they are green, open this release run and click 'Re-run failed jobs'. Nothing was published." ;;
+            ci=cancelled)
+              echo "::error::A newer push to the branch cancelled this commit's tests ($url). Either release the newest commit with npm run release:github, or open that cancelled run, click 'Re-run all jobs', wait for green, then click 'Re-run failed jobs' here. Nothing was published." ;;
+            ci=missing)
+              echo "::error::No CI run exists for this commit. Push the branch that holds it so GitHub tests it, then run npm run release:github again. Nothing was published." ;;
+            *)
+              echo "::error::GitHub could not be asked about this commit's tests (see the log above). Your code is not the problem: click 'Re-run failed jobs' on this release run. Nothing was published." ;;
+          esac
+          exit "$status"
+
+  image:
+    name: Build and smoke-test the image
+    runs-on: ubuntu-latest
+    needs: release
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -85,42 +146,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: server/requirements.txt
       - run: npm ci
-      - run: python -m pip install -r server/requirements.txt
-      - name: Run all fast safety tests
-        run: npm test
-      - name: Install browser engines
-        run: npx playwright install --with-deps chromium webkit
-      - name: Run critical desktop, Android-size, and iPhone browser flows
-        run: npm run test:e2e
-      - name: Build and verify generated application files
-        run: |
-          npm run build
-          npm run sync:www
-          npm run verify:generated
-      - name: Dependencies must have no known high-severity vulnerability
+      - name: Dependencies must have no known high-severity vulnerability today
+        # CI audited them when the commit was pushed; a release days later must
+        # not inherit an advisory published since. Cheap, no test re-run.
         run: npm audit --audit-level=high
-      - name: Migrate the throwaway PostgreSQL 16 database
-        env:
-          DATABASE_URL: postgresql+psycopg://albayan:release-check-only-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/albayan_test_release
-        run: |
-          python -m alembic upgrade head
-          python -m alembic current
-      - name: Prove the money race scenarios on real PostgreSQL
-        env:
-          ALBAYAN_TEST_POSTGRES_URL: postgresql+psycopg://albayan:release-check-only-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/albayan_test_release
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pytest -q -p no:cacheprovider -rs server/test_postgres_financial_review.py server/test_postgres_studio_jobs.py | tee "$RUNNER_TEMP/postgres-release.log"
-          # A skipped scenario proves nothing; the release must show they ran.
-          if grep -Eq '[0-9]+ (skipped|deselected)' "$RUNNER_TEMP/postgres-release.log"; then
-            echo "::error::PostgreSQL scenarios were skipped; no image is built."
-            exit 1
-          fi
       - name: Build immutable release image
+        # Built from the COMMITTED bundles (script.js, studio.js, www/...): the
+        # CI run the gate requires proves they are exactly what the source
+        # builds (its frontend job rebuilds and fails on any git diff), so a
+        # stale bundle can never be published.
         # Jelastic needs a SINGLE linux/amd64 manifest: no provenance/SBOM
         # attestations (they turn the push into a manifest list). Same rule as
         # scripts/publish-image.js.
@@ -129,11 +164,10 @@ jobs:
           --platform linux/amd64
           --provenance=false
           --sbom=false
-          --build-arg ALBAYAN_BUILD_SHA=${{ steps.release.outputs.release }}
-          --label org.opencontainers.image.revision=${{ github.sha }}
+          --build-arg ALBAYAN_BUILD_SHA=${{ needs.release.outputs.release }}
+          --label org.opencontainers.image.revision=${{ needs.release.outputs.sha }}
           --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          --tag "$IMAGE:${{ steps.release.outputs.release }}"
-          --tag "$IMAGE:latest"
+          --tag "$IMAGE:${{ needs.release.outputs.release }}"
           --file server/Dockerfile .
       - name: Smoke-test the exact image before publishing
         shell: bash
@@ -144,7 +178,7 @@ jobs:
             --env ALBAYAN_COOKIE_SECURE=false \
             --env ALBAYAN_ALLOW_SQLITE=true \
             --env ALBAYAN_DB_PATH=/tmp/albayan-release-check.db \
-            "$IMAGE:${{ steps.release.outputs.release }}"
+            "$IMAGE:${{ needs.release.outputs.release }}"
           trap 'docker rm --force albayan-release-check >/dev/null 2>&1 || true' EXIT
           for attempt in {1..30}; do
             if curl --fail --silent http://127.0.0.1:18080/api/health/ready | tee "$RUNNER_TEMP/ready.json" >/dev/null; then
@@ -157,37 +191,80 @@ jobs:
             sleep 1
           done
           # The running image must report the release name Jelastic will show.
-          grep -q '"${{ steps.release.outputs.release }}"' "$RUNNER_TEMP/ready.json" \
-            || { echo "::error::The image does not report release ${{ steps.release.outputs.release }}"; cat "$RUNNER_TEMP/ready.json"; exit 1; }
+          grep -q '"${{ needs.release.outputs.release }}"' "$RUNNER_TEMP/ready.json" \
+            || { echo "::error::The image does not report release ${{ needs.release.outputs.release }}"; cat "$RUNNER_TEMP/ready.json"; exit 1; }
+          test "$(docker exec albayan-release-check id -u)" != "0"
+      - name: Python packages inside the image must have no known vulnerability today
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python "$IMAGE:${{ needs.release.outputs.release }}" -m pip freeze > "$RUNNER_TEMP/image-packages.txt"
+          python -m pip install --quiet pip-audit
+          python -m pip_audit --no-deps -r "$RUNNER_TEMP/image-packages.txt"
+      - name: Hand the smoke-tested image to the publish job
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker save "$IMAGE:${{ needs.release.outputs.release }}" | gzip -1 > "$RUNNER_TEMP/albayan-image.tar.gz"
+          ls -l "$RUNNER_TEMP/albayan-image.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-${{ needs.release.outputs.release }}
+          path: ${{ runner.temp }}/albayan-image.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+          overwrite: true   # a re-run of all jobs replaces the artifact instead of failing
+
+  publish:
+    name: Publish to Docker Hub
+    runs-on: ubuntu-latest
+    needs: [release, ci-gate, image]
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-image-${{ needs.release.outputs.release }}
+          path: ${{ runner.temp }}
+      - name: Load the smoke-tested image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker load < "$RUNNER_TEMP/albayan-image.tar.gz"
+          docker image inspect "$IMAGE:${{ needs.release.outputs.release }}" --format 'loaded {{.Id}}'
+          docker tag "$IMAGE:${{ needs.release.outputs.release }}" "$IMAGE:latest"
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Publish immutable release image (rollback tag)
-        run: docker push "$IMAGE:${{ steps.release.outputs.release }}"
-      - name: Publish latest image
-        if: ${{ github.event_name == 'push' || inputs.publish_latest }}
-        run: docker push "$IMAGE:latest"
+        run: docker push "$IMAGE:${{ needs.release.outputs.release }}"
       - name: Confirm Docker Hub holds a single linux/amd64 manifest
         shell: bash
-        # Jelastic cannot pull a manifest list; fail loudly here rather than at
-        # redeploy time.
+        # Jelastic cannot pull a manifest list; check the rollback tag BEFORE
+        # latest moves, so a bad push can never become what Jelastic pulls.
         run: |
           set -euo pipefail
-          raw="$(docker buildx imagetools inspect --raw "$IMAGE:${{ steps.release.outputs.release }}")"
+          raw="$(docker buildx imagetools inspect --raw "$IMAGE:${{ needs.release.outputs.release }}")"
           if grep -Eq 'manifest\.list|image\.index' <<<"$raw"; then
-            echo "::error::Pushed a manifest list; Jelastic needs a single manifest."
+            echo "::error::Pushed a manifest list; Jelastic needs a single manifest. latest was NOT moved."
             echo "$raw"
             exit 1
           fi
-          docker buildx imagetools inspect "$IMAGE:${{ steps.release.outputs.release }}"
+          docker buildx imagetools inspect "$IMAGE:${{ needs.release.outputs.release }}"
+      - name: Publish latest image
+        if: ${{ github.event_name == 'push' || inputs.publish_latest }}
+        run: docker push "$IMAGE:latest"
       - name: Release summary
         run: |
           {
             echo "### Docker image published"
-            echo "- Release: \`${{ steps.release.outputs.release }}\`"
-            echo "- Rollback tag: \`$IMAGE:${{ steps.release.outputs.release }}\`"
+            echo "- Release: \`${{ needs.release.outputs.release }}\`"
+            echo "- Commit: \`${{ needs.release.outputs.sha }}\`"
+            echo "- Proved by CI: ${{ needs.ci-gate.outputs.ci_url }}"
+            echo "- Rollback tag: \`$IMAGE:${{ needs.release.outputs.release }}\`"
             echo "- Latest updated: \`${{ github.event_name == 'push' || inputs.publish_latest }}\`"
             echo "- Next: redeploy \`latest\` in Libyan Spider by hand, then check"
             echo "  https://albayanhub.com/api/health/ready shows this release name."
