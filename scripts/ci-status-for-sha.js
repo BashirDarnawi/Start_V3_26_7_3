@@ -67,21 +67,29 @@ function jobsFor(req, jobs) {
   return jobs.filter(job => (req.prefix ? job.name.startsWith(req.name) : job.name === req.name));
 }
 
-/** Verdict for one run from its jobs: passed | failed | running | missing. */
-function judgeRun(jobs) {
+/**
+ * Verdict for one run from its jobs: passed | failed | running | missing.
+ * GitHub lists a queued run for up to a minute before it creates the run's
+ * jobs, so a required job that is absent from a run that has not completed
+ * means "not created yet", never "missing".
+ */
+function judgeRun(jobs, runStatus = 'completed') {
   const missing = [];
   const failed = [];
   let running = false;
   for (const req of REQUIRED) {
     const matches = jobsFor(req, jobs || []);
-    if (!matches.length) { missing.push(req.name); continue; }
+    if (!matches.length) {
+      if (runStatus === 'completed') missing.push(req.name); else running = true;
+      continue;
+    }
     for (const job of matches) {
       if (job.status !== 'completed') { running = true; continue; }
       if (job.conclusion !== 'success') failed.push(`${job.name}: ${job.conclusion}`);
     }
   }
   if (failed.length) return { state: 'failed', reason: failed.join('; ') };
-  if (running) return { state: 'running', reason: 'required CI jobs are still running' };
+  if (running) return { state: 'running', reason: runStatus === 'completed' ? 'required CI jobs are still running' : 'the CI run is queued or running' };
   if (missing.length) return { state: 'missing', reason: `required job(s) not in the CI run: ${missing.join(', ')}` };
   return { state: 'passed', reason: 'every required CI job succeeded' };
 }
@@ -105,7 +113,7 @@ function evaluate(runs, jobsByRunId, repo) {
     if (run.status === 'completed' && (run.conclusion === 'cancelled' || run.conclusion === 'skipped')) {
       return { state: 'cancelled', reason: `the CI run for this commit was ${run.conclusion}`, runId: run.id, url: run.html_url };
     }
-    const verdict = judgeRun(jobsByRunId[run.id] || []);
+    const verdict = judgeRun(jobsByRunId[run.id] || [], run.status);
     return { ...verdict, runId: run.id, url: run.html_url };
   });
   const newest = verdicts[0];
@@ -147,10 +155,15 @@ function parseArgs(argv) {
 
 function findToken() {
   if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) return process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-  // On a laptop, a `gh auth login` session raises the API limit and lets the
-  // refuse-red-commit check work behind shared addresses.
+  // On a laptop, an authenticated call raises GitHub's limit from 60 to 5000
+  // requests an hour (unauthenticated, the whole household shares 60), so the
+  // refuse-red-commit check keeps working. Try a `gh auth login` session,
+  // then the login git itself uses to push (read-only use, same account).
   const gh = spawnSync('gh', ['auth', 'token'], { encoding: 'utf8', shell: false });
-  return gh.status === 0 ? (gh.stdout || '').trim() : '';
+  if (gh.status === 0 && (gh.stdout || '').trim()) return gh.stdout.trim();
+  const fill = spawnSync('git', ['credential', 'fill'], { input: 'protocol=https\nhost=github.com\n\n', encoding: 'utf8', shell: false });
+  const match = fill.status === 0 ? (fill.stdout || '').match(/^password=(.+)$/m) : null;
+  return match ? match[1].trim() : '';
 }
 
 const TRANSIENT = new Set([403, 429, 500, 502, 503, 504]);
