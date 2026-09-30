@@ -367,8 +367,41 @@ jobs:
           -scheme App
           -configuration Debug
           -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/dd"
           CODE_SIGNING_ALLOWED=NO
           build
+      - name: The app must launch and stay alive on a simulator
+        # Apple's iOS 27 SDK kills apps that still use the old (non-scene)
+        # start-up style at launch ("UIScene life cycle is required"); a build
+        # alone cannot catch that. Install the simulator build, launch it, and
+        # require the process to be alive 20 s later with no such error logged.
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available --json | python3 -c "
+          import json, sys
+          for runtime, devices in json.load(sys.stdin)['devices'].items():
+              if 'iOS' not in runtime: continue
+              for d in devices:
+                  if d['name'].startswith('iPhone'): print(d['udid']); sys.exit(0)
+          sys.exit('no iPhone simulator available')")"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          app="$(find "$RUNNER_TEMP/dd/Build/Products" -name App.app -path '*iphonesimulator*' | head -n 1)"
+          xcrun simctl install "$udid" "$app"
+          started="$(date '+%Y-%m-%d %H:%M:%S')"
+          pid="$(xcrun simctl launch "$udid" com.albayan.app | awk '{print $2}')"
+          sleep 20
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "::error::The app process died within 20 s of launch."
+            xcrun simctl spawn "$udid" log show --start "$started" --predicate 'process == "App"' --style compact | tail -n 40
+            exit 1
+          fi
+          if xcrun simctl spawn "$udid" log show --start "$started" --predicate 'process == "App"' --style compact | grep -q 'UIScene life cycle'; then
+            echo "::error::iOS refused the app's start-up style (UIScene life cycle is required)."
+            exit 1
+          fi
+          kill "$pid" || true
       - name: Release configuration must also compile for a real device
         # An App Store archive uses Release; catch Release-only failures here,
         # not in the owner's Xcode. Signing is skipped (no certificates in CI).
