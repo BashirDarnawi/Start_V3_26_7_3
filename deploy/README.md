@@ -105,20 +105,31 @@ cannot silently rot.
 
 ## Publishing Docker Hub images
 
-The normal path is on your computer:
+The normal path builds on GitHub's Intel machines (the server needs a
+linux/amd64 image; an Apple Silicon Mac would have to translate every build
+step and then upload the whole image):
+
+```
+npm run release:github
+```
+
+It refuses uncommitted changes, pushes the branch, then pushes a
+`release-<git-sha>-<time>` tag. That tag starts the GitHub workflow **Publish
+verified Docker image** (`.github/workflows/publish-image.yml`), which runs
+every check, the browser flows, the PostgreSQL money scenarios and a smoke test
+of the exact image, then pushes two tags: `bashird/albayan:latest` and the
+rollback tag `bashird/albayan:<release name>`. A red run pushes nothing. The
+workflow needs the repository secrets `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN` (a Docker Hub access token with Read & Write, never the
+account password). The "Run workflow" button on that page builds a branch by
+hand and moves `latest` only when its option is ticked.
+
+Fallback on your computer (same checks, builds and pushes locally):
 
 ```
 npm run release:image:push
 ```
 
-It runs every check, builds the image and pushes two tags:
-`bashird/albayan:latest` and `bashird/albayan:release-<git-sha>-<time>` (the
-rollback tag; it is printed at the end). It refuses to run with uncommitted
-changes. Docker Desktop must be logged in to Docker Hub with an access token,
-never the account password.
-
-Alternative: the manual GitHub workflow **Publish verified Docker image**
-builds on GitHub's machines and pushes `bashird/albayan:<full-git-commit>`
-(and `latest` only when its option is ticked). It needs the repository secrets
-`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. Use one path or the other for a
-release, not both. Jelastic still pulls the image in a separate manual step.
+It needs Docker Desktop logged in to Docker Hub with an access token. Use one
+path or the other for a release, not both. Jelastic still pulls the image in a
+separate manual step either way.

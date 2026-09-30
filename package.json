@@ -40,7 +40,8 @@
     "release:prepare": "npm run release:quality && npm run sync:mobile && npm run verify:mobile",
     "release:check": "npm test && npm run verify:mobile && npm audit --audit-level=high && npm run test:e2e",
     "release:image": "npm run release:quality && docker build -t bashird/albayan:latest -f server/Dockerfile .",
-    "release:image:push": "node scripts/publish-image.js"
+    "release:image:push": "node scripts/publish-image.js",
+    "release:github": "node scripts/release-github.js"
   },
   "keywords": [],
   "author": "",

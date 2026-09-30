@@ -76,6 +76,8 @@ each feature alone. Do not automatically rewrite historical money records.
 
 Production uses **Docker Hub `bashird/albayan` → Libyan Spider Jelastic**.
 A Git commit, an image push, a Jelastic redeploy, and a mobile-app build are
-different steps. `npm run release:image:push` runs checks, builds, and pushes a
-versioned rollback tag plus `latest`; it does not redeploy Jelastic. Only run
-publishing commands with the owner's explicit authorization.
+different steps. `npm run release:github` pushes a release tag so GitHub's
+Intel machines run the checks, build, and push a versioned rollback tag plus
+`latest` (`npm run release:image:push` does the same on your computer); neither
+redeploys Jelastic. Only run publishing commands with the owner's explicit
+authorization.

@@ -36,6 +36,22 @@ transactional, auditable, reversible, and must explain its business assumptions.
 ## Web release — only after explicit authorization
 
 ```text
+npm run release:github
+```
+
+This pushes the committed source and a `release-<git-revision>-<timestamp>`
+tag; the tag starts the GitHub workflow **Publish verified Docker image**,
+which builds on GitHub's Intel machines (no laptop translation or upload). The
+workflow runs the same gates as the local publisher: frontend build, generated
+assets, every test suite, browser flows, high-severity npm findings, the
+PostgreSQL money scenarios, and a smoke test of the exact image. It publishes
+a single Linux/amd64 Docker manifest compatible with the existing Jelastic
+workflow and fails the run if Docker Hub received anything else. Watch the run
+at https://github.com/BashirDarnawi/Start_V3_26_7_3/actions/workflows/publish-image.yml.
+
+The local fallback does the same work on your computer:
+
+```text
 npm run release:image:push
 ```
 
@@ -51,7 +67,8 @@ build unless `--allow-dirty` is passed (`npm run release:image:push -- --allow-d
 and it is not a claim that GitHub contains that exact source. Save/review/commit source separately when
 authorized. Keep the previous good release tag for rollback.
 
-After the push, deploy it by hand in Jelastic (the script never does this):
+After the push (GitHub run green, or the local script finished), deploy it by
+hand in Jelastic (neither path ever does this):
 
 1. In the Jelastic dashboard open the albayan environment, hover the app
    container (the bashird/albayan node) and click Redeploy.

@@ -49,4 +49,29 @@ for (const pattern of ['server/data/', '**/backups/', '**/*.db', '**/*.db-*', '*
 assert.ok(!dockerIgnore.some(line => line.startsWith('!')), 'Review any Docker re-inclusion rule for private data');
 const dockerfile = fs.readFileSync(path.join(__dirname, '../server/Dockerfile'), 'utf8');
 assert.ok(dockerfile.includes('RUN python /app/server/image_safety.py /app'), 'Validate actual copied image content before publishing');
+// The GitHub release path must keep the laptop publisher's guarantees: a
+// release-* tag starts the build, the tag name becomes the release the health
+// page reports, only a single linux/amd64 manifest reaches Docker Hub, and
+// nothing is pushed before the gates and the smoke test pass.
+const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/publish-image.yml'), 'utf8');
+assert.match(workflow, /^\s+tags:\n\s+- 'release-\*'/m, 'A release-* tag push must start the image build');
+assert.ok(workflow.includes('ALBAYAN_BUILD_SHA=${{ steps.release.outputs.release }}'), 'The image must report the release name');
+assert.ok(workflow.includes('--provenance=false') && workflow.includes('--sbom=false'), 'Jelastic needs a single manifest: no attestations');
+assert.ok(workflow.includes('--platform linux/amd64'), 'The server runs Intel images');
+const order = ['Run all fast safety tests', 'Prove the money race scenarios', 'Build immutable release image',
+  'Smoke-test the exact image', 'Log in to Docker Hub', 'Publish immutable release image', 'Confirm Docker Hub holds a single linux/amd64 manifest'];
+let cursor = -1;
+for (const step of order) {
+  const at = workflow.indexOf(step);
+  assert.ok(at > cursor, `Release workflow step order: ${step} must come after the previous gate`);
+  cursor = at;
+}
+assert.ok(!workflow.includes('publish_latest }}\n        run: docker push "$IMAGE:latest"\n') || workflow.includes("github.event_name == 'push' || inputs.publish_latest"),
+  'A tag release always moves latest; a manual run honours its option');
+const scripts = require('../package.json').scripts;
+assert.equal(scripts['release:github'], 'node scripts/release-github.js', 'npm run release:github starts the GitHub build');
+const releaseScript = fs.readFileSync(path.join(__dirname, 'release-github.js'), 'utf8');
+assert.ok(releaseScript.includes("git(['status', '--porcelain'])") && releaseScript.includes('uncommitted changes'), 'Refuse to release uncommitted source');
+assert.match(releaseScript, /release-\$\{sha\}-\$\{stamp\}/, 'Tag name must match the publisher release format');
+assert.ok(!/--allow-dirty/.test(releaseScript), 'GitHub can only build committed source; no dirty override');
 console.log('Build safety checks passed: isolated tests, bundles, styles, artifact coverage and private-data exclusions.');

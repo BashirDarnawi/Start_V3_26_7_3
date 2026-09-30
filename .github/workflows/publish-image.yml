@@ -1,6 +1,21 @@
 name: Publish verified Docker image
 
+# Two ways to start a release build on GitHub's Intel (linux/amd64) machines,
+# so no laptop has to translate the image:
+#
+#  1. `npm run release:github` on your computer pushes a `release-<sha>-<time>`
+#     tag; that tag push starts this workflow and always moves `latest`.
+#  2. The "Run workflow" button (workflow_dispatch) builds the chosen branch and
+#     moves `latest` only when its option is ticked.
+#
+# Either way the image is only pushed after the full test suite, the browser
+# flows, the PostgreSQL money scenarios, and a smoke test of the exact image.
+# Jelastic (Libyan Spider) is never touched: redeploy there by hand, then check
+# https://albayanhub.com/api/health/ready shows the release name printed here.
 on:
+  push:
+    tags:
+      - 'release-*'
   workflow_dispatch:
     inputs:
       publish_latest:
@@ -16,10 +31,14 @@ concurrency:
   group: publish-production-image
   cancel-in-progress: false
 
+env:
+  IMAGE: bashird/albayan
+
 jobs:
   verify-and-publish:
     name: Test, smoke-check, and publish
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment: production
     # A throwaway PostgreSQL 16 (production's database) for the money race
     # scenarios; same as CI's postgres-migration job and `npm run test:postgres`.
@@ -40,6 +59,25 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+      - name: Name the release
+        id: release
+        shell: bash
+        # A tag push uses the tag itself (npm run release:github made it from
+        # the exact commit being built). A manual run gets the same shape the
+        # laptop publisher used: release-<12-char sha>-<UTC time>.
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release="${GITHUB_REF_NAME}"
+          else
+            release="release-$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT%H%M%SZ)"
+          fi
+          if [[ ! "$release" =~ ^release-[a-f0-9]{7,40}-[0-9TZ]+$ ]]; then
+            echo "::error::Unexpected release name '$release'; nothing is built."
+            exit 1
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "Release: $release (commit $(git rev-parse HEAD))"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -62,6 +100,8 @@ jobs:
           npm run build
           npm run sync:www
           npm run verify:generated
+      - name: Dependencies must have no known high-severity vulnerability
+        run: npm audit --audit-level=high
       - name: Migrate the throwaway PostgreSQL 16 database
         env:
           DATABASE_URL: postgresql+psycopg://albayan:release-check-only-password@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/albayan_test_release
@@ -81,19 +121,21 @@ jobs:
             exit 1
           fi
       - name: Build immutable release image
-        env:
-          IMAGE: bashird/albayan
+        # Jelastic needs a SINGLE linux/amd64 manifest: no provenance/SBOM
+        # attestations (they turn the push into a manifest list). Same rule as
+        # scripts/publish-image.js.
         run: >-
           docker build
-          --build-arg ALBAYAN_BUILD_SHA=${{ github.sha }}
+          --platform linux/amd64
+          --provenance=false
+          --sbom=false
+          --build-arg ALBAYAN_BUILD_SHA=${{ steps.release.outputs.release }}
           --label org.opencontainers.image.revision=${{ github.sha }}
           --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          --tag "$IMAGE:${{ github.sha }}"
+          --tag "$IMAGE:${{ steps.release.outputs.release }}"
           --tag "$IMAGE:latest"
           --file server/Dockerfile .
       - name: Smoke-test the exact image before publishing
-        env:
-          IMAGE: bashird/albayan
         shell: bash
         run: |
           set -euo pipefail
@@ -102,11 +144,11 @@ jobs:
             --env ALBAYAN_COOKIE_SECURE=false \
             --env ALBAYAN_ALLOW_SQLITE=true \
             --env ALBAYAN_DB_PATH=/tmp/albayan-release-check.db \
-            "$IMAGE:${{ github.sha }}"
+            "$IMAGE:${{ steps.release.outputs.release }}"
           trap 'docker rm --force albayan-release-check >/dev/null 2>&1 || true' EXIT
           for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:18080/api/health/ready >/dev/null; then
-              exit 0
+            if curl --fail --silent http://127.0.0.1:18080/api/health/ready | tee "$RUNNER_TEMP/ready.json" >/dev/null; then
+              break
             fi
             if [[ "$attempt" == 30 ]]; then
               docker logs albayan-release-check
@@ -114,19 +156,39 @@ jobs:
             fi
             sleep 1
           done
+          # The running image must report the release name Jelastic will show.
+          grep -q '"${{ steps.release.outputs.release }}"' "$RUNNER_TEMP/ready.json" \
+            || { echo "::error::The image does not report release ${{ steps.release.outputs.release }}"; cat "$RUNNER_TEMP/ready.json"; exit 1; }
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Publish immutable SHA image
-        run: docker push "bashird/albayan:${{ github.sha }}"
+      - name: Publish immutable release image (rollback tag)
+        run: docker push "$IMAGE:${{ steps.release.outputs.release }}"
       - name: Publish latest image
-        if: ${{ inputs.publish_latest }}
-        run: docker push bashird/albayan:latest
+        if: ${{ github.event_name == 'push' || inputs.publish_latest }}
+        run: docker push "$IMAGE:latest"
+      - name: Confirm Docker Hub holds a single linux/amd64 manifest
+        shell: bash
+        # Jelastic cannot pull a manifest list; fail loudly here rather than at
+        # redeploy time.
+        run: |
+          set -euo pipefail
+          raw="$(docker buildx imagetools inspect --raw "$IMAGE:${{ steps.release.outputs.release }}")"
+          if grep -Eq 'manifest\.list|image\.index' <<<"$raw"; then
+            echo "::error::Pushed a manifest list; Jelastic needs a single manifest."
+            echo "$raw"
+            exit 1
+          fi
+          docker buildx imagetools inspect "$IMAGE:${{ steps.release.outputs.release }}"
       - name: Release summary
         run: |
-          echo "### Docker image published" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Immutable: \`bashird/albayan:${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Latest updated: \`${{ inputs.publish_latest }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Jelastic deployment is intentionally a separate manual approval step." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Docker image published"
+            echo "- Release: \`${{ steps.release.outputs.release }}\`"
+            echo "- Rollback tag: \`$IMAGE:${{ steps.release.outputs.release }}\`"
+            echo "- Latest updated: \`${{ github.event_name == 'push' || inputs.publish_latest }}\`"
+            echo "- Next: redeploy \`latest\` in Libyan Spider by hand, then check"
+            echo "  https://albayanhub.com/api/health/ready shows this release name."
+          } >> "$GITHUB_STEP_SUMMARY"
