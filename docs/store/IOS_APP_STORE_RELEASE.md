@@ -46,18 +46,14 @@ once or for every release.
    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
    ```
 
-## Step 2 — Decide iPad (once, before the first upload)
+## Step 2 — iPad (decided: iPhone only)
 
-The project currently targets iPhone **and** iPad. That means App Review
-tests the app on an iPad and 13-inch iPad screenshots are mandatory. Two
-choices:
-
-- **iPhone only (recommended for the first release):** in Xcode, target
-  `App` → General → Supported Destinations → remove iPad. It still installs
-  on iPads in compatibility mode. Commit the change.
-- **Keep iPad:** run the app on the "iPad Pro 13-inch" simulator in Arabic and
-  English, portrait and landscape, fix any layout problems, and take the iPad
-  screenshots in Step 6.
+The first release targets iPhone only (`TARGETED_DEVICE_FAMILY = 1`, decided
+1 October 2026). App Review therefore tests on iPhone, only iPhone screenshots
+are required, and the app still installs on iPads in compatibility mode. To
+add iPad later: in Xcode, target `App` → General → Supported Destinations →
+add iPad, test the layout on the "iPad Pro 13-inch" simulator in Arabic and
+English, and add 13-inch iPad screenshots (2064×2752) to the listing.
 
 ## Step 3 — App Store Connect record (once)
 
@@ -138,7 +134,6 @@ In Xcode:
   10 images, PNG or JPEG, no transparency. Take them on the "iPhone 17 Pro
   Max" simulator (Xcode → Open Developer Tool → Simulator; ⌘S saves a
   screenshot to the Desktop at the right size).
-- iPad 13-inch screenshots (2064×2752) only if you kept iPad in Step 2.
 - Use the demo workspace with invented customers, never real data. Good
   screens: dashboard, customers, a receipt with its photo, ads, deliveries,
   and one Arabic view.
