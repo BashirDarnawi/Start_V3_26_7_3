@@ -5968,7 +5968,7 @@ function showNewReceiptChooser() {
     <div class="glass-panel w-full max-w-lg p-6 rounded-3xl" onclick="event.stopPropagation()">
       <div class="flex justify-between items-start mb-1">
         <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isAr ? 'اختر نوع الوصل' : 'Choose receipt type'}</h2>
-        <button onclick="document.getElementById('new-receipt-chooser')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+        <button onclick="document.getElementById('new-receipt-chooser')?.remove()" class="h-11 w-11 inline-flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <p class="text-xs text-slate-500 mb-5">${isAr ? 'اختر بعناية — الأنواع مختلفة.' : 'Choose carefully — the types are different.'}</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">

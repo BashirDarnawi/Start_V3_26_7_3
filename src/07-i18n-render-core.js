@@ -227,6 +227,15 @@ function getDir() {
 // THEME MANAGEMENT
 // ==========================================
 
+// <html dir/lang> for the current language. Called at boot (before and after
+// the saved preference loads) and by toggleLanguage().
+function applyDocumentLanguage() {
+  try {
+    document.documentElement.setAttribute('dir', getDir());
+    document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
+  } catch (_) {}
+}
+
 function applyTheme() {
   const root = document.documentElement;
   const isDark = state.theme === 'dark' ||

@@ -1040,7 +1040,7 @@ function renderLogin() {
 
             ${isServerModeEnabled() ? `
             <label class="flex items-center gap-2 pt-1 select-none cursor-pointer" for="login-remember">
-              <input type="checkbox" id="login-remember" class="w-4 h-4 accent-indigo-600" />
+              <input type="checkbox" id="login-remember" class="w-5 h-5 accent-indigo-600" />
               <span class="text-sm text-slate-600 dark:text-slate-300">${isRTL ? 'تذكرني على هذا الجهاز' : 'Remember me on this device'}</span>
             </label>
             ` : ''}
@@ -2251,7 +2251,7 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
     <div class="workspace-stat-card glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
       <div class="workspace-stat-layout flex items-start justify-between">
         <div class="min-w-0 flex-1">
-          <p class="workspace-stat-label text-[10px] md:text-sm text-slate-500 font-medium uppercase">${title}</p>
+          <p class="workspace-stat-label text-[11px] md:text-sm text-slate-500 font-medium uppercase">${title}</p>
           <p class="workspace-stat-value text-lg md:text-3xl font-bold mt-1 md:mt-2"><bdi>${value}</bdi></p>
         </div>
         <div class="w-8 h-8 md:w-12 md:h-12 bg-gradient-to-br ${gradient} rounded-lg md:rounded-xl flex items-center justify-center text-white shadow-lg flex-shrink-0 ml-2">
@@ -2475,15 +2475,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                            6411 balance while 6411.10 was actually owed. -->
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
                       </div>
                     </div>
                   </div>
@@ -2493,15 +2493,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceUSD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
                       </div>
                     </div>
                   </div>
@@ -2655,8 +2655,8 @@ function renderCustomersView() {
       <div class="grid ${canSeeCustomerBalances ? 'grid-cols-2 sm:grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
-        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
-        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
+        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', Math.round(totalDebts).toLocaleString('en-US') + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', Math.round(totalRevenue).toLocaleString('en-US') + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
         ` : ''}
       </div>
 

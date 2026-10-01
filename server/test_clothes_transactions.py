@@ -1,5 +1,6 @@
 """Transactional clothes-order and inventory regression tests."""
 
+import base64
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -684,3 +685,110 @@ class TestClothesSubscriptionBoundary:
         watermarks = client.get("/api/sync/watermarks", cookies=cookies)
         assert watermarks.status_code == 200
         assert "clothesProducts" in watermarks.json()["watermarks"]
+
+
+def _product_photo(product_id: str):
+    with db_conn() as conn:
+        row = conn.execute(
+            text(
+                "SELECT data_json FROM entities "
+                "WHERE type='clothesProducts' AND id=:id AND deleted=false"
+            ),
+            {"id": product_id},
+        ).mappings().one()
+    return json_loads(row["data_json"]).get("photo")
+
+
+class TestClothesProductPhotoProjection:
+    """Product photos stay out of lean lists and can never be wiped by an edit."""
+
+    PHOTO = "data:image/jpeg;base64,/9j/2Q=="
+
+    def _create(self, actor, product_id: str, *, photo=PHOTO, lean=True):
+        suffix = "?include_media=false" if lean else ""
+        response = client.post(
+            f"/api/collections/clothesProducts{suffix}",
+            json={"id": product_id, "data": {"name": product_id, "costUSD": 1, "priceLYD": 5,
+                                             "photo": photo,
+                                             "variants": [{"color": "Red", "size": "M", "qty": 3}]}},
+            cookies=actor["cookies"],
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_create_and_lists_are_lean_but_the_row_and_the_detail_keep_the_photo(self, actor):
+        created = self._create(actor, "photo_proj_create")
+        assert "photo" not in created["data"]
+        assert created["data"]["_mediaOmitted"] is True
+        assert created["data"]["_photoCount"] == 1
+        assert _product_photo("photo_proj_create") == self.PHOTO
+
+        lean = client.get("/api/collections/clothesProducts?include_media=false", cookies=actor["cookies"])
+        assert lean.status_code == 200
+        lean_row = next(r for r in lean.json() if r["id"] == "photo_proj_create")
+        assert "photo" not in lean_row["data"] and lean_row["data"]["_photoCount"] == 1
+
+        full = client.get("/api/collections/clothesProducts", cookies=actor["cookies"])  # old-client default
+        full_row = next(r for r in full.json() if r["id"] == "photo_proj_create")
+        assert full_row["data"]["photo"] == self.PHOTO
+
+        detail = client.get("/api/collections/clothesProducts/photo_proj_create", cookies=actor["cookies"])
+        assert detail.status_code == 200 and detail.json()["data"]["photo"] == self.PHOTO
+
+    def test_edits_without_the_photo_key_keep_it_and_an_explicit_null_removes_it(self, actor):
+        created = self._create(actor, "photo_proj_edit")
+        lm = created["lastModified"]
+        renamed = client.patch(
+            "/api/collections/clothesProducts/photo_proj_edit?include_media=false",
+            json={"data": {"name": "Renamed"}, "expectedLastModified": lm},
+            cookies=actor["cookies"],
+        )
+        assert renamed.status_code == 200, renamed.text
+        assert "photo" not in renamed.json()["data"] and renamed.json()["data"]["_photoCount"] == 1
+        assert _product_photo("photo_proj_edit") == self.PHOTO
+
+        restocked = client.patch(
+            "/api/collections/clothesProducts/photo_proj_edit",
+            json={"data": {"variants": [{"color": "Red", "size": "M", "qty": 9}]},
+                  "expectedLastModified": renamed.json()["lastModified"]},
+            cookies=actor["cookies"],
+        )
+        assert restocked.status_code == 200, restocked.text
+        assert _product_photo("photo_proj_edit") == self.PHOTO
+
+        removed = client.patch(
+            "/api/collections/clothesProducts/photo_proj_edit?include_media=false",
+            json={"data": {"photo": None}, "expectedLastModified": restocked.json()["lastModified"]},
+            cookies=actor["cookies"],
+        )
+        assert removed.status_code == 200, removed.text
+        assert removed.json()["data"]["_photoCount"] == 0
+        assert not _product_photo("photo_proj_edit")
+
+    def test_photo_route_serves_the_image_with_private_caching_and_404s_without_one(self, actor):
+        self._create(actor, "photo_proj_route")
+        served = client.get("/api/collections/clothesProducts/photo_proj_route/photo", cookies=actor["cookies"])
+        assert served.status_code == 200, served.text
+        assert served.headers["content-type"].startswith("image/jpeg")
+        assert served.headers["cache-control"] == "private, max-age=300"
+        assert served.content == base64.b64decode("/9j/2Q==")
+
+        self._create(actor, "photo_proj_none", photo=None)
+        missing = client.get("/api/collections/clothesProducts/photo_proj_none/photo", cookies=actor["cookies"])
+        assert missing.status_code == 404
+        unknown = client.get("/api/collections/clothesProducts/no_such_product/photo", cookies=actor["cookies"])
+        assert unknown.status_code == 404
+        anonymous = client.get("/api/collections/clothesProducts/photo_proj_route/photo")
+        assert anonymous.status_code == 401
+
+    def test_a_sale_response_still_carries_the_touched_product_photo(self, actor):
+        self._create(actor, "photo_proj_sale")
+        response = client.post(
+            "/api/clothes/orders/mutate",
+            json={"action": "create", "idempotencyKey": "clothes-photo-proj-sale-001",
+                  "data": _order_data("photo_proj_sale", 1)},
+            cookies=actor["cookies"],
+        )
+        assert response.status_code == 200, response.text
+        products = response.json().get("updatedProducts") or []
+        assert products and products[0]["data"].get("photo") == self.PHOTO

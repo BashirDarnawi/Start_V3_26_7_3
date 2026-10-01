@@ -1594,6 +1594,16 @@ check('server-mode shipments move stock through the transactional route and vali
   serverApi.includes("headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId(), ") &&
   serverApi.includes("if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0;"));
 
+check('clothes product photos stay out of the product list and hydrate before edit',
+  serverApi.includes("new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts'])") &&
+  serverApi.includes("clothesProducts: Object.freeze(['photo'])") &&
+  clothes.includes("ensureEntityMediaLoaded('clothesProducts', id)") &&
+  clothes.includes("!isEntityMediaHydrated('clothesProducts', product)") &&
+  clothes.includes('if (editTarget && !_clothesPhotoDirty) delete payload.photo;') &&
+  clothes.includes('/photo?v=') && clothes.includes('loading="lazy"') && clothes.includes('crossorigin="use-credentials"') &&
+  clothes.includes('_clothesPhotoDirty = true;') &&
+  modals.includes("if (typeof _clothesPhotoDirty !== 'undefined') _clothesPhotoDirty = false;"));
+
 check('money boxes keep thousands separators, WhatsApp links use international digits, campaign actions replay safely',
   forms.includes("const grouped = /^\\s*\\d{1,3}(,\\d{3})+(\\.\\d*)?\\s*$/.test(val);") &&
   forms.includes("normalizeDigitsAscii(val).replace(/،/g, ',').replace(/٫/g, '.')") && !forms.includes("  val = val.replace(/٫/g, '.');") &&

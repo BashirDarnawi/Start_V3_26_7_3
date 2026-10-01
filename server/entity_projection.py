@@ -22,6 +22,9 @@ INLINE_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "adCampaignRequests": ("creativeImages",),
     "walletPaymentRequests": ("receiptPhoto",),
     "pages": ("metaPagePictureData",),
+    # One data-URL string per product; hydrated by id for Edit and served by
+    # /api/collections/clothesProducts/{id}/photo for the product cards.
+    "clothesProducts": ("photo",),
 }
 
 # Stripping and COUNTING are different questions. _photoCount answers "how
@@ -35,6 +38,7 @@ COUNTED_MEDIA_FIELDS: dict[str, tuple[str, ...]] = {
     "adCampaignRequests": ("creativeImages",),
     "walletPaymentRequests": ("receiptPhoto",),
     "pages": (),
+    "clothesProducts": ("photo",),
 }
 
 _SQL_JSON_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")

@@ -93,3 +93,19 @@ def test_ad_photo_permission_is_separate_from_record_visibility():
     assert can_include_entity_media("receipts", True, False) is True
     assert _project_entity_media({"type": "customers", "data": {"name": "A"}}, False)["data"]["name"] == "A"
     assert _without_customer_contacts([{"email": "x", "value": 1}]) == [{"value": 1}]
+
+
+def test_sql_projection_strips_single_string_product_photo_and_counts_it():
+    # A product photo is ONE data-URL string (not a list): the SQL and Python
+    # projections must strip it and count it identically, because the client's
+    # hydrate-before-edit guard reads _photoCount.
+    with_photo = {"name": "Shirt", "photo": "data:image/jpeg;base64,/9j/2Q==",
+                  "variants": [{"color": "Red", "size": "M", "qty": 2}]}
+    projected, count = _sqlite_inline_media_projection("clothesProducts", with_photo)
+    assert "photo" not in projected
+    assert projected["name"] == "Shirt"
+    assert count == _without_inline_media("clothesProducts", with_photo)["_photoCount"] == 1
+    for bare in ({"name": "No photo"}, {"name": "Null", "photo": None}, {"name": "Empty", "photo": ""}):
+        projected, count = _sqlite_inline_media_projection("clothesProducts", bare)
+        assert "photo" not in projected
+        assert count == _without_inline_media("clothesProducts", bare)["_photoCount"] == 0

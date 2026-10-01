@@ -110,6 +110,12 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       },
       signal: controller.signal
     };
+    // From beforeunload on, WebKit refuses every request this document starts
+    // and logs it as a page error: end a read the way a navigation-cancelled
+    // read ends, without calling fetch.
+    if (method === 'GET' && _documentLeaving) {
+      throw new DOMException('The page is leaving', 'AbortError');
+    }
     // Navigation aborts READS only: an aborted write is retried, and a retry
     // of a committed write reads as a false conflict or a "failed" delete.
     try {
@@ -572,9 +578,8 @@ function makeSessionChangedError() {
 // Collections synchronized through the generic collection API. Keep this one
 // list shared by full loads, per-collection cursors and visibility purges so a
 // newly-added collection cannot accidentally miss one of the safety paths.
-// Order is load order: the office core first, the clothes module (whose
-// products carry inline photos) last, so the workspace is usable before the
-// heaviest lists arrive.
+// Order is load order: the office core first, the clothes module last, so
+// the workspace is usable before the lists a user opens least often arrive.
 const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'adCampaignRequests',
@@ -587,7 +592,7 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // request lightweight records and fetch the full item only when a user opens
 // Photos or Edit. Old servers safely ignore the query parameter, while old
 // clients keep receiving full records because the backend default is true.
-const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
 // mobile uplink: a body with an image, or simply large, gets the 90s media
@@ -629,7 +634,8 @@ const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   receipts: Object.freeze(['photos', 'receiptImage']),
   adCampaignRequests: Object.freeze(['creativeImages']),
   walletPaymentRequests: Object.freeze(['receiptPhoto']),
-  pages: Object.freeze(['metaPagePictureData'])
+  pages: Object.freeze(['metaPagePictureData']),
+  clothesProducts: Object.freeze(['photo'])
 });
 
 // Stripped from lists, but NOT counted as a photo someone attached: the
@@ -641,7 +647,8 @@ const COUNTED_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   receipts: Object.freeze(['photos', 'receiptImage']),
   adCampaignRequests: Object.freeze(['creativeImages']),
   walletPaymentRequests: Object.freeze(['receiptPhoto']),
-  pages: Object.freeze([])
+  pages: Object.freeze([]),
+  clothesProducts: Object.freeze(['photo'])
 });
 
 function _inlineMediaFields(collection) {
@@ -1011,6 +1018,29 @@ function cancelPendingRequests() {
   _pendingRequests.clear();
 }
 
+// The document is leaving (reload, Back to another page, a link). WebKit's
+// order is beforeunload -> it stops this document's loads (in-flight reads end
+// quietly) -> any request STARTED after that is refused on the spot and logged
+// as "Fetch API cannot load ... due to access control checks" -> pagehide. So:
+// abort our reads while that is still quiet (beforeunload runs first), and
+// start no read afterwards (apiFetch answers with the AbortError the loaders
+// already treat as "the page moved on"). A navigation can still be abandoned
+// (offline reload, a download answer), so the latch lets go after a while,
+// and on a back/forward-cache restore.
+let _documentLeaving = false;
+let _documentLeavingTimer = null;
+function isDocumentLeaving() { return _documentLeaving; }
+function markDocumentLeaving() {
+  _documentLeaving = true;
+  cancelPendingRequests();
+  clearTimeout(_documentLeavingTimer);
+  _documentLeavingTimer = setTimeout(() => { _documentLeaving = false; }, 10000);
+}
+function clearDocumentLeaving() {
+  clearTimeout(_documentLeavingTimer);
+  _documentLeaving = false;
+}
+
 // Refresh throttle - prevent too many refreshes (persists across reloads in the same tab)
 let _lastRefreshTime = 0;
 const REFRESH_THROTTLE_MS = 2000; // Minimum 2 seconds between refreshes
@@ -1030,14 +1060,17 @@ function isRefreshThrottled() {
   return false;
 }
 
-// Cancel pending requests when the page is being unloaded (refresh/back).
-// FIRST flush any debounce-pending user updates (permission grants) with
+// The page is going away (refresh/Back/link). beforeunload runs BEFORE WebKit
+// stops this document's loads, so our reads abort quietly there; pagehide
+// FIRST flushes any debounce-pending user updates (permission grants) with
 // keepalive so they are not silently lost with the page.
 try {
+  window.addEventListener('beforeunload', markDocumentLeaving);
   window.addEventListener('pagehide', () => {
     try { flushPendingUserUpdates(); } catch (_) {}
-    cancelPendingRequests();
+    markDocumentLeaving();
   }, { passive: true });
+  window.addEventListener('pageshow', event => { if (event && event.persisted) clearDocumentLeaving(); });
 } catch (_) {}
 
 // Get timeout based on collection type (larger collections need more time)
@@ -1048,7 +1081,7 @@ function getCollectionTimeout(collection) {
     customers: 15000,   // Customers - 15 seconds
     pages: 10000,       // Pages - 10 seconds
     exchangeRateHistory: 8000,  // Small - 8 seconds
-    clothesProducts: 90000,     // Product photos are inline base64 - 90 seconds
+    clothesProducts: 90000,     // lean rows on a current server; full rows (inline photos) on an old one
     clothesShipments: 30000,
     clothesOrders: 20000,
     default: 15000      // Default - 15 seconds
@@ -1234,7 +1267,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         // request is never re-issued immediately, which WebKit reports as a
         // page error when a navigation is tearing the page down). Two
         // refinements: a timed-out page is slow, not broken, so the next
-        // attempt gets a doubled budget; a read that navigation cancelled is
+        // attempt gets a doubled budget; a read the leaving page cancelled is
         // not retried at all.
         let budget = timeoutMs;
         const items = await withRetry(async () => {
@@ -1242,9 +1275,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
             return await apiJson(path, { method: 'GET' }, { timeoutMs: budget });
           } catch (e) {
             if (e?.name === 'AbortError') {
-              let navAborted = false;
-              try { navAborted = (typeof getNavigationSignal === 'function') && !!getNavigationSignal()?.aborted; } catch (_) {}
-              if (navAborted) e.status = 499;           // client went away: withRetry stops here
+              if (_documentLeaving) e.status = 499;      // the page is going away: withRetry stops here
               else budget = Math.min(budget * 2, 180000);
             }
             throw e;
@@ -2387,7 +2418,8 @@ async function serverLoadAllData() {
   const loadAborted = () => (
     !loadUserId ||
     String(state.currentUser?.id || '') !== loadUserId ||
-    serverSessionIdentityChanged(loadIdentity)
+    serverSessionIdentityChanged(loadIdentity) ||
+    _documentLeaving
   );
   const abortedResult = () => ({ failed: [], forbidden: [], aborted: true });
   if (loadAborted()) return abortedResult();

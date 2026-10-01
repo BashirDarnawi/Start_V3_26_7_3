@@ -891,9 +891,7 @@ function renderClothesProductCard(p) {
     <div class="glass-panel rounded-2xl p-5">
       <div class="flex items-start gap-4">
         <div class="w-16 h-16 rounded-xl overflow-hidden bg-gradient-to-br from-rose-100 to-pink-100 dark:from-rose-900/30 dark:to-pink-900/30 flex items-center justify-center shrink-0">
-          ${p.photo
-            ? `<img src="${Security.escapeHtml(p.photo)}" alt="" class="w-full h-full object-cover" />`
-            : `<i data-lucide="shirt" class="w-7 h-7 text-rose-400"></i>`}
+          ${clothesProductThumbMarkup(p)}
         </div>
         <div class="flex-1 min-w-0">
           <div class="flex items-start justify-between gap-2">
@@ -1006,6 +1004,11 @@ let _clothesTempVariants = [];
 let _clothesEditBaseline = 0;
 let _clothesOrderEditBaseline = 0;  // order version when the edit form opened (a 3 s delta must not move it)
 let _clothesTempPhoto = null;
+// True once the user changed the photo in the open form (picked or removed).
+// Server lists are lean (no photo bytes), so an untouched photo is left OUT
+// of the save payload: the server keeps what it has, and a lean record can
+// never wipe a stored photo.
+let _clothesPhotoDirty = false;
 // Generation token for async photo compression — bumped on every product modal
 // open/close so a callback that resolves after the modal changed is discarded.
 let _clothesPhotoToken = 0;
@@ -1016,15 +1019,53 @@ function showClothesProductModal() {
   state.modalData = null;
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
+  _clothesPhotoDirty = false;
   _clothesPhotoToken++; // invalidate any pending photo-compression callback
   updateUrlParams({ modal: 'clothes-product', id: 'new' }); // URL tracking
   renderModal();
 }
 
-function editClothesProduct(id) {
+// Product cards: a lean server record carries only a photo COUNT, so the card
+// loads its thumbnail from the product-photo route (lazy, browser-cached);
+// a hydrated or local record still shows its inline photo.
+function clothesProductThumbMarkup(p) {
+  if (p.photo) return `<img src="${Security.escapeHtml(p.photo)}" alt="" class="w-full h-full object-cover" />`;
+  const lean = typeof isServerModeEnabled === 'function' && isServerModeEnabled() &&
+    typeof getEntityPhotoCountHint === 'function' && getEntityPhotoCountHint('clothesProducts', p) > 0;
+  if (lean) {
+    const base = (typeof getServerBaseUrl === 'function') ? getServerBaseUrl() : '';
+    const src = `${base}/api/collections/clothesProducts/${encodeURIComponent(p.id)}/photo?v=${Math.max(0, Number(p._lastModified) || 0)}`;
+    return `<img src="${Security.escapeHtml(src)}" alt="" loading="lazy" decoding="async"${base ? ' crossorigin="use-credentials"' : ''} class="w-full h-full object-cover" onerror="clothesProductThumbError(this)" />`;
+  }
+  return `<i data-lucide="shirt" class="w-7 h-7 text-rose-400"></i>`;
+}
+
+function clothesProductThumbError(img) {
+  // The thumbnail could not load (offline, no permission): leave the tinted
+  // placeholder box instead of a broken image; no retry storm.
+  try { img.remove(); } catch (_) {}
+}
+
+async function editClothesProduct(id) {
   if (!clothesCanUse()) return;
-  const product = getVisibleClothesProducts().find(p => p.id === id);
+  let product = getVisibleClothesProducts().find(p => p.id === id);
   if (!product) return;
+  // A lean record (server list without photo bytes) must be hydrated first:
+  // the edit form round-trips the photo, so it has to open on the full record.
+  if (typeof getEntityPhotoCountHint === 'function' && getEntityPhotoCountHint('clothesProducts', product) > 0 &&
+      typeof isEntityMediaHydrated === 'function' && !isEntityMediaHydrated('clothesProducts', product)) {
+    try {
+      product = await ensureEntityMediaLoaded('clothesProducts', id);
+    } catch (_) {
+      showNotification(
+        clothesIsAr() ? 'تعذر تحميل الصورة' : 'Photo unavailable',
+        clothesIsAr() ? 'تعذر تحميل صورة المنتج. تحقق من الاتصال ثم حاول مرة أخرى.' : "Could not load this product's photo. Check the connection and try again.",
+        'error'
+      );
+      return;
+    }
+    if (!product) return;
+  }
   state.activeModal = 'clothes-product';
   state.modalData = product;
   _clothesEditBaseline = Number(product._lastModified) || 0;
@@ -1033,6 +1074,7 @@ function editClothesProduct(id) {
     ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
     : [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = product.photo || null;
+  _clothesPhotoDirty = false;
   _clothesPhotoToken++; // invalidate any pending photo callback from a prior modal
   updateUrlParams({ modal: 'clothes-product', id }); // URL tracking
   renderModal();
@@ -1049,6 +1091,7 @@ function reseedClothesEditState(collection, record) {
       ? variants.map(v => ({ color: String(v?.color || ''), size: String(v?.size || ''), qty: Math.max(0, Math.floor(Number(v?.qty) || 0)) }))
       : [{ color: '', size: '', qty: 0 }];
     _clothesTempPhoto = record.photo || null;
+    _clothesPhotoDirty = false;
   } else if (collection === 'clothesShipments') {
     const lines = Array.isArray(record.lines) ? record.lines : [];
     _clothesTempShipLines = lines.length
@@ -1267,6 +1310,7 @@ function uploadClothesProductPhotoFiles(fileList) {
       return;
     }
     _clothesTempPhoto = dataUrl;
+    _clothesPhotoDirty = true;
     refreshClothesPhotoPreview();
   }).catch(() => {
     if (myToken !== _clothesPhotoToken) return;
@@ -1276,6 +1320,7 @@ function uploadClothesProductPhotoFiles(fileList) {
 
 function removeClothesProductPhoto() {
   _clothesTempPhoto = null;
+  _clothesPhotoDirty = true;
   _clothesPhotoToken++; // a pending compression must not undo the removal
   refreshClothesPhotoPreview();
 }
@@ -1327,6 +1372,9 @@ async function saveClothesProductFromModal() {
   }
 
   const payload = { name, category, note, photo: _clothesTempPhoto, costUSD, priceLYD, variants };
+  // An untouched photo stays out of the update: the server keeps its copy, so
+  // a lean record (no bytes) can never wipe the stored photo.
+  if (editTarget && !_clothesPhotoDirty) delete payload.photo;
 
   if (editTarget) {
     const saved = await updateRecord(state.clothesProducts, editTarget.id, payload, _clothesEditBaseline || undefined);

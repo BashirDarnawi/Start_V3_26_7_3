@@ -848,7 +848,7 @@ function renderModal() {
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
                   <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
-                  <button type="button" onclick="addReceiptPaymentSplit()" class="text-xs text-emerald-600 font-medium">${isArAd ? '+ إضافة تقسيم' : '+ Add Split'}</button>
+                  <button type="button" onclick="addReceiptPaymentSplit()" class="min-h-11 inline-flex items-center px-2 text-xs text-emerald-600 font-medium">${isArAd ? '+ إضافة تقسيم' : '+ Add Split'}</button>
                 </div>
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
@@ -1368,10 +1368,10 @@ function renderModal() {
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5" id="receipt-status-tabs">
-                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
               <input type="hidden" id="receipt-status" value="${Security.escapeHtml(String(receiptData.status || 'Paid'))}" />
 
@@ -4475,6 +4475,7 @@ function closeModal() {
   // Discard any pending (unsaved) clothes-product/shipment edits
   if (typeof _clothesTempVariants !== 'undefined') _clothesTempVariants = [];
   if (typeof _clothesTempPhoto !== 'undefined') _clothesTempPhoto = null;
+  if (typeof _clothesPhotoDirty !== 'undefined') _clothesPhotoDirty = false;
   if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken++; // invalidate pending photo callback
 
   if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];

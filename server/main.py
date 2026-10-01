@@ -188,6 +188,7 @@ from .meta_ads import (
     stamp_import_completion,
 )
 from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
+from .clothes_media import create_clothes_media_router
 from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from .systems.ads_studio.studio_api import create_studio_router
 from .systems.ads_studio.studio_privacy import redact_staff_identity, register_redacted_type, scrub_studio_personal_data_conn  # P1-05, P1-16
@@ -13727,6 +13728,15 @@ app.include_router(
         current_user_dependency=current_user,
         get_entity_fn=get_entity,
         user_has_permission_fn=user_has_permission,
+        max_data_url_length=MAX_DATA_URL_LENGTH,
+    )
+)
+app.include_router(
+    create_clothes_media_router(
+        current_user_dependency=current_user,
+        get_entity_fn=get_entity,
+        user_has_permission_fn=user_has_permission,
+        require_clothes_subscription_fn=_require_clothes_subscription,
         max_data_url_length=MAX_DATA_URL_LENGTH,
     )
 )

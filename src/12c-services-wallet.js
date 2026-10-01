@@ -211,8 +211,8 @@ function renderServicesHub() {
         <i data-lucide="${hubEsc(service.icon || 'box')}" class="hub-tile-watermark" aria-hidden="true"></i>
         <span class="relative block">
           ${hubServiceIcon(service)}
-          <span class="mt-3 block truncate text-sm font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? service.nameAr : service.name)}</span>
-          <span class="block truncate text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2.5">${hubEsc(isRTL ? service.descriptionAr : service.description)}</span>
+          <span class="mt-3 block line-clamp-2 leading-snug text-sm font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? service.nameAr : service.name)}</span>
+          <span class="block line-clamp-2 text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2.5">${hubEsc(isRTL ? service.descriptionAr : service.description)}</span>
           <span class="flex flex-wrap items-center gap-1.5">
             ${hubPill(status.label, status.tone)}
             ${service.hasChildren ? hubPill(`${(service.children?.length || 0)} ${hubText('systems', 'أنظمة')}`, 'slate') : ''}

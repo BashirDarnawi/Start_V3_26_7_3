@@ -4345,6 +4345,18 @@ check('lightweight media summaries keep counts and never reuse stale photo bytes
   const mutationEcho = sandbox.mergeMutationInlineMedia('receipts', newer, { photos: [SAFE_RECEIPT_JPEG] });
   assert(mutationEcho.photos?.[0] === SAFE_RECEIPT_JPEG, 'lightweight mutation response lost known local media');
   assert(sandbox.isEntityMediaHydrated('receipts', mutationEcho), 'reattached mutation media still looks omitted');
+  // A clothes product carries ONE photo string: the same contract must hold for a non-list field.
+  const fullProduct = { id: 'p1', _lastModified: 10, photo: SAFE_RECEIPT_PNG };
+  const leanProduct = { id: 'p1', _lastModified: 10, _mediaOmitted: true, _photoCount: 1 };
+  const reusedProduct = sandbox.mergeMatchingVersionInlineMedia('clothesProducts', leanProduct, fullProduct);
+  assert(reusedProduct.photo === SAFE_RECEIPT_PNG && sandbox.isEntityMediaHydrated('clothesProducts', reusedProduct), 'matching product photo was not reused');
+  const newerProduct = sandbox.mergeMatchingVersionInlineMedia('clothesProducts', { ...leanProduct, _lastModified: 11 }, fullProduct);
+  assert(!Object.prototype.hasOwnProperty.call(newerProduct, 'photo') && !sandbox.isEntityMediaHydrated('clothesProducts', newerProduct), 'newer product summary reused a stale photo');
+  assert(sandbox.getEntityPhotoCountHint('clothesProducts', leanProduct) === 1, 'product photo-count hint missing');
+  const productEcho = sandbox.mergeMutationInlineMedia('clothesProducts', leanProduct, { photo: SAFE_RECEIPT_JPEG });
+  assert(productEcho.photo === SAFE_RECEIPT_JPEG && productEcho._mediaOmitted === false, 'lean product echo lost the photo that was just saved');
+  const removedEcho = sandbox.mergeMutationInlineMedia('clothesProducts', leanProduct, { photo: null });
+  assert(removedEcho.photo === null, 'an explicit photo removal must survive the lean echo');
 });
 
 check('ad photo normalization and outside button support current and legacy fields', () => {

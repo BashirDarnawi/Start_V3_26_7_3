@@ -41,6 +41,43 @@ def enforce_ad_photo_mutation_permissions(
         raise HTTPException(status_code=403, detail="View Photos permission is required to choose the main photo")
 
 
+def data_url_image_response(source: str, max_data_url_length: int) -> Response:
+    """Decode one stored data-URL photo into an image response (shared by the
+    ad and clothes-product photo routes). Refuses remote/unknown values so the
+    route can never act as an open proxy."""
+    if len(source) > max_data_url_length:
+        raise HTTPException(status_code=413, detail="Photo is too large")
+    match = re.fullmatch(
+        r"data:image/(png|jpe?g|gif|webp);base64,([A-Za-z0-9+/]+={0,2})",
+        source,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        # Uploaded photos are stored as data URLs. Refuse remote/unknown
+        # values instead of turning this route into an open proxy.
+        raise HTTPException(status_code=404, detail="Photo source unavailable")
+    try:
+        content = base64.b64decode(match.group(2), validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid photo data")
+    if not content:
+        raise HTTPException(status_code=422, detail="Invalid photo data")
+
+    subtype = match.group(1).lower()
+    if subtype in {"jpg", "jpeg"}:
+        subtype = "jpeg"
+    return Response(
+        content=content,
+        media_type=f"image/{subtype}",
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+            "Vary": "Cookie, Origin",
+        },
+    )
+
+
 def create_ad_media_router(
     *,
     current_user_dependency: Callable[..., dict[str, Any]],
@@ -102,37 +139,6 @@ def create_ad_media_router(
         if selected is None or selected < 0 or selected >= len(sources):
             selected = 0
 
-        source = sources[selected]
-        if len(source) > max_data_url_length:
-            raise HTTPException(status_code=413, detail="Photo is too large")
-        match = re.fullmatch(
-            r"data:image/(png|jpe?g|gif|webp);base64,([A-Za-z0-9+/]+={0,2})",
-            source,
-            flags=re.IGNORECASE,
-        )
-        if not match:
-            # Uploaded photos are stored as data URLs. Refuse remote/unknown
-            # values instead of turning this route into an open proxy.
-            raise HTTPException(status_code=404, detail="Photo source unavailable")
-        try:
-            content = base64.b64decode(match.group(2), validate=True)
-        except (binascii.Error, ValueError):
-            raise HTTPException(status_code=422, detail="Invalid photo data")
-        if not content:
-            raise HTTPException(status_code=422, detail="Invalid photo data")
-
-        subtype = match.group(1).lower()
-        if subtype in {"jpg", "jpeg"}:
-            subtype = "jpeg"
-        return Response(
-            content=content,
-            media_type=f"image/{subtype}",
-            headers={
-                "Cache-Control": "private, max-age=300",
-                "Content-Disposition": "inline",
-                "X-Content-Type-Options": "nosniff",
-                "Vary": "Cookie, Origin",
-            },
-        )
+        return data_url_image_response(sources[selected], max_data_url_length)
 
     return router

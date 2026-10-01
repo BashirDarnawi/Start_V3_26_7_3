@@ -6880,6 +6880,15 @@ function getDir() {
 // THEME MANAGEMENT
 // ==========================================
 
+// <html dir/lang> for the current language. Called at boot (before and after
+// the saved preference loads) and by toggleLanguage().
+function applyDocumentLanguage() {
+  try {
+    document.documentElement.setAttribute('dir', getDir());
+    document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
+  } catch (_) {}
+}
+
 function applyTheme() {
   const root = document.documentElement;
   const isDark = state.theme === 'dark' ||
@@ -9210,6 +9219,12 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       },
       signal: controller.signal
     };
+    // From beforeunload on, WebKit refuses every request this document starts
+    // and logs it as a page error: end a read the way a navigation-cancelled
+    // read ends, without calling fetch.
+    if (method === 'GET' && _documentLeaving) {
+      throw new DOMException('The page is leaving', 'AbortError');
+    }
     // Navigation aborts READS only: an aborted write is retried, and a retry
     // of a committed write reads as a false conflict or a "failed" delete.
     try {
@@ -9672,9 +9687,8 @@ function makeSessionChangedError() {
 // Collections synchronized through the generic collection API. Keep this one
 // list shared by full loads, per-collection cursors and visibility purges so a
 // newly-added collection cannot accidentally miss one of the safety paths.
-// Order is load order: the office core first, the clothes module (whose
-// products carry inline photos) last, so the workspace is usable before the
-// heaviest lists arrive.
+// Order is load order: the office core first, the clothes module last, so
+// the workspace is usable before the lists a user opens least often arrive.
 const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'adCampaignRequests',
@@ -9687,7 +9701,7 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // request lightweight records and fetch the full item only when a user opens
 // Photos or Edit. Old servers safely ignore the query parameter, while old
 // clients keep receiving full records because the backend default is true.
-const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests']);
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
 // mobile uplink: a body with an image, or simply large, gets the 90s media
@@ -9729,7 +9743,8 @@ const INLINE_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   receipts: Object.freeze(['photos', 'receiptImage']),
   adCampaignRequests: Object.freeze(['creativeImages']),
   walletPaymentRequests: Object.freeze(['receiptPhoto']),
-  pages: Object.freeze(['metaPagePictureData'])
+  pages: Object.freeze(['metaPagePictureData']),
+  clothesProducts: Object.freeze(['photo'])
 });
 
 // Stripped from lists, but NOT counted as a photo someone attached: the
@@ -9741,7 +9756,8 @@ const COUNTED_MEDIA_FIELDS_BY_COLLECTION = Object.freeze({
   receipts: Object.freeze(['photos', 'receiptImage']),
   adCampaignRequests: Object.freeze(['creativeImages']),
   walletPaymentRequests: Object.freeze(['receiptPhoto']),
-  pages: Object.freeze([])
+  pages: Object.freeze([]),
+  clothesProducts: Object.freeze(['photo'])
 });
 
 function _inlineMediaFields(collection) {
@@ -10111,6 +10127,29 @@ function cancelPendingRequests() {
   _pendingRequests.clear();
 }
 
+// The document is leaving (reload, Back to another page, a link). WebKit's
+// order is beforeunload -> it stops this document's loads (in-flight reads end
+// quietly) -> any request STARTED after that is refused on the spot and logged
+// as "Fetch API cannot load ... due to access control checks" -> pagehide. So:
+// abort our reads while that is still quiet (beforeunload runs first), and
+// start no read afterwards (apiFetch answers with the AbortError the loaders
+// already treat as "the page moved on"). A navigation can still be abandoned
+// (offline reload, a download answer), so the latch lets go after a while,
+// and on a back/forward-cache restore.
+let _documentLeaving = false;
+let _documentLeavingTimer = null;
+function isDocumentLeaving() { return _documentLeaving; }
+function markDocumentLeaving() {
+  _documentLeaving = true;
+  cancelPendingRequests();
+  clearTimeout(_documentLeavingTimer);
+  _documentLeavingTimer = setTimeout(() => { _documentLeaving = false; }, 10000);
+}
+function clearDocumentLeaving() {
+  clearTimeout(_documentLeavingTimer);
+  _documentLeaving = false;
+}
+
 // Refresh throttle - prevent too many refreshes (persists across reloads in the same tab)
 let _lastRefreshTime = 0;
 const REFRESH_THROTTLE_MS = 2000; // Minimum 2 seconds between refreshes
@@ -10130,14 +10169,17 @@ function isRefreshThrottled() {
   return false;
 }
 
-// Cancel pending requests when the page is being unloaded (refresh/back).
-// FIRST flush any debounce-pending user updates (permission grants) with
+// The page is going away (refresh/Back/link). beforeunload runs BEFORE WebKit
+// stops this document's loads, so our reads abort quietly there; pagehide
+// FIRST flushes any debounce-pending user updates (permission grants) with
 // keepalive so they are not silently lost with the page.
 try {
+  window.addEventListener('beforeunload', markDocumentLeaving);
   window.addEventListener('pagehide', () => {
     try { flushPendingUserUpdates(); } catch (_) {}
-    cancelPendingRequests();
+    markDocumentLeaving();
   }, { passive: true });
+  window.addEventListener('pageshow', event => { if (event && event.persisted) clearDocumentLeaving(); });
 } catch (_) {}
 
 // Get timeout based on collection type (larger collections need more time)
@@ -10148,7 +10190,7 @@ function getCollectionTimeout(collection) {
     customers: 15000,   // Customers - 15 seconds
     pages: 10000,       // Pages - 10 seconds
     exchangeRateHistory: 8000,  // Small - 8 seconds
-    clothesProducts: 90000,     // Product photos are inline base64 - 90 seconds
+    clothesProducts: 90000,     // lean rows on a current server; full rows (inline photos) on an old one
     clothesShipments: 30000,
     clothesOrders: 20000,
     default: 15000      // Default - 15 seconds
@@ -10334,7 +10376,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         // request is never re-issued immediately, which WebKit reports as a
         // page error when a navigation is tearing the page down). Two
         // refinements: a timed-out page is slow, not broken, so the next
-        // attempt gets a doubled budget; a read that navigation cancelled is
+        // attempt gets a doubled budget; a read the leaving page cancelled is
         // not retried at all.
         let budget = timeoutMs;
         const items = await withRetry(async () => {
@@ -10342,9 +10384,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
             return await apiJson(path, { method: 'GET' }, { timeoutMs: budget });
           } catch (e) {
             if (e?.name === 'AbortError') {
-              let navAborted = false;
-              try { navAborted = (typeof getNavigationSignal === 'function') && !!getNavigationSignal()?.aborted; } catch (_) {}
-              if (navAborted) e.status = 499;           // client went away: withRetry stops here
+              if (_documentLeaving) e.status = 499;      // the page is going away: withRetry stops here
               else budget = Math.min(budget * 2, 180000);
             }
             throw e;
@@ -11487,7 +11527,8 @@ async function serverLoadAllData() {
   const loadAborted = () => (
     !loadUserId ||
     String(state.currentUser?.id || '') !== loadUserId ||
-    serverSessionIdentityChanged(loadIdentity)
+    serverSessionIdentityChanged(loadIdentity) ||
+    _documentLeaving
   );
   const abortedResult = () => ({ failed: [], forbidden: [], aborted: true });
   if (loadAborted()) return abortedResult();
@@ -16362,7 +16403,7 @@ function renderLogin() {
 
             ${isServerModeEnabled() ? `
             <label class="flex items-center gap-2 pt-1 select-none cursor-pointer" for="login-remember">
-              <input type="checkbox" id="login-remember" class="w-4 h-4 accent-indigo-600" />
+              <input type="checkbox" id="login-remember" class="w-5 h-5 accent-indigo-600" />
               <span class="text-sm text-slate-600 dark:text-slate-300">${isRTL ? 'تذكرني على هذا الجهاز' : 'Remember me on this device'}</span>
             </label>
             ` : ''}
@@ -17573,7 +17614,7 @@ function renderStatCard(title, value, icon, gradient, onClick = '', isActive = f
     <div class="workspace-stat-card glass-panel rounded-xl md:rounded-2xl p-3 md:p-6 hover:scale-105 transition-transform${clickClass}${activeClass}"${clickAttr}>
       <div class="workspace-stat-layout flex items-start justify-between">
         <div class="min-w-0 flex-1">
-          <p class="workspace-stat-label text-[10px] md:text-sm text-slate-500 font-medium uppercase">${title}</p>
+          <p class="workspace-stat-label text-[11px] md:text-sm text-slate-500 font-medium uppercase">${title}</p>
           <p class="workspace-stat-value text-lg md:text-3xl font-bold mt-1 md:mt-2"><bdi>${value}</bdi></p>
         </div>
         <div class="w-8 h-8 md:w-12 md:h-12 bg-gradient-to-br ${gradient} rounded-lg md:rounded-xl flex items-center justify-center text-white shadow-lg flex-shrink-0 ml-2">
@@ -17797,15 +17838,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                            6411 balance while 6411.10 was actually owed. -->
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">${stats.totalSpentLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">${stats.totalPaidLYD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceLYD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceLYD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceLYD >= 0 ? '+' : ''}${stats.balanceLYD.toFixed(2)}</div>
                       </div>
                     </div>
                   </div>
@@ -17815,15 +17856,15 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                     <div class="grid grid-cols-3 gap-1 text-xs">
                       <div class="text-center p-1.5 bg-slate-50 dark:bg-slate-800/50 rounded-lg">
                         <div class="text-[10px] text-slate-400">${isAr ? 'المصروف' : 'Spent'}</div>
-                        <div class="font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-slate-700 dark:text-slate-300">$${stats.totalSpentUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg">
                         <div class="text-[10px] text-emerald-600">${isAr ? 'المدفوع' : 'Paid'}</div>
-                        <div class="font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold text-emerald-600">$${stats.totalPaidUSD.toFixed(2)}</div>
                       </div>
                       <div class="text-center p-1.5 ${stats.balanceUSD >= 0 ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-rose-50 dark:bg-rose-900/20'} rounded-lg">
                         <div class="text-[10px] ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${isAr ? 'الرصيد' : 'Balance'}</div>
-                        <div class="font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
+                        <div class="customer-money-cell font-bold ${stats.balanceUSD >= 0 ? 'text-blue-600' : 'text-rose-600'}">${stats.balanceUSD >= 0 ? '+' : ''}$${stats.balanceUSD.toFixed(2)}</div>
                       </div>
                     </div>
                   </div>
@@ -17977,8 +18018,8 @@ function renderCustomersView() {
       <div class="grid ${canSeeCustomerBalances ? 'grid-cols-2 sm:grid-cols-3 gap-2 md:gap-6' : 'grid-cols-1 gap-6'}">
         ${renderStatCard(isAr ? 'إجمالي العملاء' : 'Total Customers', allCustomers.length, 'users', 'from-indigo-500 to-purple-600')}
         ${canSeeCustomerBalances ? `
-        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', totalDebts.toFixed(0) + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
-        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', totalRevenue.toFixed(0) + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
+        ${renderStatCard(isAr ? 'الديون المستحقة' : 'Outstanding Debts', Math.round(totalDebts).toLocaleString('en-US') + ' LYD', 'alert-circle', 'from-rose-500 to-pink-600')}
+        <div class="col-span-2 sm:col-span-1">${renderStatCard(isAr ? 'إجمالي الإيرادات (الوصولات)' : 'Lifetime Revenue (Receipts)', Math.round(totalRevenue).toLocaleString('en-US') + ' LYD', 'dollar-sign', 'from-emerald-500 to-teal-600')}</div>
         ` : ''}
       </div>
 
@@ -22487,8 +22528,8 @@ function renderServicesHub() {
         <i data-lucide="${hubEsc(service.icon || 'box')}" class="hub-tile-watermark" aria-hidden="true"></i>
         <span class="relative block">
           ${hubServiceIcon(service)}
-          <span class="mt-3 block truncate text-sm font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? service.nameAr : service.name)}</span>
-          <span class="block truncate text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2.5">${hubEsc(isRTL ? service.descriptionAr : service.description)}</span>
+          <span class="mt-3 block line-clamp-2 leading-snug text-sm font-bold text-slate-900 dark:text-white">${hubEsc(isRTL ? service.nameAr : service.name)}</span>
+          <span class="block line-clamp-2 text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 mb-2.5">${hubEsc(isRTL ? service.descriptionAr : service.description)}</span>
           <span class="flex flex-wrap items-center gap-1.5">
             ${hubPill(status.label, status.tone)}
             ${service.hasChildren ? hubPill(`${(service.children?.length || 0)} ${hubText('systems', 'أنظمة')}`, 'slate') : ''}
@@ -23441,7 +23482,7 @@ function shellPill(label, tone = 'slate') {
     blue: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
     slate: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
   };
-  return `<span class="shell-pill inline-flex items-center rounded-full px-2.5 py-1 text-[10px] font-bold ${tones[tone] || tones.slate}">${label}</span>`;
+  return `<span class="shell-pill inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-bold ${tones[tone] || tones.slate}">${label}</span>`;
 }
 
 // Same gate the sidebar uses, so the More page and the tab bar never show a
@@ -23604,7 +23645,7 @@ function renderManagerHomeHero(receipts, ads, canViewFinancials) {
   const kpi = (label, value, onclick) => `
     <button type="button" onclick="${onclick}" class="hub-card p-3.5 text-start touch-target">
       <span class="block text-[11px] text-slate-500 dark:text-slate-400">${label}</span>
-      <span class="shell-kpi-value block mt-1 text-lg font-extrabold text-slate-900 dark:text-white" dir="ltr">${value}</span>
+      <span class="shell-kpi-value block mt-1 text-lg font-extrabold text-slate-900 dark:text-white whitespace-nowrap" dir="ltr">${value}</span>
     </button>`;
   return `
     <section class="manager-home-hero workspace-home-overview" data-manager-home-hero>
@@ -30226,7 +30267,7 @@ function showNewReceiptChooser() {
     <div class="glass-panel w-full max-w-lg p-6 rounded-3xl" onclick="event.stopPropagation()">
       <div class="flex justify-between items-start mb-1">
         <h2 class="text-xl font-bold text-slate-800 dark:text-white">${isAr ? 'اختر نوع الوصل' : 'Choose receipt type'}</h2>
-        <button onclick="document.getElementById('new-receipt-chooser')?.remove()" class="text-slate-400 hover:text-slate-600 p-1"><i data-lucide="x" class="w-5 h-5"></i></button>
+        <button onclick="document.getElementById('new-receipt-chooser')?.remove()" class="h-11 w-11 inline-flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <p class="text-xs text-slate-500 mb-5">${isAr ? 'اختر بعناية — الأنواع مختلفة.' : 'Choose carefully — the types are different.'}</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -38608,7 +38649,7 @@ function renderModal() {
               <div class="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2">
                 <div class="flex justify-between items-center">
                   <span class="text-xs font-bold text-slate-600">${isArAd ? 'التفاصيل المالية' : 'Financial Details'}</span>
-                  <button type="button" onclick="addReceiptPaymentSplit()" class="text-xs text-emerald-600 font-medium">${isArAd ? '+ إضافة تقسيم' : '+ Add Split'}</button>
+                  <button type="button" onclick="addReceiptPaymentSplit()" class="min-h-11 inline-flex items-center px-2 text-xs text-emerald-600 font-medium">${isArAd ? '+ إضافة تقسيم' : '+ Add Split'}</button>
                 </div>
                 <div id="receipt-financial-section">
                   ${renderReceiptFinancials(
@@ -39128,10 +39169,10 @@ function renderModal() {
             <div class="px-1">
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 mb-1.5">${isArR ? 'الحالة' : 'Status'}</label>
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5" id="receipt-status-tabs">
-                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
-                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Paid')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${!receiptData.status || receiptData.status === 'Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Paid">${trStatus('Paid')}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Not Paid')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Not Paid' ? 'bg-blue-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Not Paid">${isArR ? 'غير مدفوع' : 'Not Paid'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Canceled')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Canceled' ? 'bg-rose-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Canceled">${isArR ? 'ملغي' : 'Canceled'}</button>
+                <button type="button" onclick="setReceiptStatus(this, 'Lost')" class="receipt-status-btn min-h-11 px-2 sm:px-4 py-2 rounded-lg text-sm font-medium transition-all ${receiptData.status === 'Lost' ? 'bg-slate-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}" data-status="Lost">${isArR ? 'مفقود' : 'Lost'}</button>
               </div>
               <input type="hidden" id="receipt-status" value="${Security.escapeHtml(String(receiptData.status || 'Paid'))}" />
 
@@ -42235,6 +42276,7 @@ function closeModal() {
   // Discard any pending (unsaved) clothes-product/shipment edits
   if (typeof _clothesTempVariants !== 'undefined') _clothesTempVariants = [];
   if (typeof _clothesTempPhoto !== 'undefined') _clothesTempPhoto = null;
+  if (typeof _clothesPhotoDirty !== 'undefined') _clothesPhotoDirty = false;
   if (typeof _clothesPhotoToken === 'number') _clothesPhotoToken++; // invalidate pending photo callback
 
   if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];
@@ -45446,8 +45488,7 @@ async function init() {
   
   // Apply theme immediately (prevents white flash in dark mode)
   applyTheme();
-  document.documentElement.setAttribute('dir', getDir());
-  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
+  applyDocumentLanguage();  // the default language now; again after loadState() restores the saved one
   if (typeof setupPhotoPasteSupport === 'function') setupPhotoPasteSupport();
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
@@ -45536,6 +45577,10 @@ async function init() {
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
+  // loadState() restored the saved language: re-apply <html dir/lang>, or an
+  // Arabic install boots with the shell in RTL but every overlay appended to
+  // <body> (receipt chooser, toasts, dialogs) laid out LTR.
+  applyDocumentLanguage();
 
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // A silent wait reads as a frozen app: after 3 s say that the connection is

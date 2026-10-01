@@ -10,8 +10,7 @@ async function init() {
   
   // Apply theme immediately (prevents white flash in dark mode)
   applyTheme();
-  document.documentElement.setAttribute('dir', getDir());
-  document.documentElement.setAttribute('lang', state.language === 'ar' ? 'ar' : 'en');
+  applyDocumentLanguage();  // the default language now; again after loadState() restores the saved one
   if (typeof setupPhotoPasteSupport === 'function') setupPhotoPasteSupport();
   setupMobileRuntime().catch((error) => {
     console.warn('[MobileRuntime] Setup failed:', error?.message || error);
@@ -100,6 +99,10 @@ async function init() {
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
+  // loadState() restored the saved language: re-apply <html dir/lang>, or an
+  // Arabic install boots with the shell in RTL but every overlay appended to
+  // <body> (receipt chooser, toasts, dialogs) laid out LTR.
+  applyDocumentLanguage();
 
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // A silent wait reads as a frozen app: after 3 s say that the connection is

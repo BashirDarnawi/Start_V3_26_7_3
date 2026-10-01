@@ -158,3 +158,30 @@ def test_backfill_never_changes_closed_period_rows(old_database, monkeypatch):
     monkeypatch.setattr(backfills, "financial_period_is_closed", lambda *_a, **_k: True)
     assert backfills.backfill_covered_settled_receipts() == 0
     assert raw_rows(old_database) == original
+
+
+@pytest.mark.parametrize("include_media", [True, False])
+@pytest.mark.parametrize("delta", [False, True])
+def test_old_product_list_and_detail_share_truth_without_writing(old_database, include_media, delta):
+    # Clothes products store ONE photo string; lean lists drop it and count it,
+    # the detail keeps it, and stored rows (including unshrunk old photos) are
+    # never rewritten by a read.
+    old = {"name": "Old shirt", "costUSD": 3, "priceLYD": 20,
+           "photo": "data:image/png;base64,old-product-photo",
+           "variants": [{"color": "Red", "size": "M", "qty": 4}]}
+    insert(old_database, "clothesProducts", "old_product", old)
+    original = raw_rows(old_database)
+    admin = {"id": "admin", "role": "Admin", "permissions": {}}
+    rows = main.get_collection("clothesProducts", user=admin, include_media=include_media,
+                               updated_since=1 if delta else None)
+    assert len(rows) == 1
+    assert rows[0].data["name"] == "Old shirt"
+    detail = main.get_collection_item("clothesProducts", "old_product", user=admin)
+    assert detail.data["photo"] == old["photo"]
+    if include_media:
+        assert rows[0].data["photo"] == old["photo"]
+    else:
+        assert "photo" not in rows[0].data
+        assert rows[0].data["_photoCount"] == 1
+        assert rows[0].data["_mediaOmitted"] is True
+    assert raw_rows(old_database) == original
