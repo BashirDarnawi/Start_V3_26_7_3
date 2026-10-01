@@ -10330,20 +10330,26 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         if (beforeCreatedAt !== null && beforeId) {
           path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
         }
-        let items;
-        try {
-          items = await apiJson(path, { method: 'GET' }, { timeoutMs });
-        } catch (e) {
-          if (e?.name === 'AbortError') {
-            // A timeout means the page is slow, not broken: one more try with a
-            // doubled budget, instead of three equal attempts that pile up on
-            // the server (the native client cannot cancel the first request).
-            items = await apiJson(path, { method: 'GET' }, { timeoutMs: timeoutMs * 2 });
-          } else {
-            // Transient server/network error: two more attempts, as before.
-            items = await withRetry(() => apiJson(path, { method: 'GET' }, { timeoutMs }), 2, 300);
+        // Same cadence as always (3 attempts, 300 ms then 600 ms apart: a
+        // request is never re-issued immediately, which WebKit reports as a
+        // page error when a navigation is tearing the page down). Two
+        // refinements: a timed-out page is slow, not broken, so the next
+        // attempt gets a doubled budget; a read that navigation cancelled is
+        // not retried at all.
+        let budget = timeoutMs;
+        const items = await withRetry(async () => {
+          try {
+            return await apiJson(path, { method: 'GET' }, { timeoutMs: budget });
+          } catch (e) {
+            if (e?.name === 'AbortError') {
+              let navAborted = false;
+              try { navAborted = (typeof getNavigationSignal === 'function') && !!getNavigationSignal()?.aborted; } catch (_) {}
+              if (navAborted) e.status = 499;           // client went away: withRetry stops here
+              else budget = Math.min(budget * 2, 180000);
+            }
+            throw e;
           }
-        }
+        }, 2, 300);
         if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
 
         if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }
