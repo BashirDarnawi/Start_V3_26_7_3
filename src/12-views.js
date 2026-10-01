@@ -425,19 +425,19 @@ function renderFirstRunSetup() {
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('email')}</label>
-            <input type="email" id="first-email" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
+            <input type="email" id="first-email" dir="ltr" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" maxlength="120" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('password')}</label>
-            <input type="password" id="first-password" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
+            <input type="password" id="first-password" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="first-password-confirm" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
+            <input type="password" id="first-password-confirm" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${isAr ? 'أعد كتابة كلمة المرور' : 'Repeat password'}" minlength="8" />
           </div>
           ${serverSetup ? `<div>
             <label class="block text-sm font-medium mb-2">${isAr ? 'رمز إعداد الخادم' : 'Server Setup Token'}</label>
-            <input type="password" id="first-setup-token" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
+            <input type="password" id="first-setup-token" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="ALBAYAN_SETUP_TOKEN" minlength="16" maxlength="256" autocomplete="off" />
             <p class="mt-1 text-xs text-slate-500">${isAr ? 'أدخل الرمز الذي أضافه مشغل الخادم.' : 'Enter the random token configured by the server operator.'}</p>
           </div>` : ''}
           <button type="submit" class="w-full btn-shine alb-btn-primary text-white font-bold py-3 rounded-xl transition-all">
@@ -1017,7 +1017,7 @@ function renderLogin() {
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('email')}</label>
               <div class="relative">
                 <i data-lucide="mail" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                <input type="email" id="login-email" dir="ltr" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
+                <input type="email" id="login-email" dir="ltr" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="name@company.com" autocomplete="username" />
               </div>
             </div>`;
 
@@ -1034,7 +1034,7 @@ function renderLogin() {
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${t('password')}</label>
               <div class="relative">
                 <i data-lucide="lock" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"></i>
-                <input type="password" id="login-password" dir="ltr" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
+                <input type="password" id="login-password" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full pl-10 pr-4 py-3 glass-input rounded-xl" placeholder="••••••••" autocomplete="current-password" />
               </div>
             </div>
 

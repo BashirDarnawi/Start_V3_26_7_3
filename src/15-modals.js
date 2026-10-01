@@ -1039,14 +1039,14 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'البريد الإلكتروني *' : 'Email Address *'}</label>
-              <input type="email" id="user-email" dir="ltr" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
+              <input type="email" id="user-email" dir="ltr" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" value="${Security.escapeHtml(userData.email || '')}" required class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="john@company.com" />
             </div>
           </div>
           
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? `كلمة المرور ${isEdit ? '(اتركها فارغة للإبقاء عليها)' : '*'}` : `Password ${isEdit ? '(leave blank to keep)' : '*'}`}</label>
-              <input type="password" id="user-password" dir="ltr" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && (!canManageUsersAction('resetPassword') || _targetOutranksEditor(userData, true)) ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
+              <input type="password" id="user-password" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" ${!isEdit ? 'required' : ''} ${isEdit && !isSelfEdit && typeof canManageUsersAction === 'function' && (!canManageUsersAction('resetPassword') || _targetOutranksEditor(userData, true)) ? 'disabled' : ''} class="w-full glass-input px-4 py-2.5 rounded-xl" placeholder="${isEdit ? '••••••••' : (isArU ? 'على الأقل 8 أحرف' : 'Min. 8 characters')}" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-600 dark:text-slate-400 uppercase mb-2">${isArU ? 'الدور *' : 'Role *'}</label>
@@ -2036,11 +2036,11 @@ function renderModal() {
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-                <input type="password" id="pwreset-new" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
+                <input type="password" id="pwreset-new" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" />
               </div>
               <div>
                 <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-                <input type="password" id="pwreset-confirm" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" />
+                <input type="password" id="pwreset-confirm" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" />
               </div>
               <div class="flex space-x-3 pt-2">
                 <button type="button" onclick="passwordResetConfirmServer()" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -2065,7 +2065,7 @@ function renderModal() {
             <div class="space-y-4">
               <div>
                 <label class="block text-sm font-medium mb-2">${t('email')}</label>
-                <input type="email" id="pwreset-email" dir="ltr" value="${Security.escapeHtml(emailVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
+                <input type="email" id="pwreset-email" dir="ltr" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" value="${Security.escapeHtml(emailVal)}" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
               </div>
               <div class="flex space-x-3 pt-2">
                 <button type="button" onclick="passwordResetRequestServer()" class="flex-1 btn-shine bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700">
@@ -2103,7 +2103,7 @@ function renderModal() {
           <div class="space-y-4">
             <div>
               <label class="block text-sm font-medium mb-2">${t('email')}</label>
-              <input type="email" id="pwreset-email" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
+              <input type="email" id="pwreset-email" dir="ltr" lang="en" inputmode="email" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="name@company.com" />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('recoveryKey')}</label>
@@ -2111,11 +2111,11 @@ function renderModal() {
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-              <input type="password" id="pwreset-new" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-new" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div>
               <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-              <input type="password" id="pwreset-confirm" dir="ltr" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" ${hasRecovery ? '' : 'disabled'} />
+              <input type="password" id="pwreset-confirm" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" minlength="8" ${hasRecovery ? '' : 'disabled'} />
             </div>
             <div class="flex space-x-3 pt-2">
               <button type="button" onclick="passwordResetConfirmLocal()" class="flex-1 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700 ${hasRecovery ? '' : 'opacity-50 cursor-not-allowed'}" ${hasRecovery ? '' : 'disabled'}>
@@ -2146,15 +2146,15 @@ function renderModal() {
         <form id="modal-form" class="space-y-4">
           <div>
             <label class="block text-sm font-medium mb-2">${t('currentPassword')}</label>
-            <input type="password" id="cp-current" dir="ltr" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
+            <input type="password" id="cp-current" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('newPassword')}</label>
-            <input type="password" id="cp-new" dir="ltr" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" />
+            <input type="password" id="cp-new" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="${rtl ? 'على الأقل 8 أحرف' : 'Min. 8 characters'}" />
           </div>
           <div>
             <label class="block text-sm font-medium mb-2">${t('confirmPassword')}</label>
-            <input type="password" id="cp-confirm" dir="ltr" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
+            <input type="password" id="cp-confirm" dir="ltr" lang="en" autocapitalize="none" autocorrect="off" spellcheck="false" required minlength="8" class="w-full px-4 py-3 glass-input rounded-xl" placeholder="••••••••" />
           </div>
           <div class="flex space-x-3 pt-2">
             <button type="submit" class="flex-1 btn-shine bg-emerald-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-emerald-700">
