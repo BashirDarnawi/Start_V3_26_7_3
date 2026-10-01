@@ -176,6 +176,8 @@ Android versions are set in `android/app/build.gradle`.
   release version should change.
 - First example: `versionCode 1`, `versionName "1.0"`.
 - Next uploaded build example: `versionCode 2`, `versionName "1.0.1"`.
+- `package.json` "version" must carry the same version ("1.0.1"; a two-number
+  version such as 1.1 is "1.1.0" there), or `npm run test:mobile-config` fails.
 
 Never reuse an old `versionCode`, even if its release was rejected or removed.
 

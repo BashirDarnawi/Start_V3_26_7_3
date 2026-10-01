@@ -405,13 +405,9 @@ function isPhoneBrowserHistoryManaged() {
 function pushMobileOverlayHistoryEntry() {
   if (!isPhoneBrowserHistoryManaged()) return;
   try {
-    // Same-URL entry: Back pops it and the popstate handler turns the pop
-    // into "close the top overlay". albayanModal is explicitly cleared so
-    // closeModal() never mistakes a sentinel for a tracked-modal entry;
-    // underAlbayanModal remembers that the dialog's own ?modal entry sits
-    // directly beneath this sentinel (overlay opened late over a tracked
-    // modal — e.g. the duplicate-serial warning), so closeModal() can
-    // consume BOTH entries when it tears the whole stack down at once.
+    // Same-URL entry: Back pops it into "close the top overlay". albayanModal
+    // is cleared so closeModal() never takes a sentinel for a tracked modal;
+    // underAlbayanModal marks a ?modal entry directly beneath (late overlay).
     window.history.pushState(
       Object.assign({}, window.history.state || {}, {
         overlaySentinel: true,

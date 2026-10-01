@@ -176,6 +176,11 @@ context.getAdPhotoSources = ad => ad.adPhotos || [];
 context.protectedImageUrl = pathname => pathname;
 // The row renderers are the startup half of the Meta UI (the dialogs are the lazy meta-tools.js).
 vm.runInContext(fs.readFileSync(path.join(root, 'src/15d0-meta-ads-core.js'), 'utf8'), context);
+check('lean page avatar: the picture route only when an archived copy exists, else the signed URL', () => {
+  const lean = { id: 'p1', _mediaOmitted: true, _lastModified: 7, metaPagePictureUrl: 'https://scontent.example/pic.jpg' };
+  assert.equal(context.adPagePictureUrl(null, lean), 'https://scontent.example/pic.jpg');
+  assert.equal(context.adPagePictureUrl(null, { ...lean, metaPagePictureArchivedFrom: 'https://scontent.example/pic.jpg' }), '/api/collections/pages/p1/picture?v=7');
+});
 check('real renderer never exposes uploaded private media without viewPhotos', () => {
   photoAllowed = false;
   const ad = { id: 'private', photoCount: 1, adPhotos: ['data:image/png;base64,PRIVATE'] };

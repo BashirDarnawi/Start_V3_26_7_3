@@ -687,13 +687,9 @@ function isPhoneBrowserHistoryManaged() {
 function pushMobileOverlayHistoryEntry() {
   if (!isPhoneBrowserHistoryManaged()) return;
   try {
-    // Same-URL entry: Back pops it and the popstate handler turns the pop
-    // into "close the top overlay". albayanModal is explicitly cleared so
-    // closeModal() never mistakes a sentinel for a tracked-modal entry;
-    // underAlbayanModal remembers that the dialog's own ?modal entry sits
-    // directly beneath this sentinel (overlay opened late over a tracked
-    // modal — e.g. the duplicate-serial warning), so closeModal() can
-    // consume BOTH entries when it tears the whole stack down at once.
+    // Same-URL entry: Back pops it into "close the top overlay". albayanModal
+    // is cleared so closeModal() never takes a sentinel for a tracked modal;
+    // underAlbayanModal marks a ?modal entry directly beneath (late overlay).
     window.history.pushState(
       Object.assign({}, window.history.state || {}, {
         overlaySentinel: true,
@@ -1646,6 +1642,13 @@ async function setupNativeServices() {
         removeNativeAppLock();
       }
       queueNativeReminderSync();
+    });
+    // iOS: the sheet's own resign is ignored above, so a real background behind
+    // an open sheet is recorded here ('pause' never fires for the sheet itself).
+    if (Platform.isIOS) await _addNativeListener(app, 'pause', () => {
+      _nativeBackgroundedAt = Date.now();
+      _nativeWentBackground = true;
+      if (_nativePrefs.biometricEnabled && state?.currentUser) renderNativeAppLock();
     });
     await _addNativeListener(app, 'appRestoredResult', event => {
       if (event?.pluginId !== 'Camera' || event?.methodName !== 'getPhoto' || !event?.data) return;
@@ -2680,14 +2683,10 @@ function initIndexedDB(onLateOpen) {
       resolve(val);
     };
 
-    // Watchdog: if no event ever arrives, continue without IndexedDB.
-    // This outcome is INCONCLUSIVE — the store may hold an intact workspace
-    // that simply could not be read this session — so flag it for init() /
-    // render(), which must not present the workspace as a fresh install.
-    // A connection that arrives AFTER this fires is NOT silently adopted
-    // (that used to flip saveState() into drop-collections mode and let the
-    // next flush overwrite the intact IndexedDB data): see the case split in
-    // request.onsuccess below.
+    // Watchdog: no event ever arrived, continue without IndexedDB. INCONCLUSIVE
+    // (the store may hold an intact workspace): flag it so init()/render() never
+    // present a fresh install, and a late connection is NOT silently adopted
+    // (see the case split in request.onsuccess).
     timer = setTimeout(() => {
       console.warn('IndexedDB open timed out, continuing without it');
       window.__albayanIdbOpenInconclusive = true;
@@ -2746,13 +2745,9 @@ function initIndexedDB(onLateOpen) {
       database.onclose = () => {
         if (db !== database) return; // a newer connection already took over
         db = null;
-        // Recovery runs whether the reopen settles in time (then branch) or
-        // arrives late after its own watchdog (onLateOpen inside onsuccess):
-        // edits made during the db === null window live only in the
-        // localStorage snapshot, so everything must be marked dirty and
-        // re-persisted the moment a connection is adopted — otherwise the
-        // next saveState() would strip the collections from the snapshot
-        // while IndexedDB still holds the pre-close data.
+        // Recovery runs whether the reopen settles in time or late (onLateOpen):
+        // edits made while db === null live only in the localStorage snapshot,
+        // so mark everything dirty and re-persist once a connection is adopted.
         const recover = () => {
           if (typeof markAllCollectionsDirty === 'function') {
             markAllCollectionsDirty();
@@ -9322,15 +9317,16 @@ async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   if (!plugin || typeof plugin.request !== 'function') return fetch(url, opts);
   if (controller.signal.aborted) throw new DOMException('The request was aborted', 'AbortError');
   const abortPromise = new Promise((_, reject) => {
-    controller.signal.addEventListener('abort', () => reject(new DOMException('The request timed out', 'AbortError')), { once: true });
+    // The native task cannot be cancelled and may still commit: 499 stops withRetry from sending the body twice.
+    controller.signal.addEventListener('abort', () => reject(Object.assign(new DOMException('The request timed out', 'AbortError'), { status: 499 })), { once: true });
   });
   const request = plugin.request({
     url,
     method: opts.method,
     headers: opts.headers,
     ...(body !== undefined ? { data: body, dataType: 'json' } : {}),
-    connectTimeout: timeoutMs,
-    readTimeout: timeoutMs,
+    connectTimeout: Math.max(1000, timeoutMs - 1000),
+    readTimeout: Math.max(1000, timeoutMs - 1000),
     responseType: 'text'
   });
   const native = await Promise.race([request, abortPromise]);
@@ -13057,14 +13053,9 @@ async function serverLiveSyncOnce() {
     return { ok: !deliveryFetchFailed };
   }
 
-  // Admin/Employee: each collection owns its cursor. A single shared cursor is
-  // unsafe because requests are not one database snapshot: a newer ad could
-  // otherwise advance past an older receipt update that arrived just after
-  // the receipts request finished.
-  // Do not hammer forbidden/unsubscribed endpoints every three seconds. A
-  // permission or subscription refresh changes this list on the next tick,
-  // whose zero cursor then performs a complete catch-up for the newly granted
-  // collection.
+  // Each collection owns its cursor (requests are not one snapshot: a newer ad
+  // could advance past an older receipt update). Forbidden/unsubscribed
+  // endpoints are skipped; a newly granted collection catches up from zero.
   const deltaCollections = getAuthorizedServerSyncCollections();
   const entitlementBefore = _serverLiveSync.serviceEntitlements || getServerServiceEntitlementSnapshot();
   if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
@@ -13509,14 +13500,10 @@ function startServerLiveSync() {
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
   _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
-  // Seed from the server watermark when we have one (authoritative, skew-free).
-  // Before the first server load this session it is 0, so fall back to the state
-  // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
-  // can only LOWER a clock-skewed estimate) the moment it completes.
-  // Only a COMPLETE full load may seed a non-zero global cursor. If startup
-  // was throttled or even one collection failed, begin at zero so a failed
-  // collection cannot permanently miss changes below another collection's
-  // newer timestamp.
+  // Seed from the server watermark (authoritative, skew-free); serverLoadAllData
+  // re-seeds when it completes. Only a COMPLETE full load may seed a non-zero
+  // cursor: after a throttled start or one failed collection begin at zero so
+  // nothing below another collection's newer timestamp is missed.
   _serverLiveSync.cursor = _serverLiveSync.fullLoadCursorReady
     ? (_serverLiveSync.serverWatermark || 0)
     : 0;
@@ -13535,7 +13522,8 @@ function startServerLiveSync() {
     // 'online'/'visibilitychange' handlers below reset the backoff and fire
     // an immediate catch-up tick, so recovery is never delayed by this.
     if (navigator.onLine === false) return;
-    if (Date.now() < _serverLiveSync.nextAllowedAt) return;
+    const wait = _serverLiveSync.nextAllowedAt - Date.now();
+    if (wait > 0 && wait <= 60000) return; // past the 60 s cap only a clock step: poll now
     serverLiveSyncTick().catch(() => {});
   }, SERVER_API.liveSyncIntervalMs || 3000);
 
@@ -13745,6 +13733,7 @@ async function _activateServerSession(user, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      if (typeof clearLogoutPending === 'function') clearLogoutPending(); // a fresh sign-in outlives an old pending logout
       if (typeof setMobileColdStartBlocked === 'function') setMobileColdStartBlocked(false);
       resetPerUserListFilters();
       // Device-local convenience list for the "choose an account" screen.
@@ -15657,13 +15646,9 @@ function render() {
           // Only swap on a real change (see _lastViewHTML).
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
-            // A background live-sync tick may swap the view while the user is
-            // mid-entry in an unbound field (e.g. wallet transfer amount).
-            // Snapshot dirty fields (value differs from the HTML default) and
-            // restore them after the swap — but only when the new HTML kept
-            // the SAME default attribute, so a render that intentionally emits
-            // a new value=/checked/selected (clear buttons, programmatic
-            // filter resets) always wins and is never fought.
+            // A live-sync tick may swap the view mid-entry: snapshot dirty fields
+            // and restore them only when the new HTML kept the SAME default, so a
+            // render that intentionally emits a new value/checked always wins.
             const _dirtyFields = [];
             viewContainer.querySelectorAll('input[id], textarea[id], select[id]').forEach(el => {
               if (el.type === 'checkbox' || el.type === 'radio') {
@@ -17014,7 +16999,7 @@ function renderSidebar() {
           </div>
           <div class="flex-1 min-w-0">
             <div class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(state.currentUser?.name || 'User')}</div>
-            <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(state.currentUser?.role || 'Employee')}</div>
+            <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(shellRoleLabel(state.currentUser?.role || 'Employee', state.language === 'ar'))}</div>
           </div>
           <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="${state.language === 'ar' ? 'تعديل ملفك الشخصي' : 'Edit Your Profile'}">
             <i data-lucide="settings" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
@@ -17026,7 +17011,7 @@ function renderSidebar() {
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
-            <span>${state.theme}</span>
+            <span>${shellEsc(shellThemeLabel(state.theme, state.language === 'ar'))}</span>
           </button>
           <button onclick="toggleLanguage()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="globe" class="w-4 h-4"></i>
@@ -23511,6 +23496,9 @@ function shellText(en, ar) {
 function shellThemeLabel(theme, isAr) {
   return ({ light: isAr ? 'فاتح' : 'Light', dark: isAr ? 'داكن' : 'Dark', system: isAr ? 'النظام' : 'System' })[theme] || String(theme || '');
 }
+function shellRoleLabel(role, isAr) {
+  return (isAr && { Admin: 'مدير', Employee: 'موظف', Delivery: 'سائق توصيل' }[role]) || String(role || '');
+}
 
 function shellEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
@@ -23660,7 +23648,7 @@ function renderMoreView() {
       <h1 class="text-[26px] font-extrabold tracking-tight text-slate-900 dark:text-white mb-4">${isAr ? 'المزيد' : 'More'}</h1>
       <button type="button" onclick="editUser('${shellEsc(user.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 mb-5 text-start touch-target">
         <span class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white font-bold flex-shrink-0">${shellEsc(shellInitial(user.name))}</span>
-        <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(user.role || '')}</span></span>
+        <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(shellRoleLabel(user.role, isAr))}</span></span>
         <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
       </button>
       <div class="shell-more-grid grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -24372,7 +24360,7 @@ function shellPageRow(page, card, meta = {}) {
 function shellUserRow(user, card, meta = {}) {
   const isAr = state.language === 'ar';
   const id = String(user?.id || '');
-  const roleLabel = isAr ? (({ Admin: 'مدير', Employee: 'موظف', Delivery: 'سائق توصيل' })[user?.role] || user?.role || '') : (user?.role || '');
+  const roleLabel = shellRoleLabel(user?.role, isAr);
   const rolePill = shellPill(shellEsc(roleLabel), isAdminRole(user?.role) ? 'rose' : isDeliveryRole(user?.role) ? 'blue' : 'slate');
   return shellListRow({
     kind: 'users', id, card,
@@ -27492,8 +27480,8 @@ function getReceiptPhotoCount(receipt) {
 function getAdPhotoSources(ad) {
   if (!ad || typeof ad !== 'object') return [];
   const raw = [
-    ...(Array.isArray(ad.adPhotos) ? ad.adPhotos : []),
-    ...(Array.isArray(ad.photos) ? ad.photos : [])
+    ...(Array.isArray(ad.adPhotos) ? ad.adPhotos : (ad.adPhotos ? [ad.adPhotos] : [])),
+    ...(Array.isArray(ad.photos) ? ad.photos : (ad.photos ? [ad.photos] : []))
   ];
   const seen = new Set();
   return raw.reduce((photos, value) => {
@@ -29474,7 +29462,7 @@ async function submitCompanyDebtCoverage() {
       const targetReturned = (response.updatedReceipts || []).some(
         entity => String(entity?.id || '') === dialogState.receiptId
       );
-      if (!targetReturned) throw new Error('The server did not return the updated receipt. Refresh and try again.');
+      if (!targetReturned) throw new Error(_ccvText('The server did not return the updated receipt. Refresh and try again.', 'لم يُرجع الخادم الوصل المحدّث. حدّث وحاول مجدداً.'));
 
       // applyValidatedServerEntityBatch validates the whole batch first, then
       // updates state and renders once. Receipt envelopes deliberately precede
@@ -29484,21 +29472,21 @@ async function submitCompanyDebtCoverage() {
         ...(response.updatedAds || []).map(entity => ({ collection: 'ads', entity }))
       ];
       const applied = applyValidatedServerEntityBatch(entityBatch, 'receiptCompanyCoverage');
-      if (applied.length !== entityBatch.length) throw new Error('The company coverage response was incomplete. Refresh and verify the receipt.');
+      if (applied.length !== entityBatch.length) throw new Error(_ccvText('The company coverage response was incomplete. Refresh and verify the receipt.', 'رد تغطية الشركة غير مكتمل. حدّث وراجع الوصل.'));
 
       closeCompanyDebtCoverageModal({ force: true });
       showNotification(
-        response.replayed ? 'Company coverage confirmed' : 'Company funds applied',
-        `${_companyCoverageMoney(amountMinorUSD / 100)} was recorded as a business expense. The receipt remains Not Paid.`,
+        response.replayed ? _ccvText('Company coverage confirmed', 'تم تأكيد التغطية') : _ccvText('Company funds applied', 'تم تطبيق أموال الشركة'),
+        `${_companyCoverageMoney(amountMinorUSD / 100)} ${_ccvText('was recorded as a business expense. The receipt remains Not Paid.', 'سُجّل كمصروف شركة. يبقى الوصل غير مدفوع.')}`,
         'success'
       );
       return response;
     } catch (error) {
       if (_companyDebtCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
-        ? describe409(error, 'This receipt changed on another device. Refresh and review its current balance.')
-        : (_serverRefusalText(error?.message) || 'Could not apply company funds. Try again.');
-      showNotification('Company coverage failed', message, 'error');
+        ? describe409(error, _ccvText('This receipt changed on another device. Refresh and review its current balance.', 'تغيّر هذا الوصل على جهاز آخر. حدّثه وراجع رصيده الحالي.'))
+        : (_serverRefusalText(error?.message) || _ccvText('Could not apply company funds. Try again.', 'تعذّر تطبيق أموال الشركة. حاول مجدداً.'));
+      showNotification(_ccvText('Company coverage failed', 'فشلت التغطية'), message, 'error');
       if (isVersionConflict409(error)) closeCompanyDebtCoverageModal({ force: true });
       return false;
     } finally {
@@ -42385,13 +42373,9 @@ function closeModal() {
     if (topHistoryEntry && topHistoryEntry.albayanModal) {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
     } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
-      // Phone browsers: an untracked overlay (duplicate-serial warning…)
-      // opened late, so its sentinel sits ON TOP of the dialog's ?modal
-      // entry and closeModal tears both down at once. Consume BOTH entries
-      // (rewriting only the sentinel leaves the buried ?modal entry alive and
-      // a later Back resurrects the dialog); go(-2)'s popstate is bookkeeping,
-      // flagged like consumeOverlayHistoryEntry does. Sentinels are never
-      // pushed on desktop or in the packaged app, so this cannot run there.
+      // Phone browsers: a late overlay's sentinel sits ON TOP of the dialog's
+      // ?modal entry, so consume BOTH (else a later Back resurrects the dialog);
+      // go(-2)'s popstate is bookkeeping. Sentinels never exist on desktop/app.
       _suppressOverlayPopstateUntil = Date.now() + 800;
       try {
         window.history.go(-2);
@@ -43199,7 +43183,7 @@ function adPagePictureUrl(ad, adPage) {
   if (stored.indexOf('data:image/') === 0) return stored;
   // Lean page record (server lists omit the archived picture): the picture
   // route serves it by id, through the native interceptor on the phone.
-  if (adPage && adPage._mediaOmitted === true && adPage.id && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
+  if (adPage && adPage._mediaOmitted === true && adPage.id && String(adPage.metaPagePictureArchivedFrom || '').trim() && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
     return protectedImageUrl(`/api/collections/pages/${encodeURIComponent(String(adPage.id))}/picture?v=${Math.max(0, Number(adPage._lastModified) || 0)}`);
   }
   // Server-synced Facebook Page profile picture: the ad's own copy first
@@ -45664,10 +45648,11 @@ async function init() {
   // A sign-out the server never received (offline): finish it now, and never
   // trust the cached session until it is done.
   let logoutPending = (typeof isLogoutPending === 'function') && isLogoutPending();
+  const hadPendingLogout = logoutPending;
   if (logoutPending && serverOk) {
     if ((await apiLogout()) !== false) { clearLogoutPending(); logoutPending = false; }
   }
-  if (logoutPending && bootProbe) bootProbe.user = null;
+  if (hadPendingLogout && bootProbe) bootProbe.user = null; // that session is dead either way
   // First-ever visit with no prior local workspace (no snapshot, no storage-
   // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
   // network does not strand the user in an empty local workspace. Returning
@@ -45775,7 +45760,7 @@ async function init() {
     try {
       // The boot probe already answered for packaged apps: reuse it instead of
       // a second round trip.
-      me = logoutPending ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
+      me = hadPendingLogout ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
     } catch (error) {
       if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;
@@ -45827,6 +45812,8 @@ async function init() {
       setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
       
       // Render UI immediately with cached data (a missing record or plan reads "loading" until the load settles)
+      // Packaged app: the lock card goes into the DOM in the same task as the first paint.
+      if (packagedMobileBoot && typeof setupNativeServices === 'function') { await setupNativeServices(); if (typeof renderNativeAppLock === 'function') renderNativeAppLock(); }
       _serverLiveSync.startupLoadPending = true;
       render();
       const startupIdentity = getServerSessionIdentity();
@@ -45891,13 +45878,9 @@ async function init() {
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
     await loadCollectionsFromStorage(legacyCollections);
 
-    // The IndexedDB open never settled this boot (watchdog / onblocked): the
-    // store may still hold the full workspace even though this session could
-    // not read it and loaded the collections empty (or from a stale legacy
-    // snapshot). Freeze them so no late-arriving connection can ever flush
-    // these in-memory arrays over the intact stored copies —
-    // markCollectionDirty honors isCollectionCorrupted. A reload with a
-    // healthy open restores everything through the normal path.
+    // The IndexedDB open never settled (watchdog / onblocked): the store may
+    // still hold the full workspace. Freeze the collections so a late connection
+    // can never flush these empty arrays over the intact stored copies.
     if (!db && window.__albayanIdbOpenInconclusive === true &&
         typeof markCollectionCorrupted === 'function') {
       for (const name of PERSISTED_COLLECTIONS) markCollectionCorrupted(name);
@@ -46054,13 +46037,9 @@ async function init() {
     startCloudSync();
   }
 
-  // Auto-backup once per day (local mode, IndexedDB). A phone browser never keeps a
-  // tab alive for 24 continuous hours, so a bare setInterval alone never
-  // fired there — run a due-check at startup, on tab resume AND on the
-  // interval. The newest-backup lookup keeps every trigger idempotent (at
-  // most one backup per AUTO_BACKUP_INTERVAL), and callback-style IDB means
-  // no new awaits before render(). `db` is re-checked per call because the
-  // connection can now drop/reopen mid-session.
+  // Auto-backup once per day (local mode). A phone tab never lives 24 h, so the
+  // due-check runs at startup, on resume AND on the interval; the newest-backup
+  // lookup keeps it idempotent. `db` is re-checked per call (can reopen).
   const runDailyBackupIfDue = () => {
     if (!db || state.serverMode) return;
     try {

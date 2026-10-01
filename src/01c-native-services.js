@@ -799,6 +799,13 @@ async function setupNativeServices() {
       }
       queueNativeReminderSync();
     });
+    // iOS: the sheet's own resign is ignored above, so a real background behind
+    // an open sheet is recorded here ('pause' never fires for the sheet itself).
+    if (Platform.isIOS) await _addNativeListener(app, 'pause', () => {
+      _nativeBackgroundedAt = Date.now();
+      _nativeWentBackground = true;
+      if (_nativePrefs.biometricEnabled && state?.currentUser) renderNativeAppLock();
+    });
     await _addNativeListener(app, 'appRestoredResult', event => {
       if (event?.pluginId !== 'Camera' || event?.methodName !== 'getPhoto' || !event?.data) return;
       let pending = null;

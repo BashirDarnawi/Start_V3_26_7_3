@@ -96,10 +96,11 @@ async function init() {
   // A sign-out the server never received (offline): finish it now, and never
   // trust the cached session until it is done.
   let logoutPending = (typeof isLogoutPending === 'function') && isLogoutPending();
+  const hadPendingLogout = logoutPending;
   if (logoutPending && serverOk) {
     if ((await apiLogout()) !== false) { clearLogoutPending(); logoutPending = false; }
   }
-  if (logoutPending && bootProbe) bootProbe.user = null;
+  if (hadPendingLogout && bootProbe) bootProbe.user = null; // that session is dead either way
   // First-ever visit with no prior local workspace (no snapshot, no storage-
   // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
   // network does not strand the user in an empty local workspace. Returning
@@ -207,7 +208,7 @@ async function init() {
     try {
       // The boot probe already answered for packaged apps: reuse it instead of
       // a second round trip.
-      me = logoutPending ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
+      me = hadPendingLogout ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
     } catch (error) {
       if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;
@@ -259,6 +260,8 @@ async function init() {
       setLoadingStatus(state.language === 'ar' ? 'جاهز!' : 'Ready!');
       
       // Render UI immediately with cached data (a missing record or plan reads "loading" until the load settles)
+      // Packaged app: the lock card goes into the DOM in the same task as the first paint.
+      if (packagedMobileBoot && typeof setupNativeServices === 'function') { await setupNativeServices(); if (typeof renderNativeAppLock === 'function') renderNativeAppLock(); }
       _serverLiveSync.startupLoadPending = true;
       render();
       const startupIdentity = getServerSessionIdentity();
@@ -323,13 +326,9 @@ async function init() {
     // Load huge data collections (IndexedDB-first), migrate legacy localStorage if needed
     await loadCollectionsFromStorage(legacyCollections);
 
-    // The IndexedDB open never settled this boot (watchdog / onblocked): the
-    // store may still hold the full workspace even though this session could
-    // not read it and loaded the collections empty (or from a stale legacy
-    // snapshot). Freeze them so no late-arriving connection can ever flush
-    // these in-memory arrays over the intact stored copies —
-    // markCollectionDirty honors isCollectionCorrupted. A reload with a
-    // healthy open restores everything through the normal path.
+    // The IndexedDB open never settled (watchdog / onblocked): the store may
+    // still hold the full workspace. Freeze the collections so a late connection
+    // can never flush these empty arrays over the intact stored copies.
     if (!db && window.__albayanIdbOpenInconclusive === true &&
         typeof markCollectionCorrupted === 'function') {
       for (const name of PERSISTED_COLLECTIONS) markCollectionCorrupted(name);
@@ -486,13 +485,9 @@ async function init() {
     startCloudSync();
   }
 
-  // Auto-backup once per day (local mode, IndexedDB). A phone browser never keeps a
-  // tab alive for 24 continuous hours, so a bare setInterval alone never
-  // fired there — run a due-check at startup, on tab resume AND on the
-  // interval. The newest-backup lookup keeps every trigger idempotent (at
-  // most one backup per AUTO_BACKUP_INTERVAL), and callback-style IDB means
-  // no new awaits before render(). `db` is re-checked per call because the
-  // connection can now drop/reopen mid-session.
+  // Auto-backup once per day (local mode). A phone tab never lives 24 h, so the
+  // due-check runs at startup, on resume AND on the interval; the newest-backup
+  // lookup keeps it idempotent. `db` is re-checked per call (can reopen).
   const runDailyBackupIfDue = () => {
     if (!db || state.serverMode) return;
     try {

@@ -195,15 +195,16 @@ async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   if (!plugin || typeof plugin.request !== 'function') return fetch(url, opts);
   if (controller.signal.aborted) throw new DOMException('The request was aborted', 'AbortError');
   const abortPromise = new Promise((_, reject) => {
-    controller.signal.addEventListener('abort', () => reject(new DOMException('The request timed out', 'AbortError')), { once: true });
+    // The native task cannot be cancelled and may still commit: 499 stops withRetry from sending the body twice.
+    controller.signal.addEventListener('abort', () => reject(Object.assign(new DOMException('The request timed out', 'AbortError'), { status: 499 })), { once: true });
   });
   const request = plugin.request({
     url,
     method: opts.method,
     headers: opts.headers,
     ...(body !== undefined ? { data: body, dataType: 'json' } : {}),
-    connectTimeout: timeoutMs,
-    readTimeout: timeoutMs,
+    connectTimeout: Math.max(1000, timeoutMs - 1000),
+    readTimeout: Math.max(1000, timeoutMs - 1000),
     responseType: 'text'
   });
   const native = await Promise.race([request, abortPromise]);

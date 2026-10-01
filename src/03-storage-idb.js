@@ -143,14 +143,10 @@ function initIndexedDB(onLateOpen) {
       resolve(val);
     };
 
-    // Watchdog: if no event ever arrives, continue without IndexedDB.
-    // This outcome is INCONCLUSIVE — the store may hold an intact workspace
-    // that simply could not be read this session — so flag it for init() /
-    // render(), which must not present the workspace as a fresh install.
-    // A connection that arrives AFTER this fires is NOT silently adopted
-    // (that used to flip saveState() into drop-collections mode and let the
-    // next flush overwrite the intact IndexedDB data): see the case split in
-    // request.onsuccess below.
+    // Watchdog: no event ever arrived, continue without IndexedDB. INCONCLUSIVE
+    // (the store may hold an intact workspace): flag it so init()/render() never
+    // present a fresh install, and a late connection is NOT silently adopted
+    // (see the case split in request.onsuccess).
     timer = setTimeout(() => {
       console.warn('IndexedDB open timed out, continuing without it');
       window.__albayanIdbOpenInconclusive = true;
@@ -209,13 +205,9 @@ function initIndexedDB(onLateOpen) {
       database.onclose = () => {
         if (db !== database) return; // a newer connection already took over
         db = null;
-        // Recovery runs whether the reopen settles in time (then branch) or
-        // arrives late after its own watchdog (onLateOpen inside onsuccess):
-        // edits made during the db === null window live only in the
-        // localStorage snapshot, so everything must be marked dirty and
-        // re-persisted the moment a connection is adopted — otherwise the
-        // next saveState() would strip the collections from the snapshot
-        // while IndexedDB still holds the pre-close data.
+        // Recovery runs whether the reopen settles in time or late (onLateOpen):
+        // edits made while db === null live only in the localStorage snapshot,
+        // so mark everything dirty and re-persist once a connection is adopted.
         const recover = () => {
           if (typeof markAllCollectionsDirty === 'function') {
             markAllCollectionsDirty();

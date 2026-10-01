@@ -4494,13 +4494,9 @@ function closeModal() {
     if (topHistoryEntry && topHistoryEntry.albayanModal) {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
     } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
-      // Phone browsers: an untracked overlay (duplicate-serial warning…)
-      // opened late, so its sentinel sits ON TOP of the dialog's ?modal
-      // entry and closeModal tears both down at once. Consume BOTH entries
-      // (rewriting only the sentinel leaves the buried ?modal entry alive and
-      // a later Back resurrects the dialog); go(-2)'s popstate is bookkeeping,
-      // flagged like consumeOverlayHistoryEntry does. Sentinels are never
-      // pushed on desktop or in the packaged app, so this cannot run there.
+      // Phone browsers: a late overlay's sentinel sits ON TOP of the dialog's
+      // ?modal entry, so consume BOTH (else a later Back resurrects the dialog);
+      // go(-2)'s popstate is bookkeeping. Sentinels never exist on desktop/app.
       _suppressOverlayPopstateUntil = Date.now() + 800;
       try {
         window.history.go(-2);

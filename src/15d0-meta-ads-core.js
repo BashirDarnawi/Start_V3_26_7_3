@@ -150,7 +150,7 @@ function adPagePictureUrl(ad, adPage) {
   if (stored.indexOf('data:image/') === 0) return stored;
   // Lean page record (server lists omit the archived picture): the picture
   // route serves it by id, through the native interceptor on the phone.
-  if (adPage && adPage._mediaOmitted === true && adPage.id && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
+  if (adPage && adPage._mediaOmitted === true && adPage.id && String(adPage.metaPagePictureArchivedFrom || '').trim() && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
     return protectedImageUrl(`/api/collections/pages/${encodeURIComponent(String(adPage.id))}/picture?v=${Math.max(0, Number(adPage._lastModified) || 0)}`);
   }
   // Server-synced Facebook Page profile picture: the ad's own copy first

@@ -155,6 +155,30 @@ async function main() {
     assert.equal(f.run('_serverLiveSync.nextAllowedAt'), 0);
     assert.deepEqual(badges, ['syncing', 'error', 'syncing', 'synced']);
   });
+  await test('a backwards clock step never suspends polling: a wait past the 60 s cap polls at once', async () => {
+    const f = syncFixture(); let callback = null; let ticks = 0;
+    f.sandbox.setInterval = fn => { callback = fn; return 1; };
+    f.sandbox.serverLiveSyncTick = async () => { ticks++; };
+    f.sandbox.startServerLiveSync();
+    assert.equal(typeof callback, 'function');
+    const base = ticks; // the start itself fires one catch-up tick
+    f.run('_serverLiveSync.nextAllowedAt = Date.now() + 30000'); callback();
+    assert.equal(ticks - base, 0);
+    f.run('_serverLiveSync.nextAllowedAt = Date.now() + 3600000'); callback();
+    assert.equal(ticks - base, 1);
+  });
+  await test('a native write that hits the JS deadline is not re-sent: the abort carries status 499 and the native budget is shorter', async () => {
+    const f = syncFixture(); const requests = [];
+    f.sandbox.DOMException = DOMException;
+    f.run("Platform.detect = () => ({ isCapacitor: true, isIOS: true, isAndroid: false, isWeb: false, isNative: true })");
+    f.sandbox.window.Capacitor = { Plugins: { CapacitorHttp: { request: options => { requests.push(options); return new Promise(() => {}); } } } };
+    const controller = new AbortController();
+    const pending = f.sandbox._nativeAwareFetch('https://app.example/api/x', { method: 'POST', headers: {} }, { a: 1 }, controller, 5000);
+    controller.abort();
+    const error = await pending.then(() => null, e => e);
+    assert.equal(error?.name, 'AbortError'); assert.equal(error?.status, 499);
+    assert.equal(requests.length, 1); assert.equal(requests[0].connectTimeout, 4000); assert.equal(requests[0].readTimeout, 4000);
+  });
   for (const errorStatus of [0, 403, 503]) {
     await test(`stopped delta fan-out launches only 4 of 14 requests and ignores late ${errorStatus || 'successful'} results`, async () => {
       const f = syncFixture(); const pending = deferred(); const calls = [];

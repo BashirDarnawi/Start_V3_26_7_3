@@ -1536,6 +1536,23 @@ check('ads use their original table and phone summary while deliveries retain jo
 // ---------- deep scan 2026-09-18 ----------
 const securitySrc = read('src/02-security.js');
 const controlCenterSrc = read('src/12b-control-center.js');
+
+check('bug-hunt follow-ups: Arabic outcome toasts, translated role/theme labels, no native re-send, lock before first paint, dead session never restored, iOS pause records a real background',
+  !helpers.includes("showNotification('Company coverage failed'") &&
+  helpers.includes("_ccvText('Company coverage failed', 'فشلت التغطية')") &&
+  !views.includes('<span>${state.theme}</span>') &&
+  views.includes("shellThemeLabel(state.theme, state.language === 'ar')") &&
+  views.includes("shellRoleLabel(state.currentUser?.role || 'Employee', state.language === 'ar')") &&
+  managerShell.includes('function shellRoleLabel(role, isAr) {') &&
+  managerShell.includes('${shellEsc(shellRoleLabel(user.role, isAr))}') &&
+  serverApi.includes('{ status: 499 }') && serverApi.includes('connectTimeout: Math.max(1000, timeoutMs - 1000)') &&
+  init.includes('const hadPendingLogout = logoutPending;') && init.includes('if (hadPendingLogout && bootProbe) bootProbe.user = null;') &&
+  init.includes("await setupNativeServices(); if (typeof renderNativeAppLock === 'function') renderNativeAppLock();") &&
+  liveSync.includes("if (typeof clearLogoutPending === 'function') clearLogoutPending();") &&
+  liveSync.includes('if (wait > 0 && wait <= 60000) return;') &&
+  nativeServices.includes("if (Platform.isIOS) await _addNativeListener(app, 'pause', () => {") &&
+  helpers.includes("Array.isArray(ad.adPhotos) ? ad.adPhotos : (ad.adPhotos ? [ad.adPhotos] : [])") &&
+  metaAdsCore.includes("String(adPage.metaPagePictureArchivedFrom || '').trim()"));
 check('phone header names the current view and lists remember their filter-panel choice',
   views.includes('${Security.escapeHtml(String(getWorkspaceViewTitle()))}') &&
   views.includes("const FILTER_PANELS_STORAGE_KEY = 'albayan_filter_panels_v1';") &&

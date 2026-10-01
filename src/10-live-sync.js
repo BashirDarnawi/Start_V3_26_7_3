@@ -617,14 +617,9 @@ async function serverLiveSyncOnce() {
     return { ok: !deliveryFetchFailed };
   }
 
-  // Admin/Employee: each collection owns its cursor. A single shared cursor is
-  // unsafe because requests are not one database snapshot: a newer ad could
-  // otherwise advance past an older receipt update that arrived just after
-  // the receipts request finished.
-  // Do not hammer forbidden/unsubscribed endpoints every three seconds. A
-  // permission or subscription refresh changes this list on the next tick,
-  // whose zero cursor then performs a complete catch-up for the newly granted
-  // collection.
+  // Each collection owns its cursor (requests are not one snapshot: a newer ad
+  // could advance past an older receipt update). Forbidden/unsubscribed
+  // endpoints are skipped; a newly granted collection catches up from zero.
   const deltaCollections = getAuthorizedServerSyncCollections();
   const entitlementBefore = _serverLiveSync.serviceEntitlements || getServerServiceEntitlementSnapshot();
   if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
@@ -1069,14 +1064,10 @@ function startServerLiveSync() {
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
   _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
-  // Seed from the server watermark when we have one (authoritative, skew-free).
-  // Before the first server load this session it is 0, so fall back to the state
-  // estimate for a fast start; serverLoadAllData re-seeds authoritatively (and
-  // can only LOWER a clock-skewed estimate) the moment it completes.
-  // Only a COMPLETE full load may seed a non-zero global cursor. If startup
-  // was throttled or even one collection failed, begin at zero so a failed
-  // collection cannot permanently miss changes below another collection's
-  // newer timestamp.
+  // Seed from the server watermark (authoritative, skew-free); serverLoadAllData
+  // re-seeds when it completes. Only a COMPLETE full load may seed a non-zero
+  // cursor: after a throttled start or one failed collection begin at zero so
+  // nothing below another collection's newer timestamp is missed.
   _serverLiveSync.cursor = _serverLiveSync.fullLoadCursorReady
     ? (_serverLiveSync.serverWatermark || 0)
     : 0;
@@ -1095,7 +1086,8 @@ function startServerLiveSync() {
     // 'online'/'visibilitychange' handlers below reset the backoff and fire
     // an immediate catch-up tick, so recovery is never delayed by this.
     if (navigator.onLine === false) return;
-    if (Date.now() < _serverLiveSync.nextAllowedAt) return;
+    const wait = _serverLiveSync.nextAllowedAt - Date.now();
+    if (wait > 0 && wait <= 60000) return; // past the 60 s cap only a clock step: poll now
     serverLiveSyncTick().catch(() => {});
   }, SERVER_API.liveSyncIntervalMs || 3000);
 
@@ -1305,6 +1297,7 @@ async function _activateServerSession(user, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      if (typeof clearLogoutPending === 'function') clearLogoutPending(); // a fresh sign-in outlives an old pending logout
       if (typeof setMobileColdStartBlocked === 'function') setMobileColdStartBlocked(false);
       resetPerUserListFilters();
       // Device-local convenience list for the "choose an account" screen.

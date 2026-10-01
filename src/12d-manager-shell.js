@@ -11,6 +11,9 @@ function shellText(en, ar) {
 function shellThemeLabel(theme, isAr) {
   return ({ light: isAr ? 'فاتح' : 'Light', dark: isAr ? 'داكن' : 'Dark', system: isAr ? 'النظام' : 'System' })[theme] || String(theme || '');
 }
+function shellRoleLabel(role, isAr) {
+  return (isAr && { Admin: 'مدير', Employee: 'موظف', Delivery: 'سائق توصيل' }[role]) || String(role || '');
+}
 
 function shellEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
@@ -160,7 +163,7 @@ function renderMoreView() {
       <h1 class="text-[26px] font-extrabold tracking-tight text-slate-900 dark:text-white mb-4">${isAr ? 'المزيد' : 'More'}</h1>
       <button type="button" onclick="editUser('${shellEsc(user.id)}')" class="hub-card hub-row w-full flex items-center gap-3 p-3.5 mb-5 text-start touch-target">
         <span class="w-11 h-11 rounded-full alb-mark flex items-center justify-center text-white font-bold flex-shrink-0">${shellEsc(shellInitial(user.name))}</span>
-        <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(user.role || '')}</span></span>
+        <span class="flex-1 min-w-0"><span class="block truncate font-bold text-slate-900 dark:text-white">${shellEsc(user.name || 'User')}</span><span class="block text-xs text-slate-500">${shellEsc(shellRoleLabel(user.role, isAr))}</span></span>
         <i data-lucide="${isAr ? 'chevron-left' : 'chevron-right'}" class="w-4 h-4 text-slate-400"></i>
       </button>
       <div class="shell-more-grid grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -872,7 +875,7 @@ function shellPageRow(page, card, meta = {}) {
 function shellUserRow(user, card, meta = {}) {
   const isAr = state.language === 'ar';
   const id = String(user?.id || '');
-  const roleLabel = isAr ? (({ Admin: 'مدير', Employee: 'موظف', Delivery: 'سائق توصيل' })[user?.role] || user?.role || '') : (user?.role || '');
+  const roleLabel = shellRoleLabel(user?.role, isAr);
   const rolePill = shellPill(shellEsc(roleLabel), isAdminRole(user?.role) ? 'rose' : isDeliveryRole(user?.role) ? 'blue' : 'slate');
   return shellListRow({
     kind: 'users', id, card,

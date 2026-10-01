@@ -148,8 +148,8 @@ def create_ad_media_router(
         seen: set[str] = set()
         for field in ("adPhotos", "photos"):
             values = data.get(field)
-            if not isinstance(values, list):
-                continue
+            # A single string counts as one photo in the lists: serve it too.
+            values = values if isinstance(values, list) else [values]
             for value in values:
                 source = str(value or "").strip()
                 if not source or source in seen:

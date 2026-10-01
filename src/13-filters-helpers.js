@@ -3106,8 +3106,8 @@ function getReceiptPhotoCount(receipt) {
 function getAdPhotoSources(ad) {
   if (!ad || typeof ad !== 'object') return [];
   const raw = [
-    ...(Array.isArray(ad.adPhotos) ? ad.adPhotos : []),
-    ...(Array.isArray(ad.photos) ? ad.photos : [])
+    ...(Array.isArray(ad.adPhotos) ? ad.adPhotos : (ad.adPhotos ? [ad.adPhotos] : [])),
+    ...(Array.isArray(ad.photos) ? ad.photos : (ad.photos ? [ad.photos] : []))
   ];
   const seen = new Set();
   return raw.reduce((photos, value) => {
@@ -5088,7 +5088,7 @@ async function submitCompanyDebtCoverage() {
       const targetReturned = (response.updatedReceipts || []).some(
         entity => String(entity?.id || '') === dialogState.receiptId
       );
-      if (!targetReturned) throw new Error('The server did not return the updated receipt. Refresh and try again.');
+      if (!targetReturned) throw new Error(_ccvText('The server did not return the updated receipt. Refresh and try again.', 'لم يُرجع الخادم الوصل المحدّث. حدّث وحاول مجدداً.'));
 
       // applyValidatedServerEntityBatch validates the whole batch first, then
       // updates state and renders once. Receipt envelopes deliberately precede
@@ -5098,21 +5098,21 @@ async function submitCompanyDebtCoverage() {
         ...(response.updatedAds || []).map(entity => ({ collection: 'ads', entity }))
       ];
       const applied = applyValidatedServerEntityBatch(entityBatch, 'receiptCompanyCoverage');
-      if (applied.length !== entityBatch.length) throw new Error('The company coverage response was incomplete. Refresh and verify the receipt.');
+      if (applied.length !== entityBatch.length) throw new Error(_ccvText('The company coverage response was incomplete. Refresh and verify the receipt.', 'رد تغطية الشركة غير مكتمل. حدّث وراجع الوصل.'));
 
       closeCompanyDebtCoverageModal({ force: true });
       showNotification(
-        response.replayed ? 'Company coverage confirmed' : 'Company funds applied',
-        `${_companyCoverageMoney(amountMinorUSD / 100)} was recorded as a business expense. The receipt remains Not Paid.`,
+        response.replayed ? _ccvText('Company coverage confirmed', 'تم تأكيد التغطية') : _ccvText('Company funds applied', 'تم تطبيق أموال الشركة'),
+        `${_companyCoverageMoney(amountMinorUSD / 100)} ${_ccvText('was recorded as a business expense. The receipt remains Not Paid.', 'سُجّل كمصروف شركة. يبقى الوصل غير مدفوع.')}`,
         'success'
       );
       return response;
     } catch (error) {
       if (_companyDebtCoverageDialogState !== dialogState) return false;
       const message = error?.status === 409
-        ? describe409(error, 'This receipt changed on another device. Refresh and review its current balance.')
-        : (_serverRefusalText(error?.message) || 'Could not apply company funds. Try again.');
-      showNotification('Company coverage failed', message, 'error');
+        ? describe409(error, _ccvText('This receipt changed on another device. Refresh and review its current balance.', 'تغيّر هذا الوصل على جهاز آخر. حدّثه وراجع رصيده الحالي.'))
+        : (_serverRefusalText(error?.message) || _ccvText('Could not apply company funds. Try again.', 'تعذّر تطبيق أموال الشركة. حاول مجدداً.'));
+      showNotification(_ccvText('Company coverage failed', 'فشلت التغطية'), message, 'error');
       if (isVersionConflict409(error)) closeCompanyDebtCoverageModal({ force: true });
       return false;
     } finally {

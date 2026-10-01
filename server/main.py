@@ -8280,6 +8280,7 @@ def _ad_mutation_atomic(
                 can_upload=user_has_permission(actor, "ads", "uploadPhotos"),
                 can_view=user_has_permission(actor, "ads", "viewPhotos"),
             )
+            require_data_url_media(COUNTED_MEDIA_FIELDS.get("ads") or (), clean_request, existing)
             is_refund = body.action == "update" and "refundType" in clean_request
             # A receipt relink is the only other terminal-ad-capable edit. It
             # moves the ad's committed funding onto a different receipt while
@@ -9879,6 +9880,7 @@ def settle_receipt_and_linked_ads(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     updates = drop_hidden_contact_writes("receipts", sanitize_json(body.data or {}) or {}, user_has_permission(user, "customers", "viewContacts"))
+    require_data_url_media(COUNTED_MEDIA_FIELDS.get("receipts") or (), updates, existing_data)
     current_delivery_status = str(existing_data.get("deliveryStatus") or "").strip()
     requested_delivery_status = str(updates.get("deliveryStatus") or "").strip()
     delivery_workflow.refuse_regression(existing_data, updates, str(user.get("role") or "").lower(), active_driver=_active_delivery_user)  # same rules as PATCH
@@ -9982,6 +9984,7 @@ def unsettle_receipt_and_linked_ads(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     updates = drop_hidden_contact_writes("receipts", sanitize_json(body.data or {}) or {}, user_has_permission(user, "customers", "viewContacts"))
+    require_data_url_media(COUNTED_MEDIA_FIELDS.get("receipts") or (), updates, existing_data)
     if "status" in updates and str(updates.get("status") or "") != "Not Paid":
         raise HTTPException(
             status_code=400, detail="Receipt debt conversion status must be Not Paid"

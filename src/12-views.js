@@ -208,13 +208,9 @@ function render() {
           // Only swap on a real change (see _lastViewHTML).
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
-            // A background live-sync tick may swap the view while the user is
-            // mid-entry in an unbound field (e.g. wallet transfer amount).
-            // Snapshot dirty fields (value differs from the HTML default) and
-            // restore them after the swap — but only when the new HTML kept
-            // the SAME default attribute, so a render that intentionally emits
-            // a new value=/checked/selected (clear buttons, programmatic
-            // filter resets) always wins and is never fought.
+            // A live-sync tick may swap the view mid-entry: snapshot dirty fields
+            // and restore them only when the new HTML kept the SAME default, so a
+            // render that intentionally emits a new value/checked always wins.
             const _dirtyFields = [];
             viewContainer.querySelectorAll('input[id], textarea[id], select[id]').forEach(el => {
               if (el.type === 'checkbox' || el.type === 'radio') {
@@ -1565,7 +1561,7 @@ function renderSidebar() {
           </div>
           <div class="flex-1 min-w-0">
             <div class="font-bold text-sm text-slate-800 dark:text-white truncate">${Security.escapeHtml(state.currentUser?.name || 'User')}</div>
-            <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(state.currentUser?.role || 'Employee')}</div>
+            <div class="text-xs text-slate-500 truncate">${Security.escapeHtml(shellRoleLabel(state.currentUser?.role || 'Employee', state.language === 'ar'))}</div>
           </div>
           <button onclick="editUser('${state.currentUser?.id}')" class="p-2 rounded-lg hover:bg-white/50 dark:hover:bg-slate-700/50 transition-colors" title="${state.language === 'ar' ? 'تعديل ملفك الشخصي' : 'Edit Your Profile'}">
             <i data-lucide="settings" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
@@ -1577,7 +1573,7 @@ function renderSidebar() {
         <div class="flex items-center justify-between bg-white/20 dark:bg-slate-800/20 rounded-xl p-2">
           <button onclick="toggleTheme()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>
-            <span>${state.theme}</span>
+            <span>${shellEsc(shellThemeLabel(state.theme, state.language === 'ar'))}</span>
           </button>
           <button onclick="toggleLanguage()" class="flex-1 flex items-center justify-center space-x-2 py-2 rounded-lg text-xs font-bold hover:bg-white/20">
             <i data-lucide="globe" class="w-4 h-4"></i>

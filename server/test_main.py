@@ -775,6 +775,13 @@ class TestPhotoSourcesOnGenericWrites:
                               cookies={"albayan_session": admin_session})
         assert remote.status_code == 400, remote.text
 
+    def test_a_single_string_photo_is_served_like_a_one_item_list(self, admin_session):
+        created = self._post(admin_session, "ads", "photo_src_scalar_ad", {"status": "Active", "adPhotos": self.PNG})
+        assert created.status_code == 200, created.text
+        served = client.get("/api/collections/ads/photo_src_scalar_ad/primary-photo?index=0", cookies={"albayan_session": admin_session})
+        assert served.status_code == 200, served.text
+        assert served.headers["content-type"].startswith("image/png")
+
     def test_an_oversize_photo_is_refused_not_truncated(self, admin_session):
         from server import main as main_module
         huge = "data:image/png;base64," + ("A" * (main_module.MAX_DATA_URL_LENGTH + 64))

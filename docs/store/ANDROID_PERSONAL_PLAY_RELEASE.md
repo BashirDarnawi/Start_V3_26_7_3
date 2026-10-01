@@ -99,7 +99,9 @@ android/app/build/outputs/bundle/release/app-release.aab
 
 Before building, confirm the numbers in `android/app/build.gradle`. The first
 upload can use `versionCode 1` and `versionName "1.0"`. Increment `versionCode`
-before **every later upload to any Play track**.
+before **every later upload to any Play track**. The same version must also be in
+`package.json` "version" ("1.0" there is "1.0.0"; "1.0.1" stays "1.0.1"), or
+`npm run test:mobile-config` fails.
 
 The `.aab` is the Android client. It is not the Docker image. The Docker image
 continues to run the backend on Libyan Spider/Jelastic.
