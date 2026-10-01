@@ -28,5 +28,9 @@
     "LocalNotifications": {
       "sound": "default"
     }
+  },
+  "backgroundColor": "#eef1f7",
+  "ios": {
+    "appendUserAgent": "Albayan/1.0"
   }
 }

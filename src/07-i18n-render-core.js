@@ -241,6 +241,9 @@ function applyTheme() {
   // Keep the used color-scheme in sync with the APP theme so native widgets (selects, date
   // pickers, scrollbars) are not white on dark and Chrome auto-dark does not invert the light theme.
   try { root.style.colorScheme = isDark ? 'dark' : 'light'; } catch (_) {}
+  // The inline script in index.html reads this before script.js loads, so a
+  // dark-theme user never sees a light flash on startup.
+  try { localStorage.setItem('albayan_theme', isDark ? 'dark' : 'light'); } catch (_) {}
 
   // The two media-keyed theme-color metas in index.html track the OS scheme
   // for first paint only. Once the app theme is applied, pin BOTH metas to

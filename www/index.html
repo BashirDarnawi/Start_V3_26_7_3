@@ -66,7 +66,7 @@
          script.js evaluates. IconQueue (src/07-i18n-render-core.js) queues
          and retries until it arrives, and init() is gated on DOMContentLoaded,
          which by spec fires only after deferred scripts have run. -->
-    <script src="assets/lucide.min.js" defer></script>
+    <script src="assets/lucide.min.js" async></script>
 
     <!-- Custom CSS -->
     <link rel="stylesheet" href="style.css">
@@ -93,6 +93,10 @@
          lite). applyPerformanceMode() re-applies the same boolean later, so
          this is idempotent. ES5 on purpose; CSP allows 'unsafe-inline'. -->
     <script>(function(){var full=false;try{full=localStorage.getItem('albayan_perf_mode')==='full'}catch(e){}if(!full)document.body.classList.add('perf-lite')})();</script>
+    <!-- The theme applyTheme() last used (src/07-i18n-render-core.js writes
+         'albayan_theme'): add the dark class now so the loading screen paints
+         in the right colours instead of flashing light first. ES5 on purpose. -->
+    <script>(function(){var t='';try{t=localStorage.getItem('albayan_theme')||''}catch(e){}if(t==='dark'){var r=document.documentElement;r.classList.add('dark');try{r.style.colorScheme='dark'}catch(e){}}})();</script>
 
     <!-- Background Noise Texture -->
     <div class="bg-noise"></div>

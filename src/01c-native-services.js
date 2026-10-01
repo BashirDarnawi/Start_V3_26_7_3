@@ -732,12 +732,16 @@ async function setupNativeServices() {
       return;
     }
 
-    _nativePrefs.biometricEnabled = (await nativeSecureGet('biometric_lock_enabled')) === true;
-    _nativePrefs.remindersEnabled = (await nativeSecureGet('reconciliation_reminders_enabled')) === true;
-    if (typeof hydrateAppLoginPendingFromSecureStorage === 'function') {
-      await hydrateAppLoginPendingFromSecureStorage();
-    }
-    await getNativeBiometricInfo(true);
+    // Four independent native reads: run them together (each bridge call costs
+    // a few ms on a phone, and the login page waits for this block).
+    const [biometricEnabled, remindersEnabled] = await Promise.all([
+      nativeSecureGet('biometric_lock_enabled'),
+      nativeSecureGet('reconciliation_reminders_enabled'),
+      (typeof hydrateAppLoginPendingFromSecureStorage === 'function') ? hydrateAppLoginPendingFromSecureStorage() : Promise.resolve(),
+      getNativeBiometricInfo(true)
+    ]);
+    _nativePrefs.biometricEnabled = biometricEnabled === true;
+    _nativePrefs.remindersEnabled = remindersEnabled === true;
     _nativePrefs.ready = true;
     if (_nativePrefs.biometricEnabled) {
       _nativeAuthenticationRequired = true;

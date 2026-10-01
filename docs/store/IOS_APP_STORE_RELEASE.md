@@ -113,7 +113,9 @@ npx cap open ios
 
 `sync:mobile` regenerates the app's web files inside the Xcode project (they
 are not committed); `verify:mobile` must print "Verified source, root, www,
-Android, and iOS web artifacts." before you continue.
+Android, and iOS web artifacts." before you continue. Xcode itself refuses to
+build when those files are older than the project's (build phase "Web files
+must be current"): the error names the command to run.
 
 In Xcode:
 

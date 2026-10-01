@@ -102,8 +102,28 @@ async function init() {
   const legacyCollections = loadState();
 
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
-  // Detect backend (multi-user internet mode)
-  let serverOk = await apiHealthCheck();
+  // A silent wait reads as a frozen app: after 3 s say that the connection is
+  // slow (the probes below may legitimately take up to 8 s on a weak network).
+  const slowConnectionHint = setTimeout(() => {
+    try {
+      if (loadingScreen && loadingScreen.style.display !== 'none') {
+        setLoadingStatus(state.language === 'ar' ? 'الاتصال بطيء… ما زلنا نحاول' : 'Slow connection… still trying');
+      }
+    } catch (_) {}
+  }, 3000);
+  // Detect backend (multi-user internet mode). A packaged phone app targets a
+  // known server, so it asks /api/auth/me straight away: any definite answer
+  // proves the server is reachable AND settles the session in the same round
+  // trip (one request instead of health -> auth/me -> needs-setup). Only a
+  // network failure falls back to the health probe. Browsers keep the health
+  // probe: for them it decides whether a backend exists at all.
+  const packagedMobileBoot = !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
+  let bootProbe = null;
+  if (packagedMobileBoot && typeof apiAuthMeProbe === 'function') {
+    try { bootProbe = await apiAuthMeProbe(6000); }
+    catch (error) { if (error?.code === 'SERVER_SESSION_CHANGED') { clearTimeout(slowConnectionHint); return; } bootProbe = null; }
+  }
+  let serverOk = bootProbe?.reachable === true ? true : await apiHealthCheck();
   // First-ever visit with no prior local workspace (no snapshot, no storage-
   // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
   // network does not strand the user in an empty local workspace. Returning
@@ -123,6 +143,7 @@ async function init() {
       if (serverOk) break;
     }
   }
+  clearTimeout(slowConnectionHint);
   // Recoverable-failure signal (runtime-only, never persisted): the login /
   // first-run screens can show a "server unreachable — Retry" banner that
   // calls retryServerDetection() instead of silently offering a device-local
@@ -208,7 +229,9 @@ async function init() {
     let authCheckUnavailable = false;
     const authRequestIdentity = getAuthMeIdentity();
     try {
-      me = await apiAuthMe();
+      // The boot probe already answered for packaged apps: reuse it instead of
+      // a second round trip.
+      me = (bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe();
     } catch (error) {
       if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;
@@ -598,6 +621,11 @@ function maybeShowLocalDataDurabilityReminder() {
   });
 })();
 
+// The icon library (lucide, ~400 KB) is loaded `async` in index.html, so
+// DOMContentLoaded no longer waits for it and the first server request starts
+// as soon as the page is parsed; icons render through IconQueue, which
+// retries until the library exists. (The test harness sets readyState to
+// 'loading' on purpose to keep init() from auto-running.)
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
 } else {

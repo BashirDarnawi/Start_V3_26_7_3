@@ -121,7 +121,8 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
-    const resp = await fetch(url, opts);
+    const resp = await _nativeAwareFetch(url, opts, body, controller, effectiveTimeout);
+    try { resp.albayanRequestId = requestId; } catch (_) {}
     // #region agent log
     if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function' && path.includes('/collections/')) {
       window.__albayanDebugEmit('H2', 'script.js:apiFetch:response', 'API response received', {
@@ -155,6 +156,42 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
   } finally {
     clearTimeout(t);
   }
+}
+
+// Packaged apps route requests through Capacitor's native HTTP layer (iOS
+// WKWebView blocks cross-site cookies). Its patched fetch() ignores the
+// AbortSignal and the configured timeouts for POST/PATCH/DELETE (the native
+// task runs with a 600 s default), so a stalled login or save never timed
+// out and never retried. Calling the plugin directly lets the timeout apply
+// and lets the abort timer win the race; the response is wrapped back into a
+// standard Response so every caller stays unchanged. GETs keep the patched
+// fetch, which honours the abort signal already.
+async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
+  const plugin = (typeof Platform !== 'undefined' && Platform.isCapacitor && opts.method !== 'GET')
+    ? (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp)
+    : null;
+  if (!plugin || typeof plugin.request !== 'function') return fetch(url, opts);
+  if (controller.signal.aborted) throw new DOMException('The request was aborted', 'AbortError');
+  const abortPromise = new Promise((_, reject) => {
+    controller.signal.addEventListener('abort', () => reject(new DOMException('The request timed out', 'AbortError')), { once: true });
+  });
+  const request = plugin.request({
+    url,
+    method: opts.method,
+    headers: opts.headers,
+    ...(body !== undefined ? { data: body, dataType: 'json' } : {}),
+    connectTimeout: timeoutMs,
+    readTimeout: timeoutMs,
+    responseType: 'text'
+  });
+  const native = await Promise.race([request, abortPromise]);
+  const status = Number(native?.status) || 0;
+  const raw = native?.data;
+  const text = raw == null ? '' : (typeof raw === 'string' ? raw : JSON.stringify(raw));
+  const headers = new Headers();
+  try { for (const [key, value] of Object.entries(native?.headers || {})) headers.set(key, String(value)); } catch (_) {}
+  const bodyAllowed = !(status === 204 || status === 205 || status === 304 || status < 200);
+  return new Response(bodyAllowed ? text : null, { status: status || 599, headers });
 }
 
 /**
@@ -266,7 +303,11 @@ async function apiJson(path, options = {}, timeout = {}) {
   }
   
   if (!resp.ok) {
-    const msg = apiDetailMessage(data, resp.statusText || 'Request failed');
+    const msg = apiDetailMessage(data, _httpFailureText(resp.status, data, resp.statusText));
+    try {
+      const rid = resp.headers.get('X-Request-ID') || resp.albayanRequestId || '';
+      console.warn(`[apiJson] ${resp.status} ${options.method || 'GET'} ${path} rid=${rid} ${String(text || '').slice(0, 160).replace(/\s+/g, ' ')}`);
+    } catch (_) {}
     // A definitive 401 during an authenticated request means cached business
     // data must not remain visible indefinitely. Login/setup failures and the
     // user's own logout request are intentionally excluded.
@@ -285,6 +326,24 @@ async function apiJson(path, options = {}, timeout = {}) {
     throw err;
   }
   return data;
+}
+
+// The native client reports no status text, so without this every non-JSON
+// failure (a busy server, a Cloudflare page, a proxy error) read as the bare
+// "Request failed". Name the situation and keep the code visible.
+function _httpFailureText(status, data, statusText) {
+  const ar = (typeof state !== 'undefined' && state.language === 'ar');
+  const looksLikeHtml = typeof data === 'string' && /<html|<!doctype/i.test(data);
+  if (status === 502 || status === 503 || status === 504 || (status >= 520 && status <= 524)) {
+    return ar ? `الخادم مشغول أو يُعاد تشغيله (HTTP ${status}). حاول مجدداً بعد لحظات.`
+              : `The server is busy or restarting (HTTP ${status}). Try again in a moment.`;
+  }
+  if (status === 403 && looksLikeHtml) {
+    return ar ? `تم إيقاف الطلب قبل وصوله إلى الخادم (HTTP 403، حماية الشبكة).`
+              : `The request was blocked before reaching the server (HTTP 403, network protection).`;
+  }
+  if (statusText) return `${statusText} (HTTP ${status})`;
+  return ar ? `فشل الطلب (HTTP ${status})` : `Request failed (HTTP ${status})`;
 }
 
 async function apiHealthCheck() {
@@ -352,6 +411,28 @@ async function apiAuthMe() {
   finally { if (_sessionRequest === request) _sessionRequest = null; }
 }
 
+// Packaged phone apps target a known server, so one bounded round trip can
+// prove reachability AND settle the session: 200 = signed in, 401 (or any
+// other definite answer) = reachable but signed out, a network failure or a
+// 5xx = not proven (the caller falls back to the health probe). No retries:
+// the cold start must stay bounded on a dead network.
+async function apiAuthMeProbe(timeoutMs = 6000) {
+  const identity = getAuthMeIdentity();
+  try {
+    const user = await apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs });
+    if (user) {
+      _sessionCache = { user, timestamp: Date.now(), cacheDurationMs: 10000, identity };
+      rememberServerHasUsers();
+    }
+    return { reachable: true, user: user || null };
+  } catch (e) {
+    if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
+    const status = Number(e?.status) || 0;
+    if (status === 401 || (status >= 400 && status < 500 && status !== 408)) return { reachable: true, user: null };
+    return { reachable: false, user: null };
+  }
+}
+
 async function _loadAuthMeForIdentity(identity) {
   const assertCurrent = () => {
     if (getAuthMeIdentity() !== identity) throw makeSessionChangedError();
@@ -372,6 +453,7 @@ async function _loadAuthMeForIdentity(identity) {
     if (user) {
       if (state.currentUser?.id && String(user.id || '') !== String(state.currentUser.id)) throw makeSessionChangedError();
       _sessionCache = { user, timestamp: Date.now(), cacheDurationMs: 10000, identity };
+      rememberServerHasUsers();
     }
     
     return user;
@@ -413,6 +495,7 @@ async function apiLogin(email, password, rememberMe = false) {
   const payload = { email, password, rememberMe: rememberMe === true };
   try {
   const res = await apiJson('/api/auth/login', { method: 'POST', body: payload }, { timeoutMs: 12000 });
+  if (res?.user) rememberServerHasUsers();
   return res?.user || null;
   } catch (e) {
     // If rate limited, show a user-friendly message
@@ -426,7 +509,14 @@ async function apiLogin(email, password, rememberMe = false) {
 
 // Does the server still need its first admin? Used so the login page can offer
 // setup up-front instead of only after a failed login. Never throws.
+const SERVER_HAS_USERS_KEY = 'albayan_server_has_users';
+function rememberServerHasUsers() {
+  try { localStorage.setItem(SERVER_HAS_USERS_KEY, '1'); } catch (_) {}
+}
 async function apiNeedsSetup() {
+  // Any earlier successful sign-in proved the server has users: that never
+  // reverts, so skip the round trip on every later start.
+  try { if (localStorage.getItem(SERVER_HAS_USERS_KEY) === '1') return { needsSetup: false, setupEnabled: false }; } catch (_) {}
   try {
     const res = await apiJson('/api/auth/needs-setup', { method: 'GET' }, { timeoutMs: 8000 });
     return {
@@ -482,12 +572,15 @@ function makeSessionChangedError() {
 // Collections synchronized through the generic collection API. Keep this one
 // list shared by full loads, per-collection cursors and visibility purges so a
 // newly-added collection cannot accidentally miss one of the safety paths.
+// Order is load order: the office core first, the clothes module (whose
+// products carry inline photos) last, so the workspace is usable before the
+// heaviest lists arrive.
 const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
-  'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings',
   'adCampaignRequests',
   'walletTransactions', 'serviceSubscriptions',
-  'appSettings', 'dollarPurchases'
+  'appSettings', 'dollarPurchases',
+  'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'
 ]);
 
 // Receipt/ad photos are large base64 strings. Normal lists and live deltas
@@ -955,6 +1048,9 @@ function getCollectionTimeout(collection) {
     customers: 15000,   // Customers - 15 seconds
     pages: 10000,       // Pages - 10 seconds
     exchangeRateHistory: 8000,  // Small - 8 seconds
+    clothesProducts: 90000,     // Product photos are inline base64 - 90 seconds
+    clothesShipments: 30000,
+    clothesOrders: 20000,
     default: 15000      // Default - 15 seconds
   };
   return timeouts[collection] || timeouts.default;
@@ -1134,15 +1230,20 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         if (beforeCreatedAt !== null && beforeId) {
           path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
         }
-        const items = await withRetry(
-          () => apiJson(
-            path,
-            { method: 'GET' },
-            { timeoutMs }
-          ),
-          2, // 2 retries (3 total attempts) - reduced for faster failure
-          300 // 300ms base delay (faster retry)
-        );
+        let items;
+        try {
+          items = await apiJson(path, { method: 'GET' }, { timeoutMs });
+        } catch (e) {
+          if (e?.name === 'AbortError') {
+            // A timeout means the page is slow, not broken: one more try with a
+            // doubled budget, instead of three equal attempts that pile up on
+            // the server (the native client cannot cancel the first request).
+            items = await apiJson(path, { method: 'GET' }, { timeoutMs: timeoutMs * 2 });
+          } else {
+            // Transient server/network error: two more attempts, as before.
+            items = await withRetry(() => apiJson(path, { method: 'GET' }, { timeoutMs }), 2, 300);
+          }
+        }
         if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
 
         if (!Array.isArray(items) || items.length === 0) { lastPageFull = false; break; }

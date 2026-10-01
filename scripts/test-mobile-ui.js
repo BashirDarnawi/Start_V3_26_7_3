@@ -706,7 +706,11 @@ check('packaged mobile shows a retryable offline/server notice',
 check('packaged mobile cold start gates before auth instead of showing Login',
   init.includes('const blockPackagedMobileColdStart') &&
   init.includes('setMobileColdStartBlocked(true);') &&
-  init.indexOf('if (blockPackagedMobileColdStart)') < init.indexOf('me = await apiAuthMe()') &&
+  init.indexOf('if (blockPackagedMobileColdStart)') < init.indexOf('bootProbe.user : await apiAuthMe()') &&
+  // The packaged app's one-round-trip probe is the reachability check; a network
+  // failure must still fall back to the health probe (and therefore to the gate).
+  init.includes("let serverOk = bootProbe?.reachable === true ? true : await apiHealthCheck();") &&
+  serverApi.includes('async function apiAuthMeProbe(timeoutMs = 6000) {') &&
   mobileRuntime.includes('id="mobile-connection-gate"') &&
   mobileRuntime.includes('You have not been signed out.') &&
   mobileRuntime.includes('window.location.reload()'));
@@ -1585,7 +1589,8 @@ check('server-mode shipments move stock through the transactional route and vali
   clothes.includes("function clothesLocalDate(value) {") &&
   !clothes.includes("String(s.receivedAt).split('T')[0]") &&
   serverApi.includes('function apiDetailMessage(data, fallback) {') &&
-  serverApi.includes("const msg = apiDetailMessage(data, resp.statusText || 'Request failed');") &&
+  serverApi.includes("const msg = apiDetailMessage(data, _httpFailureText(resp.status, data, resp.statusText));") &&
+  serverApi.includes("function _httpFailureText(status, data, statusText) {") &&
   serverApi.includes("headers: { 'Content-Type': 'application/json', 'X-Request-ID': newRequestId(), ") &&
   serverApi.includes("if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0;"));
 
