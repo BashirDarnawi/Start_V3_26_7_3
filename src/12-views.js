@@ -1442,7 +1442,7 @@ function renderSidebar() {
   };
 
   const allNavItems = [
-    { id: 'control-center', icon: 'gauge', label: 'Control Center' },
+    { id: 'control-center', icon: 'gauge', label: 'controlCenter' },
     { id: 'analytics', icon: 'layout-dashboard', label: 'analytics' },
     { id: 'customers', icon: 'smile', label: 'customers' },
     { id: 'receipts', icon: 'receipt', label: 'receipts' },

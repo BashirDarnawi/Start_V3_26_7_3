@@ -231,7 +231,7 @@ function renderServicesHub() {
         </div>
         <div class="flex-1 min-w-0">
           <div class="text-xs text-slate-500 dark:text-slate-400">${hubGreeting()}</div>
-          <div class="truncate text-base font-bold text-slate-900 dark:text-white">${isRTL ? `مرحباً، ${hubEsc(userName)}!` : `Welcome, ${hubEsc(userName)}!`}</div>
+          <div class="line-clamp-2 leading-tight text-base font-bold text-slate-900 dark:text-white">${isRTL ? `مرحباً، ${hubEsc(userName)}!` : `Welcome, ${hubEsc(userName)}!`}</div>
         </div>
         <div class="flex items-center gap-1.5">
           <button type="button" onclick="toggleTheme()" class="touch-target h-10 w-10 rounded-full bg-white/80 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 flex items-center justify-center text-slate-700 dark:text-slate-200" aria-label="${hubText('Theme', 'المظهر')}"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i></button>

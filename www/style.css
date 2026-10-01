@@ -3874,6 +3874,21 @@ body.platform-android .studio-v2-header { top: var(--app-safe-top); }
 /* The studio header carried the inset a second time on top of the body padding. */
 body.platform-ios .studio-v2-header,
 body.platform-android .studio-v2-header { padding-top: 8px; }
+/* While stuck at the inset, the band above the header (under the clock and
+   battery) would show the scrolling list: paint it with the header's own
+   background so the status bar always sits on chrome. */
+body.platform-ios .mobile-app-header, body.platform-android .mobile-app-header,
+body.platform-ios .studio-v2-header, body.platform-android .studio-v2-header { overflow: visible; }
+body.platform-ios .mobile-app-header::before, body.platform-android .mobile-app-header::before,
+body.platform-ios .studio-v2-header::before, body.platform-android .studio-v2-header::before {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: var(--app-safe-top);
+  background: inherit;
+}
+/* Add Ad form: the page search, days and link fields were 38 px tall and under
+   16 px (iOS zooms into any smaller field on focus). */
+@media (max-width: 900px) {
+  #ad-page-search, #ad-days, .ad-link-input { min-height: 44px; font-size: 16px; }
+}
 /* A page title never breaks inside a word; below 360 px the actions go under it. */
 .ui-workspace .page-header h1 { overflow-wrap: normal; hyphens: manual; }
 @media (max-width: 359px) {

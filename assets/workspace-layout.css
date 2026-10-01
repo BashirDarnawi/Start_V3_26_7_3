@@ -77,3 +77,11 @@
   .workspace-record .shell-summary-disclosure { justify-self: end; }
   .workspace-record-facts { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Phone text floor: nothing a user must read is smaller than 11 px (money notes,
+   status pills, counters); navigation labels 12 px. Loaded after tailwind.css,
+   so these utility overrides win by order alone. */
+@media (max-width: 900px) {
+  .text-\[9px\], .text-\[10px\] { font-size: 11px; }
+  .mobile-bottom-nav-item, .studio-v2-nav-item { font-size: 12px; }
+}
