@@ -64,8 +64,11 @@ for (const lazyOut of Object.keys(manifest.lazy || {})) {
 // bundle in the Dockerfile made /studio.js 500 on the live site while every
 // local test stayed green (release claude-fixes-20260802T122742Z).
 const dockerfile = fs.readFileSync(path.join(ROOT, 'server', 'Dockerfile'), 'utf8');
+// The same goes for every other file main.py serves from the project root:
+// the shell, the stylesheet, the public pages and the assets folder.
 const bundleOutputs = ['script.js', ...Object.keys(manifest.lazy || {})];
-for (const bundle of bundleOutputs) {
+const servedStaticFiles = ['index.html', 'style.css', 'privacy.html', 'delete-account.html', 'assets'];
+for (const bundle of [...bundleOutputs, ...servedStaticFiles]) {
   const copied = dockerfile.split(/\r?\n/).some(line =>
     /^\s*COPY\s/.test(line) && line.split(/\s+/).includes(bundle));
   if (!copied) {

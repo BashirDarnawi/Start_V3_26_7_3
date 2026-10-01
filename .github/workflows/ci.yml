@@ -55,7 +55,7 @@ jobs:
       - name: Native bundled files must also match the reviewed source
         run: npm run verify:mobile
       - name: Generated files must be committed
-        run: git diff --exit-code -- script.js studio.js clothes.js assets/tailwind.css www
+        run: git diff --exit-code -- script.js studio.js studio-staff.js studio-pages.js clothes.js admin-tools.js meta-tools.js assets/tailwind.css www
       - name: Dependencies must have no known high-severity vulnerability
         run: npm audit --audit-level=high
 

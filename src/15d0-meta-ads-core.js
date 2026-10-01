@@ -1,14 +1,9 @@
-// ==========================================
-// META ADS — SECURE READ-ONLY SYNCHRONIZATION
-// ==========================================
-// Albayan remains the source of truth for customers, receipts, payments,
-// exchange rates, photos and notes. Meta facts live only in server-controlled
-// meta* fields and are displayed beside (never over) Albayan's own values.
-//
-// STARTUP half: what the ad rows, cards and headers draw, the dialog state
-// that sign-out resets, and the two dialog closers. The Meta Sync and Meta
-// Insights dialogs themselves ship in the lazy meta-tools.js bundle
-// (src/15d-meta-ads.js), opened through 15d1-meta-tools-loader.js.
+// META ADS — SECURE READ-ONLY SYNCHRONIZATION. Albayan stays the source of
+// truth for customers, receipts, payments, rates, photos and notes; Meta facts
+// live only in server-controlled meta* fields, shown beside Albayan's values.
+// STARTUP half: what ad rows/cards/headers draw, the dialog state sign-out
+// resets, the two closers. The dialogs ship in lazy meta-tools.js
+// (src/15d-meta-ads.js) via 15d1-meta-tools-loader.js.
 
 const metaAdsUi = {
   open: false, // the renderer draws only while open: a late load never reopens a closed dialog
@@ -153,6 +148,11 @@ function adPagePictureUrl(ad, adPage) {
   // entirely once the Meta link is gone), the stored data URL does not.
   const stored = String(adPage?.metaPagePictureData || ad?.metaPagePictureData || '').trim();
   if (stored.indexOf('data:image/') === 0) return stored;
+  // Lean page record (server lists omit the archived picture): the picture
+  // route serves it by id, through the native interceptor on the phone.
+  if (adPage && adPage._mediaOmitted === true && adPage.id && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
+    return protectedImageUrl(`/api/collections/pages/${encodeURIComponent(String(adPage.id))}/picture?v=${Math.max(0, Number(adPage._lastModified) || 0)}`);
+  }
   // Server-synced Facebook Page profile picture: the ad's own copy first
   // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
   // the linked page record's copy for ads the sync has not revisited yet.
@@ -224,7 +224,7 @@ function renderAdPrimaryThumbnail(ad, isAr) {
   let credentialAttribute = '';
   if (isServerModeEnabled()) {
     const version = Math.max(0, Number(ad?._lastModified) || 0);
-    source = `${getServerBaseUrl()}/api/collections/ads/${encodeURIComponent(String(ad.id || ''))}/primary-photo?index=${primaryIndex}&v=${version}`;
+    source = protectedImageUrl(`/api/collections/ads/${encodeURIComponent(String(ad.id || ''))}/primary-photo?index=${primaryIndex}&v=${version}`);
     // Required by the packaged iOS/Android app because its WebView origin is
     // different from albayanhub.com and the protected image uses the session.
     if (getServerBaseUrl()) credentialAttribute = ' crossorigin="use-credentials"';

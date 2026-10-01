@@ -62,40 +62,6 @@ async function init() {
     }
   } catch (_) {}
 
-  // #region agent log
-  if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
-  try {
-    const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
-    if (!dbg.escapeHtmlSelfTestLogged) {
-      dbg.escapeHtmlSelfTestLogged = true;
-      const q = Security.escapeHtml('"');
-      const a = Security.escapeHtml("'");
-      const quoteEscaped = q.includes('&quot;') || q.includes('&#34;');
-      const aposEscaped = a.includes('&#39;') || a.includes('&apos;');
-      const rawQuoteLeft = q.includes('"');
-      const rawAposLeft = a.includes("'");
-        window.__albayanDebugEmit('H1', 'script.js:init', 'escapeHtml self-test', {quoteEscaped,aposEscaped,rawQuoteLeft,rawAposLeft});
-    }
-  } catch (_) {}
-  }
-  // #endregion
-
-  // #region agent log
-  if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
-  try {
-    const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
-    if (!dbg.envLogged) {
-      dbg.envLogged = true;
-        window.__albayanDebugEmit('H-ENV', 'script.js:init', 'runtime environment', {
-            protocol: String(window.location && window.location.protocol || ''),
-            origin: String(window.location && window.location.origin || ''),
-            host: String(window.location && window.location.host || ''),
-            pathname: String(window.location && window.location.pathname || ''),
-        });
-    }
-  } catch (_) {}
-  }
-  // #endregion
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
@@ -127,6 +93,13 @@ async function init() {
     catch (error) { if (error?.code === 'SERVER_SESSION_CHANGED') { clearTimeout(slowConnectionHint); return; } bootProbe = null; }
   }
   let serverOk = bootProbe?.reachable === true ? true : await apiHealthCheck();
+  // A sign-out the server never received (offline): finish it now, and never
+  // trust the cached session until it is done.
+  let logoutPending = (typeof isLogoutPending === 'function') && isLogoutPending();
+  if (logoutPending && serverOk) {
+    if ((await apiLogout()) !== false) { clearLogoutPending(); logoutPending = false; }
+  }
+  if (logoutPending && bootProbe) bootProbe.user = null;
   // First-ever visit with no prior local workspace (no snapshot, no storage-
   // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
   // network does not strand the user in an empty local workspace. Returning
@@ -234,7 +207,7 @@ async function init() {
     try {
       // The boot probe already answered for packaged apps: reuse it instead of
       // a second round trip.
-      me = (bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe();
+      me = logoutPending ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
     } catch (error) {
       if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;

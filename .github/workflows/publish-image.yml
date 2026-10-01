@@ -194,6 +194,12 @@ jobs:
           grep -q '"${{ needs.release.outputs.release }}"' "$RUNNER_TEMP/ready.json" \
             || { echo "::error::The image does not report release ${{ needs.release.outputs.release }}"; cat "$RUNNER_TEMP/ready.json"; exit 1; }
           test "$(docker exec albayan-release-check id -u)" != "0"
+          # Every page and bundle the browser asks for must answer from this
+          # image (a bundle missing from the Dockerfile once 500ed on the live site).
+          for route in / /script.js /studio.js /studio-staff.js /studio-pages.js /clothes.js /admin-tools.js /meta-tools.js /style.css /privacy /delete-account; do
+            curl --fail --silent --output /dev/null "http://127.0.0.1:18080$route" \
+              || { echo "::error::The image does not serve $route"; docker logs albayan-release-check | tail -40; exit 1; }
+          done
       - name: Python packages inside the image must have no known vulnerability today
         shell: bash
         run: |

@@ -114,6 +114,41 @@ android.applicationVariants.configureEach { variant ->
     }
 }
 
+// Mirror of the iOS "Web files must be current" build phase: the web files
+// bundled into the APK must equal the project's www/ (npm run sync:mobile), or
+// a stale copy ships while every test stays green. Runs for every variant.
+android.applicationVariants.configureEach { variant ->
+    def webAssetsTask = tasks.register("verify${variant.name.capitalize()}WebAssets") {
+        group = 'verification'
+        description = "Verify the bundled web files match www/ before building the ${variant.name} variant"
+        def wwwDir = rootProject.file('../www')
+        def publicDir = project.file('src/main/assets/public')
+        doLast {
+            if (!new File(publicDir, 'script.js').exists()) {
+                throw new GradleException(
+                    'Web files are missing from the Android app. In the project folder run: npm run sync:mobile  (then build again).'
+                )
+            }
+            if (!wwwDir.isDirectory()) {
+                return
+            }
+            wwwDir.eachFileRecurse(groovy.io.FileType.FILES) { source ->
+                def relative = wwwDir.toPath().relativize(source.toPath()).toString()
+                def bundled = new File(publicDir, relative)
+                if (!bundled.exists() || !java.util.Arrays.equals(bundled.bytes, source.bytes)) {
+                    throw new GradleException(
+                        "Web file ${relative} inside the Android app is older than the project's. " +
+                        'In the project folder run: npm run sync:mobile  (then build again).'
+                    )
+                }
+            }
+        }
+    }
+    variant.preBuildProvider.configure {
+        dependsOn(webAssetsTask)
+    }
+}
+
 repositories {
     flatDir{
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'

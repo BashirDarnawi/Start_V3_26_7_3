@@ -932,6 +932,7 @@ check('login account chooser renders when saved accounts exist',
 check('remember-me is opt-in and wired into the server login payload',
   views.includes('id="login-remember"') &&
   !views.includes('id="login-remember" checked') &&
+  views.includes("Platform.isCapacitor) ? 'checked' : ''") &&  // the packaged app defaults to the long session; the web stays opt-in
   views.includes("document.getElementById('login-remember')") &&
   liveSync.includes('function handleLogin(email, password, rememberMe)') &&
   liveSync.includes('_handleLoginOnce(email, password, generation, rememberMe === true)') &&
@@ -1595,7 +1596,7 @@ check('server-mode shipments move stock through the transactional route and vali
   serverApi.includes("if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0;"));
 
 check('clothes product photos stay out of the product list and hydrate before edit',
-  serverApi.includes("new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts'])") &&
+  serverApi.includes("new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts', 'pages'])") &&
   serverApi.includes("clothesProducts: Object.freeze(['photo'])") &&
   clothes.includes("ensureEntityMediaLoaded('clothesProducts', id)") &&
   clothes.includes("!isEntityMediaHydrated('clothesProducts', product)") &&

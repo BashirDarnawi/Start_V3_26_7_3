@@ -742,3 +742,62 @@ class TestMobileAppOrigins:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+
+class TestPhotoSourcesOnGenericWrites:
+    """Photo fields accept only image data URLs; oversize photos are refused, never cut."""
+
+    PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+    def _post(self, admin_session, collection, entity_id, data):
+        return client.post(f"/api/collections/{collection}", json={"id": entity_id, "data": data},
+                           cookies={"albayan_session": admin_session})
+
+    def test_remote_and_scripted_sources_are_refused_on_create(self, admin_session):
+        for bad in ("https://attacker.example/pixel.png", "data:image/svg+xml;base64,PHN2Zy8+", "data:image/png;base64,%%%"):
+            response = self._post(admin_session, "ads", "photo_src_bad_ad", {"status": "Active", "adPhotos": [bad]})
+            assert response.status_code == 400, response.text
+            response = self._post(admin_session, "receipts", "photo_src_bad_receipt", {"customerName": "X", "photos": [bad]})
+            assert response.status_code == 400, response.text
+            response = self._post(admin_session, "clothesProducts", "photo_src_bad_product", {"name": "P", "photo": bad, "variants": []})
+            assert response.status_code == 400, response.text
+
+    def test_data_urls_pass_and_an_unchanged_legacy_value_is_still_accepted(self, admin_session):
+        created = self._post(admin_session, "ads", "photo_src_ok_ad", {"status": "Active", "adPhotos": [self.PNG]})
+        assert created.status_code == 200, created.text
+        same = client.patch("/api/collections/ads/photo_src_ok_ad",
+                            json={"data": {"adPhotos": [self.PNG], "status": "Paused"}, "expectedLastModified": created.json()["lastModified"]},
+                            cookies={"albayan_session": admin_session})
+        assert same.status_code == 200, same.text
+        remote = client.patch("/api/collections/ads/photo_src_ok_ad",
+                              json={"data": {"adPhotos": ["https://attacker.example/x.png"]}, "expectedLastModified": same.json()["lastModified"]},
+                              cookies={"albayan_session": admin_session})
+        assert remote.status_code == 400, remote.text
+
+    def test_an_oversize_photo_is_refused_not_truncated(self, admin_session):
+        from server import main as main_module
+        huge = "data:image/png;base64," + ("A" * (main_module.MAX_DATA_URL_LENGTH + 64))
+        response = self._post(admin_session, "ads", "photo_src_huge_ad", {"status": "Active", "adPhotos": [huge]})
+        assert response.status_code in (413, 422), response.text
+        assert client.get("/api/collections/ads/photo_src_huge_ad", cookies={"albayan_session": admin_session}).status_code == 404
+
+
+class TestPagePictureRoute:
+    def test_page_picture_is_served_by_id_and_404s_without_one(self, admin_session):
+        png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        with db_conn() as conn:
+            for page_id, data in (("page_pic_yes", {"name": "Pic page", "metaPagePictureData": png}), ("page_pic_no", {"name": "Bare page"})):
+                conn.execute(text("DELETE FROM entities WHERE type='pages' AND id=:id"), {"id": page_id})
+                conn.execute(text(
+                    "INSERT INTO entities(type,id,data_json,deleted,created_at,created_by,last_modified) "
+                    "VALUES('pages',:id,:data,false,1,'test',1)"), {"id": page_id, "data": json_dumps(data)})
+        served = client.get("/api/collections/pages/page_pic_yes/picture", cookies={"albayan_session": admin_session})
+        assert served.status_code == 200, served.text
+        assert served.headers["content-type"].startswith("image/png")
+        assert served.headers["cache-control"] == "private, max-age=300"
+        assert client.get("/api/collections/pages/page_pic_no/picture", cookies={"albayan_session": admin_session}).status_code == 404
+        assert client.get("/api/collections/pages/page_pic_yes/picture").status_code == 401
+        lean = client.get("/api/collections/pages?include_media=false", cookies={"albayan_session": admin_session})
+        row = next(r for r in lean.json() if r["id"] == "page_pic_yes")
+        assert "metaPagePictureData" not in row["data"] and row["data"]["_mediaOmitted"] is True

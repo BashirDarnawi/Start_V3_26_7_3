@@ -897,6 +897,8 @@ async function serverLiveSyncTick() {
   if (ok) {
     _serverLiveSync.failStreak = 0;
     _serverLiveSync.nextAllowedAt = 0;
+    // A successful poll proves the server is reachable: clear a notice left by a timed-out probe.
+    try { if (typeof updateMobileServerReachability === 'function') updateMobileServerReachability(true); } catch (_) {}
   } else {
     _serverLiveSync.failStreak = Math.min((_serverLiveSync.failStreak || 0) + 1, 5);
     _serverLiveSync.nextAllowedAt = Date.now() +
@@ -1303,6 +1305,7 @@ async function _activateServerSession(user, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      if (typeof setMobileColdStartBlocked === 'function') setMobileColdStartBlocked(false);
       resetPerUserListFilters();
       // Device-local convenience list for the "choose an account" screen.
       rememberLoginAccount(user);
@@ -1812,6 +1815,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
     state.serverLogs = [];
   }
   state.currentUser = null;
+  if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
   if (serverMode) activateAnonymousServerCollectionStorage();
   state.currentView = 'analytics';
   saveState();
@@ -1839,7 +1843,7 @@ async function _handleLogoutOnce() {
     let pendingUpdates = null;
     try { pendingUpdates = flushPendingUserUpdates(); } catch (_) {}
     await waitForPromiseBounded(pendingUpdates, 5000);
-    if (serverMode) await apiLogout(); // apiLogout has its own bounded timeout
+    const serverSignedOut = !serverMode || (await apiLogout()) !== false; // apiLogout has its own bounded timeout
 
     advanceServerSessionEpoch();
     cancelPendingRequests();
@@ -1847,12 +1851,24 @@ async function _handleLogoutOnce() {
     SessionManager.destroySession();
     resetAuthenticatedServerCaches();
     if (serverMode) await wipeAuthenticatedServerDataFromClient();
+    if (serverMode && !serverSignedOut) {
+      // Offline sign-out: the server session is still valid. Finish it on the
+      // next start and drop the phone's cookie copy now.
+      if (typeof markLogoutPending === 'function') markLogoutPending();
+      if (typeof clearNativeServerCookies === 'function') await waitForPromiseBounded(clearNativeServerCookies(), 3000);
+    }
 
     state.currentUser = null;
+    if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
     if (serverMode) activateAnonymousServerCollectionStorage();
     state.currentView = 'analytics';
     saveState();
-    showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+    if (serverMode && !serverSignedOut) {
+      showNotification(state.language === 'ar' ? 'تم تسجيل الخروج من هذا الجهاز' : 'Signed out on this device',
+        state.language === 'ar' ? 'لم يصل الخادم إلى طلب الخروج (لا اتصال). سيكتمل عند الاتصال التالي.' : 'The server did not receive the sign-out (no connection). It completes on the next connection.', 'warning');
+    } else {
+      showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+    }
     render();
   } finally {
     overlay.remove();
@@ -1895,6 +1911,7 @@ function handleServerAuthExpired(requestIdentity, done) {  // done: [title, text
       // current user's namespace before switching to anonymous storage.
       await wipeAuthenticatedServerDataFromClient();
       state.currentUser = null;
+      if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
       activateAnonymousServerCollectionStorage();
       state.currentView = 'analytics';
       saveState();

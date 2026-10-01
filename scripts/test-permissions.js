@@ -3194,7 +3194,7 @@ check('server money/subscription calls use dedicated transactional endpoints', (
   assert(!built.includes('_thisPatch.finally(() => {'), 'PATCH-chain cleanup still creates an unhandled rejecting Promise');
   assert(built.includes('if (_activeLogin && _activeLogin.generation === _loginGeneration) return _activeLogin.promise;'), 'double-submit login guard is missing');
   assert(built.includes('if (_logoutInFlight || _serverAuthExpiryInFlight)'), 'login is not blocked while a prior session is closing');
-  assert(built.includes('if (serverMode) await apiLogout();'), 'logout renders before the server logout request settles');
+  assert(built.includes('const serverSignedOut = !serverMode || (await apiLogout()) !== false;'), 'logout renders before the server logout request settles');
   assert(!built.includes('Promise.resolve(_flushP).then(() => apiLogout())'), 'delayed logout can still destroy a newly-created session');
   assert(built.includes('await handleServerAuthExpired(requestSessionIdentity);'), 'authenticated 401 responses do not trigger a secure local wipe');
   assert(built.includes('await wipeAuthenticatedServerDataFromClient();'), 'session expiry does not await the current cache-namespace wipe');

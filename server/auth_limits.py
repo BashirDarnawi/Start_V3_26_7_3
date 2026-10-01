@@ -60,6 +60,9 @@ _SETUP_GLOBAL_MAX_ATTEMPTS = read_env_int("ALBAYAN_SETUP_GLOBAL_MAX_ATTEMPTS", 1
 # security boundary.
 _APP_LOGIN_WINDOW_MS = read_env_int("ALBAYAN_APP_LOGIN_WINDOW_MS", 15 * 60 * 1000)
 _APP_LOGIN_HANDOFF_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_HANDOFF_MAX_ATTEMPTS", 10)
+# Per shared address (an office behind one NAT): matches the exchange cap, so
+# the two per-IP ceilings of the same 1:1 flow agree.
+_APP_LOGIN_HANDOFF_IP_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_HANDOFF_IP_MAX_ATTEMPTS", 30)
 _APP_LOGIN_EXCHANGE_MAX_ATTEMPTS = read_env_int("ALBAYAN_APP_LOGIN_EXCHANGE_MAX_ATTEMPTS", 30)
 
 
@@ -342,7 +345,7 @@ def _app_handoff_rate_check(request: Request, user_id: str) -> tuple[bool, int]:
 
     allowed, _left, retry = check_rate_limit(
         f"applogin-handoff:ip:{_client_ip(request)}",
-        _APP_LOGIN_HANDOFF_MAX_ATTEMPTS,
+        _APP_LOGIN_HANDOFF_IP_MAX_ATTEMPTS,
         _APP_LOGIN_WINDOW_MS,
     )
     if not allowed:

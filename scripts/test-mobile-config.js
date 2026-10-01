@@ -28,12 +28,17 @@ const androidCode = one(android, /versionCode\s+(\d+)/, 'Android versionCode');
 const iosIds = uniqueMatches(iosProject, /PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([^;]+);/g);
 const iosVersions = uniqueMatches(iosProject, /MARKETING_VERSION\s*=\s*([^;]+);/g);
 const iosBuilds = uniqueMatches(iosProject, /CURRENT_PROJECT_VERSION\s*=\s*([^;]+);/g);
-const packageMarketingVersion = String(packageJson.version || '').split('.').slice(0, 2).join('.');
+// package.json carries a 3-segment version ("1.0.0", "1.0.1"); the stores show
+// "1.0" / "1.0.1". Only a trailing ".0" patch is dropped, so a patch release
+// ("1.0.1") must be written in all three places and a mismatch is reported as
+// what it is, not hidden by cutting the version to two segments.
+const marketingVersion = version => String(version || '').trim().replace(/^(\d+\.\d+)\.0$/, '$1');
+const packageMarketingVersion = marketingVersion(packageJson.version);
 
 if (androidId !== capacitor.appId) failures.push(`Android applicationId (${androidId}) differs from Capacitor appId (${capacitor.appId}).`);
 if (iosIds.length !== 1 || iosIds[0] !== capacitor.appId) failures.push(`iOS bundle ID must be exactly ${capacitor.appId}.`);
-if (iosVersions.length !== 1 || iosVersions[0] !== androidVersion) failures.push('Android versionName and iOS MARKETING_VERSION differ.');
-if (androidVersion !== packageMarketingVersion) failures.push(`Native version ${androidVersion} differs from package version ${packageJson.version}.`);
+if (iosVersions.length !== 1 || marketingVersion(iosVersions[0]) !== marketingVersion(androidVersion)) failures.push('Android versionName and iOS MARKETING_VERSION differ.');
+if (marketingVersion(androidVersion) !== packageMarketingVersion) failures.push(`Native version ${androidVersion} differs from package.json version ${packageJson.version} (the same version must be written in Xcode, build.gradle and package.json).`);
 if (iosBuilds.length !== 1 || iosBuilds[0] !== androidCode) failures.push('Android versionCode and iOS build number differ.');
 if (!Number.isInteger(Number(androidCode)) || Number(androidCode) < 1) failures.push('Native build number must be a positive integer.');
 if (!androidManifest.includes('android:scheme="albayan"') || !androidManifest.includes('android:host="auth"')) failures.push('Android app-login deep link is missing.');

@@ -172,6 +172,8 @@ context.isServerModeEnabled = () => true;
 context.getServerBaseUrl = () => 'https://app.example.invalid';
 context.getAdPrimaryPhotoIndex = ad => ad.primaryAdPhotoIndex || 0;
 context.getAdPhotoSources = ad => ad.adPhotos || [];
+// Phone builds route <img> loads through the native layer; the browser path is the plain URL.
+context.protectedImageUrl = pathname => pathname;
 // The row renderers are the startup half of the Meta UI (the dialogs are the lazy meta-tools.js).
 vm.runInContext(fs.readFileSync(path.join(root, 'src/15d0-meta-ads-core.js'), 'utf8'), context);
 check('real renderer never exposes uploaded private media without viewPhotos', () => {

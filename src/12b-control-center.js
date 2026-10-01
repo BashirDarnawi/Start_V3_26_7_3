@@ -223,7 +223,7 @@ function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
 }
 
 // ---- Subscription plans manager (owner pricing without redeploys) ----
-let _planManager = { loading: false, loadedAt: 0, version: 0, plans: [], error: '', dirty: false };
+let _planManager = { loading: false, loadedAt: 0, version: 0, plans: [], error: '', dirty: false, saving: false };
 // Mirrors the server's KNOWN_SERVICE_IDS; the server re-validates anyway.
 const PLAN_MANAGER_SERVICE_IDS = ['international_shipping', 'local_shipping', 'warehouse', 'smart_systems', 'clothes_system', 'ad_maker'];
 
@@ -298,7 +298,9 @@ function planManagerAddBundle() {
 }
 
 async function savePlanManager() {
-  if (!_planManager.plans.length) return;
+  if (!_planManager.plans.length || _planManager.saving) return;
+  _planManager.saving = true;
+  if (state.currentView === 'control-center') render();
   try {
     const payload = await apiAdminSaveSubscriptionPlans(_planManager.plans.map(p => ({
       id: String(p.id),
@@ -322,6 +324,9 @@ async function savePlanManager() {
   } catch (error) {
     const detail = (error?.payload && error.payload.detail) ? error.payload.detail : (error?.message || ccText('Save failed', 'فشل الحفظ'));
     showNotification(ccText('Could not save plans', 'تعذر حفظ الخطط'), String(detail), 'error');
+  } finally {
+    _planManager.saving = false;
+    if (state.currentView === 'control-center') render();
   }
 }
 
@@ -350,7 +355,7 @@ function renderPlanManagerSection() {
           <p class="mt-1 text-sm text-slate-500">${ccText('Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version:', 'الأسعار بالدينار ومحفوظة على الخادم — الحفظ هنا يغيّر ما يدفعه العملاء لاحقاً، ولا يغيّر ما اشتروه سابقاً. إصدار الكتالوج:')} ${Number(_planManager.version) || 0}${_planManager.dirty ? ` · <span class="font-bold text-amber-600">${ccText('unsaved changes', 'تغييرات غير محفوظة')}</span>` : ''}</p></div>
           <div class="flex gap-2">
             <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">${ccText('Reload', 'إعادة التحميل')}</button>
-            <button type="button" onclick="savePlanManager()" ${_planManager.dirty ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">${ccText('Save all plans', 'حفظ كل الخطط')}</button>
+            <button type="button" onclick="savePlanManager()" ${_planManager.dirty && !_planManager.saving ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">${ccText('Save all plans', 'حفظ كل الخطط')}</button>
           </div>
         </div>
         ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}

@@ -8,6 +8,10 @@ function shellText(en, ar) {
   return state.language === 'ar' ? ar : en;
 }
 
+function shellThemeLabel(theme, isAr) {
+  return ({ light: isAr ? 'فاتح' : 'Light', dark: isAr ? 'داكن' : 'Dark', system: isAr ? 'النظام' : 'System' })[theme] || String(theme || '');
+}
+
 function shellEsc(value) {
   return Security.escapeHtml(String(value === null || value === undefined ? '' : value));
 }
@@ -168,7 +172,7 @@ function renderMoreView() {
           </button>`).join('')}
       </div>
       <div class="mt-6 grid grid-cols-2 gap-2">
-        <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(state.theme)}</button>
+        <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(shellThemeLabel(state.theme, isAr))}</button>
         <button type="button" onclick="toggleLanguage()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="globe" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
       </div>
       <button type="button" onclick="handleLogout()" class="touch-target mt-3 w-full min-h-12 rounded-2xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 font-bold flex items-center justify-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${t('logout')}</button>

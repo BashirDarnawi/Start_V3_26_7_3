@@ -104,6 +104,15 @@ assert.ok(ci.includes('playwright-failure-report-${{ matrix.leg }}'), 'Each brow
 assert.ok(ci.includes('npm run test:modal-presentation && npm run test:modal-keyboard-stability && npm run test:indexeddb-snapshot'), 'The modal/keyboard/snapshot checks still run on a browser leg');
 assert.match(fs.readFileSync(path.join(__dirname, '../playwright.config.js'), 'utf8'), /workers:\s*1,/, 'Browser specs share one admin account: exactly one worker per machine');
 assert.ok(ci.includes('PostgreSQL scenarios were skipped'), 'CI must fail when the PostgreSQL money scenarios are skipped');
+// A rebuilt lazy bundle that nobody committed used to pass CI: the diff step
+// named four of the seven bundles. It must name script.js, every manifest
+// bundle, the Tailwind output and the www copy.
+const generatedDiff = ci.match(/git diff --exit-code -- (.+)$/m);
+assert.ok(generatedDiff, 'CI must refuse uncommitted generated files');
+const diffPaths = generatedDiff[1].trim().split(/\s+/);
+for (const bundle of ['script.js', ...Object.keys(require('../src/manifest.json').lazy || {}), 'assets/tailwind.css', 'www']) {
+  assert.ok(diffPaths.includes(bundle), `The generated-files diff must cover ${bundle}`);
+}
 
 const { evaluate, REQUIRED, IGNORED } = require('./ci-status-for-sha');
 assert.deepEqual(REQUIRED.map(r => r.name), ['Frontend tests and generated files', 'FastAPI tests', 'Real browser critical flows', 'PostgreSQL migration smoke test', 'Docker production smoke test'], 'Every server-relevant CI job gates a release');

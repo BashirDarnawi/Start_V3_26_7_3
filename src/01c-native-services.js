@@ -411,11 +411,20 @@ async function getNativeBiometricInfo(refresh = false) {
   } catch (_) { return null; }
 }
 
+// iOS presents the Face ID / passcode sheet out of process: UIKit reports
+// willResignActive when it appears and didBecomeActive when it leaves, which
+// @capacitor/app forwards as appStateChange. While this flag is set those two
+// events are the sheet's own and must not count as a background / return
+// (otherwise a cancelled prompt re-opened itself forever, and a slow unlock
+// was prompted twice).
+let _nativePromptOpen = false;
+
 async function authenticateNativeDevice(reason = '') {
   const biometric = getCapacitorPlugin('BiometricAuthNative');
   if (!biometric?.internalAuthenticate) return false;
   const info = await getNativeBiometricInfo(true);
   if ((_nativeNoDeviceLock = !info?.isAvailable && !info?.deviceIsSecure)) return false;
+  _nativePromptOpen = true;
   try {
     await biometric.internalAuthenticate({
       reason: reason || (state.language === 'ar' ? 'افتح تطبيق البيان' : 'Unlock Albayan'),
@@ -433,6 +442,8 @@ async function authenticateNativeDevice(reason = '') {
       console.warn('[NativeSecurity] Authentication failed:', error?.code || error?.message || error);
     }
     return false;
+  } finally {
+    _nativePromptOpen = false;
   }
 }
 
@@ -466,6 +477,13 @@ function renderNativeAppLock() {
 function removeNativeAppLock() {
   document.getElementById('native-app-lock')?.remove();
   document.body.classList.remove('native-app-locked');
+}
+
+// After a sign-out (manual, forced by a 401, or emergency): a login form needs
+// no lock, and a pending "authentication required" must not outlive the user.
+function resetNativeAppLockSession() {
+  _nativeAuthenticationRequired = false;
+  removeNativeAppLock();
 }
 
 async function nativeLockSignOut() {
@@ -610,6 +628,7 @@ async function _syncNativeReconciliationRemindersOnce(context) {
       title: state.language === 'ar' ? 'إعلان يحتاج تسوية' : 'Ad ready for reconciliation',
       body: state.language === 'ar' ? 'أدخل المصروف الفعلي وأرجع المتبقي للعميل.' : 'Enter the actual spend and return any remainder to the customer.',
       schedule: { at, allowWhileIdle: true },
+      sound: 'default',  // iOS: the config-level sound applies to Android only
       extra: { albayanType: 'reconciliation', adId: String(item.ad.id) }
     });
   }
@@ -760,6 +779,7 @@ async function setupNativeServices() {
 
     const app = getCapacitorAppPlugin();
     await _addNativeListener(app, 'appStateChange', event => {
+      if (_nativePromptOpen) return;  // the system sheet's own deactivation is not a background
       if (!event?.isActive) {
         _nativeBackgroundedAt = Date.now();
         _nativeWentBackground = true;

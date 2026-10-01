@@ -91,9 +91,12 @@ The test suite keeps iOS and Android in step, so change both places:
 |---|---|---|---|
 | Xcode → target App → General → Identity | Version / Build | 1.0 / 1 | 1.0 / 2 |
 | `android/app/build.gradle` | versionName / versionCode | "1.0" / 1 | "1.0" / 2 |
+| `package.json` | version (three numbers) | "1.0.0" | "1.0.0" |
 
 Then `npm run test:mobile-config` must pass. Never reuse a build number.
 Version stays `1.0` until the app changes for customers; then `1.0.1`, `1.1`, …
+A version change goes in all three places (`1.0.1` everywhere; `1.1` in Xcode
+and build.gradle is `1.1.0` in package.json).
 
 ## Step 5 — Build and upload (every upload, about 15 minutes)
 

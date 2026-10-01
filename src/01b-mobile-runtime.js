@@ -164,7 +164,12 @@ async function retryMobileConnection() {
   }
 
   removeMobileConnectivityNotice();
+  const hadGate = !!document.getElementById('mobile-connection-gate');
   removeMobileConnectionGate();
+  if (hadGate) {
+    _mobileColdStartBlocked = false;
+    if (typeof state !== 'undefined' && state.currentUser && typeof render === 'function') { try { render(); } catch (_) {} }
+  }
   if (typeof state !== 'undefined' && state.currentUser) {
     try {
       if (typeof serverLiveSyncTick === 'function') await serverLiveSyncTick();  // the tick keeps the in-flight guard and backoff

@@ -173,7 +173,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nroot=\"$SRCROOT/../..\"\npub=\"$SRCROOT/App/public\"\nif [ ! -f \"$pub/script.js\" ]; then\n  echo \"error: Web files are missing from the iOS app. In the project folder run: npm run sync:mobile  (then build again).\"\n  exit 1\nfi\nfor f in index.html script.js studio.js clothes.js; do\n  if [ -f \"$root/www/$f\" ] && ! cmp -s \"$root/www/$f\" \"$pub/$f\"; then\n    echo \"error: Web file $f inside the iOS app is older than the project's. In the project folder run: npm run sync:mobile  (then build again).\"\n    exit 1\n  fi\ndone\n";
+			shellScript = "set -e\nroot=\"$SRCROOT/../..\"\npub=\"$SRCROOT/App/public\"\nif [ ! -f \"$pub/script.js\" ]; then\n  echo \"error: Web files are missing from the iOS app. In the project folder run: npm run sync:mobile  (then build again).\"\n  exit 1\nfi\nif [ -d \"$root/www\" ]; then\n  find \"$root/www\" -type f | while IFS= read -r f; do\n    rel=\"${f#$root/www/}\"\n    if ! cmp -s \"$f\" \"$pub/$rel\"; then\n      echo \"error: Web file $rel inside the iOS app is older than the project's. In the project folder run: npm run sync:mobile  (then build again).\"\n      exit 1\n    fi\n  done || exit 1\nfi\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */

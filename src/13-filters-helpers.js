@@ -4859,26 +4859,29 @@ function closeCompanyDebtCoverageModal({ force = false, restoreFocus = true } = 
   return true;
 }
 
+// Bilingual text for the company-funds dialog (Arabic mode showed English).
+function _ccvText(en, ar) { return state.language === 'ar' ? ar : en; }
+
 function openCompanyDebtCoverageModal(receiptId, opener = null) {
   // Exact-admin check at the action door, even though the receipt card is also
   // hidden for everyone else. Roles can change while a page is already open.
   if (!isCurrentUserAdmin()) {
-    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    showNotification(_ccvText('Access denied', 'تم رفض الوصول'), _ccvText('Only an administrator can use company funds.', 'فقط المدير يمكنه استخدام أموال الشركة.'), 'error');
     return false;
   }
   const safeReceiptId = String(receiptId || '').trim();
   const receipt = (state.receipts || []).find(row => row && String(row.id) === safeReceiptId);
   if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
     showNotification(
-      'Company coverage unavailable',
-      'This must be an unpaid customer-debt receipt (in-shop or delivery) with an outstanding balance.',
+      _ccvText('Company coverage unavailable', 'تغطية الشركة غير متاحة'),
+      _ccvText('This must be an unpaid customer-debt receipt (in-shop or delivery) with an outstanding balance.', 'يجب أن يكون وصل دين عميل غير مدفوع (في المحل أو توصيل) وبرصيد مستحق.'),
       'warning'
     );
     return false;
   }
   const expectedLastModified = Number(receipt._lastModified);
   if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
-    showNotification('Refresh required', 'This receipt is missing its server version. Refresh and try again.', 'warning');
+    showNotification(_ccvText('Refresh required', 'يلزم التحديث'), _ccvText('This receipt is missing its server version. Refresh and try again.', 'هذا الوصل بلا نسخة خادم. حدّث الصفحة وحاول مجدداً.'), 'warning');
     return false;
   }
 
@@ -4888,7 +4891,7 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
     receipt.serialNumber || receipt.finalReceiptNo || receipt.tempReceiptNo || receipt.id
   ));
   const customer = (state.customers || []).find(row => row && String(row.id) === String(getReceiptCustomerReferenceId(receipt) || ''));
-  const customerName = Security.escapeHtml(String(customer?.name || receipt.customerName || 'Customer'));
+  const customerName = Security.escapeHtml(String(customer?.name || receipt.customerName || _ccvText('Customer', 'عميل')));
   const bodyOverflow = document.body.style.overflow;
   const idempotencyKey = generateId('company_coverage');
 
@@ -4903,13 +4906,13 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
           <div class="min-w-0">
             <h2 id="company-coverage-title" class="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-white">
               <i data-lucide="landmark" class="h-5 w-5 flex-shrink-0 text-violet-600"></i>
-              <span>Cover debt with company funds</span>
+              <span>${_ccvText('Cover debt with company funds', 'تغطية الدين من أموال الشركة')}</span>
             </h2>
-            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; Receipt ${serial}</p>
+            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; ${_ccvText('Receipt', 'وصل')} ${serial}</p>
           </div>
           <button type="button" onclick="closeCompanyDebtCoverageModal()"
             class="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:hover:bg-slate-800"
-            aria-label="Close company funds dialog">
+            aria-label="${_ccvText('Close company funds dialog', 'إغلاق نافذة أموال الشركة')}">
             <i data-lucide="x" class="h-5 w-5"></i>
           </button>
         </div>
@@ -4918,16 +4921,16 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
           <div id="company-coverage-warning" class="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm leading-5 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
             <div class="flex gap-2">
               <i data-lucide="triangle-alert" class="mt-0.5 h-5 w-5 flex-shrink-0"></i>
-              <p><strong>Business expense only.</strong> This does not record a customer payment, does not count as revenue, and does not change this receipt to Paid.</p>
+              <p><strong>${_ccvText('Business expense only.', 'مصروف شركة فقط.')}</strong> ${_ccvText('This does not record a customer payment, does not count as revenue, and does not change this receipt to Paid.', 'لا يسجّل هذا دفعة من العميل، ولا يُحسب إيراداً، ولا يغيّر حالة الوصل إلى مدفوع.')}</p>
             </div>
           </div>
 
           <div class="mt-4">
             <div class="mb-2 flex items-end justify-between gap-3">
-              <label for="company-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">Company amount (USD)</label>
+              <label for="company-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${_ccvText('Company amount (USD)', 'مبلغ الشركة (دولار)')}</label>
               <button type="button" onclick="setCompanyDebtCoverageFullAmount()"
                 class="min-h-11 rounded-xl px-3 text-xs font-bold text-violet-700 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:text-violet-300 dark:hover:bg-violet-950/30">
-                Use full outstanding
+                ${_ccvText('Use full outstanding', 'استخدم كامل المستحق')}
               </button>
             </div>
             <div class="relative">
@@ -4938,23 +4941,23 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
                 class="min-h-12 w-full rounded-xl border border-slate-300 bg-white py-3 pl-8 pr-3 text-base font-bold text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"
                 aria-describedby="company-coverage-amount-help company-coverage-validation" required>
             </div>
-            <p id="company-coverage-amount-help" class="mt-1 text-xs text-slate-500 dark:text-slate-400">You may cover part or all of the current customer debt.</p>
+            <p id="company-coverage-amount-help" class="mt-1 text-xs text-slate-500 dark:text-slate-400">${_ccvText('You may cover part or all of the current customer debt.', 'يمكنك تغطية جزء من دين العميل الحالي أو كله.')}</p>
           </div>
 
           <div class="mt-4">
-            <label for="company-coverage-reason" class="text-sm font-bold text-slate-800 dark:text-slate-100">Business reason <span class="text-rose-600">*</span></label>
+            <label for="company-coverage-reason" class="text-sm font-bold text-slate-800 dark:text-slate-100">${_ccvText('Business reason', 'سبب العمل')} <span class="text-rose-600">*</span></label>
             <textarea id="company-coverage-reason" rows="3" maxlength="500" required
               oninput="updateCompanyDebtCoveragePreview()"
-              placeholder="Example: Company goodwill adjustment approved by manager"
+              placeholder="${_ccvText('Example: Company goodwill adjustment approved by manager', 'مثال: تسوية ودّية من الشركة بموافقة المدير')}"
               class="mt-2 min-h-24 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"></textarea>
           </div>
 
           <div class="mt-4 rounded-xl border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-800 dark:bg-violet-950/30">
-            <h3 class="text-sm font-bold text-violet-900 dark:text-violet-100">Before and after</h3>
+            <h3 class="text-sm font-bold text-violet-900 dark:text-violet-100">${_ccvText('Before and after', 'قبل وبعد')}</h3>
             <dl class="mt-2 grid grid-cols-3 gap-2 text-center">
-              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Debt before</dt><dd id="company-coverage-before" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
-              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Company covers</dt><dd id="company-coverage-applied" class="mt-1 text-sm font-bold text-violet-700 dark:text-violet-300"></dd></div>
-              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Debt after</dt><dd id="company-coverage-after" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${_ccvText('Debt before', 'الدين قبل')}</dt><dd id="company-coverage-before" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${_ccvText('Company covers', 'تغطي الشركة')}</dt><dd id="company-coverage-applied" class="mt-1 text-sm font-bold text-violet-700 dark:text-violet-300"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${_ccvText('Debt after', 'الدين بعد')}</dt><dd id="company-coverage-after" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
             </dl>
           </div>
           <p id="company-coverage-validation" class="mt-3 min-h-5 text-sm font-medium text-rose-600" role="alert" aria-live="polite"></p>
@@ -4962,10 +4965,10 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
 
         <div class="flex flex-shrink-0 flex-col-reverse gap-2 border-t border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 sm:flex-row sm:justify-end">
           <button id="company-coverage-cancel" type="button" onclick="closeCompanyDebtCoverageModal()"
-            class="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">Cancel</button>
+            class="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">${_ccvText('Cancel', 'إلغاء')}</button>
           <button id="company-coverage-submit" type="button" onclick="submitCompanyDebtCoverage()"
             class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
-            <i data-lucide="landmark" class="h-4 w-4"></i><span>Confirm company expense</span>
+            <i data-lucide="landmark" class="h-4 w-4"></i><span>${_ccvText('Confirm company expense', 'تأكيد مصروف الشركة')}</span>
           </button>
         </div>
       </div>
@@ -5020,10 +5023,10 @@ function updateCompanyDebtCoveragePreview() {
   modal.querySelector('#company-coverage-after').textContent = _companyCoverageMoney(remainingMinorUSD / 100);
 
   let message = '';
-  if (!amountMinorUSD) message = 'Enter an amount greater than $0.00.';
-  else if (amountMinorUSD > dialogState.outstandingMinorUSD) message = 'The amount cannot be more than the current outstanding debt.';
-  else if (!reason) message = 'A business reason is required.';
-  else if (reason.length > 500) message = 'The business reason must be 500 characters or fewer.';
+  if (!amountMinorUSD) message = _ccvText('Enter an amount greater than $0.00.', 'أدخل مبلغاً أكبر من 0.00$.');
+  else if (amountMinorUSD > dialogState.outstandingMinorUSD) message = _ccvText('The amount cannot be more than the current outstanding debt.', 'لا يمكن أن يتجاوز المبلغ الدين المستحق الحالي.');
+  else if (!reason) message = _ccvText('A business reason is required.', 'سبب العمل مطلوب.');
+  else if (reason.length > 500) message = _ccvText('The business reason must be 500 characters or fewer.', 'يجب ألا يتجاوز سبب العمل 500 حرف.');
   validation.textContent = message;
   if (submit) submit.disabled = !!message || dialogState.busy;
   if (amountInput) amountInput.disabled = dialogState.busy;
@@ -5040,13 +5043,13 @@ async function submitCompanyDebtCoverage() {
   // Exact-admin check again at commit time. Never trust a button rendered by
   // an older session/role snapshot.
   if (!isCurrentUserAdmin()) {
-    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    showNotification(_ccvText('Access denied', 'تم رفض الوصول'), _ccvText('Only an administrator can use company funds.', 'فقط المدير يمكنه استخدام أموال الشركة.'), 'error');
     closeCompanyDebtCoverageModal({ force: true });
     return false;
   }
   const receipt = (state.receipts || []).find(row => row && String(row.id) === dialogState.receiptId);
   if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
-    showNotification('Receipt changed', 'This receipt is no longer eligible for company coverage.', 'warning');
+    showNotification(_ccvText('Receipt changed', 'تغيّر الوصل'), _ccvText('This receipt is no longer eligible for company coverage.', 'لم يعد هذا الوصل مؤهلاً لتغطية الشركة.'), 'warning');
     closeCompanyDebtCoverageModal({ force: true });
     return false;
   }
@@ -5054,7 +5057,7 @@ async function submitCompanyDebtCoverage() {
   const currentOutstandingMinorUSD = Math.round(_getCompanyCoverableOutstandingUSD(receipt) * 100);
   if (!Number.isSafeInteger(currentLastModified) || currentLastModified !== dialogState.expectedLastModified
       || currentOutstandingMinorUSD !== dialogState.outstandingMinorUSD) {
-    showNotification('Receipt changed', 'Refresh the receipt and review the current balance before trying again.', 'warning');
+    showNotification(_ccvText('Receipt changed', 'تغيّر الوصل'), _ccvText('Refresh the receipt and review the current balance before trying again.', 'حدّث الوصل وراجع الرصيد الحالي قبل المحاولة مجدداً.'), 'warning');
     closeCompanyDebtCoverageModal({ force: true });
     return false;
   }

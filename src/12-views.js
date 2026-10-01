@@ -1040,7 +1040,7 @@ function renderLogin() {
 
             ${isServerModeEnabled() ? `
             <label class="flex items-center gap-2 pt-1 select-none cursor-pointer" for="login-remember">
-              <input type="checkbox" id="login-remember" class="w-5 h-5 accent-indigo-600" />
+              <input type="checkbox" id="login-remember" class="w-5 h-5 accent-indigo-600" ${(typeof Platform !== 'undefined' && Platform.isCapacitor) ? 'checked' : ''} />
               <span class="text-sm text-slate-600 dark:text-slate-300">${isRTL ? 'تذكرني على هذا الجهاز' : 'Remember me on this device'}</span>
             </label>
             ` : ''}

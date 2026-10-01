@@ -12,15 +12,10 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
-// ==========================================
-// PURE-JS CRYPTO FALLBACK (insecure contexts)
-// ==========================================
-// crypto.subtle only exists in secure contexts (https:// or localhost). On a
-// plain-HTTP LAN origin (e.g. a phone opening http://192.168.x.x:8000) it is
-// undefined in both iOS Safari and Android Chrome, which used to make every
-// local-mode password flow throw. These pure-JS SHA-256 / PBKDF2-HMAC-SHA256
-// implementations produce byte-identical output to the Web Crypto API and are
-// used only when crypto.subtle is unavailable.
+// PURE-JS CRYPTO FALLBACK: crypto.subtle exists only in secure contexts
+// (https:// or localhost); on a plain-HTTP LAN origin it is undefined on iOS
+// Safari and Android Chrome. These SHA-256 / PBKDF2-HMAC-SHA256 routines give
+// byte-identical output to Web Crypto and run only when crypto.subtle is absent.
 
 // New hashes created on the pure-JS path use fewer iterations (still recorded
 // in the stored `iterations` field, so they verify anywhere) because 600k

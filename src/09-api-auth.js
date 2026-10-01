@@ -47,6 +47,18 @@ function setServerModeOverride(mode) {
   window.location.reload();
 }
 
+// Packaged apps: an <img> is a cross-site WebView load without the session
+// cookie, so protected images go through Capacitor's native GET interceptor
+// (same-origin URL, native cookie jar). The web keeps the direct URL.
+function protectedImageUrl(path) {
+  const url = `${getServerBaseUrl()}${path}`;
+  if (!(typeof Platform !== 'undefined' && Platform.isCapacitor)) return url;
+  let origin = '';
+  try { origin = (window.Capacitor && typeof window.Capacitor.getServerUrl === 'function' && window.Capacitor.getServerUrl()) || window.location.origin; } catch (_) {}
+  if (!origin) return url;
+  return `${origin}/_capacitor_http_interceptor_?u=${encodeURIComponent(url)}`;
+}
+
 function getServerBaseUrl() {
   const base = (state.serverBaseUrl || '').trim();
   if (base) return base.replace(/\/+$/, '');
@@ -88,11 +100,13 @@ function newRequestId() {
   return `${_clientTrace.pageId}-${_clientTrace.seq.toString(36)}`.slice(0, 64);
 }
 
-async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { timeoutMs } = {}) {
+async function apiFetch(path, { method = 'GET', body, headers = {}, navigationAbort = true } = {}, { timeoutMs } = {}) {
   const url = `${getServerBaseUrl()}${path}`;
   const controller = new AbortController();
   const effectiveTimeout = timeoutMs ?? SERVER_API.requestTimeoutMs;
   const t = setTimeout(() => controller.abort(), effectiveTimeout);
+  let _navSignal = null;
+  const _onNavAbort = () => controller.abort();
   // #region agent log
   const _fetchStart = Date.now();
   // #endregion
@@ -120,8 +134,12 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
     // of a committed write reads as a false conflict or a "failed" delete.
     try {
       const navSignal = (method === 'GET' && typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;
-      if (navSignal && navSignal.aborted) controller.abort();
-      if (navSignal) navSignal.addEventListener('abort', () => controller.abort(), { once: true });
+      if (navSignal && navigationAbort !== false) {
+        if (navSignal.aborted) controller.abort();
+        // Removed when the request settles (the signal is shared by every read).
+        _navSignal = navSignal;
+        navSignal.addEventListener('abort', _onNavAbort, { once: true });
+      }
     } catch (_) {}
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
@@ -161,17 +179,15 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
     throw e;
   } finally {
     clearTimeout(t);
+    try { if (_navSignal) _navSignal.removeEventListener('abort', _onNavAbort); } catch (_) {}
   }
 }
 
-// Packaged apps route requests through Capacitor's native HTTP layer (iOS
-// WKWebView blocks cross-site cookies). Its patched fetch() ignores the
-// AbortSignal and the configured timeouts for POST/PATCH/DELETE (the native
-// task runs with a 600 s default), so a stalled login or save never timed
-// out and never retried. Calling the plugin directly lets the timeout apply
-// and lets the abort timer win the race; the response is wrapped back into a
-// standard Response so every caller stays unchanged. GETs keep the patched
-// fetch, which honours the abort signal already.
+// Packaged apps: Capacitor's patched fetch() ignores AbortSignal and timeouts
+// for POST/PATCH/DELETE (native default 600 s), so a stalled login or save
+// never timed out. Calling the plugin directly makes the timeout and the abort
+// timer apply; the reply is wrapped as a standard Response. GETs keep the
+// patched fetch, which honours the abort signal already.
 async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   const plugin = (typeof Platform !== 'undefined' && Platform.isCapacitor && opts.method !== 'GET')
     ? (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp)
@@ -355,9 +371,11 @@ function _httpFailureText(status, data, statusText) {
 async function apiHealthCheck() {
   if (!SERVER_API.enabledByDefault) return false;
   try {
-    // Fast health check (3 second timeout). init() escalates with longer
-    // timeouts on a first-ever visit — see the probe retry in src/17-init.js.
-    const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs: 3000 });
+    // Fast health check (3 s in a browser). A phone on a slow but working
+    // network needs the same 8 s the Retry button already uses, or a returning
+    // install stays stuck at the "server unavailable" gate.
+    const timeoutMs = (typeof connectivityUiEnabled === 'function' && connectivityUiEnabled()) ? 8000 : 3000;
+    const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs });
     return !!data?.ok;
   } catch {
     return false;
@@ -422,10 +440,17 @@ async function apiAuthMe() {
 // other definite answer) = reachable but signed out, a network failure or a
 // 5xx = not proven (the caller falls back to the health probe). No retries:
 // the cold start must stay bounded on a dead network.
+// A session answer must look like a user: a captive portal or proxy can
+// answer 200 with HTML, which must never pass as "signed in".
+function _isSessionUser(user) {
+  return !!user && typeof user === 'object' && !Array.isArray(user) && typeof Security !== 'undefined' && Security.isValidRecordId(String(user.id || ''));
+}
+
 async function apiAuthMeProbe(timeoutMs = 6000) {
   const identity = getAuthMeIdentity();
   try {
     const user = await apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs });
+    if (user && !_isSessionUser(user)) return { reachable: false, user: null };
     if (user) {
       _sessionCache = { user, timestamp: Date.now(), cacheDurationMs: 10000, identity };
       rememberServerHasUsers();
@@ -455,6 +480,11 @@ async function _loadAuthMeForIdentity(identity) {
     );
     
     assertCurrent();
+    if (user && !_isSessionUser(user)) {
+      const bad = new Error(_httpFailureText(502, user, ''));
+      bad.status = 502;
+      throw bad;
+    }
     // Cache successful session only for the identity that initiated it.
     if (user) {
       if (state.currentUser?.id && String(user.id || '') !== String(state.currentUser.id)) throw makeSessionChangedError();
@@ -545,13 +575,28 @@ async function apiSetupAdmin(name, email, password, setupToken) {
   return res?.user || null;
 }
 
+// true when the server session is gone (signed out, or already expired: 401),
+// false when the server could not be reached.
 async function apiLogout() {
   try {
     await apiJson('/api/auth/logout', { method: 'POST', body: {} }, { timeoutMs: 12000 });
+    return true;
   } catch (e) {
-    // Expected to fail sometimes (session already expired, network issues)
     if (ALBAYAN_DEBUG_MODE) console.warn('[apiLogout] Failed (expected if session expired):', e?.message || e);
+    return e?.status === 401;
   }
+}
+
+// A sign-out the server never received: finished on the next start.
+const LOGOUT_PENDING_KEY = 'albayan_logout_pending';
+function markLogoutPending() { try { localStorage.setItem(LOGOUT_PENDING_KEY, '1'); } catch (_) {} }
+function isLogoutPending() { try { return localStorage.getItem(LOGOUT_PENDING_KEY) === '1'; } catch (_) { return false; } }
+function clearLogoutPending() { try { localStorage.removeItem(LOGOUT_PENDING_KEY); } catch (_) {} }
+async function clearNativeServerCookies() {
+  try {
+    const cookies = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorCookies;
+    if (cookies && typeof cookies.clearCookies === 'function') await cookies.clearCookies({ url: getServerBaseUrl() });
+  } catch (_) {}
 }
 
 function getServerSessionIdentity() {
@@ -592,7 +637,7 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // request lightweight records and fetch the full item only when a user opens
 // Photos or Edit. Old servers safely ignore the query parameter, while old
 // clients keep receiving full records because the backend default is true.
-const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts']);
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts', 'pages']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
 // mobile uplink: a body with an image, or simply large, gets the 90s media
@@ -1018,15 +1063,13 @@ function cancelPendingRequests() {
   _pendingRequests.clear();
 }
 
-// The document is leaving (reload, Back to another page, a link). WebKit's
-// order is beforeunload -> it stops this document's loads (in-flight reads end
-// quietly) -> any request STARTED after that is refused on the spot and logged
-// as "Fetch API cannot load ... due to access control checks" -> pagehide. So:
-// abort our reads while that is still quiet (beforeunload runs first), and
-// start no read afterwards (apiFetch answers with the AbortError the loaders
-// already treat as "the page moved on"). A navigation can still be abandoned
-// (offline reload, a download answer), so the latch lets go after a while,
-// and on a back/forward-cache restore.
+// The document is leaving (reload, Back, a link). WebKit: beforeunload ->
+// in-flight loads stop quietly -> a request STARTED after that is refused and
+// logged as "Fetch API cannot load ... access control checks" -> pagehide.
+// So: abort reads while it is still quiet and start none afterwards (apiFetch
+// answers AbortError, which loaders treat as "the page moved on"). A navigation
+// can be abandoned (offline reload, a download), so the latch lets go after a
+// while and on a back/forward-cache restore.
 let _documentLeaving = false;
 let _documentLeavingTimer = null;
 function isDocumentLeaving() { return _documentLeaving; }
@@ -1272,7 +1315,9 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         let budget = timeoutMs;
         const items = await withRetry(async () => {
           try {
-            return await apiJson(path, { method: 'GET' }, { timeoutMs: budget });
+            // A snapshot page is view-independent: an in-app navigation must not
+            // cancel it; only a timeout or the document leaving does.
+            return await apiJson(path, { method: 'GET', navigationAbort: false }, { timeoutMs: budget });
           } catch (e) {
             if (e?.name === 'AbortError') {
               if (_documentLeaving) e.status = 499;      // the page is going away: withRetry stops here
@@ -2676,13 +2721,11 @@ async function serverLoadAllData() {
 }
 
 // ---- SYSTEM-BROWSER APP LOGIN (Phase 2) ----
-// Optional sign-in for the packaged Capacitor apps: the hosted login page
-// opens in Safari/Chrome (password managers, passkeys, SSO) and returns via
-// the albayan://auth deep link with a ONE-TIME code; the app exchanges
-// code+verifier (PKCE-style: only the verifier's SHA-256 leaves the device)
-// for the same HttpOnly session the app-owned form uses. Both sides run from
-// this bundle: NATIVE = startAppBrowserLogin / deep-link handling; WEB =
-// detects ?app_login=1, mints the handoff code, renders "return to app".
+// Optional sign-in for the packaged apps: the hosted login page opens in
+// Safari/Chrome and returns via the albayan://auth deep link with a ONE-TIME
+// code; the app exchanges code+verifier (PKCE-style) for the same HttpOnly
+// session. NATIVE = startAppBrowserLogin / deep-link handling; WEB = detects
+// ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
 // Native app: the pending {state, verifier} is kept in Keychain/Keystore so
@@ -2975,8 +3018,13 @@ function _drainAppLoginCallbackQueue() {
   });
 }
 
+const APP_LOGIN_HANDLED_LAUNCH_KEY = 'albayan_app_login_handled_launch';
+function _markAppLoginLaunchHandled(url) { try { sessionStorage.setItem(APP_LOGIN_HANDLED_LAUNCH_KEY, String(url || '')); } catch (_) {} }
+function _isAppLoginLaunchHandled(url) { try { return !!url && sessionStorage.getItem(APP_LOGIN_HANDLED_LAUNCH_KEY) === String(url); } catch (_) { return false; } }
+
 async function _processAppLoginCallback(url) {
   if (_appLoginExchangeBusy) return;
+  _markAppLoginLaunchHandled(url);
   if (typeof state !== 'undefined' && state.currentUser) {
     // Already signed in (e.g. stale link re-opened) — nothing to do.
     clearAppBrowserLoginPending();
@@ -3043,8 +3091,11 @@ async function setupAppLoginDeepLinks() {
     // Cold start: the deep link may have LAUNCHED the app instead of
     // resuming it — the listener above never fires for that first URL.
     if (App.getLaunchUrl) {
+      // Capacitor keeps the last opened URL for the life of the native process,
+      // so a WebView reload (Retry, Reload buttons) would replay a link this
+      // session already handled. sessionStorage lives exactly as long.
       const launch = await App.getLaunchUrl();
-      if (launch && launch.url) handleAppLoginDeepLink(launch.url);
+      if (launch && launch.url && !_isAppLoginLaunchHandled(launch.url)) handleAppLoginDeepLink(launch.url);
     }
   } catch (_) {}
 }

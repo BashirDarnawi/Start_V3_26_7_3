@@ -3,16 +3,12 @@
 // Full-featured conversion from React
 // SECURITY ENHANCED VERSION
 // ==========================================
-
-// ALBAYAN PLATFORM RULES (see PLATFORM_FOUNDATION.md, CONTRIBUTING.md, MONEY_PLATFORM_ROADMAP.md):
-// walletTransactions is an append-only ledger (balance is computed, never stored; reversals, not edits);
+// PLATFORM RULES (PLATFORM_FOUNDATION.md, CONTRIBUTING.md, MONEY_PLATFORM_ROADMAP.md):
+// walletTransactions is an append-only ledger (balance computed, never stored; reversals, not edits);
 // serviceSubscriptions is the source of truth for access; service ids never change after launch;
 // large collections go in state + PERSISTED_COLLECTIONS; no plaintext secrets; audit logs stay redacted.
 //
-// ==========================================
-// PLATFORM DETECTION MODULE
-// ==========================================
-// Detects platform (web, iOS, Android, HarmonyOS) and capabilities
+// PLATFORM DETECTION: web, iOS, Android, HarmonyOS and capabilities.
 
 // /studio (or a studio. subdomain) boots the standalone Ads Studio shell.
 const IS_STUDIO_SHELL = (

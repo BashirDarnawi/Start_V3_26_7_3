@@ -1034,7 +1034,7 @@ function clothesProductThumbMarkup(p) {
     typeof getEntityPhotoCountHint === 'function' && getEntityPhotoCountHint('clothesProducts', p) > 0;
   if (lean) {
     const base = (typeof getServerBaseUrl === 'function') ? getServerBaseUrl() : '';
-    const src = `${base}/api/collections/clothesProducts/${encodeURIComponent(p.id)}/photo?v=${Math.max(0, Number(p._lastModified) || 0)}`;
+    const src = protectedImageUrl(`/api/collections/clothesProducts/${encodeURIComponent(p.id)}/photo?v=${Math.max(0, Number(p._lastModified) || 0)}`);
     return `<img src="${Security.escapeHtml(src)}" alt="" loading="lazy" decoding="async"${base ? ' crossorigin="use-credentials"' : ''} class="w-full h-full object-cover" onerror="clothesProductThumbError(this)" />`;
   }
   return `<i data-lucide="shirt" class="w-7 h-7 text-rose-400"></i>`;

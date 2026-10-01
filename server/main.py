@@ -171,6 +171,7 @@ from .financial_core import (
     _financial_usd,
 )
 from .entity_projection import (
+    COUNTED_MEDIA_FIELDS,
     INLINE_MEDIA_FIELDS,
     _inline_media_sql_projection,
     _project_entity_media,
@@ -187,7 +188,8 @@ from .meta_ads import (
     guard_meta_ad_page_link,
     stamp_import_completion,
 )
-from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions
+from .ad_media import create_ad_media_router, enforce_ad_photo_mutation_permissions, require_data_url_media
+from .page_media import create_page_media_router
 from .clothes_media import create_clothes_media_router
 from .systems.ads_studio.social_studio import SOCIAL_STUDIO_COLLECTIONS, create_social_studio_router
 from .systems.ads_studio.studio_api import create_studio_router
@@ -812,6 +814,9 @@ def sanitize_json(obj: Any, depth: int = 0, parent_key: str = "") -> Any:
         # Base64 image data URLs must not be truncated to 10k (that corrupts
         # the image). They contain no HTML anyway. Give them a large cap.
         if obj.startswith("data:image/"):
+            # Refuse rather than slice: a cut data URL is a corrupt image.
+            if len(obj) > MAX_DATA_URL_LENGTH:
+                raise HTTPException(status_code=413, detail="Photo is too large")
             return sanitize_str(obj, MAX_DATA_URL_LENGTH)
         return sanitize_str(obj)
     if isinstance(obj, (int, float)):
@@ -11319,6 +11324,7 @@ def create_collection_item(
         # the generic route (the transactional ad route already refuses it).
         raise HTTPException(status_code=403, detail="Forbidden")
     protect_company_coverage_fields(collection, generic_data)
+    require_data_url_media(COUNTED_MEDIA_FIELDS.get(collection) or (), generic_data)
     if collection == "ads":
         enforce_ad_photo_mutation_permissions(
             generic_data, None,
@@ -11542,6 +11548,7 @@ def update_collection_item(
             )
 
     financial_updates = sanitize_json(body.data or {}) or {}
+    require_data_url_media(COUNTED_MEDIA_FIELDS.get(collection) or (), financial_updates, existing.get("data") or {})
     if collection in {"receipts", "ads"} and "customerId" in financial_updates:
         _repointed = str(financial_updates.get("customerId") or "").strip()
         if _repointed and _repointed != str((existing.get("data") or {}).get("customerId") or "").strip():
@@ -13725,6 +13732,14 @@ app.include_router(
 # Register the focused read-only Meta Ads integration before the SPA catch-all.
 app.include_router(
     create_ad_media_router(
+        current_user_dependency=current_user,
+        get_entity_fn=get_entity,
+        user_has_permission_fn=user_has_permission,
+        max_data_url_length=MAX_DATA_URL_LENGTH,
+    )
+)
+app.include_router(
+    create_page_media_router(
         current_user_dependency=current_user,
         get_entity_fn=get_entity,
         user_has_permission_fn=user_has_permission,

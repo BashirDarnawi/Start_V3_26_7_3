@@ -944,11 +944,10 @@ function handleServiceClick(serviceId) {
 
   // Navigate to service
   const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
-  state.currentView = targetView;
+  // Through the router: address, history entry, scroll reset and in-flight
+  // request cancellation, like every other navigation.
   state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
-
-  saveState();
-  render();
+  navigateToInternal(targetView, true);
 }
 
 function handleSmartSystemClick(systemId) {
@@ -982,8 +981,6 @@ function handleSmartSystemClick(systemId) {
 
   // Navigate to system
   const targetView = system.openView || (systemId === 'albayan_manager' ? 'analytics' : 'service-placeholder');
-  state.currentView = targetView;
   state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
-  saveState();
-  render();
+  navigateToInternal(targetView, true);
 }

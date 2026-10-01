@@ -3,16 +3,12 @@
 // Full-featured conversion from React
 // SECURITY ENHANCED VERSION
 // ==========================================
-
-// ALBAYAN PLATFORM RULES (see PLATFORM_FOUNDATION.md, CONTRIBUTING.md, MONEY_PLATFORM_ROADMAP.md):
-// walletTransactions is an append-only ledger (balance is computed, never stored; reversals, not edits);
+// PLATFORM RULES (PLATFORM_FOUNDATION.md, CONTRIBUTING.md, MONEY_PLATFORM_ROADMAP.md):
+// walletTransactions is an append-only ledger (balance computed, never stored; reversals, not edits);
 // serviceSubscriptions is the source of truth for access; service ids never change after launch;
 // large collections go in state + PERSISTED_COLLECTIONS; no plaintext secrets; audit logs stay redacted.
 //
-// ==========================================
-// PLATFORM DETECTION MODULE
-// ==========================================
-// Detects platform (web, iOS, Android, HarmonyOS) and capabilities
+// PLATFORM DETECTION: web, iOS, Android, HarmonyOS and capabilities.
 
 // /studio (or a studio. subdomain) boots the standalone Ads Studio shell.
 const IS_STUDIO_SHELL = (
@@ -450,7 +446,12 @@ async function retryMobileConnection() {
   }
 
   removeMobileConnectivityNotice();
+  const hadGate = !!document.getElementById('mobile-connection-gate');
   removeMobileConnectionGate();
+  if (hadGate) {
+    _mobileColdStartBlocked = false;
+    if (typeof state !== 'undefined' && state.currentUser && typeof render === 'function') { try { render(); } catch (_) {} }
+  }
   if (typeof state !== 'undefined' && state.currentUser) {
     try {
       if (typeof serverLiveSyncTick === 'function') await serverLiveSyncTick();  // the tick keeps the in-flight guard and backoff
@@ -1258,11 +1259,20 @@ async function getNativeBiometricInfo(refresh = false) {
   } catch (_) { return null; }
 }
 
+// iOS presents the Face ID / passcode sheet out of process: UIKit reports
+// willResignActive when it appears and didBecomeActive when it leaves, which
+// @capacitor/app forwards as appStateChange. While this flag is set those two
+// events are the sheet's own and must not count as a background / return
+// (otherwise a cancelled prompt re-opened itself forever, and a slow unlock
+// was prompted twice).
+let _nativePromptOpen = false;
+
 async function authenticateNativeDevice(reason = '') {
   const biometric = getCapacitorPlugin('BiometricAuthNative');
   if (!biometric?.internalAuthenticate) return false;
   const info = await getNativeBiometricInfo(true);
   if ((_nativeNoDeviceLock = !info?.isAvailable && !info?.deviceIsSecure)) return false;
+  _nativePromptOpen = true;
   try {
     await biometric.internalAuthenticate({
       reason: reason || (state.language === 'ar' ? 'افتح تطبيق البيان' : 'Unlock Albayan'),
@@ -1280,6 +1290,8 @@ async function authenticateNativeDevice(reason = '') {
       console.warn('[NativeSecurity] Authentication failed:', error?.code || error?.message || error);
     }
     return false;
+  } finally {
+    _nativePromptOpen = false;
   }
 }
 
@@ -1313,6 +1325,13 @@ function renderNativeAppLock() {
 function removeNativeAppLock() {
   document.getElementById('native-app-lock')?.remove();
   document.body.classList.remove('native-app-locked');
+}
+
+// After a sign-out (manual, forced by a 401, or emergency): a login form needs
+// no lock, and a pending "authentication required" must not outlive the user.
+function resetNativeAppLockSession() {
+  _nativeAuthenticationRequired = false;
+  removeNativeAppLock();
 }
 
 async function nativeLockSignOut() {
@@ -1457,6 +1476,7 @@ async function _syncNativeReconciliationRemindersOnce(context) {
       title: state.language === 'ar' ? 'إعلان يحتاج تسوية' : 'Ad ready for reconciliation',
       body: state.language === 'ar' ? 'أدخل المصروف الفعلي وأرجع المتبقي للعميل.' : 'Enter the actual spend and return any remainder to the customer.',
       schedule: { at, allowWhileIdle: true },
+      sound: 'default',  // iOS: the config-level sound applies to Android only
       extra: { albayanType: 'reconciliation', adId: String(item.ad.id) }
     });
   }
@@ -1607,6 +1627,7 @@ async function setupNativeServices() {
 
     const app = getCapacitorAppPlugin();
     await _addNativeListener(app, 'appStateChange', event => {
+      if (_nativePromptOpen) return;  // the system sheet's own deactivation is not a background
       if (!event?.isActive) {
         _nativeBackgroundedAt = Date.now();
         _nativeWentBackground = true;
@@ -1667,15 +1688,10 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
-// ==========================================
-// PURE-JS CRYPTO FALLBACK (insecure contexts)
-// ==========================================
-// crypto.subtle only exists in secure contexts (https:// or localhost). On a
-// plain-HTTP LAN origin (e.g. a phone opening http://192.168.x.x:8000) it is
-// undefined in both iOS Safari and Android Chrome, which used to make every
-// local-mode password flow throw. These pure-JS SHA-256 / PBKDF2-HMAC-SHA256
-// implementations produce byte-identical output to the Web Crypto API and are
-// used only when crypto.subtle is unavailable.
+// PURE-JS CRYPTO FALLBACK: crypto.subtle exists only in secure contexts
+// (https:// or localhost); on a plain-HTTP LAN origin it is undefined on iOS
+// Safari and Android Chrome. These SHA-256 / PBKDF2-HMAC-SHA256 routines give
+// byte-identical output to Web Crypto and run only when crypto.subtle is absent.
 
 // New hashes created on the pure-JS path use fewer iterations (still recorded
 // in the stored `iterations` field, so they verify anywhere) because 600k
@@ -9158,6 +9174,18 @@ function setServerModeOverride(mode) {
   window.location.reload();
 }
 
+// Packaged apps: an <img> is a cross-site WebView load without the session
+// cookie, so protected images go through Capacitor's native GET interceptor
+// (same-origin URL, native cookie jar). The web keeps the direct URL.
+function protectedImageUrl(path) {
+  const url = `${getServerBaseUrl()}${path}`;
+  if (!(typeof Platform !== 'undefined' && Platform.isCapacitor)) return url;
+  let origin = '';
+  try { origin = (window.Capacitor && typeof window.Capacitor.getServerUrl === 'function' && window.Capacitor.getServerUrl()) || window.location.origin; } catch (_) {}
+  if (!origin) return url;
+  return `${origin}/_capacitor_http_interceptor_?u=${encodeURIComponent(url)}`;
+}
+
 function getServerBaseUrl() {
   const base = (state.serverBaseUrl || '').trim();
   if (base) return base.replace(/\/+$/, '');
@@ -9199,11 +9227,13 @@ function newRequestId() {
   return `${_clientTrace.pageId}-${_clientTrace.seq.toString(36)}`.slice(0, 64);
 }
 
-async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { timeoutMs } = {}) {
+async function apiFetch(path, { method = 'GET', body, headers = {}, navigationAbort = true } = {}, { timeoutMs } = {}) {
   const url = `${getServerBaseUrl()}${path}`;
   const controller = new AbortController();
   const effectiveTimeout = timeoutMs ?? SERVER_API.requestTimeoutMs;
   const t = setTimeout(() => controller.abort(), effectiveTimeout);
+  let _navSignal = null;
+  const _onNavAbort = () => controller.abort();
   // #region agent log
   const _fetchStart = Date.now();
   // #endregion
@@ -9231,8 +9261,12 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
     // of a committed write reads as a false conflict or a "failed" delete.
     try {
       const navSignal = (method === 'GET' && typeof getNavigationSignal === 'function') ? getNavigationSignal() : null;
-      if (navSignal && navSignal.aborted) controller.abort();
-      if (navSignal) navSignal.addEventListener('abort', () => controller.abort(), { once: true });
+      if (navSignal && navigationAbort !== false) {
+        if (navSignal.aborted) controller.abort();
+        // Removed when the request settles (the signal is shared by every read).
+        _navSignal = navSignal;
+        navSignal.addEventListener('abort', _onNavAbort, { once: true });
+      }
     } catch (_) {}
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
@@ -9272,17 +9306,15 @@ async function apiFetch(path, { method = 'GET', body, headers = {} } = {}, { tim
     throw e;
   } finally {
     clearTimeout(t);
+    try { if (_navSignal) _navSignal.removeEventListener('abort', _onNavAbort); } catch (_) {}
   }
 }
 
-// Packaged apps route requests through Capacitor's native HTTP layer (iOS
-// WKWebView blocks cross-site cookies). Its patched fetch() ignores the
-// AbortSignal and the configured timeouts for POST/PATCH/DELETE (the native
-// task runs with a 600 s default), so a stalled login or save never timed
-// out and never retried. Calling the plugin directly lets the timeout apply
-// and lets the abort timer win the race; the response is wrapped back into a
-// standard Response so every caller stays unchanged. GETs keep the patched
-// fetch, which honours the abort signal already.
+// Packaged apps: Capacitor's patched fetch() ignores AbortSignal and timeouts
+// for POST/PATCH/DELETE (native default 600 s), so a stalled login or save
+// never timed out. Calling the plugin directly makes the timeout and the abort
+// timer apply; the reply is wrapped as a standard Response. GETs keep the
+// patched fetch, which honours the abort signal already.
 async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   const plugin = (typeof Platform !== 'undefined' && Platform.isCapacitor && opts.method !== 'GET')
     ? (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp)
@@ -9466,9 +9498,11 @@ function _httpFailureText(status, data, statusText) {
 async function apiHealthCheck() {
   if (!SERVER_API.enabledByDefault) return false;
   try {
-    // Fast health check (3 second timeout). init() escalates with longer
-    // timeouts on a first-ever visit — see the probe retry in src/17-init.js.
-    const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs: 3000 });
+    // Fast health check (3 s in a browser). A phone on a slow but working
+    // network needs the same 8 s the Retry button already uses, or a returning
+    // install stays stuck at the "server unavailable" gate.
+    const timeoutMs = (typeof connectivityUiEnabled === 'function' && connectivityUiEnabled()) ? 8000 : 3000;
+    const data = await apiJson('/api/health', { method: 'GET' }, { timeoutMs });
     return !!data?.ok;
   } catch {
     return false;
@@ -9533,10 +9567,17 @@ async function apiAuthMe() {
 // other definite answer) = reachable but signed out, a network failure or a
 // 5xx = not proven (the caller falls back to the health probe). No retries:
 // the cold start must stay bounded on a dead network.
+// A session answer must look like a user: a captive portal or proxy can
+// answer 200 with HTML, which must never pass as "signed in".
+function _isSessionUser(user) {
+  return !!user && typeof user === 'object' && !Array.isArray(user) && typeof Security !== 'undefined' && Security.isValidRecordId(String(user.id || ''));
+}
+
 async function apiAuthMeProbe(timeoutMs = 6000) {
   const identity = getAuthMeIdentity();
   try {
     const user = await apiJson('/api/auth/me', { method: 'GET' }, { timeoutMs });
+    if (user && !_isSessionUser(user)) return { reachable: false, user: null };
     if (user) {
       _sessionCache = { user, timestamp: Date.now(), cacheDurationMs: 10000, identity };
       rememberServerHasUsers();
@@ -9566,6 +9607,11 @@ async function _loadAuthMeForIdentity(identity) {
     );
     
     assertCurrent();
+    if (user && !_isSessionUser(user)) {
+      const bad = new Error(_httpFailureText(502, user, ''));
+      bad.status = 502;
+      throw bad;
+    }
     // Cache successful session only for the identity that initiated it.
     if (user) {
       if (state.currentUser?.id && String(user.id || '') !== String(state.currentUser.id)) throw makeSessionChangedError();
@@ -9656,13 +9702,28 @@ async function apiSetupAdmin(name, email, password, setupToken) {
   return res?.user || null;
 }
 
+// true when the server session is gone (signed out, or already expired: 401),
+// false when the server could not be reached.
 async function apiLogout() {
   try {
     await apiJson('/api/auth/logout', { method: 'POST', body: {} }, { timeoutMs: 12000 });
+    return true;
   } catch (e) {
-    // Expected to fail sometimes (session already expired, network issues)
     if (ALBAYAN_DEBUG_MODE) console.warn('[apiLogout] Failed (expected if session expired):', e?.message || e);
+    return e?.status === 401;
   }
+}
+
+// A sign-out the server never received: finished on the next start.
+const LOGOUT_PENDING_KEY = 'albayan_logout_pending';
+function markLogoutPending() { try { localStorage.setItem(LOGOUT_PENDING_KEY, '1'); } catch (_) {} }
+function isLogoutPending() { try { return localStorage.getItem(LOGOUT_PENDING_KEY) === '1'; } catch (_) { return false; } }
+function clearLogoutPending() { try { localStorage.removeItem(LOGOUT_PENDING_KEY); } catch (_) {} }
+async function clearNativeServerCookies() {
+  try {
+    const cookies = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorCookies;
+    if (cookies && typeof cookies.clearCookies === 'function') await cookies.clearCookies({ url: getServerBaseUrl() });
+  } catch (_) {}
 }
 
 function getServerSessionIdentity() {
@@ -9703,7 +9764,7 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
 // request lightweight records and fetch the full item only when a user opens
 // Photos or Edit. Old servers safely ignore the query parameter, while old
 // clients keep receiving full records because the backend default is true.
-const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts']);
+const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts', 'pages']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
 // mobile uplink: a body with an image, or simply large, gets the 90s media
@@ -10129,15 +10190,13 @@ function cancelPendingRequests() {
   _pendingRequests.clear();
 }
 
-// The document is leaving (reload, Back to another page, a link). WebKit's
-// order is beforeunload -> it stops this document's loads (in-flight reads end
-// quietly) -> any request STARTED after that is refused on the spot and logged
-// as "Fetch API cannot load ... due to access control checks" -> pagehide. So:
-// abort our reads while that is still quiet (beforeunload runs first), and
-// start no read afterwards (apiFetch answers with the AbortError the loaders
-// already treat as "the page moved on"). A navigation can still be abandoned
-// (offline reload, a download answer), so the latch lets go after a while,
-// and on a back/forward-cache restore.
+// The document is leaving (reload, Back, a link). WebKit: beforeunload ->
+// in-flight loads stop quietly -> a request STARTED after that is refused and
+// logged as "Fetch API cannot load ... access control checks" -> pagehide.
+// So: abort reads while it is still quiet and start none afterwards (apiFetch
+// answers AbortError, which loaders treat as "the page moved on"). A navigation
+// can be abandoned (offline reload, a download), so the latch lets go after a
+// while and on a back/forward-cache restore.
 let _documentLeaving = false;
 let _documentLeavingTimer = null;
 function isDocumentLeaving() { return _documentLeaving; }
@@ -10383,7 +10442,9 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         let budget = timeoutMs;
         const items = await withRetry(async () => {
           try {
-            return await apiJson(path, { method: 'GET' }, { timeoutMs: budget });
+            // A snapshot page is view-independent: an in-app navigation must not
+            // cancel it; only a timeout or the document leaving does.
+            return await apiJson(path, { method: 'GET', navigationAbort: false }, { timeoutMs: budget });
           } catch (e) {
             if (e?.name === 'AbortError') {
               if (_documentLeaving) e.status = 499;      // the page is going away: withRetry stops here
@@ -11787,13 +11848,11 @@ async function serverLoadAllData() {
 }
 
 // ---- SYSTEM-BROWSER APP LOGIN (Phase 2) ----
-// Optional sign-in for the packaged Capacitor apps: the hosted login page
-// opens in Safari/Chrome (password managers, passkeys, SSO) and returns via
-// the albayan://auth deep link with a ONE-TIME code; the app exchanges
-// code+verifier (PKCE-style: only the verifier's SHA-256 leaves the device)
-// for the same HttpOnly session the app-owned form uses. Both sides run from
-// this bundle: NATIVE = startAppBrowserLogin / deep-link handling; WEB =
-// detects ?app_login=1, mints the handoff code, renders "return to app".
+// Optional sign-in for the packaged apps: the hosted login page opens in
+// Safari/Chrome and returns via the albayan://auth deep link with a ONE-TIME
+// code; the app exchanges code+verifier (PKCE-style) for the same HttpOnly
+// session. NATIVE = startAppBrowserLogin / deep-link handling; WEB = detects
+// ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
 // Native app: the pending {state, verifier} is kept in Keychain/Keystore so
@@ -12086,8 +12145,13 @@ function _drainAppLoginCallbackQueue() {
   });
 }
 
+const APP_LOGIN_HANDLED_LAUNCH_KEY = 'albayan_app_login_handled_launch';
+function _markAppLoginLaunchHandled(url) { try { sessionStorage.setItem(APP_LOGIN_HANDLED_LAUNCH_KEY, String(url || '')); } catch (_) {} }
+function _isAppLoginLaunchHandled(url) { try { return !!url && sessionStorage.getItem(APP_LOGIN_HANDLED_LAUNCH_KEY) === String(url); } catch (_) { return false; } }
+
 async function _processAppLoginCallback(url) {
   if (_appLoginExchangeBusy) return;
+  _markAppLoginLaunchHandled(url);
   if (typeof state !== 'undefined' && state.currentUser) {
     // Already signed in (e.g. stale link re-opened) — nothing to do.
     clearAppBrowserLoginPending();
@@ -12154,8 +12218,11 @@ async function setupAppLoginDeepLinks() {
     // Cold start: the deep link may have LAUNCHED the app instead of
     // resuming it — the listener above never fires for that first URL.
     if (App.getLaunchUrl) {
+      // Capacitor keeps the last opened URL for the life of the native process,
+      // so a WebView reload (Retry, Reload buttons) would replay a link this
+      // session already handled. sessionStorage lives exactly as long.
       const launch = await App.getLaunchUrl();
-      if (launch && launch.url) handleAppLoginDeepLink(launch.url);
+      if (launch && launch.url && !_isAppLoginLaunchHandled(launch.url)) handleAppLoginDeepLink(launch.url);
     }
   } catch (_) {}
 }
@@ -13270,6 +13337,8 @@ async function serverLiveSyncTick() {
   if (ok) {
     _serverLiveSync.failStreak = 0;
     _serverLiveSync.nextAllowedAt = 0;
+    // A successful poll proves the server is reachable: clear a notice left by a timed-out probe.
+    try { if (typeof updateMobileServerReachability === 'function') updateMobileServerReachability(true); } catch (_) {}
   } else {
     _serverLiveSync.failStreak = Math.min((_serverLiveSync.failStreak || 0) + 1, 5);
     _serverLiveSync.nextAllowedAt = Date.now() +
@@ -13676,6 +13745,7 @@ async function _activateServerSession(user, loginGeneration) {
       }
       advanceServerSessionEpoch();
       state.currentUser = user;
+      if (typeof setMobileColdStartBlocked === 'function') setMobileColdStartBlocked(false);
       resetPerUserListFilters();
       // Device-local convenience list for the "choose an account" screen.
       rememberLoginAccount(user);
@@ -14185,6 +14255,7 @@ function emergencyFinishClientSignOut(serverMode, expired) {
     state.serverLogs = [];
   }
   state.currentUser = null;
+  if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
   if (serverMode) activateAnonymousServerCollectionStorage();
   state.currentView = 'analytics';
   saveState();
@@ -14212,7 +14283,7 @@ async function _handleLogoutOnce() {
     let pendingUpdates = null;
     try { pendingUpdates = flushPendingUserUpdates(); } catch (_) {}
     await waitForPromiseBounded(pendingUpdates, 5000);
-    if (serverMode) await apiLogout(); // apiLogout has its own bounded timeout
+    const serverSignedOut = !serverMode || (await apiLogout()) !== false; // apiLogout has its own bounded timeout
 
     advanceServerSessionEpoch();
     cancelPendingRequests();
@@ -14220,12 +14291,24 @@ async function _handleLogoutOnce() {
     SessionManager.destroySession();
     resetAuthenticatedServerCaches();
     if (serverMode) await wipeAuthenticatedServerDataFromClient();
+    if (serverMode && !serverSignedOut) {
+      // Offline sign-out: the server session is still valid. Finish it on the
+      // next start and drop the phone's cookie copy now.
+      if (typeof markLogoutPending === 'function') markLogoutPending();
+      if (typeof clearNativeServerCookies === 'function') await waitForPromiseBounded(clearNativeServerCookies(), 3000);
+    }
 
     state.currentUser = null;
+    if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
     if (serverMode) activateAnonymousServerCollectionStorage();
     state.currentView = 'analytics';
     saveState();
-    showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+    if (serverMode && !serverSignedOut) {
+      showNotification(state.language === 'ar' ? 'تم تسجيل الخروج من هذا الجهاز' : 'Signed out on this device',
+        state.language === 'ar' ? 'لم يصل الخادم إلى طلب الخروج (لا اتصال). سيكتمل عند الاتصال التالي.' : 'The server did not receive the sign-out (no connection). It completes on the next connection.', 'warning');
+    } else {
+      showNotification(state.language === 'ar' ? 'تم تسجيل الخروج' : 'Logged Out', state.language === 'ar' ? 'إلى اللقاء قريباً!' : 'See you soon!', 'info');
+    }
     render();
   } finally {
     overlay.remove();
@@ -14268,6 +14351,7 @@ function handleServerAuthExpired(requestIdentity, done) {  // done: [title, text
       // current user's namespace before switching to anonymous storage.
       await wipeAuthenticatedServerDataFromClient();
       state.currentUser = null;
+      if (typeof resetNativeAppLockSession === 'function') resetNativeAppLockSession();
       activateAnonymousServerCollectionStorage();
       state.currentView = 'analytics';
       saveState();
@@ -16405,7 +16489,7 @@ function renderLogin() {
 
             ${isServerModeEnabled() ? `
             <label class="flex items-center gap-2 pt-1 select-none cursor-pointer" for="login-remember">
-              <input type="checkbox" id="login-remember" class="w-5 h-5 accent-indigo-600" />
+              <input type="checkbox" id="login-remember" class="w-5 h-5 accent-indigo-600" ${(typeof Platform !== 'undefined' && Platform.isCapacitor) ? 'checked' : ''} />
               <span class="text-sm text-slate-600 dark:text-slate-300">${isRTL ? 'تذكرني على هذا الجهاز' : 'Remember me on this device'}</span>
             </label>
             ` : ''}
@@ -23263,11 +23347,10 @@ function handleServiceClick(serviceId) {
 
   // Navigate to service
   const targetView = service.openView || (serviceId === 'smart_systems' ? 'smart-systems' : 'service-placeholder');
-  state.currentView = targetView;
+  // Through the router: address, history entry, scroll reset and in-flight
+  // request cancellation, like every other navigation.
   state.viewData = targetView === 'service-placeholder' ? { serviceId } : null;
-
-  saveState();
-  render();
+  navigateToInternal(targetView, true);
 }
 
 function handleSmartSystemClick(systemId) {
@@ -23301,10 +23384,8 @@ function handleSmartSystemClick(systemId) {
 
   // Navigate to system
   const targetView = system.openView || (systemId === 'albayan_manager' ? 'analytics' : 'service-placeholder');
-  state.currentView = targetView;
   state.viewData = targetView === 'service-placeholder' ? { serviceId: systemId } : null;
-  saveState();
-  render();
+  navigateToInternal(targetView, true);
 }
 // ADMIN TOOLS LAZY LOADER (main bundle): the Control Center and merge tools
 // ship as admin-tools.js (manifest "lazy") to keep the startup budget. This
@@ -23425,6 +23506,10 @@ if (/^\/control-center(\/|$)/.test(window.location.pathname || '')) {
 
 function shellText(en, ar) {
   return state.language === 'ar' ? ar : en;
+}
+
+function shellThemeLabel(theme, isAr) {
+  return ({ light: isAr ? 'فاتح' : 'Light', dark: isAr ? 'داكن' : 'Dark', system: isAr ? 'النظام' : 'System' })[theme] || String(theme || '');
 }
 
 function shellEsc(value) {
@@ -23587,7 +23672,7 @@ function renderMoreView() {
           </button>`).join('')}
       </div>
       <div class="mt-6 grid grid-cols-2 gap-2">
-        <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(state.theme)}</button>
+        <button type="button" onclick="toggleTheme()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="${state.theme === 'dark' ? 'moon' : state.theme === 'light' ? 'sun' : 'monitor'}" class="w-4 h-4"></i>${isAr ? 'المظهر' : 'Theme'}: ${shellEsc(shellThemeLabel(state.theme, isAr))}</button>
         <button type="button" onclick="toggleLanguage()" class="hub-card touch-target min-h-12 flex items-center justify-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-200"><i data-lucide="globe" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
       </div>
       <button type="button" onclick="handleLogout()" class="touch-target mt-3 w-full min-h-12 rounded-2xl bg-rose-50 dark:bg-rose-900/20 text-rose-600 font-bold flex items-center justify-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${t('logout')}</button>
@@ -29160,26 +29245,29 @@ function closeCompanyDebtCoverageModal({ force = false, restoreFocus = true } = 
   return true;
 }
 
+// Bilingual text for the company-funds dialog (Arabic mode showed English).
+function _ccvText(en, ar) { return state.language === 'ar' ? ar : en; }
+
 function openCompanyDebtCoverageModal(receiptId, opener = null) {
   // Exact-admin check at the action door, even though the receipt card is also
   // hidden for everyone else. Roles can change while a page is already open.
   if (!isCurrentUserAdmin()) {
-    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    showNotification(_ccvText('Access denied', 'تم رفض الوصول'), _ccvText('Only an administrator can use company funds.', 'فقط المدير يمكنه استخدام أموال الشركة.'), 'error');
     return false;
   }
   const safeReceiptId = String(receiptId || '').trim();
   const receipt = (state.receipts || []).find(row => row && String(row.id) === safeReceiptId);
   if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
     showNotification(
-      'Company coverage unavailable',
-      'This must be an unpaid customer-debt receipt (in-shop or delivery) with an outstanding balance.',
+      _ccvText('Company coverage unavailable', 'تغطية الشركة غير متاحة'),
+      _ccvText('This must be an unpaid customer-debt receipt (in-shop or delivery) with an outstanding balance.', 'يجب أن يكون وصل دين عميل غير مدفوع (في المحل أو توصيل) وبرصيد مستحق.'),
       'warning'
     );
     return false;
   }
   const expectedLastModified = Number(receipt._lastModified);
   if (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0) {
-    showNotification('Refresh required', 'This receipt is missing its server version. Refresh and try again.', 'warning');
+    showNotification(_ccvText('Refresh required', 'يلزم التحديث'), _ccvText('This receipt is missing its server version. Refresh and try again.', 'هذا الوصل بلا نسخة خادم. حدّث الصفحة وحاول مجدداً.'), 'warning');
     return false;
   }
 
@@ -29189,7 +29277,7 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
     receipt.serialNumber || receipt.finalReceiptNo || receipt.tempReceiptNo || receipt.id
   ));
   const customer = (state.customers || []).find(row => row && String(row.id) === String(getReceiptCustomerReferenceId(receipt) || ''));
-  const customerName = Security.escapeHtml(String(customer?.name || receipt.customerName || 'Customer'));
+  const customerName = Security.escapeHtml(String(customer?.name || receipt.customerName || _ccvText('Customer', 'عميل')));
   const bodyOverflow = document.body.style.overflow;
   const idempotencyKey = generateId('company_coverage');
 
@@ -29204,13 +29292,13 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
           <div class="min-w-0">
             <h2 id="company-coverage-title" class="flex items-center gap-2 text-lg font-bold text-slate-900 dark:text-white">
               <i data-lucide="landmark" class="h-5 w-5 flex-shrink-0 text-violet-600"></i>
-              <span>Cover debt with company funds</span>
+              <span>${_ccvText('Cover debt with company funds', 'تغطية الدين من أموال الشركة')}</span>
             </h2>
-            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; Receipt ${serial}</p>
+            <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">${customerName} &bull; ${_ccvText('Receipt', 'وصل')} ${serial}</p>
           </div>
           <button type="button" onclick="closeCompanyDebtCoverageModal()"
             class="inline-flex min-h-11 min-w-11 flex-shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:hover:bg-slate-800"
-            aria-label="Close company funds dialog">
+            aria-label="${_ccvText('Close company funds dialog', 'إغلاق نافذة أموال الشركة')}">
             <i data-lucide="x" class="h-5 w-5"></i>
           </button>
         </div>
@@ -29219,16 +29307,16 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
           <div id="company-coverage-warning" class="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm leading-5 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
             <div class="flex gap-2">
               <i data-lucide="triangle-alert" class="mt-0.5 h-5 w-5 flex-shrink-0"></i>
-              <p><strong>Business expense only.</strong> This does not record a customer payment, does not count as revenue, and does not change this receipt to Paid.</p>
+              <p><strong>${_ccvText('Business expense only.', 'مصروف شركة فقط.')}</strong> ${_ccvText('This does not record a customer payment, does not count as revenue, and does not change this receipt to Paid.', 'لا يسجّل هذا دفعة من العميل، ولا يُحسب إيراداً، ولا يغيّر حالة الوصل إلى مدفوع.')}</p>
             </div>
           </div>
 
           <div class="mt-4">
             <div class="mb-2 flex items-end justify-between gap-3">
-              <label for="company-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">Company amount (USD)</label>
+              <label for="company-coverage-amount" class="text-sm font-bold text-slate-800 dark:text-slate-100">${_ccvText('Company amount (USD)', 'مبلغ الشركة (دولار)')}</label>
               <button type="button" onclick="setCompanyDebtCoverageFullAmount()"
                 class="min-h-11 rounded-xl px-3 text-xs font-bold text-violet-700 hover:bg-violet-50 focus:outline-none focus:ring-2 focus:ring-violet-500 dark:text-violet-300 dark:hover:bg-violet-950/30">
-                Use full outstanding
+                ${_ccvText('Use full outstanding', 'استخدم كامل المستحق')}
               </button>
             </div>
             <div class="relative">
@@ -29239,23 +29327,23 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
                 class="min-h-12 w-full rounded-xl border border-slate-300 bg-white py-3 pl-8 pr-3 text-base font-bold text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"
                 aria-describedby="company-coverage-amount-help company-coverage-validation" required>
             </div>
-            <p id="company-coverage-amount-help" class="mt-1 text-xs text-slate-500 dark:text-slate-400">You may cover part or all of the current customer debt.</p>
+            <p id="company-coverage-amount-help" class="mt-1 text-xs text-slate-500 dark:text-slate-400">${_ccvText('You may cover part or all of the current customer debt.', 'يمكنك تغطية جزء من دين العميل الحالي أو كله.')}</p>
           </div>
 
           <div class="mt-4">
-            <label for="company-coverage-reason" class="text-sm font-bold text-slate-800 dark:text-slate-100">Business reason <span class="text-rose-600">*</span></label>
+            <label for="company-coverage-reason" class="text-sm font-bold text-slate-800 dark:text-slate-100">${_ccvText('Business reason', 'سبب العمل')} <span class="text-rose-600">*</span></label>
             <textarea id="company-coverage-reason" rows="3" maxlength="500" required
               oninput="updateCompanyDebtCoveragePreview()"
-              placeholder="Example: Company goodwill adjustment approved by manager"
+              placeholder="${_ccvText('Example: Company goodwill adjustment approved by manager', 'مثال: تسوية ودّية من الشركة بموافقة المدير')}"
               class="mt-2 min-h-24 w-full resize-y rounded-xl border border-slate-300 bg-white p-3 text-sm text-slate-900 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:border-slate-600 dark:bg-slate-800 dark:text-white dark:focus:ring-violet-900"></textarea>
           </div>
 
           <div class="mt-4 rounded-xl border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-800 dark:bg-violet-950/30">
-            <h3 class="text-sm font-bold text-violet-900 dark:text-violet-100">Before and after</h3>
+            <h3 class="text-sm font-bold text-violet-900 dark:text-violet-100">${_ccvText('Before and after', 'قبل وبعد')}</h3>
             <dl class="mt-2 grid grid-cols-3 gap-2 text-center">
-              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Debt before</dt><dd id="company-coverage-before" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
-              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Company covers</dt><dd id="company-coverage-applied" class="mt-1 text-sm font-bold text-violet-700 dark:text-violet-300"></dd></div>
-              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">Debt after</dt><dd id="company-coverage-after" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${_ccvText('Debt before', 'الدين قبل')}</dt><dd id="company-coverage-before" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${_ccvText('Company covers', 'تغطي الشركة')}</dt><dd id="company-coverage-applied" class="mt-1 text-sm font-bold text-violet-700 dark:text-violet-300"></dd></div>
+              <div class="rounded-lg bg-white p-2 dark:bg-slate-800"><dt class="text-[11px] text-slate-500">${_ccvText('Debt after', 'الدين بعد')}</dt><dd id="company-coverage-after" class="mt-1 text-sm font-bold text-rose-600"></dd></div>
             </dl>
           </div>
           <p id="company-coverage-validation" class="mt-3 min-h-5 text-sm font-medium text-rose-600" role="alert" aria-live="polite"></p>
@@ -29263,10 +29351,10 @@ function openCompanyDebtCoverageModal(receiptId, opener = null) {
 
         <div class="flex flex-shrink-0 flex-col-reverse gap-2 border-t border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900 sm:flex-row sm:justify-end">
           <button id="company-coverage-cancel" type="button" onclick="closeCompanyDebtCoverageModal()"
-            class="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">Cancel</button>
+            class="min-h-11 rounded-xl border border-slate-300 px-4 text-sm font-bold text-slate-700 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800">${_ccvText('Cancel', 'إلغاء')}</button>
           <button id="company-coverage-submit" type="button" onclick="submitCompanyDebtCoverage()"
             class="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 text-sm font-bold text-white hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
-            <i data-lucide="landmark" class="h-4 w-4"></i><span>Confirm company expense</span>
+            <i data-lucide="landmark" class="h-4 w-4"></i><span>${_ccvText('Confirm company expense', 'تأكيد مصروف الشركة')}</span>
           </button>
         </div>
       </div>
@@ -29321,10 +29409,10 @@ function updateCompanyDebtCoveragePreview() {
   modal.querySelector('#company-coverage-after').textContent = _companyCoverageMoney(remainingMinorUSD / 100);
 
   let message = '';
-  if (!amountMinorUSD) message = 'Enter an amount greater than $0.00.';
-  else if (amountMinorUSD > dialogState.outstandingMinorUSD) message = 'The amount cannot be more than the current outstanding debt.';
-  else if (!reason) message = 'A business reason is required.';
-  else if (reason.length > 500) message = 'The business reason must be 500 characters or fewer.';
+  if (!amountMinorUSD) message = _ccvText('Enter an amount greater than $0.00.', 'أدخل مبلغاً أكبر من 0.00$.');
+  else if (amountMinorUSD > dialogState.outstandingMinorUSD) message = _ccvText('The amount cannot be more than the current outstanding debt.', 'لا يمكن أن يتجاوز المبلغ الدين المستحق الحالي.');
+  else if (!reason) message = _ccvText('A business reason is required.', 'سبب العمل مطلوب.');
+  else if (reason.length > 500) message = _ccvText('The business reason must be 500 characters or fewer.', 'يجب ألا يتجاوز سبب العمل 500 حرف.');
   validation.textContent = message;
   if (submit) submit.disabled = !!message || dialogState.busy;
   if (amountInput) amountInput.disabled = dialogState.busy;
@@ -29341,13 +29429,13 @@ async function submitCompanyDebtCoverage() {
   // Exact-admin check again at commit time. Never trust a button rendered by
   // an older session/role snapshot.
   if (!isCurrentUserAdmin()) {
-    showNotification('Access denied', 'Only an administrator can use company funds.', 'error');
+    showNotification(_ccvText('Access denied', 'تم رفض الوصول'), _ccvText('Only an administrator can use company funds.', 'فقط المدير يمكنه استخدام أموال الشركة.'), 'error');
     closeCompanyDebtCoverageModal({ force: true });
     return false;
   }
   const receipt = (state.receipts || []).find(row => row && String(row.id) === dialogState.receiptId);
   if (!_isReceiptEligibleForCompanyCoverage(receipt)) {
-    showNotification('Receipt changed', 'This receipt is no longer eligible for company coverage.', 'warning');
+    showNotification(_ccvText('Receipt changed', 'تغيّر الوصل'), _ccvText('This receipt is no longer eligible for company coverage.', 'لم يعد هذا الوصل مؤهلاً لتغطية الشركة.'), 'warning');
     closeCompanyDebtCoverageModal({ force: true });
     return false;
   }
@@ -29355,7 +29443,7 @@ async function submitCompanyDebtCoverage() {
   const currentOutstandingMinorUSD = Math.round(_getCompanyCoverableOutstandingUSD(receipt) * 100);
   if (!Number.isSafeInteger(currentLastModified) || currentLastModified !== dialogState.expectedLastModified
       || currentOutstandingMinorUSD !== dialogState.outstandingMinorUSD) {
-    showNotification('Receipt changed', 'Refresh the receipt and review the current balance before trying again.', 'warning');
+    showNotification(_ccvText('Receipt changed', 'تغيّر الوصل'), _ccvText('Refresh the receipt and review the current balance before trying again.', 'حدّث الوصل وراجع الرصيد الحالي قبل المحاولة مجدداً.'), 'warning');
     closeCompanyDebtCoverageModal({ force: true });
     return false;
   }
@@ -42959,17 +43047,12 @@ function renderAdsStudioLoadingState() {
 if (IS_STUDIO_SHELL || /^\/(ads-studio|studio)(\/|$)/.test(window.location.pathname || '')) {
   try { ensureAdsStudioLoaded(); } catch (_) {}
 }
-// ==========================================
-// META ADS — SECURE READ-ONLY SYNCHRONIZATION
-// ==========================================
-// Albayan remains the source of truth for customers, receipts, payments,
-// exchange rates, photos and notes. Meta facts live only in server-controlled
-// meta* fields and are displayed beside (never over) Albayan's own values.
-//
-// STARTUP half: what the ad rows, cards and headers draw, the dialog state
-// that sign-out resets, and the two dialog closers. The Meta Sync and Meta
-// Insights dialogs themselves ship in the lazy meta-tools.js bundle
-// (src/15d-meta-ads.js), opened through 15d1-meta-tools-loader.js.
+// META ADS — SECURE READ-ONLY SYNCHRONIZATION. Albayan stays the source of
+// truth for customers, receipts, payments, rates, photos and notes; Meta facts
+// live only in server-controlled meta* fields, shown beside Albayan's values.
+// STARTUP half: what ad rows/cards/headers draw, the dialog state sign-out
+// resets, the two closers. The dialogs ship in lazy meta-tools.js
+// (src/15d-meta-ads.js) via 15d1-meta-tools-loader.js.
 
 const metaAdsUi = {
   open: false, // the renderer draws only while open: a late load never reopens a closed dialog
@@ -43114,6 +43197,11 @@ function adPagePictureUrl(ad, adPage) {
   // entirely once the Meta link is gone), the stored data URL does not.
   const stored = String(adPage?.metaPagePictureData || ad?.metaPagePictureData || '').trim();
   if (stored.indexOf('data:image/') === 0) return stored;
+  // Lean page record (server lists omit the archived picture): the picture
+  // route serves it by id, through the native interceptor on the phone.
+  if (adPage && adPage._mediaOmitted === true && adPage.id && typeof isServerModeEnabled === 'function' && isServerModeEnabled()) {
+    return protectedImageUrl(`/api/collections/pages/${encodeURIComponent(String(adPage.id))}/picture?v=${Math.max(0, Number(adPage._lastModified) || 0)}`);
+  }
   // Server-synced Facebook Page profile picture: the ad's own copy first
   // (refreshed by every Meta sync pass, so its signed URL stays fresh), then
   // the linked page record's copy for ads the sync has not revisited yet.
@@ -43185,7 +43273,7 @@ function renderAdPrimaryThumbnail(ad, isAr) {
   let credentialAttribute = '';
   if (isServerModeEnabled()) {
     const version = Math.max(0, Number(ad?._lastModified) || 0);
-    source = `${getServerBaseUrl()}/api/collections/ads/${encodeURIComponent(String(ad.id || ''))}/primary-photo?index=${primaryIndex}&v=${version}`;
+    source = protectedImageUrl(`/api/collections/ads/${encodeURIComponent(String(ad.id || ''))}/primary-photo?index=${primaryIndex}&v=${version}`);
     // Required by the packaged iOS/Android app because its WebView origin is
     // different from albayanhub.com and the protected image uses the session.
     if (getServerBaseUrl()) credentialAttribute = ' crossorigin="use-credentials"';
@@ -45542,40 +45630,6 @@ async function init() {
     }
   } catch (_) {}
 
-  // #region agent log
-  if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
-  try {
-    const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
-    if (!dbg.escapeHtmlSelfTestLogged) {
-      dbg.escapeHtmlSelfTestLogged = true;
-      const q = Security.escapeHtml('"');
-      const a = Security.escapeHtml("'");
-      const quoteEscaped = q.includes('&quot;') || q.includes('&#34;');
-      const aposEscaped = a.includes('&#39;') || a.includes('&apos;');
-      const rawQuoteLeft = q.includes('"');
-      const rawAposLeft = a.includes("'");
-        window.__albayanDebugEmit('H1', 'script.js:init', 'escapeHtml self-test', {quoteEscaped,aposEscaped,rawQuoteLeft,rawAposLeft});
-    }
-  } catch (_) {}
-  }
-  // #endregion
-
-  // #region agent log
-  if (ALBAYAN_DEBUG_MODE && typeof window.__albayanDebugEmit === 'function') {
-  try {
-    const dbg = (window.__albayanDebugAudit = window.__albayanDebugAudit || {});
-    if (!dbg.envLogged) {
-      dbg.envLogged = true;
-        window.__albayanDebugEmit('H-ENV', 'script.js:init', 'runtime environment', {
-            protocol: String(window.location && window.location.protocol || ''),
-            origin: String(window.location && window.location.origin || ''),
-            host: String(window.location && window.location.host || ''),
-            pathname: String(window.location && window.location.pathname || ''),
-        });
-    }
-  } catch (_) {}
-  }
-  // #endregion
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
@@ -45607,6 +45661,13 @@ async function init() {
     catch (error) { if (error?.code === 'SERVER_SESSION_CHANGED') { clearTimeout(slowConnectionHint); return; } bootProbe = null; }
   }
   let serverOk = bootProbe?.reachable === true ? true : await apiHealthCheck();
+  // A sign-out the server never received (offline): finish it now, and never
+  // trust the cached session until it is done.
+  let logoutPending = (typeof isLogoutPending === 'function') && isLogoutPending();
+  if (logoutPending && serverOk) {
+    if ((await apiLogout()) !== false) { clearLogoutPending(); logoutPending = false; }
+  }
+  if (logoutPending && bootProbe) bootProbe.user = null;
   // First-ever visit with no prior local workspace (no snapshot, no storage-
   // eviction cookie): escalate the probe 3s -> 5s -> 8s so a slow phone
   // network does not strand the user in an empty local workspace. Returning
@@ -45714,7 +45775,7 @@ async function init() {
     try {
       // The boot probe already answered for packaged apps: reuse it instead of
       // a second round trip.
-      me = (bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe();
+      me = logoutPending ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
     } catch (error) {
       if (error?.code === 'SERVER_SESSION_CHANGED') return;
       authCheckUnavailable = true;
