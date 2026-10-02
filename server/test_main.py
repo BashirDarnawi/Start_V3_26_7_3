@@ -729,6 +729,33 @@ class TestMobileAppOrigins:
         )
         assert response.status_code == 200
 
+    def test_app_page_referer_without_origin_is_trusted(self):
+        """Bug-hunt R4 (ios-capacitor-bridge-1): the apps' GETs carry their own page as Referer
+        (Android https://localhost/..., iPhone capacitor://localhost/...) and no Origin; the host
+        comparison refused them. Only the exact allowlisted app origins pass, as for an Origin."""
+        from fastapi import HTTPException
+        from starlette.requests import Request
+        from server.main import require_same_origin
+
+        def check(**headers):
+            scope = {"type": "http", "method": "GET", "path": "/", "scheme": "https", "server": ("albayan.example", 443),
+                     "client": ("198.51.100.7", 1), "query_string": b"",
+                     "headers": [(k.replace("_", "-").encode(), v.encode()) for k, v in {"host": "albayan.example", **headers}.items()]}
+            try:
+                require_same_origin(Request(scope))
+                return 200
+            except HTTPException as refused:
+                return refused.status_code
+
+        for referer in ("https://localhost/index.html", "capacitor://localhost/?view=ads-studio", "ionic://localhost/"):
+            assert check(referer=referer, x_request_id="pg-1") == 200, referer  # before: 403
+        assert check(referer="https://albayan.example/index.html") == 200  # the website itself, unchanged
+        for referer in ("https://evil.example/", "https://localhost.evil.example/", "capacitor://localhost.evil.example/",
+                        "capacitor://localhost:8443/", "https://user@localhost/", "http://[::1/"):
+            assert check(referer=referer, x_request_id="pg-1") == 403, referer
+        # When an Origin is sent it still decides: a foreign Origin is refused whatever the Referer says.
+        assert check(origin="https://evil.example", referer="capacitor://localhost/") == 403
+
     def test_headerless_cross_site_request_still_rejected(self):
         """A classic CSRF vector (form post: no Origin, no Referer, and no
         custom headers possible) must still be blocked."""

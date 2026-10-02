@@ -70,10 +70,11 @@ function getAdProfitEventTime(ad) {
   return Date.now();
 }
 
-function _adFundingReceiptRateLYD(ad) {
+function _adFundingReceiptRateLYD(ad, receiptsById) {
   // The rate the customer actually paid: weighted over the funding receipts.
+  // receiptsById (from the snapshot) holds the row find() would pick; other callers still scan.
   const receipts = state.receipts || [];
-  const find = id => (id ? receipts.find(r => r && !r._deleted && String(r.id) === String(id)) : null);
+  const find = id => (id ? (receiptsById ? receiptsById.get(String(id)) || null : receipts.find(r => r && !r._deleted && String(r.id) === String(id))) : null);
   const rateOf = r => {
     const explicit = analyticsNumber(r?.exchangeRate);
     if (explicit > 0) return explicit;
@@ -95,7 +96,7 @@ function _adFundingReceiptRateLYD(ad) {
   return 0;
 }
 
-function getAdSaleRateLYD(ad) {
+function getAdSaleRateLYD(ad, receiptsById) {
   // No local price on the ad means nobody agreed a sale rate with a customer;
   // pricing it at today's default rate would invent revenue that moves every
   // time the default rate is edited. It stays under "missing sale rate".
@@ -103,7 +104,7 @@ function getAdSaleRateLYD(ad) {
   // A paid ad funded by receipts earned the LYD those receipts carry, not the
   // default rate of the day the ad was typed in.
   if (typeof getAdPaymentState === 'function' && getAdPaymentState(ad) === 'paid') {
-    const fundedRate = _adFundingReceiptRateLYD(ad);
+    const fundedRate = _adFundingReceiptRateLYD(ad, receiptsById);
     if (fundedRate > 0) return fundedRate;
   }
   const helperRate = typeof getAdSpendExchangeRate === 'function'
@@ -145,6 +146,12 @@ function buildAdProfitabilitySnapshot(purchases, ads) {
     .map(ad => ({ ad, time: getAdProfitEventTime(ad), spendCents: Math.max(0, Math.round(getAdActualSpendUSD(ad) * 100)) }))
     .sort((a, b) => a.time - b.time || String(a.ad.id || '').localeCompare(String(b.ad.id || '')));
 
+  // One receipt index per build (first live row per id, as find() picks): a find() per
+  // allocation froze big workspaces. Not memoised: state.receipts changes in place.
+  const receiptsById = new Map();
+  for (const r of (Array.isArray(state.receipts) ? state.receipts : [])) {
+    if (r && !r._deleted && !receiptsById.has(String(r.id))) receiptsById.set(String(r.id), r);
+  }
   let nextLot = 0;
   const available = [];
   const rows = [];
@@ -168,7 +175,7 @@ function buildAdProfitabilitySnapshot(purchases, ads) {
     const paid = typeof getAdPaymentState === 'function'
       ? getAdPaymentState(event.ad) === 'paid'
       : !!event.ad.isPaid;
-    const saleRateLYD = getAdSaleRateLYD(event.ad);
+    const saleRateLYD = getAdSaleRateLYD(event.ad, receiptsById);
     const recognizedRevenueLYD = paid && saleRateLYD > 0 ? (coveredCents / 100) * saleRateLYD : 0;
     const writtenOff = !paid && typeof getAdPaymentState === 'function' && getAdPaymentState(event.ad) === 'wont_pay';  // a known loss, not "not yet billed"
     rows.push({

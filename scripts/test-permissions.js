@@ -6544,6 +6544,101 @@ checkAsync('Clear All says "Cleared" only once the server write resolved', async
   }
 });
 
+// Bug-hunt R4 (permission-matrix-1): a device may still hold history rows with the
+// customer's old and new phone numbers; without customers.viewContacts they show '—'.
+check('R4 permission-matrix-1: a cached phone row in receipt and ad history shows — for the Accountant, the numbers for an Admin', () => {
+  const original = { ads: S.ads, receipts: S.receipts, customers: S.customers, pages: S.pages, language: S.language, insert: sandbox.document.body.insertAdjacentHTML };
+  let inserted = '';
+  sandbox.document.body.insertAdjacentHTML = (_position, html) => { inserted = String(html); };
+  const changes = [{ field: 'Phone Number', from: '0912832305', to: '0925040463' }, { field: 'Status', from: 'Not Paid', to: 'Paid' }];
+  const history = [{ editedAt: '2026-10-02T00:00:00.000Z', editedBy: 'Bashir', changes }];
+  try {
+    S.language = 'en';
+    S.customers = [{ id: 'history-customer', name: 'Customer' }];
+    S.pages = [{ id: 'history-page', name: 'Page' }];
+    S.receipts = [{ id: 'history-phone', serialNumber: '1002', customerId: 'history-customer', createdAt: '2026-09-01T10:00:00Z', editHistory: history }];
+    S.ads = [{ id: 'history-phone-ad', customerId: 'history-customer', pageId: 'history-page', createdAt: '2026-09-01T10:00:00Z', editHistory: history }];
+    loginAs(employee(JSON.parse(JSON.stringify(vm.runInContext('PERMISSION_TEMPLATES.accountant.permissions', sandbox)))));
+    for (const show of [() => sandbox.showReceiptEditHistory('history-phone'), () => sandbox.showAdEditHistory('history-phone-ad')]) {
+      inserted = '';
+      show();
+      const shown = visible(inserted);
+      assert(shown.includes('Phone Number') && shown.includes('Not Paid'), 'the history rows went missing');
+      assert(!shown.includes('0912832305') && !shown.includes('0925040463'), 'before: the Accountant read both phone numbers');
+    }
+    loginAs(ADMIN);
+    sandbox.showReceiptEditHistory('history-phone');
+    assert(visible(inserted).includes('0912832305') && visible(inserted).includes('0925040463'), 'the Admin lost the real numbers');
+  } finally {
+    sandbox.document.body.insertAdjacentHTML = original.insert;
+    Object.assign(S, { ads: original.ads, receipts: original.receipts, customers: original.customers, pages: original.pages, language: original.language });
+  }
+});
+
+// Bug-hunt R4 (concurrency-idempotency-3): permission and role edits were last-writer-wins.
+checkAsync('R4 concurrency-idempotency-3: a toggle sends the map it was made on, a 409 reloads the server copy, and an Edit User save sends the role only when it changed', async () => {
+  const pending = vm.runInContext('_serverUserUpdate', sandbox);
+  const original = {
+    isServerModeEnabled: sandbox.isServerModeEnabled, apiUpdateUser: sandbox.apiUpdateUser, apiListUsersForUi: sandbox.apiListUsersForUi,
+    saveState: sandbox.saveState, markCollectionDirty: sandbox.markCollectionDirty, flushDirtyCollections: sandbox.flushDirtyCollections,
+    addAuditLog: sandbox.addAuditLog, closeModal: sandbox.closeModal, getElementById: sandbox.document.getElementById, debounceMs: pending.debounceMs
+  };
+  const bodies = [];
+  const wait = () => new Promise(resolve => setTimeout(resolve, 20));
+  const other = () => S.users.find(u => u.id === 'u-other');
+  sandbox.isServerModeEnabled = () => true;
+  sandbox.saveState = () => {}; sandbox.markCollectionDirty = () => {}; sandbox.flushDirtyCollections = async () => {}; sandbox.addAuditLog = () => {};
+  sandbox.closeModal = () => {};
+  pending.debounceMs = 0;
+  try {
+    loginAs(ADMIN);
+    OTHER.permissions = { receipts: ['view', 'add', 'edit', 'delete'] };
+    sandbox.apiUpdateUser = async (id, body) => { bodies.push(JSON.parse(JSON.stringify(body))); return { ...other(), permissions: body.permissions }; };
+    sandbox.togglePermission('u-other', 'ads', 'view', true);
+    sandbox.togglePermission('u-other', 'receipts', 'delete', false);
+    await wait();
+    assert(bodies.length === 1, `expected one batched PATCH, got ${bodies.length}`);
+    assert(JSON.stringify(bodies[0].expectedPermissions) === '{"receipts":["view","add","edit","delete"]}', 'before: the PATCH named no base map: ' + JSON.stringify(bodies[0]));
+    assert(JSON.stringify(bodies[0].permissions) === '{"receipts":["view","add","edit"],"ads":["view"]}', 'wrong permissions sent');
+
+    // Another manager changed the user first: 409, the server copy replaces the optimistic one.
+    clearNotes();
+    sandbox.apiUpdateUser = async (id, body) => { bodies.push(body); throw Object.assign(new Error('Conflict: this user was changed by someone else'), { status: 409 }); };
+    sandbox.apiListUsersForUi = async () => [{ id: 'u-other', name: 'Abdu', role: 'Employee', permissions: { receipts: ['view'] } }];
+    sandbox.applyPermissionTemplate('u-other', 'viewer');
+    await wait();
+    assert(JSON.stringify(bodies[1].expectedPermissions) === '{"receipts":["view","add","edit"],"ads":["view"]}', 'the template did not name its base map');
+    assert(JSON.stringify(other().permissions) === '{"receipts":["view"]}', 'the refused copy stayed on screen: ' + JSON.stringify(other().permissions));
+    assert(notes.some(n => n.t === 'Changed by another manager'), 'no "changed by another manager" notice: ' + JSON.stringify(notes));
+
+    // Edit User: a save that leaves the role alone sends no role; a role change names the one the form opened on.
+    const fields = { 'user-role': { value: 'Employee' }, 'user-name': { value: 'Abdu Fixed' }, 'user-email': { value: 'abdu@example.com' }, 'user-password': { value: '' } };
+    sandbox.document.getElementById = id => fields[id] || null;
+    sandbox.apiUpdateUser = async (id, body) => { bodies.push(JSON.parse(JSON.stringify(body))); return { ...other(), ...body }; };
+    for (const role of ['Employee', 'Delivery']) {
+      fields['user-role'].value = role;
+      S.activeModal = 'user';
+      S.modalData = { ...other(), role: 'Employee' };
+      await sandbox.handleModalSubmit();
+    }
+    const [same, changed] = bodies.slice(-2);
+    assert(same && !('role' in same) && !('expectedRole' in same) && same.name === 'Abdu Fixed', 'before: an unchanged role was sent back: ' + JSON.stringify(same));
+    assert(changed && changed.role === 'Delivery' && changed.expectedRole === 'Employee', 'a role change lost its base: ' + JSON.stringify(changed));
+    S.language = 'ar';  // the form's refusal toast reads the shared map
+    assert(!/[A-Za-z]/.test(sandbox._serverRefusalText('Conflict: this user was changed by someone else')), 'the conflict refusal reads in English');
+  } finally {
+    S.language = 'en';
+    Object.assign(sandbox, { isServerModeEnabled: original.isServerModeEnabled, apiUpdateUser: original.apiUpdateUser, apiListUsersForUi: original.apiListUsersForUi,
+      saveState: original.saveState, markCollectionDirty: original.markCollectionDirty, flushDirtyCollections: original.flushDirtyCollections,
+      addAuditLog: original.addAuditLog, closeModal: original.closeModal });
+    sandbox.document.getElementById = original.getElementById;
+    pending.debounceMs = original.debounceMs;
+    S.activeModal = null; S.modalData = null;
+    OTHER.permissions = {};
+    loginAs(ADMIN);
+  }
+});
+
 // ---------- report ----------
 async function reportResults() {
   for (const { name, fn } of asyncChecks) {

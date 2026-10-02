@@ -2248,10 +2248,8 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
   }
 }
 
-// Mirror of the server's _ensure_actor_can_grant_permissions: a non-admin may
-// only SAVE a permission map made of grants they hold themselves (the whole
-// map is sent, so a grant the target already holds counts too). Returns the
-// first grant the actor lacks, or '' when the save would be accepted.
+// Mirror of the server's _ensure_actor_can_grant_permissions: a non-admin saves only a map of grants
+// they hold (the whole map is sent, the target's own grants included). Returns the first one lacking, or ''.
 function _unheldGrant(permissions) {
   if (isCurrentUserAdmin()) return '';
   for (const [mk, list] of Object.entries(permissions || {})) {
@@ -2262,9 +2260,8 @@ function _unheldGrant(permissions) {
   return '';
 }
 
-// Server twin (_refuse_unheld_target): may the current user re-role / reset the password of
-// `user`? A held full action covers its Own variant; a driver's own-scope grants do not count.
-// A reset (reset=true) also skips the rest of a driver's template grants, but no other grant.
+// Server twin (_refuse_unheld_target): may the current user re-role / reset the password of `user`?
+// A held action covers its Own variant; a driver's own-scope grants (for a reset, its whole template) do not count.
 const _DRIVER_TEMPLATE_GRANTS = { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'], receipts: ['viewOwn'] };
 function _targetOutranksEditor(user, reset) {
   if (isCurrentUserAdmin()) return false;
@@ -2311,13 +2308,14 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
   const next = { ...(user.permissions || {}), [moduleKey]: list };
   const unheld = _unheldGrant(next);
   if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  const base = user.permissions || {};  // what this screen showed: a stale one gets 409, not a silent re-grant
   user.permissions = next;
 
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
+  scheduleServerUserUpdate(userId, { permissions: user.permissions }, { base });
   
   // Add audit log
   addAuditLog('update', userId, `${enabled ? 'Granted' : 'Revoked'} permission: ${moduleKey}.${permKey} for ${user.name}`, {
@@ -2344,13 +2342,14 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
   const next = { ...(user.permissions || {}), [moduleKey]: enableAll ? Object.keys(moduleConfig.permissions) : [] };
   const unheld = _unheldGrant(next);
   if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  const base = user.permissions || {};
   user.permissions = next;
 
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
+  scheduleServerUserUpdate(userId, { permissions: user.permissions }, { base });
 
   addAuditLog('update', userId, `${enableAll ? 'Granted all' : 'Revoked all'} ${moduleKey} permissions for ${user.name}`, {
     resourceType: 'user',
@@ -2375,12 +2374,13 @@ function applyPermissionTemplate(userId, templateKey) {
   const next = JSON.parse(JSON.stringify(template.permissions));
   const unheld = _unheldGrant(next);
   if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  const base = user.permissions || {};
   user.permissions = next;
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
+  scheduleServerUserUpdate(userId, { permissions: user.permissions }, { base });
 
   addAuditLog('update', userId, `Applied permission template "${template.name}" to ${user.name}`, {
     resourceType: 'user',
@@ -2502,9 +2502,7 @@ function importUserPermissions(userId) {
   input.click();
 }
 
-// A delivery action is allowed when the user holds the matching deliveries.*
-// permission (office staff), OR when they are the assigned driver acting on
-// their OWN delivery. The server enforces the same rule.
+// Allowed with the matching deliveries.* permission (office), or to the assigned driver on their OWN job (as the server).
 function canDoDeliveryAction(action, itemId) {
   if (can('deliveries', action)) return true;
   if (isDeliveryRole(state.currentUser?.role)) {
@@ -2525,14 +2523,15 @@ function denyDeliveryAction() {
 
 async function assignDelivery(itemId, userId) {
   if (!userId) return;
-  const already = ((state.receipts || []).find(r => r.id === itemId) || (state.ads || []).find(a => a.id === itemId) || {}).deliveryPersonId;
-  const neededAction = String(already || '').trim() ? 'reassign' : 'assign';
-  if (!can('deliveries', neededAction) && !can('deliveries', 'assign')) {
+  // Check if it's a receipt or an ad
+  const isReceipt = state.receipts.find(r => r.id === itemId);
+  const item = isReceipt || (state.ads || []).find(a => a.id === itemId) || {};
+  // As the server: an editor of the record skips the workflow rule; a grant alone needs reassign to change a driver.
+  const neededAction = String(item.deliveryPersonId || '').trim() ? 'reassign' : 'assign';
+  if (!canActOnRecord(isReceipt ? 'receipts' : 'ads', 'edit', item.createdBy || item.creatorId) && !can('deliveries', neededAction)) {
     denyDeliveryAction();
     return;
   }
-  // Check if it's a receipt or an ad
-  const isReceipt = state.receipts.find(r => r.id === itemId);
   let savedOk = false;
   if (isReceipt) {
     savedOk = await updateRecord(state.receipts, itemId, { deliveryPersonId: userId });
@@ -2599,9 +2598,7 @@ async function updateDeliveryStatus(itemId, status) {
   render();
 }
 
-// Rapid double taps can queue two async saves before the first render removes
-// the action button. Keep one delivery mutation per item in flight; the server
-// remains the authority for transitions across different devices.
+// One delivery mutation per item in flight: a double tap queued two saves before the render removed the button.
 const _deliveryActionInFlight = new Set();
 
 async function markAsCollected(itemId) {
@@ -3634,8 +3631,8 @@ function updateReceiptDeliveryCompletionComputed() {
     const feeBase = feeCmp.feeDifferenceStatus === 'SAME'
       ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
-        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(0)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`)
-        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(0)} LYD)` : `Fee: HIGHER (${diff.toFixed(0)} LYD)`));
+        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(2)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(2)} LYD)`)
+        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(2)} LYD)` : `Fee: HIGHER (${diff.toFixed(2)} LYD)`));
     const feePaidByShop = _readDeliveryFeePaidBy() === 'shop';
     feeEl.textContent = feeBase + (feePaidByShop ? (isArC ? ' • يتحملها المحل' : ' • paid by shop') : '');
   }
@@ -3954,8 +3951,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
-          ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(2)} LYD</span></div>
+          ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${phoneLtrHtml(phone)}</span></div>` : ''}
         </div>
 
         <div>
@@ -4101,11 +4098,8 @@ async function refreshAdsAfterReceiptPaidCascade(receipt) {
   return refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback: true });
 }
 
-// Map raw engine failures ('Load failed' on Safari, 'Failed to fetch' on
-// Chromium, AbortError timeouts) to a bilingual, actionable message. Returns
-// null when the server WAS reached (e.status set) or the error does not look
-// like a connectivity failure — callers then keep their real HTTP detail.
-// Callers should log the raw e.message to the console for diagnostics.
+// Raw engine failures ('Load failed', 'Failed to fetch', timeouts) as a bilingual, actionable message;
+// null when the server answered (e.status) or it is no connectivity failure. Log the raw message.
 function describeNetworkError(e) {
   if (e?.status) return null; // server WAS reached — keep the real HTTP detail
   const name = String(e?.name || '');
@@ -4115,6 +4109,13 @@ function describeNetworkError(e) {
     || name === 'AbortError'
     || (name === 'TypeError' && /failed to fetch|load failed|network|cancelled/i.test(msg));
   if (!looksNetwork) return null;
+  // A timeout (the app's native one is a 'Load failed' saying so): the save went out and may have
+  // committed, so never "nothing was saved" (a retyped save made a duplicate).
+  if (name === 'AbortError' || /timed? ?out/i.test(String(e?.nativeMessage || ''))) {
+    return state.language === 'ar'
+      ? 'لم يرد الخادم في الوقت المحدد، فتعذّر تأكيد الحفظ وربما تم. تحقّق قبل إدخاله مرة أخرى.'
+      : 'The server did not answer in time, so the save could not be confirmed and may have gone through. Check before entering it again.';
+  }
   if (offline) {
     return state.language === 'ar'
       ? 'لا يوجد اتصال بالإنترنت — لم يتم الحفظ ولم يُفقد ما أدخلته. أعد الاتصال ثم حاول مرة أخرى.'
@@ -4375,7 +4376,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
               const debtEl = document.getElementById('delivery-complete-debt');
               const quotedEl = document.getElementById('delivery-complete-quoted');
               if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(2)} LYD`;
-              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(0)} LYD`;
+              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(2)} LYD`;
             } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
             showNotification(
@@ -5661,12 +5662,8 @@ function _logReceiptCollection(receipt, action, collectedAmount) {
   });
 }
 
-// Open a small modal to record HOW MUCH was collected for a receipt (user
-// request). Supports partial collection; the card then shows collected + the
-// amount still left to collect. Self-contained (stop-ad-modal style) so it
-// doesn't touch renderModal/state.modalData.
-// ---- Receipt collection (2-step): ask "same as receipt?" -> Yes records it
-// as-is; No opens a payment-methods editor like the ad/receipt forms. ----
+// ---- Receipt collection (user request), self-contained so it never touches renderModal/state.modalData:
+// "same as receipt?" Yes records it as-is; No opens a payment-methods editor. Partial amounts show what is left. ----
 let _tempCollectPayments = [];   // [{ method, amount }] working list for the "No" editor
 let _collectReceiptId = '';
 let _collectTargetLYD = 0;
@@ -5709,9 +5706,8 @@ function _blockDestroyedReceiptEdit(receipt) {
   return true;
 }
 
-// The collect dialog and the Permissions Manager push a ?modal= entry but are
-// not closeModal() dialogs: consume it the same way, else Back (desktop, the
-// Android app) or a refresh reopened them (a collection could be re-recorded).
+// The collect dialog and the Permissions Manager push a ?modal= entry: consume it like closeModal(),
+// else Back or a refresh reopened them (a collection could be re-recorded).
 function _closeUrlTrackedOverlay(el) {
   if (!el || el.isConnected === false) return;  // already closed: never consume another entry
   el.remove();
@@ -5805,7 +5801,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${paymentMethodOptions(p.method).map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+          ${paymentMethodOptions(p.method).map(m => `<option value="${Security.escapeHtml(m)}" ${p.method === m ? 'selected' : ''}>${Security.escapeHtml(trMethod(m))}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
@@ -6201,11 +6197,8 @@ function manageRefund(adId) {
   renderModal();
 }
 
-// Open transfer modal for a receipt
-// Only money the business actually RECEIVED can move between customers.
-// A "Not Paid" receipt (and a Canceled/Lost one) holds no real money, but the
-// transfer used to accept it anyway and mint a spendable Paid receipt for the
-// target customer — money invented out of nothing.
+// Open transfer modal for a receipt. Only RECEIVED money can move: a Not Paid / Canceled / Lost
+// receipt minted a spendable Paid receipt for the target customer out of nothing.
 function _isTransferableReceipt(r) {
   const st = String(r?.status || '');
   if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
@@ -6373,6 +6366,9 @@ function _editHistoryFieldLabel(field) {
   return state.language === 'ar' ? _EDIT_HISTORY_AR[text] || text : text;
 }
 function _editHistoryValueText(value, field) {
+  // Phone/contact rows show '—' without customers.viewContacts, as the server sends them.
+  const key = String(field || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if ((/phone|profile|address|contact|email|whatsapp/.test(key) || /^deliveryplace(name)?$/.test(key)) && !can('customers', 'viewContacts')) return '—';
   const text = _adEditHistoryText(value);
   if (state.language !== 'ar') return text;
   if (text === 'None' || text === 'N/A') return '—';
@@ -6380,9 +6376,7 @@ function _editHistoryValueText(value, field) {
   return text.replace(/(\d+) (payment|allocation|link)\(s\)/g, (_, count, word) => `${_EDIT_HISTORY_AR[word]}: ${count}`);
 }
 
-// Normalize legacy/imported rows before rendering. Older data can use
-// date/userName/oldValue/newValue, and a malformed row must never break the
-// whole Ads screen.
+// Normalize legacy rows (date/userName/oldValue/newValue) before rendering; a malformed one must never break the Ads screen.
 function _isLegacyMetaSyncHistoryRow(row) {
   const actor = String(row?.editedBy || row?.userName || row?.actorName || '').trim().toLowerCase();
   return actor.startsWith('meta automatic') || String(row?.source || '').toLowerCase().startsWith('meta_');
@@ -7072,11 +7066,8 @@ async function saveSplitPayments() {
 // Top-ups management functions
 let tempTopUps = [];
 
-// Read whatever the user typed in the Add New Top-up form. Returns a top-up
-// entry ({date, amount, extendDays, note}) or null when the form is empty.
-// Shared by the "Add Top-up" button AND saveTopUps — previously an amount that
-// was typed but not explicitly "Add"ed was SILENTLY DROPPED on Save, which
-// made the whole feature look broken.
+// What is typed in the Add New Top-up form ({date, amount, extendDays, note}) or null, for the Add
+// button AND saveTopUps (an amount typed but not "Add"ed was silently dropped on Save).
 function _readTopUpForm() {
   const amountEl = document.getElementById('topup-amount');
   if (!amountEl) return null;
@@ -7092,11 +7083,8 @@ function _readTopUpForm() {
   };
 }
 
-// Which receipts fund this ad and how much money they still hold. Top-up
-// money is drawn FROM these receipts, so this drives the "Available" line in
-// the top-ups modal and the overdraft guard. Returns null for ads that are
-// not receipt-funded (unpaid ads owe money instead of spending receipt
-// balance) — their top-ups keep the old free-form behavior.
+// The receipts funding this ad and what they still hold: top-ups draw from them (the "Available"
+// line and the overdraft guard). Null for an ad not receipt-funded (its top-ups stay free-form).
 function getAdFundingAvailability(ad) {
   if (!ad) return null;
   if (getAdPaymentState(ad) !== 'paid') return null;
@@ -7125,11 +7113,8 @@ function getAdFundingAvailability(ad) {
   };
 }
 
-// Receipt money still available given the modal's working list. The saved
-// top-ups are already inside each receipt's remaining balance, so only the
-// DIFFERENCE between the working list and what's saved moves the number
-// (removing a saved top-up makes money available again). Returns null when
-// the ad isn't receipt-funded.
+// Receipt money still available for the modal's working list: saved top-ups are already in each
+// receipt's balance, so only the difference moves it. Null when the ad isn't receipt-funded.
 function _topUpAvailableNow(workingList) {
   const ad = state.ads.find(a => a.id === state.modalData?.id);
   const funding = getAdFundingAvailability(ad);
@@ -7354,12 +7339,8 @@ async function saveTopUps() {
     if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString(appDateLocale());
   }
 
-  // Charge / refund the funding receipts so the money model stays balanced:
-  // added top-up money grows this ad's allocation rows (the receipts'
-  // remaining balance drops everywhere it is shown), removed top-ups give the
-  // money back. Ads WITHOUT allocation rows are counted by their full
-  // amountUSD automatically (getReceiptUsageStats fallback), so only explicit
-  // allocation rows need updating here.
+  // Charge / refund the funding receipts: added top-ups grow this ad's allocation rows, removed ones
+  // give the money back. Ads without rows count their full amountUSD (getReceiptUsageStats).
   if (funding && funding.hasAllocations && Math.abs(delta) > 0.009) {
     const allocations = ad.receiptAllocations.map(a => ({ ...a }));
     if (delta > 0) {

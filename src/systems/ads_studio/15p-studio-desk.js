@@ -572,7 +572,7 @@ function studioDeskDecide(id, decision, button = null, confirmed = false, versio
   const draft = studioDeskDecision(requestId);
   const noteBox = typeof document !== 'undefined' && typeof document.getElementById === 'function' ? document.getElementById(`studio-desk-note-${requestId}`) : null;
   if (noteBox) draft.note = String(noteBox.value || '').slice(0, 1000);
-  const note = Security.sanitizeInput(String(draft.note || ''), { maxLength: 1000 }).trim();
+  const note = Security.plainText(draft.note, 1000);  // plain text, as the customer reads it
   draft.error = '';
   if (decision !== 'Approved' && !draft.reason) draft.error = adsStudioText('Choose a reason for this decision.', 'اختر سبباً لهذا القرار.');
   else if (decision !== 'Approved' && !note) draft.error = adsStudioText('Write what the customer should change.', 'اكتب للعميل ما الذي يجب تعديله.');

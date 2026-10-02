@@ -37,6 +37,13 @@ const adEditHistoryViewer = helpers.slice(
 );
 const clothes = read('src/15b-clothes.js');
 const adsStudio = read('src/systems/ads_studio/15c-ads-studio.js');
+// The harnesses' Security.plainText: the ad-words rule of src/02-security.js (NUL, < and >, a leading
+// javascript:/vbscript: go; "data:" and "on…=" stay).
+const fakePlainText = (value, max) => {
+  let s = String(value ?? '').replace(/\0/g, '').replace(/[<>]/g, '').trim();
+  while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
+  return (max ? s.slice(0, max) : s).trim();
+};
 // studioParsePhone (15g): the classic destination check (15c adsStudioDestinationPhone) reads a phone
 // number with it, so the classic-only sandboxes below load it next to normalizeDigitsAscii.
 const studioParsePhoneSrc = (() => {
@@ -850,7 +857,7 @@ check('Ads Studio workflow buttons are single-flight and retries carry operation
 check('Ads Studio media requests allow realistic slow mobile uploads',
   serverApi.includes('ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000') &&
   serverApi.includes("name === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 15000") &&
-  serverApi.includes("String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS"));
+  serverApi.includes("const isStudio = String(collection || '') === 'adCampaignRequests';\n  const timeoutMs = isStudio ? ADS_STUDIO_MEDIA_TIMEOUT_MS : mediaAwareTimeoutMs(record);"));
 check('Ads Studio dates and destinations are validated for the phone timezone',
   adsStudio.includes('date.getFullYear()') &&
   !/function _adsStudioDateOffset[\s\S]{0,240}toISOString/.test(adsStudio) &&
@@ -946,7 +953,7 @@ check('password and passkey logins both upsert the device account list',
   permissionsSrc.includes('rememberLoginAccount(user);'));
 check('server login does not advertise unfinished passkey authentication',
   views.includes('const passkeySupported = !isServerModeEnabled()') &&
-  views.includes('Passkey sign-in is not enabled in server mode yet.') &&
+  !views.includes('Passkey sign-in is not enabled in server mode yet.') &&
   views.includes("${!isServerModeEnabled() ? `<div class=\"mt-3\">") &&
   !views.includes('saved passwords and passkeys work there.'));
 check('admin data integrity check is read-only, phone-safe, and server-backed',
@@ -1561,6 +1568,10 @@ check('ads use their original table and phone summary while deliveries retain jo
 const securitySrc = read('src/02-security.js');
 const controlCenterSrc = read('src/12b-control-center.js');
 
+check('R3/4 review: a receipt the server renumbered is logged under the number it was saved with',
+  forms.includes("((saved.serialNumber || serialNumber) ? ' #' + (saved.serialNumber || serialNumber) : '')") &&
+  !forms.includes("(serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);\n    } else {"));
+
 check('R1 review: ad and page edit logs use the record that was saved, never the form opened after Cancel',
   modals.includes("addLog('update', 'ad', submitData.id,") && modals.includes("addLog('update', 'page', submitData.id,") &&
   !modals.includes("addLog('update', 'ad', state.modalData.id,") && !modals.includes("addLog('update', 'page', state.modalData.id,"));
@@ -1573,7 +1584,7 @@ check('bug-hunt follow-ups: Arabic outcome toasts, translated role/theme labels,
   views.includes("shellRoleLabel(state.currentUser?.role || 'Employee', state.language === 'ar')") &&
   managerShell.includes('function shellRoleLabel(role, isAr) {') &&
   managerShell.includes('${shellEsc(shellRoleLabel(user.role, isAr))}') &&
-  serverApi.includes('{ status: 499 }') && serverApi.includes('connectTimeout: Math.max(1000, timeoutMs - 1000)') &&
+  serverApi.includes('{ noRetry: true }') && serverApi.includes('if (e?.noRetry) throw e;') && serverApi.includes('connectTimeout: Math.max(1000, timeoutMs - 1000)') &&
   init.includes('const hadPendingLogout = logoutPending;') && init.includes('if (hadPendingLogout && bootProbe) bootProbe.user = null;') &&
   init.includes("await setupNativeServices(); if (typeof renderNativeAppLock === 'function') renderNativeAppLock();") &&
   liveSync.includes("if (typeof clearLogoutPending === 'function') clearLogoutPending();") &&
@@ -1882,6 +1893,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       sanitizeInput: (value, options = {}) => String(value ?? '').slice(0, options.maxLength || 100000),
       sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText,
       generateSecureId: prefix => `${prefix}-p1check0001`
     },
     document: { getElementById: id => nodes[id] || null, querySelector: selector => nodes[selector] || null, querySelectorAll: () => [] },
@@ -2407,6 +2420,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       sanitizeInput: (value, options = {}) => String(value ?? '').slice(0, options.maxLength || 100000),
       sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText,
       generateSecureId: prefix => `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 14)}`
     },
     document: { getElementById: id => nodes[id] || null, querySelector: () => null, querySelectorAll: () => [] },
@@ -3892,7 +3907,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
       generateSecureId: prefix => `${prefix}-${++secureSeq}`,
-      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText
     },
     window: win, history: hist, URLSearchParams, URL,
     isServerModeEnabled: () => true,
@@ -4299,6 +4316,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       sanitizeInput: (value, options = {}) => String(value ?? '').replace(/[<>]/g, '').trim().slice(0, options.maxLength || 100000),
       sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText,
       generateSecureId: prefix => `${prefix}_${++seq}_abcdef123456`,
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim())
     },
@@ -5623,7 +5642,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
       generateSecureId: prefix => `${prefix}-${++secureSeq}`,
-      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText
     },
     window: win, history: hist, URLSearchParams, URL,
     isServerModeEnabled: () => true,
@@ -6263,6 +6284,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
       generateSecureId: prefix => `${prefix}-${++secureSeq}`,
       sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText,
       sanitizeInput: (value, options) => String(value ?? '').slice(0, (options && options.maxLength) || 10000)
     },
     window: win, history: hist, URLSearchParams, URL,
@@ -7193,7 +7216,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
       generateSecureId: prefix => `${prefix}-${++secureSeq}`,
-      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText
     },
     window: win, history: hist, URLSearchParams, URL,
     isServerModeEnabled: () => true,
@@ -7853,7 +7878,9 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       escapeHtml: value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
       generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++secureSeq).padStart(12, '0')}`,
-      sanitizeObject: value => JSON.parse(JSON.stringify(value))
+      sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText
     },
     window: win, history: hist, URLSearchParams, URL,
     isServerModeEnabled: () => true,
@@ -8547,6 +8574,8 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
       isValidRecordId: value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(String(value ?? '').trim()),
       generateSecureId: prefix => `${prefix}_${Date.now()}_${String(++secureSeq).padStart(12, '0')}`,
       sanitizeObject: value => JSON.parse(JSON.stringify(value)),
+      sanitizeRecord: (collection, value) => JSON.parse(JSON.stringify(value)),
+      plainText: fakePlainText,
       sanitizeInput: (value, options) => String(value ?? '').slice(0, (options && options.maxLength) || 10000)
     },
     window: win, history: hist, URLSearchParams, URL,

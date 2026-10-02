@@ -314,6 +314,22 @@ def test_facts_and_checks_are_admin_only(actors, graph):
     assert graph.calls == []  # nothing refused reached Meta
 
 
+def test_facts_refresh_works_from_the_phone_apps(actors, graph, monkeypatch):
+    """Bug-hunt R4 (ios-capacitor-bridge-1): the apps' GETs carry their own page as Referer and no
+    Origin, so the admin 'Refresh from Meta' answered 403 CROSS_SITE."""
+    monkeypatch.setenv("ALBAYAN_META_AD_ACCOUNT_IDS", "")
+    monkeypatch.setenv("ALBAYAN_META_ACCESS_TOKEN", "")
+    app_client = TestClient(app)  # the native HTTP layer: no Origin header
+    cookies = actors["admin"]["cookies"]
+    app_page = {"Referer": "capacitor://localhost/?view=admin-health", "X-Request-ID": "pg-1"}
+    refreshed = app_client.get(f"{API}/facts?refresh=1", cookies=cookies, headers=app_page)
+    assert refreshed.status_code == 200, refreshed.text  # before: 403 CROSS_SITE
+    assert refreshed.json()["meta"]["configured"] is False
+    foreign = {"Referer": "capacitor://localhost.evil.example/", "X-Request-ID": "pg-1"}
+    _error(app_client.get(f"{API}/facts?refresh=1", cookies=cookies, headers=foreign), 403, "CROSS_SITE")
+    assert graph.calls == []
+
+
 def test_fact_reads_counts_only(actors, graph):
     _seed_facts(actors)
     _page(actors, "spg_fb_1", FB_PAGE)

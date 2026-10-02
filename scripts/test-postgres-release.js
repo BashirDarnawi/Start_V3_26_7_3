@@ -9,13 +9,16 @@
  *      random password (the container never sees the network outside 127.0.0.1);
  *   2. waits until it accepts connections;
  *   3. runs the same commands as CI's postgres-migration job:
- *      `alembic upgrade head`, `alembic current`, then
- *      `pytest server/test_postgres_financial_review.py server/test_postgres_studio_jobs.py`
- *      (the studio jobs loop's sweep and alert scenarios, plan tasks P1-19 and P1-21);
+ *      `alembic upgrade head`, `alembic current`, then `pytest` on the same
+ *      files: server/test_full_backup_postgres.py (the backup export on
+ *      PostgreSQL), server/test_postgres_financial_review.py and
+ *      server/test_postgres_studio_jobs.py (the studio jobs loop's sweep and
+ *      alert scenarios, plan tasks P1-19 and P1-21);
  *   4. ALWAYS removes the container: on success, on failure and on Ctrl-C.
  * A skipped scenario counts as a failure: a release must show they ran.
  * 36-40 s on the owner's PC (2026-09-25: start 2 s, migrations 1.5 s, scenarios 32-35 s);
- * about 43 s with the studio jobs scenarios (scenarios 38-39 s).
+ * about 43 s with the studio jobs scenarios (scenarios 38-39 s); 46 s on the Mac with the
+ * backup export too (2026-10-02, 37 scenarios).
  *
  * Usage:
  *   npm run test:postgres                 (also run by npm run release:image:push)
@@ -28,12 +31,13 @@ const { isolatedTestEnvironment } = require('./lib/test-environment');
 
 const ROOT = path.join(__dirname, '..');
 const IMAGE = 'postgres:16-alpine';
-const DB_NAME = 'albayan_test_release'; // the name test_postgres_financial_review.py accepts
+const DB_NAME = 'albayan_test_release'; // a name every PostgreSQL test file's database guard accepts
 const DB_USER = 'albayan';
 const LABEL = 'albayan.release-postgres.expires';
 const LIFETIME_MS = 60 * 60 * 1000; // a run killed without cleanup is removed by the next run after this
 const READY_TIMEOUT_MS = 120_000;
-const TEST_FILES = ['server/test_postgres_financial_review.py', 'server/test_postgres_studio_jobs.py'];
+// Exactly the files CI's postgres-migration job runs (scripts/test-build-safety.js keeps them equal).
+const TEST_FILES = ['server/test_full_backup_postgres.py', 'server/test_postgres_financial_review.py', 'server/test_postgres_studio_jobs.py'];
 
 const password = crypto.randomBytes(24).toString('hex'); // hex: nothing to escape in the URL
 const container = `albayan-release-pg-${crypto.randomBytes(4).toString('hex')}`;

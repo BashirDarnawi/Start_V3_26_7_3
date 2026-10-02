@@ -45,6 +45,7 @@ function resetAdsStudioSessionState() {
   if (typeof resetSocialStudioState === 'function') resetSocialStudioState();
   if (typeof resetStudioHealthState === 'function') resetStudioHealthState();
   if (typeof studioResetMe === 'function') studioResetMe();  // Studio v2 /me (15g): the next session reads it afresh
+  if (typeof studioBuilderReset === 'function') studioBuilderReset();  // the v2 request builder (15l): its draft, timers and retries end
   // Invalidate image compression still running for the previous draft/session.
   _adsStudioPhotoToken++;
   if (typeof window !== 'undefined' && window._adsStudioSearchTimer) {
@@ -885,6 +886,8 @@ function adsStudioLoadResults(id, force = false) {
   _adsStudioResults.byId.forEach(item => { if (item.promise) reading += 1; });
   if (reading >= ADS_STUDIO_RESULTS_MAX_READS) return null;
   const uid = _adsStudioResults.forUser;
+  const signal = typeof studioReadSignal === 'function' ? studioReadSignal() : null;
+  let cancelled = false;
   entry.state = entry.data ? 'done' : 'loading';
   entry.promise = apiJson(`/api/studio/campaigns/${encodeURIComponent(campaignId)}/results`, { method: 'GET' })
     .then(body => {
@@ -892,9 +895,14 @@ function adsStudioLoadResults(id, force = false) {
       entry.data = adsStudioCleanResults(body);
       entry.state = 'done';
     })
-    .catch(() => { entry.state = 'failed'; })  // a card that had a reading keeps showing it
+    .catch(error => {
+      // The app moved on (15g studioReadCancelled): a read that never happened, so no retry wait and
+      // the reading keeps its own time. A card that had a reading keeps showing it.
+      cancelled = typeof studioReadCancelled === 'function' && studioReadCancelled(error, signal);
+      entry.state = cancelled ? (entry.data ? 'done' : '') : 'failed';
+    })
     .finally(() => {
-      entry.at = Date.now();
+      if (!cancelled) entry.at = Date.now();
       entry.promise = null;
       if (uid === String(state.currentUser?.id || '')) adsStudioScheduleResultsRender();
     });
@@ -2078,7 +2086,7 @@ async function duplicateAdsStudioCampaign(id, button = null, extend = false) {
       showNotification(adsStudioText('Could not load creative', 'تعذر تحميل الصور'), adsStudioText('Check the connection and try again.', 'تحقق من الاتصال وحاول مرة أخرى.'), 'error');
       return;
     }
-    const src = Security.sanitizeObject(campaign);
+    const src = Security.sanitizeRecord('adCampaignRequests', campaign);  // the ad words stay as typed
     // The copy keeps the source's number of days (its durationDays, or its dates for an older request).
     const sourceDays = adsStudioCampaignDays(src);
     const durationDays = sourceDays >= 1 && sourceDays <= 366 ? sourceDays : 7;
@@ -2214,7 +2222,7 @@ async function startAdsStudioCampaign(id) {
   _adsStudioConfirmationChecked = false;
   _adsStudioDraft = {
     ...newAdsStudioDraft(),
-    ...Security.sanitizeObject(campaign),
+    ...Security.sanitizeRecord('adCampaignRequests', campaign),
     platforms: Array.isArray(campaign.platforms) ? campaign.platforms.slice() : [],
     locations: Array.isArray(campaign.locations) ? campaign.locations.slice() : [],
     genders: Array.isArray(campaign.genders) ? campaign.genders.slice() : ['all'],
@@ -2581,17 +2589,25 @@ async function adsStudioLoadPostPages(force = false) {
   if (!uid || !isServerModeEnabled()) return;
   if (picker.forUser !== uid) { resetAdsStudioPostPicker(); picker.forUser = uid; }
   if (picker.pagesState === 'loading') return;
-  if (!force && (picker.pagesState === 'done' || (picker.pagesState === 'failed' && Date.now() - picker.pagesFailedAt < 60000))) return;
+  if (!force && (picker.pagesState === 'done' || (picker.pagesState === 'failed' && Date.now() - picker.pagesFailedAt < 60000))) {
+    // A posts read the app cancelled left no list for the chosen page: this draw asks for it again.
+    if (picker.pagesState === 'done' && picker.pageId && !picker.posts[picker.pageId]) adsStudioLoadPagePosts(picker.pageId);
+    return;
+  }
   const generation = picker.generation;
+  const signal = typeof studioReadSignal === 'function' ? studioReadSignal() : null;
   picker.pagesState = 'loading';
   picker.pagesError = null;
   adsStudioRefreshPostPicker();
   let pages = null;
   let error = null;
+  let cancelled = false;
   try {
     pages = adsStudioNormalizePostPages(await apiJson('/api/studio/pages', { method: 'GET' }));
-  } catch (e) { error = adsStudioErrorInfo(e); }
+  } catch (e) { error = adsStudioErrorInfo(e); cancelled = typeof studioReadCancelled === 'function' && studioReadCancelled(e, signal); }
   if (generation !== picker.generation || uid !== String(state.currentUser?.id || '')) return;
+  // The app moved on (15g studioReadCancelled): not read yet, never failed; the next draw asks again.
+  if (cancelled) { picker.pagesState = ''; adsStudioRefreshPostPicker(); return; }
   if (pages) {
     picker.pages = pages;
     picker.pagesState = 'done';
@@ -2616,15 +2632,22 @@ async function adsStudioLoadPagePosts(pageId, force = false) {
   if (current && current.state === 'loading') return;
   if (!force && current && (current.state === 'done' || (current.state === 'failed' && Date.now() - current.at < 60000))) return;
   const generation = picker.generation;
+  const signal = typeof studioReadSignal === 'function' ? studioReadSignal() : null;
   picker.posts[id] = { state: 'loading', posts: current?.posts || [], checkedAt: current?.checkedAt || '', platforms: current?.platforms || {}, error: null, at: Date.now() };
   adsStudioRefreshPostPicker();
   let result = null;
   let error = null;
+  let cancelled = false;
   try {
     // "Try again" asks the server to read Meta again (it does so when its list is over a minute old).
     result = adsStudioNormalizeRecentPosts(await apiJson(`/api/studio/pages/${encodeURIComponent(id)}/recent-posts${force ? '?refresh=1' : ''}`, { method: 'GET' }));
-  } catch (e) { error = adsStudioErrorInfo(e); }
+  } catch (e) { error = adsStudioErrorInfo(e); cancelled = typeof studioReadCancelled === 'function' && studioReadCancelled(e, signal); }
   if (generation !== picker.generation) return;
+  if (cancelled) {  // the app moved on: the earlier list comes back (none: the next draw asks again)
+    if (current) picker.posts[id] = current; else delete picker.posts[id];
+    adsStudioRefreshPostPicker();
+    return;
+  }
   picker.posts[id] = result
     ? { state: 'done', posts: result.posts, checkedAt: result.checkedAt, platforms: result.platforms, error: null, at: Date.now() }
     : { state: 'failed', posts: current?.posts || [], checkedAt: current?.checkedAt || '', platforms: current?.platforms || {}, error, at: Date.now() };
@@ -3348,13 +3371,8 @@ function moveAdsStudioWizard(delta) {
 function sanitizedAdsStudioDraft() {
   const d = _adsStudioDraft || newAdsStudioDraft();
   const text = (value, max) => Security.sanitizeInput(String(value || ''), { maxLength: max }).trim();
-  // The ad's words are plain text, escaped wherever drawn: never "data:" or "on…=" stripped (r8 #15).
-  // A leading "javascript:"/"vbscript:" goes too: the server saves such a field empty.
-  const copy = (value, max) => {
-    let s = String(value || '').replace(/\0/g, '').replace(/[<>]/g, '').trim();
-    while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
-    return s.slice(0, max).trim();
-  };
+  // The ad's words: the one plain-text rule (02 Security.plainText), never "data:" or "on…=" stripped (r8 #15).
+  const copy = (value, max) => Security.plainText(value, max);
   const list = (values, maxItems = 30) => Array.from(new Set((Array.isArray(values) ? values : []).map(value => text(value, 80)).filter(Boolean))).slice(0, maxItems);
   const boostType = ['boost_post', 'boost_page'].includes(String(d.boostType || '')) ? String(d.boostType) : '';
   // A half-typed post link must never brick "Save draft": only a link the
@@ -3506,7 +3524,7 @@ async function saveAdsStudioDraftOnce(closeAfter = true, stabilityAttempt = 0) {
 }
 
 function upsertAdsStudioEntity(entity) {
-  let data = entity?.data ? Security.sanitizeObject(entity.data) : null;
+  let data = entity?.data ? Security.sanitizeRecord('adCampaignRequests', entity.data) : null;
   if (!data?.id) return null;
   if (isServerModeEnabled() && typeof makeLightweightMediaRecord === 'function') {
     data = makeLightweightMediaRecord('adCampaignRequests', data);
@@ -3768,7 +3786,7 @@ async function reviewAdsStudioCampaignOnce(id, decision, confirmed = false) {
   if (inputValue !== undefined) setAdsStudioReviewNote(id, inputValue);
   const reasonValue = typeof document !== 'undefined' ? document.getElementById(`ads-review-reason-${id}`)?.value : undefined;
   if (reasonValue !== undefined) setAdsStudioReviewReason(id, reasonValue);
-  const note = Security.sanitizeInput(String(_adsStudioReviewNotes[id] || ''), { maxLength: 1000 }).trim();
+  const note = Security.plainText(_adsStudioReviewNotes[id], 1000);  // the customer reads it as written
   const reasonCode = decision === 'Approved' ? '' : adsStudioReviewReasonFor(campaign);
   if (decision !== 'Approved' && !reasonCode) {
     showNotification(adsStudioText('Choose a reason', 'اختر سبباً'), adsStudioText('Choose a reason for this decision.', 'اختر سبباً لهذا القرار.'), 'warning');
@@ -4127,6 +4145,17 @@ function _adsStudioWalletRequestRow(entity, adminView) {
     </div>`;
 }
 
+// The name of the ad request a ledger row is for: its own reference, or (a refund, a returned budget)
+// that of the payment row it reverses. '' when not known here.
+function adsStudioWalletTxRequestName(tx) {
+  const id = String(tx?.referenceId || '');
+  const ref = tx?.referenceType === 'reversalOf' && id
+    ? (state.walletTransactions || []).find(row => row && String(row.id || '') === id)
+    : tx;
+  const campaign = ref?.referenceType === 'adCampaignRequest' ? findVisibleAdsStudioCampaign(ref.referenceId) : null;
+  return campaign ? String(campaign.name || '') : '';
+}
+
 function renderAdsStudioWallet() {
   if (_adsStudioWalletForUser !== String(state.currentUser?.id || '')) resetAdsStudioWalletCache();
   if (_adsStudioWalletMine === null) refreshAdsStudioWallet();
@@ -4205,8 +4234,12 @@ function renderAdsStudioWallet() {
         <h3 class="font-bold text-slate-800 dark:text-white mb-3">${adsStudioText('Recent wallet activity', 'آخر حركات المحفظة')}</h3>
         ${history.length ? `<div class="space-y-1">${history.map(tx => {
           const incoming = String(tx.toUserId || '') === uid;
+          // The type in the reader's language and the request's name; the ledger's English memo (it
+          // carries internal ids) only as a small second line when there is no request.
+          const request = adsStudioWalletTxRequestName(tx);
+          const memo = request ? '' : String(tx.memo || '');
           return `<div class="workspace-wallet-row text-sm py-1.5 border-b border-slate-100 dark:border-slate-800 last:border-0">
-            <span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(String(tx.memo || tx.type || ''))}</span>
+            <div class="min-w-0"><span class="text-slate-600 dark:text-slate-300">${Security.escapeHtml(walletTxLabel(tx.type, adsStudioIsAr()))}${request ? ` · <bdi>${Security.escapeHtml(request)}</bdi>` : ''}</span>${memo ? `<div class="text-[11px] text-slate-400 break-words"><bdi dir="ltr">${Security.escapeHtml(memo)}</bdi></div>` : ''}</div>
             <span class="workspace-wallet-amount font-mono font-bold ${incoming ? 'text-emerald-600' : 'text-rose-600'}" dir="ltr">${incoming ? '+' : '−'}${adsStudioMoney(Math.abs(parseInt(tx.amountMinor, 10) || 0))}</span>
           </div>`;
         }).join('')}</div>`
@@ -6777,10 +6810,15 @@ function studioV2Back() {
   return parent ? studioV2Go(parent) : studioV2Leave();
 }
 
-// For the app's hardware Back key (P2-09 hook): true when the studio moved up a level itself; false on
-// Home or outside the v2 layout, so the app's own Back runs.
+// For the app's hardware Back key (P2-09 hook): true when the studio closed a sheet or moved up a level
+// itself; false on Home or outside the v2 layout, so the app's own Back runs.
 function studioHandleBack() {
   if (typeof state === 'undefined' || state.currentView !== 'ads-studio') return false;
+  // The classic Withdraw, Unlink and Link sheets (15c; the desk draws the last two) are drawn in the
+  // view, not as dialogs: Back closes an open one first, in both layouts.
+  if (typeof _adsStudioWithdrawConfirmId !== 'undefined' && _adsStudioWithdrawConfirmId) { cancelAdsStudioWithdraw(); return true; }
+  if (typeof _adsStudioUnlinkSheet !== 'undefined' && _adsStudioUnlinkSheet) { closeAdsStudioUnlinkSheet(); return true; }
+  if (typeof _adsStudioLinkSheet !== 'undefined' && _adsStudioLinkSheet) { closeAdsStudioLinkSheet(); return true; }
   const frame = studioV2Frame();
   if (!frame) return false;
   return studioV2Parent(studioV2Route(studioV2ReadAddress(), frame), frame) ? studioV2Back() : false;
@@ -8556,6 +8594,13 @@ function studioBuilderSync() {
   _studioBuilder.pages = { state: '', list: [], error: '', failedAt: 0, pageId: '', posts: Object.create(null) };
 }
 
+// Sign-out and session expiry (15c resetAdsStudioSessionState): the same reset for any user, so the
+// open draft, its timers and its photos never outlive the session that typed them.
+function studioBuilderReset() {
+  _studioBuilder.forUser = null;  // no user id: the sync below resets
+  studioBuilderSync();
+}
+
 function studioBuilderCurrent(generation) {
   return generation === _studioBuilder.generation && _studioBuilder.forUser === studioBuilderUid();
 }
@@ -8839,7 +8884,7 @@ function studioBuilderDraftFromCampaign(campaign) {
   const list = value => Array.isArray(value) ? value.slice() : [];
   const draft = {
     ...newAdsStudioDraft(),
-    ...Security.sanitizeObject(campaign),
+    ...Security.sanitizeRecord('adCampaignRequests', campaign),  // the ad words stay as typed
     platforms: list(campaign.platforms),
     locations: list(campaign.locations),
     locationKeys: list(campaign.locationKeys).filter(key => STUDIO_BUILDER_KEY_RE.test(String(key))),
@@ -8878,6 +8923,8 @@ function studioBuilderOpenSession(kind, draft, extra = {}) {
     kind,
     draft,
     id: String(draft.id),
+    uid: studioBuilderUid(),  // the account and the builder session it was opened in (studioBuilderSaveNow)
+    generation: _studioBuilder.generation,
     created: !!extra.created,
     baseline: extra.created ? Number(extra.baseline) || 0 : 0,
     saved: {},
@@ -9144,6 +9191,9 @@ function studioBuilderFlush(session = _studioBuilder.session) {
 // One save at a time per draft; a change made meanwhile is saved right after.
 function studioBuilderSaveNow(session) {
   if (!session || ['conflict', 'locked'].includes(session.status)) return null;
+  // Every send passes here (the timers, the retry, the page-hide flush): a draft opened by another
+  // account, or before a sign-out, is never sent as the account signed in now.
+  if (session.uid !== studioBuilderUid() || session.generation !== _studioBuilder.generation) { studioBuilderStopTimers(session); return null; }
   if (session.inFlight) { session.again = true; return session.inFlight; }
   if (!session.dirty) return null;
   if (typeof adsStudioCanCreate === 'function' && !adsStudioCanCreate()) return null;
@@ -11129,14 +11179,16 @@ function studioWalletLoadMethods(retry = false) {
   if (_studioWallet.methodsFailed && retry !== true) return Promise.resolve(null);
   const generation = _studioWallet.generation;
   _studioWallet.methodsFailed = false;
+  const signal = studioReadSignal();
   _studioWallet.methodsLoading = (async () => {
     try {
       const catalog = await studioApi('/api/wallet/payment-requests/methods', { method: 'GET' });
       _studioWallet.methods = studioWalletCleanMethods(catalog && catalog.methods);
       const rate = Number(catalog && catalog.rate && catalog.rate.usdToLyd);
       _studioWallet.rate = Number.isFinite(rate) && rate > 0 ? rate : 0;
-    } catch (_) {
-      _studioWallet.methodsFailed = true;
+    } catch (error) {
+      // A read the app cancelled by moving on (15g) never failed: the next draw asks again.
+      if (!studioReadCancelled(error, signal)) _studioWallet.methodsFailed = true;
     } finally {
       _studioWallet.methodsLoading = null;
     }
@@ -12165,6 +12217,10 @@ function renderStudioAccountScreen() {
               <a class="studio-v2-row" data-testid="studio-account-terms" href="${base}/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
                 ${studioWalletIcon('scroll-text')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
+              </a>
+              <a class="studio-v2-row" data-testid="studio-account-delete" href="${base}/delete-account" target="_blank" rel="noopener noreferrer">
+                ${studioWalletIcon('user-x')}
+                <span class="studio-v2-row-label">${studioEsc(adsStudioText('Request account deletion', 'طلب حذف الحساب'))}</span>
               </a>
               ${row('handleLogout()', 'log-out', adsStudioText('Sign out', 'تسجيل الخروج'), '', 'studio-account-logout', ' is-danger')}
             </div>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ (API 31+) ignores allowBackup="false" for device-to-device
+     transfer: without these rules a copied phone opens signed in, with the
+     business cache and the fingerprint lock silently off. Nothing is copied
+     or backed up, so a new phone starts at the sign-in screen. A section with
+     no exclude means "copy everything"; the root domain also covers
+     app_webview (the WebView's cookies, IndexedDB and localStorage). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

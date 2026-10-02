@@ -1,8 +1,7 @@
 // ==========================================
 // CAPACITOR MOBILE RUNTIME
 // ==========================================
-// Native Android Back handling and a clear connectivity notice for the
-// packaged app. The web app keeps normal browser history/online behaviour.
+// Android Back and the connectivity notice for the packaged app; the web keeps its own.
 
 let _mobileRuntimeReady = false;
 let _mobileLastBackAt = 0;
@@ -205,7 +204,7 @@ function mobileSurfaceZIndex(element) {
 
 function getTopMobileSurface() {
   const surfaces = Array.from(document.querySelectorAll(
-    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal'
+    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal, #analytics-breakdown-dialog, #dollar-purchase-dialog'
   )).filter(element => element && element.isConnected !== false);
   return surfaces
     .map((element, domOrder) => ({ element, domOrder, zIndex: mobileSurfaceZIndex(element) }))
@@ -271,10 +270,20 @@ function closeTopMobileSurface() {
     closeMetaInsightsModal();
     return true;
   }
+  // Their admin-tools closers also clear body's overflow-hidden and restore focus.
+  if (topSurface.id === 'dollar-purchase-dialog') {
+    if (typeof closeDollarPurchaseManager === 'function') closeDollarPurchaseManager();
+    else topSurface.remove();
+    return true;
+  }
+  if (topSurface.id === 'analytics-breakdown-dialog') {
+    if (typeof closeAnalyticsBreakdown === 'function') closeAnalyticsBreakdown();
+    else topSurface.remove();
+    return true;
+  }
 
-  // This alert requires an explicit decision. Android Back follows the safe
-  // "choose another customer" path instead of merely deleting the overlay and
-  // leaving an unacknowledged customer selected underneath it.
+  // An explicit-decision alert: Back takes the safe "choose another customer" path,
+  // never a bare remove() that leaves the unacknowledged customer selected.
   if (topSurface.id === 'receipt-customer-risk-warning') {
     if (typeof cancelReceiptCustomerRiskWarning === 'function') cancelReceiptCustomerRiskWarning();
     else topSurface.remove();
@@ -290,9 +299,8 @@ function closeTopMobileSurface() {
     return true;
   }
 
-  // Standalone overlays (delivery, collect, history, choosers) have no activeModal: clean
-  // their URL/working state too. The driver form's crash draft writes its debounced keys
-  // before Back removes the DOM it reads (the timer would no-op after).
+  // Standalone overlays (no activeModal) clean their URL/working state too. The driver
+  // form's crash draft is written first: its debounce timer would find the DOM gone.
   if (topSurface.id === 'delivery-complete-modal' && typeof _flushDeliveryCompletionDraftNow === 'function') {
     try { _flushDeliveryCompletionDraftNow(); } catch (_) {}
   }
@@ -382,9 +390,7 @@ async function setupMobileRuntime() {
     }
   }
 
-  // SYSTEM-BROWSER APP LOGIN (Phase 2): listen for the albayan://auth deep
-  // link that brings a finished browser sign-in back into the packaged app
-  // (Capacitor-only; the function guards itself).
+  // System-browser login: albayan://auth brings the sign-in back (Capacitor-only, self-guarded).
   if (typeof setupAppLoginDeepLinks === 'function') {
     setupAppLoginDeepLinks().catch((error) => {
       console.warn('[MobileRuntime] App-login deep links unavailable:', error?.message || error);
@@ -451,9 +457,8 @@ function shouldSuppressOverlayPopstate() {
 function markOverlayPopClose(closed) {
   if (closed) {
     _lastOverlayPopCloseAt = Date.now();
-    // The popped entry was the surface's sentinel/?modal entry. Depth may
-    // under-count after a tracked-modal pop; under-counting only ever makes
-    // the observer SKIP an auto-consume (the old status quo), never over-pop.
+    // The popped entry was the surface's sentinel/?modal entry. Depth may under-count
+    // after a tracked-modal pop: that only skips an auto-consume, never over-pops.
     if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
   }
   return !!closed;
@@ -462,9 +467,8 @@ function markOverlayPopClose(closed) {
 // ==========================================
 // CENTRAL OVERLAY OBSERVER (history + iOS body scroll lock)
 // ==========================================
-// Every standalone surface is appended to <body>, so one childList observer pushes/consumes
-// the sentinel entries and toggles a body scroll lock while any dialog is open (iOS < 16
-// lacks overscroll-behavior: drags in a dialog scrolled the page / pull-to-refreshed).
+// Surfaces are <body> children: one childList observer pushes/consumes the sentinels and
+// locks body scroll while a dialog is open (iOS < 16: drags in a dialog scrolled the page).
 
 let _overlayObservedCount = 0;
 let _scrollLockActive = false;
@@ -472,7 +476,7 @@ let _scrollLockY = 0;
 
 function _overlaySurfaceCount() {
   return document.querySelectorAll(
-    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal'
+    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal, #analytics-breakdown-dialog, #dollar-purchase-dialog'
   ).length;
 }
 
@@ -504,9 +508,7 @@ function _unlockBodyScrollForOverlay() {
   bodyStyle.width = '';
   const y = _scrollLockY;
   window.scrollTo(0, y);
-  // closeModal triggers render(), whose own scroll save/restore may read
-  // scrollY as 0 while the body was still position:fixed — restore again
-  // after that render had its chance to run.
+  // closeModal's render() may save scrollY as 0 under position:fixed: restore after it too.
   requestAnimationFrame(() => window.scrollTo(0, y));
 }
 
@@ -517,9 +519,8 @@ function _handleOverlayDomChange() {
   _overlayObservedCount = count;
 
   if (count > previous) {
-    // Surface(s) opened. An opener that just pushed a ?modal entry (tracked #app-modal
-    // dialogs, collect-receipt) already gave Back one: a sentinel would cost an extra press.
-    // One sentinel per transition (batch-opens in one task are not a real flow).
+    // Opened: one sentinel per transition, unless the opener just pushed a ?modal entry
+    // (tracked #app-modal, collect-receipt): a second one would cost an extra Back press.
     if (Date.now() - _albayanLastModalUrlPushAt > 400) {
       pushMobileOverlayHistoryEntry();
     }

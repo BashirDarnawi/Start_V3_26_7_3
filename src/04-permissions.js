@@ -154,9 +154,7 @@ const PERMISSION_MODULES = {
     icon: 'settings',
     color: 'slate',
     description: 'System settings',
-    // NOTE: backup/restore/clearData were removed — those are whole-database
-    // operations the server only ever allows for the Admin ROLE, so offering
-    // them as grantable toggles was misleading (they never did anything).
+    // No backup/restore/clearData toggles: the server allows them to the Admin ROLE only.
     permissions: {
       view: { label: 'View Settings', description: 'View system settings' },
       edit: { label: 'Edit Settings', description: 'Edit system settings' },
@@ -168,8 +166,7 @@ const PERMISSION_MODULES = {
     icon: 'file-clock',
     color: 'violet',
     description: 'System audit trail',
-    // NOTE: 'backup' was removed — no code ever honored it (log backup is an
-    // Admin-role operation), so the toggle was decorative.
+    // No 'backup' toggle: log backup is an Admin-role operation.
     permissions: {
       view: { label: 'View Audit Logs', description: 'View all audit logs' },
       viewOwn: { label: 'View Own Logs', description: 'View only own activity' },
@@ -177,8 +174,7 @@ const PERMISSION_MODULES = {
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
   },
-  // Clothes System (module keys MUST equal the collection names — the server
-  // maps collection → permission module by name)
+  // Clothes System: module keys MUST equal the collection names (the server maps them by name)
   clothesProducts: {
     name: 'Clothes — Products',
     icon: 'shirt',
@@ -235,9 +231,7 @@ const PERMISSION_MODULES = {
       editOwn: { label: 'Edit Own Settings', description: 'Edit own clothes settings' }
     }
   },
-  // Albayan Ads Studio requests are intentionally separate from the internal
-  // `ads` collection. Customers can prepare and submit only their own drafts;
-  // approval stays with an authorized reviewer.
+  // Ads Studio requests are separate from internal ads: customers submit only their own drafts; a reviewer approves.
   adCampaignRequests: {
     name: 'Ads Studio — Campaign Requests',
     icon: 'rocket',
@@ -370,8 +364,7 @@ const PERMISSION_TEMPLATES = {
     icon: 'badge-check',
     color: 'blue',
     permissions: {
-      // Reviewers can inspect every submitted request and record a decision,
-      // but they must never rewrite or submit a customer's draft.
+      // Reviewers see and decide every request; never rewrite or submit a customer's draft.
       adCampaignRequests: ['view', 'review']
     }
   }
@@ -383,11 +376,8 @@ function hasPermission(userId, module, action) {
   if (!userId || userId === 'system') return true;
 
   let user = (state.users || []).find(u => u && u.id === userId);
-  // FALLBACK: state.users can be empty or hold a permission-less stub (e.g. the
-  // /api/users/public list only carries {id,name,role}). The login and
-  // /api/auth/me responses always carry the caller's full permissions on
-  // state.currentUser — use that as the source of truth for the current user
-  // so the whole UI can never lock out a properly-permissioned account.
+  // FALLBACK: state.users may hold a permission-less stub (/api/users/public); login and /api/auth/me
+  // put the full map on state.currentUser, so the UI never locks out a permitted account.
   if ((!user || !user.permissions) && state.currentUser && String(state.currentUser.id) === String(userId)) {
     user = state.currentUser;
   }
@@ -408,9 +398,7 @@ function hasPermission(userId, module, action) {
   return modulePerms.includes(action) || modulePerms.some(p => String(p).toLowerCase() === String(action).toLowerCase());
 }
 
-// Refresh current user's permissions from server.
-// Returns true when the permissions actually changed (callers use this to
-// schedule a re-render so a locked sidebar can recover without re-login).
+// Refresh the current user's permissions; true when they changed (a re-render then unlocks the sidebar).
 async function refreshCurrentUserPermissions() {
   const sessionIdentityAtStart = typeof getServerSessionIdentity === 'function' ? getServerSessionIdentity() : undefined;
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
@@ -426,9 +414,7 @@ async function refreshCurrentUserPermissions() {
     const me = await apiAuthMe();
     if (getAuthMeIdentity() !== requestIdentity) return false;
     if (me && String(me.id || '') === currentId) {
-      // Role is authorization state too. Copying permissions alone left a
-      // demoted Admin permanently Admin in the browser when both maps were
-      // empty, even though the server had already revoked that access.
+      // The role too: copying permissions alone left a demoted Admin an Admin in the browser.
       state.currentUser = {
         ...state.currentUser,
         ...Security.sanitizeObject(me),
@@ -442,8 +428,7 @@ async function refreshCurrentUserPermissions() {
         subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
       });
       const changed = beforeAccess !== afterAccess;
-      // UPSERT into state.users, so the periodic refresh repairs a missing or
-      // permission-less (stub) record.
+      // Upsert: the periodic refresh repairs a missing or stub record.
       upsertCurrentUserIntoUsers();
       if (changed) console.log('[Permissions] Refreshed current user access');
       return changed;
@@ -457,8 +442,7 @@ async function refreshCurrentUserPermissions() {
   return false;
 }
 
-// Keep the current user's record in state.users WITH permissions: login and
-// /api/auth/me carry the full map; GET /api/users/public only {id,name,role}.
+// Keep the current user's record in state.users WITH permissions (/api/users/public carries none).
 function upsertCurrentUserIntoUsers() {
   const cu = state.currentUser;
   if (!cu || !cu.id) return;
@@ -476,28 +460,20 @@ function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
 }
 
-// User-management capability: Admin role OR the matching users.* permission.
-// The server enforces the same rule (plus anti-escalation guards), so these
-// buttons/actions now work for permission-granted non-admins too.
+// User management: Admin role OR the matching users.* permission (the server's rule, plus anti-escalation).
 function canManageUsersAction(action) {
   return isCurrentUserAdmin() || currentUserHasPermission('users', action);
 }
 
-// Admin role OR the named permission. Use for every capability the
-// Permissions Manager advertises, so a granted toggle actually does something.
+// Admin role OR the named permission: for every capability the Permissions Manager offers.
 function can(module, action) {
   return isCurrentUserAdmin() || currentUserHasPermission(module, action);
 }
 
-// The audit trail the current user is allowed to SEE.
-// auditLogs.view => all entries; auditLogs.viewOwn => only their own.
-// Without either, nothing. state.logs is a DEVICE-LOCAL trail (it can hold
-// entries written while a different user was logged in on this browser), so
-// this scoping is what keeps a viewOwn user from reading someone else's
-// activity — never render or export state.logs directly.
+// The audit trail the current user may SEE: auditLogs.view all, viewOwn only their own, else nothing.
+// state.logs is DEVICE-LOCAL (other users' entries too): never render or export it directly.
 function getVisibleAuditLogs() {
-  // In server mode the server's trail is authoritative AND already scoped by
-  // the caller's auditLogs.view/viewOwn permission (GET /api/audit).
+  // Server mode: GET /api/audit's trail, already scoped by auditLogs.view/viewOwn.
   const source = isServerModeEnabled()
     ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
     : getVisibleRecords(state.logs);
@@ -510,18 +486,41 @@ function getVisibleAuditLogs() {
   return [];
 }
 
-// Refresh the server audit trail, then re-render the Audit Logs screen.
-// Cheap guard so the render loop can call it without re-entering.
+// Refresh the server audit trail, then re-render the Audit Logs screen (guarded: the render loop calls
+// it). The newest 500 rows come first; a filter or "Load older entries" pages back with the (ts, id) cursor.
 let _auditFetchInFlight = false;
-async function refreshServerAuditLogs({ force = false } = {}) {
+async function refreshServerAuditLogs({ force = false, older = false } = {}) {
   if (!isServerModeEnabled() || !state.currentUser?.id) return;
   if (_auditFetchInFlight) return;
-  const fresh = Date.now() - (state.serverLogsLoadedAt || 0) < 15000;
-  if (!force && fresh) return;
+  const stale = force || Date.now() - (state.serverLogsLoadedAt || 0) >= 15000;
+  const from = state.auditDateFrom ? Date.parse(`${state.auditDateFrom}T00:00`) : 0;  // local midnight
+  const filtered = !!(state.auditSearch || state.auditDateFrom || state.auditDateTo)
+    || [state.auditActionFilter, state.auditCategoryFilter, state.auditSeverityFilter, state.auditUserFilter].some(f => f !== 'all');
+  const logs = () => state.serverLogs || [];
+  // On its own it stops at the trail's end, at 10,500 rows or at the filter's start date.
+  const deeper = () => logs().length > 0 && state.serverLogsComplete === false
+    && (older || (filtered && logs().length < 10500 && !(Date.parse(logs()[logs().length - 1].date) < from)));
+  if (!stale && !deeper()) return;
   _auditFetchInFlight = true;
+  const identity = getServerSessionIdentity();  // rows read for the last account are never kept
   try {
-    state.serverLogs = await apiListAuditLogs(500);
-    state.serverLogsLoadedAt = Date.now();
+    if (stale) {
+      const rows = await apiListAuditLogs(500);
+      if (serverSessionIdentityChanged(identity)) return;
+      // Older pages already here stay when the new first page reaches them (force, after a cleanup, starts over).
+      const at = rows.length === 500 && !force ? logs().findIndex(l => l.id === rows[499].id) : -1;
+      state.serverLogs = at < 0 ? rows : rows.concat(logs().slice(at + 1));
+      if (at < 0) state.serverLogsComplete = rows.length < 500;
+      state.serverLogsLoadedAt = Date.now();
+    }
+    for (let page = 0; page < 10 && deeper(); page++) {
+      const last = logs()[logs().length - 1];
+      const rows = await apiListAuditLogs(1000, 0, `&before_ts=${Date.parse(last.date)}&before_id=${encodeURIComponent(last.id)}`);
+      if (serverSessionIdentityChanged(identity)) return;
+      const ids = new Set(logs().map(l => l.id));
+      state.serverLogs = logs().concat(rows.filter(l => !ids.has(l.id)));
+      if (rows.length < 1000) state.serverLogsComplete = true;
+    }
     if (state.currentView === 'audit') RenderQueue.schedule('auditLogs(server)');
   } catch (e) {
     console.warn('[Audit] Failed to load server logs:', e?.message || e);
@@ -807,8 +806,7 @@ async function copyTextToClipboard(text) {
     ta.style.left = '-1000px';
     document.body.appendChild(ta);
     try {
-      // iOS Safari cannot select a readonly textarea via select(); use Range + setSelectionRange.
-      // The readonly attribute stays on at creation to suppress the iOS keyboard.
+      // iOS Safari cannot select() a readonly textarea: Range + setSelectionRange (readonly at creation keeps the keyboard away).
       ta.contentEditable = 'true';
       ta.readOnly = false;
       const range = document.createRange();

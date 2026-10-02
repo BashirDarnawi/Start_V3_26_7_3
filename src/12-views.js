@@ -950,20 +950,15 @@ function renderLogin() {
   if (window.__albayanAppLoginReturn && typeof _renderAppLoginReturnHTML === 'function') {
     return _renderAppLoginReturnHTML();
   }
-  // Local mode can verify its locally stored WebAuthn credentials. Production
-  // server mode must not advertise passkeys until server-side challenge and
-  // credential endpoints exist.
+  // Passkeys only where they work (local mode, secure origin): server mode has no challenge or
+  // credential endpoints, so its login draws no Passkey button (a disabled one read as unfinished).
   const passkeySupported = !isServerModeEnabled()
     && !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
   // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
   // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
   // (02-security.js), but tell the user why security features are degraded.
   const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
-  const passkeyHint = isServerModeEnabled()
-    ? (isRTL ? 'تسجيل الدخول بمفتاح المرور غير مفعّل بعد في وضع السيرفر.' : 'Passkey sign-in is not enabled in server mode yet.')
-    : passkeySupported
-    ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
-    : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
+  const passkeyHint = isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.';
 
   const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
 
@@ -1042,6 +1037,7 @@ function renderLogin() {
             </button>
           </form>
 
+          ${passkeySupported ? `
           <div class="my-6 flex items-center gap-3">
             <div class="flex-1 h-px bg-slate-200 dark:bg-slate-800"></div>
             <div class="text-[11px] font-bold text-slate-400 uppercase">${isRTL ? 'أو' : 'or'}</div>
@@ -1050,8 +1046,7 @@ function renderLogin() {
 
           <button type="button"
             onclick="passkeySignIn()"
-            ${passkeySupported ? '' : 'disabled'}
-            class="w-full glass-panel rounded-xl px-4 py-3 font-extrabold flex items-center justify-center gap-2 ${passkeySupported ? 'hover:shadow-xl' : 'opacity-60 cursor-not-allowed'}${prefillAccount && passkeySupported ? ' border border-indigo-200 dark:border-indigo-800' : ''}"
+            class="w-full glass-panel rounded-xl px-4 py-3 font-extrabold flex items-center justify-center gap-2 hover:shadow-xl${prefillAccount ? ' border border-indigo-200 dark:border-indigo-800' : ''}"
             title="${Security.escapeHtml(passkeyHint)}"
           >
             <i data-lucide="key-round" class="w-5 h-5"></i>
@@ -1059,7 +1054,7 @@ function renderLogin() {
           </button>
           <div class="mt-2 text-[11px] text-slate-400 text-center">
             ${passkeyHint}
-          </div>
+          </div>` : ''}
           ${(typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()) ? `
           <button type="button" onclick="nativeLoginUseBrowser()" class="mt-3 text-xs font-bold alb-link mx-auto block min-h-11">
             ${isRTL ? 'استخدام تسجيل الدخول عبر المتصفح المحمي' : 'Use secure browser sign-in'}
@@ -1845,12 +1840,8 @@ function renderAnalyticsView() {
   const notCollectedUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0) - collectedUSD;
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
-  // Delivery tracking. Deliveries are tracked ONLY on receipts (ads are pinned to
-  // 'Office' when created, so sourcing this panel from ads showed 0 forever while
-  // renderDeliveriesView listed real deliveries). Same filter/normalisation as
-  // renderDeliveriesView so the two screens cannot contradict each other.
-  // The terminal "done" status is 'Delivered' (there is no 'completed' status in
-  // DELIVERY_STATUSES); Canceled is neither active nor completed.
+  // Deliveries live on receipts only (ads are pinned to 'Office'): renderDeliveriesView's filter, so the
+  // screens agree. 'Delivered' is done; Canceled is neither active nor done.
   const deliveryStatuses = receipts
     .filter(r => {
       if (!r) return false;
@@ -1893,11 +1884,7 @@ function renderAnalyticsView() {
   });
   const topPages = Object.entries(adsByPage)
     .map(([pageId, count]) => {
-      // Deleting a page keeps its ads (history) but leaves them pointing at the
-      // deleted page's id, and the name can be reused by a NEW page. Resolve the
-      // name among live pages ONLY and tag the orphaned row, otherwise two
-      // different page ids render as one indistinguishable name here while the
-      // Pages card counts ads against the new id.
+      // Live pages only, a deleted page's row tagged: a NEW page may reuse the name under another id.
       const livePage = state.pages.find(p => p && !p._deleted && String(p.id) === String(pageId));
       const deletedPage = livePage ? null : state.pages.find(p => p && p._deleted && String(p.id) === String(pageId));
       const deletedName = deletedPage?.name || '';
@@ -2346,10 +2333,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
 
     const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
-          // Only render Edit/Delete when the handler would actually allow it
-          // (editCustomer → canActOnRecord edit; deleteCustomer →
-          // currentUserHasPermission delete). Matches how the Add button is
-          // gated, so view-only roles don't see dead buttons.
+          // Edit/Delete only when the handler allows it (canActOnRecord edit / customers.delete): no dead buttons.
           const canEditThisCustomer = canActOnRecord('customers', 'edit', c.createdBy);
           const canDeleteThisCustomer = can('customers', 'delete');
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -2420,7 +2404,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <div class="flex-1">
               ${!canSeeContacts
                 ? `<span class="text-slate-400">••• ${HIDDEN}</span>`
-                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
+                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${phoneLtrHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
                   </div>
                 </div>
 
@@ -2531,11 +2515,7 @@ function loadMoreCustomers() {
   updateCustomersViewFiltered();
 }
 
-// Same reason as the customers grid: every page card carries spend figures and
-// icons, and drawing all of them at once is what a phone actually chokes on
-// (the per-card scanning is indexed now, the DOM work is not). The limit
-// resets whenever the search changes, so a search always shows its best
-// matches from the top.
+// Paged like the customers grid: drawing every card at once is what a phone chokes on; a new search starts at the top.
 const PAGES_PAGE_SIZE = 50;
 let _pagesShowLimit = PAGES_PAGE_SIZE;
 let _pagesFilterFingerprint = '';
@@ -2561,11 +2541,7 @@ function renderCustomersView() {
     state.customerFinancialFilter = 'all';
     if (financialCustomerSorts.has(String(state.customerSort || ''))) state.customerSort = 'newest';
   }
-  // ONE statsIndex per render pass: getFilteredCustomers (financial filter +
-  // sort), the header stat cards and every customer card all reuse it. Each
-  // index build is a full ads/receipts/pages pass, and the debt block in
-  // getCustomerStats now depends on the index's committedUSDByReceiptId to
-  // avoid per-receipt ads rescans — so build it once, up front.
+  // ONE statsIndex per render pass (a full ads/receipts/pages pass): the filter, header stats and every card reuse it.
   const statsIndex = buildCustomerStatsIndex();
   const allFilteredCustomers = getFilteredCustomers(statsIndex);
   const allCustomers = getCustomersVisibleToCurrentUser();
@@ -3164,7 +3140,7 @@ function renderReceiptsView() {
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
                     return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
-                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(2)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
                     </div>`;
                   })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
@@ -3345,7 +3321,7 @@ function renderReceiptsView() {
                     </button>` : ''}
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
                     ${canEditThisReceipt ? `<button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>` : ''}
-                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
+                    ${isPackagedMobileApp() ? '' : `<button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>`}
                     ${canDeleteThisReceipt ? `<button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
                   </div>
                 </div>
@@ -3714,14 +3690,15 @@ function updateAdsViewFiltered() {
 }
 
 function renderAdsView() {
-  // PERFORMANCE: build id->record Maps ONCE so each table row does O(1) lookups
-  // instead of scanning state.customers / state.receipts / state.users per row
-  // (was O(ads × (customers+receipts+users)) on every keystroke). Same Map is
-  // passed into getFilteredAds so the search filter is O(1)-per-ad too.
+  // id->record Maps built once: O(1) lookups per row and per search keystroke (getFilteredAds too).
   const customersById = new Map(state.customers.map(c => [c.id, c]));
   const receiptsById = new Map(getReceiptsVisibleToCurrentUser().map(r => [String(r.id), r]));
   const usersById = new Map(state.users.map(u => [String(u.id), u]));
-  const pagesById = new Map(getPagesVisibleToCurrentUser().map(p => [p.id, p]));
+  const visiblePages = getPagesVisibleToCurrentUser();
+  const pagesById = new Map(visiblePages.map(p => [p.id, p]));
+  // A page merged or deleted (on any device) left its filter hiding every ad behind "All Pages".
+  const pageFilter = String(state.adFilters?.page || 'all');
+  if (pageFilter !== 'all' && !visiblePages.some(p => String(p.id) === pageFilter)) state.adFilters = { ...state.adFilters, page: 'all' };
   // Pairing a hand-made ad with its Meta twin scans every ad, so it is resolved
   // once per render pass instead of once per row (same shape as the deliveries
   // view's collection-target cache).
@@ -3734,7 +3711,6 @@ function renderAdsView() {
   const activeReceiptLabel = Security.escapeHtml(String(
     activeReceipt?.finalReceiptNo || activeReceipt?.serialNumber || activeReceipt?.tempReceiptNo || (isAr ? 'الوصل المحدد' : 'Selected receipt')
   ));
-  const visiblePages = getPagesVisibleToCurrentUser();
   const canSearchAdContacts = can('customers', 'viewContacts');
   const adAdvancedFilterCount = [
     (adF.status || 'all') !== 'all',
@@ -3742,7 +3718,8 @@ function renderAdsView() {
     (adF.page || 'all') !== 'all'
   ].filter(Boolean).length;
   const adAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('ads');
-  const adQuickMode = adF.payment === 'pending_setup' ? 'setup' : (adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all'));
+  const adQuickMode = adF.payment === 'pending_setup' ? 'setup' : (adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : (adAdvancedFilterCount ? 'custom' : 'all')));
+  const adsFiltered = adAdvancedFilterCount > 0 || !!String(state.adSearch || '').trim();
   const adFilterFingerprint = JSON.stringify([adReceiptFilter, state.adSearch, adF.status || 'all', adF.payment || 'all', adF.page || 'all']);
   if (adFilterFingerprint !== _adsFilterFingerprint) {
     _adsFilterFingerprint = adFilterFingerprint;
@@ -3765,9 +3742,9 @@ function renderAdsView() {
             <i data-lucide="plus" class="w-4 h-4"></i>
             <span>${t('addAd')}</span>
           </button>
-          <button type="button" onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl" aria-label="${isAr ? 'طباعة الإعلانات' : 'Print ads'}" title="${isAr ? 'طباعة الإعلانات' : 'Print ads'}">
+          ${isPackagedMobileApp() ? '' : `<button type="button" onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl" aria-label="${isAr ? 'طباعة الإعلانات' : 'Print ads'}" title="${isAr ? 'طباعة الإعلانات' : 'Print ads'}">
             <i data-lucide="printer" class="w-4 h-4"></i>
-          </button>
+          </button>`}
         </div>
       </div>
 
@@ -3812,7 +3789,7 @@ function renderAdsView() {
       </div>
 
       <div id="ads-table-container" class="ads-table-container glass-panel rounded-2xl p-6 overflow-x-auto">
-        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p></div>` : `
+        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : adsFiltered ? (isAr ? 'لا توجد إعلانات تطابق الفلاتر' : 'No ads match your filters') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p>${!adReceiptFilter && adsFiltered ? `<button type="button" onclick="state.adSearch='';applyAdQuickFilter('all')" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : `
           <table class="ads-summary-table mobile-card-table w-full text-sm">
             <colgroup>
               <col class="ads-col-customer">
@@ -3856,11 +3833,7 @@ function renderAdsView() {
                   : isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
-                // createdBy is immutable server ownership metadata; creatorId
-                // is retained as the legacy/local fallback. Name resolution
-                // falls back to the deleted-user tombstone directory and the
-                // record's own createdByName stamp so the creator's name
-                // survives account deletion (see resolveCreatorDisplayName).
+                // createdBy (creatorId legacy); the name survives account deletion (resolveCreatorDisplayName).
                 const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
                 // An imported ad is "created by" the automation, so name the
                 // person who actually did the setup. Hidden when it would only
@@ -3869,11 +3842,7 @@ function renderAdsView() {
                 const completedByName = completedByRaw && completedByRaw !== String(resolveCreatorDisplayName(ad, isAr))
                   ? Security.escapeHtml(completedByRaw)
                   : '';
-                // Deleting a page keeps its ads (history) but leaves their pageId
-                // pointing at the deleted page, whose name a NEW page may reuse.
-                // Keep resolving the name (the ad really did run on it) but mark
-                // the row, otherwise these ads read as if they belong to the live
-                // page of the same name while its Pages card counts 0 of them.
+                // A deleted page keeps its name on its ads, but the row is marked: a NEW page may reuse the name.
                 const adPage = ad.pageId ? pagesById.get(ad.pageId) : null;
                 const adPageDeleted = !!(adPage && adPage._deleted);
                 // For ads linked to delivery receipts, get delivery status from the receipt (source of truth)
@@ -3890,9 +3859,7 @@ function renderAdsView() {
                 // All receipts linked to this ad (delivery + funding), deduped —
                 // used for the Serial fallback AND the Payment method display.
                 const adReceiptIds = getAdLinkedReceiptIds(ad);
-                // Serial: ads rarely carry their own serial number — fall back
-                // to the linked receipt number(s): the delivery receipt
-                // (D#/final no) or the funding receipts' serials.
+                // Serial: the ad's own, else its linked receipts' numbers (D#/final no, funding serials).
                 const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || (rc.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : '')).trim() : '';
                 let serialDisplay = String(ad.serialNumber || '').trim();
                 if (!serialDisplay) {
@@ -3901,11 +3868,8 @@ function renderAdsView() {
                   )];
                   serialDisplay = serialNos.slice(0, 3).join(', ') + (serialNos.length > 3 ? ` +${serialNos.length - 3}` : '');
                 }
-                // Payment method(s): the ad's own method when set (Not Paid
-                // collection), plus the REAL methods from the linked receipts'
-                // payment splits — a paid ad stores '' as its own method, so
-                // the column used to render an empty badge. 'Split Payment' is
-                // a container label, not a method: drop it once real ones exist.
+                // Methods: the ad's own (a paid ad stores '') plus its receipts' real split methods;
+                // 'Split Payment' is only a container label.
                 const _methods = new Set();
                 if (ad.paymentMethod) _methods.add(String(ad.paymentMethod));
                 adReceiptIds.forEach(id => {
@@ -3919,9 +3883,7 @@ function renderAdsView() {
                 });
                 if (_methods.size > 1) _methods.delete('Split Payment');
                 const paymentMethods = [..._methods];
-                // Rendered ahead of the template so the page avatar knows
-                // whether a photo tile actually renders beside it (manual ads
-                // without uploads produce no tile and need the solo layout).
+                // Built first: the page avatar needs to know whether a photo tile sits beside it.
                 const adPrimaryTile = shellAdMedia(ad, isAr);
                 const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
                 const visibleLinkedReceiptIds = canOpenWorkspaceView('receipts')
@@ -3936,7 +3898,7 @@ function renderAdsView() {
                         <div class="min-w-0 flex-1">
                           <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
-                          ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                          ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${phoneLtrHtml(ad.phoneNumber)}</div>` : ''}
                         </div>
                       </div>
                       <!-- Who touched this ad, on its OWN full-width row under the
@@ -4094,13 +4056,8 @@ function loadMoreDeliveries() {
   render();
 }
 
-// One-render-pass memo for getReceiptCollectionTarget. Legacy zero-amount
-// delivery receipts derive their collection target by scanning ALL ads
-// (13-filters-helpers linked-ads derivation), and a single deliveries render
-// used to run that scan twice per such receipt (uncollected-total reduce +
-// visible row). Keyed by receipt id and cleared at the top of every
-// renderDeliveriesView pass, so data edits are always picked up and the cache
-// never outlives the pass that filled it.
+// Per-render memo of getReceiptCollectionTarget (a legacy zero-amount receipt scans every ad):
+// keyed by receipt id, cleared at the top of each renderDeliveriesView pass.
 const _deliveryCollectionTargetCache = new Map();
 let _deliveryUsageIndex = null;  // rebuilt with the cache: one ads pass per deliveries render
 function _getCollectionTargetCached(item) {
@@ -4113,13 +4070,8 @@ function _getCollectionTargetCached(item) {
   return target;
 }
 
-// logOnly=true is the scoped-search fast path: updateDeliveriesViewFiltered
-// swaps ONLY #delivery-log-results into the live DOM, so the stats tiles and
-// the driver-performance panel in the throwaway template are never seen.
-// They don't depend on the search term either — skipping their computation
-// (full reduces over every delivery receipt, incl. per-legacy-receipt ad
-// scans, plus ~6 filter passes per driver) removes the heavy part of every
-// search keystroke on phones.
+// logOnly=true (search keystrokes): updateDeliveriesViewFiltered swaps only #delivery-log-results,
+// so the stats tiles and driver panel (the heavy, search-independent part) are skipped.
 function renderDeliveriesView(logOnly) {
   const logOnlyPass = logOnly === true;
   _deliveryCollectionTargetCache.clear();
@@ -4147,10 +4099,7 @@ function renderDeliveriesView(logOnly) {
       amountUSD: Number(r.amountUSD || 0) || 0
     }));
 
-  // The stats tiles and driver-performance panel are skipped entirely on
-  // log-only (search keystroke) passes — see the logOnly note above. Their
-  // markup blocks below are guarded the same way, so stats/driverPerformance
-  // are never read while null/empty.
+  // Skipped on log-only passes (see above); their markup below is guarded the same way.
   let stats = null;
   let driverPerformance = [];
   if (!logOnlyPass) {
@@ -4167,10 +4116,7 @@ function renderDeliveriesView(logOnly) {
     uncollectedLYD: deliveryReceipts.reduce((sum, d) => sum + _getOutstandingDueLocal(d), 0),
     heldByDrivers: heldRows.length,
     driverCashLYD: heldRows.reduce((sum, d) => sum + _getCollectedCashLocal(d), 0),
-    // Delivery-fee money (LYD only, never ads credit): what was collected in
-    // fees, how much of it the shop/owner covered (a loss), and the aggregate
-    // variance vs the quoted fees — the sum of each completion's stored
-    // feeDiff, i.e. exactly the HIGHER/LOWER semantics the driver flow computes.
+    // Fee money (LYD, never ads credit): collected, shop-paid (a loss), and the summed stored feeDiff vs quoted.
     feesCollectedLYD: deliveredRows.reduce((sum, d) => {
       const raw = d.deliveryFeeCollected ?? d.actualDeliveryFeeCollected;
       return sum + ((raw === undefined || raw === null) ? 0 : (Number(raw) || 0));
@@ -4213,6 +4159,7 @@ function renderDeliveriesView(logOnly) {
     // foldSearchText on BOTH sides: the driver's primary phone lookup must
     // match Arabic-keyboard digits (٠٩١٢...) and unhamza'd name spellings.
     const term = foldSearchText(searchTerm);
+    const numTerm = term.replace(/^#/, '') || term;
     filteredDeliveries = filteredDeliveries.filter(d => {
       const customer = deliveryCustomersById.get(String(d.customerId));
       const name = foldSearchText(customer?.name || '');
@@ -4221,8 +4168,9 @@ function renderDeliveriesView(logOnly) {
       const phone = foldSearchText(phoneText);
       const digitsTerm = term.replace(/\D/g, '').replace(/^0+/, '');
       const phoneKeyHit = digitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(phoneText) || '').includes(digitsTerm);
-      const receiptNo = foldSearchText(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '');
-      return name.includes(term) || phone.includes(term) || phoneKeyHit || receiptNo.includes(term);
+      // A delivered job is found by its paper number too, not only the temporary D-number ('#4521' as well).
+      const numberHit = [d.tempReceiptNo, d.finalReceiptNo, d.serialNumber].some(n => n && foldSearchText(n).includes(numTerm));
+      return name.includes(term) || phone.includes(term) || phoneKeyHit || numberHit;
     });
   }
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
@@ -4259,7 +4207,9 @@ function renderDeliveriesView(logOnly) {
     const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
     const safeId = esc(ad.id);
     const tone = ({ 'Needs Delivery': 'waiting', 'In Progress': 'active', 'Delivered': 'done', 'Canceled': 'canceled' })[ad.deliveryStatus] || 'neutral';
-    const receiptNumber = ad.tempReceiptNo || ad.finalReceiptNo || ad.serialNumber || ad.displayNumber || ad.id;
+    const statusChoices = deliveryStatusChoices(ad);
+    const finalNo = ad.finalReceiptNo || ad.serialNumber;  // as the Receipts card: D17 → 4521 once delivered
+    const receiptNumber = ad.tempReceiptNo && finalNo ? `${ad.tempReceiptNo} → ${finalNo}` : (ad.tempReceiptNo || finalNo || ad.displayNumber || ad.id);
     return `
       <article class="ops-delivery-card ${isUrgent ? 'is-urgent' : ''}" data-delivery-record="${safeId}">
         <header class="ops-record-header">
@@ -4267,7 +4217,7 @@ function renderDeliveriesView(logOnly) {
           <div class="ops-record-identity">
             <p class="ops-eyebrow">${isAr ? 'وصل' : 'Receipt'} <bdi>#${esc(receiptNumber)}</bdi></p>
             <h3>${esc(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
-            <p class="ops-record-phone"><bdi>${esc(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</bdi></p>
+            <p class="ops-record-phone">${ad.phoneNumber || customer?.phones?.[0] ? phoneLtrHtml(ad.phoneNumber || customer.phones[0]) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</p>
           </div>
           <span class="ops-status ops-status--${tone}">${trStatus(ad.deliveryStatus)}</span>
         </header>
@@ -4295,11 +4245,11 @@ function renderDeliveriesView(logOnly) {
         </div>
         <footer class="ops-record-actions" aria-label="${isAr ? 'الإجراءات' : 'Actions'}">
           ${roleLower === 'delivery' ? ''
-            : `<label class="ops-status-editor"><span class="sr-only">${isAr ? 'الحالة' : 'Status'}</span><select onchange="updateDeliveryStatus('${safeId}', this.value)" class="ops-select">${DELIVERY_STATUSES.map(s => `<option value="${esc(s)}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>`}
+            : `<label class="ops-status-editor"><span class="sr-only">${isAr ? 'الحالة' : 'Status'}</span><select onchange="updateDeliveryStatus('${safeId}', this.value)" class="ops-select">${statusChoices.map(s => `<option value="${esc(s)}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>`}
           <button type="button" onclick="showDeliveryDetails('${safeId}')" class="ops-button ops-button--quiet"><i data-lucide="arrow-up-right" class="w-4 h-4"></i><span>${isAr ? 'التفاصيل' : 'Details'}</span></button>
           ${canShareDeliveryReceiptToWhatsApp(ad) ? `<button type="button" data-receipt-id="${safeId}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="ops-button ops-button--whatsapp" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}"><i data-lucide="message-circle" class="w-4 h-4"></i><span>WhatsApp</span></button>` : ''}
           ${active ? `<button type="button" onclick="openDeliveryCancelModal('${safeId}')" class="ops-button ops-button--quiet ops-button--danger"><i data-lucide="x-circle" class="w-4 h-4"></i><span>${t('cancel')}</span></button>` : ''}
-          ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `<button type="button" onclick="removeDeliveryMission('${safeId}')" class="ops-button ops-button--icon ops-button--danger" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}" aria-label="${isAr ? 'حذف المهمة' : 'Delete Mission'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
+          ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' && statusChoices.includes('Office') ? `<button type="button" onclick="removeDeliveryMission('${safeId}')" class="ops-button ops-button--icon ops-button--danger" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}" aria-label="${isAr ? 'حذف المهمة' : 'Delete Mission'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
         </footer>
       </article>`;
   };
@@ -4328,7 +4278,7 @@ function renderDeliveriesView(logOnly) {
           <div class="ops-hero-actions">
             <button type="button" onclick="refreshDeliveries()" class="ops-button ops-button--hero"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
             ${canAssign ? `<button type="button" onclick="checkStuckDeliveries()" class="ops-button ops-button--hero" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}"><i data-lucide="alert-triangle" class="w-4 h-4"></i>${isAr ? 'فحص العالقة' : 'Check Stuck'}</button>` : ''}
-            ${canExportDeliveries ? `<button type="button" onclick="exportDeliveryReport()" class="ops-button ops-button--hero-primary"><i data-lucide="download" class="w-4 h-4"></i>${t('export')}</button>` : ''}
+            ${canExportDeliveries && !isPackagedMobileApp() ? `<button type="button" onclick="exportDeliveryReport()" class="ops-button ops-button--hero-primary"><i data-lucide="download" class="w-4 h-4"></i>${t('export')}</button>` : ''}
           </div>
         </div>
       </header>
@@ -4407,11 +4357,8 @@ function updateDeliveriesViewFiltered() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  // Build the fresh view HTML off-screen, then swap in only the results table
-  // so the search input keeps its caret and the phone keyboard stays open
-  // (same approach as updateCustomersViewFiltered). logOnly=true skips the
-  // stats tiles + driver-performance computations — nothing outside
-  // #delivery-log-results is ever read from this throwaway template.
+  // Off-screen render, then swap only the results: the search keeps its caret and the keyboard;
+  // logOnly=true skips the stats (nothing outside #delivery-log-results is read here).
   const tpl = document.createElement('template');
   tpl.innerHTML = renderDeliveriesView(true);
   const newResults = tpl.content.querySelector('#delivery-log-results');
@@ -4451,10 +4398,7 @@ function exportDeliveryReport() {
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   let csv = 'Customer,Phone,Debt LYD,Collected LYD,Remaining Due,Status,Driver,Office Received,Date\n';
-  // Pin the CSV Date column to the Gregorian calendar with ASCII digits so it
-  // is sortable and matches the app's stored timestamps. formatDateShort uses
-  // toLocaleString() with no locale, which renders Hijri / Arabic-Indic digits
-  // on an ar-SA device — unsortable text in Excel.
+  // Gregorian, ASCII-digit CSV dates (formatDateShort gives Hijri / Arabic-Indic digits on ar-SA).
   const _csvDateGreg = (v) => {
     const d = new Date(v);
     if (isNaN(d.getTime())) return '';
@@ -4470,12 +4414,8 @@ function exportDeliveryReport() {
     csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _csvPhoneText(_deliveryPhoneText(r, customer)) : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
-  // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
-  // instead of garbling them (mojibake).
-  // Route through downloadFile so the blob URL outlives the click task —
-  // iOS Safari cancels the download if the URL is revoked in the same tick.
-  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
-  // only claim "downloaded" when the download actually started.
+  // BOM: Excel reads the Arabic names. downloadFile keeps the blob URL past the click (iOS) and
+  // refuses in FB/IG in-app browsers: "downloaded" only when it started.
   if (!downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8')) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
@@ -4580,6 +4520,11 @@ function _isReceivedInOffice(item) {
 // CSV phone Excel keeps as text: '+218…' -> '00218 …' (no apostrophe), '0912…' -> '091 2…' (keeps the 0)
 function _csvPhoneText(v) {
   return String(v ?? '').trim().replace(/^\+/, '00').replace(/^(00\d{3}|0[1-9]\d)(?=\d)/, '$1 ');
+}
+
+// A phone reads left to right in Arabic too: '+218 91 456 7890', never '7890 456 91 218+'.
+function phoneLtrHtml(phone) {
+  return `<bdi dir="ltr">${Security.escapeHtml(String(phone))}</bdi>`;
 }
 
 function _deliveryPhoneText(r, customer) {
@@ -4691,6 +4636,15 @@ function undoOfficeHandover(itemId) {
   setOfficeHandover(itemId, false);
 }
 
+// The statuses a picker offers, as server/delivery_workflow.py: all to an editor of the record
+// (or an admin); a deliveries.* grant alone only the workflow's next moves (TRANSITIONS).
+function deliveryStatusChoices(item, module = 'receipts') {
+  if (canActOnRecord(module, 'edit', item.createdBy || item.creatorId)) return DELIVERY_STATUSES;
+  const from = String(((state.receipts || []).find(r => r && r.id === item.id) || item).deliveryStatus || '').trim();
+  const next = { '': ['Needs Delivery', 'In Progress', 'Office'], Office: ['Needs Delivery', 'In Progress', 'Canceled'], 'Needs Delivery': ['In Progress', 'Canceled', 'Office'], 'In Progress': ['Canceled'] }[from] || [];
+  return DELIVERY_STATUSES.filter(s => s === (from || 'Needs Delivery') || (next.includes(s) && can('deliveries', s === 'In Progress' ? 'accept' : 'assign')));
+}
+
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
 async function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
@@ -4726,6 +4680,10 @@ async function removeDeliveryMission(itemId) {
         : 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.',
       'warning'
     );
+    return;
+  }
+  if ((ds === 'In Progress' || ds === 'Canceled') && !canActOnRecord('receipts', 'edit', receipt.createdBy || receipt.creatorId)) {
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'هذه المهمة قيد التنفيذ أو ملغاة بالفعل؛ ألغِها بدلاً من ذلك، أو اطلب ذلك ممن يستطيع تعديل الوصل.' : 'This job is already in progress or canceled; cancel it instead, or ask someone who can edit the receipt.', 'warning');
     return;
   }
 
@@ -4781,6 +4739,7 @@ function showDeliveryDetails(itemId) {
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
   const editHandler = isReceipt ? 'editReceipt' : 'editAd';
+  const canPickDriver = !ad.deliveryPersonId || can('deliveries', 'reassign') || canActOnRecord(isReceipt ? 'receipts' : 'ads', 'edit', ad.createdBy || ad.creatorId);
   const isItemPaid = isReceipt ? ad.isPaid === true : getAdPaymentState(ad) === 'paid';
   // For an unpaid debt receipt show what is actually LEFT to collect (net of
   // company coverage), never the gross a driver must no longer demand.
@@ -4821,7 +4780,7 @@ function showDeliveryDetails(itemId) {
               <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
               <p class="text-sm text-slate-500 flex items-center space-x-1">
                 <i data-lucide="phone" class="w-3 h-3"></i>
-                <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</span>
+                <span>${ad.phoneNumber || customer?.phones?.[0] ? phoneLtrHtml(ad.phoneNumber || customer.phones[0]) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</span>
               </p>
             </div>
           </div>
@@ -4851,12 +4810,12 @@ function showDeliveryDetails(itemId) {
             ${roleLower === 'delivery'
               ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${trStatus(ad.deliveryStatus)}</div>`
               : `<select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
-              ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
+              ${deliveryStatusChoices(ad, isReceipt ? 'receipts' : 'ads').map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
             </select>`}
           </div>
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="text-xs text-slate-500 font-medium mb-2">${isAr ? 'السائق' : 'Driver'}</div>
-            ${roleLower === 'delivery'
+            ${roleLower === 'delivery' || !canPickDriver
               ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(deliveryPerson?.name || (isAr ? 'غير مُعيَّن' : 'Unassigned'))}</div>`
               : `<select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
               <option value="">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</option>
@@ -4998,7 +4957,7 @@ function renderDeliveryDashboard() {
         ${renderStatCard(trStatus('Needs Delivery'), needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
         ${renderStatCard(trStatus('In Progress'), inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
         ${renderStatCard(trStatus('Delivered'), delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
-        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
+        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(2)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
       </div>
 
       <!-- My Deliveries -->
@@ -5031,7 +4990,7 @@ function renderDeliveryDashboard() {
                           </div>
                         ` : ''}
                       </div>
-                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
+                      <p class="text-xs md:text-sm text-slate-500 mt-1">${phone ? phoneLtrHtml(phone) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</p>
                       ${ad.isReceipt && (displayTempNo || displayFinalNo) ? `
                         <div class="text-xs text-indigo-600 font-bold mt-1">
                           ${isAr ? 'الوصل' : 'Receipt'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isAr ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
@@ -5044,23 +5003,21 @@ function renderDeliveryDashboard() {
                       ` : ''}
                       ${ad.isReceipt && (ad.quotedDeliveryFee !== undefined && ad.quotedDeliveryFee !== null) ? `
                         <div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
+                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(2)} LYD</span>
                         </div>
                       ` : ''}
                       ${(() => {
-                        // After completion: the fee actually collected, who paid
-                        // it, and the HIGHER/LOWER variance vs the quoted fee
-                        // (same semantics the completion flow computes).
+                        // After completion: the fee collected, who paid it, and its HIGHER/LOWER variance vs the quoted fee.
                         if (!ad.isReceipt || String(ad.deliveryStatus || '') !== 'Delivered') return '';
                         const feeRaw = ad.actualDeliveryFeeCollected ?? ad.deliveryFeeCollected;
                         if (feeRaw === undefined || feeRaw === null) return '';
                         const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
                         const feeDiffNum = Number(ad.feeDiff) || 0;
                         const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
-                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
+                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(2)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
                           : '';
                         return `<div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
+                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(2)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
                         </div>`;
                       })()}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
@@ -5245,7 +5202,7 @@ function openDeliveryCancelModal(itemId) {
             <div class="text-xs text-slate-500">
               ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}
               ${ref ? ` • ${itemType === 'receipt' ? (isAr ? 'وصل' : 'Receipt') : (isAr ? 'توصيل' : 'Delivery')} ${Security.escapeHtml(ref)}` : ''}
-              ${phone ? ` • ${Security.escapeHtml(phone)}` : ''}
+              ${phone ? ` • ${phoneLtrHtml(phone)}` : ''}
             </div>
           </div>
         </div>
@@ -5359,10 +5316,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  // A plain render() is enough here: state.receipts/state.ads were just
-  // replaced, so the view HTML genuinely differs and the identical-HTML skip
-  // cannot swallow the update — no need to blow away the partial-update
-  // caches with forceFullRender().
+  // render(), not forceFullRender(): the rows were just replaced, so the identical-HTML skip cannot swallow it.
   render();
   showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
   // Kick off the (already committed) server-mode ads reconciliation AFTER the
@@ -5874,18 +5828,20 @@ function renderUsersView() {
 
 function renderAuditView() {
   const isAr = state.language === 'ar';
-  // PERMISSION SCOPING: auditLogs.view sees everything; auditLogs.viewOwn sees
-  // only their own entries. Every count, stat tile, filter dropdown and table
-  // row below derives from allLogs, so scoping here scopes the whole screen.
+  // PERMISSION SCOPING: auditLogs.view sees all, viewOwn only their own; everything below derives from allLogs.
   const canViewAllLogs = can('auditLogs', 'view');
   const canViewOwnLogs = canViewAllLogs || currentUserHasPermission('auditLogs', 'viewOwn');
-  const canExportLogs = can('auditLogs', 'export');
+  const canExportLogs = can('auditLogs', 'export') && !isPackagedMobileApp();  // the app cannot save files
   const canClearLogs = can('auditLogs', 'clear');
   if (!canViewOwnLogs) return renderNoAccessView();
   // In server mode pull the authoritative, server-scoped trail (no-op when
   // fresh; re-renders this view when it arrives).
   refreshServerAuditLogs();
   const allLogs = getVisibleAuditLogs();
+  // The server trail comes newest first (500 rows, then older pages): say so while older ones are not here.
+  const auditPartial = isServerModeEnabled() && state.serverLogsComplete === false && allLogs.length > 0;
+  const newest = isAr ? `أحدث ${allLogs.length.toLocaleString('en-US')} سجل` : `${allLogs.length.toLocaleString('en-US')} entries`;
+  const loadOlderBtn = auditPartial ? `<button type="button" onclick="refreshServerAuditLogs({ older: true })" class="management-button mt-3 col-span-full">${isAr ? 'تحميل سجلات أقدم' : 'Load older entries'}</button>` : '';
 
   // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
   // digit queries and unhamza'd Arabic spellings match stored log fields.
@@ -6020,7 +5976,7 @@ function renderAuditView() {
 
       <div class="management-audit-layout">
         <aside class="management-audit-overview" aria-label="${isAr ? 'ملخص الأنشطة المتاحة' : 'Available activity summary'}">
-          <section class="management-card management-audit-summary"><span class="management-section-icon"><i data-lucide="activity" class="h-5 w-5"></i></span><span class="management-eyebrow">${isAr ? 'السجلات المتاحة لك' : 'Records available to you'}</span><strong class="management-audit-total">${allLogs.length.toLocaleString('en-US')}</strong><p>${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p><dl class="management-facts"><div><dt>${isAr ? 'إنشاء' : 'Creates'}</dt><dd>${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'تعديلات' : 'Updates'}</dt><dd>${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'حذف' : 'Deletes'}</dt><dd>${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</dd></div></dl></section>
+          <section class="management-card management-audit-summary"><span class="management-section-icon"><i data-lucide="activity" class="h-5 w-5"></i></span><span class="management-eyebrow">${auditPartial ? (isAr ? newest : `Newest ${newest}`) : (isAr ? 'السجلات المتاحة لك' : 'Records available to you')}</span><strong class="management-audit-total">${allLogs.length.toLocaleString('en-US')}</strong><p>${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p><dl class="management-facts"><div><dt>${isAr ? 'إنشاء' : 'Creates'}</dt><dd>${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'تعديلات' : 'Updates'}</dt><dd>${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'حذف' : 'Deletes'}</dt><dd>${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</dd></div></dl>${loadOlderBtn}</section>
           <section class="management-card management-audit-storage"><i data-lucide="${isServerModeEnabled() ? 'cloud' : 'hard-drive'}" class="h-5 w-5"></i><h2>${isServerModeEnabled() ? (isAr ? 'سجل الخادم' : 'Server activity trail') : (isAr ? 'سجل هذا الجهاز' : 'This device’s activity trail')}</h2><p>${isServerModeEnabled() ? (isAr ? 'يُطلب أحدث سجل من الخادم عند فتح هذه الصفحة. تعكس الصادرات السجلات المتاحة لحسابك.' : 'The latest trail is requested from the server when this page opens. Exports reflect the records available to your account.') : (isAr ? 'السجلات محفوظة في هذا المتصفح. أنشئ نسخة احتياطية قبل مسح بيانات المتصفح أو تغيير الجهاز.' : 'Records are stored in this browser. Back up before clearing browser data or changing devices.')}</p>${!isServerModeEnabled() ? `<span class="management-storage-caption">${db ? 'IndexedDB' : 'LocalStorage'}</span>` : ''}</section>
         </aside>
         <div class="management-audit-feed">
@@ -6097,7 +6053,7 @@ function renderAuditView() {
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
-            <p class="text-slate-500 font-medium">${hasActiveFilters ? (isAr ? 'لا توجد سجلات مطابقة للفلاتر' : 'No logs match your filters') : (isAr ? 'لا توجد سجلات نشاط بعد' : 'No activity logs yet')}</p>
+            <p class="text-slate-500 font-medium">${hasActiveFilters ? (auditPartial ? (isAr ? `لا يوجد تطابق في ${newest}` : `No match in the newest ${newest}`) : (isAr ? 'لا توجد سجلات مطابقة للفلاتر' : 'No logs match your filters')) : (isAr ? 'لا توجد سجلات نشاط بعد' : 'No activity logs yet')}</p>${loadOlderBtn}
             ${hasActiveFilters ? `<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}
           </div>
         ` : `
@@ -6852,7 +6808,7 @@ function renderSettingsView() {
           ` : ''}
           ` : ''}
         </div>
-        ${isServerModeEnabled() && isCurrentUserAdmin() ? `
+        ${isServerModeEnabled() && isCurrentUserAdmin() && !isPackagedMobileApp() ? `
         <div class="mt-4 rounded-xl border-2 border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-900/20 p-4">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">

@@ -589,6 +589,47 @@ async function main() {
       assert.deepEqual(notes, [['Error', 'Invalid current password', 'error']], 'no "Session Expired"');
     });
   }
+  // Bug hunt r34 (R4-ios-capacitor-bridge-2): the phone apps reported a timed-out or dropped save as a
+  // refusal (a fake HTTP 499: "Not allowed"), or as an unknown error; the web says the answer was lost.
+  await test('R4 ios-capacitor-bridge-2: a native timeout or dropped connection reads as a lost answer, never a refusal', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const f = fixture();
+    f.sandbox.DOMException = DOMException;
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['studio.js']) f.run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    f.run("Platform._cache = Object.assign({}, Platform.detect(), { isCapacitor: true, platform: 'ios', isIOS: true })");
+    let reply = () => new Promise(() => {});
+    f.sandbox.window.Capacitor = { Plugins: { CapacitorHttp: { request: () => reply() } } };
+    const send = controller => f.sandbox._nativeAwareFetch('https://app.example/api/social-studio/posts', { method: 'POST', headers: {} }, { caption: 'x' }, controller, 20000);
+    // 1. The JS deadline: the plugin never answers and the timer aborts.
+    const controller = new AbortController();
+    let calls = 0;
+    const pending = f.sandbox.withRetry(() => { calls += 1; return send(controller); });
+    controller.abort();
+    const timeout = await pending.then(() => null, e => e);
+    assert.equal(timeout?.name, 'AbortError');
+    assert.equal(timeout?.status, undefined, 'before: a fake HTTP 499');
+    assert.equal(timeout?.noRetry, true);
+    assert.equal(calls, 1, 'a write that may have committed is never re-sent');
+    assert.notEqual(f.sandbox._serverRefusalToast('save', 'receipts', timeout)[0], 'Not allowed');
+    assert.match(f.sandbox.describeNetworkError(timeout), /could not be confirmed and may have gone through/);
+    assert.equal(f.sandbox.studioErrorInfo(timeout, 'action').code, 'NETWORK');
+    assert.equal(f.sandbox.socialAnswerLost(timeout), true, 'Social Studio must say the post may have been saved');
+    // 2. The plugin's own failure (an NSURLError timeout): the browser's 'Load failed'.
+    reply = () => Promise.reject(Object.assign(new Error('The request timed out.'), { code: 'NSURLErrorDomain' }));
+    const dropped = await send(new AbortController()).then(() => null, e => e);
+    assert.equal(dropped?.name, 'TypeError');
+    assert.equal(dropped?.message, 'Load failed');
+    assert.equal(dropped?.status, undefined);
+    assert.equal(f.sandbox.studioErrorInfo(dropped, 'action').code, 'NETWORK', 'before: UNKNOWN');
+    assert.match(String(f.sandbox.describeNetworkError(dropped)), /could not be confirmed/);
+    // 3. An HTTP answer still resolves as a Response with its status.
+    reply = async () => ({ status: 403, data: { detail: 'Forbidden' }, headers: {} });
+    Object.assign(f.sandbox, { Response, Headers });
+    const answered = await send(new AbortController());
+    assert.equal(answered.status, 403);
+  });
   console.log(`\n${passed} session/privacy regressions passed.`);
 }
 

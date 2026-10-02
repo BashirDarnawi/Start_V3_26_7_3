@@ -995,6 +995,58 @@ class TestDeliveryFieldAndTransitionBoundary:
         )
         assert driver_tombstone.status_code == admin_tombstone.status_code == 404
 
+    def test_driver_with_a_shop_or_studio_drafts_opens_only_its_own_by_id(self, actors):
+        """Bug-hunt R4 (permission-matrix-5): a Delivery account that also runs a Clothes shop or Ads
+        Studio drafts got 403 opening its OWN product or draft by id (the photo hydrate behind its edit
+        screen): the driver branch demanded the full view grant. It now takes the list route's view /
+        viewOwn checks, so it opens what it created and nothing else."""
+        stamp = now_ms()
+        driver_id, email = new_id("user"), f"hardening-driver-shop-{stamp}@tests.albayanhub.com"
+        password = hash_password("SecurityUser123!", iterations=PBKDF2_ITERATIONS_DEFAULT)
+        permissions = {"deliveries": ["view", "viewOwn", "accept", "complete"],
+                       "clothesProducts": ["viewOwn", "add", "editOwn"], "adCampaignRequests": ["viewOwn"]}
+        rows = [
+            ("serviceSubscriptions", f"hardening_driver_shop_sub_{stamp}", driver_id,
+             {"userId": driver_id, "serviceId": "clothes_system", "status": "active", "expiresAt": "2099-01-01T00:00:00Z"}),
+            ("clothesProducts", f"hardening_driver_own_product_{stamp}", driver_id, {"name": "Own shirt", "variants": []}),
+            ("clothesProducts", f"hardening_other_shop_product_{stamp}", actors["admin_user"]["id"],
+             {"name": "Other shirt", "variants": []}),
+            ("adCampaignRequests", f"hardening_driver_own_draft_{stamp}", driver_id, {"name": "Own draft", "status": "Draft"}),
+        ]
+        with db_conn() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (id,name,email,role,permissions_json,password_hash,password_salt,"
+                    "password_algo,password_iterations,deleted,created_at,created_by,last_modified) "
+                    "VALUES (:id,'Driver Shop',:email,'Delivery',:perms,:hash,:salt,:algo,:iterations,false,:now,NULL,:now)"
+                ),
+                {"id": driver_id, "email": email, "perms": json_dumps(permissions), "hash": password.hash_hex,
+                 "salt": password.salt_hex, "algo": password.algo, "iterations": password.iterations, "now": stamp},
+            )
+            for entity_type, entity_id, owner, data in rows:
+                conn.execute(
+                    text("INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                         "VALUES (:type,:id,:data,false,:now,:owner,:now)"),
+                    {"type": entity_type, "id": entity_id, "owner": owner, "now": stamp,
+                     "data": json_dumps({"id": entity_id, "createdBy": owner, **data})},
+                )
+        try:
+            cookies = _login(email, "SecurityUser123!")
+            own_product = client.get(f"/api/collections/clothesProducts/{rows[1][1]}", cookies=cookies)
+            other_product = client.get(f"/api/collections/clothesProducts/{rows[2][1]}", cookies=cookies)
+            own_draft = client.get(f"/api/collections/adCampaignRequests/{rows[3][1]}", cookies=cookies)
+            guessed_page = client.get("/api/collections/pages/hardening_guessed_page", cookies=cookies)
+            assert own_product.status_code == 200, own_product.text  # before: 403
+            assert own_product.json()["data"]["name"] == "Own shirt"
+            assert other_product.status_code == 403, other_product.text
+            assert own_draft.status_code == 200, own_draft.text  # before: 403
+            assert guessed_page.status_code == 403, guessed_page.text  # no pages grant: still refused
+        finally:
+            with db_conn() as conn:
+                for entity_type, entity_id, _owner, _data in rows:
+                    conn.execute(text("DELETE FROM entities WHERE type=:type AND id=:id"),
+                                 {"type": entity_type, "id": entity_id})
+
     def test_same_delivery_baseline_allows_exactly_one_concurrent_patch(self, actors):
         created = client.post(
             "/api/collections/receipts",
@@ -8955,3 +9007,78 @@ class TestDestroyedReceipts:
             "destroyed_r3_after", "destroyed_cust_3", 15, actors, serialNumber="88794"
         )
         assert fresh["data"]["serialNumber"] == "88794"
+
+
+class TestReceiptPaymentRowValues:
+    """Bug-hunt R4 (xss-injection-sweep-1): the receipt forms put each payment row's amount,
+    rates, method and collection type inside HTML attributes. A quote stored there by a
+    staff account with only "Create receipts" ran a script in the admin's session when the
+    receipt was opened for editing, so the server refuses such rows (and never rewrites a
+    plain value)."""
+
+    ATTACKS = [
+        ("rate2", '7" autofocus onfocus="X'),
+        ("amount", '1" onfocus="A'),
+        ("rate", '1" onfocus="B'),
+        ("collectionType", 'office" data-x="1'),
+        ("method", 'Cash" onfocus="C'),
+        ("amount", "ten"),
+    ]
+
+    @pytest.fixture(scope="class")
+    def clerk(self, actors):
+        _user, cookies = _create_user(
+            actors["admin"],
+            email="hardening-receipt-rows@tests.albayanhub.com",
+            permissions={"receipts": ["view", "add", "edit"]},
+        )
+        TestReceiptAndAdTransactions._customer("payment_rows_customer", actors)
+        return cookies
+
+    @staticmethod
+    def _paid(receipt_id, **row):
+        payment = {"method": "Cash (LYD)", "amount": 100, "rate": 1, "rate2": 9.7, "collectionType": "office", **row}
+        return {"id": receipt_id, "data": {
+            "recordType": "receipt", "customerId": "payment_rows_customer", "status": "Paid", "isPaid": True,
+            "deliveryStatus": "Office", "amountUSD": 10.31, "amountLocal": 100, "exchangeRate": 9.7,
+            "paymentMethod": "Cash (LYD)", "payments": [payment]}}
+
+    @pytest.mark.parametrize("index", range(len(ATTACKS)))
+    def test_a_payment_row_value_that_breaks_an_attribute_is_refused(self, actors, clerk, index):
+        field, value = self.ATTACKS[index]
+        receipt_id = f"payment_rows_attack_{index}"
+        refused = client.post("/api/collections/receipts", json=self._paid(receipt_id, **{field: value}), cookies=clerk)
+        assert refused.status_code == 400, refused.text  # before: 200, stored as typed
+        assert refused.json()["detail"] == "Invalid payment row"
+        assert client.get(f"/api/collections/receipts/{receipt_id}", cookies=actors["admin"]).status_code == 404
+
+    def test_a_quote_in_the_receipt_payment_method_is_refused(self, actors, clerk):
+        body = self._paid("payment_rows_attack_method")
+        body["data"]["paymentMethod"] = "Cash' onfocus='M"
+        refused = client.post("/api/collections/receipts", json=body, cookies=clerk)
+        assert refused.status_code == 400, refused.text
+        assert client.get("/api/collections/receipts/payment_rows_attack_method", cookies=actors["admin"]).status_code == 404
+
+    def test_plain_rows_save_unchanged_and_a_planned_row_cannot_be_patched_into_an_attack(self, actors, clerk):
+        saved = client.post("/api/collections/receipts", json=self._paid("payment_rows_plain", rate2="7.5"), cookies=clerk)
+        assert saved.status_code == 200, saved.text
+        row = client.get("/api/collections/receipts/payment_rows_plain", cookies=actors["admin"]).json()["data"]["payments"][0]
+        assert (row["amount"], row["rate"], row["rate2"], row["method"], row["collectionType"]) == (100, 1, "7.5", "Cash (LYD)", "office")
+
+        planned = [{"method": "Cash (LYD)", "amount": 100, "rate": 1, "rate2": 9.7, "collectionType": "office"}]
+        created = client.post("/api/collections/receipts", json={"id": "payment_rows_not_paid", "data": {
+            "recordType": "receipt", "customerId": "payment_rows_customer", "status": "Not Paid", "isPaid": False,
+            "deliveryStatus": "Office", "statusDetail": {"notPaidCollection": "office"},
+            "amountUSD": 10.31, "amountLocal": 100, "exchangeRate": 9.7, "plannedPayments": planned}}, cookies=clerk)
+        assert created.status_code == 200, created.text
+        refused = client.patch("/api/collections/receipts/payment_rows_not_paid", json={
+            "data": {"plannedPayments": [{**planned[0], "rate2": '7" autofocus onfocus="X'}]},
+            "expectedLastModified": created.json()["lastModified"]}, cookies=clerk)
+        assert refused.status_code == 400, refused.text  # before: 200
+        stored = client.get("/api/collections/receipts/payment_rows_not_paid", cookies=actors["admin"]).json()
+        assert stored["data"]["plannedPayments"][0]["rate2"] == 9.7 and stored["lastModified"] == created.json()["lastModified"]
+        plain = client.patch("/api/collections/receipts/payment_rows_not_paid", json={
+            "data": {"plannedPayments": [{**planned[0], "amount": "120.5"}]},
+            "expectedLastModified": created.json()["lastModified"]}, cookies=clerk)
+        assert plain.status_code == 200, plain.text
+        assert plain.json()["data"]["plannedPayments"][0]["amount"] == "120.5"

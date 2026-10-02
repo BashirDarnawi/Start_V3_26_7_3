@@ -164,3 +164,113 @@ def test_an_editor_who_sees_contacts_still_replaces_them(actors):
     assert saved.status_code == 200, saved.text
     stored = _stored(customer_id)
     assert stored["phones"] == [p2] and stored["profileLinks"] == []
+
+
+# Bug-hunt R4 (permission-matrix-1): a receipt's edit history carried the customer's old and new
+# phone numbers to every role that may read receipts. The stock Accountant (no customers.viewContacts)
+# saw them in the Edit History dialog; a Read Only account received and cached them. Rows about a
+# contact field now reach such roles as '—', and their saves (which echo the masked history back)
+# can only append rows, never overwrite the stored ones.
+ACCOUNTANT = {"analytics": ["view", "export", "viewFinancials", "viewSensitive"],  # src/04-permissions.js templates
+              "receipts": ["view", "add", "edit", "markCollected", "transfer", "viewHistory", "export"],
+              "customers": ["view", "viewBalance"], "ads": ["view"], "auditLogs": ["view", "export"]}
+READ_ONLY = {"analytics": ["view"], "ads": ["view", "viewPhotos"], "receipts": ["view"], "customers": ["view"],
+             "pages": ["view"], "deliveries": ["view"], "auditLogs": ["viewOwn"]}
+
+
+def _stored_receipt(receipt_id):
+    with db_conn() as conn:
+        row = conn.execute(text("SELECT data_json FROM entities WHERE type='receipts' AND id=:id"),
+                           {"id": receipt_id}).mappings().first()
+    return json_loads(row["data_json"])
+
+
+@pytest.fixture(scope="module")
+def history_actors(actors):
+    return {**actors, "accountant": _user("acct", "Employee", ACCOUNTANT), "viewer": _user("view", "Employee", READ_ONLY)}
+
+
+def _receipt_with_phone_history(actors, status="Paid"):
+    """A receipt whose phone the admin corrected, exactly as src/14-forms.js records it."""
+    old_phone, new_phone = _phone(), _phone()
+    admin = actors["admin"]["cookies"]
+    customer_id = _customer(actors, phones=[old_phone])
+    data = {"recordType": "receipt", "customerId": customer_id, "status": status, "isPaid": status == "Paid",
+            "amountUSD": 10, "amountLocal": 97, "exchangeRate": 9.7, "paymentMethod": "Cash (LYD)",
+            "deliveryStatus": "Office", "phoneNumber": old_phone}
+    if status == "Paid":
+        data.update(serialNumber=str(700000 + secrets.randbelow(99999)),
+                    payments=[{"method": "Cash (LYD)", "amount": 97, "rate": 1, "rate2": 9.7, "collectionType": "office"}])
+    else:
+        data.update(statusDetail={"notPaidCollection": "office"})
+    created = client.post("/api/collections/receipts", cookies=admin, json={"data": data})
+    assert created.status_code == 200, created.text
+    history = [{"editedAt": "2026-10-02T00:00:00.000Z", "editedBy": "Admin",
+                "changes": [{"field": "Phone Number", "from": old_phone, "to": new_phone},
+                            {"field": "Status", "from": "Paid", "to": "Paid"}]}]
+    patched = client.patch(f"/api/collections/receipts/{created.json()['id']}", cookies=admin, json={
+        "data": {"phoneNumber": new_phone, "editHistory": history, "editCount": 1},
+        "expectedLastModified": created.json()["lastModified"]})
+    assert patched.status_code == 200, patched.text
+    return created.json()["id"], old_phone, new_phone, history
+
+
+def test_receipt_edit_history_hides_phone_numbers_from_roles_without_view_contacts(history_actors):
+    receipt_id, old_phone, new_phone, history = _receipt_with_phone_history(history_actors)
+    for who in ("accountant", "viewer"):
+        cookies = history_actors[who]["cookies"]
+        replies = {
+            "list": client.get("/api/collections/receipts?limit=1000&include_media=false", cookies=cookies),
+            "item": client.get(f"/api/collections/receipts/{receipt_id}", cookies=cookies),
+            "delta": client.get("/api/collections/receipts?updated_since=0&limit=1000&include_deleted=true&include_media=false", cookies=cookies),
+            "bootstrap": client.get("/api/bootstrap", cookies=cookies),
+        }
+        for name, reply in replies.items():
+            assert reply.status_code == 200, (who, name, reply.text)
+            body = reply.text
+            assert old_phone not in body and new_phone not in body, (who, name)  # before: both numbers, in every reply
+        changes = replies["item"].json()["data"]["editHistory"][0]["changes"]
+        assert changes[0] == {"field": "Phone Number", "from": "—", "to": "—"}  # the row stays, its numbers do not
+        assert changes[1] == {"field": "Status", "from": "Paid", "to": "Paid"}
+    admin_view = client.get(f"/api/collections/receipts/{receipt_id}", cookies=history_actors["admin"]["cookies"]).json()
+    assert admin_view["data"]["editHistory"] == history  # the admin still reads the real history
+
+
+def test_an_accountant_save_echoing_the_masked_history_keeps_the_real_rows(history_actors):
+    receipt_id, old_phone, new_phone, history = _receipt_with_phone_history(history_actors)
+    cookies = history_actors["accountant"]["cookies"]
+    seen = client.get(f"/api/collections/receipts/{receipt_id}", cookies=cookies).json()
+    new_row = {"editedAt": "2026-10-02T01:00:00.000Z", "editedBy": "Accountant",
+               "changes": [{"field": "Amount (USD)", "from": "$10.00", "to": "$10.00"}]}
+    # What the receipt form sends: the history it received plus its own row.
+    saved = client.patch(f"/api/collections/receipts/{receipt_id}", cookies=cookies, json={
+        "data": {"notes": "checked", "editHistory": seen["data"]["editHistory"] + [new_row], "editCount": 2},
+        "expectedLastModified": seen["lastModified"]})
+    assert saved.status_code == 200, saved.text
+    stored = _stored_receipt(receipt_id)
+    assert stored["editHistory"] == history + [new_row]  # before: the admin's numbers were overwritten with '—'
+    assert stored["editCount"] == 2 and stored["notes"] == "checked"
+    # A shorter (stale) list cannot drop stored rows either.
+    seen = client.get(f"/api/collections/receipts/{receipt_id}", cookies=cookies).json()
+    saved = client.patch(f"/api/collections/receipts/{receipt_id}", cookies=cookies, json={
+        "data": {"editHistory": [], "editCount": 0}, "expectedLastModified": seen["lastModified"]})
+    assert saved.status_code == 200, saved.text
+    assert _stored_receipt(receipt_id)["editHistory"] == history + [new_row] and _stored_receipt(receipt_id)["editCount"] == 2
+
+
+def test_settle_by_an_accountant_keeps_the_real_phone_history(history_actors):
+    receipt_id, old_phone, new_phone, history = _receipt_with_phone_history(history_actors, status="Not Paid")
+    cookies = history_actors["accountant"]["cookies"]
+    seen = client.get(f"/api/collections/receipts/{receipt_id}", cookies=cookies).json()
+    assert seen["data"]["editHistory"][0]["changes"][0]["from"] == "—"
+    new_row = {"editedAt": "2026-10-02T02:00:00.000Z", "editedBy": "Accountant",
+               "changes": [{"field": "Status", "from": "Not Paid", "to": "Paid"}]}
+    settled = client.post(f"/api/receipts/{receipt_id}/settle", cookies=cookies, json={
+        "expectedLastModified": seen["lastModified"], "idempotencyKey": f"r4-pm1-settle-{TAG}",
+        "data": {"serialNumber": str(800000 + secrets.randbelow(99999)),
+                 "payments": [{"method": "Cash (LYD)", "amount": 97, "rate": 1, "rate2": 9.7, "collectionType": "office"}],
+                 "editHistory": seen["data"]["editHistory"] + [new_row], "editCount": 2}})
+    assert settled.status_code == 200, settled.text
+    assert old_phone not in settled.text and new_phone not in settled.text
+    stored = _stored_receipt(receipt_id)
+    assert stored["status"] == "Paid" and stored["editHistory"] == history + [new_row]

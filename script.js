@@ -283,8 +283,7 @@ applyWorkspaceExperienceMode();
 // ==========================================
 // CAPACITOR MOBILE RUNTIME
 // ==========================================
-// Native Android Back handling and a clear connectivity notice for the
-// packaged app. The web app keeps normal browser history/online behaviour.
+// Android Back and the connectivity notice for the packaged app; the web keeps its own.
 
 let _mobileRuntimeReady = false;
 let _mobileLastBackAt = 0;
@@ -487,7 +486,7 @@ function mobileSurfaceZIndex(element) {
 
 function getTopMobileSurface() {
   const surfaces = Array.from(document.querySelectorAll(
-    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal'
+    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal, #analytics-breakdown-dialog, #dollar-purchase-dialog'
   )).filter(element => element && element.isConnected !== false);
   return surfaces
     .map((element, domOrder) => ({ element, domOrder, zIndex: mobileSurfaceZIndex(element) }))
@@ -553,10 +552,20 @@ function closeTopMobileSurface() {
     closeMetaInsightsModal();
     return true;
   }
+  // Their admin-tools closers also clear body's overflow-hidden and restore focus.
+  if (topSurface.id === 'dollar-purchase-dialog') {
+    if (typeof closeDollarPurchaseManager === 'function') closeDollarPurchaseManager();
+    else topSurface.remove();
+    return true;
+  }
+  if (topSurface.id === 'analytics-breakdown-dialog') {
+    if (typeof closeAnalyticsBreakdown === 'function') closeAnalyticsBreakdown();
+    else topSurface.remove();
+    return true;
+  }
 
-  // This alert requires an explicit decision. Android Back follows the safe
-  // "choose another customer" path instead of merely deleting the overlay and
-  // leaving an unacknowledged customer selected underneath it.
+  // An explicit-decision alert: Back takes the safe "choose another customer" path,
+  // never a bare remove() that leaves the unacknowledged customer selected.
   if (topSurface.id === 'receipt-customer-risk-warning') {
     if (typeof cancelReceiptCustomerRiskWarning === 'function') cancelReceiptCustomerRiskWarning();
     else topSurface.remove();
@@ -572,9 +581,8 @@ function closeTopMobileSurface() {
     return true;
   }
 
-  // Standalone overlays (delivery, collect, history, choosers) have no activeModal: clean
-  // their URL/working state too. The driver form's crash draft writes its debounced keys
-  // before Back removes the DOM it reads (the timer would no-op after).
+  // Standalone overlays (no activeModal) clean their URL/working state too. The driver
+  // form's crash draft is written first: its debounce timer would find the DOM gone.
   if (topSurface.id === 'delivery-complete-modal' && typeof _flushDeliveryCompletionDraftNow === 'function') {
     try { _flushDeliveryCompletionDraftNow(); } catch (_) {}
   }
@@ -664,9 +672,7 @@ async function setupMobileRuntime() {
     }
   }
 
-  // SYSTEM-BROWSER APP LOGIN (Phase 2): listen for the albayan://auth deep
-  // link that brings a finished browser sign-in back into the packaged app
-  // (Capacitor-only; the function guards itself).
+  // System-browser login: albayan://auth brings the sign-in back (Capacitor-only, self-guarded).
   if (typeof setupAppLoginDeepLinks === 'function') {
     setupAppLoginDeepLinks().catch((error) => {
       console.warn('[MobileRuntime] App-login deep links unavailable:', error?.message || error);
@@ -733,9 +739,8 @@ function shouldSuppressOverlayPopstate() {
 function markOverlayPopClose(closed) {
   if (closed) {
     _lastOverlayPopCloseAt = Date.now();
-    // The popped entry was the surface's sentinel/?modal entry. Depth may
-    // under-count after a tracked-modal pop; under-counting only ever makes
-    // the observer SKIP an auto-consume (the old status quo), never over-pop.
+    // The popped entry was the surface's sentinel/?modal entry. Depth may under-count
+    // after a tracked-modal pop: that only skips an auto-consume, never over-pops.
     if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
   }
   return !!closed;
@@ -744,9 +749,8 @@ function markOverlayPopClose(closed) {
 // ==========================================
 // CENTRAL OVERLAY OBSERVER (history + iOS body scroll lock)
 // ==========================================
-// Every standalone surface is appended to <body>, so one childList observer pushes/consumes
-// the sentinel entries and toggles a body scroll lock while any dialog is open (iOS < 16
-// lacks overscroll-behavior: drags in a dialog scrolled the page / pull-to-refreshed).
+// Surfaces are <body> children: one childList observer pushes/consumes the sentinels and
+// locks body scroll while a dialog is open (iOS < 16: drags in a dialog scrolled the page).
 
 let _overlayObservedCount = 0;
 let _scrollLockActive = false;
@@ -754,7 +758,7 @@ let _scrollLockY = 0;
 
 function _overlaySurfaceCount() {
   return document.querySelectorAll(
-    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal'
+    '.mobile-dialog-overlay, #receipt-photo-viewer, #command-palette-modal, #analytics-breakdown-dialog, #dollar-purchase-dialog'
   ).length;
 }
 
@@ -786,9 +790,7 @@ function _unlockBodyScrollForOverlay() {
   bodyStyle.width = '';
   const y = _scrollLockY;
   window.scrollTo(0, y);
-  // closeModal triggers render(), whose own scroll save/restore may read
-  // scrollY as 0 while the body was still position:fixed — restore again
-  // after that render had its chance to run.
+  // closeModal's render() may save scrollY as 0 under position:fixed: restore after it too.
   requestAnimationFrame(() => window.scrollTo(0, y));
 }
 
@@ -799,9 +801,8 @@ function _handleOverlayDomChange() {
   _overlayObservedCount = count;
 
   if (count > previous) {
-    // Surface(s) opened. An opener that just pushed a ?modal entry (tracked #app-modal
-    // dialogs, collect-receipt) already gave Back one: a sentinel would cost an extra press.
-    // One sentinel per transition (batch-opens in one task are not a real flow).
+    // Opened: one sentinel per transition, unless the opener just pushed a ?modal entry
+    // (tracked #app-modal, collect-receipt): a second one would cost an extra Back press.
     if (Date.now() - _albayanLastModalUrlPushAt > 400) {
       pushMobileOverlayHistoryEntry();
     }
@@ -1691,16 +1692,11 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
-// PURE-JS CRYPTO FALLBACK: crypto.subtle is missing outside secure contexts (a
-// plain-HTTP LAN origin on iOS Safari / Android Chrome). These SHA-256 and
-// PBKDF2-HMAC-SHA256 routines match Web Crypto exactly and run only then.
+// PURE-JS CRYPTO FALLBACK (no crypto.subtle on a plain-HTTP origin): matches Web Crypto exactly.
 
-// New hashes created on the pure-JS path use fewer iterations (still recorded
-// in the stored `iterations` field, so they verify anywhere) because 600k
-// PBKDF2 iterations in plain JS would block the UI for many seconds.
+// Fewer iterations on the pure-JS path (recorded in `iterations`): 600k would freeze the UI.
 const _ALB_FALLBACK_PBKDF2_ITERATIONS = 60000;
-// Web Crypto runs off the UI thread and can use OWASP's current
-// PBKDF2-HMAC-SHA256 work factor without freezing the browser.
+// Web Crypto runs off the UI thread: OWASP's current work factor.
 const _ALB_NATIVE_PBKDF2_ITERATIONS = 600000;
 
 // SHA-256 round constants (FIPS 180-4)
@@ -1828,11 +1824,8 @@ const Security = {
   },
   
 
-  // Return a URL safe to put in an href/src, or '#' for an unsafe scheme.
-  // escapeHtml alone does NOT neutralize javascript:/data:/vbscript: URLs, so
-  // any user-supplied link (e.g. a customer profile link stored raw) must pass
-  // through here before rendering. Allows http/https/mailto/tel and
-  // relative / protocol-relative URLs.
+  // A URL safe for an href/src, or '#' (escapeHtml does NOT stop javascript:/data:/vbscript:): every
+  // user link passes here. Allows http/https/mailto/tel and relative URLs.
   safeUrl: (url) => {
     const s = String(url == null ? '' : url).trim();
     if (!s) return '#';
@@ -1894,9 +1887,7 @@ const Security = {
 
   // Sanitize object recursively
   sanitizeObject: (obj, depth = 0) => {
-    // Never return unsanitized attacker-controlled data when the nesting limit
-    // is exceeded. Dropping an over-deep branch fails closed and still protects
-    // the UI from recursion/stack exhaustion.
+    // Over the nesting limit: the branch is dropped (fails closed, no stack exhaustion).
     if (depth > 10) return null;
     if (obj === null || obj === undefined) return obj;
     if (typeof obj === 'string') return Security.sanitizeInput(obj);
@@ -1927,11 +1918,32 @@ const Security = {
           if (typeof v === 'string') return Security.sanitizeInput(v, { allowDataUrl: true });
           return Security.sanitizeObject(v, depth + 1);
         });
+      } else if (key === 'adCampaignRequests' && Array.isArray(value)) {
+        sanitized[sanitizedKey] = value.map(v => Security.sanitizeRecord(key, v, depth + 2));  // a whole saved state
       } else {
         sanitized[sanitizedKey] = Security.sanitizeObject(value, depth + 1);
       }
     }
     return sanitized;
+  },
+
+  // Ad words: the server's rule only (NUL, < and >, a leading javascript:/vbscript:); never "data:"
+  // or "on…=" inside them (r8 #15). Plain text, escaped wherever drawn.
+  plainText: (value, max) => {
+    let s = String(value ?? '').replace(/\0/g, '').replace(/[<>]/g, '').trim();
+    while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
+    return (max ? s.slice(0, max) : s).trim();
+  },
+
+  // sanitizeObject for a record of `collection`: an ad request (only) keeps its words by plainText.
+  sanitizeRecord: (collection, obj, depth = 0) => {
+    const out = Security.sanitizeObject(obj, depth);
+    if (collection === 'adCampaignRequests' && out && typeof out === 'object' && !Array.isArray(out)) {
+      for (const k of ['name', 'pageName', 'primaryText', 'headline', 'description', 'notes', 'reviewNote', 'stopReason']) {
+        if (typeof obj[k] === 'string') out[k] = Security.plainText(obj[k]);
+      }
+    }
+    return out;
   },
 
   // JSON with sorted keys (arrays keep order, undefined is skipped): equal data
@@ -1970,10 +1982,7 @@ const Security = {
     return bytes;
   },
 
-  // Password hashing using Web Crypto API (PBKDF2 by default; legacy SHA-256 supported)
-  // Falls back to pure-JS SHA-256/PBKDF2 when crypto.subtle is unavailable
-  // (insecure http:// origins) — output is byte-identical either way.
-  // Returns: { hash, salt, algo, iterations? }
+  // PBKDF2 (legacy SHA-256 too), pure JS without crypto.subtle (same bytes). { hash, salt, algo, iterations? }
   hashPassword: async (password, salt = null, options = {}) => {
     const algo = options.algo || 'pbkdf2-sha256';
     const pwd = String(password ?? '');
@@ -1993,12 +2002,8 @@ const Security = {
       return { hash, salt: saltHex, algo: 'sha256' };
     }
 
-    // PBKDF2-SHA256 (recommended). New hashes made on the pure-JS path use a
-    // lower default iteration count (recorded in `iterations`, which every
-    // call site round-trips through user.passwordIterations, so the hash
-    // verifies everywhere — including later under HTTPS with native crypto).
-    // Verification always passes the stored count explicitly, so it is never
-    // affected by this default.
+    // PBKDF2-SHA256. The pure-JS default count is recorded (user.passwordIterations), and a verify
+    // always passes the stored count, so a hash verifies everywhere.
     const iterations = Number.isFinite(options.iterations)
       ? options.iterations
       : (subtle ? _ALB_NATIVE_PBKDF2_ITERATIONS : _ALB_FALLBACK_PBKDF2_ITERATIONS);
@@ -2057,9 +2062,7 @@ const Security = {
         if (Number.isFinite(n)) iters = n;
       }
     }
-    // Old local backups created before iteration metadata was added used
-    // 310,000 rounds. Preserve that exact verification path, then upgrade the
-    // hash to the current work factor after a successful login.
+    // Old backups without a count used 310,000 rounds: verify so, then upgrade after login.
     if (algo === 'pbkdf2-sha256' && !Number.isFinite(iters)) iters = 310000;
     if (algo === 'pbkdf2-sha256' && (
       !Number.isSafeInteger(iters) || iters < 1 || iters > 10000000
@@ -2095,9 +2098,8 @@ const Security = {
     return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id);
   },
 
-  // Validate record ids and relationship ids without rewriting them. Rewriting
-  // would silently break links between customers, receipts, ads and users, so
-  // callers must reject the whole import/server payload when this fails.
+  // Validate record and relationship ids, never rewrite them (that breaks the links between
+  // records): a failure rejects the whole import/server payload.
   validateRecordIdentifiers: (value, path = 'record', depth = 0, validateOwnId = depth === 0) => {
     if (depth > 12 || value === null || value === undefined) return { valid: true };
     if (Array.isArray(value)) {
@@ -3485,9 +3487,7 @@ const PERMISSION_MODULES = {
     icon: 'settings',
     color: 'slate',
     description: 'System settings',
-    // NOTE: backup/restore/clearData were removed — those are whole-database
-    // operations the server only ever allows for the Admin ROLE, so offering
-    // them as grantable toggles was misleading (they never did anything).
+    // No backup/restore/clearData toggles: the server allows them to the Admin ROLE only.
     permissions: {
       view: { label: 'View Settings', description: 'View system settings' },
       edit: { label: 'Edit Settings', description: 'Edit system settings' },
@@ -3499,8 +3499,7 @@ const PERMISSION_MODULES = {
     icon: 'file-clock',
     color: 'violet',
     description: 'System audit trail',
-    // NOTE: 'backup' was removed — no code ever honored it (log backup is an
-    // Admin-role operation), so the toggle was decorative.
+    // No 'backup' toggle: log backup is an Admin-role operation.
     permissions: {
       view: { label: 'View Audit Logs', description: 'View all audit logs' },
       viewOwn: { label: 'View Own Logs', description: 'View only own activity' },
@@ -3508,8 +3507,7 @@ const PERMISSION_MODULES = {
       clear: { label: 'Clear Logs', description: 'Clear audit logs' }
     }
   },
-  // Clothes System (module keys MUST equal the collection names — the server
-  // maps collection → permission module by name)
+  // Clothes System: module keys MUST equal the collection names (the server maps them by name)
   clothesProducts: {
     name: 'Clothes — Products',
     icon: 'shirt',
@@ -3566,9 +3564,7 @@ const PERMISSION_MODULES = {
       editOwn: { label: 'Edit Own Settings', description: 'Edit own clothes settings' }
     }
   },
-  // Albayan Ads Studio requests are intentionally separate from the internal
-  // `ads` collection. Customers can prepare and submit only their own drafts;
-  // approval stays with an authorized reviewer.
+  // Ads Studio requests are separate from internal ads: customers submit only their own drafts; a reviewer approves.
   adCampaignRequests: {
     name: 'Ads Studio — Campaign Requests',
     icon: 'rocket',
@@ -3701,8 +3697,7 @@ const PERMISSION_TEMPLATES = {
     icon: 'badge-check',
     color: 'blue',
     permissions: {
-      // Reviewers can inspect every submitted request and record a decision,
-      // but they must never rewrite or submit a customer's draft.
+      // Reviewers see and decide every request; never rewrite or submit a customer's draft.
       adCampaignRequests: ['view', 'review']
     }
   }
@@ -3714,11 +3709,8 @@ function hasPermission(userId, module, action) {
   if (!userId || userId === 'system') return true;
 
   let user = (state.users || []).find(u => u && u.id === userId);
-  // FALLBACK: state.users can be empty or hold a permission-less stub (e.g. the
-  // /api/users/public list only carries {id,name,role}). The login and
-  // /api/auth/me responses always carry the caller's full permissions on
-  // state.currentUser — use that as the source of truth for the current user
-  // so the whole UI can never lock out a properly-permissioned account.
+  // FALLBACK: state.users may hold a permission-less stub (/api/users/public); login and /api/auth/me
+  // put the full map on state.currentUser, so the UI never locks out a permitted account.
   if ((!user || !user.permissions) && state.currentUser && String(state.currentUser.id) === String(userId)) {
     user = state.currentUser;
   }
@@ -3739,9 +3731,7 @@ function hasPermission(userId, module, action) {
   return modulePerms.includes(action) || modulePerms.some(p => String(p).toLowerCase() === String(action).toLowerCase());
 }
 
-// Refresh current user's permissions from server.
-// Returns true when the permissions actually changed (callers use this to
-// schedule a re-render so a locked sidebar can recover without re-login).
+// Refresh the current user's permissions; true when they changed (a re-render then unlocks the sidebar).
 async function refreshCurrentUserPermissions() {
   const sessionIdentityAtStart = typeof getServerSessionIdentity === 'function' ? getServerSessionIdentity() : undefined;
   if (!isServerModeEnabled() || !state.currentUser?.id) return false;
@@ -3757,9 +3747,7 @@ async function refreshCurrentUserPermissions() {
     const me = await apiAuthMe();
     if (getAuthMeIdentity() !== requestIdentity) return false;
     if (me && String(me.id || '') === currentId) {
-      // Role is authorization state too. Copying permissions alone left a
-      // demoted Admin permanently Admin in the browser when both maps were
-      // empty, even though the server had already revoked that access.
+      // The role too: copying permissions alone left a demoted Admin an Admin in the browser.
       state.currentUser = {
         ...state.currentUser,
         ...Security.sanitizeObject(me),
@@ -3773,8 +3761,7 @@ async function refreshCurrentUserPermissions() {
         subscriptions: Array.isArray(state.currentUser.subscriptions) ? state.currentUser.subscriptions : []
       });
       const changed = beforeAccess !== afterAccess;
-      // UPSERT into state.users, so the periodic refresh repairs a missing or
-      // permission-less (stub) record.
+      // Upsert: the periodic refresh repairs a missing or stub record.
       upsertCurrentUserIntoUsers();
       if (changed) console.log('[Permissions] Refreshed current user access');
       return changed;
@@ -3788,8 +3775,7 @@ async function refreshCurrentUserPermissions() {
   return false;
 }
 
-// Keep the current user's record in state.users WITH permissions: login and
-// /api/auth/me carry the full map; GET /api/users/public only {id,name,role}.
+// Keep the current user's record in state.users WITH permissions (/api/users/public carries none).
 function upsertCurrentUserIntoUsers() {
   const cu = state.currentUser;
   if (!cu || !cu.id) return;
@@ -3807,28 +3793,20 @@ function currentUserHasPermission(module, action) {
   return hasPermission(state.currentUser?.id, module, action);
 }
 
-// User-management capability: Admin role OR the matching users.* permission.
-// The server enforces the same rule (plus anti-escalation guards), so these
-// buttons/actions now work for permission-granted non-admins too.
+// User management: Admin role OR the matching users.* permission (the server's rule, plus anti-escalation).
 function canManageUsersAction(action) {
   return isCurrentUserAdmin() || currentUserHasPermission('users', action);
 }
 
-// Admin role OR the named permission. Use for every capability the
-// Permissions Manager advertises, so a granted toggle actually does something.
+// Admin role OR the named permission: for every capability the Permissions Manager offers.
 function can(module, action) {
   return isCurrentUserAdmin() || currentUserHasPermission(module, action);
 }
 
-// The audit trail the current user is allowed to SEE.
-// auditLogs.view => all entries; auditLogs.viewOwn => only their own.
-// Without either, nothing. state.logs is a DEVICE-LOCAL trail (it can hold
-// entries written while a different user was logged in on this browser), so
-// this scoping is what keeps a viewOwn user from reading someone else's
-// activity — never render or export state.logs directly.
+// The audit trail the current user may SEE: auditLogs.view all, viewOwn only their own, else nothing.
+// state.logs is DEVICE-LOCAL (other users' entries too): never render or export it directly.
 function getVisibleAuditLogs() {
-  // In server mode the server's trail is authoritative AND already scoped by
-  // the caller's auditLogs.view/viewOwn permission (GET /api/audit).
+  // Server mode: GET /api/audit's trail, already scoped by auditLogs.view/viewOwn.
   const source = isServerModeEnabled()
     ? (Array.isArray(state.serverLogs) ? state.serverLogs : [])
     : getVisibleRecords(state.logs);
@@ -3841,18 +3819,41 @@ function getVisibleAuditLogs() {
   return [];
 }
 
-// Refresh the server audit trail, then re-render the Audit Logs screen.
-// Cheap guard so the render loop can call it without re-entering.
+// Refresh the server audit trail, then re-render the Audit Logs screen (guarded: the render loop calls
+// it). The newest 500 rows come first; a filter or "Load older entries" pages back with the (ts, id) cursor.
 let _auditFetchInFlight = false;
-async function refreshServerAuditLogs({ force = false } = {}) {
+async function refreshServerAuditLogs({ force = false, older = false } = {}) {
   if (!isServerModeEnabled() || !state.currentUser?.id) return;
   if (_auditFetchInFlight) return;
-  const fresh = Date.now() - (state.serverLogsLoadedAt || 0) < 15000;
-  if (!force && fresh) return;
+  const stale = force || Date.now() - (state.serverLogsLoadedAt || 0) >= 15000;
+  const from = state.auditDateFrom ? Date.parse(`${state.auditDateFrom}T00:00`) : 0;  // local midnight
+  const filtered = !!(state.auditSearch || state.auditDateFrom || state.auditDateTo)
+    || [state.auditActionFilter, state.auditCategoryFilter, state.auditSeverityFilter, state.auditUserFilter].some(f => f !== 'all');
+  const logs = () => state.serverLogs || [];
+  // On its own it stops at the trail's end, at 10,500 rows or at the filter's start date.
+  const deeper = () => logs().length > 0 && state.serverLogsComplete === false
+    && (older || (filtered && logs().length < 10500 && !(Date.parse(logs()[logs().length - 1].date) < from)));
+  if (!stale && !deeper()) return;
   _auditFetchInFlight = true;
+  const identity = getServerSessionIdentity();  // rows read for the last account are never kept
   try {
-    state.serverLogs = await apiListAuditLogs(500);
-    state.serverLogsLoadedAt = Date.now();
+    if (stale) {
+      const rows = await apiListAuditLogs(500);
+      if (serverSessionIdentityChanged(identity)) return;
+      // Older pages already here stay when the new first page reaches them (force, after a cleanup, starts over).
+      const at = rows.length === 500 && !force ? logs().findIndex(l => l.id === rows[499].id) : -1;
+      state.serverLogs = at < 0 ? rows : rows.concat(logs().slice(at + 1));
+      if (at < 0) state.serverLogsComplete = rows.length < 500;
+      state.serverLogsLoadedAt = Date.now();
+    }
+    for (let page = 0; page < 10 && deeper(); page++) {
+      const last = logs()[logs().length - 1];
+      const rows = await apiListAuditLogs(1000, 0, `&before_ts=${Date.parse(last.date)}&before_id=${encodeURIComponent(last.id)}`);
+      if (serverSessionIdentityChanged(identity)) return;
+      const ids = new Set(logs().map(l => l.id));
+      state.serverLogs = logs().concat(rows.filter(l => !ids.has(l.id)));
+      if (rows.length < 1000) state.serverLogsComplete = true;
+    }
     if (state.currentView === 'audit') RenderQueue.schedule('auditLogs(server)');
   } catch (e) {
     console.warn('[Audit] Failed to load server logs:', e?.message || e);
@@ -4138,8 +4139,7 @@ async function copyTextToClipboard(text) {
     ta.style.left = '-1000px';
     document.body.appendChild(ta);
     try {
-      // iOS Safari cannot select a readonly textarea via select(); use Range + setSelectionRange.
-      // The readonly attribute stays on at creation to suppress the iOS keyboard.
+      // iOS Safari cannot select() a readonly textarea: Range + setSelectionRange (readonly at creation keeps the keyboard away).
       ta.contentEditable = 'true';
       ta.readOnly = false;
       const range = document.createRange();
@@ -6249,7 +6249,7 @@ async function sanitizeCollectionInPlace(collectionName) {
     for (let j = i; j < end; j++) {
       const item = arr[j];
       if (item && typeof item === 'object') {
-        arr[j] = Security.sanitizeObject(item);
+        arr[j] = Security.sanitizeRecord(collectionName, item);
       } else if (typeof item === 'string') {
         arr[j] = Security.sanitizeInput(item);
       }
@@ -6258,11 +6258,9 @@ async function sanitizeCollectionInPlace(collectionName) {
     await new Promise(r => setTimeout(r, 0));
   }
 
-  // Old local caches predate strict id validation. Quarantine unsafe records
-  // instead of rendering them (stored XSS) or silently discarding them. The
-  // original sanitized rows remain exportable in state for manual recovery;
-  // an IndexedDB source is marked protected so the filtered array cannot
-  // overwrite it.
+  // Old caches predate strict id validation: unsafe records are quarantined, never rendered (stored
+  // XSS) nor silently dropped. The rows stay exportable for recovery; an IndexedDB source is marked
+  // protected so the filtered array cannot overwrite it.
   const safe = [];
   const quarantined = [];
   for (let i = 0; i < arr.length; i++) {
@@ -6975,12 +6973,8 @@ function toggleLanguage() {
   if (window.lucide) lucide.createIcons();
 }
 
-// NOTE: the old "scroll performance mode" (setupScrollPerformanceMode toggling
-// body.is-scrolling on every scroll) was REMOVED together with its CSS. Hiding
-// the aurora and re-styling every panel at scroll start/stop forced full-page
-// style recalculations mid-scroll — on weak machines that swallowed touchpad
-// scrolling and flashed the background. Performance mode (body.perf-lite)
-// handles weak devices properly by turning effects off permanently.
+// The old scroll "performance mode" (body.is-scrolling per scroll) was removed: its mid-scroll
+// restyles swallowed touchpad scrolling on weak machines; body.perf-lite turns effects off instead.
 
 // Strip data-lucide from converted SVGs after each createIcons() pass: lucide keeps the
 // attribute, so every later pass rebuilt every icon (full-page DOM churn per render tick).
@@ -7092,12 +7086,13 @@ function cannotPrintOrDownload() {
   return typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser);
 }
 
-// kind: 'download' | 'print'.
+// kind: 'download' | 'print'. The packaged app never sends people to the web (App Review).
 function inAppLimitationText(kind) {
-  const app = isPackagedMobileApp();
-  return state.language === 'ar'
-    ? `${kind === 'print' ? 'الطباعة' : 'التنزيلات'} لا تعمل ${app ? 'داخل التطبيق — استخدم نسخة الويب في المتصفح' : 'داخل متصفح فيسبوك/إنستغرام المدمج — افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'} ثم أعد المحاولة.`
-    : `${kind === 'print' ? "Printing doesn't" : "Downloads don't"} work ${app ? 'inside the app — use the web version in a browser' : 'inside the Facebook/Instagram in-app browser — open this page in Safari or Chrome (menu -> "Open in browser")'}, then try again.`;
+  const ar = state.language === 'ar', print = kind === 'print';
+  if (isPackagedMobileApp()) return ar ? `${print ? 'الطباعة غير متاحة' : 'التنزيل غير متاح'} داخل التطبيق.` : `${print ? "Printing isn't" : "Downloads aren't"} available in the app.`;
+  return ar
+    ? `${print ? 'الطباعة' : 'التنزيلات'} لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح») ثم أعد المحاولة.`
+    : `${print ? "Printing doesn't" : "Downloads don't"} work inside the Facebook/Instagram in-app browser — open this page in Safari or Chrome (menu -> "Open in browser"), then try again.`;
 }
 
 function notifyInAppBrowserLimitation(kind) {
@@ -7284,7 +7279,7 @@ function requestUserTombstoneRefresh() {
 function addRecord(array, record) {
   if (!Array.isArray(array) || !record || typeof record !== 'object') return Promise.resolve(false);
   const collectionName = getCollectionNameFromArray(array);
-  const cleanRecord = Security.sanitizeObject(record);
+  const cleanRecord = Security.sanitizeRecord(collectionName, record);
   if (!cleanRecord.id) cleanRecord.id = Security.generateSecureId(collectionName || 'id');
   const idCheck = Security.validateRecordIdentifiers(cleanRecord, collectionName || 'record');
   if (!idCheck.valid || !Security.isValidRecordId(cleanRecord.id)) {
@@ -7329,7 +7324,7 @@ function addRecord(array, record) {
         if (entity?.data && entity?.id) {
           const idx = array.findIndex(x => x && x.id === id);
           if (idx !== -1) {
-            array[idx] = Security.sanitizeObject(entity.data);
+            array[idx] = Security.sanitizeRecord(collectionName, entity.data);
             if (collectionName) markCollectionDirty(collectionName);
             saveState();
           }
@@ -7346,7 +7341,7 @@ function addRecord(array, record) {
             if (existing?.data && serverRecordMatchesCreateRetry(existing.data, cleanRecord)) {
               const idx = array.findIndex(x => x && x.id === id);
                if (idx !== -1) {
-                 const existingData = Security.sanitizeObject(existing.data);
+                 const existingData = Security.sanitizeRecord(collectionName, existing.data);
                  array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
                    ? makeLightweightMediaRecord(collectionName, existingData)
                    : existingData;
@@ -7797,18 +7792,15 @@ function updateRecord(array, id, updates, expectedLastModified) {
       return Promise.resolve(false);
     }
 
-    const sanitizedUpdates = Security.sanitizeObject(updates);
+    const sanitizedUpdates = Security.sanitizeRecord(collectionName, updates);
     const updatesIdCheck = Security.validateRecordIdentifiers(sanitizedUpdates, `${collectionName || 'record'}.updates`);
     if (!updatesIdCheck.valid) {
       showNotification('Invalid Record', updatesIdCheck.error, 'error');
       return Promise.resolve(false);
     }
-    // Never allow changing protected fields (createdByName is the
-    // creation-time stamp that keeps "Created by" readable after the
-    // creator's account is deleted, and customerName is the creation-time
-    // customer stamp that keeps a receipts/ads-only role able to read who the
-    // record is for — edits must never rewrite either; the live customer name
-    // still wins on read whenever it is available).
+    // Protected fields never change. createdByName and customerName are creation-time stamps (who
+    // made it once that account is gone; who it is for, for a receipts/ads-only role); the live
+    // customer name still wins on read.
     const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'customerName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
@@ -8030,7 +8022,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           } else if (entityOrSettlement?.data) {
             const idx = array.findIndex(x => x && x.id === id);
             if (idx !== -1) {
-              array[idx] = Security.sanitizeObject(entityOrSettlement.data);
+              array[idx] = Security.sanitizeRecord(collectionName, entityOrSettlement.data);
               if (collectionName) markCollectionDirty(collectionName);
               saveState();
             }
@@ -8062,7 +8054,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               const idx = array.findIndex(x => x && x.id === id);
               let _latestData = null;
               if (idx !== -1 && latest?.data) {
-                 _latestData = Security.sanitizeObject(latest.data);
+                 _latestData = Security.sanitizeRecord(collectionName, latest.data);
                  array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
                    ? makeLightweightMediaRecord(collectionName, _latestData)
                    : _latestData;
@@ -8178,7 +8170,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           let fresh = _confirmedBase;
           try {
             const latest = await apiGetEntity(collectionName, id);
-            if (latest?.data) fresh = Security.sanitizeObject(latest.data);
+            if (latest?.data) fresh = Security.sanitizeRecord(collectionName, latest.data);
           } catch (_) {}
           const idx = array.indexOf(_optimisticRecord);
           if (idx !== -1) {
@@ -8885,10 +8877,8 @@ function getDeliveryReceiptDueUsage(receipt) {
   };
 }
 
-// Canonical receipt status used by filters and debt reporting. Historical
-// records contain several spellings (Pending, Unpaid, Cancelled), while new
-// records use Not Paid and Canceled. Keep that compatibility at read time so
-// old receipts immediately benefit without rewriting financial history.
+// Canonical receipt status for filters and debt reports: old spellings (Pending, Unpaid, Cancelled)
+// map at read time to Not Paid / Canceled, so financial history is never rewritten.
 function getReceiptPaymentState(receipt) {
   if (!receipt || receipt._deleted) return 'unknown';
   const status = String(receipt.status || '')
@@ -8940,6 +8930,7 @@ const _SERVER_REFUSAL_AR = [
   ['This account still has money in its wallet', 'ما زال في محفظة هذا الحساب مال؛ حوّله إلى مستخدم آخر أولاً ثم احذف الحساب.'],
   ['This driver still has open delivery jobs', 'لدى هذا السائق مهام توصيل مفتوحة؛ أعد إسنادها أو أنهِها أولاً.'],
   ['A user with this email already exists', 'يوجد مستخدم بهذا البريد الإلكتروني بالفعل.'],
+  ['Conflict: this user was changed by someone else', 'عدّل مدير آخر هذا المستخدم للتو؛ أعد فتح النموذج وحاول مجدداً.', 'Another manager just changed this user; reopen the form and try again.'],
   ['Cannot remove the last remaining admin', 'لا يمكن إزالة آخر مدير؛ رقِّ مستخدماً آخر إلى مدير أولاً.'],
   ['Cannot change the role of a user who holds permissions you do not', 'لا يمكنك تغيير دور مستخدم يملك صلاحيات لا تملكها.'],
   ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.'],
@@ -9030,11 +9021,8 @@ function getReceiptDebtType(receipt) {
   return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';
 }
 
-// Locale for every user-visible date. Without an explicit locale, phones set
-// to Arabic default to ar-SA — Hijri calendar with Arabic-Indic digits — so
-// 2026-07-22 rendered as year ١٤٤٨. The -u- extension keys pin the Gregorian
-// calendar and latin digits; they are honored by every Intl implementation
-// far below the iOS 15 baseline.
+// Locale for every user-visible date: Arabic phones default to ar-SA (Hijri, Arabic-Indic digits: 2026
+// showed as ١٤٤٨); the -u- keys pin Gregorian and latin digits (supported far below iOS 15).
 function appDateLocale() {
   return state.language === 'ar' ? 'ar-LY-u-ca-gregory-nu-latn' : 'en-GB';
 }
@@ -9316,11 +9304,8 @@ async function apiFetch(path, { method = 'GET', body, headers = {}, navigationAb
   }
 }
 
-// Packaged apps: Capacitor's patched fetch() ignores AbortSignal and timeouts
-// for POST/PATCH/DELETE (native default 600 s), so a stalled login or save
-// never timed out. Calling the plugin directly makes the timeout and the abort
-// timer apply; the reply is wrapped as a standard Response. GETs keep the
-// patched fetch, which honours the abort signal already.
+// Packaged apps: the patched fetch() ignores aborts and timeouts on writes (native 600 s: a stalled
+// save never ended), so writes call the plugin directly, wrapped as a Response. GETs keep fetch.
 async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   const plugin = (typeof Platform !== 'undefined' && Platform.isCapacitor && opts.method !== 'GET')
     ? (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp)
@@ -9328,9 +9313,11 @@ async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   if (!plugin || typeof plugin.request !== 'function') return fetch(url, opts);
   if (controller.signal.aborted) throw new DOMException('The request was aborted', 'AbortError');
   const abortPromise = new Promise((_, reject) => {
-    // The native task cannot be cancelled and may still commit: 499 stops withRetry from sending the body twice.
-    controller.signal.addEventListener('abort', () => reject(Object.assign(new DOMException('The request timed out', 'AbortError'), { status: 499 })), { once: true });
+    // The native task cannot be cancelled and may still commit: noRetry stops withRetry from sending the
+    // body twice. No HTTP status: a fake one (499) read as a refusal ('Not allowed'), not a lost answer.
+    controller.signal.addEventListener('abort', () => reject(Object.assign(new DOMException('The request timed out', 'AbortError'), { noRetry: true })), { once: true });
   });
+  // The plugin's own failure (native timeout, lost connection) reads as the browser's 'Load failed'.
   const request = plugin.request({
     url,
     method: opts.method,
@@ -9339,6 +9326,9 @@ async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
     connectTimeout: Math.max(1000, timeoutMs - 1000),
     readTimeout: Math.max(1000, timeoutMs - 1000),
     responseType: 'text'
+  }).catch(e => {
+    if (e && e.status) throw e;
+    throw Object.assign(new TypeError('Load failed'), { nativeMessage: String(e?.message || ''), code: e?.code });
   });
   const native = await Promise.race([request, abortPromise]);
   const status = Number(native?.status) || 0;
@@ -9383,6 +9373,7 @@ async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
     } catch (e) {
       lastError = e;
       if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
+      if (e?.noRetry) throw e;  // a write that may have committed is never re-sent
       const status = e?.status;
       // Don't retry client errors (400, 401, 403, 404, 409) or successful responses
       if (status && status >= 400 && status < 500 && status !== 408) {
@@ -9569,13 +9560,9 @@ async function apiAuthMe() {
   finally { if (_sessionRequest === request) _sessionRequest = null; }
 }
 
-// Packaged phone apps target a known server, so one bounded round trip can
-// prove reachability AND settle the session: 200 = signed in, 401 (or any
-// other definite answer) = reachable but signed out, a network failure or a
-// 5xx = not proven (the caller falls back to the health probe). No retries:
-// the cold start must stay bounded on a dead network.
-// A session answer must look like a user: a captive portal or proxy can
-// answer 200 with HTML, which must never pass as "signed in".
+// Phone apps: one bounded round trip proves reachability AND the session (200 signed in, any other
+// definite answer signed out, network failure/5xx not proven: the health probe decides). No retries
+// on a dead network. A 200 must look like a user: a captive portal's HTML is never "signed in".
 function _isSessionUser(user) {
   return !!user && typeof user === 'object' && !Array.isArray(user) && typeof Security !== 'undefined' && Security.isValidRecordId(String(user.id || ''));
 }
@@ -9754,11 +9741,8 @@ function makeSessionChangedError() {
   return error;
 }
 
-// Collections synchronized through the generic collection API. Keep this one
-// list shared by full loads, per-collection cursors and visibility purges so a
-// newly-added collection cannot accidentally miss one of the safety paths.
-// Order is load order: the office core first, the clothes module last, so
-// the workspace is usable before the lists a user opens least often arrive.
+// The ONE list of generic-API collections (full loads, cursors, visibility purges: a new one misses
+// no safety path), in load order: office core first, the clothes module last.
 const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'adCampaignRequests',
@@ -9767,10 +9751,8 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'
 ]);
 
-// Receipt/ad photos are large base64 strings. Normal lists and live deltas
-// request lightweight records and fetch the full item only when a user opens
-// Photos or Edit. Old servers safely ignore the query parameter, while old
-// clients keep receiving full records because the backend default is true.
+// Photos are large base64 strings: lists and deltas ask for lightweight records, and Photos/Edit
+// fetch the full item. Old servers ignore the parameter; old clients still get full records.
 const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts', 'pages']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
@@ -9778,12 +9760,8 @@ const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // budget. Small bodies keep the 20s timeout.
 const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
 function mediaAwareTimeoutMs(body) {
-  // Deliberately NOT JSON.stringify(body): apiFetch serializes the same body
-  // again for the wire, and doubling a multi-megabyte photo payload's
-  // serialization caused a real memory/CPU spike on old phones. A shallow
-  // walk over string values (photos live at most a few levels deep:
-  // data.photos[i], data.adPhotos[i], data.receiptImage) sums lengths and
-  // spots data-URL prefixes without materializing a second copy.
+  // Not JSON.stringify(body): a second serialization of a multi-MB photo body spiked old phones. A
+  // shallow walk (photos sit a few levels deep) sums string lengths and spots data-URL prefixes.
   try {
     let size = 0;
     const scan = (val, depth) => {
@@ -9917,11 +9895,8 @@ function mergeMutationInlineMedia(collection, incoming, knownRecord) {
   return merged;
 }
 
-// Capture server-issued collection watermarks BEFORE a full load starts. A
-// full load spans several requests and is not one DB snapshot; seeding a delta
-// cursor from the rows it happened to return can skip a write that lands after
-// an early collection request. Starting the follow-up delta at these captured
-// values makes every write concurrent with the snapshot visible.
+// Server watermarks captured BEFORE a full load (several requests, not one snapshot): a delta cursor
+// seeded from the returned rows could skip a concurrent write; starting here shows every one.
 async function apiGetSyncWatermarks() {
   const identity = getServerSessionIdentity();
   const payload = await apiJson('/api/sync/watermarks', { method: 'GET' }, { timeoutMs: 10000 });
@@ -9962,8 +9937,7 @@ async function apiGetSyncWatermarks() {
   return watermarks;
 }
 
-// Cache for users list to avoid repeated API calls. It is identity-scoped:
-// an Admin's full user list must never be reused by a later non-admin session.
+// Users list cache, identity-scoped: an Admin's list must never serve a later non-admin session.
 let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' }; // 30 second cache
 
 // Session cache to prevent logout on rapid refresh
@@ -10010,9 +9984,7 @@ async function apiListUsersForUi() {
   }
 }
 
-// The users-list cache must never outlive a user mutation, or the next
-// live-sync tick re-serves pre-edit permissions and overwrites fresh local
-// state with stale data.
+// Never outlive a user mutation: the next live-sync tick would re-serve pre-edit permissions.
 function invalidateUsersListCache() {
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
 }
@@ -10072,10 +10044,8 @@ async function apiUpdateUser(userId, updates) {
   return res;
 }
 
-// Debounced server-side persistence for user permission changes (the UI
-// mutates local state first; server mode must also PATCH /api/users/{id}).
-// Resolves true once the write landed (or local mode saved), false when it
-// was refused — callers that promise success must wait for it.
+// Debounced PATCH /api/users/{id} for permission changes (the UI changes local state first). Resolves
+// true once it landed (or local mode saved), false when refused: callers that promise success wait.
 const _serverUserUpdate = {
   timers: new Map(),
   pending: new Map(),
@@ -10083,15 +10053,15 @@ const _serverUserUpdate = {
   debounceMs: 700
 };
 
-function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
+function scheduleServerUserUpdate(userId, updates, { quiet = false, base } = {}) {
   const uid = String(userId || '');
   if (!uid) return Promise.resolve(false);
   if (!isServerModeEnabled()) return Promise.resolve(true);
-  // Permission edits are made by Admins or users.managePermissions holders;
-  // the server enforces the same rule.
+  // Admins or users.managePermissions holders only (the server enforces the same).
   if (!canManageUsersAction('managePermissions')) return Promise.resolve(false);
 
-  const prev = _serverUserUpdate.pending.get(uid) || {};
+  // A batch names the map its FIRST change was made on; once another manager changed it, 409.
+  const prev = _serverUserUpdate.pending.get(uid) || (base ? { expectedPermissions: base } : {});
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
   const done = new Promise((resolve) => {
     _serverUserUpdate.waiters.set(uid, [...(_serverUserUpdate.waiters.get(uid) || []), resolve]);
@@ -10123,6 +10093,23 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
     } catch (e) {
       // Reload users on the next tick: the grid shows a refused grant.
       try { if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0; } catch (_) {}
+      if (isVersionConflict409(e)) {
+        // Show the server's copy; a change queued on the same stale screen goes too.
+        clearTimeout(_serverUserUpdate.timers.get(uid));
+        _serverUserUpdate.timers.delete(uid);
+        _serverUserUpdate.pending.delete(uid);
+        invalidateUsersListCache();
+        try {
+          const fresh = (await apiListUsersForUi()).find(u => u && String(u.id) === uid);
+          const i = fresh?.permissions ? state.users.findIndex(u => u && String(u.id) === uid) : -1;
+          if (i !== -1) { state.users[i] = { ...state.users[i], ...fresh, _lastModified: Date.now() }; markCollectionDirty('users'); saveState(); }
+        } catch (_) {}
+        _syncPermissionBoxes(uid);
+        const ar = state.language === 'ar';
+        if (!quiet) showNotification(ar ? 'غيّره مدير آخر' : 'Changed by another manager', ar ? 'عدّله مدير آخر للتو، فأُعيد تحميل صلاحياته. أعد تغييرك إن لزم.' : 'Another manager just changed this user; the permissions were reloaded. Make your change again if needed.', 'warning');
+        settle(false);
+        return;
+      }
       if (!quiet) {
         showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
@@ -10134,12 +10121,8 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   return done;
 }
 
-// Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
-// logout: without this, closing/reloading the tab within the 700ms debounce
-// silently drops a permission grant — the admin's screen keeps showing 90/90
-// (saved locally) while the server row never received it.
-// Uses raw fetch with keepalive so the request survives page teardown, and no
-// navigation-abort signal is attached.
+// Fire debounce-pending user updates NOW (pagehide, logout): closing the tab inside the 700ms debounce
+// silently lost a grant. Raw keepalive fetch, no navigation-abort signal: it survives teardown.
 function flushPendingUserUpdates() {
   const inflight = [];
   try {
@@ -10266,11 +10249,8 @@ function getCollectionTimeout(collection) {
   return timeouts[collection] || timeouts.default;
 }
 
-// Every entity endpoint returns the same envelope. Validate it at this single
-// trust boundary before any caller can merge the payload into state. This is
-// intentionally shared by list/delta/get/create/patch and the transactional
-// wallet/subscription endpoints: validating only list responses left conflict
-// recovery and payment refresh able to upsert poisoned relationship ids.
+// The one trust boundary for every entity envelope (list/delta/get/create/patch, wallet and
+// subscriptions), before any merge into state: list-only checks let poisoned relationship ids in.
 function validateServerEntityResponse(collection, entity, context = 'response') {
   const name = String(collection || 'entity');
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
@@ -10322,9 +10302,8 @@ function mergeServerEntityDataById(target, indexById, entity) {
   return false;
 }
 
-// Apply a group of already-committed server entities to local state as one
-// in-memory step. Prepare and validate every item first so a malformed second
-// envelope can never leave only the first item applied locally.
+// Apply committed server entities as one in-memory step: every item is validated first, so a
+// malformed second envelope never leaves the first one applied alone.
 function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
   const prepared = (Array.isArray(entries) ? entries : []).map((entry, index) => {
     const collection = String(entry?.collection || '');
@@ -10336,7 +10315,7 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
     const entity = validateServerEntityResponse(collection, entry.entity, `${reason}[${index}]`);
     return {
       collection,
-      saved: Security.sanitizeObject(entity.data),
+      saved: Security.sanitizeRecord(collection, entity.data),
       lastModified: Number(entity.lastModified)
     };
   });
@@ -10422,11 +10401,8 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         .filter(record => record && record.id != null)
         .map(record => [String(record.id), record])
     );
-    // Safety cap against infinite loops. Must be high enough to load the
-    // designed maximum collection size (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION,
-    // 100k) — the old flat 50 pages capped every collection at 50×300 = 15,000
-    // records and silently returned only the NEWEST 15k as if complete, dropping
-    // the oldest from view and understating every total.
+    // Loop cap sized for the designed maximum (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION, 100k): a flat
+    // 50 pages silently returned only the newest 15,000 rows as if complete, understating every total.
     const _maxRecords = (typeof STORAGE_CONFIG !== 'undefined' && STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) || 100000;
     const maxPages = Math.ceil(_maxRecords / limit) + 5;
     let lastPageFull = false;
@@ -10589,7 +10565,7 @@ async function ensureEntityMediaLoaded(collection, id) {
       // Refresh LRU order and return a detached object so callers cannot mutate
       // the cached copy while editing their local draft.
       cacheTransientAdCampaignMedia(key, cached);
-      return Security.sanitizeObject(cached);
+      return Security.sanitizeRecord(name, cached);
     }
   }
   if (_pendingEntityMediaLoads.has(key)) return await _pendingEntityMediaLoads.get(key);
@@ -10600,7 +10576,7 @@ async function ensureEntityMediaLoaded(collection, id) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const entity = await apiGetEntity(name, safeId, { timeoutMs: name === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 15000 });
       if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
-      const full = entity?.data ? Security.sanitizeObject(entity.data) : null;
+      const full = entity?.data ? Security.sanitizeRecord(name, entity.data) : null;
       const latest = findCurrent();
       if (!full || !latest || latest._deleted) return latest;
       const responseVersion = Number(full._lastModified);
@@ -10609,7 +10585,7 @@ async function ensureEntityMediaLoaded(collection, id) {
 
       if (name === 'adCampaignRequests') {
         cacheTransientAdCampaignMedia(key, full);
-        return Security.sanitizeObject(full);
+        return Security.sanitizeRecord(name, full);
       }
 
       const target = state[name];
@@ -10637,11 +10613,14 @@ async function ensureEntityMediaLoaded(collection, id) {
 async function apiCreateEntity(collection, record) {
   const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
   const path = `/api/collections/${encodeURIComponent(collection)}${omitMedia ? '?include_media=false' : ''}`;
-  const timeoutMs = String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 20000;
+  // A create with photos gets the 90 s media budget and one retry, as apiPatchEntity (20 s cut it short).
+  const isStudio = String(collection || '') === 'adCampaignRequests';
+  const timeoutMs = isStudio ? ADS_STUDIO_MEDIA_TIMEOUT_MS : mediaAwareTimeoutMs(record);
+  const retries = (!isStudio && timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS) ? 1 : 2;
   const entity = await requestValidatedServerEntity(collection, 'create', () =>
     withRetry(() =>
       apiJson(path, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs })
-    , 2, 500)
+    , retries, 500)
   );
   // Customer campaign images stay in the builder/transient LRU. Never reattach
   // them to the collection response, which is persisted to IndexedDB.
@@ -10994,13 +10973,9 @@ async function apiMutateAd(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
   const identity = getServerSessionIdentity();
-  // A stable body/idempotency key makes a response-loss retry safe: the server
-  // checks the adFunding idempotency marker BEFORE the version-conflict check
-  // and replays the committed result instead of moving the same funding twice
-  // (the caller pins adId + idempotencyKey + payload per attempt, so retries
-  // resend identical bytes). Bodies carrying adPhotos get the media timeout;
-  // those retry once instead of twice because each retry re-uploads the whole
-  // body from byte 0 and would otherwise saturate a weak uplink for minutes.
+  // A response-loss retry is safe: the server checks the idempotency marker BEFORE the version check
+  // and replays the committed result (the caller pins adId, key and payload per attempt). Photo bodies
+  // get the media timeout and one retry (each retry re-uploads the whole body on a weak uplink).
   const _mutateTimeoutMs = mediaAwareTimeoutMs(payload && payload.data);
   const response = await withRetry(() => apiJson('/api/ads/mutate?include_media=false', {
     method: 'POST',
@@ -12750,8 +12725,7 @@ function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false)
   if (incomingVersion !== null) return true;
   if (currentVersion !== null) return false;
 
-  // Legacy/offline records may predate server revision stamps. Keep supporting
-  // them without reporting an identical replay as a change.
+  // Legacy/offline records may lack revision stamps: an identical replay is no change.
   try {
     return JSON.stringify(incoming) !== JSON.stringify(current);
   } catch (_) {
@@ -12782,7 +12756,7 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
     const existing = existingIndex !== undefined ? arr[existingIndex] : null;
     if (existing && !_shouldApplyDeltaRecord(rec, existing, refreshEqualVersion)) continue;  // version-only check, before the sanitiser
     const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
-    const clean = Security.sanitizeObject(prepared);
+    const clean = Security.sanitizeRecord(collectionName, prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
       if (!_shouldApplyDeltaRecord(clean, arr[idx], refreshEqualVersion)) continue;
@@ -16400,20 +16374,15 @@ function renderLogin() {
   if (window.__albayanAppLoginReturn && typeof _renderAppLoginReturnHTML === 'function') {
     return _renderAppLoginReturnHTML();
   }
-  // Local mode can verify its locally stored WebAuthn credentials. Production
-  // server mode must not advertise passkeys until server-side challenge and
-  // credential endpoints exist.
+  // Passkeys only where they work (local mode, secure origin): server mode has no challenge or
+  // credential endpoints, so its login draws no Passkey button (a disabled one read as unfinished).
   const passkeySupported = !isServerModeEnabled()
     && !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
   // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
   // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
   // (02-security.js), but tell the user why security features are degraded.
   const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
-  const passkeyHint = isServerModeEnabled()
-    ? (isRTL ? 'تسجيل الدخول بمفتاح المرور غير مفعّل بعد في وضع السيرفر.' : 'Passkey sign-in is not enabled in server mode yet.')
-    : passkeySupported
-    ? (isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.')
-    : (isRTL ? 'Passkey يتطلب HTTPS أو localhost. افتح التطبيق عبر localhost لاستخدامه.' : 'Passkeys require HTTPS or localhost. Open the app via localhost to use it.');
+  const passkeyHint = isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.';
 
   const bannersHTML = _renderLoginBanners(isRTL, webCryptoOk);
 
@@ -16492,6 +16461,7 @@ function renderLogin() {
             </button>
           </form>
 
+          ${passkeySupported ? `
           <div class="my-6 flex items-center gap-3">
             <div class="flex-1 h-px bg-slate-200 dark:bg-slate-800"></div>
             <div class="text-[11px] font-bold text-slate-400 uppercase">${isRTL ? 'أو' : 'or'}</div>
@@ -16500,8 +16470,7 @@ function renderLogin() {
 
           <button type="button"
             onclick="passkeySignIn()"
-            ${passkeySupported ? '' : 'disabled'}
-            class="w-full glass-panel rounded-xl px-4 py-3 font-extrabold flex items-center justify-center gap-2 ${passkeySupported ? 'hover:shadow-xl' : 'opacity-60 cursor-not-allowed'}${prefillAccount && passkeySupported ? ' border border-indigo-200 dark:border-indigo-800' : ''}"
+            class="w-full glass-panel rounded-xl px-4 py-3 font-extrabold flex items-center justify-center gap-2 hover:shadow-xl${prefillAccount ? ' border border-indigo-200 dark:border-indigo-800' : ''}"
             title="${Security.escapeHtml(passkeyHint)}"
           >
             <i data-lucide="key-round" class="w-5 h-5"></i>
@@ -16509,7 +16478,7 @@ function renderLogin() {
           </button>
           <div class="mt-2 text-[11px] text-slate-400 text-center">
             ${passkeyHint}
-          </div>
+          </div>` : ''}
           ${(typeof isSystemBrowserLoginEnabled === 'function' && isSystemBrowserLoginEnabled()) ? `
           <button type="button" onclick="nativeLoginUseBrowser()" class="mt-3 text-xs font-bold alb-link mx-auto block min-h-11">
             ${isRTL ? 'استخدام تسجيل الدخول عبر المتصفح المحمي' : 'Use secure browser sign-in'}
@@ -17295,12 +17264,8 @@ function renderAnalyticsView() {
   const notCollectedUSD = revenueReceipts.reduce((sum, r) => sum + (r.amountUSD || 0), 0) - collectedUSD;
   const collectionRate = revenueReceipts.length > 0 ? ((collectedReceipts.length / revenueReceipts.length) * 100).toFixed(1) : 0;
 
-  // Delivery tracking. Deliveries are tracked ONLY on receipts (ads are pinned to
-  // 'Office' when created, so sourcing this panel from ads showed 0 forever while
-  // renderDeliveriesView listed real deliveries). Same filter/normalisation as
-  // renderDeliveriesView so the two screens cannot contradict each other.
-  // The terminal "done" status is 'Delivered' (there is no 'completed' status in
-  // DELIVERY_STATUSES); Canceled is neither active nor completed.
+  // Deliveries live on receipts only (ads are pinned to 'Office'): renderDeliveriesView's filter, so the
+  // screens agree. 'Delivered' is done; Canceled is neither active nor done.
   const deliveryStatuses = receipts
     .filter(r => {
       if (!r) return false;
@@ -17343,11 +17308,7 @@ function renderAnalyticsView() {
   });
   const topPages = Object.entries(adsByPage)
     .map(([pageId, count]) => {
-      // Deleting a page keeps its ads (history) but leaves them pointing at the
-      // deleted page's id, and the name can be reused by a NEW page. Resolve the
-      // name among live pages ONLY and tag the orphaned row, otherwise two
-      // different page ids render as one indistinguishable name here while the
-      // Pages card counts ads against the new id.
+      // Live pages only, a deleted page's row tagged: a NEW page may reuse the name under another id.
       const livePage = state.pages.find(p => p && !p._deleted && String(p.id) === String(pageId));
       const deletedPage = livePage ? null : state.pages.find(p => p && p._deleted && String(p.id) === String(pageId));
       const deletedName = deletedPage?.name || '';
@@ -17796,10 +17757,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
 
     const phones = getCustomerPhoneEntries(c).map(entry => entry.value);
     const profileLinks = Array.isArray(c.profileLinks) ? c.profileLinks : [];
-          // Only render Edit/Delete when the handler would actually allow it
-          // (editCustomer → canActOnRecord edit; deleteCustomer →
-          // currentUserHasPermission delete). Matches how the Add button is
-          // gated, so view-only roles don't see dead buttons.
+          // Edit/Delete only when the handler allows it (canActOnRecord edit / customers.delete): no dead buttons.
           const canEditThisCustomer = canActOnRecord('customers', 'edit', c.createdBy);
           const canDeleteThisCustomer = can('customers', 'delete');
           // Display number: total - index (so first item = highest number, matching newest-first sort)
@@ -17870,7 +17828,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <div class="flex-1">
               ${!canSeeContacts
                 ? `<span class="text-slate-400">••• ${HIDDEN}</span>`
-                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
+                : (phones.length > 0 ? phones.map(phone => `<div class="text-slate-700 dark:text-slate-300">${phoneLtrHtml(phone || '')}</div>`).join('') : `<span class="text-slate-400">${isAr ? 'لا يوجد هاتف' : 'No phone'}</span>`)}
                   </div>
                 </div>
 
@@ -17981,11 +17939,7 @@ function loadMoreCustomers() {
   updateCustomersViewFiltered();
 }
 
-// Same reason as the customers grid: every page card carries spend figures and
-// icons, and drawing all of them at once is what a phone actually chokes on
-// (the per-card scanning is indexed now, the DOM work is not). The limit
-// resets whenever the search changes, so a search always shows its best
-// matches from the top.
+// Paged like the customers grid: drawing every card at once is what a phone chokes on; a new search starts at the top.
 const PAGES_PAGE_SIZE = 50;
 let _pagesShowLimit = PAGES_PAGE_SIZE;
 let _pagesFilterFingerprint = '';
@@ -18011,11 +17965,7 @@ function renderCustomersView() {
     state.customerFinancialFilter = 'all';
     if (financialCustomerSorts.has(String(state.customerSort || ''))) state.customerSort = 'newest';
   }
-  // ONE statsIndex per render pass: getFilteredCustomers (financial filter +
-  // sort), the header stat cards and every customer card all reuse it. Each
-  // index build is a full ads/receipts/pages pass, and the debt block in
-  // getCustomerStats now depends on the index's committedUSDByReceiptId to
-  // avoid per-receipt ads rescans — so build it once, up front.
+  // ONE statsIndex per render pass (a full ads/receipts/pages pass): the filter, header stats and every card reuse it.
   const statsIndex = buildCustomerStatsIndex();
   const allFilteredCustomers = getFilteredCustomers(statsIndex);
   const allCustomers = getCustomersVisibleToCurrentUser();
@@ -18614,7 +18564,7 @@ function renderReceiptsView() {
                     if (feeCollectedRaw === undefined || feeCollectedRaw === null) return '';
                     const feeShopPaid = String(receipt.deliveryFeePaidBy || 'customer') === 'shop';
                     return `<div class="text-[10px] mt-0.5 font-bold ${feeShopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}">
-                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(0)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
+                      ${isArV ? 'قيمة التوصيل' : 'Delivery fee'}: ${(Number(feeCollectedRaw) || 0).toFixed(2)} LYD <span class="no-print">• ${feeShopPaid ? (isArV ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isArV ? 'دفعها العميل' : 'paid by customer')}</span>
                     </div>`;
                   })()}
                   ${hasTransfers ? `<div class="text-xs text-blue-600 mt-1 flex items-center justify-end space-x-1" title="${isArV ? 'تم التحويل' : 'Transferred'}${lastTransferNameSafe ? (isArV ? ' إلى ' : ' to ') + lastTransferNameSafe : ''}"><i data-lucide="swap" class="w-3 h-3"></i><span>${isArV ? 'تم التحويل' : 'Transferred'}</span></div>` : ''}
@@ -18795,7 +18745,7 @@ function renderReceiptsView() {
                     </button>` : ''}
                     <button onclick="manageSplitPayments('${receipt.id}')" class="text-purple-600 hover:text-purple-700" title="${state.language === 'ar' ? 'تعديل الدفعات المقسّمة' : 'Manage split payments'}"><i data-lucide="credit-card" class="w-4 h-4"></i></button>
                     ${canEditThisReceipt ? `<button onclick="editReceipt('${receipt.id}')" class="text-blue-600 hover:text-blue-700" title="${t('edit')}"><i data-lucide="edit" class="w-4 h-4"></i></button>` : ''}
-                    <button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>
+                    ${isPackagedMobileApp() ? '' : `<button onclick="printReceiptCard(this)" class="text-slate-600 hover:text-slate-700" title="${t('print')}"><i data-lucide="printer" class="w-4 h-4"></i></button>`}
                     ${canDeleteThisReceipt ? `<button onclick="deleteReceipt('${receipt.id}')" class="text-rose-600 hover:text-rose-700" title="${t('delete')}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
                   </div>
                 </div>
@@ -19164,14 +19114,15 @@ function updateAdsViewFiltered() {
 }
 
 function renderAdsView() {
-  // PERFORMANCE: build id->record Maps ONCE so each table row does O(1) lookups
-  // instead of scanning state.customers / state.receipts / state.users per row
-  // (was O(ads × (customers+receipts+users)) on every keystroke). Same Map is
-  // passed into getFilteredAds so the search filter is O(1)-per-ad too.
+  // id->record Maps built once: O(1) lookups per row and per search keystroke (getFilteredAds too).
   const customersById = new Map(state.customers.map(c => [c.id, c]));
   const receiptsById = new Map(getReceiptsVisibleToCurrentUser().map(r => [String(r.id), r]));
   const usersById = new Map(state.users.map(u => [String(u.id), u]));
-  const pagesById = new Map(getPagesVisibleToCurrentUser().map(p => [p.id, p]));
+  const visiblePages = getPagesVisibleToCurrentUser();
+  const pagesById = new Map(visiblePages.map(p => [p.id, p]));
+  // A page merged or deleted (on any device) left its filter hiding every ad behind "All Pages".
+  const pageFilter = String(state.adFilters?.page || 'all');
+  if (pageFilter !== 'all' && !visiblePages.some(p => String(p.id) === pageFilter)) state.adFilters = { ...state.adFilters, page: 'all' };
   // Pairing a hand-made ad with its Meta twin scans every ad, so it is resolved
   // once per render pass instead of once per row (same shape as the deliveries
   // view's collection-target cache).
@@ -19184,7 +19135,6 @@ function renderAdsView() {
   const activeReceiptLabel = Security.escapeHtml(String(
     activeReceipt?.finalReceiptNo || activeReceipt?.serialNumber || activeReceipt?.tempReceiptNo || (isAr ? 'الوصل المحدد' : 'Selected receipt')
   ));
-  const visiblePages = getPagesVisibleToCurrentUser();
   const canSearchAdContacts = can('customers', 'viewContacts');
   const adAdvancedFilterCount = [
     (adF.status || 'all') !== 'all',
@@ -19192,7 +19142,8 @@ function renderAdsView() {
     (adF.page || 'all') !== 'all'
   ].filter(Boolean).length;
   const adAdvancedFiltersOpen = isWorkspaceFilterPanelExpanded('ads');
-  const adQuickMode = adF.payment === 'pending_setup' ? 'setup' : (adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : 'all'));
+  const adQuickMode = adF.payment === 'pending_setup' ? 'setup' : (adF.payment === 'not_paid' ? 'unpaid' : (adF.status === 'Stopped' ? 'stopped' : (adAdvancedFilterCount ? 'custom' : 'all')));
+  const adsFiltered = adAdvancedFilterCount > 0 || !!String(state.adSearch || '').trim();
   const adFilterFingerprint = JSON.stringify([adReceiptFilter, state.adSearch, adF.status || 'all', adF.payment || 'all', adF.page || 'all']);
   if (adFilterFingerprint !== _adsFilterFingerprint) {
     _adsFilterFingerprint = adFilterFingerprint;
@@ -19215,9 +19166,9 @@ function renderAdsView() {
             <i data-lucide="plus" class="w-4 h-4"></i>
             <span>${t('addAd')}</span>
           </button>
-          <button type="button" onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl" aria-label="${isAr ? 'طباعة الإعلانات' : 'Print ads'}" title="${isAr ? 'طباعة الإعلانات' : 'Print ads'}">
+          ${isPackagedMobileApp() ? '' : `<button type="button" onclick="printCurrentPage()" class="btn-shine bg-slate-600 text-white px-3 py-2 rounded-xl" aria-label="${isAr ? 'طباعة الإعلانات' : 'Print ads'}" title="${isAr ? 'طباعة الإعلانات' : 'Print ads'}">
             <i data-lucide="printer" class="w-4 h-4"></i>
-          </button>
+          </button>`}
         </div>
       </div>
 
@@ -19262,7 +19213,7 @@ function renderAdsView() {
       </div>
 
       <div id="ads-table-container" class="ads-table-container glass-panel rounded-2xl p-6 overflow-x-auto">
-        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p></div>` : `
+        ${allAds.length === 0 ? `<div class="text-center py-12"><i data-lucide="inbox" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i><p class="text-slate-500">${adReceiptFilter ? (isAr ? 'لا توجد إعلانات مرتبطة بهذا الوصل' : 'No ads are linked to this receipt') : adsFiltered ? (isAr ? 'لا توجد إعلانات تطابق الفلاتر' : 'No ads match your filters') : (isAr ? 'لا توجد إعلانات بعد' : 'No ads yet')}</p>${!adReceiptFilter && adsFiltered ? `<button type="button" onclick="state.adSearch='';applyAdQuickFilter('all')" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}</div>` : `
           <table class="ads-summary-table mobile-card-table w-full text-sm">
             <colgroup>
               <col class="ads-col-customer">
@@ -19306,11 +19257,7 @@ function renderAdsView() {
                   : isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
-                // createdBy is immutable server ownership metadata; creatorId
-                // is retained as the legacy/local fallback. Name resolution
-                // falls back to the deleted-user tombstone directory and the
-                // record's own createdByName stamp so the creator's name
-                // survives account deletion (see resolveCreatorDisplayName).
+                // createdBy (creatorId legacy); the name survives account deletion (resolveCreatorDisplayName).
                 const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
                 // An imported ad is "created by" the automation, so name the
                 // person who actually did the setup. Hidden when it would only
@@ -19319,11 +19266,7 @@ function renderAdsView() {
                 const completedByName = completedByRaw && completedByRaw !== String(resolveCreatorDisplayName(ad, isAr))
                   ? Security.escapeHtml(completedByRaw)
                   : '';
-                // Deleting a page keeps its ads (history) but leaves their pageId
-                // pointing at the deleted page, whose name a NEW page may reuse.
-                // Keep resolving the name (the ad really did run on it) but mark
-                // the row, otherwise these ads read as if they belong to the live
-                // page of the same name while its Pages card counts 0 of them.
+                // A deleted page keeps its name on its ads, but the row is marked: a NEW page may reuse the name.
                 const adPage = ad.pageId ? pagesById.get(ad.pageId) : null;
                 const adPageDeleted = !!(adPage && adPage._deleted);
                 // For ads linked to delivery receipts, get delivery status from the receipt (source of truth)
@@ -19340,9 +19283,7 @@ function renderAdsView() {
                 // All receipts linked to this ad (delivery + funding), deduped —
                 // used for the Serial fallback AND the Payment method display.
                 const adReceiptIds = getAdLinkedReceiptIds(ad);
-                // Serial: ads rarely carry their own serial number — fall back
-                // to the linked receipt number(s): the delivery receipt
-                // (D#/final no) or the funding receipts' serials.
+                // Serial: the ad's own, else its linked receipts' numbers (D#/final no, funding serials).
                 const _rcptNo = (rc) => rc ? String(rc.serialNumber || rc.finalReceiptNo || rc.tempReceiptNo || (rc.receiptType === 'TRANSFER_IN' ? (state.language === 'ar' ? 'تحويل' : 'TRF') : '')).trim() : '';
                 let serialDisplay = String(ad.serialNumber || '').trim();
                 if (!serialDisplay) {
@@ -19351,11 +19292,8 @@ function renderAdsView() {
                   )];
                   serialDisplay = serialNos.slice(0, 3).join(', ') + (serialNos.length > 3 ? ` +${serialNos.length - 3}` : '');
                 }
-                // Payment method(s): the ad's own method when set (Not Paid
-                // collection), plus the REAL methods from the linked receipts'
-                // payment splits — a paid ad stores '' as its own method, so
-                // the column used to render an empty badge. 'Split Payment' is
-                // a container label, not a method: drop it once real ones exist.
+                // Methods: the ad's own (a paid ad stores '') plus its receipts' real split methods;
+                // 'Split Payment' is only a container label.
                 const _methods = new Set();
                 if (ad.paymentMethod) _methods.add(String(ad.paymentMethod));
                 adReceiptIds.forEach(id => {
@@ -19369,9 +19307,7 @@ function renderAdsView() {
                 });
                 if (_methods.size > 1) _methods.delete('Split Payment');
                 const paymentMethods = [..._methods];
-                // Rendered ahead of the template so the page avatar knows
-                // whether a photo tile actually renders beside it (manual ads
-                // without uploads produce no tile and need the solo layout).
+                // Built first: the page avatar needs to know whether a photo tile sits beside it.
                 const adPrimaryTile = shellAdMedia(ad, isAr);
                 const adPageAvatarTile = renderAdPageAvatar(ad, adPage, isAr, !!adPrimaryTile);
                 const visibleLinkedReceiptIds = canOpenWorkspaceView('receipts')
@@ -19386,7 +19322,7 @@ function renderAdsView() {
                         <div class="min-w-0 flex-1">
                           <div class="break-words font-medium">#${adDisplayNum} - ${Security.escapeHtml(customer?.name || ad.customerName || (needsSetup ? (ad.metaAdName || (isAr ? 'إعلان Meta جديد' : 'New Meta ad')) : (isAr ? 'غير معروف' : 'Unknown')))}</div>
                           ${needsSetup ? `<div class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"><i data-lucide="wand-sparkles" class="h-3 w-3"></i>${isAr ? 'يحتاج العميل والدفع والوصل' : 'Needs customer, payment and receipt'}</div>` : ''}
-                          ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${Security.escapeHtml(ad.phoneNumber)}</div>` : ''}
+                          ${ad.phoneNumber ? `<div class="text-xs text-slate-500">${phoneLtrHtml(ad.phoneNumber)}</div>` : ''}
                         </div>
                       </div>
                       <!-- Who touched this ad, on its OWN full-width row under the
@@ -19544,13 +19480,8 @@ function loadMoreDeliveries() {
   render();
 }
 
-// One-render-pass memo for getReceiptCollectionTarget. Legacy zero-amount
-// delivery receipts derive their collection target by scanning ALL ads
-// (13-filters-helpers linked-ads derivation), and a single deliveries render
-// used to run that scan twice per such receipt (uncollected-total reduce +
-// visible row). Keyed by receipt id and cleared at the top of every
-// renderDeliveriesView pass, so data edits are always picked up and the cache
-// never outlives the pass that filled it.
+// Per-render memo of getReceiptCollectionTarget (a legacy zero-amount receipt scans every ad):
+// keyed by receipt id, cleared at the top of each renderDeliveriesView pass.
 const _deliveryCollectionTargetCache = new Map();
 let _deliveryUsageIndex = null;  // rebuilt with the cache: one ads pass per deliveries render
 function _getCollectionTargetCached(item) {
@@ -19563,13 +19494,8 @@ function _getCollectionTargetCached(item) {
   return target;
 }
 
-// logOnly=true is the scoped-search fast path: updateDeliveriesViewFiltered
-// swaps ONLY #delivery-log-results into the live DOM, so the stats tiles and
-// the driver-performance panel in the throwaway template are never seen.
-// They don't depend on the search term either — skipping their computation
-// (full reduces over every delivery receipt, incl. per-legacy-receipt ad
-// scans, plus ~6 filter passes per driver) removes the heavy part of every
-// search keystroke on phones.
+// logOnly=true (search keystrokes): updateDeliveriesViewFiltered swaps only #delivery-log-results,
+// so the stats tiles and driver panel (the heavy, search-independent part) are skipped.
 function renderDeliveriesView(logOnly) {
   const logOnlyPass = logOnly === true;
   _deliveryCollectionTargetCache.clear();
@@ -19597,10 +19523,7 @@ function renderDeliveriesView(logOnly) {
       amountUSD: Number(r.amountUSD || 0) || 0
     }));
 
-  // The stats tiles and driver-performance panel are skipped entirely on
-  // log-only (search keystroke) passes — see the logOnly note above. Their
-  // markup blocks below are guarded the same way, so stats/driverPerformance
-  // are never read while null/empty.
+  // Skipped on log-only passes (see above); their markup below is guarded the same way.
   let stats = null;
   let driverPerformance = [];
   if (!logOnlyPass) {
@@ -19617,10 +19540,7 @@ function renderDeliveriesView(logOnly) {
     uncollectedLYD: deliveryReceipts.reduce((sum, d) => sum + _getOutstandingDueLocal(d), 0),
     heldByDrivers: heldRows.length,
     driverCashLYD: heldRows.reduce((sum, d) => sum + _getCollectedCashLocal(d), 0),
-    // Delivery-fee money (LYD only, never ads credit): what was collected in
-    // fees, how much of it the shop/owner covered (a loss), and the aggregate
-    // variance vs the quoted fees — the sum of each completion's stored
-    // feeDiff, i.e. exactly the HIGHER/LOWER semantics the driver flow computes.
+    // Fee money (LYD, never ads credit): collected, shop-paid (a loss), and the summed stored feeDiff vs quoted.
     feesCollectedLYD: deliveredRows.reduce((sum, d) => {
       const raw = d.deliveryFeeCollected ?? d.actualDeliveryFeeCollected;
       return sum + ((raw === undefined || raw === null) ? 0 : (Number(raw) || 0));
@@ -19663,6 +19583,7 @@ function renderDeliveriesView(logOnly) {
     // foldSearchText on BOTH sides: the driver's primary phone lookup must
     // match Arabic-keyboard digits (٠٩١٢...) and unhamza'd name spellings.
     const term = foldSearchText(searchTerm);
+    const numTerm = term.replace(/^#/, '') || term;
     filteredDeliveries = filteredDeliveries.filter(d => {
       const customer = deliveryCustomersById.get(String(d.customerId));
       const name = foldSearchText(customer?.name || '');
@@ -19671,8 +19592,9 @@ function renderDeliveriesView(logOnly) {
       const phone = foldSearchText(phoneText);
       const digitsTerm = term.replace(/\D/g, '').replace(/^0+/, '');
       const phoneKeyHit = digitsTerm.length >= 4 && String(normalizeCustomerPhoneKey(phoneText) || '').includes(digitsTerm);
-      const receiptNo = foldSearchText(d.tempReceiptNo || d.finalReceiptNo || d.serialNumber || '');
-      return name.includes(term) || phone.includes(term) || phoneKeyHit || receiptNo.includes(term);
+      // A delivered job is found by its paper number too, not only the temporary D-number ('#4521' as well).
+      const numberHit = [d.tempReceiptNo, d.finalReceiptNo, d.serialNumber].some(n => n && foldSearchText(n).includes(numTerm));
+      return name.includes(term) || phone.includes(term) || phoneKeyHit || numberHit;
     });
   }
   filteredDeliveries.sort((a, b) => new Date(b.createdAt || b.date || 0) - new Date(a.createdAt || a.date || 0));
@@ -19709,7 +19631,9 @@ function renderDeliveriesView(logOnly) {
     const isUrgent = ad.deliveryStatus === 'Needs Delivery' && !ad.deliveryPersonId;
     const safeId = esc(ad.id);
     const tone = ({ 'Needs Delivery': 'waiting', 'In Progress': 'active', 'Delivered': 'done', 'Canceled': 'canceled' })[ad.deliveryStatus] || 'neutral';
-    const receiptNumber = ad.tempReceiptNo || ad.finalReceiptNo || ad.serialNumber || ad.displayNumber || ad.id;
+    const statusChoices = deliveryStatusChoices(ad);
+    const finalNo = ad.finalReceiptNo || ad.serialNumber;  // as the Receipts card: D17 → 4521 once delivered
+    const receiptNumber = ad.tempReceiptNo && finalNo ? `${ad.tempReceiptNo} → ${finalNo}` : (ad.tempReceiptNo || finalNo || ad.displayNumber || ad.id);
     return `
       <article class="ops-delivery-card ${isUrgent ? 'is-urgent' : ''}" data-delivery-record="${safeId}">
         <header class="ops-record-header">
@@ -19717,7 +19641,7 @@ function renderDeliveriesView(logOnly) {
           <div class="ops-record-identity">
             <p class="ops-eyebrow">${isAr ? 'وصل' : 'Receipt'} <bdi>#${esc(receiptNumber)}</bdi></p>
             <h3>${esc(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
-            <p class="ops-record-phone"><bdi>${esc(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</bdi></p>
+            <p class="ops-record-phone">${ad.phoneNumber || customer?.phones?.[0] ? phoneLtrHtml(ad.phoneNumber || customer.phones[0]) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</p>
           </div>
           <span class="ops-status ops-status--${tone}">${trStatus(ad.deliveryStatus)}</span>
         </header>
@@ -19745,11 +19669,11 @@ function renderDeliveriesView(logOnly) {
         </div>
         <footer class="ops-record-actions" aria-label="${isAr ? 'الإجراءات' : 'Actions'}">
           ${roleLower === 'delivery' ? ''
-            : `<label class="ops-status-editor"><span class="sr-only">${isAr ? 'الحالة' : 'Status'}</span><select onchange="updateDeliveryStatus('${safeId}', this.value)" class="ops-select">${DELIVERY_STATUSES.map(s => `<option value="${esc(s)}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>`}
+            : `<label class="ops-status-editor"><span class="sr-only">${isAr ? 'الحالة' : 'Status'}</span><select onchange="updateDeliveryStatus('${safeId}', this.value)" class="ops-select">${statusChoices.map(s => `<option value="${esc(s)}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}</select></label>`}
           <button type="button" onclick="showDeliveryDetails('${safeId}')" class="ops-button ops-button--quiet"><i data-lucide="arrow-up-right" class="w-4 h-4"></i><span>${isAr ? 'التفاصيل' : 'Details'}</span></button>
           ${canShareDeliveryReceiptToWhatsApp(ad) ? `<button type="button" data-receipt-id="${safeId}" onclick="showDeliveryWhatsAppPrompt(this.dataset.receiptId, this)" class="ops-button ops-button--whatsapp" title="${isAr ? 'مشاركة على واتساب' : 'Share to WhatsApp'}" aria-label="${isAr ? 'مشاركة معلومات التوصيل على واتساب' : 'Share delivery information to WhatsApp'}"><i data-lucide="message-circle" class="w-4 h-4"></i><span>WhatsApp</span></button>` : ''}
           ${active ? `<button type="button" onclick="openDeliveryCancelModal('${safeId}')" class="ops-button ops-button--quiet ops-button--danger"><i data-lucide="x-circle" class="w-4 h-4"></i><span>${t('cancel')}</span></button>` : ''}
-          ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' ? `<button type="button" onclick="removeDeliveryMission('${safeId}')" class="ops-button ops-button--icon ops-button--danger" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}" aria-label="${isAr ? 'حذف المهمة' : 'Delete Mission'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
+          ${canAssign && String(ad.deliveryStatus || '') !== 'Delivered' && statusChoices.includes('Office') ? `<button type="button" onclick="removeDeliveryMission('${safeId}')" class="ops-button ops-button--icon ops-button--danger" title="${isAr ? 'حذف المهمة' : 'Delete Mission'}" aria-label="${isAr ? 'حذف المهمة' : 'Delete Mission'}"><i data-lucide="trash-2" class="w-4 h-4"></i></button>` : ''}
         </footer>
       </article>`;
   };
@@ -19778,7 +19702,7 @@ function renderDeliveriesView(logOnly) {
           <div class="ops-hero-actions">
             <button type="button" onclick="refreshDeliveries()" class="ops-button ops-button--hero"><i data-lucide="refresh-cw" class="w-4 h-4"></i>${isAr ? 'تحديث' : 'Refresh'}</button>
             ${canAssign ? `<button type="button" onclick="checkStuckDeliveries()" class="ops-button ops-button--hero" title="${isAr ? 'البحث عن توصيلات عالقة قيد التنفيذ لأكثر من 3 أيام' : 'Find deliveries stuck in progress for more than 3 days'}"><i data-lucide="alert-triangle" class="w-4 h-4"></i>${isAr ? 'فحص العالقة' : 'Check Stuck'}</button>` : ''}
-            ${canExportDeliveries ? `<button type="button" onclick="exportDeliveryReport()" class="ops-button ops-button--hero-primary"><i data-lucide="download" class="w-4 h-4"></i>${t('export')}</button>` : ''}
+            ${canExportDeliveries && !isPackagedMobileApp() ? `<button type="button" onclick="exportDeliveryReport()" class="ops-button ops-button--hero-primary"><i data-lucide="download" class="w-4 h-4"></i>${t('export')}</button>` : ''}
           </div>
         </div>
       </header>
@@ -19857,11 +19781,8 @@ function updateDeliveriesViewFiltered() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  // Build the fresh view HTML off-screen, then swap in only the results table
-  // so the search input keeps its caret and the phone keyboard stays open
-  // (same approach as updateCustomersViewFiltered). logOnly=true skips the
-  // stats tiles + driver-performance computations — nothing outside
-  // #delivery-log-results is ever read from this throwaway template.
+  // Off-screen render, then swap only the results: the search keeps its caret and the keyboard;
+  // logOnly=true skips the stats (nothing outside #delivery-log-results is read here).
   const tpl = document.createElement('template');
   tpl.innerHTML = renderDeliveriesView(true);
   const newResults = tpl.content.querySelector('#delivery-log-results');
@@ -19901,10 +19822,7 @@ function exportDeliveryReport() {
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   let csv = 'Customer,Phone,Debt LYD,Collected LYD,Remaining Due,Status,Driver,Office Received,Date\n';
-  // Pin the CSV Date column to the Gregorian calendar with ASCII digits so it
-  // is sortable and matches the app's stored timestamps. formatDateShort uses
-  // toLocaleString() with no locale, which renders Hijri / Arabic-Indic digits
-  // on an ar-SA device — unsortable text in Excel.
+  // Gregorian, ASCII-digit CSV dates (formatDateShort gives Hijri / Arabic-Indic digits on ar-SA).
   const _csvDateGreg = (v) => {
     const d = new Date(v);
     if (isNaN(d.getTime())) return '';
@@ -19920,12 +19838,8 @@ function exportDeliveryReport() {
     csv += `${csvCell(customer?.name || r.customerName || 'Unknown')},${csvCell(can('customers', 'viewContacts') ? _csvPhoneText(_deliveryPhoneText(r, customer)) : '')},${debt},${collected},${remaining},${csvCell(r.deliveryStatus || '')},${csvCell(driver?.name || '')},${received ? 'Yes' : 'No'},${csvCell(_csvDateGreg(r.createdAt || r.date))}\n`;
   });
   
-  // Prepend a UTF-8 BOM so Excel reads Arabic customer/driver names correctly
-  // instead of garbling them (mojibake).
-  // Route through downloadFile so the blob URL outlives the click task —
-  // iOS Safari cancels the download if the URL is revoked in the same tick.
-  // downloadFile refuses inside FB/IG in-app browsers (with its own warning):
-  // only claim "downloaded" when the download actually started.
+  // BOM: Excel reads the Arabic names. downloadFile keeps the blob URL past the click (iOS) and
+  // refuses in FB/IG in-app browsers: "downloaded" only when it started.
   if (!downloadFile('﻿' + csv, `delivery-report-${getTodayDateString()}.csv`, 'text/csv;charset=utf-8')) return;
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? 'تم تنزيل تقرير التوصيل' : 'Delivery report downloaded', 'success');
 }
@@ -20030,6 +19944,11 @@ function _isReceivedInOffice(item) {
 // CSV phone Excel keeps as text: '+218…' -> '00218 …' (no apostrophe), '0912…' -> '091 2…' (keeps the 0)
 function _csvPhoneText(v) {
   return String(v ?? '').trim().replace(/^\+/, '00').replace(/^(00\d{3}|0[1-9]\d)(?=\d)/, '$1 ');
+}
+
+// A phone reads left to right in Arabic too: '+218 91 456 7890', never '7890 456 91 218+'.
+function phoneLtrHtml(phone) {
+  return `<bdi dir="ltr">${Security.escapeHtml(String(phone))}</bdi>`;
 }
 
 function _deliveryPhoneText(r, customer) {
@@ -20141,6 +20060,15 @@ function undoOfficeHandover(itemId) {
   setOfficeHandover(itemId, false);
 }
 
+// The statuses a picker offers, as server/delivery_workflow.py: all to an editor of the record
+// (or an admin); a deliveries.* grant alone only the workflow's next moves (TRANSITIONS).
+function deliveryStatusChoices(item, module = 'receipts') {
+  if (canActOnRecord(module, 'edit', item.createdBy || item.creatorId)) return DELIVERY_STATUSES;
+  const from = String(((state.receipts || []).find(r => r && r.id === item.id) || item).deliveryStatus || '').trim();
+  const next = { '': ['Needs Delivery', 'In Progress', 'Office'], Office: ['Needs Delivery', 'In Progress', 'Canceled'], 'Needs Delivery': ['In Progress', 'Canceled', 'Office'], 'In Progress': ['Canceled'] }[from] || [];
+  return DELIVERY_STATUSES.filter(s => s === (from || 'Needs Delivery') || (next.includes(s) && can('deliveries', s === 'In Progress' ? 'accept' : 'assign')));
+}
+
 // "Delete mission" (remove from delivery tracking) without deleting the receipt itself.
 async function removeDeliveryMission(itemId) {
   const id = String(itemId || '');
@@ -20176,6 +20104,10 @@ async function removeDeliveryMission(itemId) {
         : 'Delivered missions cannot be removed. Use Office Handover (Undo) or manage the receipt from the Receipts screen.',
       'warning'
     );
+    return;
+  }
+  if ((ds === 'In Progress' || ds === 'Canceled') && !canActOnRecord('receipts', 'edit', receipt.createdBy || receipt.creatorId)) {
+    showNotification(isAr ? 'غير مسموح' : 'Not Allowed', isAr ? 'هذه المهمة قيد التنفيذ أو ملغاة بالفعل؛ ألغِها بدلاً من ذلك، أو اطلب ذلك ممن يستطيع تعديل الوصل.' : 'This job is already in progress or canceled; cancel it instead, or ask someone who can edit the receipt.', 'warning');
     return;
   }
 
@@ -20231,6 +20163,7 @@ function showDeliveryDetails(itemId) {
   const roleLower = String(state.currentUser?.role || '').toLowerCase();
   const canOffice = roleLower !== 'delivery' && (currentUserHasPermission('deliveries', 'markCollected') || isCurrentUserAdmin());
   const editHandler = isReceipt ? 'editReceipt' : 'editAd';
+  const canPickDriver = !ad.deliveryPersonId || can('deliveries', 'reassign') || canActOnRecord(isReceipt ? 'receipts' : 'ads', 'edit', ad.createdBy || ad.creatorId);
   const isItemPaid = isReceipt ? ad.isPaid === true : getAdPaymentState(ad) === 'paid';
   // For an unpaid debt receipt show what is actually LEFT to collect (net of
   // company coverage), never the gross a driver must no longer demand.
@@ -20271,7 +20204,7 @@ function showDeliveryDetails(itemId) {
               <h3 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}</h3>
               <p class="text-sm text-slate-500 flex items-center space-x-1">
                 <i data-lucide="phone" class="w-3 h-3"></i>
-                <span>${Security.escapeHtml(ad.phoneNumber || customer?.phones?.[0] || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</span>
+                <span>${ad.phoneNumber || customer?.phones?.[0] ? phoneLtrHtml(ad.phoneNumber || customer.phones[0]) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</span>
               </p>
             </div>
           </div>
@@ -20301,12 +20234,12 @@ function showDeliveryDetails(itemId) {
             ${roleLower === 'delivery'
               ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${trStatus(ad.deliveryStatus)}</div>`
               : `<select onchange="updateDeliveryStatus('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
-              ${DELIVERY_STATUSES.map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
+              ${deliveryStatusChoices(ad, isReceipt ? 'receipts' : 'ads').map(s => `<option value="${s}" ${ad.deliveryStatus === s ? 'selected' : ''}>${trStatus(s)}</option>`).join('')}
             </select>`}
           </div>
           <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700">
             <div class="text-xs text-slate-500 font-medium mb-2">${isAr ? 'السائق' : 'Driver'}</div>
-            ${roleLower === 'delivery'
+            ${roleLower === 'delivery' || !canPickDriver
               ? `<div class="w-full px-3 py-2 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200">${Security.escapeHtml(deliveryPerson?.name || (isAr ? 'غير مُعيَّن' : 'Unassigned'))}</div>`
               : `<select onchange="assignDelivery('${ad.id}', this.value); this.closest('#app-modal').remove();" class="w-full glass-input px-3 py-2 rounded-lg text-sm font-medium">
               <option value="">${isAr ? 'غير مُعيَّن' : 'Unassigned'}</option>
@@ -20448,7 +20381,7 @@ function renderDeliveryDashboard() {
         ${renderStatCard(trStatus('Needs Delivery'), needsDelivery.length, 'clock', 'from-amber-500 to-orange-600', "setDeliveryDashboardFilter('Needs Delivery')", filterStatus === 'Needs Delivery')}
         ${renderStatCard(trStatus('In Progress'), inProgress.length, 'truck', 'from-blue-500 to-cyan-600', "setDeliveryDashboardFilter('In Progress')", filterStatus === 'In Progress')}
         ${renderStatCard(trStatus('Delivered'), delivered.length, 'check-circle', 'from-emerald-500 to-teal-600', "setDeliveryDashboardFilter('Delivered')", filterStatus === 'Delivered')}
-        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(0)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
+        ${renderStatCard(isAr ? 'بحوزة السائق' : 'Held', `${heldByDriver.length} (${cashHeldByDriver.toFixed(2)} LYD)`, 'wallet', 'from-purple-500 to-pink-600', "setDeliveryDashboardFilter('Held')", filterStatus === 'Held')}
       </div>
 
       <!-- My Deliveries -->
@@ -20481,7 +20414,7 @@ function renderDeliveryDashboard() {
                           </div>
                         ` : ''}
                       </div>
-                      <p class="text-xs md:text-sm text-slate-500 mt-1">${Security.escapeHtml(phone || (isAr ? 'لا يوجد هاتف' : 'No phone'))}</p>
+                      <p class="text-xs md:text-sm text-slate-500 mt-1">${phone ? phoneLtrHtml(phone) : (isAr ? 'لا يوجد هاتف' : 'No phone')}</p>
                       ${ad.isReceipt && (displayTempNo || displayFinalNo) ? `
                         <div class="text-xs text-indigo-600 font-bold mt-1">
                           ${isAr ? 'الوصل' : 'Receipt'}: ${displayTempNo && displayFinalNo ? `${displayTempNo} → ${displayFinalNo}` : (displayTempNo ? `${displayTempNo} ${isAr ? '(مؤقت)' : '(Temp)'}` : displayFinalNo)}
@@ -20494,23 +20427,21 @@ function renderDeliveryDashboard() {
                       ` : ''}
                       ${ad.isReceipt && (ad.quotedDeliveryFee !== undefined && ad.quotedDeliveryFee !== null) ? `
                         <div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(0)} LYD</span>
+                          ${isAr ? 'الرسوم المتفق عليها' : 'Quoted fee'}: <span class="font-bold text-emerald-600">${Number(ad.quotedDeliveryFee || 0).toFixed(2)} LYD</span>
                         </div>
                       ` : ''}
                       ${(() => {
-                        // After completion: the fee actually collected, who paid
-                        // it, and the HIGHER/LOWER variance vs the quoted fee
-                        // (same semantics the completion flow computes).
+                        // After completion: the fee collected, who paid it, and its HIGHER/LOWER variance vs the quoted fee.
                         if (!ad.isReceipt || String(ad.deliveryStatus || '') !== 'Delivered') return '';
                         const feeRaw = ad.actualDeliveryFeeCollected ?? ad.deliveryFeeCollected;
                         if (feeRaw === undefined || feeRaw === null) return '';
                         const shopPaid = String(ad.deliveryFeePaidBy || 'customer') === 'shop';
                         const feeDiffNum = Number(ad.feeDiff) || 0;
                         const varianceChip = ad.feeDifferenceStatus && ad.feeDifferenceStatus !== 'SAME'
-                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(0)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
+                          ? ` <span class="font-bold ${ad.feeDifferenceStatus === 'HIGHER' ? 'text-purple-600 dark:text-purple-300' : 'text-amber-600'}">(${ad.feeDifferenceStatus === 'HIGHER' ? '+' : '-'}${Math.abs(feeDiffNum).toFixed(2)} LYD ${isAr ? 'عن المتفق عليه' : 'vs quoted'})</span>`
                           : '';
                         return `<div class="text-[11px] text-slate-500 mt-0.5">
-                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(0)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
+                          ${isAr ? 'قيمة التوصيل المُحصَّلة' : 'Fee collected'}: <span class="font-bold ${shopPaid ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600'}">${(Number(feeRaw) || 0).toFixed(2)} LYD</span> • <span class="${shopPaid ? 'text-rose-600 dark:text-rose-400 font-bold' : ''}">${shopPaid ? (isAr ? 'يتحملها المحل (خسارة)' : 'paid by shop (loss)') : (isAr ? 'دفعها العميل' : 'paid by customer')}</span>${varianceChip}
                         </div>`;
                       })()}
                       ${ad.isReceipt && ad.deliveryInstructions ? `
@@ -20695,7 +20626,7 @@ function openDeliveryCancelModal(itemId) {
             <div class="text-xs text-slate-500">
               ${Security.escapeHtml(customer?.name || (isAr ? 'غير معروف' : 'Unknown'))}
               ${ref ? ` • ${itemType === 'receipt' ? (isAr ? 'وصل' : 'Receipt') : (isAr ? 'توصيل' : 'Delivery')} ${Security.escapeHtml(ref)}` : ''}
-              ${phone ? ` • ${Security.escapeHtml(phone)}` : ''}
+              ${phone ? ` • ${phoneLtrHtml(phone)}` : ''}
             </div>
           </div>
         </div>
@@ -20809,10 +20740,7 @@ async function submitDeliveryCancel(itemType, itemId) {
 
   document.getElementById('delivery-cancel-modal')?.remove();
   document.getElementById('delivery-complete-modal')?.remove();
-  // A plain render() is enough here: state.receipts/state.ads were just
-  // replaced, so the view HTML genuinely differs and the identical-HTML skip
-  // cannot swallow the update — no need to blow away the partial-update
-  // caches with forceFullRender().
+  // render(), not forceFullRender(): the rows were just replaced, so the identical-HTML skip cannot swallow it.
   render();
   showNotification(state.language === 'ar' ? 'أُلغيت' : 'Canceled', state.language === 'ar' ? 'تم إلغاء التوصيل' : 'Delivery canceled', 'success');
   // Kick off the (already committed) server-mode ads reconciliation AFTER the
@@ -21324,18 +21252,20 @@ function renderUsersView() {
 
 function renderAuditView() {
   const isAr = state.language === 'ar';
-  // PERMISSION SCOPING: auditLogs.view sees everything; auditLogs.viewOwn sees
-  // only their own entries. Every count, stat tile, filter dropdown and table
-  // row below derives from allLogs, so scoping here scopes the whole screen.
+  // PERMISSION SCOPING: auditLogs.view sees all, viewOwn only their own; everything below derives from allLogs.
   const canViewAllLogs = can('auditLogs', 'view');
   const canViewOwnLogs = canViewAllLogs || currentUserHasPermission('auditLogs', 'viewOwn');
-  const canExportLogs = can('auditLogs', 'export');
+  const canExportLogs = can('auditLogs', 'export') && !isPackagedMobileApp();  // the app cannot save files
   const canClearLogs = can('auditLogs', 'clear');
   if (!canViewOwnLogs) return renderNoAccessView();
   // In server mode pull the authoritative, server-scoped trail (no-op when
   // fresh; re-renders this view when it arrives).
   refreshServerAuditLogs();
   const allLogs = getVisibleAuditLogs();
+  // The server trail comes newest first (500 rows, then older pages): say so while older ones are not here.
+  const auditPartial = isServerModeEnabled() && state.serverLogsComplete === false && allLogs.length > 0;
+  const newest = isAr ? `أحدث ${allLogs.length.toLocaleString('en-US')} سجل` : `${allLogs.length.toLocaleString('en-US')} entries`;
+  const loadOlderBtn = auditPartial ? `<button type="button" onclick="refreshServerAuditLogs({ older: true })" class="management-button mt-3 col-span-full">${isAr ? 'تحميل سجلات أقدم' : 'Load older entries'}</button>` : '';
 
   // Apply filters. foldSearchText on BOTH sides of the search so Arabic-Indic
   // digit queries and unhamza'd Arabic spellings match stored log fields.
@@ -21470,7 +21400,7 @@ function renderAuditView() {
 
       <div class="management-audit-layout">
         <aside class="management-audit-overview" aria-label="${isAr ? 'ملخص الأنشطة المتاحة' : 'Available activity summary'}">
-          <section class="management-card management-audit-summary"><span class="management-section-icon"><i data-lucide="activity" class="h-5 w-5"></i></span><span class="management-eyebrow">${isAr ? 'السجلات المتاحة لك' : 'Records available to you'}</span><strong class="management-audit-total">${allLogs.length.toLocaleString('en-US')}</strong><p>${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p><dl class="management-facts"><div><dt>${isAr ? 'إنشاء' : 'Creates'}</dt><dd>${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'تعديلات' : 'Updates'}</dt><dd>${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'حذف' : 'Deletes'}</dt><dd>${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</dd></div></dl></section>
+          <section class="management-card management-audit-summary"><span class="management-section-icon"><i data-lucide="activity" class="h-5 w-5"></i></span><span class="management-eyebrow">${auditPartial ? (isAr ? newest : `Newest ${newest}`) : (isAr ? 'السجلات المتاحة لك' : 'Records available to you')}</span><strong class="management-audit-total">${allLogs.length.toLocaleString('en-US')}</strong><p>${canViewAllLogs ? (isAr ? 'نشاط مساحة العمل حسب صلاحياتك.' : 'Workspace activity within your permissions.') : (isAr ? 'أنشطتك الشخصية فقط.' : 'Your own activity only.')}</p><dl class="management-facts"><div><dt>${isAr ? 'إنشاء' : 'Creates'}</dt><dd>${allLogs.filter(l => l.action === 'create').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'تعديلات' : 'Updates'}</dt><dd>${allLogs.filter(l => l.action === 'update').length.toLocaleString('en-US')}</dd></div><div><dt>${isAr ? 'حذف' : 'Deletes'}</dt><dd>${allLogs.filter(l => l.action === 'delete' || l.action === 'Delete').length.toLocaleString('en-US')}</dd></div></dl>${loadOlderBtn}</section>
           <section class="management-card management-audit-storage"><i data-lucide="${isServerModeEnabled() ? 'cloud' : 'hard-drive'}" class="h-5 w-5"></i><h2>${isServerModeEnabled() ? (isAr ? 'سجل الخادم' : 'Server activity trail') : (isAr ? 'سجل هذا الجهاز' : 'This device’s activity trail')}</h2><p>${isServerModeEnabled() ? (isAr ? 'يُطلب أحدث سجل من الخادم عند فتح هذه الصفحة. تعكس الصادرات السجلات المتاحة لحسابك.' : 'The latest trail is requested from the server when this page opens. Exports reflect the records available to your account.') : (isAr ? 'السجلات محفوظة في هذا المتصفح. أنشئ نسخة احتياطية قبل مسح بيانات المتصفح أو تغيير الجهاز.' : 'Records are stored in this browser. Back up before clearing browser data or changing devices.')}</p>${!isServerModeEnabled() ? `<span class="management-storage-caption">${db ? 'IndexedDB' : 'LocalStorage'}</span>` : ''}</section>
         </aside>
         <div class="management-audit-feed">
@@ -21547,7 +21477,7 @@ function renderAuditView() {
         ${paginatedLogs.length === 0 ? `
           <div class="p-12 text-center">
             <i data-lucide="${hasActiveFilters ? 'search-x' : 'file-clock'}" class="w-16 h-16 mx-auto text-slate-300 mb-4"></i>
-            <p class="text-slate-500 font-medium">${hasActiveFilters ? (isAr ? 'لا توجد سجلات مطابقة للفلاتر' : 'No logs match your filters') : (isAr ? 'لا توجد سجلات نشاط بعد' : 'No activity logs yet')}</p>
+            <p class="text-slate-500 font-medium">${hasActiveFilters ? (auditPartial ? (isAr ? `لا يوجد تطابق في ${newest}` : `No match in the newest ${newest}`) : (isAr ? 'لا توجد سجلات مطابقة للفلاتر' : 'No logs match your filters')) : (isAr ? 'لا توجد سجلات نشاط بعد' : 'No activity logs yet')}</p>${loadOlderBtn}
             ${hasActiveFilters ? `<button onclick="clearAuditFilters()" class="mt-4 text-purple-600 hover:text-purple-700 font-medium">${isAr ? 'مسح كل الفلاتر' : 'Clear all filters'}</button>` : ''}
           </div>
         ` : `
@@ -22302,7 +22232,7 @@ function renderSettingsView() {
           ` : ''}
           ` : ''}
         </div>
-        ${isServerModeEnabled() && isCurrentUserAdmin() ? `
+        ${isServerModeEnabled() && isCurrentUserAdmin() && !isPackagedMobileApp() ? `
         <div class="mt-4 rounded-xl border-2 border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-900/20 p-4">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">
@@ -23073,9 +23003,7 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
     const sid = String(serviceId || '').trim();
     if (!sid) return;
     const isRTL = state.language === 'ar';
-    // Cancelling ends EVERY paid period of this service immediately, and
-    // there is no subscription refund. Say so before it happens — a customer
-    // who renewed early would otherwise lose prepaid days to a one-word Yes.
+    // Cancel ends EVERY paid period now, with no refund: said first (an early renewer loses prepaid days).
     const days = Math.max(0, Math.trunc(Number(paidDaysLeft) || 0));
     const warning = days > 0
       ? (isRTL
@@ -23093,6 +23021,12 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
 }
 
 // ---------- Wallet ----------
+
+// A ledger row's title (this page and the studio's Overview); an unknown type shows as itself.
+const WALLET_TX_LABELS = { credit: ['Wallet top-up', 'شحن المحفظة'], transfer: ['Transfer', 'تحويل'], reversal: ['Reversal', 'عكس معاملة'], service_payment: ['Subscription', 'اشتراك'], campaign_payment: ['Campaign budget', 'ميزانية حملة'], campaign_refund: ['Campaign refund', 'استرجاع حملة'], campaign_payment_release: ['Campaign budget returned', 'إرجاع ميزانية حملة'] };
+function walletTxLabel(type, isAr) {
+  return Object.prototype.hasOwnProperty.call(WALLET_TX_LABELS, type) ? WALLET_TX_LABELS[type][isAr ? 1 : 0] : String(type || '');
+}
 
 function renderWalletView() {
   const isRTL = state.language === 'ar';
@@ -23130,7 +23064,6 @@ function renderWalletView() {
     .slice(0, 50);
 
   const who = id => !id || id === 'system' ? (isRTL ? 'النظام' : 'System') : (userById.get(String(id))?.name || userById.get(String(id))?.email || String(id));
-  const txLabels = { credit: ['Wallet top-up', 'شحن المحفظة'], transfer: ['Transfer', 'تحويل'], reversal: ['Reversal', 'عكس معاملة'], service_payment: ['Subscription', 'اشتراك'], campaign_payment: ['Campaign budget', 'ميزانية حملة'], campaign_refund: ['Campaign refund', 'استرجاع حملة'], campaign_payment_release: ['Campaign budget returned', 'إرجاع ميزانية حملة'] };
   const txRows = txs.map(tx => {
     const isIn = tx.toUserId === uid;
     // The admin sees everyone's rows: a row between two others has no sign.
@@ -23144,7 +23077,7 @@ function renderWalletView() {
     return `
       <div class="workspace-wallet-row py-3 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
-          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(txLabels[tx.type]?.[isRTL ? 1 : 0] || tx.type || 'tx')}</div>
+          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(walletTxLabel(tx.type, isRTL) || 'tx')}</div>
           <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
@@ -23155,10 +23088,7 @@ function renderWalletView() {
     `;
   }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-6 text-center">${isRTL ? 'لا توجد معاملات بعد' : 'No transactions yet'}</div>`;
 
-  // Renewals APPEND rows, so one service can hold several prepaid periods.
-  // Showing them as separate lines (each with its own Cancel) implied a
-  // per-period control that does not exist — cancel always ends the whole
-  // service. One truthful line per service: the LAST paid date.
+  // Renewals append rows, but Cancel always ends the whole service: one line per service (its LAST paid date).
   const subsByService = new Map();
   for (const s of activeSubs) {
     const sid = String(s.serviceId || '');
@@ -26609,10 +26539,8 @@ function refreshPermissionsModalUi(userId, moduleKey = null) {
   }
 }
 
-// Mirror of the server's _ensure_actor_can_grant_permissions: a non-admin may
-// only SAVE a permission map made of grants they hold themselves (the whole
-// map is sent, so a grant the target already holds counts too). Returns the
-// first grant the actor lacks, or '' when the save would be accepted.
+// Mirror of the server's _ensure_actor_can_grant_permissions: a non-admin saves only a map of grants
+// they hold (the whole map is sent, the target's own grants included). Returns the first one lacking, or ''.
 function _unheldGrant(permissions) {
   if (isCurrentUserAdmin()) return '';
   for (const [mk, list] of Object.entries(permissions || {})) {
@@ -26623,9 +26551,8 @@ function _unheldGrant(permissions) {
   return '';
 }
 
-// Server twin (_refuse_unheld_target): may the current user re-role / reset the password of
-// `user`? A held full action covers its Own variant; a driver's own-scope grants do not count.
-// A reset (reset=true) also skips the rest of a driver's template grants, but no other grant.
+// Server twin (_refuse_unheld_target): may the current user re-role / reset the password of `user`?
+// A held action covers its Own variant; a driver's own-scope grants (for a reset, its whole template) do not count.
 const _DRIVER_TEMPLATE_GRANTS = { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'], ads: ['viewOwn'], customers: ['viewOwn', 'viewContacts'], receipts: ['viewOwn'] };
 function _targetOutranksEditor(user, reset) {
   if (isCurrentUserAdmin()) return false;
@@ -26672,13 +26599,14 @@ function togglePermission(userId, moduleKey, permKey, enabled) {
   const next = { ...(user.permissions || {}), [moduleKey]: list };
   const unheld = _unheldGrant(next);
   if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  const base = user.permissions || {};  // what this screen showed: a stale one gets 409, not a silent re-grant
   user.permissions = next;
 
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
+  scheduleServerUserUpdate(userId, { permissions: user.permissions }, { base });
   
   // Add audit log
   addAuditLog('update', userId, `${enabled ? 'Granted' : 'Revoked'} permission: ${moduleKey}.${permKey} for ${user.name}`, {
@@ -26705,13 +26633,14 @@ function toggleModulePermissions(userId, moduleKey, enableAll) {
   const next = { ...(user.permissions || {}), [moduleKey]: enableAll ? Object.keys(moduleConfig.permissions) : [] };
   const unheld = _unheldGrant(next);
   if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  const base = user.permissions || {};
   user.permissions = next;
 
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
+  scheduleServerUserUpdate(userId, { permissions: user.permissions }, { base });
 
   addAuditLog('update', userId, `${enableAll ? 'Granted all' : 'Revoked all'} ${moduleKey} permissions for ${user.name}`, {
     resourceType: 'user',
@@ -26736,12 +26665,13 @@ function applyPermissionTemplate(userId, templateKey) {
   const next = JSON.parse(JSON.stringify(template.permissions));
   const unheld = _unheldGrant(next);
   if (unheld) { _denyUnheldGrant(unheld, userId); return; }
+  const base = user.permissions || {};
   user.permissions = next;
   user._lastModified = getMonotonicTime();
   markCollectionDirty('users');
   saveState();
   flushDirtyCollections().catch(() => {});
-  scheduleServerUserUpdate(userId, { permissions: user.permissions });
+  scheduleServerUserUpdate(userId, { permissions: user.permissions }, { base });
 
   addAuditLog('update', userId, `Applied permission template "${template.name}" to ${user.name}`, {
     resourceType: 'user',
@@ -26863,9 +26793,7 @@ function importUserPermissions(userId) {
   input.click();
 }
 
-// A delivery action is allowed when the user holds the matching deliveries.*
-// permission (office staff), OR when they are the assigned driver acting on
-// their OWN delivery. The server enforces the same rule.
+// Allowed with the matching deliveries.* permission (office), or to the assigned driver on their OWN job (as the server).
 function canDoDeliveryAction(action, itemId) {
   if (can('deliveries', action)) return true;
   if (isDeliveryRole(state.currentUser?.role)) {
@@ -26886,14 +26814,15 @@ function denyDeliveryAction() {
 
 async function assignDelivery(itemId, userId) {
   if (!userId) return;
-  const already = ((state.receipts || []).find(r => r.id === itemId) || (state.ads || []).find(a => a.id === itemId) || {}).deliveryPersonId;
-  const neededAction = String(already || '').trim() ? 'reassign' : 'assign';
-  if (!can('deliveries', neededAction) && !can('deliveries', 'assign')) {
+  // Check if it's a receipt or an ad
+  const isReceipt = state.receipts.find(r => r.id === itemId);
+  const item = isReceipt || (state.ads || []).find(a => a.id === itemId) || {};
+  // As the server: an editor of the record skips the workflow rule; a grant alone needs reassign to change a driver.
+  const neededAction = String(item.deliveryPersonId || '').trim() ? 'reassign' : 'assign';
+  if (!canActOnRecord(isReceipt ? 'receipts' : 'ads', 'edit', item.createdBy || item.creatorId) && !can('deliveries', neededAction)) {
     denyDeliveryAction();
     return;
   }
-  // Check if it's a receipt or an ad
-  const isReceipt = state.receipts.find(r => r.id === itemId);
   let savedOk = false;
   if (isReceipt) {
     savedOk = await updateRecord(state.receipts, itemId, { deliveryPersonId: userId });
@@ -26960,9 +26889,7 @@ async function updateDeliveryStatus(itemId, status) {
   render();
 }
 
-// Rapid double taps can queue two async saves before the first render removes
-// the action button. Keep one delivery mutation per item in flight; the server
-// remains the authority for transitions across different devices.
+// One delivery mutation per item in flight: a double tap queued two saves before the render removed the button.
 const _deliveryActionInFlight = new Set();
 
 async function markAsCollected(itemId) {
@@ -27995,8 +27922,8 @@ function updateReceiptDeliveryCompletionComputed() {
     const feeBase = feeCmp.feeDifferenceStatus === 'SAME'
       ? (isArC ? 'قيمة التوصيل: مطابقة' : 'Fee: SAME')
       : (feeCmp.feeDifferenceStatus === 'LOWER'
-        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(0)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(0)} LYD)`)
-        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(0)} LYD)` : `Fee: HIGHER (${diff.toFixed(0)} LYD)`));
+        ? (isArC ? `قيمة التوصيل: أقل (${Math.abs(diff).toFixed(2)} LYD)` : `Fee: LOWER (${Math.abs(diff).toFixed(2)} LYD)`)
+        : (isArC ? `قيمة التوصيل: أعلى (${diff.toFixed(2)} LYD)` : `Fee: HIGHER (${diff.toFixed(2)} LYD)`));
     const feePaidByShop = _readDeliveryFeePaidBy() === 'shop';
     feeEl.textContent = feeBase + (feePaidByShop ? (isArC ? ' • يتحملها المحل' : ' • paid by shop') : '');
   }
@@ -28315,8 +28242,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
           <div class="text-xs text-slate-500 mb-1">${isArD ? 'الوصل' : 'Receipt'}</div>
           <div class="font-bold text-indigo-600">${Security.escapeHtml(tempNo || 'D?')}${finalNo ? ` → ${Security.escapeHtml(finalNo)}` : ''}</div>
           ${place ? `<div class="text-xs text-slate-600 dark:text-slate-300 mt-1"><span class="font-bold">📍</span> ${Security.escapeHtml(place)}</div>` : ''}
-          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(0)} LYD</span></div>
-          ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(phone)}</span></div>` : ''}
+          <div class="text-xs text-slate-500 mt-1">${isArD ? 'الدين المستحق' : 'Debt due'}: <span id="delivery-complete-debt" class="font-bold text-slate-800 dark:text-slate-200">${debt.toFixed(2)} LYD</span> • ${isArD ? 'قيمة التوصيل المتفق عليها' : 'Quoted fee'}: <span id="delivery-complete-quoted" class="font-bold text-emerald-600 dark:text-emerald-400">${quoted.toFixed(2)} LYD</span></div>
+          ${phone ? `<div class="text-xs text-slate-500 mt-1">${isArD ? 'الهاتف' : 'Phone'}: <span class="font-bold text-slate-700 dark:text-slate-300">${phoneLtrHtml(phone)}</span></div>` : ''}
         </div>
 
         <div>
@@ -28462,11 +28389,8 @@ async function refreshAdsAfterReceiptPaidCascade(receipt) {
   return refreshAdsAfterReceiptServerCascade(receipt, { allowPaidLocalFallback: true });
 }
 
-// Map raw engine failures ('Load failed' on Safari, 'Failed to fetch' on
-// Chromium, AbortError timeouts) to a bilingual, actionable message. Returns
-// null when the server WAS reached (e.status set) or the error does not look
-// like a connectivity failure — callers then keep their real HTTP detail.
-// Callers should log the raw e.message to the console for diagnostics.
+// Raw engine failures ('Load failed', 'Failed to fetch', timeouts) as a bilingual, actionable message;
+// null when the server answered (e.status) or it is no connectivity failure. Log the raw message.
 function describeNetworkError(e) {
   if (e?.status) return null; // server WAS reached — keep the real HTTP detail
   const name = String(e?.name || '');
@@ -28476,6 +28400,13 @@ function describeNetworkError(e) {
     || name === 'AbortError'
     || (name === 'TypeError' && /failed to fetch|load failed|network|cancelled/i.test(msg));
   if (!looksNetwork) return null;
+  // A timeout (the app's native one is a 'Load failed' saying so): the save went out and may have
+  // committed, so never "nothing was saved" (a retyped save made a duplicate).
+  if (name === 'AbortError' || /timed? ?out/i.test(String(e?.nativeMessage || ''))) {
+    return state.language === 'ar'
+      ? 'لم يرد الخادم في الوقت المحدد، فتعذّر تأكيد الحفظ وربما تم. تحقّق قبل إدخاله مرة أخرى.'
+      : 'The server did not answer in time, so the save could not be confirmed and may have gone through. Check before entering it again.';
+  }
   if (offline) {
     return state.language === 'ar'
       ? 'لا يوجد اتصال بالإنترنت — لم يتم الحفظ ولم يُفقد ما أدخلته. أعد الاتصال ثم حاول مرة أخرى.'
@@ -28736,7 +28667,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
               const debtEl = document.getElementById('delivery-complete-debt');
               const quotedEl = document.getElementById('delivery-complete-quoted');
               if (debtEl) debtEl.textContent = `${getReceiptCollectionTarget(latestData).amountLocal.toFixed(2)} LYD`;
-              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(0)} LYD`;
+              if (quotedEl) quotedEl.textContent = `${(Number(latestData.quotedDeliveryFee ?? 0) || 0).toFixed(2)} LYD`;
             } catch (_) {}
             updateReceiptDeliveryCompletionComputed();
             showNotification(
@@ -30022,12 +29953,8 @@ function _logReceiptCollection(receipt, action, collectedAmount) {
   });
 }
 
-// Open a small modal to record HOW MUCH was collected for a receipt (user
-// request). Supports partial collection; the card then shows collected + the
-// amount still left to collect. Self-contained (stop-ad-modal style) so it
-// doesn't touch renderModal/state.modalData.
-// ---- Receipt collection (2-step): ask "same as receipt?" -> Yes records it
-// as-is; No opens a payment-methods editor like the ad/receipt forms. ----
+// ---- Receipt collection (user request), self-contained so it never touches renderModal/state.modalData:
+// "same as receipt?" Yes records it as-is; No opens a payment-methods editor. Partial amounts show what is left. ----
 let _tempCollectPayments = [];   // [{ method, amount }] working list for the "No" editor
 let _collectReceiptId = '';
 let _collectTargetLYD = 0;
@@ -30070,9 +29997,8 @@ function _blockDestroyedReceiptEdit(receipt) {
   return true;
 }
 
-// The collect dialog and the Permissions Manager push a ?modal= entry but are
-// not closeModal() dialogs: consume it the same way, else Back (desktop, the
-// Android app) or a refresh reopened them (a collection could be re-recorded).
+// The collect dialog and the Permissions Manager push a ?modal= entry: consume it like closeModal(),
+// else Back or a refresh reopened them (a collection could be re-recorded).
 function _closeUrlTrackedOverlay(el) {
   if (!el || el.isConnected === false) return;  // already closed: never consume another entry
   el.remove();
@@ -30166,7 +30092,7 @@ function _collectEditorView(receiptId, receipt) {
       <div class="col-span-7">
         ${idx === 0 ? `<label class="block text-[10px] text-slate-400 mb-1">${isAr ? 'الطريقة' : 'Method'}</label>` : ''}
         <select onchange="updateCollectPaymentRow(${idx}, 'method', this.value)" class="w-full glass-input px-2 py-1.5 rounded-lg text-sm">
-          ${paymentMethodOptions(p.method).map(m => `<option value="${m}" ${p.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+          ${paymentMethodOptions(p.method).map(m => `<option value="${Security.escapeHtml(m)}" ${p.method === m ? 'selected' : ''}>${Security.escapeHtml(trMethod(m))}</option>`).join('')}
         </select>
       </div>
       <div class="col-span-4">
@@ -30562,11 +30488,8 @@ function manageRefund(adId) {
   renderModal();
 }
 
-// Open transfer modal for a receipt
-// Only money the business actually RECEIVED can move between customers.
-// A "Not Paid" receipt (and a Canceled/Lost one) holds no real money, but the
-// transfer used to accept it anyway and mint a spendable Paid receipt for the
-// target customer — money invented out of nothing.
+// Open transfer modal for a receipt. Only RECEIVED money can move: a Not Paid / Canceled / Lost
+// receipt minted a spendable Paid receipt for the target customer out of nothing.
 function _isTransferableReceipt(r) {
   const st = String(r?.status || '');
   if (st === 'Canceled' || st === 'Lost' || st === 'Destroyed') return false;
@@ -30734,6 +30657,9 @@ function _editHistoryFieldLabel(field) {
   return state.language === 'ar' ? _EDIT_HISTORY_AR[text] || text : text;
 }
 function _editHistoryValueText(value, field) {
+  // Phone/contact rows show '—' without customers.viewContacts, as the server sends them.
+  const key = String(field || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if ((/phone|profile|address|contact|email|whatsapp/.test(key) || /^deliveryplace(name)?$/.test(key)) && !can('customers', 'viewContacts')) return '—';
   const text = _adEditHistoryText(value);
   if (state.language !== 'ar') return text;
   if (text === 'None' || text === 'N/A') return '—';
@@ -30741,9 +30667,7 @@ function _editHistoryValueText(value, field) {
   return text.replace(/(\d+) (payment|allocation|link)\(s\)/g, (_, count, word) => `${_EDIT_HISTORY_AR[word]}: ${count}`);
 }
 
-// Normalize legacy/imported rows before rendering. Older data can use
-// date/userName/oldValue/newValue, and a malformed row must never break the
-// whole Ads screen.
+// Normalize legacy rows (date/userName/oldValue/newValue) before rendering; a malformed one must never break the Ads screen.
 function _isLegacyMetaSyncHistoryRow(row) {
   const actor = String(row?.editedBy || row?.userName || row?.actorName || '').trim().toLowerCase();
   return actor.startsWith('meta automatic') || String(row?.source || '').toLowerCase().startsWith('meta_');
@@ -31433,11 +31357,8 @@ async function saveSplitPayments() {
 // Top-ups management functions
 let tempTopUps = [];
 
-// Read whatever the user typed in the Add New Top-up form. Returns a top-up
-// entry ({date, amount, extendDays, note}) or null when the form is empty.
-// Shared by the "Add Top-up" button AND saveTopUps — previously an amount that
-// was typed but not explicitly "Add"ed was SILENTLY DROPPED on Save, which
-// made the whole feature look broken.
+// What is typed in the Add New Top-up form ({date, amount, extendDays, note}) or null, for the Add
+// button AND saveTopUps (an amount typed but not "Add"ed was silently dropped on Save).
 function _readTopUpForm() {
   const amountEl = document.getElementById('topup-amount');
   if (!amountEl) return null;
@@ -31453,11 +31374,8 @@ function _readTopUpForm() {
   };
 }
 
-// Which receipts fund this ad and how much money they still hold. Top-up
-// money is drawn FROM these receipts, so this drives the "Available" line in
-// the top-ups modal and the overdraft guard. Returns null for ads that are
-// not receipt-funded (unpaid ads owe money instead of spending receipt
-// balance) — their top-ups keep the old free-form behavior.
+// The receipts funding this ad and what they still hold: top-ups draw from them (the "Available"
+// line and the overdraft guard). Null for an ad not receipt-funded (its top-ups stay free-form).
 function getAdFundingAvailability(ad) {
   if (!ad) return null;
   if (getAdPaymentState(ad) !== 'paid') return null;
@@ -31486,11 +31404,8 @@ function getAdFundingAvailability(ad) {
   };
 }
 
-// Receipt money still available given the modal's working list. The saved
-// top-ups are already inside each receipt's remaining balance, so only the
-// DIFFERENCE between the working list and what's saved moves the number
-// (removing a saved top-up makes money available again). Returns null when
-// the ad isn't receipt-funded.
+// Receipt money still available for the modal's working list: saved top-ups are already in each
+// receipt's balance, so only the difference moves it. Null when the ad isn't receipt-funded.
 function _topUpAvailableNow(workingList) {
   const ad = state.ads.find(a => a.id === state.modalData?.id);
   const funding = getAdFundingAvailability(ad);
@@ -31715,12 +31630,8 @@ async function saveTopUps() {
     if (totalExtendDays > 0) newEndDisplay = new Date(updates.endDate).toLocaleDateString(appDateLocale());
   }
 
-  // Charge / refund the funding receipts so the money model stays balanced:
-  // added top-up money grows this ad's allocation rows (the receipts'
-  // remaining balance drops everywhere it is shown), removed top-ups give the
-  // money back. Ads WITHOUT allocation rows are counted by their full
-  // amountUSD automatically (getReceiptUsageStats fallback), so only explicit
-  // allocation rows need updating here.
+  // Charge / refund the funding receipts: added top-ups grow this ad's allocation rows, removed ones
+  // give the money back. Ads without rows count their full amountUSD (getReceiptUsageStats).
   if (funding && funding.hasAllocations && Math.abs(delta) > 0.009) {
     const allocations = ad.receiptAllocations.map(a => ({ ...a }));
     if (delta > 0) {
@@ -31980,11 +31891,8 @@ document.addEventListener('click', function(e) {
 // RECEIPT MODAL HELPER FUNCTIONS
 // ==========================================
 
-// These two pickers run on EVERY keystroke of an oninput handler, and "09" is
-// the prefix of nearly every Libyan number — so the first characters typed
-// each rebuild the largest possible dropdown. Debouncing on the same 80 ms as
-// the list searches keeps the keyboard responsive; it changes nothing about
-// which records match.
+// Debounced (80 ms, like the list searches): these pickers ran on every keystroke and "09" starts
+// nearly every Libyan number, so each first key rebuilt the biggest dropdown. Matches are unchanged.
 let _receiptPhoneFilterTimer = null;
 let _pageCustomerFilterTimer = null;
 // Phone rows are cached briefly from when the picker opens (not rebuilt per
@@ -32083,6 +31991,7 @@ function showReceiptPhoneDropdown() {
 
 function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUsers) {
   const isArF = state.language === 'ar';
+  const esc = v => Security.escapeHtml(String(v));  // stored row values land inside attributes
   // BUG FIX: Check if array exists and has elements before accessing
   if (!Array.isArray(existingPayments) || existingPayments.length === 0) {
     return `<div class="text-xs text-slate-400 p-4">${isArF ? 'لا توجد دفعات معدة' : 'No payments configured'}</div>`;
@@ -32108,12 +32017,12 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                  ${paymentMethodOptions(payment.method).map(m => `<option value="${esc(m)}" ${payment.method === m ? 'selected' : ''}>${esc(trMethod(m))}</option>`).join('')}
                 </select>
               </div>
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'المبلغ' : 'Amount'}</label>
-                <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" value="${esc(payment.amount || 0)}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
               </div>
             </div>
 
@@ -32121,7 +32030,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${esc(paymentRate1Value(payment))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
                   <span class="payment-r1-display text-sm font-bold text-indigo-600">0.00 LYD</span>
@@ -32129,7 +32038,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               </div>
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${esc(payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate)}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R2:</div>
                   <span class="payment-r2-display text-sm font-bold text-emerald-600">0.00 USD</span>
@@ -32138,7 +32047,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             </div>
 
             <!-- Hidden collection type for data consistency -->
-            <input type="hidden" class="collection-type" value="${payment.collectionType || 'office'}" />
+            <input type="hidden" class="collection-type" value="${esc(payment.collectionType || 'office')}" />
 
             <!-- Integrated Totals -->
             <div class="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-4">
@@ -32198,19 +32107,19 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                ${paymentMethodOptions(payment.method).map(m => `<option value="${esc(m)}" ${payment.method === m ? 'selected' : ''}>${esc(trMethod(m))}</option>`).join('')}
               </select>
             </div>
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'المبلغ' : 'Amount'}</label>
-              <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600" value="${esc(payment.amount || 0)}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
             </div>
           </div>
 
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${esc(paymentRate1Value(payment))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
                 <span class="payment-r1-display text-xs font-bold text-indigo-600">0.00 LYD</span>
@@ -32218,7 +32127,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             </div>
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${esc(payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate)}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R2: </span>
                 <span class="payment-r2-display text-xs font-bold text-emerald-600">0.00 USD</span>
@@ -32227,7 +32136,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           </div>
 
           <!-- Hidden collection type for data consistency -->
-          <input type="hidden" class="collection-type" value="${payment.collectionType || 'office'}" />
+          <input type="hidden" class="collection-type" value="${esc(payment.collectionType || 'office')}" />
         </div>
       </div>
     `).join('');
@@ -33094,14 +33003,9 @@ function getDefaultRate1(paymentMethod) {
   return state.defaultExchangeRate; // Default for others
 }
 
-// AUTO-SERIAL GROUPS
-// Some payment methods have no paper receipt from the provider, so the app
-// issues its own sequential number. Each group owns an INDEPENDENT counter:
-//   S — LTT / Libyana / Madar          (S1, S2, …)
-//   B — Bank Transfer (LYD) / (USD)    (B1, B2, …)
-//   O — Transfer Office                (O1, O2, …)
-//   E — Sadad / USDT                   (E1, E2, …)
-// The serial field is READ-ONLY for these methods (see updateSerialLockState).
+// AUTO-SERIAL GROUPS: methods with no provider paper receipt get an app-issued
+// number, one INDEPENDENT counter per group (S1.., B1.., O1.., E1..); the serial
+// field is READ-ONLY for them (see updateSerialLockState).
 const AUTO_SERIAL_GROUPS = {
   S: ['LTT', 'Libyana', 'Madar'],
   B: ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Bank Transfer'],
@@ -33183,11 +33087,8 @@ function getSelectedPaymentMethods() {
     .filter(Boolean);
 }
 
-// The auto-serial method to number this receipt by — but ONLY when EVERY
-// payment row is auto-numbered. If any row is a manual method (Cash), the
-// customer got a real paper receipt, so its number must be typed by hand and
-// the field stays editable. Returns null in that case (and when there are no
-// payment rows at all).
+// The auto-serial method for this receipt, ONLY when EVERY payment row is auto-numbered: a manual
+// row (Cash) means a real paper receipt, typed by hand. null then (and with no rows).
 function getSelectedAutoSerialMethod() {
   const paymentItems = document.querySelectorAll('.payment-split-item');
   let firstAuto = null;
@@ -33467,11 +33368,8 @@ function updateReceiptTotals() {
   
   let totalR1 = 0; // Total PAID (LYD) - sum of all R1 values
   let totalR2 = 0; // Total ADS CREDIT (USD) - sum of all R2 values (rounded UP, = credit granted)
-  // Un-rounded USD total. The credit granted (totalR2) is rounded UP in the
-  // customer's favor, but comparing THAT against the market rate manufactures a
-  // fake "saving" even when the customer paid exactly at market rate (and can
-  // hide a real "paid extra"). The saved-vs-extra verdict and the effective
-  // average rate must be judged from this un-rounded basis.
+  // Un-rounded USD total: the credit (totalR2) rounds UP for the customer, so judging saved-vs-extra
+  // and the average rate on it invents a fake "saving" (or hides a real "paid extra").
   let totalR2Raw = 0;
 
   paymentItems.forEach((item) => {
@@ -33665,9 +33563,18 @@ async function saveReceiptFromModal() {
 }
 
 // The server fills an empty D-number and type and re-stamps the name; a manual retry re-stamps the dates.
+function _notifyReceiptNumberChanged(from, to) {
+  const ar = state.language === 'ar';
+  showNotification(ar ? 'تغيّر رقم الوصل' : 'Receipt number changed', ar
+    ? `أصبح رقم الوصل ${to} (الرقم ${from} استُخدم للتو لوصل آخر).`
+    : `Receipt number changed to ${to} (${from} was just used by another receipt).`, 'info');
+}
+
 function receiptCreateRetryMatches(row, sent) {
   const cmp = { ...sent, customerName: undefined, startDate: undefined, endDate: undefined, collectionDate: undefined };
   if (!cmp.tempReceiptNo) cmp.tempReceiptNo = cmp.receiptType = undefined;
+  // The server may give this same row the next free app number.
+  if (isAutoSerialNumber(cmp.serialNumber) && String(row?.serialNumber || '')[0] === cmp.serialNumber[0]) cmp.serialNumber = cmp.finalReceiptNo = undefined;
   return serverRecordMatchesCreateRetry(row, cmp);
 }
 
@@ -33863,11 +33770,8 @@ async function _saveReceiptFromModalInner() {
   // Validate receipt number
   const serialInputEl = document.getElementById('receipt-serial');
   const serialErrEl = document.getElementById('receipt-serial-error');
-  // Safety net: an auto-numbered payment method must never save without its
-  // serial (e.g. the field was left empty because the method was pre-selected).
-  // It must NOT fire for a temp-delivery receipt (those carry a D-number) nor
-  // for a "Not Paid" receipt, whose number the form deliberately hides — issuing
-  // one there would burn a number on a receipt that shows none.
+  // Safety net: an auto-numbered method never saves without its serial, except a temp-delivery
+  // (D-number) or "Not Paid" receipt, whose number is hidden (issuing one would burn it).
   {
     const autoMethod = getSelectedAutoSerialMethod();
     const serialApplies = !isTempDelivery && status !== 'Not Paid';
@@ -33876,7 +33780,7 @@ async function _saveReceiptFromModalInner() {
       if (next) serialInputEl.value = next;
     }
   }
-  const serialNumber = document.getElementById('receipt-serial').value.trim();
+  let serialNumber = document.getElementById('receipt-serial').value.trim();
 
   // Temp delivery receipts must have a D{n} temporary number.
   if (isTempDelivery) {
@@ -33945,8 +33849,15 @@ async function _saveReceiptFromModalInner() {
       receipt.id !== (editTarget ? editTarget.id : null) &&
       !receipt._deleted
     );
-    
-    if (existingReceipt) {
+    // Another cashier's receipt took this app number first (S42): a NEW receipt takes the next free one.
+    const autoMethod = !editTarget && existingReceipt && getSelectedAutoSerialMethod();
+    const nextSerial = autoMethod && isAutoSerialNumber(serialNumber)
+      && serialNumber.startsWith(getAutoSerialPrefix(autoMethod)) ? getNextAutoSerialNumber(autoMethod) : null;
+    if (nextSerial && nextSerial !== serialNumber) {
+      _notifyReceiptNumberChanged(serialNumber, nextSerial);
+      serialNumber = nextSerial;
+      if (serialInputEl) serialInputEl.value = nextSerial;
+    } else if (existingReceipt) {
       const customer = state.customers.find(c => c.id === existingReceipt.customerId);
       const customerName = customer ? customer.name : (state.language === 'ar' ? 'غير معروف' : 'Unknown');
       
@@ -33959,11 +33870,8 @@ async function _saveReceiptFromModalInner() {
   // Determine delivery status and delivery person based on status and collection method
   let receiptDeliveryStatus = 'Office';
   let receiptDeliveryPersonId = '';
-  // MONEY-MATH: isPaid must be DERIVED from the status, not defaulted to true.
-  // 'Canceled'/'Lost' used to inherit the true default, so switching a NEVER-PAID
-  // receipt to Canceled/Lost flipped it to paid and minted spendable ad credit
-  // from money the business never received. A canceled/lost receipt only counts
-  // as paid if it really held money before (or a Lost one is resolved as paid).
+  // MONEY-MATH: isPaid is DERIVED from the status (a true default made a never-paid Canceled/Lost
+  // receipt paid, minting ad credit): only money held before, or Lost resolved as paid, counts.
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
 
@@ -34040,11 +33948,8 @@ async function _saveReceiptFromModalInner() {
     }
   }
 
-  // Setting a not-yet-delivered temp delivery receipt to "Paid - By Delivery"
-  // IS a delivery completion, and the server only accepts completions through
-  // the verified flow (unique final number + proof photo + collected amounts).
-  // Route there instead of letting the save die with a raw server error:
-  // admins may complete it themselves, everyone else needs the driver.
+  // "Paid - By Delivery" on an undelivered temp receipt IS a completion, which the server takes only
+  // through the verified flow (final number + photo + amounts): admins go there, others need the driver.
   if (status === 'Paid' && (statusDetail.paidCollection || 'office') === 'delivery' && editTarget
       && isTempDeliveryReceiptNo(editTarget.tempReceiptNo)
       && editTarget.deliveryStatus !== 'Delivered' && editTarget.deliveryStatus !== 'Canceled') {
@@ -34291,7 +34196,9 @@ async function _saveReceiptFromModalInner() {
         newlyCreatedDeliveryReceiptId = String(saved.id || '');
       }
       showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
+      // The server may hand out the next free app number.
+      if (isAutoSerialNumber(receipt.serialNumber) && saved.serialNumber && saved.serialNumber !== receipt.serialNumber) _notifyReceiptNumberChanged(receipt.serialNumber, saved.serialNumber);
+      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : ((saved.serialNumber || serialNumber) ? ' #' + (saved.serialNumber || serialNumber) : '')} for ${customerName}`);
     } else {
       const savedOk = await addRecord(state.receipts, receipt);
       if (!savedOk) return;
@@ -34426,11 +34333,8 @@ function checkReceiptNumberDuplicate(input) {
     return;
   }
   
-  // Check for duplicates (excluding current record if editing).
-  // Search state.receipts — receipts were migrated OUT of state.ads long ago
-  // (normalizeReceiptsFromAds strips recordType==='receipt' from ads on every
-  // load), so the old state.ads lookup never found anything and this live
-  // warning was a silent no-op. Mirrors the save-time check in saveReceipt.
+  // Check for duplicates (excluding current record if editing) in state.receipts, like the
+  // save-time check (receipts left state.ads long ago; the old lookup never matched).
   const existingReceipt = state.receipts.find(receipt =>
     receipt.serialNumber === serialNumber &&
     receipt.id !== (state.modalData ? state.modalData.id : null) &&
@@ -34775,12 +34679,8 @@ function getReceiptsForAd(customerId, pageId) {
     const isPaid = (r.isPaid === true) || statusLower === 'paid';
     if (!isPaid) return false;
 
-    // Funding receipts must be real paid receipts.
-    // Temp delivery receipts (D#) are allowed ONLY after they are finalized:
-    // - a final receipt number exists (digits or S-prefixed)
-    // A receipt may be collected/marked Paid from the Receipts screen after its
-    // delivery workflow. Its old deliveryStatus can remain Office, but Paid plus
-    // a final number is authoritative and is also what the server accepts.
+    // Funding receipts must be really paid: a temp delivery receipt (D#) only once it has a final
+    // number (Paid + final number is what the server accepts, even with deliveryStatus still Office).
     const looksTemp = (String(r.receiptType || '').toUpperCase() === 'DELIVERY_TEMP') || isTempDeliveryReceiptNo(r.tempReceiptNo);
     if (looksTemp) {
       const finalNo = String(r.finalReceiptNo || r.serialNumber || '').trim();
@@ -38270,9 +38170,8 @@ function renderModal() {
     }
     case 'ad':
       const visibleCustomers = getVisibleRecords(state.customers);
-      // TEMPORARY (owner request, Aug 2026): while the duplicate-page cleanup
-      // runs, admins may only link ads to Meta-imported pages (the ones with
-      // the blue Meta badge). Set the flag to false to restore every page.
+      // TEMPORARY (owner request, Aug 2026): during the duplicate-page cleanup, admins link ads to
+      // Meta-imported pages only. Set the flag to false to restore every page.
       const AD_PAGES_META_ONLY_FOR_ADMIN = true;
       const visiblePages = (AD_PAGES_META_ONLY_FOR_ADMIN && isCurrentUserAdmin())
         ? getVisibleRecords(state.pages).filter(p => String(p.metaPageId || '').trim())
@@ -38290,30 +38189,22 @@ function renderModal() {
       state.tempAdPrimaryPhotoDirty = false;
       const durationDaysDefault = (adData.days !== undefined ? adData.days : (adData.startDate && adData.endDate ? Math.max(0, Math.round((new Date(adData.endDate) - new Date(adData.startDate)) / (1000 * 60 * 60 * 24))) : ''));
       const adCreator = isEdit && adData.creatorId ? state.users.find(u => u.id === adData.creatorId) : state.currentUser;
-      // Badge describes the ad's CREATOR, not the viewer. Driving it from the
-      // viewer's role mislabeled an Admin-created ad as "USER" for a non-admin
-      // editor (and vice-versa). isAdminRole() returns false for an unresolved
-      // creator, so it gracefully falls back to the "USER" badge.
+      // The badge describes the ad's CREATOR, not the viewer (an Admin's ad showed "USER" to staff);
+      // an unknown creator falls back to "USER".
       const creatorIsAdmin = isAdminRole(adCreator?.role);
       const isArAd = state.language === 'ar';
       const isImportedMetaDraft = isEdit && isMetaAdSetupPending(adData);
       // A Meta-linked ad already knows its page (the import linked it). Offering
       // the page picker there only invites a wrong change, so the field locks.
       const adLinkedPage = state.pages.find(p => p && !p._deleted && String(p.id) === String(adData.pageId || ''));
-      // A LIVE Facebook identity (ad id or page id) locks the page.
-      // metaImportSource alone is provenance: it survives an unlink, and the
-      // server guard stops caring once metaPageId is gone — keying on it left
-      // unlinked drafts locked for employees while the server would accept
-      // any page.
+      // A LIVE Facebook identity (ad id or page id) locks the page. Not metaImportSource: it outlives an
+      // unlink, which left unlinked drafts locked though the server accepts any page.
       const adIsMetaLinked = String(adData.metaAdId || '').trim() !== ''
         || String(adData.metaPageId || '').trim() !== '';
-      // Meta reveals a page's NAME later than its id, so a fresh draft can
-      // carry metaPageId with pageId still empty (the import defers local
-      // linking to the next sync pass). The lock must key on the ad's own
-      // Facebook identity, never on whether this browser happens to have the
-      // local link resolved right now — an open picker in that window is how
-      // an imported ad got attached to another business's page. When the
-      // matching local page already exists (by Facebook id), use it directly.
+      // Meta reveals a page's NAME later than its id, so a fresh draft can carry metaPageId with pageId
+      // still empty. The lock keys on the ad's own Facebook identity, never on this browser's local link
+      // (an open picker then attached an imported ad to another business's page); a matching local page
+      // (by Facebook id) is used directly.
       const adMetaPageId = String(adData.metaPageId || '').trim();
       const metaResolvedPage = (!adLinkedPage && adMetaPageId)
         ? state.pages.find(p => p && !p._deleted && String(p.metaPageId || '').trim() === adMetaPageId)
@@ -38327,17 +38218,13 @@ function renderModal() {
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
-      // Settle target for the funding hint: a LIVE debt settles its budget
-      // minus company coverage, a TERMINAL ad only its committed total (stop already released
-      // the rest) — in step with getOriginalUnpaidAdBudgetUSD and the save-
-      // time validation, so the hint never demands the dead $9.00 of a
-      // stopped ad whose remaining committed spend is $1.24.
+      // Settle target for the funding hint, in step with getOriginalUnpaidAdBudgetUSD and the save
+      // check: a LIVE debt's budget minus company coverage, a TERMINAL ad's committed total only.
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
         : Math.max(Number(adData.amountUSD || 0) - getAdCompanyCoveredUSD(adData), 0);
-      // A stopped ad keeps its original budget as immutable history. The final
-      // actual spend is changed only through the atomic stop/reconciliation
-      // flow, which also updates every affected receipt balance.
+      // A stopped ad keeps its budget as history; its final spend changes only through the atomic
+      // stop/reconciliation flow, which updates the receipts too.
       const isStoppedAdEdit = isEdit && String(adData.status || '') === 'Stopped';
       const stoppedPlannedUSD = Math.max(Number(adData.amountUSD) || 0, 0);
       const stoppedFinalUSD = getFrozenFinalAdSpendUSD(adData) ?? Math.max(Number(adData.spentUSD) || 0, 0);
@@ -38581,16 +38468,12 @@ function renderModal() {
                   <div id="ad-driver-budget-section" class="${adData.collectionMethod === 'driver' ? '' : 'hidden'} mb-3 p-3 bg-violet-50 dark:bg-violet-900/20 rounded-lg border border-violet-200 dark:border-violet-800 space-y-2">
                     <label for="ad-driver-budget-usd" class="block text-xs font-bold text-violet-700 dark:text-violet-300">${isArAd ? 'ميزانية الإعلان (USD) *' : 'Ad Budget (USD) *'}</label>
                     ${(() => {
-                      // A Meta-linked ad takes its budget straight from Meta's
-                      // real planned total (read-only) so the recorded customer
-                      // debt can never drift from what Meta actually runs.
+                      // A Meta-linked ad's budget is Meta's real planned total (read-only), so the
+                      // customer's debt never drifts from what Meta runs.
                       const metaBudgetRaw = metaAdAutoBudgetUSD(adData);
-                      // ...EXCEPT when Meta's total is below money already
-                      // reserved on this ad's receipts. Locking a lower budget
-                      // would make the funding<=budget guard reject EVERY save
-                      // (even a photo-only edit) with no way to raise the field
-                      // again, and the only escape would be silently releasing
-                      // reserved receipt credit. Stay manual and say why.
+                      // ...EXCEPT when Meta's total is below money already reserved on this ad's
+                      // receipts: locked lower, the funding<=budget guard refused EVERY save with no
+                      // way out but silently releasing receipt credit. Stay manual and say why.
                       const committedUSD = getAdCommittedFundingTotalUSD(adData);
                       const metaBudgetBlocked = metaBudgetRaw > 0 && committedUSD > metaBudgetRaw + 0.005;
                       const metaBudget = metaBudgetBlocked ? 0 : metaBudgetRaw;
@@ -39627,15 +39510,15 @@ function renderModal() {
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'المبلغ (دينار)' : 'Amount (LYD)'}</label>
-                    <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.amount}" oninput="sanitizeMoneyInput(this)" />
+                    <input type="text" inputmode="decimal" class="split-amount w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(payment.amount))}" oninput="sanitizeMoneyInput(this)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الصرف' : 'Exchange Rate'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(paymentRate1Value(payment)))}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'سعر الدولار (سعر 2)' : 'USD Rate (Rate 2)'}</label>
-                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${payment.rate2 !== undefined && payment.rate2 !== null && payment.rate2 !== '' ? payment.rate2 : paymentRate1Value(payment)}" oninput="sanitizeMoneyInput(this, 4)" />
+                    <input type="text" inputmode="decimal" class="split-rate2 w-full glass-input px-3 py-2 rounded-lg text-sm" value="${Security.escapeHtml(String(payment.rate2 !== undefined && payment.rate2 !== null && payment.rate2 !== '' ? payment.rate2 : paymentRate1Value(payment)))}" oninput="sanitizeMoneyInput(this, 4)" />
                   </div>
                   <div>
                     <label class="block text-xs font-medium mb-1">${isArS ? 'نوع التحصيل' : 'Collection Type'}</label>
@@ -40030,6 +39913,9 @@ function renderModal() {
       };
       const lockMoney = (minor) => walletFormatMinor(Math.max(0, Number(minor) || 0), 'LYD');
       const lockChargeLink = `<button type="button" onclick="closeModal(); if (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL && typeof adsStudioOpenChargeForm === 'function') adsStudioOpenChargeForm(${Math.max(0, (Number(lockPlans[0]?.priceMinor) || 0) - lydBalanceMinor)}); else if (typeof hubOpenChargeWallet === 'function') hubOpenChargeWallet(); else navigateTo('wallet');" class="touch-target w-full min-h-11 text-center text-sm font-bold text-blue-600 dark:text-blue-300">${isRTL ? 'اشحن المحفظة' : 'Charge wallet'}</button>`;
+      // Charge wallet is admin-only outside the Ads Studio: others ask the office.
+      const lockCanCharge = isCurrentUserAdmin() || (typeof IS_STUDIO_SHELL !== 'undefined' && IS_STUDIO_SHELL);
+      const lockOffice = isRTL ? 'اطلب من المكتب شحن محفظتك.' : 'Ask the office to top up your wallet.';
 
       const planCard = (plan, primary) => {
         const planName = Security.escapeHtml(String((isRTL ? plan.nameAr : plan.name) || plan.id));
@@ -40061,7 +39947,7 @@ function renderModal() {
               <div class="flex items-center justify-between gap-3 px-4 py-3"><span class="text-slate-500">${short ? (isRTL ? 'ينقصك' : 'You need') : (isRTL ? 'الرصيد بعد' : 'Balance after')}</span><span class="font-bold ${short ? 'text-rose-600' : 'text-emerald-600'}" dir="ltr">${Security.escapeHtml(lockMoney(Math.abs(after)))}</span></div>
             </div>
             <button type="button" onclick="handleSubscribePlan('${safePlanId}', '${Security.escapeHtml(String(lockServiceId))}', ${price})" ${short ? 'disabled' : ''} class="touch-target w-full min-h-14 rounded-2xl text-base font-bold ${short ? 'bg-slate-200 dark:bg-slate-700 text-slate-400 cursor-not-allowed' : 'btn-shine bg-blue-600 text-white hover:bg-blue-700'}">${buyLabel}</button>
-            ${short ? `<div class="mt-2 text-center text-[11px] font-bold text-rose-600">${isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.'}</div>` : ''}
+            ${short ? `<div class="mt-2 text-center text-[11px] font-bold text-rose-600">${lockCanCharge ? (isRTL ? 'الرصيد غير كافٍ — اشحن المحفظة أولاً.' : 'Balance is short — charge the wallet first.') : (isRTL ? 'الرصيد غير كافٍ — اطلب من المكتب شحن محفظتك.' : 'Balance is short — ask the office to top up your wallet.')}</div>` : ''}
           </div>`;
       };
 
@@ -40123,7 +40009,7 @@ function renderModal() {
           <button type="button" onclick="closeModal()" class="touch-target flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-200" aria-label="${isRTL ? 'إغلاق' : 'Close'}"><i data-lucide="x" class="w-4 h-4"></i></button>
         </div>
         ${plansBody}
-        ${isServerModeEnabled() ? lockChargeLink : ''}
+        ${!isServerModeEnabled() ? '' : lockCanCharge ? lockChargeLink : `<p class="text-center text-sm text-slate-500 dark:text-slate-400">${lockOffice}</p>`}
       `;
       break;
     }
@@ -40340,9 +40226,8 @@ function renderModal() {
       initAdFunding(state.modalData || {});
       // If editing, select the page to populate customer
       const adData = state.modalData || {};
-      // A Meta draft may know its Facebook page id before the local link is
-      // attached; resolve it here the same way the page field does, so the
-      // customer picker fills from the CORRECT page instead of staying empty.
+      // A Meta draft may know its Facebook page before the local link: resolve it as the page field
+      // does, so the customer picker fills from the RIGHT page.
       let initAdPageId = String(adData.pageId || '');
       if (!initAdPageId) {
         const initMetaPageId = String(adData.metaPageId || '').trim();
@@ -40393,10 +40278,8 @@ function renderModal() {
   
   const form = document.getElementById('modal-form');
   if (form) {
-    // Reentrancy guard: user/customer/page creation awaits async work
-    // (apiCreateUser / password hashing) before the modal closes, so a
-    // double-click on Create ran handleModalSubmit twice and created
-    // duplicate records. Also disable the submit button for visible feedback.
+    // Reentrancy guard: creates await async work before the modal closes, so a double-click on Create
+    // made duplicates. The disabled button shows it.
     let submitting = false;
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -40424,9 +40307,8 @@ function renderModal() {
   }
 }
 
-// Keep one request identity across response-loss retries. Volatile audit
-// timestamps are excluded from the fingerprint and the first prepared payload
-// is reused, so an identical retry cannot accidentally create a second ad.
+// One request identity across response-loss retries: audit timestamps stay out of the fingerprint
+// and the first payload is reused, so a retry never makes a second ad.
 const _pendingAdMutationAttempts = new Map();
 
 function getAdMutationFingerprint(action, adId, expectedLastModified, data) {
@@ -40443,18 +40325,21 @@ function getAdMutationFingerprint(action, adId, expectedLastModified, data) {
   return JSON.stringify({ action, adId, expectedLastModified: expectedLastModified ?? null, data: stable });
 }
 
-function getAdMutationAttempt(action, adId, expectedLastModified, data) {
+// pinnedAdId: the open New Ad form's id. A changed re-submit after a lost answer keeps it (fresh key):
+// a first Save that went through answers 409, never a second ad.
+function getAdMutationAttempt(action, adId, expectedLastModified, data, pinnedAdId = '') {
   const act = String(action || '');
   const existingId = String(adId || '');
+  const pinned = act === 'create' ? String(pinnedAdId || '') : '';
   const slot = act === 'create' ? 'create' : `${act}:${existingId}`;
   const fingerprint = getAdMutationFingerprint(act, existingId, expectedLastModified, data);
   const prior = _pendingAdMutationAttempts.get(slot);
-  if (prior?.fingerprint === fingerprint) return prior;
+  if (prior?.fingerprint === fingerprint && (!pinned || prior.adId === pinned)) return prior;
   if (prior?.promise) return prior;
   const attempt = {
     slot,
     fingerprint,
-    adId: existingId || Security.generateSecureId('ad'),
+    adId: existingId || pinned || Security.generateSecureId('ad'),
     idempotencyKey: ensureOperationIdempotencyKey('', `ad-${act || 'mutate'}`),
     expectedLastModified,
     data: Security.sanitizeObject(data || {}),
@@ -40468,6 +40353,60 @@ function completeAdMutationAttempt(attempt) {
   if (attempt && _pendingAdMutationAttempts.get(attempt.slot) === attempt) {
     _pendingAdMutationAttempts.delete(attempt.slot);
   }
+}
+
+// What the Edit Ad form shows, writes or funds from: a change to it while the form was open is a
+// conflict (saving undid a colleague's top-up). Meta and spend syncs change none of it.
+const AD_FORM_GUARDED_FIELDS = Object.freeze(['customerId', 'pageId', 'adLinks', 'adLink', 'paymentStatus',
+  'collectionMethod', 'collectionPayments', 'paymentMethod', 'status', 'deliveryStatus', 'deliveryPersonId',
+  'refundType', 'refundAmount', 'refundStatus', 'refundAllocationBaseline', 'refundDueBaseline', 'amountUSD',
+  'amountLocal', 'exchangeRate', 'receiptAllocations', 'dueAllocations', 'mergedPaidAllocations',
+  'linkedDeliveryReceiptId', 'companyFundingAllocations', 'companyDirectCoverageUSD', 'amountAdjustments',
+  'topUps', 'initialAmountUSD', 'initialEndDate', 'startDate', 'endDate', 'days']);
+
+function adChangedUnderOpenForm(opened, live) {
+  if (!opened || !live || opened === live || Number(opened._lastModified) === Number(live._lastModified)) return false;
+  return getAdPhotoCount(opened) !== getAdPhotoCount(live)
+    || AD_FORM_GUARDED_FIELDS.some(key => Security.stableJson(opened[key] ?? null) !== Security.stableJson(live[key] ?? null));
+}
+
+async function installAdFromServer(id) {
+  try { applyValidatedServerEntityBatch([{ collection: 'ads', entity: await apiGetEntity('ads', id) }], 'adReload'); } catch (_) {}
+}
+
+// An Edit Ad conflict: the newest copy (with its photos) goes into the open form for a fresh Save.
+// False when it cannot be shown: the form stays as typed.
+async function reloadAdFormAfterConflict(sent, stillOpen) {
+  if (isServerModeEnabled()) await installAdFromServer(sent.id);
+  const fresh = state.ads.find(a => a && !a._deleted && String(a.id) === String(sent.id));
+  // Photos it cannot show would be replaced by the next Save (editAd will not open then either).
+  if (!stillOpen() || !fresh || Number(fresh._lastModified) === Number(sent._lastModified)
+    || (can('ads', 'viewPhotos') && getAdPhotoCount(fresh) > 0 && !isEntityMediaHydrated('ads', fresh))) return false;
+  state.modalData = fresh;
+  state.tempMergeFunding = state.tempMixedReceiptTargetUSD = null;  // re-seeded as on open
+  initAdFunding(fresh);
+  renderModal();
+  const isAr = state.language === 'ar';
+  showNotification(isAr ? 'تعارض في التعديل' : 'Ad Changed', isAr
+    ? 'تم تغيير هذا الإعلان من مستخدم آخر. حمّلنا أحدث نسخة — راجعه ثم احفظ مرة أخرى.'
+    : 'This ad changed on another device. We loaded the latest version — check it and save again.', 'warning');
+  return true;
+}
+
+// A New Ad re-submit met its own pinned id (409): the first Save went through while its answer was lost.
+async function adoptAlreadySavedAd(form, stillOpen) {
+  const adId = String(form?.dataset?.draftAdId || '');
+  if (!adId) return false;
+  const prior = _pendingAdMutationAttempts.get('create');
+  if (prior?.adId === adId) completeAdMutationAttempt(prior);
+  await installAdFromServer(adId);
+  if (stillOpen()) closeModal();
+  render();
+  const isAr = state.language === 'ar';
+  showNotification(isAr ? 'محفوظ مسبقاً' : 'Already saved', isAr
+    ? 'هذا الإعلان محفوظ مسبقاً، فقد نجح الحفظ الأول. افتحه من الإعلانات لمراجعته.'
+    : 'This ad was already saved: the first Save went through. Open it from Ads to check it.', 'warning');
+  return true;
 }
 
 function resolveAdPrimaryReceiptId({ paymentStatus, collectionMethod, linkedDeliveryReceiptId, allocations, dueAllocations } = {}) {
@@ -40490,19 +40429,15 @@ function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   const hasPaymentStatus = Object.prototype.hasOwnProperty.call(adUpdates || {}, 'paymentStatus');
   const normalizedPaymentStatus = getAdPaymentState(adUpdates);
   if (hasPaymentStatus) data.paymentStatus = normalizedPaymentStatus;
-  // Paid ads remain server-derived from receipt allocations. Not Paid + Driver
-  // is different: its positive budget is real customer debt even when no
-  // receipt credit funds it yet, so send one narrowly-scoped request value.
+  // Paid budgets come from the receipt rows on the server. A Not Paid + Driver budget is real debt
+  // even with no receipt credit, so it is sent as one narrow request value.
   if (hasPaymentStatus && normalizedPaymentStatus === 'not_paid' && String(adUpdates?.collectionMethod || '').toLowerCase() === 'driver') {
     data.driverBudgetUSD = normalizeAdDriverBudgetUSD(adUpdates?.amountUSD);
   } else {
     delete data.driverBudgetUSD;
   }
-  // These values are materialized from allocations/payment rows by the server.
-  // Sending them would invite a forged total that disagrees with the funding
-  // rows. The allocation requests themselves remain explicit inputs.
-  // customerName is likewise server-authoritative: the server stamps it from
-  // the customers table by customerId, so a client value is never trusted.
+  // The server derives these from the funding rows (a sent total could be forged) and stamps
+  // customerName from customerId; only the allocation requests stay inputs.
   for (const field of [
     'amountUSD', 'amountLocal', 'receiptIds', 'fundingReceiptId',
     'dueAmountToUseUSD', 'hasMergedPaidFunds', 'isPaid', 'initialAmountUSD',
@@ -40515,11 +40450,12 @@ function buildServerAdMutationData(adUpdates, { create = false } = {}) {
   return data;
 }
 
-async function saveAdThroughAtomicServer(action, adId, expectedLastModified, data) {
+async function saveAdThroughAtomicServer(action, adId, expectedLastModified, data, pinForm = null) {
   if (action === 'update' && (!Number.isSafeInteger(expectedLastModified) || expectedLastModified < 0)) {
     throw new Error('This ad is missing its server version. Refresh and try again.');
   }
-  const attempt = getAdMutationAttempt(action, adId, expectedLastModified, data);
+  const attempt = getAdMutationAttempt(action, adId, expectedLastModified, data, pinForm?.dataset?.draftAdId);
+  if (action === 'create' && pinForm?.dataset) pinForm.dataset.draftAdId = attempt.adId;
   if (attempt.promise) return await attempt.promise;
   attempt.promise = (async () => {
     const payload = {
@@ -40575,10 +40511,8 @@ function _relinkNormalizePool(rows) {
     }));
 }
 
-// Return the new funding pools when the save re-points the ad onto a DIFFERENT
-// receipt while conserving every pool's committed total to the cent; otherwise
-// null (not a relink). Old receipts drop out by omission — exactly what frees
-// them. The server independently re-checks conservation, so this only gates UX.
+// The new pools when the save moves the ad onto a DIFFERENT receipt, each pool's total kept to the
+// cent; else null (not a relink). Omitted old receipts are freed. The server re-checks; this gates UX.
 function computeTerminalRelinkPools(liveAd, adUpdates) {
   const oldPaid = _relinkNormalizePool(liveAd && liveAd.receiptAllocations);
   const oldDue = _relinkNormalizePool(liveAd && liveAd.dueAllocations);
@@ -40607,9 +40541,8 @@ function getAdCommittedFundingTotalUSD(ad) {
   return Math.round((paid + due) * 100) / 100;
 }
 
-// SETTLE (terminal ads): the paid debt flips not_paid -> paid and the whole committed
-// total (paid + due pools) moves into PAID receipt rows to the cent, freeing the old
-// unpaid receipt. Returns the new pools or null; the server re-checks every rule.
+// SETTLE (terminal ads): the debt flips not_paid -> paid and the committed total (paid + due) moves
+// onto PAID receipt rows to the cent, freeing the unpaid receipt. New pools or null; the server re-checks.
 function computeTerminalSettlePools(liveAd, adUpdates) {
   if (getAdPaymentState(liveAd) !== 'not_paid') return null;
   if (getAdPaymentState(adUpdates) !== 'paid') return null;
@@ -40622,11 +40555,8 @@ function computeTerminalSettlePools(liveAd, adUpdates) {
   return { paid: newPaid, due: [] };
 }
 
-// Shared "nothing ELSE changed" core for the two terminal-ad primitives:
-// every editable non-funding, non-payment field must match the stored ad.
-// Payment state and collection method are checked by the callers — a relink
-// forbids changing them, while a settle IS the not_paid -> paid flip (which
-// also legitimately clears the collection method).
+// Terminal-ad relink/settle: every editable field but funding and payment must match the stored ad.
+// Callers check payment: a relink keeps it, a settle IS the not_paid -> paid flip.
 function _terminalEditKeepsNonFundingFields(liveAd, adUpdates) {
   const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
   const sameTime = (a, b) => {
@@ -40647,9 +40577,8 @@ function _terminalEditKeepsNonFundingFields(liveAd, adUpdates) {
   return true;
 }
 
-// True only when the funding receipt is the ONLY thing the save changed on a
-// terminal ad. Any other editable field keeps the "Ad Finished — use Refund"
-// block, because a relink must never silently drop an unrelated edit.
+// True only when the funding receipt is ALL a terminal-ad save changed: a relink never silently
+// drops another edit (those keep "Ad Finished — use Refund").
 function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
   if (photosDirty) return false;
   const sameStr = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
@@ -40658,17 +40587,15 @@ function terminalRelinkOnlyChangesFunding(liveAd, adUpdates, photosDirty) {
   return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
 }
 
-// Settle counterpart: the not_paid -> paid flip IS the point of the save, and
-// switching the form to Paid legitimately clears the collection method, so
-// only the remaining editable fields must be untouched.
+// Settle counterpart: the not_paid -> paid flip is the point (and Paid clears the collection
+// method), so only the other editable fields must be untouched.
 function terminalSettleOnlyChangesFundingAndPayment(liveAd, adUpdates, photosDirty) {
   if (photosDirty) return false;
   return _terminalEditKeepsNonFundingFields(liveAd, adUpdates);
 }
 
-// Retarget the stop/refund baselines that still name the VACATED receipt to the single newly
-// introduced receipt (mirrors _financial_apply_relink; the delete guard counts baselines as links,
-// else the freed receipt can never be deleted). Only receiptId strings move; no-op unless exactly one is new.
+// Point stop/refund baselines naming the VACATED receipt at the one new receipt (as
+// _financial_apply_relink), or the delete guard never frees it. No-op unless exactly one is new.
 function _relinkBaselineUpdates(liveAd, pools) {
   const oldIds = new Set();
   ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
@@ -40773,10 +40700,8 @@ async function applyLocalReceiptRelink(liveAd, pools) {
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
-// Local-mode counterpart of the server SETTLE branch: flip the terminal debt
-// to Paid and move the committed pools WITHOUT touching amountUSD/spentUSD/
-// status (updateRecord merges, so omitted fields keep their stored values).
-// Field-for-field mirror of _financial_apply_relink's settle transition.
+// Local mode's SETTLE (mirrors _financial_apply_relink): flip the terminal debt to Paid and move the
+// committed pools; amountUSD/spentUSD/status are omitted, so updateRecord keeps them.
 async function applyLocalReceiptSettle(liveAd, pools) {
   const paidIds = pools.paid.map(row => row.receiptId);
   const updates = {
@@ -40803,9 +40728,8 @@ async function applyLocalReceiptSettle(liveAd, pools) {
   return await updateRecord(state.ads, liveAd.id, updates);
 }
 
-// "YYYY-MM-DD" of the LOCAL day of a stored value. Meta-imported ads store
-// full UTC timestamps (a 00:00 Tripoli start is 22:00Z the day before); the
-// old split('T')[0] showed that earlier UTC day and an untouched save kept it.
+// "YYYY-MM-DD" of the stored value's LOCAL day: Meta ads store UTC (a 00:00 Tripoli start is 22:00Z
+// the day before), and split('T')[0] showed and kept that earlier day.
 function _localDateInputValue(value) {
   if (!value) return '';
   const raw = String(value);
@@ -40817,9 +40741,8 @@ function _localDateInputValue(value) {
 
 async function handleModalSubmit() {
   const isEdit = state.modalData !== null;
-  // A save can finish after Cancel and another form opened. The old record
-  // may save, but only its own form may close (else the new form's typing
-  // and photos are lost): a stale save only re-renders.
+  // A save can finish after Cancel and another form opened: only its own form may close (else the
+  // new form's typing and photos are lost); a stale save only re-renders.
   const submitModal = state.activeModal;
   let submitData = state.modalData;
   const submitForm = document.getElementById('modal-form');
@@ -41020,9 +40943,8 @@ async function handleModalSubmit() {
       // Collect all phone numbers
       const phoneInputs = document.querySelectorAll('.customer-phone');
       const phones = dedupeCustomerPhoneValues(Array.from(phoneInputs).map(input => input.value.trim()).filter(p => p));
-      // A whitespace-only phone passes `required` but is filtered out above —
-      // without this check the customer is saved with zero phone numbers.
-      // Hidden contacts (no viewContacts) are not edited here; the server keeps them.
+      // A blank phone passes `required` but is filtered out above: without this the customer had no
+      // phone. Hidden contacts (no viewContacts) are not edited here; the server keeps them.
       const hideContacts = isEdit && !can('customers', 'viewContacts');
       if (!hideContacts && phones.length === 0) {
         showNotification(isAr ? 'خطأ في الإدخال' : 'Validation Error', isAr ? 'رقم هاتف واحد على الأقل مطلوب' : 'At least one phone number is required', 'error');
@@ -41078,16 +41000,15 @@ async function handleModalSubmit() {
     case 'ad':
       try {
       const isArSubAd = state.language === 'ar';
-      // Live-sync replaces objects in state.ads, so re-point modalData at the
-      // CURRENT record: the lock baseline and preserved fields are read at
-      // save time (server-side cascades bumped the version while open).
+      // Live sync replaces objects in state.ads, so modalData is still the copy the form opened on: re-point
+      // it at the CURRENT record (lock baseline) after a Meta or spend sync; any other change is a conflict.
       if (isEdit && state.modalData?.id) {
         const liveAd = state.ads.find(a => a && !a._deleted && String(a.id) === String(state.modalData.id));
+        if (adChangedUnderOpenForm(state.modalData, liveAd)) throw Object.assign(new Error('Conflict: ad has changed'), { status: 409 });
         if (liveAd) state.modalData = submitData = liveAd;
       }
-      // A terminal/refunded ad still accepts two money-safe edits (relink its funding receipt, or
-      // settle its paid-off debt), so the "cannot edit" decision waits for the funding form: the
-      // terminal-ad branch at save time allows only those and shows "Ad Finished — use Refund".
+      // A terminal/refunded ad still takes a relink or a settle, so "cannot edit" waits for the funding
+      // form: the terminal-ad branch below allows only those ("Ad Finished — use Refund").
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -41150,11 +41071,8 @@ async function handleModalSubmit() {
         driverBudgetRate: document.getElementById('ad-driver-budget-rate')?.value
       });
       const isPaid = paymentStatus === 'paid';
-      // These three inputs do NOT exist in the ad modal template. Reading them
-      // always yielded false/undefined, which on EDIT erased spentUSD /
-      // extraTimeMinutes and reset the office-handover flag. Preserve the
-      // existing record's values instead (create leaves modalData null, so a
-      // new ad still gets the correct defaults).
+      // The form has no inputs for these: keep the stored values (reading absent inputs erased spentUSD,
+      // extraTimeMinutes and the office flag on edit). A new ad has no modalData, so it gets the defaults.
       const isReceived = state.modalData?.isReceivedInOffice || false;
       const spentUSD = state.modalData?.spentUSD;
       const extraTime = state.modalData?.extraTimeMinutes;
@@ -41248,12 +41166,9 @@ async function handleModalSubmit() {
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
         const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
-        // A LIVE debt settles its budget minus company coverage. A TERMINAL
-        // ad's budget is dead — stop already released the unspent part — so
-        // only its COMMITTED total still holds receipt money and THAT is what
-        // the paid funding must equal (e.g. $1.24 of a stopped $9.00 ad).
-        // getOriginalUnpaidAdBudgetUSD makes the same terminal-aware choice
-        // for the funding UI's hint and autofill, keeping all three in step.
+        // A LIVE debt settles its budget minus company coverage. A TERMINAL ad's budget is dead (stop
+        // released the rest): the paid funding must equal its COMMITTED total (e.g. $1.24 of a stopped
+        // $9.00 ad), as getOriginalUnpaidAdBudgetUSD does for the hint and autofill.
         const requiredSettleUSD = isTerminalSettle
           ? getAdCommittedFundingTotalUSD(state.modalData)
           : getOriginalUnpaidAdBudgetUSD();
@@ -41312,9 +41227,8 @@ async function handleModalSubmit() {
 
           // If editing, add back what this ad already allocated from this receipt
           if (isEdit && state.modalData?.id) {
-            // This includes the ad's current due allocation when converting a
-            // Driver debt to Paid. The server replaces those rows atomically,
-            // so the current ad must not block its own settlement receipt.
+            // Includes the ad's own due row when a Driver debt turns Paid: the server swaps those rows
+            // atomically, so the ad never blocks its own settlement receipt.
             remaining += getEditingAdExistingAllocationUSD(receiptId);
           }
 
@@ -41414,9 +41328,8 @@ async function handleModalSubmit() {
         const dueInput = document.getElementById('ad-due-amount-to-use');
         if (dueInput && linkedReceiptId) {
           dueAmountToUseUSD = parseFloat(dueInput.value) || 0;
-          // The validation branches above intentionally keep their receipt
-          // variables block-scoped. Resolve the selected receipt again here so
-          // edit add-back never depends on an out-of-scope `linkedReceipt`.
+          // The validation branches keep their receipt block-scoped: resolve it again, so the edit
+          // add-back never reads an out-of-scope `linkedReceipt`.
           const selectedDueReceipt = state.receipts.find(
             receipt => receipt && !receipt._deleted && String(receipt.id || '') === String(linkedReceiptId)
           );
@@ -41479,11 +41392,8 @@ async function handleModalSubmit() {
           .filter(a => a.receiptId && parseFloat(a.amountUSD) > 0)
           .map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) }));
         
-        // Validate merged allocations don't exceed receipt remaining.
-        // MONEY-MATH: aggregate per receipt FIRST (mirrors the paid path above).
-        // Checking row-by-row let two rows that pick the SAME receipt each pass
-        // individually while their sum over-drew the receipt, and the edit
-        // add-back was applied once per duplicate row, widening the gap.
+        // MONEY-MATH: merged rows are checked PER RECEIPT, as on the paid path (row by row, two rows on
+        // one receipt each passed while their sum over-drew it).
         const mergedTotalsByReceipt = new Map();
         for (const alloc of mergedAllocations) {
           const rid = String(alloc.receiptId || '');
@@ -41512,9 +41422,8 @@ async function handleModalSubmit() {
           }
           const usageStats = getReceiptUsageStats(receipt);
           let remaining = usageStats.remainingUSD || 0;
-          // If editing, add back what this ad already merged from this receipt
-          // (mirrors the paid path) so re-saving the same amount is allowed —
-          // applied ONCE per receipt, not once per duplicate row.
+          // Editing: add back what this ad already merged from this receipt (as the paid path), ONCE
+          // per receipt, so re-saving the same amount passes.
           if (isEdit && state.modalData?.id) {
             const existingAd = state.ads.find(a => a.id === state.modalData.id);
             const src = existingAd?.mergedPaidAllocations || existingAd?.receiptAllocations;
@@ -41648,9 +41557,8 @@ async function handleModalSubmit() {
         adUpdates.unpaidReceiptDebtIncrease = unpaidReceiptDebtIncrease;
       }
       if (isServerModeEnabled() && document.getElementById('ad-meta-page-override')?.value === '1') {
-        // Request-only admin confirmation from the warned Change-page flow;
-        // the server pops it before saving, so it is never stored. Local mode
-        // has no server guard to satisfy, so it must not ride into the record.
+        // Request-only admin confirmation (warned Change-page flow); the server pops it, and local
+        // mode has no server guard, so it never rides into the record.
         adUpdates.confirmMetaPageOverride = true;
       }
 
@@ -41662,9 +41570,8 @@ async function handleModalSubmit() {
         if (_adCustomer && _adCustomer.name) adUpdates.customerName = String(_adCustomer.name);
       }
 
-      // Ordinary edits do not need to re-upload unchanged base64 images. Both
-      // the generic local update and the atomic server mutation merge omitted
-      // fields over the stored record. Sending [] remains an intentional clear.
+      // An edit sends no unchanged photos: both save paths merge omitted fields over the stored
+      // record. Sending [] is still an intentional clear.
       if (isEdit && !state.tempAdPhotosDirty) {
         delete adUpdates.adPhotos;
       } else if (isEdit) {
@@ -41674,11 +41581,8 @@ async function handleModalSubmit() {
         delete adUpdates.primaryAdPhotoIndex;
       }
 
-      // Re-baseline the top-up arithmetic. saveTopUps derives the ad's amount
-      // and end date from initialAmountUSD/initialEndDate + the top-ups. Those
-      // baselines are written ONLY by saveTopUps, so an amount/end-date edited
-      // here was silently REVERTED by the next top-up save (and the funding
-      // receipt re-charged). Rebase them off what we are saving now.
+      // saveTopUps derives amount and end date from initialAmountUSD/initialEndDate + the top-ups: rebase
+      // them on this save, or the next top-up save reverted this edit (and re-charged the receipt).
       if (isEdit && Array.isArray(state.modalData?.topUps) && state.modalData.topUps.length > 0) {
         const topUpUSD = state.modalData.topUps.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
         const topUpDays = state.modalData.topUps.reduce((s, t) => s + (parseInt(t.extendDays, 10) || 0), 0);
@@ -41689,12 +41593,8 @@ async function handleModalSubmit() {
         }
       }
 
-      // Liquidity window integrity: growing an ad's budget in an ORDINARY
-      // edit spends money exactly like a top-up but writes no dated row.
-      // Record the growth in an append-only ledger so the liquidity window
-      // can count in-window growth of pre-window ads (capped at real spend
-      // when read; shrinking an ad is never recorded — money returning is
-      // handled by refunds).
+      // Liquidity window integrity: budget growth in an ordinary edit spends money like a top-up, so log it
+      // (append-only, dated) for the window. Shrinking is never logged; returned money goes through refunds.
       if (isEdit) {
         const priorAmountUSD = parseFloat(state.modalData?.amountUSD) || 0;
         const growthUSD = Math.round((amountUSD - priorAmountUSD) * 100) / 100;
@@ -41713,15 +41613,12 @@ async function handleModalSubmit() {
         adUpdates.collectionDate = new Date().toISOString();
       }
       
-      // A terminal/refunded ad accepts two edits: a receipt RELINK (only the funding
-      // receipt changes) and a SETTLE (a paid-off debt moves onto paid receipts, to the
-      // cent). Anything else keeps the "Ad Finished — use Refund" block.
+      // A terminal/refunded ad takes a RELINK (only the funding receipt changes) or a SETTLE (a debt
+      // moves onto paid receipts, to the cent); anything else is "Ad Finished — use Refund".
       if (isEdit && adIsTerminalForEdit(state.modalData)) {
         const liveTerminalAd = state.modalData;
-        // Settle is detected FIRST: it is non-null only when the payment
-        // flipped not_paid -> paid, and a flipped payment can never be a
-        // plain relink (which forbids payment changes) — this also lets a
-        // settle move the funding onto a different receipt in the same save.
+        // Settle FIRST: only a not_paid -> paid flip is one, a relink never changes payment, and a
+        // settle may also move the funding onto another receipt in the same save.
         const settlePools = computeTerminalSettlePools(liveTerminalAd, adUpdates);
         const relinkPools = settlePools ? null : computeTerminalRelinkPools(liveTerminalAd, adUpdates);
         const onlyFundingChanged = relinkPools
@@ -41856,7 +41753,8 @@ async function handleModalSubmit() {
             'create',
             '',
             null,
-            buildServerAdMutationData(adUpdates, { create: true })
+            buildServerAdMutationData(adUpdates, { create: true }),
+            submitForm  // pins this form's ad id
           );
         } else {
           const ad = {
@@ -41906,6 +41804,9 @@ async function handleModalSubmit() {
         // ("Conflict: …"). Other 409s are business-rule refusals whose actual
         // reason must reach the user (see describe409).
         const conflict = isVersionConflict409(error);
+        if (conflict && isEdit && submitIsCurrent() && await reloadAdFormAfterConflict(submitData, submitIsCurrent)) return;
+        if (!isEdit && error?.status === 409 && /^ad id already exists/i.test(String(error?.message || '').trim())
+          && await adoptAlreadySavedAd(submitForm, submitIsCurrent)) return;
         showNotification(
           conflict ? (state.language === 'ar' ? 'تعارض في التعديل' : 'Ad Changed') : (state.language === 'ar' ? 'خطأ' : 'Error'),
           error?.status === 409
@@ -41913,6 +41814,9 @@ async function handleModalSubmit() {
             : _serverRefusalToast('save', 'ads', error)[1],
           conflict ? 'warning' : 'error'
         );
+        // RETURN, not break: the shared tail closed the form, losing what was typed.
+        if (!submitIsCurrent()) render();
+        return;
       }
       break;
     case 'user':
@@ -41943,8 +41847,7 @@ async function handleModalSubmit() {
       const userName = Security.sanitizeInput(document.getElementById('user-name').value, { maxLength: 100 });
       const userEmail = Security.sanitizeInput(document.getElementById('user-email').value, { maxLength: 120 }).toLowerCase();
 
-      // sanitizeInput trims, but a whitespace-only name still satisfies the
-      // HTML `required` attribute — reject it or a blank user gets saved.
+      // A whitespace-only name passes HTML `required` (sanitizeInput trims it): reject it.
       if (!userName) {
         showNotification(
           state.language === 'ar' ? 'خطأ في الإدخال' : 'Validation Error',
@@ -41963,11 +41866,8 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Email must be unique. In server mode the DB enforces this (returns 409),
-      // but in local mode nothing did — a duplicate email meant login always
-      // resolved to the FIRST matching user, permanently locking the other user
-      // out of their own account. Reject a duplicate against any other
-      // non-deleted user (excluding the one being edited).
+      // Email must be unique (the server 409s; local mode did not, and login then always found the
+      // FIRST match, locking the other user out): no other non-deleted user may hold it.
       {
         const _editingUserId = state.modalData?.id;
         const dup = (state.users || []).some(u =>
@@ -42007,9 +41907,10 @@ async function handleModalSubmit() {
       if (isEdit) {
           const payload = {
             name: userName,
-            email: userEmail,
-          role: userRole
+            email: userEmail
         };
+          // The role only when changed, plus the one this form opened on: a stale form gets 409.
+          if (userRole !== state.modalData.role) Object.assign(payload, { role: userRole, expectedRole: state.modalData.role });
         const newPassword = document.getElementById('user-password').value;
           if (newPassword) {
             if (String(newPassword).length < 8) {
@@ -42100,8 +42001,7 @@ async function handleModalSubmit() {
           delete updates.password;
         }
         
-        // If role changed to Admin, clear custom permissions (they get all by default)
-        // If role changed from Admin, set default permissions
+        // To Admin: clear custom permissions (Admins hold all); from Admin: the role's defaults.
         if (isAdminEditor) {
         const oldRole = state.modalData.role;
         if (oldRole !== userRole) {
@@ -42154,10 +42054,8 @@ async function handleModalSubmit() {
       const isArPage = state.language === 'ar';
       // Whitespace-only input satisfies `required` — trim + check both fields.
       const pageName = document.getElementById('page-name').value.trim();
-      // Collapse internal whitespace and cap the length: a category is a short
-      // label, and the raw field used to accept a 10,000-character paste that
-      // would permanently wreck the picker for everyone. Double spaces also
-      // used to create a second copy of an existing category.
+      // A category is a short label: collapse spaces (double spaces made a second copy of a
+      // category) and cap the length (a huge paste wrecked the picker for everyone).
       const pageCategory = Security.sanitizeInput(
         String(document.getElementById('page-category').value || '').replace(/\s+/g, ' ').trim(),
         { maxLength: 80 }
@@ -42171,10 +42069,8 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Duplicate-name guard (user request): a page whose name matches an
-      // existing page (case-insensitive, ignoring the page being edited) is
-      // BLOCKED for non-admins; an Admin gets an explicit approve-anyway
-      // confirmation. Prevents accidental duplicates like two "albayan" pages.
+      // A page name already in use (any case, other pages) is BLOCKED for staff; an Admin may confirm
+      // it anyway. Stops accidental duplicates like two "albayan" pages.
       const editingPageId = isEdit ? String(state.modalData?.id || '') : '';
       const duplicatePage = (state.pages || []).find(p =>
         p && !p._deleted &&
@@ -42361,11 +42257,8 @@ function closeModal() {
 }
 
 // ---- Delete-cascade helpers ----
-// When a receipt disappears, every record that references it must be updated
-// too, or money numbers go wrong (user report: deleting a transferred-in
-// receipt left the source receipt still showing the money as gone). These are
-// shared by deleteReceipt AND deleteCustomer so both paths clean up the same
-// way.
+// A deleted receipt updates every record that references it, or money numbers go wrong. Shared by
+// deleteReceipt and deleteCustomer so both clean up the same way.
 
 // Remove every funding reference to `receiptId` from visible ads (allocation
 // rows, merged mirror, direct id fields). Returns how many ads were touched.
@@ -42394,9 +42287,8 @@ async function cleanupAdFundingLinks(receiptId) {
       const kept = ad.companyFundingAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.companyFundingAllocations.length) updates.companyFundingAllocations = kept;
     }
-    // The merged-funding mirror too — leaving it stale would let the next ad
-    // edit reseed the merge editor from it and re-write an allocation that
-    // draws money from the deleted receipt.
+    // The merged-funding mirror too: left stale, the next ad edit re-seeds the merge editor from it
+    // and draws money from the deleted receipt again.
     if (Array.isArray(ad.mergedPaidAllocations)) {
       const kept = ad.mergedPaidAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.mergedPaidAllocations.length) {
@@ -42411,9 +42303,8 @@ async function cleanupAdFundingLinks(receiptId) {
       const kept = ad.receiptIds.filter(rid => rid !== receiptId);
       if (kept.length !== ad.receiptIds.length) updates.receiptIds = kept;
     }
-    // The stop-ad snapshot too: a later stop-amount edit recomputes the
-    // surviving receipts' shares from this baseline, so a deleted receipt
-    // left inside would dilute the pool and undercharge the survivors.
+    // The stop-ad snapshot too: a later stop-amount edit shares the pool from it, so a deleted
+    // receipt left inside would undercharge the survivors.
     if (ad.stopAllocationBaseline && typeof ad.stopAllocationBaseline === 'object') {
       const nextBaseline = { ...ad.stopAllocationBaseline };
       let baselineChanged = false;
@@ -42438,11 +42329,8 @@ async function cleanupAdFundingLinks(receiptId) {
   return touched;
 }
 
-// When a delivery is CANCELED its debt will never be collected, so ads funded
-// from that due credit must stop counting it — otherwise uncollectible money
-// keeps backing ad budgets forever. The ads themselves stay (no feature
-// removed); only their due-funding rows pointing at this receipt are
-// released. Returns how many ads were touched.
+// A CANCELED delivery's debt is never collected: release the ads' due-funding rows on it (the ads
+// stay), or uncollectible money backs their budgets forever. Returns how many ads changed.
 async function releaseCanceledDeliveryDueFunding(receiptId) {
   const rid = String(receiptId || '');
   let touched = 0;
@@ -42456,10 +42344,8 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
       const kept = ad.dueAllocations.filter(al => String(al?.receiptId || '') !== rid);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
-    // Legacy single-field shape predating dueAllocations. The mirror identity
-    // (linkedDeliveryReceiptId, or the older receiptId forms) comes from the
-    // shared reader so this release clears exactly the money the balance
-    // readers counted — both USD and LYD mirrors, like the server does.
+    // Legacy single-field shape predating dueAllocations: the shared reader names the mirror, so this
+    // clears exactly what the balance readers counted (USD and LYD), like the server.
     if (isAdLegacyDueMirrorForReceipt(ad, rid) && getAdLegacyDueMirrorUSD(ad, rid) > 0) {
       updates.dueAmountToUseUSD = 0;
       updates.dueAmountToUseLYD = 0;
@@ -42505,12 +42391,8 @@ async function undoTransferIntoReceipt(receipt) {
   return source;
 }
 
-// If `receipt` was a transfer SOURCE, its outgoing transfers created paired
-// TRANSFER_IN receipts for other customers. Deleting the source removes that
-// money's origin, so the paired receipts must be deleted too — otherwise the
-// other customers keep spendable money that no longer exists anywhere.
-// Handles onward (chained) transfers; `seen` guards against cycles. Returns
-// how many paired receipts were deleted.
+// A deleted transfer SOURCE takes its paired TRANSFER_IN receipts with it, or the other customers keep
+// money that no longer exists. Follows chained transfers (`seen` stops cycles); returns how many went.
 async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   seen = seen || new Set();
   if (!receipt || seen.has(String(receipt.id))) return 0;
@@ -42540,9 +42422,8 @@ async function deleteCustomer(id) {
   // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
-  // Server mode cannot safely unwind a customer's ads, receipts, transfers,
-  // and funding links through separate generic requests. Refuse before any
-  // mutation; a future dedicated cascade endpoint can make this atomic.
+  // Server mode cannot unwind a customer's ads, receipts, transfers and funding links safely through
+  // separate requests: refuse before any change (a cascade endpoint could make it atomic).
   if (isServerModeEnabled() && (linkedReceipts.length > 0 || linkedAds.length > 0)) {
     showNotification(
       state.language === 'ar' ? 'لا يمكن الحذف' : 'Cannot Delete Customer',
@@ -42582,11 +42463,8 @@ async function deleteCustomer(id) {
       if (!await deleteRecord(state.ads, ad.id, batchDeleteOps)) return;
     }
     for (const receipt of linkedReceipts) {
-      // Same link cleanup deleteReceipt does. Without it, ads of OTHER
-      // customers funded by these receipts kept dead allocation rows, money
-      // transferred IN from another customer stayed deducted at its source,
-      // and money transferred OUT lived on as spendable phantom receipts.
-      // Undo BEFORE cleanup: the undo reads spent amounts from allocations.
+      // deleteReceipt's link cleanup, or other customers' ads kept dead rows and transfers stayed
+      // half-done. Undo BEFORE cleanup: the undo reads spent amounts from the allocations.
       await undoTransferIntoReceipt(receipt);
       await cleanupAdFundingLinks(receipt.id);
       await cascadeDeleteOutgoingTransfers(receipt, undefined, batchDeleteOps);
@@ -42594,10 +42472,8 @@ async function deleteCustomer(id) {
     }
     if (!await deleteRecord(state.customers, id, batchDeleteOps)) return;
     if (!await flushBatchDeletes(batchDeleteOps.collectServerOps)) return;
-    // Unlink the customer from pages: page.customerIds kept the ghost id, so
-    // the Pages view still showed the deleted customer as owner and every
-    // page save re-persisted the dangling link. Only after the delete stuck:
-    // a refused delete must leave the pages linked.
+    // Unlink the customer from pages (a ghost id showed a deleted owner), only after the delete
+    // stuck: a refused delete leaves the pages linked.
     for (const page of getVisibleRecords(state.pages)) {
       if (Array.isArray(page.customerIds) && page.customerIds.includes(id)) {
         await updateRecord(state.pages, page.id, { customerIds: page.customerIds.filter(cid => cid !== id) });
@@ -42623,9 +42499,8 @@ async function deletePage(id) {
   }
   const isArPg = state.language === 'ar';
   let pageWarning = isArPg ? 'هل تريد حذف هذه الصفحة؟' : 'Delete this page?';
-  // Ads keep pointing at the deleted page's id for history. Recreating a page
-  // with the same name makes a NEW id, so those ads would not appear under it
-  // — the user must know this before deleting.
+  // Ads keep the deleted page's id for history; a recreated page gets a NEW id and will not list
+  // them, so say so before deleting.
   const pageAdsCount = state.ads.filter(a => a && !a._deleted && a.recordType !== 'receipt' && String(a.pageId || '') === String(id)).length;
   if (pageAdsCount > 0) {
     pageWarning += isArPg
@@ -42656,9 +42531,8 @@ async function deleteReceipt(id) {
     && !a._deleted
   );
   const isArDel = state.language === 'ar';
-  // Transfer links in BOTH directions (user report: deleting a transferred-in
-  // receipt must give the money back to the source; deleting a source must
-  // also remove the transferred-in receipts it created for other customers).
+  // Transfer links both ways: deleting a transferred-in receipt gives the money back to its source,
+  // and deleting a source removes the transferred-in receipts it made.
   const isTransferIn = String(receipt?.receiptType || '') === 'TRANSFER_IN';
   const transferSource = isTransferIn
     ? state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''))
@@ -42666,9 +42540,8 @@ async function deleteReceipt(id) {
   const outgoingTargets = (Array.isArray(receipt?.transfers) ? receipt.transfers : [])
     .map(t => state.receipts.find(r => r && !r._deleted && String(r.id) === String(t?.toReceiptId || '')))
     .filter(Boolean);
-  // The local single-device cascade above cannot be reproduced safely as a
-  // sequence of server requests. Block linked server deletions before the
-  // source receipt or any ad allocation is changed.
+  // The local single-device cascade above cannot be replayed safely as server requests: block
+  // linked server deletes before any receipt or allocation changes.
   if (isServerModeEnabled() && (linkedAds.length > 0 || transferSource || outgoingTargets.length > 0)) {
     showNotification(
       state.language === 'ar' ? 'لا يمكن حذف الوصل' : 'Cannot Delete Receipt',

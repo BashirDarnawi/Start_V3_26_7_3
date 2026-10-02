@@ -5,7 +5,8 @@ name: Publish verified Docker image
 # that CI has already proved.
 #
 #  1. `npm run release:github` on your computer pushes a `release-<sha>-<time>`
-#     tag; that tag push starts this workflow and always moves `latest`.
+#     tag; that tag push starts this workflow and moves `latest` (never back
+#     to an older release: a re-run of an older run only pushes its own tag).
 #  2. The "Run workflow" button (workflow_dispatch) builds the chosen branch and
 #     moves `latest` only when its option is ticked.
 #
@@ -260,6 +261,35 @@ jobs:
             exit 1
           fi
           docker buildx imagetools inspect "$IMAGE:${{ needs.release.outputs.release }}"
+      - name: Refuse to move latest backwards
+        if: ${{ github.event_name == 'push' || inputs.publish_latest }}
+        shell: bash
+        # Re-running an older release run (the red steps above suggest it) must
+        # not put older code back on latest. Compare the UTC time in the release
+        # names, not git history, so a fresh npm run release:github from an older
+        # commit still rolls back on purpose. The image carries its name in
+        # ALBAYAN_RELEASE_SHA (server/Dockerfile); none readable = first release.
+        run: |
+          set -euo pipefail
+          new="${{ needs.release.outputs.release }}"
+          cur="$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Image}}' 2>/dev/null \
+            | jq -r '.config.Env[]? | select(startswith("ALBAYAN_RELEASE_SHA=")) | sub("^ALBAYAN_RELEASE_SHA=";"")' || true)"
+          named='^release-[a-f0-9]+-[0-9TZ]+(-dirty)?$'
+          if [[ ! "$cur" =~ $named ]]; then
+            echo "latest holds no release name (${cur:-none}); moving it to $new."
+            exit 0
+          fi
+          # Digits of the time only; tag pushes carry milliseconds and manual
+          # runs do not, so pad both to the same length before comparing.
+          stamp() { cut -d- -f3 <<<"$1" | tr -cd '0-9'; }
+          held="$(stamp "$cur")"; this="$(stamp "$new")"
+          while (( ${#held} < ${#this} )); do held="${held}0"; done
+          while (( ${#this} < ${#held} )); do this="${this}0"; done
+          if [[ "$held" > "$this" ]]; then
+            echo "::error::latest already holds newer release $cur; only the rollback tag $IMAGE:$new was pushed. latest did NOT move."
+            exit 1
+          fi
+          echo "latest holds $cur; moving it to $new."
       - name: Publish latest image
         if: ${{ github.event_name == 'push' || inputs.publish_latest }}
         run: docker push "$IMAGE:latest"

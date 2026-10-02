@@ -26,6 +26,7 @@ Covers:
 
 Run with: PYTHONPATH=. pytest server/test_permissions_flow.py -v
 """
+import json
 import sys
 import os
 from pathlib import Path
@@ -39,7 +40,7 @@ from sqlalchemy import text
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
 from server.main import app
-from server.db import db_conn, init_db, json_dumps, now_ms
+from server.db import db_conn, init_db, json_dumps, json_loads, now_ms
 from server.security import PBKDF2_ITERATIONS_DEFAULT, hash_password, new_id
 
 # Keep this module's real login limits independent from hundreds of other
@@ -459,6 +460,73 @@ class TestDeliveriesPermissionsOnPatch:
         assert deny.status_code == 403
 
 
+class TestDeliveryGrantEcho:
+    """Bug-hunt R4 (permission-matrix-2): a deliveries.* grant authorizes workflow fields only.
+    A bare {_lastModified} passed every check, bumped the version (a colleague's open edit then
+    failed with "record has changed") and echoed the whole record, amounts and customer included,
+    to an account that may not view it."""
+
+    def test_empty_body_is_refused_and_a_non_viewer_gets_only_workflow_fields(
+        self, employee, delivery_manager, delivery_driver
+    ):
+        admin = employee["admin"]
+        created = client.post("/api/collections/receipts", json={"data": {
+            "customerName": "Grant Echo", "status": "Paid", "isPaid": True, "amountUSD": 25,
+            "amountLocal": 242.5, "exchangeRate": 9.7, "paymentMethod": "Cash (LYD)",
+            "payments": [{"method": "Cash (LYD)", "amount": 242.5, "rate": 1, "rate2": 9.7}],
+        }}, cookies=admin)
+        assert created.status_code == 200, created.text[:300]
+        rid = created.json()["id"]
+        assigned = client.patch(f"/api/collections/receipts/{rid}", json={"data": {
+            "deliveryPersonId": delivery_driver["id"], "deliveryStatus": "Needs Delivery"}},
+            cookies=delivery_manager["cookies"])
+        assert assigned.status_code == 200, assigned.text[:300]
+        ad_id = new_id("grantecho")
+        with db_conn() as conn:
+            conn.execute(text(
+                "INSERT INTO entities (type,id,data_json,deleted,created_at,created_by,last_modified) "
+                "VALUES ('ads',:id,:d,false,:t,NULL,:t)"
+            ), {"id": ad_id, "t": now_ms(), "d": json_dumps({
+                "id": ad_id, "recordType": "ad", "customerName": "Grant Echo", "amountUSD": 40, "isPaid": True,
+                "paymentStatus": "paid", "collectionMethod": "driver", "status": "Active",
+                "deliveryStatus": "Needs Delivery", "deliveryPersonId": delivery_driver["id"]})})
+
+        def stored_version(collection, entity_id):
+            got = client.get(f"/api/collections/{collection}/{entity_id}", cookies=admin)
+            assert got.status_code == 200, got.text[:300]
+            return got.json()["lastModified"]
+
+        for collection, entity_id in (("receipts", rid), ("ads", ad_id)):
+            before = stored_version(collection, entity_id)
+            empty = client.patch(f"/api/collections/{collection}/{entity_id}", json={"data": {"_lastModified": 0}},
+                                 cookies=delivery_manager["cookies"])
+            assert empty.status_code == 403, empty.text[:300]  # before: 200 and the whole record
+            assert stored_version(collection, entity_id) == before  # before: the version moved
+
+            noted = client.patch(f"/api/collections/{collection}/{entity_id}", json={"data": {"deliveryNotes": "x"}},
+                                 cookies=delivery_manager["cookies"])
+            assert noted.status_code == 200, noted.text[:300]
+            echo = noted.json()["data"]
+            assert echo["deliveryNotes"] == "x" and echo["deliveryStatus"] == "Needs Delivery"
+            assert echo["deliveryPersonId"] == delivery_driver["id"] and echo["id"] == entity_id
+            for hidden in ("amountUSD", "amountLocal", "customerName", "payments", "paymentMethod", "isPaid"):
+                assert hidden not in echo, (collection, hidden)
+            assert noted.json()["lastModified"] == stored_version(collection, entity_id)
+
+        # The same grant with receipts.view keeps the full echo.
+        _create_user(employee["admin"], "Delivery Viewer", "permflow-delivviewer@tests.albayanhub.com",
+                     DELIV_MGR_PASSWORD, "Employee",
+                     {"receipts": ["view"], "deliveries": ["view", "accept", "assign", "reassign"]})
+        viewer_cookies, _ = _login("permflow-delivviewer@tests.albayanhub.com", DELIV_MGR_PASSWORD)
+        full = client.patch(f"/api/collections/receipts/{rid}", json={"data": {"deliveryNotes": "y"}},
+                            cookies=viewer_cookies)
+        assert full.status_code == 200, full.text[:300]
+        assert full.json()["data"]["amountUSD"] == 25 and full.json()["data"]["customerName"] == "Grant Echo"
+        assert full.json()["data"]["deliveryNotes"] == "y"
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type='ads' AND id=:id"), {"id": ad_id})
+
+
 class TestUsersCrudPermissions:
     def test_employee_with_users_add_can_create_but_not_admin(self, employee):
         # Creating an Admin is blocked for non-admins.
@@ -611,12 +679,26 @@ class TestAutoSerialNumbers:
         }}, cookies=admin)
         assert r.status_code == 200, r.text[:300]
 
-        # The same auto-serial cannot be reused.
+        # The same auto-serial cannot be reused. The app proposes it from the receipts it can
+        # see, so the server saves the duplicate under the next free B number instead of a 409
+        # (bug-hunt R3, server-main-routes-1; paper numbers still 409).
         dup = client.post("/api/collections/receipts", json={"data": {
             "customerName": "Other", "status": "Paid",
             "paymentMethod": "Bank Transfer (USD)", "serialNumber": "B1",
         }}, cookies=admin)
-        assert dup.status_code == 409, f"duplicate B1 must 409, got {dup.status_code}"
+        assert dup.status_code == 200, f"duplicate B1 must get the next free B number, got {dup.status_code}"
+        reissued = dup.json()["data"]["serialNumber"]
+        assert reissued != "B1" and reissued[:1] == "B" and reissued[1:].isdigit(), reissued
+        assert dup.json()["data"]["finalReceiptNo"] == reissued
+        with db_conn() as conn:
+            held = [
+                {(json_loads(row["data_json"]) or {}).get(field) for field in ("serialNumber", "finalReceiptNo")}
+                for row in conn.execute(text(
+                    "SELECT data_json FROM entities WHERE type='receipts' AND deleted=false"
+                )).mappings().all()
+            ]
+        assert sum("B1" in numbers for numbers in held) == 1  # never a second B1
+        assert sum(reissued in numbers for numbers in held) == 1
 
         # A different group's number is fine.
         other = client.post("/api/collections/receipts", json={"data": {
@@ -631,3 +713,60 @@ class TestAutoSerialNumbers:
             "paymentMethod": "Sadad", "serialNumber": "E0",
         }}, cookies=employee["admin"])
         assert bad.status_code == 400, f"E0 must be rejected, got {bad.status_code}"
+
+
+class TestUserEditConflicts:
+    """Bug-hunt R4 (concurrency-idempotency-3): role and permission edits were
+    last-writer-wins, so a second manager's out-of-date screen silently re-granted
+    a revoked permission or restored a removed Admin role. The editor now sends
+    what its screen showed (expectedPermissions / expectedRole); a stale screen
+    gets 409 and nothing is written."""
+
+    @staticmethod
+    def _stored(user_id):
+        with db_conn() as conn:
+            row = conn.execute(text("SELECT name, role, permissions_json FROM users WHERE id=:id"),
+                               {"id": user_id}).mappings().first()
+        return row["name"], row["role"], _perm_sets(json.loads(row["permissions_json"] or "{}"))
+
+    def test_a_stale_permission_map_is_refused_and_the_current_one_saves(self, employee):
+        admin = employee["admin"]
+        target = _create_user(admin, "Conflict Target", "permflow-conflict@tests.albayanhub.com",
+                              "ConflictPass123!Secure", "Employee", {"receipts": ["view", "add", "edit", "delete"]})
+        uid = target["id"]
+        revoked = client.patch(f"/api/users/{uid}", cookies=admin, json={
+            "permissions": {"receipts": ["view", "add", "edit"]},
+            "expectedPermissions": {"receipts": ["view", "add", "edit", "delete"]}})
+        assert revoked.status_code == 200, revoked.text
+        # A second manager's screen still shows receipts.delete and grants ads.view.
+        stale = client.patch(f"/api/users/{uid}", cookies=admin, json={
+            "permissions": {"receipts": ["view", "add", "edit", "delete"], "ads": ["view"]},
+            "expectedPermissions": {"receipts": ["view", "add", "edit", "delete"], "ads": []}})
+        assert stale.status_code == 409, stale.text  # before: 200, the revoked grant came back
+        assert stale.json()["detail"] == "Conflict: this user was changed by someone else"
+        assert self._stored(uid)[2] == {"receipts": ["add", "edit", "view"]}
+        # The current map (any order, empty modules ignored) saves.
+        current = client.patch(f"/api/users/{uid}", cookies=admin, json={
+            "permissions": {"receipts": ["view", "add", "edit"], "ads": ["view"]},
+            "expectedPermissions": {"ads": [], "receipts": ["edit", "view", "add", "view"]}})
+        assert current.status_code == 200, current.text
+        assert self._stored(uid)[2] == {"ads": ["view"], "receipts": ["add", "edit", "view"]}
+
+    def test_a_stale_role_is_refused_and_a_name_only_edit_keeps_the_role(self, employee):
+        admin = employee["admin"]
+        target = _create_user(admin, "Former Admin", "permflow-former-admin@tests.albayanhub.com",
+                              "FormerAdmin123!Secure", "Admin", {})
+        uid = target["id"]
+        demoted = client.patch(f"/api/users/{uid}", cookies=admin, json={
+            "role": "Employee", "expectedRole": "Admin", "permissions": {"receipts": ["view"]}})
+        assert demoted.status_code == 200, demoted.text
+        # Another admin's Edit User form, opened while the account was an Admin.
+        stale = client.patch(f"/api/users/{uid}", cookies=admin, json={
+            "name": "Former Admin (fixed)", "role": "Admin", "expectedRole": "admin"})
+        assert stale.status_code == 409, stale.text  # before: 200, the account was an Admin again
+        assert self._stored(uid)[:2] == ("Former Admin", "Employee")
+        # The form now sends no role when the role did not change: the stored one stays.
+        named = client.patch(f"/api/users/{uid}", cookies=admin, json={
+            "name": "Former Admin (fixed)", "email": "permflow-former-admin@tests.albayanhub.com"})
+        assert named.status_code == 200, named.text
+        assert self._stored(uid)[:2] == ("Former Admin (fixed)", "Employee")

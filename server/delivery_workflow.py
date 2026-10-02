@@ -93,8 +93,8 @@ def patch_allowed(
         extra.add("deliveryHistory")
     if target_status == "Office":
         extra.add("statusDetail")
-    if not keys or not keys.issubset(WORKFLOW_FIELDS | extra):
-        return False
+    if not (keys - {"_lastModified"}) or not keys.issubset(WORKFLOW_FIELDS | extra):
+        return False  # a bare {_lastModified} wrote nothing but bumped the version and echoed the record
     if "deliveredAt" in keys:
         return False
 
@@ -152,6 +152,14 @@ def patch_allowed(
     if "deliveryNotes" in keys and not (has("accept") or has("assign") or has("reassign")):
         return False
     return has("accept") or has("assign") or has("reassign") or has("markCollected")
+
+
+def grant_echo(saved: dict[str, Any], fields: set[str]) -> dict[str, Any]:
+    """The saved record cut to ``fields`` (+ id and version): the PATCH echo for a caller whose grant
+    authorized it but who may not view the record, so no amount, customer or payment leaks."""
+    data = saved.get("data") or {}
+    meta = {key: saved.get(key) for key in ("id", "type", "deleted", "createdAt", "lastModified")}
+    return {**meta, "data": {key: data[key] for key in fields | {"id", "_lastModified"} if key in data}}
 
 
 def normalize_grant_updates(

@@ -17,11 +17,8 @@ document.addEventListener('click', function(e) {
 // RECEIPT MODAL HELPER FUNCTIONS
 // ==========================================
 
-// These two pickers run on EVERY keystroke of an oninput handler, and "09" is
-// the prefix of nearly every Libyan number — so the first characters typed
-// each rebuild the largest possible dropdown. Debouncing on the same 80 ms as
-// the list searches keeps the keyboard responsive; it changes nothing about
-// which records match.
+// Debounced (80 ms, like the list searches): these pickers ran on every keystroke and "09" starts
+// nearly every Libyan number, so each first key rebuilt the biggest dropdown. Matches are unchanged.
 let _receiptPhoneFilterTimer = null;
 let _pageCustomerFilterTimer = null;
 // Phone rows are cached briefly from when the picker opens (not rebuilt per
@@ -120,6 +117,7 @@ function showReceiptPhoneDropdown() {
 
 function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUsers) {
   const isArF = state.language === 'ar';
+  const esc = v => Security.escapeHtml(String(v));  // stored row values land inside attributes
   // BUG FIX: Check if array exists and has elements before accessing
   if (!Array.isArray(existingPayments) || existingPayments.length === 0) {
     return `<div class="text-xs text-slate-400 p-4">${isArF ? 'لا توجد دفعات معدة' : 'No payments configured'}</div>`;
@@ -145,12 +143,12 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
                 <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" onchange="onPaymentMethodChange(this)">
-                  ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                  ${paymentMethodOptions(payment.method).map(m => `<option value="${esc(m)}" ${payment.method === m ? 'selected' : ''}>${esc(trMethod(m))}</option>`).join('')}
                 </select>
               </div>
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">${isArF ? 'المبلغ' : 'Amount'}</label>
-                <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600 focus:ring-2 focus:ring-indigo-500/20" value="${esc(payment.amount || 0)}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
               </div>
             </div>
 
@@ -158,7 +156,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div class="grid grid-cols-2 gap-4">
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${esc(paymentRate1Value(payment))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R1:</div>
                   <span class="payment-r1-display text-sm font-bold text-indigo-600">0.00 LYD</span>
@@ -166,7 +164,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
               </div>
               <div class="bg-slate-50 dark:bg-slate-900/50 p-3 rounded-lg border border-slate-200 dark:border-slate-700">
                 <label class="text-[10px] font-bold text-slate-500 uppercase mb-1.5 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
-                <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+                <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1.5 rounded text-xs font-medium text-center mb-2" value="${esc(payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate)}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
                 <div class="text-center pt-2 border-t border-slate-200 dark:border-slate-700">
                   <div class="text-[10px] font-bold text-slate-400 mb-0.5">R2:</div>
                   <span class="payment-r2-display text-sm font-bold text-emerald-600">0.00 USD</span>
@@ -175,7 +173,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             </div>
 
             <!-- Hidden collection type for data consistency -->
-            <input type="hidden" class="collection-type" value="${payment.collectionType || 'office'}" />
+            <input type="hidden" class="collection-type" value="${esc(payment.collectionType || 'office')}" />
 
             <!-- Integrated Totals -->
             <div class="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700 grid grid-cols-2 gap-4">
@@ -235,19 +233,19 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'طريقة الدفع' : 'Payment Method'}</label>
               <select class="payment-method w-full glass-input px-3 py-2 rounded-lg text-sm font-medium border border-slate-200 dark:border-slate-600" onchange="onPaymentMethodChange(this)">
-                ${paymentMethodOptions(payment.method).map(m => `<option value="${m}" ${payment.method === m ? 'selected' : ''}>${trMethod(m)}</option>`).join('')}
+                ${paymentMethodOptions(payment.method).map(m => `<option value="${esc(m)}" ${payment.method === m ? 'selected' : ''}>${esc(trMethod(m))}</option>`).join('')}
               </select>
             </div>
             <div>
               <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">${isArF ? 'المبلغ' : 'Amount'}</label>
-              <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600" value="${payment.amount || 0}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-amount w-full glass-input px-3 py-2 rounded-lg text-sm font-bold border border-slate-200 dark:border-slate-600" value="${esc(payment.amount || 0)}" placeholder="0" oninput="sanitizeMoneyInput(this); updateReceiptTotals()" />
             </div>
           </div>
 
           <div class="grid grid-cols-2 gap-3">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 1' : 'RATE 1'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${paymentRate1Value(payment)}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate1 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${esc(paymentRate1Value(payment))}" placeholder="1" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R1: </span>
                 <span class="payment-r1-display text-xs font-bold text-indigo-600">0.00 LYD</span>
@@ -255,7 +253,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
             </div>
             <div class="bg-slate-50 dark:bg-slate-900/50 p-2 rounded-lg border border-slate-200 dark:border-slate-700">
               <label class="text-[10px] font-bold text-slate-500 uppercase mb-1 block">${isArF ? 'السعر 2' : 'RATE 2'}</label>
-              <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
+              <input type="text" inputmode="decimal" class="payment-rate2 w-full glass-input px-2 py-1 rounded text-xs mb-1" value="${esc(payment.rate2 !== undefined ? payment.rate2 : state.defaultExchangeRate)}" placeholder="0" oninput="sanitizeMoneyInput(this, 4); updateReceiptTotals()" />
               <div class="text-center pt-1 border-t border-slate-200 dark:border-slate-700">
                 <span class="text-[9px] font-bold text-slate-400">R2: </span>
                 <span class="payment-r2-display text-xs font-bold text-emerald-600">0.00 USD</span>
@@ -264,7 +262,7 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
           </div>
 
           <!-- Hidden collection type for data consistency -->
-          <input type="hidden" class="collection-type" value="${payment.collectionType || 'office'}" />
+          <input type="hidden" class="collection-type" value="${esc(payment.collectionType || 'office')}" />
         </div>
       </div>
     `).join('');
@@ -1131,14 +1129,9 @@ function getDefaultRate1(paymentMethod) {
   return state.defaultExchangeRate; // Default for others
 }
 
-// AUTO-SERIAL GROUPS
-// Some payment methods have no paper receipt from the provider, so the app
-// issues its own sequential number. Each group owns an INDEPENDENT counter:
-//   S — LTT / Libyana / Madar          (S1, S2, …)
-//   B — Bank Transfer (LYD) / (USD)    (B1, B2, …)
-//   O — Transfer Office                (O1, O2, …)
-//   E — Sadad / USDT                   (E1, E2, …)
-// The serial field is READ-ONLY for these methods (see updateSerialLockState).
+// AUTO-SERIAL GROUPS: methods with no provider paper receipt get an app-issued
+// number, one INDEPENDENT counter per group (S1.., B1.., O1.., E1..); the serial
+// field is READ-ONLY for them (see updateSerialLockState).
 const AUTO_SERIAL_GROUPS = {
   S: ['LTT', 'Libyana', 'Madar'],
   B: ['Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Bank Transfer'],
@@ -1220,11 +1213,8 @@ function getSelectedPaymentMethods() {
     .filter(Boolean);
 }
 
-// The auto-serial method to number this receipt by — but ONLY when EVERY
-// payment row is auto-numbered. If any row is a manual method (Cash), the
-// customer got a real paper receipt, so its number must be typed by hand and
-// the field stays editable. Returns null in that case (and when there are no
-// payment rows at all).
+// The auto-serial method for this receipt, ONLY when EVERY payment row is auto-numbered: a manual
+// row (Cash) means a real paper receipt, typed by hand. null then (and with no rows).
 function getSelectedAutoSerialMethod() {
   const paymentItems = document.querySelectorAll('.payment-split-item');
   let firstAuto = null;
@@ -1504,11 +1494,8 @@ function updateReceiptTotals() {
   
   let totalR1 = 0; // Total PAID (LYD) - sum of all R1 values
   let totalR2 = 0; // Total ADS CREDIT (USD) - sum of all R2 values (rounded UP, = credit granted)
-  // Un-rounded USD total. The credit granted (totalR2) is rounded UP in the
-  // customer's favor, but comparing THAT against the market rate manufactures a
-  // fake "saving" even when the customer paid exactly at market rate (and can
-  // hide a real "paid extra"). The saved-vs-extra verdict and the effective
-  // average rate must be judged from this un-rounded basis.
+  // Un-rounded USD total: the credit (totalR2) rounds UP for the customer, so judging saved-vs-extra
+  // and the average rate on it invents a fake "saving" (or hides a real "paid extra").
   let totalR2Raw = 0;
 
   paymentItems.forEach((item) => {
@@ -1702,9 +1689,18 @@ async function saveReceiptFromModal() {
 }
 
 // The server fills an empty D-number and type and re-stamps the name; a manual retry re-stamps the dates.
+function _notifyReceiptNumberChanged(from, to) {
+  const ar = state.language === 'ar';
+  showNotification(ar ? 'تغيّر رقم الوصل' : 'Receipt number changed', ar
+    ? `أصبح رقم الوصل ${to} (الرقم ${from} استُخدم للتو لوصل آخر).`
+    : `Receipt number changed to ${to} (${from} was just used by another receipt).`, 'info');
+}
+
 function receiptCreateRetryMatches(row, sent) {
   const cmp = { ...sent, customerName: undefined, startDate: undefined, endDate: undefined, collectionDate: undefined };
   if (!cmp.tempReceiptNo) cmp.tempReceiptNo = cmp.receiptType = undefined;
+  // The server may give this same row the next free app number.
+  if (isAutoSerialNumber(cmp.serialNumber) && String(row?.serialNumber || '')[0] === cmp.serialNumber[0]) cmp.serialNumber = cmp.finalReceiptNo = undefined;
   return serverRecordMatchesCreateRetry(row, cmp);
 }
 
@@ -1900,11 +1896,8 @@ async function _saveReceiptFromModalInner() {
   // Validate receipt number
   const serialInputEl = document.getElementById('receipt-serial');
   const serialErrEl = document.getElementById('receipt-serial-error');
-  // Safety net: an auto-numbered payment method must never save without its
-  // serial (e.g. the field was left empty because the method was pre-selected).
-  // It must NOT fire for a temp-delivery receipt (those carry a D-number) nor
-  // for a "Not Paid" receipt, whose number the form deliberately hides — issuing
-  // one there would burn a number on a receipt that shows none.
+  // Safety net: an auto-numbered method never saves without its serial, except a temp-delivery
+  // (D-number) or "Not Paid" receipt, whose number is hidden (issuing one would burn it).
   {
     const autoMethod = getSelectedAutoSerialMethod();
     const serialApplies = !isTempDelivery && status !== 'Not Paid';
@@ -1913,7 +1906,7 @@ async function _saveReceiptFromModalInner() {
       if (next) serialInputEl.value = next;
     }
   }
-  const serialNumber = document.getElementById('receipt-serial').value.trim();
+  let serialNumber = document.getElementById('receipt-serial').value.trim();
 
   // Temp delivery receipts must have a D{n} temporary number.
   if (isTempDelivery) {
@@ -1982,8 +1975,15 @@ async function _saveReceiptFromModalInner() {
       receipt.id !== (editTarget ? editTarget.id : null) &&
       !receipt._deleted
     );
-    
-    if (existingReceipt) {
+    // Another cashier's receipt took this app number first (S42): a NEW receipt takes the next free one.
+    const autoMethod = !editTarget && existingReceipt && getSelectedAutoSerialMethod();
+    const nextSerial = autoMethod && isAutoSerialNumber(serialNumber)
+      && serialNumber.startsWith(getAutoSerialPrefix(autoMethod)) ? getNextAutoSerialNumber(autoMethod) : null;
+    if (nextSerial && nextSerial !== serialNumber) {
+      _notifyReceiptNumberChanged(serialNumber, nextSerial);
+      serialNumber = nextSerial;
+      if (serialInputEl) serialInputEl.value = nextSerial;
+    } else if (existingReceipt) {
       const customer = state.customers.find(c => c.id === existingReceipt.customerId);
       const customerName = customer ? customer.name : (state.language === 'ar' ? 'غير معروف' : 'Unknown');
       
@@ -1996,11 +1996,8 @@ async function _saveReceiptFromModalInner() {
   // Determine delivery status and delivery person based on status and collection method
   let receiptDeliveryStatus = 'Office';
   let receiptDeliveryPersonId = '';
-  // MONEY-MATH: isPaid must be DERIVED from the status, not defaulted to true.
-  // 'Canceled'/'Lost' used to inherit the true default, so switching a NEVER-PAID
-  // receipt to Canceled/Lost flipped it to paid and minted spendable ad credit
-  // from money the business never received. A canceled/lost receipt only counts
-  // as paid if it really held money before (or a Lost one is resolved as paid).
+  // MONEY-MATH: isPaid is DERIVED from the status (a true default made a never-paid Canceled/Lost
+  // receipt paid, minting ad credit): only money held before, or Lost resolved as paid, counts.
   let receiptIsPaid = true;
   let receiptIsReceivedInOffice = true;
 
@@ -2077,11 +2074,8 @@ async function _saveReceiptFromModalInner() {
     }
   }
 
-  // Setting a not-yet-delivered temp delivery receipt to "Paid - By Delivery"
-  // IS a delivery completion, and the server only accepts completions through
-  // the verified flow (unique final number + proof photo + collected amounts).
-  // Route there instead of letting the save die with a raw server error:
-  // admins may complete it themselves, everyone else needs the driver.
+  // "Paid - By Delivery" on an undelivered temp receipt IS a completion, which the server takes only
+  // through the verified flow (final number + photo + amounts): admins go there, others need the driver.
   if (status === 'Paid' && (statusDetail.paidCollection || 'office') === 'delivery' && editTarget
       && isTempDeliveryReceiptNo(editTarget.tempReceiptNo)
       && editTarget.deliveryStatus !== 'Delivered' && editTarget.deliveryStatus !== 'Canceled') {
@@ -2328,7 +2322,9 @@ async function _saveReceiptFromModalInner() {
         newlyCreatedDeliveryReceiptId = String(saved.id || '');
       }
       showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الوصل بنجاح!' : 'Receipt created successfully!', 'success');
-      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : (serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);
+      // The server may hand out the next free app number.
+      if (isAutoSerialNumber(receipt.serialNumber) && saved.serialNumber && saved.serialNumber !== receipt.serialNumber) _notifyReceiptNumberChanged(receipt.serialNumber, saved.serialNumber);
+      addLog('create', 'receipt', saved.id, `Created receipt${saved.tempReceiptNo ? ' #' + saved.tempReceiptNo : ((saved.serialNumber || serialNumber) ? ' #' + (saved.serialNumber || serialNumber) : '')} for ${customerName}`);
     } else {
       const savedOk = await addRecord(state.receipts, receipt);
       if (!savedOk) return;
@@ -2463,11 +2459,8 @@ function checkReceiptNumberDuplicate(input) {
     return;
   }
   
-  // Check for duplicates (excluding current record if editing).
-  // Search state.receipts — receipts were migrated OUT of state.ads long ago
-  // (normalizeReceiptsFromAds strips recordType==='receipt' from ads on every
-  // load), so the old state.ads lookup never found anything and this live
-  // warning was a silent no-op. Mirrors the save-time check in saveReceipt.
+  // Check for duplicates (excluding current record if editing) in state.receipts, like the
+  // save-time check (receipts left state.ads long ago; the old lookup never matched).
   const existingReceipt = state.receipts.find(receipt =>
     receipt.serialNumber === serialNumber &&
     receipt.id !== (state.modalData ? state.modalData.id : null) &&
@@ -2812,12 +2805,8 @@ function getReceiptsForAd(customerId, pageId) {
     const isPaid = (r.isPaid === true) || statusLower === 'paid';
     if (!isPaid) return false;
 
-    // Funding receipts must be real paid receipts.
-    // Temp delivery receipts (D#) are allowed ONLY after they are finalized:
-    // - a final receipt number exists (digits or S-prefixed)
-    // A receipt may be collected/marked Paid from the Receipts screen after its
-    // delivery workflow. Its old deliveryStatus can remain Office, but Paid plus
-    // a final number is authoritative and is also what the server accepts.
+    // Funding receipts must be really paid: a temp delivery receipt (D#) only once it has a final
+    // number (Paid + final number is what the server accepts, even with deliveryStatus still Office).
     const looksTemp = (String(r.receiptType || '').toUpperCase() === 'DELIVERY_TEMP') || isTempDeliveryReceiptNo(r.tempReceiptNo);
     if (looksTemp) {
       const finalNo = String(r.finalReceiptNo || r.serialNumber || '').trim();

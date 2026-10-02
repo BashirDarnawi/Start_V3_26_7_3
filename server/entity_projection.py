@@ -62,11 +62,18 @@ def _is_customer_contact_field(key: Any) -> bool:
     )
 
 
+# The old/new values of a change-history row: {field: 'Phone Number', from, to}.
+HISTORY_VALUE_KEYS = frozenset({"from", "to", "oldValue", "newValue", "before", "after"})
+
+
 def _without_customer_contacts(value: Any) -> Any:
-    """Copy a JSON value while removing contact-bearing keys at any depth."""
+    """Copy a JSON value while removing contact-bearing keys at any depth.
+    A history row ABOUT a contact field (editHistory[].changes[]) stays, its
+    values shown as '—'."""
     if isinstance(value, dict):
+        masked = _is_customer_contact_field(value.get("field")) or _is_customer_contact_field(value.get("label"))
         return {
-            key: _without_customer_contacts(child)
+            key: "—" if masked and key in HISTORY_VALUE_KEYS else _without_customer_contacts(child)
             for key, child in value.items()
             if not _is_customer_contact_field(key)
         }
@@ -97,6 +104,14 @@ def drop_hidden_contact_writes(entity_type: str, data: Any, can_view_contacts: b
         key: value for key, value in data.items()
         if not (_is_customer_contact_field(key) and (value is None or value == [] or value == {} or not str(value).strip()))
     }
+
+
+def keep_stored_edit_history(stored: Any, incoming: Any) -> list[Any]:
+    """Write-side twin of the history masking: a writer without
+    customers.viewContacts received '—' for contact values and echoes them, so
+    the stored rows stay and only rows past them are appended."""
+    rows = list(stored) if isinstance(stored, list) else []
+    return rows + (list(incoming[len(rows):]) if isinstance(incoming, list) else [])
 
 
 def _without_inline_media(entity_type: str, data: dict[str, Any]) -> dict[str, Any]:

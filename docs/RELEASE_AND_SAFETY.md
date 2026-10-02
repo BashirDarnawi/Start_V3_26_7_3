@@ -63,7 +63,11 @@ npm run release:image:push
 
 The publisher always runs `release:quality`, even when invoked directly. This
 builds the frontend, checks generated assets, runs the test suites and browser
-flows, and rejects high-severity npm dependency findings. It publishes a single
+flows, and rejects high-severity npm dependency findings; `test:postgres` then
+proves the same PostgreSQL files as CI. Before anything is pushed it starts the
+built image once, like the GitHub smoke test (it must report the release name,
+run as a non-root user and serve every page and bundle), so code that cannot
+start on the image's own Python never becomes `latest`. It publishes a single
 Linux/amd64 Docker manifest compatible with the existing Jelastic workflow.
 
 Two tags are published: `bashird/albayan:latest` and a unique

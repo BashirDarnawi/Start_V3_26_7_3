@@ -95,7 +95,7 @@ function requestUserTombstoneRefresh() {
 function addRecord(array, record) {
   if (!Array.isArray(array) || !record || typeof record !== 'object') return Promise.resolve(false);
   const collectionName = getCollectionNameFromArray(array);
-  const cleanRecord = Security.sanitizeObject(record);
+  const cleanRecord = Security.sanitizeRecord(collectionName, record);
   if (!cleanRecord.id) cleanRecord.id = Security.generateSecureId(collectionName || 'id');
   const idCheck = Security.validateRecordIdentifiers(cleanRecord, collectionName || 'record');
   if (!idCheck.valid || !Security.isValidRecordId(cleanRecord.id)) {
@@ -140,7 +140,7 @@ function addRecord(array, record) {
         if (entity?.data && entity?.id) {
           const idx = array.findIndex(x => x && x.id === id);
           if (idx !== -1) {
-            array[idx] = Security.sanitizeObject(entity.data);
+            array[idx] = Security.sanitizeRecord(collectionName, entity.data);
             if (collectionName) markCollectionDirty(collectionName);
             saveState();
           }
@@ -157,7 +157,7 @@ function addRecord(array, record) {
             if (existing?.data && serverRecordMatchesCreateRetry(existing.data, cleanRecord)) {
               const idx = array.findIndex(x => x && x.id === id);
                if (idx !== -1) {
-                 const existingData = Security.sanitizeObject(existing.data);
+                 const existingData = Security.sanitizeRecord(collectionName, existing.data);
                  array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
                    ? makeLightweightMediaRecord(collectionName, existingData)
                    : existingData;
@@ -608,18 +608,15 @@ function updateRecord(array, id, updates, expectedLastModified) {
       return Promise.resolve(false);
     }
 
-    const sanitizedUpdates = Security.sanitizeObject(updates);
+    const sanitizedUpdates = Security.sanitizeRecord(collectionName, updates);
     const updatesIdCheck = Security.validateRecordIdentifiers(sanitizedUpdates, `${collectionName || 'record'}.updates`);
     if (!updatesIdCheck.valid) {
       showNotification('Invalid Record', updatesIdCheck.error, 'error');
       return Promise.resolve(false);
     }
-    // Never allow changing protected fields (createdByName is the
-    // creation-time stamp that keeps "Created by" readable after the
-    // creator's account is deleted, and customerName is the creation-time
-    // customer stamp that keeps a receipts/ads-only role able to read who the
-    // record is for — edits must never rewrite either; the live customer name
-    // still wins on read whenever it is available).
+    // Protected fields never change. createdByName and customerName are creation-time stamps (who
+    // made it once that account is gone; who it is for, for a receipts/ads-only role); the live
+    // customer name still wins on read.
     const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'customerName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
@@ -841,7 +838,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           } else if (entityOrSettlement?.data) {
             const idx = array.findIndex(x => x && x.id === id);
             if (idx !== -1) {
-              array[idx] = Security.sanitizeObject(entityOrSettlement.data);
+              array[idx] = Security.sanitizeRecord(collectionName, entityOrSettlement.data);
               if (collectionName) markCollectionDirty(collectionName);
               saveState();
             }
@@ -873,7 +870,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
               const idx = array.findIndex(x => x && x.id === id);
               let _latestData = null;
               if (idx !== -1 && latest?.data) {
-                 _latestData = Security.sanitizeObject(latest.data);
+                 _latestData = Security.sanitizeRecord(collectionName, latest.data);
                  array[idx] = collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function'
                    ? makeLightweightMediaRecord(collectionName, _latestData)
                    : _latestData;
@@ -989,7 +986,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           let fresh = _confirmedBase;
           try {
             const latest = await apiGetEntity(collectionName, id);
-            if (latest?.data) fresh = Security.sanitizeObject(latest.data);
+            if (latest?.data) fresh = Security.sanitizeRecord(collectionName, latest.data);
           } catch (_) {}
           const idx = array.indexOf(_optimisticRecord);
           if (idx !== -1) {
@@ -1696,10 +1693,8 @@ function getDeliveryReceiptDueUsage(receipt) {
   };
 }
 
-// Canonical receipt status used by filters and debt reporting. Historical
-// records contain several spellings (Pending, Unpaid, Cancelled), while new
-// records use Not Paid and Canceled. Keep that compatibility at read time so
-// old receipts immediately benefit without rewriting financial history.
+// Canonical receipt status for filters and debt reports: old spellings (Pending, Unpaid, Cancelled)
+// map at read time to Not Paid / Canceled, so financial history is never rewritten.
 function getReceiptPaymentState(receipt) {
   if (!receipt || receipt._deleted) return 'unknown';
   const status = String(receipt.status || '')
@@ -1751,6 +1746,7 @@ const _SERVER_REFUSAL_AR = [
   ['This account still has money in its wallet', 'ما زال في محفظة هذا الحساب مال؛ حوّله إلى مستخدم آخر أولاً ثم احذف الحساب.'],
   ['This driver still has open delivery jobs', 'لدى هذا السائق مهام توصيل مفتوحة؛ أعد إسنادها أو أنهِها أولاً.'],
   ['A user with this email already exists', 'يوجد مستخدم بهذا البريد الإلكتروني بالفعل.'],
+  ['Conflict: this user was changed by someone else', 'عدّل مدير آخر هذا المستخدم للتو؛ أعد فتح النموذج وحاول مجدداً.', 'Another manager just changed this user; reopen the form and try again.'],
   ['Cannot remove the last remaining admin', 'لا يمكن إزالة آخر مدير؛ رقِّ مستخدماً آخر إلى مدير أولاً.'],
   ['Cannot change the role of a user who holds permissions you do not', 'لا يمكنك تغيير دور مستخدم يملك صلاحيات لا تملكها.'],
   ['Cannot reset the password of a user who holds permissions you do not', 'لا يمكنك تغيير كلمة مرور مستخدم يملك صلاحيات لا تملكها.'],
@@ -1841,11 +1837,8 @@ function getReceiptDebtType(receipt) {
   return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';
 }
 
-// Locale for every user-visible date. Without an explicit locale, phones set
-// to Arabic default to ar-SA — Hijri calendar with Arabic-Indic digits — so
-// 2026-07-22 rendered as year ١٤٤٨. The -u- extension keys pin the Gregorian
-// calendar and latin digits; they are honored by every Intl implementation
-// far below the iOS 15 baseline.
+// Locale for every user-visible date: Arabic phones default to ar-SA (Hijri, Arabic-Indic digits: 2026
+// showed as ١٤٤٨); the -u- keys pin Gregorian and latin digits (supported far below iOS 15).
 function appDateLocale() {
   return state.language === 'ar' ? 'ar-LY-u-ca-gregory-nu-latn' : 'en-GB';
 }

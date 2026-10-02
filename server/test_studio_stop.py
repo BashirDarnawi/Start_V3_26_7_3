@@ -648,6 +648,32 @@ def test_contact_link_needs_consent_and_is_audited(people):
                      {"t": STUDIO_PROFILES_TYPE, "id": profile_id(owner["id"])})
 
 
+def test_contact_link_works_from_the_phone_apps(people):
+    """Bug-hunt R4 (ios-capacitor-bridge-1): the apps' GETs carry their own page as Referer and no
+    Origin, so 'Message on WhatsApp' answered 403 CROSS_SITE ('Open Albayan directly and try again')."""
+    owner, admin = people["owner"], people["admin"]
+    _save_number(owner)
+    approved = _campaign(owner["id"], "appcontact")
+    audited = len(_audits(profile_id(owner["id"]), "contact_link"))
+    app_client = TestClient(app)  # the native HTTP layer: no Origin header
+    url = f"/api/studio/staff/customers/{owner['id']}/contact"
+    params = {"relatedType": "campaign", "relatedId": approved}
+    try:
+        for referer in ("capacitor://localhost/?view=ads-studio", "https://localhost/index.html"):
+            link = app_client.get(url, params=params, cookies=admin["cookies"],
+                                  headers={"Referer": referer, "X-Request-ID": "pg-1"})
+            assert link.status_code == 200, (referer, link.text)  # before: 403 CROSS_SITE
+            assert link.json()["whatsapp"] == "+218912345678"
+        for referer in ("https://evil.example/", "capacitor://localhost.evil.example/"):
+            _error(app_client.get(url, params=params, cookies=admin["cookies"],
+                                  headers={"Referer": referer, "X-Request-ID": "pg-1"}), 403, "CROSS_SITE")
+        assert len(_audits(profile_id(owner["id"]), "contact_link")) == audited + 2  # the refused reads wrote nothing
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type = :t AND id = :id"),
+                         {"t": STUDIO_PROFILES_TYPE, "id": profile_id(owner["id"])})
+
+
 # ------------------------------------------------------------------ the desk switch (P3-20)
 
 

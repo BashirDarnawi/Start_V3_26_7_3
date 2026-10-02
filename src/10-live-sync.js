@@ -305,8 +305,7 @@ function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false)
   if (incomingVersion !== null) return true;
   if (currentVersion !== null) return false;
 
-  // Legacy/offline records may predate server revision stamps. Keep supporting
-  // them without reporting an identical replay as a change.
+  // Legacy/offline records may lack revision stamps: an identical replay is no change.
   try {
     return JSON.stringify(incoming) !== JSON.stringify(current);
   } catch (_) {
@@ -337,7 +336,7 @@ function applyServerDelta(collectionName, records, { refreshEqualVersion = false
     const existing = existingIndex !== undefined ? arr[existingIndex] : null;
     if (existing && !_shouldApplyDeltaRecord(rec, existing, refreshEqualVersion)) continue;  // version-only check, before the sanitiser
     const prepared = mergeMatchingVersionInlineMedia(collectionName, rec, existing);
-    const clean = Security.sanitizeObject(prepared);
+    const clean = Security.sanitizeRecord(collectionName, prepared);
     const idx = byId.get(clean.id);
     if (idx !== undefined) {
       if (!_shouldApplyDeltaRecord(clean, arr[idx], refreshEqualVersion)) continue;

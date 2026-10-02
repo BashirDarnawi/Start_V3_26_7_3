@@ -60,9 +60,12 @@ def test_composite_delivery_person_index_is_created_in_its_own_connection(monkey
         if any("idx_entities_type_delivery_person" in s for s in statements)
     ]
     assert len(composite) == 1, connections
-    # Alone in its connection so a failure cannot poison the other passes.
-    assert len(composite[0]) == 1
-    ddl = composite[0][0]
+    # Alone in its connection so a failure cannot poison the other passes:
+    # the two bounded-lock SET LOCAL lines, then the DDL last.
+    assert len(composite[0]) == 3
+    assert composite[0][0] == "SET LOCAL lock_timeout = '5s'"
+    assert composite[0][1] == "SET LOCAL statement_timeout = '120s'"
+    ddl = composite[0][-1]
     assert "ON entities (type, ((data_json::jsonb->>'deliveryPersonId')))" in ddl
     assert "WHERE deleted = false" in ddl
     assert "IF NOT EXISTS" in ddl
@@ -107,6 +110,26 @@ def test_studio_claim_lookup_index(monkeypatch):
         "ON entities (((data_json::jsonb->>'metaCampaignId'))) "
         "WHERE type = 'adCampaignRequests' AND deleted = false"
     )
+
+
+def test_every_boot_index_statement_gives_up_on_a_held_lock(monkeypatch):
+    """Bug-hunt R3 (server-main-routes-2): the composite delivery index and the three
+    uq_receipts_* unique indexes ran without the 5 s lock_timeout the other passes set,
+    so one open write transaction on entities hung PostgreSQL startup indefinitely."""
+    connections = []
+    monkeypatch.setattr(module, "get_engine", lambda: _Engine("postgresql"))
+    monkeypatch.setattr(module, "db_conn", _recording_db_conn(connections))
+
+    module.add_jsonb_indexes()
+
+    with_ddl = [statements for statements in connections if any("CREATE" in s for s in statements)]
+    unbounded = [statements for statements in with_ddl if "SET LOCAL lock_timeout = '5s'" not in statements]
+    assert with_ddl and unbounded == [], unbounded  # before: idx_entities_type_delivery_person + 3 uq_receipts_*
+    for name in ("uq_receipts_serial_no", "uq_receipts_final_no", "uq_receipts_temp_no"):
+        found = [statements for statements in with_ddl if any(name in s for s in statements)]
+        assert len(found) == 1 and found[0][:2] == [
+            "SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '120s'"
+        ] and "CREATE UNIQUE INDEX" in found[0][-1], found
 
 
 def test_index_pass_is_a_no_op_on_sqlite(monkeypatch):

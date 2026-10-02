@@ -140,6 +140,7 @@ def add_jsonb_indexes():
     # cannot poison the unique-index pass below.
     try:
         with db_conn() as conn:
+            _bound_ddl_locks(conn)
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS idx_entities_type_delivery_person "
                 "ON entities (type, ((data_json::jsonb->>'deliveryPersonId'))) "
@@ -159,6 +160,7 @@ def add_jsonb_indexes():
             # Separate connection per unique index: a duplicate-data failure
             # aborts the transaction, and we don't want it to poison the rest.
             with db_conn() as conn:
+                _bound_ddl_locks(conn)
                 conn.execute(text(sql))
             print(f"✅ Created unique index: {index_name}")
         except Exception as e:

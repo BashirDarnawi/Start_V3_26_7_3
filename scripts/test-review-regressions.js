@@ -1840,6 +1840,197 @@ async function main() {
     assert.deepEqual(Array.from(run('tempTopUps'), t => t.note), ['T1', 'T2'], 'the working list still misses the colleague\'s top-up');
     assert.ok(notes.some(n => n.type === 'warning' && /loaded the latest version/.test(n.message)), JSON.stringify(notes));
   });
+  // ---- Bug hunt r34 (ad-form-network): Edit Ad conflicts, failed ad saves, the New Ad id, the subscribe sheet ----
+  const r34Photo = `data:image/jpeg;base64,${'A'.repeat(64)}`;
+  const r34AdV1 = () => ({
+    id: 'ad_1', recordType: 'ad', customerId: 'cust_1', pageId: 'page_1', amountUSD: 50, amountLocal: 250,
+    exchangeRate: 5, paymentStatus: 'paid', collectionMethod: '', status: 'Active', deliveryStatus: 'Office',
+    deliveryPersonId: '', receiptAllocations: [{ receiptId: 'rcpt_1', amountUSD: 50 }], receiptIds: ['rcpt_1'],
+    fundingReceiptId: 'rcpt_1', receiptId: 'rcpt_1', dueAllocations: [], mergedPaidAllocations: [],
+    adLinks: ['https://fb.example/old'], adLink: 'https://fb.example/old', adPhotos: [r34Photo], topUps: [],
+    startDate: '2026-09-20T00:00:00.000Z', endDate: '2026-09-27T00:00:00.000Z', days: 7,
+    editHistory: [], createdBy: 'user_a', creatorId: 'user_a', _lastModified: 1790000000000
+  });
+  // A colleague's top-up (+$20, +3 days), as live sync delivers it: the photos stay on the server.
+  const r34TopUp = () => {
+    const { adPhotos, ...rest } = r34AdV1();
+    return { ...rest, _mediaOmitted: true, _photoCount: 1, amountUSD: 70, amountLocal: 350, initialAmountUSD: 50,
+      receiptAllocations: [{ receiptId: 'rcpt_1', amountUSD: 70 }], topUps: [{ date: '2026-09-22', amount: 20, extendDays: 3, note: 'B top-up' }],
+      initialEndDate: '2026-09-27T00:00:00.000Z', endDate: '2026-09-30T00:00:00.000Z', _lastModified: 1790000060000 };
+  };
+  const r34Full = ad => { const { _mediaOmitted, _photoCount, ...rest } = ad; return { ...rest, adPhotos: [r34Photo] }; };
+  function r34AdForm(openAd) {
+    const fixture = loadBrowserSource();
+    const { sandbox, state } = fixture;
+    sandbox.URLSearchParams = URLSearchParams;
+    sandbox.console = { ...sandbox.console, error() {} };
+    let n = 0;
+    sandbox.crypto.getRandomValues = arr => { for (let i = 0; i < arr.length; i += 1) arr[i] = (n++ * 37 + i) & 255; return arr; };
+    Object.assign(state, {
+      serverMode: true, currentUser: { id: 'user_a', role: 'Admin', name: 'Staff A', permissions: {} },
+      customers: [{ id: 'cust_1', name: 'Customer One', _lastModified: 1000 }],
+      pages: [{ id: 'page_1', name: 'Page One', customerIds: ['cust_1'], _lastModified: 1000 }],
+      receipts: [{ id: 'rcpt_1', customerId: 'cust_1', status: 'Paid', isPaid: true, amountUSD: 100, amountLocal: 500, exchangeRate: 5,
+        serialNumber: '1001', paymentMethod: 'Cash (LYD)', payments: [], transfers: [], _lastModified: 1000 }],
+      ads: openAd ? [openAd] : [], activeModal: 'ad', modalData: openAd || null
+    });
+    state.users = [state.currentUser];
+    if (openAd) sandbox.initAdFunding(openAd);
+    else state.tempAdFunding = { allocations: [{ receiptId: 'rcpt_1', amountUSD: 40 }] };
+    state.tempAdPhotos = openAd ? [...openAd.adPhotos] : [r34Photo];
+    state.tempAdPhotosDirty = !openAd;
+    const fields = { 'ad-payment-status': 'paid', 'ad-collection-method': '', 'ad-linked-receipt-id': '', 'ad-start-date': '2026-09-20',
+      'ad-end-date': '2026-09-27', 'ad-days': '7', 'ad-page': 'page_1', 'ad-customer-id': 'cust_1' };
+    const form = { id: 'modal-form', dataset: {} };
+    const links = ['https://fb.example/new'];
+    sandbox.document.getElementById = id => (id === 'modal-form' ? (state.activeModal ? form : null) : (id in fields ? { id, value: fields[id], dataset: {} } : null));
+    sandbox.document.querySelectorAll = sel => (sel === '.ad-link-input' ? links.map(value => ({ value })) : []);
+    const notes = [];
+    const renders = [];
+    const sent = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.renderModal = () => renders.push(state.modalData);
+    sandbox.apiGetEntity = async () => { throw new TypeError('Load failed'); };
+    const replies = [];
+    sandbox.apiMutateAd = async payload => {
+      sent.push(JSON.parse(JSON.stringify(payload)));
+      const reply = replies.shift();
+      if (reply) return reply(payload);
+      const version = Date.now();
+      const base = state.ads.find(ad => ad.id === payload.adId) || {};
+      return { ad: { id: payload.adId, data: { ...base, ...payload.data, id: payload.adId, _lastModified: version }, lastModified: version }, updatedReceipts: [] };
+    };
+    return { ...fixture, fields, form, links, notes, renders, sent, replies };
+  }
+  await test('R4 concurrency-idempotency-1: Edit Ad never saves its old values over a colleague\'s top-up; a Meta or spend sync still saves', async () => {
+    const t = r34AdForm(r34AdV1());
+    const { sandbox, state } = t;
+    const opened = state.modalData;
+    const topUp = r34TopUp();
+    assert.equal(sandbox.applyServerDelta('ads', [topUp]), true);
+    const asked = [];
+    sandbox.apiGetEntity = async (collection, id) => { asked.push(`${collection}/${id}`); return { id, data: r34Full(topUp), lastModified: topUp._lastModified }; };
+    await sandbox.handleModalSubmit();
+    assert.deepEqual(t.sent, [], 'before: the save sent the old $50 funding against the top-up\'s version, undoing it');
+    assert.equal(state.activeModal, 'ad');
+    assert.notEqual(state.modalData, opened);
+    assert.equal(state.modalData, state.ads[0]);
+    assert.equal(state.modalData._lastModified, topUp._lastModified);
+    assert.deepEqual(Array.from(state.tempAdFunding.allocations, row => row.amountUSD), [70]);
+    assert.deepEqual(state.modalData.adPhotos, [r34Photo], 'the newest copy came with its photos');
+    assert.deepEqual(asked, ['ads/ad_1']);
+    assert.equal(t.renders.length, 1, 'the form is drawn again from the newest copy');
+    assert.ok(t.notes.some(note => note.type === 'warning' && /changed on another device/.test(note.message)), JSON.stringify(t.notes));
+    // Photos the device cannot show: the form stays as typed (no save, no reload) until they can be loaded.
+    const unloaded = r34AdForm(r34AdV1());
+    unloaded.sandbox.applyServerDelta('ads', [topUp]);
+    await unloaded.sandbox.handleModalSubmit();
+    assert.deepEqual(unloaded.sent, []);
+    assert.equal(unloaded.renders.length, 0);
+    assert.equal(unloaded.state.activeModal, 'ad');
+    assert.ok(unloaded.notes.some(note => /Refresh the data/.test(note.message)), JSON.stringify(unloaded.notes));
+    // The reloaded form (end date and days now the top-up's) saves against the newest version.
+    t.notes.length = 0;
+    t.fields['ad-end-date'] = '2026-09-30';
+    await sandbox.handleModalSubmit();
+    assert.equal(t.sent.length, 1, JSON.stringify(t.notes));
+    assert.equal(t.sent[0].expectedLastModified, topUp._lastModified);
+    assert.deepEqual(t.sent[0].data.receiptAllocations, [{ receiptId: 'rcpt_1', amountUSD: 70 }]);
+    assert.equal(state.activeModal, null);
+    // Only a Meta or spend sync happened meanwhile (the photos stay on the server): the save goes out against it.
+    const spend = r34AdForm(r34AdV1());
+    const { adPhotos, ...thin } = r34AdV1();
+    const synced = { ...thin, _mediaOmitted: true, _photoCount: 1, spentUSD: 12.5, metaSpendUSD: 12.5, metaEffectiveStatus: 'ACTIVE', _lastModified: 1790000030000 };
+    spend.sandbox.applyServerDelta('ads', [synced]);
+    await spend.sandbox.handleModalSubmit();
+    assert.equal(spend.sent.length, 1, JSON.stringify(spend.notes));
+    assert.equal(spend.sent[0].expectedLastModified, synced._lastModified);
+    assert.deepEqual(spend.sent[0].data.adLinks, ['https://fb.example/new']);
+    assert.ok(!('adPhotos' in spend.sent[0].data), 'unchanged photos are not re-sent');
+  });
+  await test('R4 concurrency-idempotency-2: a server version conflict reloads the open Edit Ad form from the newest copy instead of closing it', async () => {
+    const t = r34AdForm(r34AdV1());
+    const { sandbox, state } = t;
+    const topUp = r34TopUp();
+    t.replies.push(() => { throw Object.assign(new Error('Conflict: ad has changed'), { status: 409 }); });
+    sandbox.apiGetEntity = async (collection, id) => ({ id, data: r34Full(topUp), lastModified: topUp._lastModified });
+    await sandbox.handleModalSubmit();
+    assert.equal(t.sent.length, 1);
+    assert.equal(state.activeModal, 'ad', 'before: the conflict closed the form');
+    assert.equal(state.modalData._lastModified, topUp._lastModified);
+    assert.deepEqual(Array.from(state.tempAdFunding.allocations, row => row.amountUSD), [70]);
+    assert.equal(t.renders.length, 1);
+    assert.ok(t.notes.some(note => note.type === 'warning' && /loaded the latest version/.test(note.message)), JSON.stringify(t.notes));
+  });
+  for (const failure of ['timeout', 'HTTP 502']) {
+    await test(`R4 concurrency-idempotency-2: a New Ad save that fails (${failure}) keeps the form; the next Save keeps the ad id and meets the first one`, async () => {
+      const t = r34AdForm(null);
+      const { sandbox, state } = t;
+      const funding = state.tempAdFunding;
+      const photos = state.tempAdPhotos;
+      t.replies.push(() => { throw failure === 'timeout' ? new DOMException('The request timed out', 'AbortError') : Object.assign(new Error('The server is busy or restarting (HTTP 502). Try again in a moment.'), { status: 502 }); });
+      t.replies.push(() => { throw Object.assign(new Error('Ad ID already exists'), { status: 409 }); });
+      await sandbox.handleModalSubmit();
+      assert.equal(t.sent.length, 1);
+      assert.equal(state.activeModal, 'ad', 'before: the failed save closed the form and dropped what was typed');
+      assert.equal(state.tempAdFunding, funding);
+      assert.equal(state.tempAdPhotos, photos);
+      assert.equal(t.form.dataset.draftAdId, t.sent[0].adId);
+      // The first Save had gone through. The user fixes the link and saves again.
+      t.links[0] = 'https://fb.example/fixed';
+      const stored = { ...t.sent[0].data, id: t.sent[0].adId, _lastModified: 5 };
+      const asked = [];
+      sandbox.apiGetEntity = async (collection, id) => { asked.push(`${collection}/${id}`); return { id, data: stored, lastModified: 5 }; };
+      await sandbox.handleModalSubmit();
+      assert.equal(t.sent.length, 2, 'no third create');
+      assert.equal(t.sent[1].adId, t.sent[0].adId, 'before: a new ad id, so the committed first Save became a second ad');
+      assert.notEqual(t.sent[1].idempotencyKey, t.sent[0].idempotencyKey);
+      assert.deepEqual(t.sent[1].data.adLinks, ['https://fb.example/fixed']);
+      assert.deepEqual(asked, [`ads/${t.sent[0].adId}`]);
+      assert.deepEqual(state.ads.map(ad => ad.id), [t.sent[0].adId], 'the stored ad is installed');
+      assert.equal(state.activeModal, null);
+      assert.ok(t.notes.some(note => note.title === 'Already saved' && /first Save went through/.test(note.message)), JSON.stringify(t.notes));
+      // The next New Ad form gets a new id.
+      state.activeModal = 'ad';
+      state.tempAdFunding = { allocations: [{ receiptId: 'rcpt_1', amountUSD: 40 }] };
+      t.form.dataset = {};
+      await sandbox.handleModalSubmit();
+      assert.equal(t.sent.length, 3);
+      assert.notEqual(t.sent[2].adId, t.sent[0].adId);
+    });
+  }
+  await test('R4 permission-matrix-4: the subscribe sheet sends a non-admin short of balance to the office, not to the admin-only Charge wallet', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run("Security.escapeHtml = s => String(s ?? '')");
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    const drawn = () => { made.length = 0; sandbox.renderModal(); return made.map(el => String(el.innerHTML || '')).join('\n'); };
+    state.serverMode = true;
+    state.walletTransactions = [];
+    state.subscriptionPlans = [{ id: 'plan_clothes', name: 'Clothes monthly', nameAr: 'الملابس شهرياً', serviceIds: ['clothes-system'], priceMinor: 5000, durationDays: 30 }];
+    state.currentUser = { id: 'shop1', role: 'Employee', name: 'Shop', permissions: JSON.parse(JSON.stringify(run('PERMISSION_TEMPLATES.clothesSubscriber.permissions'))) };
+    state.users = [state.currentUser];
+    state.activeModal = 'subscription-lock';
+    state.modalData = { serviceId: 'clothes-system', serviceName: 'Clothes System' };
+    let html = drawn();
+    assert.ok(html.includes("handleSubscribePlan('plan_clothes'") && html.includes('disabled'), html.slice(0, 300));
+    assert.ok(!html.includes('hubOpenChargeWallet'), 'before: a Charge wallet button that leads to an admin-only page');
+    assert.ok(!html.includes('charge the wallet first'));
+    assert.ok(html.includes('Balance is short — ask the office to top up your wallet.'), 'the short-balance hint');
+    assert.ok(html.includes('>Ask the office to top up your wallet.</p>'), 'the line under the plans');
+    state.language = 'ar';
+    html = drawn();
+    assert.ok(html.includes('الرصيد غير كافٍ — اطلب من المكتب شحن محفظتك.') && html.includes('>اطلب من المكتب شحن محفظتك.</p>'));
+    assert.ok(!html.includes('اشحن المحفظة'));
+    // An admin keeps Charge wallet and its hint.
+    state.language = 'en';
+    state.currentUser = { id: 'adm', role: 'Admin', name: 'Admin', permissions: {} };
+    state.users = [state.currentUser];
+    html = drawn();
+    assert.ok(html.includes('hubOpenChargeWallet') && html.includes('Charge wallet') && html.includes('charge the wallet first'));
+    assert.ok(!html.includes('Ask the office'));
+  });
   await test('r6 A n=15: a live Not-Paid ad the company partly covered can be switched to Paid with the customer\'s share', async () => {
     const { sandbox, state } = loadBrowserSource();
     state.pages = [{ id: 'p1', name: 'Page', customerId: 'c1' }];
@@ -2011,7 +2202,37 @@ async function main() {
     assert.ok(notes.length === 1 && notes[0].type === 'success' && notes[0].title === 'All reminded', JSON.stringify(notes));
   });
 
-  await test('r5 PRN n=20: in the packaged app Print, Print ads, the backup and every export say "use the web version" and never claim a download', async () => {
+  await test('r5 PRN n=20 + R3 ios-app-review-5: the packaged app draws no Print or Export button that can only fail; a direct call says it is not available in the app (never "use the web version") and never claims a download', async () => {
+    // The buttons: drawn on the web, gone in the packaged app.
+    const drawn = app => {
+      const { sandbox, state, run } = loadBrowserSource();
+      run('Security').escapeHtml = plainEscape;
+      run('Platform.detect()').isCapacitor = app;
+      state.serverMode = true;
+      sandbox.refreshServerAuditLogs = () => {};
+      state.receipts = [{ id: 'r1', customerId: 'c1', recordType: 'receipt', amountUSD: 100, amountLocal: 500, exchangeRate: 5, status: 'Paid', isPaid: true, createdAt: new Date().toISOString(), createdBy: 'admin' }];
+      const html = {};
+      for (const view of ['Receipts', 'Ads', 'Deliveries', 'Audit', 'Settings']) html[view] = String(run(`render${view}View()`));
+      const clothes = clothesFixture();
+      clothes.run('Security').escapeHtml = plainEscape;
+      clothes.run('Platform.detect()').isCapacitor = app;
+      Object.assign(clothes.state, { clothesProducts: [{ id: 'p1', name: 'Shirt', variants: [], createdBy: 'admin' }],
+        clothesShipments: [{ id: 's1', supplier: 'X', status: 'ordered', createdBy: 'admin' }],
+        clothesOrders: [{ id: 'o1', lines: [], status: 'New', paymentStatus: 'unpaid', createdBy: 'admin', createdAt: new Date().toISOString() }] });
+      for (const tab of ['Products', 'Shipments', 'Orders']) html[`clothes${tab}`] = String(clothes.run(`renderClothes${tab}Tab()`));
+      return html;
+    };
+    const buttons = [['Receipts', 'printReceiptCard(this)'], ['Ads', 'printCurrentPage()'], ['Deliveries', 'exportDeliveryReport()'],
+      ['Audit', "exportAuditLogs('csv')"], ['Audit', "exportAuditLogs('json')"], ['Audit', 'backupAuditLogs()'], ['Settings', 'downloadFullServerBackup(this)'],
+      ['clothesProducts', 'exportClothesProductsCSV()'], ['clothesShipments', 'exportClothesShipmentsCSV()'], ['clothesOrders', 'exportClothesOrdersCSV()'], ['clothesOrders', "printClothesOrderSlip('o1')"]];
+    const web = drawn(false);
+    const packaged = drawn(true);
+    for (const [view, call] of buttons) {
+      assert.ok(web[view].includes(call), `the web keeps ${call}`);
+      assert.ok(!packaged[view].includes(call), `before: the app drew ${call}, which can only fail there`);
+    }
+    assert.ok(packaged.Settings.includes('exportData()'), 'Settings Export stays: in the app it offers the clipboard');
+    // A direct call (an old link, the command palette) still never fakes a download or a print.
     const { sandbox, state, run } = loadBrowserSource();
     run('Platform.detect()').isCapacitor = true;
     const notes = [];
@@ -2042,18 +2263,23 @@ async function main() {
     assert.ok(!sandbox.document.body.classList.contains('print-single') && !card.classList.contains('print-target'));
     for (const list of [notes, clothes.notes]) assert.ok(!list.some(n => n.type === 'success'), JSON.stringify(list));
     // download, receipt print, page print, and the backup after its clipboard offer was declined
-    assert.equal(notes.filter(n => n.type === 'warning' && n.message.includes('inside the app — use the web version in a browser')).length, 4, JSON.stringify(notes));
-    assert.equal(clothes.notes.filter(n => n.type === 'warning' && n.message.includes('use the web version')).length, 2, JSON.stringify(clothes.notes));
-    assert.ok(asked.length === 1 && asked[0].includes('inside the app') && asked[0].includes('Copy the backup to the clipboard instead?'), asked[0]);
+    assert.deepEqual(notes.map(n => `${n.type}: ${n.message}`), ["warning: Downloads aren't available in the app.", "warning: Printing isn't available in the app.",
+      "warning: Printing isn't available in the app.", "warning: Downloads aren't available in the app."]);
+    assert.deepEqual(clothes.notes.map(n => n.message), ["Printing isn't available in the app.", "Downloads aren't available in the app."]);
+    assert.ok(asked.length === 1 && asked[0] === "Downloads aren't available in the app.\n\nCopy the backup to the clipboard instead?", asked[0]);
     state.language = 'ar';
     run("notifyInAppBrowserLimitation('print')");
-    assert.ok(notes.at(-1).message.includes('داخل التطبيق — استخدم نسخة الويب في المتصفح'), notes.at(-1).message);
+    assert.equal(notes.at(-1).message, 'الطباعة غير متاحة داخل التطبيق.');
+    assert.equal(run("inAppLimitationText('download')"), 'التنزيل غير متاح داخل التطبيق.');
+    for (const text of [...notes.map(n => n.message), ...clothes.notes.map(n => n.message), ...asked]) {
+      assert.ok(!/web version|in a browser|نسخة الويب/.test(text), `the app never sends people to the web: ${text}`);
+    }
     // A Facebook in-app browser keeps its own way out.
-    const web = loadBrowserSource();
-    Object.assign(web.run('Platform.detect()'), { isInAppBrowser: true });
+    const web2 = loadBrowserSource();
+    Object.assign(web2.run('Platform.detect()'), { isInAppBrowser: true });
     const webNotes = [];
-    web.sandbox.showNotification = (title, message, type) => { webNotes.push({ title, message, type }); };
-    assert.equal(web.run("downloadFile('a', 'x.csv', 'text/csv')"), false);
+    web2.sandbox.showNotification = (title, message, type) => { webNotes.push({ title, message, type }); };
+    assert.equal(web2.run("downloadFile('a', 'x.csv', 'text/csv')"), false);
     assert.ok(webNotes[0].message.includes('Facebook/Instagram in-app browser — open this page in Safari or Chrome'), webNotes[0].message);
   });
 
@@ -3420,6 +3646,281 @@ async function main() {
     assert.equal(run('studioBuilderPayload(__r8Draft, null).notes'), 'xhi');
     assert.equal(run('sanitizedAdsStudioDraft().notes'), 'xhi');
   });
+  // ---- Loop round 34, studio (R3 studio-client-1..5) ----
+  await test('R3 studio-client-1: ad words with "data:", "JavaScript:" or "on…=" are saved, synced, reopened and reviewed as typed; other records are still stripped', async () => {
+    const studio = studioFixture();
+    const { sandbox, state, run, calls, replies } = studio;
+    const words = { primaryText: 'Mobile data: 10GB for 30 LYD', headline: 'Learn JavaScript: from zero', description: 'Order online=fast' };
+    const wordsOf = row => ({ primaryText: row.primaryText, headline: row.headline, description: row.description });
+    const sent = [];
+    let version = 100;
+    sandbox.apiCreateEntity = async (collection, record) => {
+      sent.push(['create', JSON.parse(JSON.stringify(record))]);
+      return { id: record.id, data: { ...record, createdBy: 'cust1', _lastModified: version }, lastModified: version };
+    };
+    sandbox.apiPatchEntity = async (collection, id, updates) => {
+      sent.push(['patch', JSON.parse(JSON.stringify(updates))]);
+      version += 1;
+      const row = state.adCampaignRequests.find(item => item.id === id) || {};
+      return { id, data: { ...row, ...updates, _lastModified: version }, lastModified: version };
+    };
+    state.adCampaignRequests = [];
+    // The classic Save draft (addRecord), then an edit of it (updateRecord): the words go as typed.
+    run(`_adsStudioDraft = { ...newAdsStudioDraft(), name: 'Summer offer', ...${JSON.stringify(words)} };`);
+    await sandbox.saveAdsStudioDraft(false);
+    assert.equal(sent[0][0], 'create');
+    assert.deepEqual(wordsOf(sent[0][1]), words, 'before: primaryText arrived as "Mobile  10GB for 30 LYD"');
+    const id = sent[0][1].id;
+    assert.deepEqual(wordsOf(state.adCampaignRequests[0]), words, 'the saved copy on this device');
+    run("_adsStudioDraft.headline = 'Buy one = get one, onsale=yes'; _adsStudioDraft.notes = 'data: plan';");
+    await sandbox.saveAdsStudioDraft(false);
+    assert.equal(sent[1][0], 'patch');
+    assert.equal(sent[1][1].headline, 'Buy one = get one, onsale=yes');
+    assert.equal(sent[1][1].notes, 'data: plan');
+    // Live sync, a batch echo and the full read for the photos keep them (and the team's words).
+    const row = { ...JSON.parse(JSON.stringify(state.adCampaignRequests[0])), ...words, notes: 'data: plan',
+      reviewNote: 'Fix the JavaScript: part', stopReason: 'onhold=yes', status: 'Draft', _lastModified: 500 };
+    assert.equal(sandbox.applyServerDelta('adCampaignRequests', [row]), true);
+    assert.deepEqual(wordsOf(state.adCampaignRequests[0]), words, 'before: live sync stored "Mobile  10GB…"');
+    assert.deepEqual([state.adCampaignRequests[0].notes, state.adCampaignRequests[0].reviewNote, state.adCampaignRequests[0].stopReason],
+      ['data: plan', 'Fix the JavaScript: part', 'onhold=yes']);
+    sandbox.applyValidatedServerEntityBatch([{ collection: 'adCampaignRequests', entity: { id, data: { ...row, _lastModified: 600 }, lastModified: 600 } }]);
+    assert.deepEqual(wordsOf(state.adCampaignRequests[0]), words, 'a batch echo');
+    const lean = { ...state.adCampaignRequests[0], _mediaOmitted: true, _photoCount: 1 };
+    delete lean.creativeImages;
+    state.adCampaignRequests[0] = lean;
+    sandbox.apiGetEntity = async () => ({ id, data: { ...row, creativeImages: ['data:image/png;base64,AAAA'], _lastModified: 600 }, lastModified: 600 });
+    assert.deepEqual(wordsOf(await sandbox.ensureEntityMediaLoaded('adCampaignRequests', id)), words, 'the full read for the photos');
+    assert.deepEqual(wordsOf(await sandbox.ensureEntityMediaLoaded('adCampaignRequests', id)), words, 'its cached copy');
+    state.adCampaignRequests[0] = { ...row, _lastModified: 600 };
+    // The reopened forms: the v2 builder's draft and the classic edit.
+    assert.deepEqual(wordsOf(JSON.parse(run('JSON.stringify(studioBuilderDraftFromCampaign(state.adCampaignRequests[0]))'))), words, 'v2 builder draft');
+    run('_adsStudioDraft = null;');
+    await sandbox.startAdsStudioCampaign(id);
+    assert.deepEqual(wordsOf(run('_adsStudioDraft')), words, 'classic edit draft');
+    // The copy on this device (saved state, loaded state, a cache cleaned before drawing).
+    const whole = run("Security.sanitizeObject({ adCampaignRequests: [{ id: 'a1', primaryText: 'Mobile data: 10GB', name: '<b>Sale</b>' }], receipts: [{ id: 'r1', notes: 'data: x' }] })");
+    assert.deepEqual([whole.adCampaignRequests[0].primaryText, whole.adCampaignRequests[0].name, whole.receipts[0].notes], ['Mobile data: 10GB', 'bSale/b', 'x']);
+    const later = sandbox.setTimeout;
+    sandbox.setTimeout = fn => { fn(); return 1; };  // its yield between chunks
+    state.adCampaignRequests = [{ ...row }];
+    state.receipts = [{ id: 'r1', notes: 'data: x onclick=go' }];
+    await sandbox.sanitizeCollectionInPlace('adCampaignRequests');
+    await sandbox.sanitizeCollectionInPlace('receipts');
+    sandbox.setTimeout = later;
+    assert.deepEqual(wordsOf(state.adCampaignRequests[0]), words, 'a cache cleaned before drawing');
+    // Guards: every other record keeps today's stripping; < and > still go from the ad words.
+    assert.equal(run("Security.sanitizeObject({ notes: 'data: x' }).notes"), 'x');
+    assert.equal(run("Security.sanitizeRecord('receipts', { notes: 'data: x' }).notes"), 'x');
+    assert.equal(state.receipts[0].notes, 'x go');
+    assert.equal(run("Security.sanitizeRecord('adCampaignRequests', { headline: ' javascript:<i>Go</i> now', notes: 'data: x' }).headline"), 'iGo/i now');
+    // The team's note is sent and kept as written: the classic review and the Team desk.
+    state.currentUser = { id: 'staff1', role: 'Employee', permissions: { adCampaignRequests: ['view', 'review'] } };
+    state.users = [state.currentUser];
+    state.adCampaignRequests = [{ ...row, status: 'Submitted', createdBy: 'cust1', _lastModified: 700 }];
+    const url = `/api/ad-studio/campaigns/${encodeURIComponent(id)}/review`;
+    replies[url] = options => ({ id, data: { ...row, status: 'Changes Requested', reviewNote: options.body.note, _lastModified: 800 }, lastModified: 800 });
+    run(`setAdsStudioReviewNote('${id}', 'data: plan, onsale=no'); setAdsStudioReviewReason('${id}', 'text_policy');`);
+    await sandbox.reviewAdsStudioCampaign(id, 'Changes Requested');
+    const review = calls.filter(call => call.url === url);
+    assert.equal(review.length, 1);
+    assert.equal(review[0].body.note, 'data: plan, onsale=no', 'before: the note arrived as "plan, no"');
+    assert.equal(state.adCampaignRequests[0].reviewNote, 'data: plan, onsale=no');
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['studio-staff.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    state.adCampaignRequests = [{ ...row, status: 'Submitted', createdBy: 'cust1', _lastModified: 900 }];
+    run(`(() => { const draft = studioDeskDecision('${id}'); draft.reason = 'text_policy'; draft.note = 'Mobile data: say it once'; })();`);
+    await sandbox.studioDeskDecide(id, 'Changes Requested');
+    assert.equal(calls.filter(call => call.url === url)[1].body.note, 'Mobile data: say it once', 'the desk note');
+    // Drawn escaped: a request name with a double quote stays inside its text.
+    const card = String(sandbox.renderAdsStudioCampaignCard({ ...row, name: 'Say "hi" onmouseover=alert(1)', status: 'Draft' }));
+    assert.ok(card.includes('Say &quot;hi&quot; onmouseover=alert(1)') && !card.includes('"hi"'), card);
+  });
+
+  await test('R3 studio-client-2: sign-out stops the v2 builder; a draft whose first save is still retrying is never created in the next account', async () => {
+    for (const how of ['sign-out', 'switch', 'same user']) {
+      const { sandbox, state, run } = studioFixture();
+      sandbox.URLSearchParams = URLSearchParams;
+      sandbox.studioV2Frame = () => 'customer';  // the v2 layout (its /me is not read here)
+      const timers = new Map();
+      let seq = 0;
+      sandbox.setTimeout = fn => { seq += 1; timers.set(seq, fn); return seq; };
+      sandbox.clearTimeout = timer => { timers.delete(timer); };
+      const fire = async () => {
+        for (let round = 0; round < 4; round++) { const due = [...timers.values()]; timers.clear(); due.forEach(fn => fn()); await settle(); }
+      };
+      const listeners = { pagehide: [], visibilitychange: [] };
+      sandbox.window.addEventListener = (type, fn) => { if (listeners[type]) listeners[type].push(fn); };
+      sandbox.document.addEventListener = (type, fn) => { if (listeners[type]) listeners[type].push(fn); };
+      let online = false;
+      const creates = [];
+      sandbox.apiCreateEntity = async (collection, record) => {
+        creates.push([String(state.currentUser?.id || ''), record.primaryText]);
+        if (!online) throw new TypeError('Failed to fetch');
+        return { id: record.id, data: { ...record, status: 'Draft', _lastModified: 5 }, lastModified: 5 };
+      };
+      run("studioBuilderStart('full'); studioBuilderListen(); studioBuilderInput('text', { value: 'A private offer' });");
+      await fire();  // the autosave a second later: no connection, a retry is armed
+      assert.equal(run('_studioBuilder.session.status'), 'offline');
+      assert.ok(creates.length >= 1 && creates.every(([uid]) => uid === 'cust1'), JSON.stringify(creates));
+      if (how === 'sign-out') sandbox.closeSensitiveAuthenticatedUi();  // sign-out and session expiry run this
+      if (how !== 'same user') {
+        state.currentUser = { id: 'adminB', role: 'Admin', permissions: {} };
+        state.users = [state.currentUser];
+      }
+      online = true;
+      await fire();
+      sandbox.document.visibilityState = 'hidden';
+      listeners.visibilitychange.forEach(fn => fn());
+      listeners.pagehide.forEach(fn => fn());
+      await fire();
+      assert.deepEqual(creates.filter(([uid]) => uid !== 'cust1'), [], `${how}: before, the draft was created as adminB`);
+      if (how === 'sign-out') assert.equal(run('_studioBuilder.session'), null, 'sign-out drops the draft and its photos');
+      if (how === 'same user') {
+        assert.equal(run('_studioBuilder.session.status'), 'saved', 'the same account still saves once the connection is back');
+        assert.deepEqual(creates[creates.length - 1], ['cust1', 'A private offer']);
+      }
+    }
+  });
+
+  await test('R3 studio-client-3: the classic Overview\'s wallet activity reads each row\'s type in Arabic with the request\'s name, never the ledger\'s English memo with ids', () => {
+    const { sandbox, state, run } = studioFixture();
+    state.language = 'ar';
+    state.adCampaignRequests = [{ id: 'cmp_1', name: 'عرض الصيف', createdBy: 'cust1', status: 'Approved' }];
+    state.walletTransactions = [
+      { id: 't3', type: 'campaign_refund', memo: 'Refund of stopped campaign cmp_1', fromUserId: 'system', toUserId: 'cust1', currency: 'USD', amountMinor: 200, referenceType: 'adCampaignRequest', referenceId: 'cmp_1' },
+      { id: 't4', type: 'campaign_payment_release', memo: 'Release of unapproved campaign payment cmp_1', fromUserId: 'system', toUserId: 'cust1', currency: 'USD', amountMinor: 300, referenceType: 'reversalOf', referenceId: 't2' },
+      { id: 't2', type: 'campaign_payment', memo: 'Ad campaign budget cmp_1', fromUserId: 'cust1', toUserId: 'system', currency: 'USD', amountMinor: 500, referenceType: 'adCampaignRequest', referenceId: 'cmp_1' },
+      { id: 't1', type: 'credit', memo: 'Top-up', fromUserId: 'system', toUserId: 'cust1', currency: 'USD', amountMinor: 1000 }
+    ];
+    run("_adsStudioWalletMine = []; _adsStudioWalletForUser = 'cust1';");
+    const titles = () => {
+      const html = String(sandbox.renderAdsStudioWallet());
+      const rows = html.slice(html.indexOf(run("adsStudioText('Recent wallet activity', 'آخر حركات المحفظة')"))).split('workspace-wallet-row').slice(1);
+      return { html, rows, titles: rows.map(row => (/<span class="text-slate-600 dark:text-slate-300">([\s\S]*?)<\/span>/.exec(row) || [])[1] || '') };
+    };
+    let view = titles();
+    assert.deepEqual(view.titles, ['استرجاع حملة · <bdi>عرض الصيف</bdi>', 'إرجاع ميزانية حملة · <bdi>عرض الصيف</bdi>', 'ميزانية حملة · <bdi>عرض الصيف</bdi>', 'شحن المحفظة'],
+      'before: the titles were "Refund of stopped campaign cmp_1", … and "Top-up"');
+    for (const memo of ['Ad campaign budget cmp_1', 'Refund of stopped campaign cmp_1', 'Release of unapproved campaign payment cmp_1']) {
+      assert.ok(!view.html.includes(memo), `${memo} is never shown`);
+    }
+    assert.ok(/<bdi dir="ltr">Top-up<\/bdi>/.test(view.rows[3]), 'a memo with no request stays a small line, left to right');
+    state.language = 'en';
+    view = titles();
+    assert.deepEqual(view.titles, ['Campaign refund · <bdi>عرض الصيف</bdi>', 'Campaign budget returned · <bdi>عرض الصيف</bdi>', 'Campaign budget · <bdi>عرض الصيف</bdi>', 'Wallet top-up']);
+    // One label map for both screens; the main Wallet page keeps its titles.
+    assert.deepEqual(['credit', 'transfer', 'reversal', 'service_payment', 'campaign_payment', 'campaign_refund', 'campaign_payment_release', 'odd_type', 'constructor'].map(type => sandbox.walletTxLabel(type, true)),
+      ['شحن المحفظة', 'تحويل', 'عكس معاملة', 'اشتراك', 'ميزانية حملة', 'استرجاع حملة', 'إرجاع ميزانية حملة', 'odd_type', 'constructor']);
+    assert.equal(sandbox.walletTxLabel('campaign_payment_release', false), 'Campaign budget returned');
+    state.language = 'ar';
+    const page = String(sandbox.renderWalletView());
+    assert.ok(['شحن المحفظة', 'ميزانية حملة', 'استرجاع حملة', 'إرجاع ميزانية حملة'].every(title => page.includes(`<div class="font-bold text-slate-800 dark:text-white">${title}</div>`)), page);
+  });
+
+  await test('R3 studio-client-4: the phone\'s Back closes the classic Withdraw, Unlink and Link sheets first (never "Press Back again to exit"), and keeps the desk section under the Link sheet', async () => {
+    const { sandbox, run } = studioFixture();
+    sandbox.URLSearchParams = URLSearchParams;
+    const notes = [];
+    const moves = [];
+    sandbox.showNotification = (title, message) => { notes.push(`${title}: ${message}`); };
+    sandbox.navigateToInternal = view => { moves.push(`navigate:${view}`); };
+    sandbox.getMobileLandingView = () => 'ads-studio';  // a customer whose landing screen is the studio
+    const history = sandbox.window.history;
+    history.back = () => { moves.push('back'); };
+    history.go = step => { moves.push(`go:${step}`); };
+    history.pushState = (stateObject, title, url) => { moves.push(`push:${url}`); };
+    history.replaceState = (stateObject, title, url) => { moves.push(`replace:${url}`); };
+    const sheets = [
+      ['_adsStudioWithdrawConfirmId', "'c1'"],
+      ['_adsStudioUnlinkSheet', "{ campaignId: 'c1', reason: '', busy: false, outcome: null }"],
+      ['_adsStudioLinkSheet', "{ campaignId: 'c1', accountId: '', metaCampaignId: '', busy: false, outcome: null }"]
+    ];
+    for (const [flag, value] of sheets) {
+      run(`${flag} = ${value};`);
+      await sandbox.handleAndroidBackButton({ canGoBack: true });
+      assert.ok(!run(flag), `${flag}: before, Back left the sheet open`);
+      assert.deepEqual(notes, [], `${flag}: before, "Press Back again to exit" (and the next Back closed the app)`);
+      assert.deepEqual(moves, []);
+      run(`${flag} = ${value};`);
+      assert.equal(sandbox.studioHandleBack(), true);
+      assert.ok(!run(flag));
+    }
+    // Nothing open: Back on the studio landing still asks before leaving the app.
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.equal(notes.length, 1);
+    // The Team desk (v2) on Launch with the Link sheet open: Back closes the sheet, the section stays.
+    notes.length = 0;
+    sandbox.studioV2Frame = () => 'staff';
+    sandbox.window.location.search = '?tab=review&section=launch';
+    run(sheets[2].join(' = '));
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.equal(run('_adsStudioLinkSheet'), null);
+    assert.deepEqual(moves, [], 'before: Back moved the desk from Launch to Requests under the open sheet');
+    assert.deepEqual(notes, []);
+    // With the sheet closed, Back on Launch goes up to Requests as before.
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.ok(moves.some(move => /section=requests/.test(move)), JSON.stringify(moves));
+  });
+
+  await test('R3 studio-client-5: a studio read the app cancels by moving on is "not read yet", never a failure (results card, payment methods, post picker); a timeout or a 500 still fails', async () => {
+    const { sandbox, run } = studioFixture();
+    sandbox.AbortController = AbortController;
+    const calls = [];
+    let mode = 'wait';
+    // As apiFetch: a navigation (cancelPendingRequests) aborts the read with an AbortError; so does a timeout.
+    sandbox.apiJson = url => new Promise((resolve, reject) => {
+      calls.push(url);
+      const aborted = () => Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+      if (mode === 'timeout') return reject(aborted());
+      if (mode === '500') return reject(Object.assign(new Error('Server Error'), { status: 500 }));
+      sandbox.getNavigationSignal().addEventListener('abort', () => reject(aborted()), { once: true });
+    });
+    const cancel = async read => { const running = read(); sandbox.cancelPendingRequests(); await running; await settle(); };
+    const readsAgain = (read, url) => { const before = calls.length; read(); assert.equal(calls.length, before + 1, `${url}: asked again`); assert.equal(calls[calls.length - 1], url); sandbox.cancelPendingRequests(); };
+    // The Meta results card.
+    await cancel(() => sandbox.adsStudioLoadResults('cmp_1'));
+    assert.equal(run("_adsStudioResults.byId.get('cmp_1').state"), '', 'before: failed ("Meta\'s numbers are late" for a minute)');
+    assert.equal(run("_adsStudioResults.byId.get('cmp_1').at"), 0, 'no retry wait, no freshness stamp');
+    await settle();
+    readsAgain(() => sandbox.adsStudioLoadResults('cmp_1'), '/api/studio/campaigns/cmp_1/results');
+    await settle();
+    run("Object.assign(_adsStudioResults.byId.get('cmp_1'), { data: { stage: 5 }, state: 'done', at: 1234 });");
+    await cancel(() => sandbox.adsStudioLoadResults('cmp_1', true));
+    assert.deepEqual(JSON.parse(run("JSON.stringify(_adsStudioResults.byId.get('cmp_1'))")), { state: 'done', data: { stage: 5 }, at: 1234, promise: null }, 'a kept reading stays as it was');
+    // Add money's payment methods.
+    await cancel(() => sandbox.studioWalletLoadMethods());
+    assert.equal(run('_studioWallet.methodsFailed'), false, 'before: "The payment methods could not be read."');
+    readsAgain(() => sandbox.studioWalletLoadMethods(), '/api/wallet/payment-requests/methods');
+    await settle();
+    // The classic post picker: the pages, then one page's posts.
+    await cancel(() => sandbox.adsStudioLoadPostPages());
+    assert.deepEqual(JSON.parse(run('JSON.stringify([_adsStudioPostPicker.pagesState, _adsStudioPostPicker.pagesError, _adsStudioPostPicker.pagesFailedAt])')), ['', null, 0], 'before: failed');
+    readsAgain(() => sandbox.adsStudioLoadPostPages(), '/api/studio/pages');
+    await settle();
+    run("_adsStudioPostPicker.pagesState = 'done'; _adsStudioPostPicker.pages = [{ id: 'p1', name: 'Shop', fb: true, ig: false }]; _adsStudioPostPicker.pageId = 'p1';");
+    await cancel(() => sandbox.adsStudioLoadPagePosts('p1'));
+    assert.equal(run("_adsStudioPostPicker.posts.p1"), undefined, 'before: "(The operation was aborted.)"');
+    readsAgain(() => sandbox.adsStudioLoadPostPages(), '/api/studio/pages/p1/recent-posts');  // the next draw asks for the list again
+    await settle();
+    run("_adsStudioPostPicker.posts.p1 = { state: 'done', posts: [{ id: 'po1' }], checkedAt: '', platforms: {}, error: null, at: 1234 };");
+    const kept = run('_adsStudioPostPicker.posts.p1');
+    await cancel(() => sandbox.adsStudioLoadPagePosts('p1', true));
+    assert.equal(run('_adsStudioPostPicker.posts.p1'), kept, 'Try again cancelled: the list shown before comes back');
+    // A real failure (a timeout while the page stays, or a 500) still fails.
+    mode = 'timeout';
+    run("_adsStudioResults.byId.clear(); _adsStudioPostPicker.pagesState = ''; delete _adsStudioPostPicker.posts.p1;");
+    await sandbox.adsStudioLoadResults('cmp_1');
+    await sandbox.adsStudioLoadPostPages();
+    assert.equal(run("_adsStudioResults.byId.get('cmp_1').state"), 'failed');
+    assert.equal(run('_adsStudioPostPicker.pagesState'), 'failed');
+    mode = '500';
+    await sandbox.studioWalletLoadMethods();
+    await sandbox.adsStudioLoadPagePosts('p1');
+    assert.equal(run('_studioWallet.methodsFailed'), true);
+    assert.equal(run('_adsStudioPostPicker.posts.p1.state'), 'failed');
+  });
+
   // ---- r8 O: misc (retries across an account switch, per-user filters, a dead IndexedDB connection) ----
   // Account A signs out and B signs in on the same tab (what _handleLogoutOnce + a login do to the identity).
   const switchAccount = (run, state) => {
@@ -4356,6 +4857,540 @@ async function main() {
     // A compression failure still hands over the original photo.
     sandbox.compressImageToDataUrl = async () => { throw new Error('decode failed'); };
     assert.equal((await sandbox.readNativeClipboardImage()).type, 'image/png');
+  });
+
+
+  // ---- Bug-hunt round 34 (admin tools and App Review) ----
+  await test('R3 admin-tools-1: a plan list that fails to load is asked for once, not again on every redraw; Reload retries at once and a redraw 30 s later tries once more', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['admin-tools.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    run(realEscape);
+    const timers = [];
+    sandbox.setTimeout = fn => { timers.push(fn); return timers.length; };  // FIFO, run by hand
+    const tick = async count => { for (let i = 0; i < count && timers.length; i += 1) { timers.shift()(); await settle(); } };
+    sandbox.render = () => { sandbox.renderView(); };
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.loadControlCenterStatus = async () => {};
+    run('_controlCenter.loadedAt = Date.now();');
+    let gets = 0;
+    sandbox.apiJson = async (url, options = {}) => {
+      if (url === '/api/admin/subscription-plans' && String(options.method || 'GET') === 'GET') gets += 1;
+      throw new Error('Failed to fetch');  // offline, or the server restarting
+    };
+    state.currentView = 'control-center';
+    sandbox.render();
+    await tick(120);
+    assert.equal(gets, 1, `before: one visit sent ${gets} plan requests`);
+    assert.ok(String(sandbox.renderPlanManagerSection()).includes('Failed to fetch'), 'the error banner shows');
+    await sandbox.loadPlanManager(true);  // the Reload button
+    await tick(120);
+    assert.equal(gets, 2, 'Reload asks once more, right away');
+    run('_planManager.failedAt = Date.now() - 31000;');  // half a minute later
+    sandbox.render();
+    await tick(120);
+    assert.equal(gets, 3, 'a redraw after 30 s tries once more by itself');
+  });
+  await test('R3 admin-tools-3: editing a loaded plan turns "Save all plans" on and shows "unsaved changes" without a redraw; Reload asks before throwing the edit away', async () => {
+    const { sandbox, run } = controlCenterFixture();
+    sandbox.isServerModeEnabled = () => true;
+    const plan = { id: 'p1', name: 'Plan', nameAr: 'خطة', serviceIds: ['ad_maker'], priceMinor: 10000, durationDays: 30 };
+    run(`_planManager.loadedAt = Date.now(); _planManager.version = 3; _planManager.plans = [${JSON.stringify(plan)}];`);
+    const clean = String(sandbox.renderPlanManagerSection());
+    assert.ok(/id="plan-manager-save"[^>]*\sdisabled\s/.test(clean), 'Save starts off');
+    assert.ok(/id="plan-manager-dirty" class="hidden"/.test(clean), 'no marker while nothing changed');
+    assert.ok(clean.includes('onclick="planManagerReload()"'), 'Reload goes through the discard question');
+    const save = { disabled: true };
+    const marker = { classList: fakeClassList() };
+    marker.classList.add('hidden');
+    sandbox.document.getElementById = id => ({ 'plan-manager-save': save, 'plan-manager-dirty': marker })[id] || null;
+    let renders = 0;
+    sandbox.render = () => { renders += 1; };
+    sandbox.planManagerSetField(0, 'priceLYD', '150');
+    assert.equal(save.disabled, false, 'before: Save stayed disabled after the edit');
+    assert.equal(marker.classList.contains('hidden'), false, 'the unsaved marker shows');
+    assert.equal(renders, 0, 'no redraw while typing: it would close the phone keyboard');
+    assert.equal(run('_planManager.plans[0].priceMinor'), 15000);
+    const edited = String(sandbox.renderPlanManagerSection());
+    assert.ok(!/id="plan-manager-save"[^>]*\sdisabled\s/.test(edited) && !/id="plan-manager-dirty" class="hidden"/.test(edited), 'a later redraw agrees');
+    const calls = [];
+    sandbox.apiJson = async url => { calls.push(url); return { version: 3, plans: [{ ...plan }] }; };
+    const asked = [];
+    sandbox.window.confirm = text => { asked.push(text); return false; };
+    await sandbox.planManagerReload();
+    assert.equal(calls.length, 0, 'kept the edit: nothing reloaded');
+    assert.equal(run('_planManager.plans[0].priceMinor'), 15000);
+    assert.ok(asked.length === 1 && asked[0].includes('Discard unsaved plan changes'), JSON.stringify(asked));
+    sandbox.window.confirm = text => { asked.push(text); return true; };
+    await sandbox.planManagerReload();
+    assert.deepEqual(calls, ['/api/admin/subscription-plans']);
+    assert.equal(run('_planManager.plans[0].priceMinor'), 10000, 'the server copy is back');
+    assert.equal(run('_planManager.dirty'), false);
+    asked.length = 0;
+    await sandbox.planManagerReload();  // nothing to lose: no question
+    assert.equal(asked.length, 0);
+    assert.equal(calls.length, 2);
+  });
+  await test('R3 admin-tools-2: the profit snapshot reads the receipts list once per build, and every number matches the old per-allocation search', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(fs.readFileSync(path.join(__dirname, '..', 'src', '12a-analytics-profit.js'), 'utf8'));
+    const receipts = [
+      { id: 'r1', _deleted: true, exchangeRate: 99, amountUSD: 10, amountLocal: 990 },  // a deleted twin listed first
+      { id: 'r1', exchangeRate: 5, amountUSD: 100, amountLocal: 500 },
+      { id: 'r1', exchangeRate: 7, amountUSD: 100, amountLocal: 700 },  // a duplicate id: the first live row wins
+      { id: 2, amountUSD: 50, amountLocal: 300 },  // a numeric id, its rate from the amounts
+      { id: 'r3', exchangeRate: 6.5, amountUSD: 20, amountLocal: 130 },
+      { id: 'r4', exchangeRate: 0, amountUSD: 0, amountLocal: 0 },  // no usable rate
+      null,
+      { id: 'r5', exchangeRate: 8, amountUSD: 10, amountLocal: 80 }
+    ];
+    const sold = { paymentStatus: 'paid', status: 'Completed', endDate: '2026-02-01', amountUSD: 100, amountLocal: 600, exchangeRate: 6, spentUSD: 100 };
+    const ads = [
+      { ...sold, id: 'a1', receiptAllocations: [{ receiptId: 'r1', amountUSD: 60 }, { receiptId: '2', amountUSD: 40 }] },
+      { ...sold, id: 'a2', receiptAllocations: [{ receiptId: 'missing', amountUSD: 10 }], dueAllocations: [{ receiptId: 'r3', amountUSD: 30 }, { receiptId: 'r1', amountUSD: 70 }] },
+      { ...sold, id: 'a3', mergedPaidAllocations: [{ receiptId: 'r5', amountUSD: 100 }] },
+      { ...sold, id: 'a4', fundingReceiptId: 'r4', receiptId: 'r3' },  // falls back past a receipt without a rate
+      { ...sold, id: 'a5', linkedDeliveryReceiptId: 2 },
+      { ...sold, id: 'a6', receiptAllocations: [{ receiptId: '', amountUSD: 50 }] },
+      { ...sold, id: 'a7', paymentStatus: 'not_paid', receiptAllocations: [{ receiptId: 'r1', amountUSD: 100 }] }
+    ];
+    for (let i = 0; i < 300; i += 1) {
+      receipts.push({ id: `bulk${i}`, exchangeRate: 5 + (i % 7) / 10, amountUSD: 10, amountLocal: 50 });
+      ads.push({ ...sold, id: `bulk_ad${i}`, endDate: `2026-03-${String(1 + (i % 28)).padStart(2, '0')}`,
+        receiptAllocations: [{ receiptId: `bulk${i}`, amountUSD: 60 }, { receiptId: `bulk${299 - i}`, amountUSD: 40 }] });
+    }
+    const purchases = [{ id: 'p1', purchaseDate: '2026-01-01', amountUSD: 20000, rateLYD: 5.2 }, { id: 'p2', purchaseDate: '2026-03-10', amountUSD: 9000, rateLYD: 5.6 }];
+    let reads = 0;
+    state.receipts = new Proxy(receipts, { get(target, key, receiver) { if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1; return Reflect.get(target, key, receiver); } });
+    const fresh = sandbox.buildAdProfitabilitySnapshot(purchases, ads);
+    assert.ok(reads <= receipts.length, `before: ${reads} receipt reads for ${receipts.length} receipts (one search per allocation)`);
+    near(fresh.rowsByAdId.get('a1').saleRateLYD, 5.4);
+    near(fresh.rowsByAdId.get('a2').saleRateLYD, 5.45);
+    near(fresh.rowsByAdId.get('a4').saleRateLYD, 6.5);
+    near(fresh.rowsByAdId.get('a5').saleRateLYD, 6);
+    // The old lookup (one receipts.find per allocation), kept as the reference.
+    run(`function _adFundingReceiptRateLYD(ad) {
+      const receipts = state.receipts || [];
+      const find = id => (id ? receipts.find(r => r && !r._deleted && String(r.id) === String(id)) : null);
+      const rateOf = r => {
+        const explicit = analyticsNumber(r?.exchangeRate);
+        if (explicit > 0) return explicit;
+        const usd = analyticsNumber(r?.amountUSD), local = analyticsNumber(r?.amountLocal);
+        return usd > 0 && local > 0 ? local / usd : 0;
+      };
+      for (const key of ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations']) {
+        let total = 0, weighted = 0;
+        for (const alloc of (Array.isArray(ad?.[key]) ? ad[key] : [])) {
+          const rate = rateOf(find(alloc?.receiptId)), amount = analyticsNumber(alloc?.amountUSD);
+          if (rate > 0 && amount > 0) { weighted += rate * amount; total += amount; }
+        }
+        if (total > 0) return weighted / total;
+      }
+      for (const id of [ad?.fundingReceiptId, ad?.receiptId, ad?.linkedDeliveryReceiptId]) {
+        const rate = rateOf(find(id));
+        if (rate > 0) return rate;
+      }
+      return 0;
+    }`);
+    assert.deepEqual(fresh, sandbox.buildAdProfitabilitySnapshot(purchases, ads), 'the same snapshot, to the last number');
+  });
+  await test('R3 admin-tools-5: Android Back closes the Analytics breakdown and the Dollar purchase dialog (the top one first) through their closers, instead of changing the page under them', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const children = [];
+    const matches = (el, selector) => selector.split(',').map(part => part.trim()).some(part => (part.startsWith('#') ? el.id === part.slice(1)
+      : part.startsWith('.') && String(el.className || '').split(/\s+/).includes(part.slice(1))));
+    sandbox.document.querySelectorAll = selector => children.filter(el => matches(el, String(selector)));
+    sandbox.document.getElementById = id => children.find(el => el.id === id) || null;
+    sandbox.window.getComputedStyle = el => ({ zIndex: el.style.zIndex || 'auto' });
+    const open = (id, zIndex, className = '') => {
+      const el = { id, className, style: { zIndex }, isConnected: true, setAttribute() {}, remove() { el.isConnected = false; children.splice(children.indexOf(el), 1); } };
+      children.push(el);
+      return el;
+    };
+    const closed = [];
+    sandbox.closeAnalyticsBreakdown = () => { closed.push('breakdown'); sandbox.document.getElementById('analytics-breakdown-dialog')?.remove(); };
+    sandbox.closeDollarPurchaseManager = () => { closed.push('dollar'); sandbox.document.getElementById('dollar-purchase-dialog')?.remove(); };
+    const calls = { back: 0, navigate: 0, exit: 0, notes: 0 };
+    sandbox.window.history.back = () => { calls.back += 1; };
+    sandbox.navigateToInternal = () => { calls.navigate += 1; };
+    sandbox.getCapacitorAppPlugin = () => ({ exitApp: async () => { calls.exit += 1; } });
+    sandbox.showNotification = () => { calls.notes += 1; };
+    sandbox.URLSearchParams = URLSearchParams;
+    state.currentView = 'analytics';  // not the landing view: a Back that misses the dialog navigates
+    open('analytics-breakdown-dialog', '10000');
+    assert.equal(sandbox.getTopMobileSurface()?.id, 'analytics-breakdown-dialog', 'before: Back did not see the breakdown');
+    assert.equal(sandbox._overlaySurfaceCount(), 1, 'the phone-browser Back entry counts it too');
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.deepEqual(closed, ['breakdown']);
+    open('dollar-purchase-dialog', '10001');
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.deepEqual(closed, ['breakdown', 'dollar']);
+    for (const order of [['analytics-breakdown-dialog', 'dollar-purchase-dialog'], ['dollar-purchase-dialog', 'analytics-breakdown-dialog']]) {
+      closed.length = 0;
+      for (const id of order) open(id, id === 'dollar-purchase-dialog' ? '10001' : '10000');
+      await sandbox.handleAndroidBackButton({ canGoBack: true });
+      await sandbox.handleAndroidBackButton({ canGoBack: true });
+      assert.deepEqual(closed, ['dollar', 'breakdown'], `${order.join(' then ')}: the dollar dialog sits on top`);
+    }
+    assert.deepEqual(calls, { back: 0, navigate: 0, exit: 0, notes: 0 }, 'the page underneath never changed and no exit notice');
+    const merge = open('page-merge-dialog', '50', 'mobile-dialog-overlay fixed inset-0');  // control: an ordinary dialog
+    await sandbox.handleAndroidBackButton({ canGoBack: true });
+    assert.equal(merge.isConnected, false);
+    assert.deepEqual(calls, { back: 0, navigate: 0, exit: 0, notes: 0 });
+    await sandbox.handleAndroidBackButton({ canGoBack: true });  // nothing open: Back leaves the page
+    assert.equal(calls.back, 1);
+  });
+  await test('R3 ios-app-review-2: a Clothes System subscriber on the phone can switch language, sign out and open Privacy and Delete account (paywall and main view); the Studio Account lists account deletion', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    run('Security').escapeHtml = plainEscape;
+    run('Platform.detect()').isCapacitor = true;
+    const subscriberPermissions = JSON.parse(JSON.stringify(run('PERMISSION_TEMPLATES.clothesSubscriber.permissions')));
+    state.currentUser = { id: 'sub1', name: 'Sub', role: 'Employee', permissions: subscriberPermissions };
+    state.users = [state.currentUser];
+    state.currentView = 'clothes-system';
+    for (const subscribed of [false, true]) {
+      sandbox.hasSubscription = id => subscribed && id === 'clothes_system';
+      const html = String(run('renderMainApp()'));
+      assert.equal(html.includes('Subscribe now'), !subscribed);
+      for (const control of ['onclick="toggleLanguage()"', 'onclick="handleLogout()"', 'href="https://albayanhub.com/privacy"', 'href="https://albayanhub.com/delete-account"']) {
+        assert.ok(html.includes(control), `${subscribed ? 'main view' : 'paywall'}: before, no ${control}`);
+      }
+    }
+    sandbox.hasSubscription = () => true;
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    const admin = String(run('renderMainApp()'));
+    assert.ok(admin.includes("navigateTo('smart-systems')") && !admin.includes('handleLogout()'), 'an admin keeps the back button and gets no strip');
+    state.currentUser = { id: 'emp', role: 'Employee', permissions: { ...subscriberPermissions, customers: ['view'] } };
+    const staff = String(run('renderMainApp()'));
+    assert.ok(staff.includes("navigateTo('customers')") && !staff.includes('handleLogout()'), 'staff with other pages keep the back button');
+    const studio = studioFixture();
+    studio.replies['/api/studio/profile'] = { whatsappNumber: '' };
+    studio.state.serverBaseUrl = 'https://albayanhub.com';
+    const account = String(studio.run('renderStudioAccountScreen()'));
+    assert.ok(account.includes('data-testid="studio-account-delete" href="https://albayanhub.com/delete-account"'), 'before: no account-deletion row');
+    assert.ok(account.indexOf('studio-account-terms') < account.indexOf('studio-account-delete') && account.indexOf('studio-account-delete') < account.indexOf('studio-account-logout'));
+    studio.state.language = 'ar';
+    assert.ok(String(studio.run('renderStudioAccountScreen()')).includes('طلب حذف الحساب'));
+  });
+  await test('R3 ios-app-review-3: the server sign-in screen draws no disabled Passkey button and no "not enabled yet" note; local mode with passkey support still offers it', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    sandbox.window.PublicKeyCredential = function PublicKeyCredential() {};
+    state.serverMode = true;
+    for (const app of [false, true]) {
+      run('Platform.detect()').isCapacitor = app;
+      run("_nativeLoginMode = 'form'");  // the app's own form, not the browser hand-off card
+      const html = String(run('renderLogin()'));
+      assert.ok(html.includes('id="login-form"'), 'the password form is drawn');
+      assert.ok(!html.includes('passkeySignIn()') && !/passkey/i.test(html), `${app ? 'app' : 'web'}: before, a disabled Passkey button and "not enabled in server mode yet"`);
+    }
+    run('Platform.detect()').isCapacitor = false;
+    state.serverMode = false;
+    const local = String(run('renderLogin()'));
+    assert.ok(local.includes('onclick="passkeySignIn()"') && local.includes('Sign in with a Passkey') && !/passkeySignIn\(\)"\s*disabled/.test(local), 'local mode keeps a working Passkey button');
+  });
+
+  await test('R4 xss-injection-sweep-1: a quote stored in a receipt payment row stays inside its attribute on every receipt editor', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    // What a staff account with only "Create receipts" could store in a payment row.
+    const row = { method: 'Cash" onfocus="C', amount: '1" onfocus="A', rate: '1" onfocus="B', rate2: '7" autofocus onfocus="X', collectionType: 'office" data-x="1' };
+    const planted = /onfocus="[ABCX]"|data-x="1"|"\s+autofocus/;
+    const safe = (html, where) => {
+      assert.doesNotMatch(html, planted, `${where}: the stored value became an attribute`);
+      assert.match(html, /&quot;/, `${where}: the value was not kept as text`);
+    };
+    safe(run('renderReceiptFinancials')([row], [row], []), 'one payment');
+    safe(run('renderReceiptFinancials')([row, { ...row }], [row, { ...row }], []), 'split payments');
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    state.activeModal = 'split-payments';
+    state.modalData = { id: 'r1', amountUSD: 10, amountLocal: 97, exchangeRate: 9.7, payments: [row] };
+    sandbox.renderModal();
+    safe(made.map(el => String(el.innerHTML || '')).join('\n'), 'Manage Split Payments');
+    run("_collectTargetLYD = 97; _tempCollectPayments = [{ method: 'Cash\" onfocus=\"C', amount: '97' }]");
+    safe(sandbox._collectEditorView('r1', state.modalData), 'collect editor');
+  });
+  await test('R4 concurrency-idempotency-4: a new receipt whose app number another cashier just took saves with the next free one; a paper number still stops', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    state.serverMode = true;
+    state.currentUser = { id: 'cashier_b', role: 'Employee', name: 'Cashier B', permissions: { receipts: ['view', 'add', 'edit'], customers: ['view'] } };
+    state.users = [state.currentUser];
+    state.customers = [{ id: 'cust_1', name: 'Customer One', phones: ['0912345678'] }, { id: 'cust_2', name: 'Customer Two', phones: ['0923456789'] }];
+    const paid = (id, serialNumber, method) => ({ id, customerId: 'cust_2', status: 'Paid', isPaid: true, paymentMethod: method,
+      payments: [{ method, amount: 50, rate: 1, rate2: 9.7 }], serialNumber, amountUSD: 5.16, _lastModified: 2 });
+    state.receipts = [paid('r41', 'S41', 'Libyana')];
+    const el = props => ({ style: {}, dataset: {}, classList: { add() {}, remove() {}, contains() { return false; } }, focus() {}, ...props });
+    const ids = {};
+    const openForm = (method, serial) => {
+      const cells = { '.payment-method': method, '.payment-amount': '100', '.payment-rate1': '1', '.payment-rate2': '9.7', '.collection-type': 'office' };
+      const row = el({ querySelector: sel => (sel in cells ? el({ value: cells[sel] }) : null) });
+      sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? [row] : []);
+      Object.assign(ids, { 'receipt-editing-id': el({ value: '' }), 'receipt-customer-id': el({ value: 'cust_1' }), 'receipt-status': el({ value: 'Paid' }),
+        'receipt-serial': el({ value: serial, readOnly: true }), 'receipt-serial-error': el({}), 'paid-collection-value': el({ value: 'office' }),
+        'receipt-phone-search': el({ value: '0912345678' }) });
+    };
+    sandbox.document.getElementById = id => ids[id] || null;
+    sandbox.requireReceiptCustomerRiskAcknowledgement = () => false;
+    const dialogs = [];
+    const sent = [];
+    const notes = [];
+    let echo = record => record;
+    sandbox.showDuplicateReceiptWarning = number => dialogs.push(number);
+    sandbox.apiCreateEntity = async (collection, record) => { sent.push(record); return { id: record.id, data: echo({ ...record }) }; };
+    sandbox.showNotification = (title, message) => notes.push(`${title}: ${message}`);
+    // B's form shows S42 for Libyana; cashier A's S42 arrives by live sync before B taps Save.
+    openForm('Libyana', sandbox.getNextAutoSerialNumber('Libyana'));
+    assert.equal(ids['receipt-serial'].value, 'S42');
+    sandbox.applyServerDelta('receipts', [paid('r42_a', 'S42', 'Libyana')]);
+    await sandbox._saveReceiptFromModalInner();
+    assert.deepEqual(dialogs, [], 'before: "Receipt Number Already Exists" on every Save, with a read-only number');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].serialNumber, 'S43');
+    assert.equal(sent[0].finalReceiptNo, 'S43');
+    assert.equal(ids['receipt-serial'].value, 'S43');
+    assert.ok(notes.includes('Receipt number changed: Receipt number changed to S43 (S42 was just used by another receipt).'), notes.join(' | '));
+    // The server handed out another free number itself: the cashier is told that one too.
+    echo = record => ({ ...record, serialNumber: 'S45', finalReceiptNo: 'S45' });
+    openForm('Libyana', sandbox.getNextAutoSerialNumber('Libyana'));
+    notes.length = 0;
+    await sandbox._saveReceiptFromModalInner();
+    assert.equal(sent[1].serialNumber, 'S44');
+    assert.ok(notes.includes('Receipt number changed: Receipt number changed to S45 (S44 was just used by another receipt).'), notes.join(' | '));
+    // A retry after a lost reply accepts its own row with the server's number, never another receipt.
+    assert.equal(sandbox.receiptCreateRetryMatches({ ...sent[1], serialNumber: 'S45', finalReceiptNo: 'S45' }, sent[1]), true);
+    assert.equal(sandbox.receiptCreateRetryMatches({ ...sent[1], serialNumber: 'S45', finalReceiptNo: 'S45', amountUSD: 1 }, sent[1]), false);
+    // A paper number that is already saved still stops with the duplicate dialog, and nothing is sent.
+    state.receipts.push(paid('r_paper', '4521', 'Cash (LYD)'));
+    openForm('Cash (LYD)', '4521');
+    await sandbox._saveReceiptFromModalInner();
+    assert.deepEqual(dialogs, ['4521']);
+    assert.equal(sent.length, 2);
+  });
+
+  await test('R4 display-correctness-1: an audit filter pages past the newest 500 entries, and a partial trail says so with Load older entries', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    sandbox.isServerModeEnabled = () => true;
+    state.currentView = 'audit';
+    // One event every 30 minutes, newest first; GET /api/audit honours the (before_ts, before_id) cursor.
+    const base = Date.parse('2026-09-30T12:00:00Z');
+    const makeTrail = n => Array.from({ length: n }, (_, i) => ({ id: `log${String(i).padStart(5, '0')}`, ts: base - i * 1800000, user_id: '',
+      action: i === 900 ? 'delete' : 'update', resource_type: 'receipts', message: i === 900 ? 'Deleted receipt R-900' : `Updated ${i}` }));
+    let trail = makeTrail(1200);
+    const calls = [];
+    sandbox.apiJson = async url => {
+      calls.push(String(url));
+      const q = new URLSearchParams(String(url).split('?')[1]);
+      const bts = q.has('before_ts') ? Number(q.get('before_ts')) : Infinity;
+      const bid = q.get('before_id') || '';
+      return trail.filter(r => r.ts < bts || (r.ts === bts && r.id < bid)).slice(0, Number(q.get('limit')));
+    };
+    const settleAudit = async () => { for (let i = 0; i < 100 && run('_auditFetchInFlight'); i++) await settle(); };
+    const view = () => String(sandbox.renderAuditView());
+    await sandbox.refreshServerAuditLogs({ force: true });
+    assert.equal(state.serverLogs.length, 500);
+    let page = view();
+    assert.ok(page.includes('Newest 500 entries') && page.includes('Load older entries') && !page.includes('Records available to you'),
+      'before: "Records available to you" over only the newest 500');
+    assert.equal(calls.length, 1, 'no filter: only the newest page is read');
+    // A date filter on the day of an entry older than the newest 500: the screen pages back by itself.
+    const day = new Date(trail[900].ts);
+    const ymd = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+    Object.assign(state, { auditDateFrom: ymd, auditDateTo: ymd });
+    view();
+    await settleAudit();
+    assert.ok(calls[1].includes(`&before_ts=${trail[499].ts}&before_id=log00499`), calls[1]);
+    page = view();
+    assert.ok(page.includes('Deleted receipt R-900'), 'before: "No logs match your filters" for an entry 19 days old');
+    assert.ok(page.includes('Records available to you') && !page.includes('Load older entries'), 'the whole 1,200-row trail is here');
+    // The 15-second refresh of the first page keeps the older pages; a forced one (after a cleanup) starts over.
+    trail = [{ id: 'log_new', ts: base + 60000, user_id: '', action: 'login', resource_type: 'auth', message: 'New login' }, ...trail];
+    state.serverLogsLoadedAt = 0;
+    await sandbox.refreshServerAuditLogs();
+    assert.equal(state.serverLogs.length, 1201);
+    assert.ok(view().includes('Deleted receipt R-900'), 'a refresh dropped the older pages');
+    Object.assign(state, { auditDateFrom: '', auditDateTo: '' });
+    await sandbox.refreshServerAuditLogs({ force: true });
+    assert.equal(state.serverLogs.length, 500);
+    // A trail longer than the automatic reach: ten more pages at most, then the button.
+    trail = makeTrail(12000);
+    Object.assign(state, { serverLogs: [], serverLogsLoadedAt: 0, auditDateFrom: '', auditDateTo: '', auditSearch: 'no such words' });
+    calls.length = 0;
+    await sandbox.refreshServerAuditLogs({ force: true });
+    assert.equal(calls.length, 11);
+    assert.equal(state.serverLogs.length, 10500);
+    page = view();
+    assert.ok(page.includes('Newest 10,500 entries') && page.includes('No match in the newest 10,500 entries') && page.includes('Load older entries'), 'the cap is not named');
+    assert.equal(calls.length, 11, 'no further automatic reads');
+    await sandbox.refreshServerAuditLogs({ older: true });
+    assert.equal(state.serverLogs.length, 12000);
+    assert.ok(view().includes('Records available to you'));
+    state.language = 'ar';
+    // A short trail is complete: the usual label, no button.
+    trail = makeTrail(120);
+    Object.assign(state, { serverLogs: [], serverLogsLoadedAt: 0, auditSearch: '' });
+    await sandbox.refreshServerAuditLogs({ force: true });
+    page = view();
+    assert.ok(page.includes('السجلات المتاحة لك') && !page.includes('تحميل سجلات أقدم'));
+    // A page that arrives after the account changed is not kept.
+    Object.assign(state, { serverLogs: [], serverLogsLoadedAt: 0 });
+    const pending = sandbox.refreshServerAuditLogs();
+    state.currentUser = { id: 'next_user', role: 'Employee', permissions: { auditLogs: ['viewOwn'] } };
+    await pending;
+    assert.deepEqual(Array.from(state.serverLogs), [], 'the last account\'s audit rows reached the next one');
+  });
+  await test('R4 display-correctness-2: a page filter left by a merged or deleted page is dropped, and filters that hide every ad say so with Clear', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    state.pages = [{ id: 'p_live', name: 'Live Page' }, { id: 'p_quiet', name: 'Quiet Page' }];
+    state.ads = ['a1', 'a2', 'a3'].map(id => ({ id, customerId: 'c1', pageId: 'p_live', status: 'Active', paymentStatus: 'paid', isPaid: true,
+      amountUSD: 10, exchangeRate: 5, amountLocal: 50, createdAt: '2026-09-01' }));
+    state.adSearch = '';
+    state.adFilters = { status: 'all', payment: 'all', page: 'p_merged_away' };
+    let html = String(sandbox.renderAdsView());
+    assert.ok(html.includes('3 total ads') && !html.includes('No ads yet'), 'before: "0 total ads / No ads yet" while every control says All');
+    assert.equal(state.adFilters.page, 'all');
+    // A live page filter that matches nothing: named, with Clear, and "All" is not lit.
+    state.adFilters = { status: 'all', payment: 'all', page: 'p_quiet' };
+    html = String(sandbox.renderAdsView());
+    assert.ok(html.includes('0 total ads') && html.includes('No ads match your filters') && html.includes(`onclick="state.adSearch='';applyAdQuickFilter('all')"`), 'no Clear');
+    assert.ok(!html.includes(`onclick="applyAdQuickFilter('all')" class="smart-filter-chip is-active"`), 'the All chip is lit over a page filter');
+    assert.equal(state.adFilters.page, 'p_quiet', 'a live page filter stays');
+    state.language = 'ar';
+    assert.ok(String(sandbox.renderAdsView()).includes('لا توجد إعلانات تطابق الفلاتر'));
+    state.adFilters = { status: 'all', payment: 'all', page: 'all' };
+    state.ads = [];
+    assert.ok(String(sandbox.renderAdsView()).includes('لا توجد إعلانات بعد'), 'no filter, no ads: "No ads yet"');
+  });
+  await test('R4 display-correctness-3: in Arabic a phone with spaces or + reads left to right on every delivery screen, the customer card and the ads table', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    state.language = 'ar';
+    const phone = '+218 91 456 7890';
+    const ltr = `<bdi dir="ltr">${phone}</bdi>`;
+    const noPhone = 'لا يوجد هاتف';
+    state.customers = [{ id: 'c1', name: 'Ali', phones: [phone] }, { id: 'c2', name: 'Huda', phones: [] }];
+    const admin = state.currentUser;
+    const driver = { id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} };
+    state.users = [admin, driver];
+    const job = { recordType: 'receipt', status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus: 'In Progress',
+      deliveryPersonId: 'drv1', amountUSD: 10, amountLocal: 50, exchangeRate: 5, payments: [], transfers: [], createdAt: '2026-09-01' };
+    state.receipts = [{ ...job, id: 'r1', customerId: 'c1', tempReceiptNo: 'D1', phoneNumber: phone }, { ...job, id: 'r2', customerId: 'c2', tempReceiptNo: 'D2' }];
+    state.currentUser = driver;
+    const dash = String(sandbox.renderDeliveryDashboard());
+    assert.ok(dash.includes(ltr), 'before: the driver dashboard shows "7890 456 91 218+"');
+    assert.ok(dash.includes(noPhone) && !dash.includes(`dir="ltr">${noPhone}`), 'the no-phone text keeps its own direction');
+    state.currentUser = admin;
+    assert.ok(String(sandbox.renderCustomersGrid([state.customers[0]])).includes(`dark:text-slate-300">${ltr}</div>`), 'customer card');
+    const ops = String(sandbox.renderDeliveriesView(true));
+    assert.ok(ops.includes(`<p class="ops-record-phone">${ltr}</p>`) && ops.includes(`<p class="ops-record-phone">${noPhone}</p>`), 'delivery log card');
+    state.ads = [{ id: 'a1', customerId: 'c1', phoneNumber: phone, status: 'Active', paymentStatus: 'paid', isPaid: true, amountUSD: 10, exchangeRate: 5, amountLocal: 50 }];
+    assert.ok(String(sandbox.renderAdsView()).includes(ltr), 'ads table');
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    const dialog = () => String(made[made.length - 1].innerHTML || '');
+    sandbox.showDeliveryDetails('r1');
+    assert.ok(dialog().includes(ltr), 'delivery details');
+    sandbox.showDeliveryDetails('r2');
+    assert.ok(dialog().includes(`<span>${noPhone}</span>`), 'delivery details without a phone');
+    sandbox.openDeliveryCancelModal('r1');
+    assert.ok(dialog().includes(` • ${ltr}`), 'cancel dialog');
+    await sandbox.openReceiptDeliveryCompletionModal('r1');
+    const complete = made.find(el => el.id === 'delivery-complete-modal');
+    assert.ok(complete && String(complete.innerHTML).includes(ltr), 'Mark Delivered dialog');
+  });
+  await test('R4 display-correctness-4: Delivery Operations finds a delivered receipt by its paper number (with or without #) or its D-number, and its card shows D17 → 4521', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    state.customers = [{ id: 'c1', name: 'Ali', phones: ['0911111111'] }];
+    state.receipts = [{ id: 'r1', recordType: 'receipt', customerId: 'c1', tempReceiptNo: 'D17', finalReceiptNo: '4521', serialNumber: '4521', status: 'Paid', isPaid: true,
+      deliveryStatus: 'Delivered', deliveryPersonId: 'drv1', amountUSD: 10, amountLocal: 50, exchangeRate: 5, payments: [], transfers: [], createdAt: '2026-09-01' }];
+    for (const search of ['4521', '#4521', 'D17']) {
+      state.deliveryFilter = { search };
+      const html = String(sandbox.renderDeliveriesView(true));
+      assert.ok(html.includes('data-delivery-record="r1"'), `before: "${search}" finds nothing`);
+      assert.ok(html.includes('<bdi>#D17 → 4521</bdi>'), 'the card shows only the temporary D-number');
+    }
+    state.deliveryFilter = { search: '9999' };
+    assert.ok(!String(sandbox.renderDeliveriesView(true)).includes('data-delivery-record="r1"'));
+  });
+  await test('R4 display-correctness-5: the driver Held tile and the fee lines show the exact 107.25 / 7.50 LYD the office sees, not whole dinars', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    state.language = 'en';
+    const admin = state.currentUser;
+    state.currentUser = { id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} };
+    state.users = [admin, state.currentUser];
+    state.customers = [{ id: 'c1', name: 'Ali' }];
+    const base = { recordType: 'receipt', customerId: 'c1', deliveryPersonId: 'drv1', quotedDeliveryFee: 7.5, amountUSD: 15, exchangeRate: 7.15,
+      payments: [], transfers: [], createdAt: '2026-09-01' };
+    state.receipts = [{ ...base, id: 'r1', tempReceiptNo: 'D1', finalReceiptNo: '4521', status: 'Paid', isPaid: true, deliveryStatus: 'Delivered',
+      amountLocal: 107.25, amountCollectedFromCustomer: 107.25, actualDeliveryFeeCollected: 5.25, deliveryFeePaidBy: 'customer', feeDifferenceStatus: 'LOWER', feeDiff: -2.25 }];
+    const dash = String(sandbox.renderDeliveryDashboard());
+    assert.ok(dash.includes('1 (107.25 LYD)') && !dash.includes('(107 LYD)'), 'before: the Held tile reads 107 LYD while the office sees 107.25');
+    assert.ok(dash.includes('>7.50 LYD</span>') && dash.includes('>5.25 LYD</span>') && dash.includes('(-2.25 LYD vs quoted)'), 'quoted fee, fee collected, variance');
+    state.currentUser = admin;
+    assert.ok(String(sandbox.renderReceiptsView()).includes('Delivery fee: 5.25 LYD'), 'the receipt card fee line');
+    state.receipts.push({ ...base, id: 'r2', tempReceiptNo: 'D2', status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery' },
+      deliveryStatus: 'In Progress', amountLocal: 0 });
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    await sandbox.openReceiptDeliveryCompletionModal('r2');
+    const complete = made.find(el => el.id === 'delivery-complete-modal');
+    assert.match(String(complete?.innerHTML), /id="delivery-complete-quoted"[^>]*>7\.50 LYD</);
+    const nodes = { 'delivery-complete-modal': { dataset: { receiptId: 'r2' } }, 'delivery-collected-total': {}, 'delivery-fee-compare': {}, 'delivery-debt-compare': {} };
+    sandbox.document.getElementById = id => nodes[id] || null;
+    sandbox.getPaymentTotalsFromDom = () => ({ totalR1: 107.25, totalR2: 0 });
+    sandbox._readDeliveryFeeLyd = () => 5.25;
+    sandbox.updateReceiptDeliveryCompletionComputed();
+    assert.equal(nodes['delivery-fee-compare'].textContent, 'Fee: LOWER (2.25 LYD)');
+  });
+  await test('R4 permission-matrix-3: a deliveries.assign holder without reassign or receipts.edit is offered no driver change and no Delete Mission on In Progress or Canceled jobs; an editor still is', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    const saved = [];
+    sandbox.updateRecord = async (list, id, updates) => { saved.push({ id, updates }); return true; };
+    const grant = { id: 'ops1', name: 'Ops', role: 'Employee', permissions: { receipts: ['view'], deliveries: ['view', 'accept', 'markCollected', 'assign', 'viewStats'] } };
+    const editor = { ...grant, id: 'ops2', permissions: { ...grant.permissions, receipts: ['view', 'edit'] } };
+    state.users = [grant, editor, { id: 'drv1', name: 'Driver One', role: 'Delivery', permissions: {} }, { id: 'drv2', name: 'Driver Two', role: 'Delivery', permissions: {} }];
+    state.customers = [{ id: 'c1', name: 'Ali' }];
+    const job = (id, deliveryStatus, extra = {}) => ({ id, recordType: 'receipt', customerId: 'c1', createdBy: 'admin', tempReceiptNo: id.toUpperCase(), status: 'Not Paid',
+      isPaid: false, statusDetail: { notPaidCollection: 'delivery' }, deliveryStatus, amountUSD: 10, amountLocal: 50, exchangeRate: 5, payments: [], transfers: [], createdAt: '2026-09-01', ...extra });
+    state.receipts = [job('d1', 'In Progress', { deliveryPersonId: 'drv1' }), job('d2', 'Canceled', { deliveryPersonId: 'drv1' }), job('d3', 'Needs Delivery')];
+    state.currentUser = grant;
+    await sandbox.assignDelivery('d1', 'drv2');
+    assert.deepEqual(saved, [], 'before: the driver change went to the server, which refuses it');
+    assert.equal(notes.pop()?.title, 'Access Denied');
+    const cards = html => id => html.split('data-delivery-record="').find(part => part.startsWith(`${id}"`)) || '';
+    const options = part => [...part.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]);
+    let card = cards(String(sandbox.renderDeliveriesView()));
+    assert.ok(!card('d1').includes('removeDeliveryMission') && !card('d2').includes('removeDeliveryMission'), 'Delete Mission on an In Progress or Canceled job');
+    assert.ok(card('d3').includes("removeDeliveryMission('d3')"), 'a waiting job keeps Delete Mission');
+    assert.deepEqual(options(card('d1')), ['In Progress', 'Canceled'], 'the status picker offers moves the server refuses');
+    await sandbox.removeDeliveryMission('d1');
+    assert.deepEqual(saved, []);
+    assert.equal(notes.pop()?.message, 'This job is already in progress or canceled; cancel it instead, or ask someone who can edit the receipt.');
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    const details = id => { sandbox.showDeliveryDetails(id); return String(made[made.length - 1].innerHTML || ''); };
+    assert.ok(!details('d1').includes('assignDelivery(') && details('d1').includes('Driver One'), 'the Details driver picker on an assigned job');
+    assert.ok(details('d3').includes("assignDelivery('d3'"), 'an unassigned job keeps its driver picker');
+    // A receipts.edit holder skips the workflow rule, as on the server.
+    state.currentUser = editor;
+    await sandbox.assignDelivery('d1', 'drv2');
+    await sandbox.removeDeliveryMission('d1');
+    assert.deepEqual(saved.map(s => s.id), ['d1', 'd1']);
+    card = cards(String(sandbox.renderDeliveriesView()));
+    assert.ok(card('d1').includes("removeDeliveryMission('d1')") && card('d2').includes("removeDeliveryMission('d2')"));
+    assert.deepEqual(options(card('d1')), ['Needs Delivery', 'In Progress', 'Delivered', 'Canceled', 'Office']);
+    assert.ok(details('d1').includes("assignDelivery('d1'"));
   });
 
   console.log(`\n${passed} review behavior regressions passed.`);

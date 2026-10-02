@@ -710,7 +710,7 @@ async function sanitizeCollectionInPlace(collectionName) {
     for (let j = i; j < end; j++) {
       const item = arr[j];
       if (item && typeof item === 'object') {
-        arr[j] = Security.sanitizeObject(item);
+        arr[j] = Security.sanitizeRecord(collectionName, item);
       } else if (typeof item === 'string') {
         arr[j] = Security.sanitizeInput(item);
       }
@@ -719,11 +719,9 @@ async function sanitizeCollectionInPlace(collectionName) {
     await new Promise(r => setTimeout(r, 0));
   }
 
-  // Old local caches predate strict id validation. Quarantine unsafe records
-  // instead of rendering them (stored XSS) or silently discarding them. The
-  // original sanitized rows remain exportable in state for manual recovery;
-  // an IndexedDB source is marked protected so the filtered array cannot
-  // overwrite it.
+  // Old caches predate strict id validation: unsafe records are quarantined, never rendered (stored
+  // XSS) nor silently dropped. The rows stay exportable for recovery; an IndexedDB source is marked
+  // protected so the filtered array cannot overwrite it.
   const safe = [];
   const quarantined = [];
   for (let i = 0; i < arr.length; i++) {

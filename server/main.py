@@ -64,9 +64,9 @@ RELEASE_SHA = (os.getenv("ALBAYAN_RELEASE_SHA") or "development").strip()[:64]
 ENABLE_ONLINE_IMPORT = os.getenv("ALBAYAN_ENABLE_ONLINE_IMPORT", "").strip().lower() in {"1", "true", "yes"}
 SETUP_TOKEN = os.getenv("ALBAYAN_SETUP_TOKEN", "")
 
-from .db import db_conn, get_database_url, get_engine, init_db, json_dumps, json_field_sql, json_loads, json_loads_or_raw, now_ms
+from .db import db_conn, get_database_url, get_engine, init_db, json_dumps, json_field_sql, json_fields_select_sql, json_loads, json_loads_or_raw, now_ms
 from .startup_support import read_env_float, read_env_int
-from . import delivery_workflow
+from . import delivery_workflow, receipt_serials
 from .meta_ads import stop_meta_ads_worker
 from .systems.ads_studio.social_studio import stop_social_studio_worker
 from .rbac import VALID_USER_ROLES, _load_permissions, can_browse_user_directory, is_admin_receipt_completion, is_within_delivery_scope, normalize_permissions, user_has_permission
@@ -180,8 +180,10 @@ from .entity_projection import (
     can_include_entity_media,
     can_read_related_receipt,
     drop_hidden_contact_writes,
+    keep_stored_edit_history,
     project_entity_contacts,
 )
+from .receipt_payment_rows import validate_receipt_payment_rows
 from .meta_ads import (
     META_AD_SERVER_FIELDS,
     META_PAGE_SERVER_FIELDS,
@@ -266,16 +268,15 @@ def _canonical_receipt_number(value: Any) -> str:
     return normalized[:80]
 
 
-def _receipt_number_scan_sql() -> str:
-    """Only the three number fields, never the photos, for collision scans."""
-    columns = ", ".join(
-        f"{json_field_sql(field)} AS n{index}" for index, field in enumerate(_RECEIPT_NUMBER_FIELDS)
-    )
-    return f"SELECT id, {columns} FROM entities WHERE type='receipts' AND deleted=false"
+def _receipt_number_scan_sql(extra_where: str = "", extra_fields: tuple[str, ...] = ()) -> str:
+    """Only the number fields, never the photos, for collision scans; PostgreSQL parses each row's JSON
+    once (it parsed it once per field). ``extra_where`` is hard-coded SQL on entities columns."""
+    fields = _RECEIPT_NUMBER_FIELDS + tuple(extra_fields)
+    return json_fields_select_sql(fields, ("id",), "type='receipts' AND deleted=false" + extra_where)
 
 
 def _receipt_number_row_fields(row: Any) -> dict[str, Any]:
-    return {field: row.get(f"n{index}") for index, field in enumerate(_RECEIPT_NUMBER_FIELDS)}
+    return {field: row.get(f"f_{field.lower()}") for field in _RECEIPT_NUMBER_FIELDS}
 
 
 def _receipt_number_keys(data: Any) -> set[str]:
@@ -324,7 +325,7 @@ def _validate_receipt_number_change_conn(
         return
     _lock_receipt_number_keys_conn(conn, introduced, postgres=postgres)
     rows = conn.execute(
-        text(_receipt_number_scan_sql() + " AND id<>:receipt_id"),
+        text(_receipt_number_scan_sql(" AND id<>:receipt_id")),
         {"receipt_id": receipt_id},
     ).mappings().all()
     for row in rows:
@@ -363,10 +364,20 @@ def _receipt_serial_exists(serial: str, *, exclude_id: str | None = None) -> boo
 
 
 # Auto-serial prefixes issued by the app for payment methods that come with no
-# provider receipt (must mirror AUTO_SERIAL_GROUPS in src/14-forms.js):
+# provider receipt (must mirror AUTO_SERIAL_GROUPS in src/14-forms.js and
+# receipt_serials.AUTO_SERIAL_GROUPS):
 #   S = LTT / Libyana / Madar   B = Bank Transfer (LYD|USD)
 #   O = Transfer Office         E = Sadad / USDT
 AUTO_SERIAL_PREFIXES = ("S", "B", "O", "E")
+
+
+def _issue_free_auto_serial_conn(conn: Any, receipt_id: str, data: dict[str, Any], old_data: Any, *, postgres: bool) -> None:
+    """A taken S/B/O/E number on an all-auto-paid receipt becomes its group's next free one (receipt_serials)."""
+    receipt_serials.issue_free_auto_serial(
+        conn, receipt_id, data, _receipt_number_keys(old_data), _canonical_receipt_number,
+        scan_sql=_receipt_number_scan_sql(" AND id<>:receipt_id", receipt_serials.SCAN_FIELDS),
+        lock=lambda key: _lock_receipt_number_keys_conn(conn, {key}, postgres=postgres),
+    )
 
 
 def _is_valid_serial_number(serial: str) -> bool:
@@ -957,6 +968,12 @@ def require_same_origin(request: Request):
     # they legitimately call the API from a different origin.
     if _is_trusted_app_origin(origin):
         return
+    try:  # the phone apps' own page (capacitor://localhost/...): their GETs carry it as Referer, with no Origin
+        _ref = urlparse(referer) if referer and not origin else None
+    except ValueError:
+        _ref = None
+    if _ref and _ref.scheme and _ref.netloc and _is_trusted_app_origin(f"{_ref.scheme}://{_ref.netloc}"):
+        return
     if not host:  # nothing to compare against; browsers always send one
         raise HTTPException(status_code=403, detail="Missing host header")
 
@@ -964,7 +981,6 @@ def require_same_origin(request: Request):
     if origin and host:
         # Extract hostname from origin (handles ports)
         try:
-            from urllib.parse import urlparse
             origin_host = urlparse(origin).netloc or origin.replace("https://", "").replace("http://", "").split("/")[0]
             if host != origin_host:
                 raise HTTPException(status_code=403, detail="Origin mismatch")
@@ -974,7 +990,6 @@ def require_same_origin(request: Request):
     # Check referer as fallback if origin missing
     if not origin and referer and host:
         try:
-            from urllib.parse import urlparse
             referer_host = urlparse(referer).netloc or referer.replace("https://", "").replace("http://", "").split("/")[0]
             # SECURITY FIX: Use strict equality, not substring match
             # 'host in referer_host' would allow evil-good.com to match good.com
@@ -1846,6 +1861,7 @@ def upsert_entity(
     *,
     create_if_missing: bool = True,
     reject_existing: bool = False,
+    auto_serial: bool = False,
 ) -> dict[str, Any]:
     """
     Create or update an entity in the database (atomic operation).
@@ -1994,6 +2010,9 @@ def upsert_entity(
         else:
             if not create_if_missing:
                 raise HTTPException(status_code=404, detail="Not found")
+            if auto_serial and entity_type == "receipts":
+                # A taken auto number gets the next free one. Group lock before the customer's, as on PATCH.
+                _issue_free_auto_serial_conn(conn, entity_id, clean, {}, postgres=postgres)
             created_at = now
             created_by = user_id
             deleted = False
@@ -9464,6 +9483,8 @@ def _financial_patch_receipt_atomic(
     idempotency_key: str | None = None,
     convert_funding_to_debt: bool = False,
     completion_recorded_by: str | None = None,
+    hidden_contacts: bool = False,
+    auto_serial: bool = False,
     _startup_bounded_ad_scan: bool = False,
     _startup_scan_result: dict[str, int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
@@ -9474,6 +9495,7 @@ def _financial_patch_receipt_atomic(
     validate_relationship_ids(clean, "receipt settlement data")
     clean = _normalize_receipt_number_fields(clean)
     _validate_receipt_number_fields(clean)
+    validate_receipt_payment_rows(clean)
     if str(clean.get("status") or "").strip().lower() == "destroyed":
         clean["status"] = "Destroyed"  # case variants must hit the same guards
     if set(clean) & (RECEIPT_TRANSFER_FIELDS - {"receiptType"}):
@@ -9523,6 +9545,10 @@ def _financial_patch_receipt_atomic(
             if expected_last_modified is not None and int(row["last_modified"]) != int(expected_last_modified):
                 raise HTTPException(status_code=409, detail="Conflict: receipt has changed")
             old = _financial_row_data(row)
+            if hidden_contacts and "editHistory" in clean:  # its contact rows reached this writer as '—'
+                clean["editHistory"] = keep_stored_edit_history(old.get("editHistory"), clean["editHistory"])
+                if "editCount" in clean:
+                    clean["editCount"] = len(clean["editHistory"])
             protect_company_coverage_fields("receipts", clean, old)
             # A DESTROYED receipt is a locked number: no edit may revive it
             # (only deleting frees the number) and no live receipt may become one.
@@ -9603,6 +9629,8 @@ def _financial_patch_receipt_atomic(
                     status_code=400,
                     detail="Receipt debt conversion must set the receipt Not Paid",
                 )
+            if auto_serial:  # the generic PATCH: a newly asked, taken auto number gets the next free one
+                _issue_free_auto_serial_conn(conn, receipt_id, merged, old, postgres=postgres)
             _validate_receipt_number_change_conn(
                 conn,
                 receipt_id,
@@ -9993,6 +10021,8 @@ def settle_receipt_and_linked_ads(
         updates,
         body.expectedLastModified,
         idempotency_key=body.idempotencyKey,
+        hidden_contacts=not user_has_permission(user, "customers", "viewContacts"),
+        auto_serial=True,  # the receipt form saves every Paid receipt here, not through the PATCH
     )
     if not replayed:
         audit(
@@ -10137,6 +10167,7 @@ def unsettle_receipt_and_linked_ads(
         body.expectedLastModified,
         idempotency_key=body.idempotencyKey,
         convert_funding_to_debt=True,
+        hidden_contacts=not user_has_permission(user, "customers", "viewContacts"),
     )
     if not replayed:
         audit(
@@ -11272,11 +11303,8 @@ def get_collection_item(
             if not _delivery_customer_is_referenced(entity_id, str(user.get("id") or "")):
                 raise HTTPException(status_code=403, detail="Forbidden")
             return EntityResponse(**_project_entity_media_for_user(item, user))
-        # Exchange-rate history is intentionally public to all authenticated
-        # roles; every other direct collection lookup is outside a driver's
-        # assigned-delivery scope.
-        if collection != "exchangeRateHistory" and not user_has_permission(user, _module_for_collection(collection), _action_for_collection(collection, "view")):
-            raise HTTPException(status_code=403, detail="Forbidden")  # a driver granted pages.view may hydrate a page by id
+        # Any other collection takes the view / viewOwn checks below, as in the list route: a driver
+        # granted pages.view hydrates a page; one who runs a shop or Studio drafts reads only its own.
 
     module = _module_for_collection(collection)
     action = _action_for_collection(collection, "view")
@@ -11480,6 +11508,7 @@ def create_collection_item(
     # Receipt number uniqueness enforcement + temp receipt generation (server-side, multi-user safe)
     elif collection == "receipts":
         data_in = sanitize_json(body.data or {}) or {}
+        validate_receipt_payment_rows(data_in)  # before a D-number is drawn
 
         status_in = sanitize_str(str(data_in.get("status") or ""))[:40]
         # Case variants must not dodge the destroyed-receipt rules.
@@ -11535,13 +11564,15 @@ def create_collection_item(
         _serials_to_check = [_final_no]
         if _serial_no and _serial_no != _final_no:
             _serials_to_check.append(_serial_no)
+        # An auto number (S/B/O/E) on an all-auto-paid receipt is not refused when taken: upsert_entity gives the next free one.
+        _auto_no = _serial_no if receipt_serials.reissuable_prefix(data_in, _serial_no) else ""
         for _s in _serials_to_check:
             if not _s:
                 continue
             # Allow S-prefixed auto-serial (S1, S2, S3) for LTT/Libyana/Madar, or regular digits
             if not _is_valid_serial_number(_s):
                 raise HTTPException(status_code=400, detail="Invalid serialNumber (must be digits or S-prefixed like S1, S2)")
-            if _receipt_serial_exists(_s):
+            if _s != _auto_no and _receipt_serial_exists(_s):
                 raise HTTPException(status_code=409, detail="serialNumber already exists")
 
         # A DESTROYED receipt records ONLY its torn paper's number, forever.
@@ -11593,6 +11624,7 @@ def create_collection_item(
             str(user.get("id") or "system"),
             create_if_missing=True,
             reject_existing=True,
+            auto_serial=collection == "receipts",
         )
     replayed_create = bool(saved.pop("_replayed", False))
     if not replayed_create:
@@ -12148,6 +12180,7 @@ def update_collection_item(
 
     creator = existing.get("createdBy") or (existing.get("data") or {}).get("createdBy") or (existing.get("data") or {}).get("creatorId")
     delivery_grant_patch = False
+    grant_echo_fields = None  # set when only a narrow grant authorized this PATCH
     if not user_has_permission(user, module, _action_for_collection(collection, "edit"), record_creator_id=str(creator or "")):
         _dw_updates = sanitize_json(body.data or {}) or {}
         _dw_keys = set(_dw_updates.keys())
@@ -12168,6 +12201,7 @@ def update_collection_item(
         if not _mark_collected_patch and not _delivery_ok:
             raise HTTPException(status_code=403, detail="Forbidden")
         delivery_grant_patch = _delivery_ok
+        grant_echo_fields = _DELIVERY_WORKFLOW_FIELDS if _delivery_ok else _RECEIPT_COLLECTION_FIELDS
 
     if collection in {"ads", "receipts"} and not delivery_grant_patch and role_lower != "delivery":
         # An edit grant is not a way around the delivery workflow: a finished
@@ -12302,13 +12336,15 @@ def update_collection_item(
         _serials_to_check = [_final_no]
         if _serial_no and _serial_no != _final_no:
             _serials_to_check.append(_serial_no)
+        _auto_no = _serial_no if (_serial_no not in _receipt_number_keys(_d0)  # a NEW auto number: re-issued if taken
+                                  and receipt_serials.reissuable_prefix({**_d0, **updates_in}, _serial_no)) else ""
         for _s in _serials_to_check:
             if not _s:
                 continue
             # Allow S-prefixed auto-serial (S1, S2, S3) for LTT/Libyana/Madar, or regular digits
             if not _is_valid_serial_number(_s):
                 raise HTTPException(status_code=400, detail="Invalid serialNumber (must be digits or S-prefixed like S1, S2)")
-            if _receipt_serial_exists(_s, exclude_id=entity_id):
+            if _s != _auto_no and _receipt_serial_exists(_s, exclude_id=entity_id):
                 raise HTTPException(status_code=409, detail="serialNumber already exists")
 
     # Enforce: Ads must NOT create deliveries in the Not Paid + Driver receipt-linked flow.
@@ -12338,7 +12374,9 @@ def update_collection_item(
         )
     elif collection == "receipts":
         saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
-            user, entity_id, updates_to_save, body.expectedLastModified
+            user, entity_id, updates_to_save, body.expectedLastModified,
+            hidden_contacts=not user_has_permission(user, "customers", "viewContacts"),
+            auto_serial=True,
         )
     else:
         saved = patch_entity(
@@ -12351,6 +12389,8 @@ def update_collection_item(
             additive_contacts=not user_has_permission(user, "customers", "viewContacts"),
         )
     audit(str(user.get("id")), "update", collection, entity_id, f"Updated {collection} {entity_id}", {})
+    if grant_echo_fields is not None and not user_has_permission(user, module, _action_for_collection(collection, "view"), record_creator_id=str(creator or "")):
+        return EntityResponse(**delivery_workflow.grant_echo(saved, grant_echo_fields))  # no amounts, customer or payments
     return EntityResponse(**_project_entity_media_for_user(saved, user, include_media))
 
 
@@ -13428,6 +13468,9 @@ def _apply_user_update_atomic(
     user_id: str,
     update_fields: dict[str, Any],
     actor: dict[str, Any],
+    *,
+    expected_role: str | None = None,
+    expected_permissions: dict[str, list[str]] | None = None,
 ) -> None:
     """Apply a user update while atomically preserving one active Admin."""
     postgres = str(get_engine().dialect.name or "") == "postgresql"
@@ -13451,6 +13494,11 @@ def _apply_user_update_atomic(
             ).mappings().first()
             if not current:
                 raise HTTPException(status_code=404, detail="Not found")
+            _grants = lambda p: {k: set(v) for k, v in (p or {}).items() if v}  # order and empty modules never matter
+            if (expected_role is not None and expected_role.strip().lower() != str(current.get("role") or "").lower()) or (
+                expected_permissions is not None and _grants(expected_permissions) != _grants(parse_permissions_json(current.get("permissions_json")))
+            ):  # the editor's screen is out of date: never write over another manager's change
+                raise HTTPException(status_code=409, detail="Conflict: this user was changed by someone else")
             if (
                 str(actor.get("role") or "").lower() != "admin"
                 and str(current.get("role") or "").lower() == "admin"
@@ -13690,7 +13738,7 @@ def update_user(user_id: str, body: UpdateUserRequest, request: Request, admin: 
     # zero admins — every admin-only endpoint (users, import, restore, audit)
     # then 403s and recovery needs direct DB access.
     def _apply_update() -> None:
-        _apply_user_update_atomic(user_id, update_fields, admin)
+        _apply_user_update_atomic(user_id, update_fields, admin, expected_role=body.expectedRole, expected_permissions=body.expectedPermissions)
 
     try:
         _apply_update()

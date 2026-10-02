@@ -621,11 +621,19 @@ function exportClothesOrdersCSV() {
 function renderClothesSystemView() {
   const isAr = clothesIsAr();
   const isAdmin = isCurrentUserAdmin();
+  // Back target: admins return to the Smart Systems hub; employees with other
+  // permissions return to their first allowed manager page; pure subscribers
+  // (this is their whole world) get no back button.
+  const backView = isAdmin ? 'smart-systems' : getAlbayanManagerLandingViewForUser(state.currentUser);
+  const showBack = isAdmin || (backView && backView !== 'clothes-system' && backView !== 'no-access');
+  // ...and no sidebar either, so the view carries their account controls (App Review).
+  const accountStrip = !isAdmin && !showBack ? renderClothesAccountStrip(isAr) : '';
 
   // Subscription gate for non-admins (view access alone is not enough)
   if (!isAdmin && !hasSubscription('clothes_system')) {
     return `
       <div class="max-w-2xl mx-auto">
+        ${accountStrip}
         <div class="glass-panel rounded-2xl p-12 text-center">
           <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center mb-6 shadow-2xl">
             <i data-lucide="lock" class="w-10 h-10 text-white"></i>
@@ -648,11 +656,6 @@ function renderClothesSystemView() {
     default: tabContent = renderClothesDashboardTab();
   }
 
-  // Back target: admins return to the Smart Systems hub; employees with other
-  // permissions return to their first allowed manager page; pure subscribers
-  // (this is their whole world) get no back button.
-  const backView = isAdmin ? 'smart-systems' : getAlbayanManagerLandingViewForUser(state.currentUser);
-  const showBack = isAdmin || (backView && backView !== 'clothes-system' && backView !== 'no-access');
   const backLabel = isAdmin ? (isAr ? 'العودة للأنظمة الذكية' : 'Back to Smart Systems') : (isAr ? 'العودة' : 'Back');
 
   return `
@@ -662,7 +665,7 @@ function renderClothesSystemView() {
       <button onclick="navigateTo('${backView}')" class="mb-6 flex items-center gap-2 text-rose-600 hover:text-rose-700 font-medium">
         <i data-lucide="${isAr ? 'arrow-right' : 'arrow-left'}" class="w-5 h-5"></i>
         <span>${backLabel}</span>
-      </button>` : ''}
+      </button>` : accountStrip}
 
       <!-- Header -->
       <div class="mb-8">
@@ -686,6 +689,18 @@ function renderClothesSystemView() {
       ${tabContent}
     </div>
   `;
+}
+
+// Language, Sign out, Privacy and Delete account for a subscriber whose whole app is this view.
+function renderClothesAccountStrip(isAr) {
+  return `
+      <div data-testid="clothes-account-strip" class="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex gap-2">
+          <button type="button" onclick="toggleLanguage()" class="min-h-11 glass-panel rounded-xl px-4 font-bold text-slate-600 dark:text-slate-300 flex items-center gap-2"><i data-lucide="languages" class="w-4 h-4"></i>${isAr ? 'English' : 'العربية'}</button>
+          <button type="button" onclick="handleLogout()" class="min-h-11 rounded-xl px-4 font-bold text-rose-600 bg-rose-50 dark:bg-rose-900/20 hover:bg-rose-100 flex items-center gap-2"><i data-lucide="log-out" class="w-4 h-4"></i>${isAr ? 'تسجيل الخروج' : 'Sign out'}</button>
+        </div>
+        ${renderAlwaysAvailableAccountLinks()}
+      </div>`;
 }
 
 // ------------------------------------------
@@ -809,9 +824,9 @@ function renderClothesProductsTab() {
             class="w-full glass-input ${isAr ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-2.5 rounded-xl"
           />
         </div>
-        <button onclick="exportClothesProductsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+        ${isPackagedMobileApp() ? '' : `<button onclick="exportClothesProductsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
           <i data-lucide="download" class="w-4 h-4"></i>
-        </button>
+        </button>`}
         <button onclick="showClothesProductModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'إضافة منتج' : 'Add Product'}
@@ -1739,9 +1754,9 @@ function renderClothesShipmentsTab() {
           <option value="all" ${_clothesShipmentStatusFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل الحالات' : 'All statuses'}</option>
           ${CLOTHES_SHIPMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesShipmentStatusFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>
-        <button onclick="exportClothesShipmentsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+        ${isPackagedMobileApp() ? '' : `<button onclick="exportClothesShipmentsCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
           <i data-lucide="download" class="w-4 h-4"></i>
-        </button>
+        </button>`}
         <button onclick="showClothesShipmentModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'إضافة شحنة' : 'Add Shipment'}
@@ -2625,9 +2640,9 @@ function renderClothesOrdersTab() {
           <option value="all" ${_clothesOrderPaymentFilter === 'all' ? 'selected' : ''}>${isAr ? 'كل حالات الدفع' : 'All payments'}</option>
           ${CLOTHES_PAYMENT_STATUSES.map(s => `<option value="${s.id}" ${_clothesOrderPaymentFilter === s.id ? 'selected' : ''}>${isAr ? s.labelAr : s.label}</option>`).join('')}
         </select>
-        <button onclick="exportClothesOrdersCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
+        ${isPackagedMobileApp() ? '' : `<button onclick="exportClothesOrdersCSV()" class="glass-panel px-3 py-2.5 rounded-xl text-slate-600 dark:text-slate-300 hover:text-rose-600 flex items-center justify-center" title="${isAr ? 'تصدير CSV (إكسل)' : 'Export CSV (Excel)'}">
           <i data-lucide="download" class="w-4 h-4"></i>
-        </button>
+        </button>`}
         <button onclick="showClothesOrderModal()" class="btn-shine bg-gradient-to-r from-rose-500 to-pink-500 text-white px-5 py-2.5 rounded-xl font-bold shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
           <i data-lucide="plus" class="w-4 h-4"></i>
           ${isAr ? 'طلب جديد' : 'New Order'}
@@ -2746,9 +2761,9 @@ function renderClothesOrderCard(o) {
         <select onchange="setClothesOrderPayment('${o.id}', this.value)" class="glass-input px-2 py-1.5 rounded-lg text-sm flex-1" title="${isAr ? 'حالة الدفع' : 'Payment status'}">
           ${CLOTHES_PAYMENT_STATUSES.map(st => `<option value="${st.id}" ${o.paymentStatus === st.id ? 'selected' : ''}>${isAr ? st.labelAr : st.label}</option>`).join('')}
         </select>
-        <button onclick="printClothesOrderSlip('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'طباعة إيصال' : 'Print slip'}">
+        ${isPackagedMobileApp() ? '' : `<button onclick="printClothesOrderSlip('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'طباعة إيصال' : 'Print slip'}">
           <i data-lucide="printer" class="w-4 h-4"></i>
-        </button>
+        </button>`}
         ${editable ? `
           <button onclick="editClothesOrder('${o.id}')" class="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800" title="${isAr ? 'تعديل' : 'Edit'}">
             <i data-lucide="pencil" class="w-4 h-4"></i>

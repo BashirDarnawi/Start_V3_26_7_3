@@ -225,7 +225,7 @@ function renderControlCenterTask(icon, color, title, detail, actionHtml = '') {
 }
 
 // ---- Subscription plans manager (owner pricing without redeploys) ----
-let _planManager = { loading: false, loadedAt: 0, version: 0, plans: [], error: '', dirty: false, saving: false };
+let _planManager = { loading: false, loadedAt: 0, failedAt: 0, version: 0, plans: [], error: '', dirty: false, saving: false };
 // Mirrors the server's KNOWN_SERVICE_IDS; the server re-validates anyway.
 const PLAN_MANAGER_SERVICE_IDS = ['international_shipping', 'local_shipping', 'warehouse', 'smart_systems', 'clothes_system', 'ad_maker'];
 
@@ -233,6 +233,8 @@ async function loadPlanManager(force = false) {
   if (_planManager.loading || !isServerModeEnabled()) return;
   if (!force && _planManager.loadedAt && Date.now() - _planManager.loadedAt < 60000) return;
   if (!force && _planManager.dirty) return; // never clobber unsaved edits
+  // After a failure only Reload asks at once: every render re-asked, looping while offline.
+  if (!force && _planManager.failedAt && Date.now() - _planManager.failedAt < 30000) return;
   _planManager.loading = true;
   _planManager.error = '';
   try {
@@ -240,8 +242,10 @@ async function loadPlanManager(force = false) {
     _planManager.plans = Array.isArray(payload?.plans) ? payload.plans : [];
     _planManager.version = Number(payload?.version || 0);
     _planManager.loadedAt = Date.now();
+    _planManager.failedAt = 0;
     _planManager.dirty = false;
   } catch (error) {
+    _planManager.failedAt = Date.now();
     _planManager.error = String(error?.payload?.detail || error?.message || ccText('Could not load the plan catalog', 'تعذّر تحميل كتالوج الخطط'));
   } finally {
     _planManager.loading = false;
@@ -266,6 +270,15 @@ function planManagerSetField(index, field, value) {
   else if (field === 'active') plan.active = value === true;
   else if (field === 'name' || field === 'nameAr') plan[field] = String(value || '').slice(0, 80);
   _planManager.dirty = true;
+  // Update in place: a render() would redraw these id-less inputs and close the phone keyboard.
+  const save = document.getElementById('plan-manager-save');
+  if (save) save.disabled = _planManager.saving;
+  document.getElementById('plan-manager-dirty')?.classList.remove('hidden');
+}
+
+function planManagerReload() {
+  if (_planManager.dirty && !window.confirm(ccText('Discard unsaved plan changes and reload from the server?', 'تجاهل تغييرات الخطط غير المحفوظة وإعادة التحميل من الخادم؟'))) return;
+  return loadPlanManager(true);
 }
 
 function planManagerAddBundle() {
@@ -354,10 +367,10 @@ function renderPlanManagerSection() {
       <section class="glass-panel rounded-3xl p-5 sm:p-6">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div><div class="flex items-center gap-2"><i data-lucide="badge-dollar-sign" class="h-5 w-5 text-emerald-600"></i><h2 class="text-xl font-black text-slate-900 dark:text-white">${ccText('Subscription plans & prices', 'خطط الاشتراك والأسعار')}</h2></div>
-          <p class="mt-1 text-sm text-slate-500">${ccText('Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version:', 'الأسعار بالدينار ومحفوظة على الخادم — الحفظ هنا يغيّر ما يدفعه العملاء لاحقاً، ولا يغيّر ما اشتروه سابقاً. إصدار الكتالوج:')} ${Number(_planManager.version) || 0}${_planManager.dirty ? ` · <span class="font-bold text-amber-600">${ccText('unsaved changes', 'تغييرات غير محفوظة')}</span>` : ''}</p></div>
+          <p class="mt-1 text-sm text-slate-500">${ccText('Prices are LYD and live on the server — saving here changes what customers pay next, never what they already bought. Catalog version:', 'الأسعار بالدينار ومحفوظة على الخادم — الحفظ هنا يغيّر ما يدفعه العملاء لاحقاً، ولا يغيّر ما اشتروه سابقاً. إصدار الكتالوج:')} ${Number(_planManager.version) || 0}<span id="plan-manager-dirty"${_planManager.dirty ? '' : ' class="hidden"'}> · <span class="font-bold text-amber-600">${ccText('unsaved changes', 'تغييرات غير محفوظة')}</span></span></p></div>
           <div class="flex gap-2">
-            <button type="button" onclick="loadPlanManager(true)" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">${ccText('Reload', 'إعادة التحميل')}</button>
-            <button type="button" onclick="savePlanManager()" ${_planManager.dirty && !_planManager.saving ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">${ccText('Save all plans', 'حفظ كل الخطط')}</button>
+            <button type="button" onclick="planManagerReload()" class="min-h-11 rounded-xl border border-slate-300 px-4 font-bold text-slate-600 dark:border-slate-700 dark:text-slate-300">${ccText('Reload', 'إعادة التحميل')}</button>
+            <button type="button" id="plan-manager-save" onclick="savePlanManager()" ${_planManager.dirty && !_planManager.saving ? '' : 'disabled'} class="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:cursor-not-allowed disabled:opacity-40">${ccText('Save all plans', 'حفظ كل الخطط')}</button>
           </div>
         </div>
         ${_planManager.error ? `<div class="mb-3 rounded-xl bg-rose-50 p-3 text-sm font-semibold text-rose-700">${Security.escapeHtml(_planManager.error)}</div>` : ''}
@@ -385,7 +398,7 @@ function renderControlCenterView() {
   if (!_controlCenter.loading && (!_controlCenter.loadedAt || Date.now() - _controlCenter.loadedAt > 60000)) {
     setTimeout(() => loadControlCenterStatus(false), 0);
   }
-  if (isServerModeEnabled() && !_planManager.loading && !_planManager.loadedAt) {
+  if (isServerModeEnabled() && !_planManager.loading && !_planManager.loadedAt && (!_planManager.failedAt || Date.now() - _planManager.failedAt > 30000)) {
     setTimeout(() => loadPlanManager(false), 0);
   }
   const facts = getControlCenterFacts();

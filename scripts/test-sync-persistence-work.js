@@ -247,17 +247,38 @@ async function main() {
     f.run('_serverLiveSync.nextAllowedAt = Date.now() + 3600000'); callback();
     assert.equal(ticks - base, 1);
   });
-  await test('a native write that hits the JS deadline is not re-sent: the abort carries status 499 and the native budget is shorter', async () => {
+  await test('a native write that hits the JS deadline is not re-sent: the abort carries noRetry (no fake HTTP status) and the native budget is shorter', async () => {
     const f = syncFixture(); const requests = [];
     f.sandbox.DOMException = DOMException;
     f.run("Platform.detect = () => ({ isCapacitor: true, isIOS: true, isAndroid: false, isWeb: false, isNative: true })");
     f.sandbox.window.Capacitor = { Plugins: { CapacitorHttp: { request: options => { requests.push(options); return new Promise(() => {}); } } } };
     const controller = new AbortController();
-    const pending = f.sandbox._nativeAwareFetch('https://app.example/api/x', { method: 'POST', headers: {} }, { a: 1 }, controller, 5000);
+    let calls = 0;
+    const pending = f.sandbox.withRetry(() => { calls += 1; return f.sandbox._nativeAwareFetch('https://app.example/api/x', { method: 'POST', headers: {} }, { a: 1 }, controller, 5000); });
     controller.abort();
     const error = await pending.then(() => null, e => e);
-    assert.equal(error?.name, 'AbortError'); assert.equal(error?.status, 499);
+    assert.equal(error?.name, 'AbortError'); assert.equal(error?.status, undefined); assert.equal(error?.noRetry, true);
+    assert.equal(calls, 1, 'withRetry sent the write a second time');
     assert.equal(requests.length, 1); assert.equal(requests[0].connectTimeout, 4000); assert.equal(requests[0].readTimeout, 4000);
+  });
+  // Bug hunt r34 (R4-concurrency-idempotency-5): a create with photos had a fixed 20 s budget; it now
+  // gets the 90 s photo budget and one retry, like a photo PATCH.
+  await test('R4 concurrency-idempotency-5: a create with photos gets the 90 s photo budget and one retry; small and Ads Studio creates keep theirs', async () => {
+    const f = syncFixture(); const seen = [];
+    f.sandbox.setTimeout = fn => { fn(); return 1; };  // withRetry's backoff runs at once
+    f.sandbox.apiJson = async (path, options, timeout) => { seen.push(timeout?.timeoutMs); throw new TypeError('Load failed'); };
+    const photo = `data:image/jpeg;base64,${'A'.repeat(4000)}`;
+    const attempts = async (collection, record) => {
+      seen.length = 0;
+      const error = await f.sandbox.apiCreateEntity(collection, record).then(() => null, e => e);
+      assert.equal(error?.message, 'Load failed');
+      return { calls: seen.length, timeouts: [...new Set(seen)] };
+    };
+    assert.deepEqual(await attempts('receipts', { id: 'r1', customerId: 'c1', photos: [photo, photo] }), { calls: 2, timeouts: [90000] }, 'before: 20 s and two retries');
+    assert.deepEqual(await attempts('clothesProducts', { id: 'p1', name: 'Dress', photo }), { calls: 2, timeouts: [90000] });
+    assert.deepEqual(await attempts('receipts', { id: 'r2', customerId: 'c1', notes: 'x'.repeat(210 * 1024) }), { calls: 2, timeouts: [90000] }, 'a body over 200 KB');
+    assert.deepEqual(await attempts('customers', { id: 'c2', name: 'Ali' }), { calls: 3, timeouts: [20000] });
+    assert.deepEqual(await attempts('adCampaignRequests', { id: 'q1', creativeImages: [photo] }), { calls: 3, timeouts: [90000] });
   });
   for (const errorStatus of [0, 403, 503]) {
     await test(`stopped delta fan-out launches only 4 of 14 requests and ignores late ${errorStatus || 'successful'} results`, async () => {

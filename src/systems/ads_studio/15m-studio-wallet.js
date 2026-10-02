@@ -260,14 +260,16 @@ function studioWalletLoadMethods(retry = false) {
   if (_studioWallet.methodsFailed && retry !== true) return Promise.resolve(null);
   const generation = _studioWallet.generation;
   _studioWallet.methodsFailed = false;
+  const signal = studioReadSignal();
   _studioWallet.methodsLoading = (async () => {
     try {
       const catalog = await studioApi('/api/wallet/payment-requests/methods', { method: 'GET' });
       _studioWallet.methods = studioWalletCleanMethods(catalog && catalog.methods);
       const rate = Number(catalog && catalog.rate && catalog.rate.usdToLyd);
       _studioWallet.rate = Number.isFinite(rate) && rate > 0 ? rate : 0;
-    } catch (_) {
-      _studioWallet.methodsFailed = true;
+    } catch (error) {
+      // A read the app cancelled by moving on (15g) never failed: the next draw asks again.
+      if (!studioReadCancelled(error, signal)) _studioWallet.methodsFailed = true;
     } finally {
       _studioWallet.methodsLoading = null;
     }
@@ -1296,6 +1298,10 @@ function renderStudioAccountScreen() {
               <a class="studio-v2-row" data-testid="studio-account-terms" href="${base}/privacy#${adsStudioIsAr() ? 'terms-ar' : 'terms'}" target="_blank" rel="noopener">
                 ${studioWalletIcon('scroll-text')}
                 <span class="studio-v2-row-label">${studioEsc(adsStudioText('Customer terms', 'شروط العملاء'))}</span>
+              </a>
+              <a class="studio-v2-row" data-testid="studio-account-delete" href="${base}/delete-account" target="_blank" rel="noopener noreferrer">
+                ${studioWalletIcon('user-x')}
+                <span class="studio-v2-row-label">${studioEsc(adsStudioText('Request account deletion', 'طلب حذف الحساب'))}</span>
               </a>
               ${row('handleLogout()', 'log-out', adsStudioText('Sign out', 'تسجيل الخروج'), '', 'studio-account-logout', ' is-danger')}
             </div>

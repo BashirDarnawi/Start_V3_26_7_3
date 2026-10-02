@@ -44,6 +44,31 @@ if (!Number.isInteger(Number(androidCode)) || Number(androidCode) < 1) failures.
 if (!androidManifest.includes('android:scheme="albayan"') || !androidManifest.includes('android:host="auth"')) failures.push('Android app-login deep link is missing.');
 if (!iosPlist.includes('<string>albayan</string>')) failures.push('iOS app-login URL scheme is missing.');
 
+// Android 12+ ignores allowBackup="false" for phone-to-phone transfer: a copied
+// phone opened signed in, with the business cache and the fingerprint lock
+// silently off. Both rule sections must exclude every domain (a section with
+// no exclude means "copy everything"; root also covers the WebView's data).
+const androidApplication = androidManifest.replace(/<!--[\s\S]*?-->/g, '').match(/<application\b[^>]*>/)?.[0] || '';
+if (!androidApplication.includes('android:allowBackup="false"')) failures.push('Android <application> must keep android:allowBackup="false" (Android 11 and older).');
+if (!androidApplication.includes('android:dataExtractionRules="@xml/data_extraction_rules"')) {
+  failures.push('Android <application> must set android:dataExtractionRules="@xml/data_extraction_rules" (Android 12+ copies app data to a new phone otherwise).');
+}
+const extractionRulesFile = 'android/app/src/main/res/xml/data_extraction_rules.xml';
+if (!fs.existsSync(path.join(ROOT, extractionRulesFile))) {
+  failures.push(`${extractionRulesFile} is missing (a copied Android phone would open signed in).`);
+} else {
+  const rules = read(extractionRulesFile).replace(/<!--[\s\S]*?-->/g, '');
+  if (/<include\b/.test(rules)) failures.push(`${extractionRulesFile} must not include anything: no app data leaves the phone.`);
+  for (const section of ['cloud-backup', 'device-transfer']) {
+    const body = rules.match(new RegExp(`<${section}\\b[^>]*>([\\s\\S]*?)</${section}>`))?.[1];
+    for (const domain of ['root', 'file', 'database', 'sharedpref', 'external']) {
+      if (!new RegExp(`<exclude\\s+domain="${domain}"\\s+path="\\."\\s*/>`).test(body || '')) {
+        failures.push(`${extractionRulesFile} <${section}> must exclude domain="${domain}" path=".".`);
+      }
+    }
+  }
+}
+
 const requiredNativeDependencies = [
   '@capacitor/browser', '@capacitor/camera', '@capacitor/clipboard',
   '@capacitor/haptics', '@capacitor/keyboard', '@capacitor/local-notifications',

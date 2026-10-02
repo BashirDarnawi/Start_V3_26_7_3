@@ -183,11 +183,8 @@ async function apiFetch(path, { method = 'GET', body, headers = {}, navigationAb
   }
 }
 
-// Packaged apps: Capacitor's patched fetch() ignores AbortSignal and timeouts
-// for POST/PATCH/DELETE (native default 600 s), so a stalled login or save
-// never timed out. Calling the plugin directly makes the timeout and the abort
-// timer apply; the reply is wrapped as a standard Response. GETs keep the
-// patched fetch, which honours the abort signal already.
+// Packaged apps: the patched fetch() ignores aborts and timeouts on writes (native 600 s: a stalled
+// save never ended), so writes call the plugin directly, wrapped as a Response. GETs keep fetch.
 async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   const plugin = (typeof Platform !== 'undefined' && Platform.isCapacitor && opts.method !== 'GET')
     ? (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp)
@@ -195,9 +192,11 @@ async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
   if (!plugin || typeof plugin.request !== 'function') return fetch(url, opts);
   if (controller.signal.aborted) throw new DOMException('The request was aborted', 'AbortError');
   const abortPromise = new Promise((_, reject) => {
-    // The native task cannot be cancelled and may still commit: 499 stops withRetry from sending the body twice.
-    controller.signal.addEventListener('abort', () => reject(Object.assign(new DOMException('The request timed out', 'AbortError'), { status: 499 })), { once: true });
+    // The native task cannot be cancelled and may still commit: noRetry stops withRetry from sending the
+    // body twice. No HTTP status: a fake one (499) read as a refusal ('Not allowed'), not a lost answer.
+    controller.signal.addEventListener('abort', () => reject(Object.assign(new DOMException('The request timed out', 'AbortError'), { noRetry: true })), { once: true });
   });
+  // The plugin's own failure (native timeout, lost connection) reads as the browser's 'Load failed'.
   const request = plugin.request({
     url,
     method: opts.method,
@@ -206,6 +205,9 @@ async function _nativeAwareFetch(url, opts, body, controller, timeoutMs) {
     connectTimeout: Math.max(1000, timeoutMs - 1000),
     readTimeout: Math.max(1000, timeoutMs - 1000),
     responseType: 'text'
+  }).catch(e => {
+    if (e && e.status) throw e;
+    throw Object.assign(new TypeError('Load failed'), { nativeMessage: String(e?.message || ''), code: e?.code });
   });
   const native = await Promise.race([request, abortPromise]);
   const status = Number(native?.status) || 0;
@@ -250,6 +252,7 @@ async function withRetry(fn, maxRetries = 2, baseDelayMs = 500) {
     } catch (e) {
       lastError = e;
       if (e?.code === 'SERVER_SESSION_CHANGED') throw e;
+      if (e?.noRetry) throw e;  // a write that may have committed is never re-sent
       const status = e?.status;
       // Don't retry client errors (400, 401, 403, 404, 409) or successful responses
       if (status && status >= 400 && status < 500 && status !== 408) {
@@ -436,13 +439,9 @@ async function apiAuthMe() {
   finally { if (_sessionRequest === request) _sessionRequest = null; }
 }
 
-// Packaged phone apps target a known server, so one bounded round trip can
-// prove reachability AND settle the session: 200 = signed in, 401 (or any
-// other definite answer) = reachable but signed out, a network failure or a
-// 5xx = not proven (the caller falls back to the health probe). No retries:
-// the cold start must stay bounded on a dead network.
-// A session answer must look like a user: a captive portal or proxy can
-// answer 200 with HTML, which must never pass as "signed in".
+// Phone apps: one bounded round trip proves reachability AND the session (200 signed in, any other
+// definite answer signed out, network failure/5xx not proven: the health probe decides). No retries
+// on a dead network. A 200 must look like a user: a captive portal's HTML is never "signed in".
 function _isSessionUser(user) {
   return !!user && typeof user === 'object' && !Array.isArray(user) && typeof Security !== 'undefined' && Security.isValidRecordId(String(user.id || ''));
 }
@@ -621,11 +620,8 @@ function makeSessionChangedError() {
   return error;
 }
 
-// Collections synchronized through the generic collection API. Keep this one
-// list shared by full loads, per-collection cursors and visibility purges so a
-// newly-added collection cannot accidentally miss one of the safety paths.
-// Order is load order: the office core first, the clothes module last, so
-// the workspace is usable before the lists a user opens least often arrive.
+// The ONE list of generic-API collections (full loads, cursors, visibility purges: a new one misses
+// no safety path), in load order: office core first, the clothes module last.
 const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'ads', 'receipts', 'customers', 'pages', 'exchangeRateHistory',
   'adCampaignRequests',
@@ -634,10 +630,8 @@ const SERVER_SYNC_COLLECTIONS = Object.freeze([
   'clothesProducts', 'clothesShipments', 'clothesOrders', 'clothesSettings'
 ]);
 
-// Receipt/ad photos are large base64 strings. Normal lists and live deltas
-// request lightweight records and fetch the full item only when a user opens
-// Photos or Edit. Old servers safely ignore the query parameter, while old
-// clients keep receiving full records because the backend default is true.
+// Photos are large base64 strings: lists and deltas ask for lightweight records, and Photos/Edit
+// fetch the full item. Old servers ignore the parameter; old clients still get full records.
 const LIGHTWEIGHT_MEDIA_COLLECTIONS = new Set(['ads', 'receipts', 'adCampaignRequests', 'clothesProducts', 'pages']);
 const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // Writes embedding photos (delivery proof, adPhotos) need minutes on a weak
@@ -645,12 +639,8 @@ const ADS_STUDIO_MEDIA_TIMEOUT_MS = 90000;
 // budget. Small bodies keep the 20s timeout.
 const MEDIA_BODY_SIZE_THRESHOLD_BYTES = 200 * 1024;
 function mediaAwareTimeoutMs(body) {
-  // Deliberately NOT JSON.stringify(body): apiFetch serializes the same body
-  // again for the wire, and doubling a multi-megabyte photo payload's
-  // serialization caused a real memory/CPU spike on old phones. A shallow
-  // walk over string values (photos live at most a few levels deep:
-  // data.photos[i], data.adPhotos[i], data.receiptImage) sums lengths and
-  // spots data-URL prefixes without materializing a second copy.
+  // Not JSON.stringify(body): a second serialization of a multi-MB photo body spiked old phones. A
+  // shallow walk (photos sit a few levels deep) sums string lengths and spots data-URL prefixes.
   try {
     let size = 0;
     const scan = (val, depth) => {
@@ -784,11 +774,8 @@ function mergeMutationInlineMedia(collection, incoming, knownRecord) {
   return merged;
 }
 
-// Capture server-issued collection watermarks BEFORE a full load starts. A
-// full load spans several requests and is not one DB snapshot; seeding a delta
-// cursor from the rows it happened to return can skip a write that lands after
-// an early collection request. Starting the follow-up delta at these captured
-// values makes every write concurrent with the snapshot visible.
+// Server watermarks captured BEFORE a full load (several requests, not one snapshot): a delta cursor
+// seeded from the returned rows could skip a concurrent write; starting here shows every one.
 async function apiGetSyncWatermarks() {
   const identity = getServerSessionIdentity();
   const payload = await apiJson('/api/sync/watermarks', { method: 'GET' }, { timeoutMs: 10000 });
@@ -829,8 +816,7 @@ async function apiGetSyncWatermarks() {
   return watermarks;
 }
 
-// Cache for users list to avoid repeated API calls. It is identity-scoped:
-// an Admin's full user list must never be reused by a later non-admin session.
+// Users list cache, identity-scoped: an Admin's list must never serve a later non-admin session.
 let _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' }; // 30 second cache
 
 // Session cache to prevent logout on rapid refresh
@@ -877,9 +863,7 @@ async function apiListUsersForUi() {
   }
 }
 
-// The users-list cache must never outlive a user mutation, or the next
-// live-sync tick re-serves pre-edit permissions and overwrites fresh local
-// state with stale data.
+// Never outlive a user mutation: the next live-sync tick would re-serve pre-edit permissions.
 function invalidateUsersListCache() {
   _usersListCache = { data: null, timestamp: 0, cacheDurationMs: 30000, identity: '' };
 }
@@ -939,10 +923,8 @@ async function apiUpdateUser(userId, updates) {
   return res;
 }
 
-// Debounced server-side persistence for user permission changes (the UI
-// mutates local state first; server mode must also PATCH /api/users/{id}).
-// Resolves true once the write landed (or local mode saved), false when it
-// was refused — callers that promise success must wait for it.
+// Debounced PATCH /api/users/{id} for permission changes (the UI changes local state first). Resolves
+// true once it landed (or local mode saved), false when refused: callers that promise success wait.
 const _serverUserUpdate = {
   timers: new Map(),
   pending: new Map(),
@@ -950,15 +932,15 @@ const _serverUserUpdate = {
   debounceMs: 700
 };
 
-function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
+function scheduleServerUserUpdate(userId, updates, { quiet = false, base } = {}) {
   const uid = String(userId || '');
   if (!uid) return Promise.resolve(false);
   if (!isServerModeEnabled()) return Promise.resolve(true);
-  // Permission edits are made by Admins or users.managePermissions holders;
-  // the server enforces the same rule.
+  // Admins or users.managePermissions holders only (the server enforces the same).
   if (!canManageUsersAction('managePermissions')) return Promise.resolve(false);
 
-  const prev = _serverUserUpdate.pending.get(uid) || {};
+  // A batch names the map its FIRST change was made on; once another manager changed it, 409.
+  const prev = _serverUserUpdate.pending.get(uid) || (base ? { expectedPermissions: base } : {});
   _serverUserUpdate.pending.set(uid, { ...prev, ...(updates && typeof updates === 'object' ? updates : {}) });
   const done = new Promise((resolve) => {
     _serverUserUpdate.waiters.set(uid, [...(_serverUserUpdate.waiters.get(uid) || []), resolve]);
@@ -990,6 +972,23 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
     } catch (e) {
       // Reload users on the next tick: the grid shows a refused grant.
       try { if (typeof _serverLiveSync !== 'undefined') _serverLiveSync.lastUsersSyncAt = 0; } catch (_) {}
+      if (isVersionConflict409(e)) {
+        // Show the server's copy; a change queued on the same stale screen goes too.
+        clearTimeout(_serverUserUpdate.timers.get(uid));
+        _serverUserUpdate.timers.delete(uid);
+        _serverUserUpdate.pending.delete(uid);
+        invalidateUsersListCache();
+        try {
+          const fresh = (await apiListUsersForUi()).find(u => u && String(u.id) === uid);
+          const i = fresh?.permissions ? state.users.findIndex(u => u && String(u.id) === uid) : -1;
+          if (i !== -1) { state.users[i] = { ...state.users[i], ...fresh, _lastModified: Date.now() }; markCollectionDirty('users'); saveState(); }
+        } catch (_) {}
+        _syncPermissionBoxes(uid);
+        const ar = state.language === 'ar';
+        if (!quiet) showNotification(ar ? 'غيّره مدير آخر' : 'Changed by another manager', ar ? 'عدّله مدير آخر للتو، فأُعيد تحميل صلاحياته. أعد تغييرك إن لزم.' : 'Another manager just changed this user; the permissions were reloaded. Make your change again if needed.', 'warning');
+        settle(false);
+        return;
+      }
       if (!quiet) {
         showNotification(state.language === 'ar' ? 'خطأ في السيرفر' : 'Server Error', state.language === 'ar' ? `فشل حفظ تغييرات المستخدم: ${e?.message || 'خطأ'}` : `Failed to save user changes: ${e?.message || 'Error'}`, 'error');
       }
@@ -1001,12 +1000,8 @@ function scheduleServerUserUpdate(userId, updates, { quiet = false } = {}) {
   return done;
 }
 
-// Fire all debounce-pending user updates IMMEDIATELY. Called on pagehide and
-// logout: without this, closing/reloading the tab within the 700ms debounce
-// silently drops a permission grant — the admin's screen keeps showing 90/90
-// (saved locally) while the server row never received it.
-// Uses raw fetch with keepalive so the request survives page teardown, and no
-// navigation-abort signal is attached.
+// Fire debounce-pending user updates NOW (pagehide, logout): closing the tab inside the 700ms debounce
+// silently lost a grant. Raw keepalive fetch, no navigation-abort signal: it survives teardown.
 function flushPendingUserUpdates() {
   const inflight = [];
   try {
@@ -1133,11 +1128,8 @@ function getCollectionTimeout(collection) {
   return timeouts[collection] || timeouts.default;
 }
 
-// Every entity endpoint returns the same envelope. Validate it at this single
-// trust boundary before any caller can merge the payload into state. This is
-// intentionally shared by list/delta/get/create/patch and the transactional
-// wallet/subscription endpoints: validating only list responses left conflict
-// recovery and payment refresh able to upsert poisoned relationship ids.
+// The one trust boundary for every entity envelope (list/delta/get/create/patch, wallet and
+// subscriptions), before any merge into state: list-only checks let poisoned relationship ids in.
 function validateServerEntityResponse(collection, entity, context = 'response') {
   const name = String(collection || 'entity');
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
@@ -1189,9 +1181,8 @@ function mergeServerEntityDataById(target, indexById, entity) {
   return false;
 }
 
-// Apply a group of already-committed server entities to local state as one
-// in-memory step. Prepare and validate every item first so a malformed second
-// envelope can never leave only the first item applied locally.
+// Apply committed server entities as one in-memory step: every item is validated first, so a
+// malformed second envelope never leaves the first one applied alone.
 function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
   const prepared = (Array.isArray(entries) ? entries : []).map((entry, index) => {
     const collection = String(entry?.collection || '');
@@ -1203,7 +1194,7 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
     const entity = validateServerEntityResponse(collection, entry.entity, `${reason}[${index}]`);
     return {
       collection,
-      saved: Security.sanitizeObject(entity.data),
+      saved: Security.sanitizeRecord(collection, entity.data),
       lastModified: Number(entity.lastModified)
     };
   });
@@ -1289,11 +1280,8 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         .filter(record => record && record.id != null)
         .map(record => [String(record.id), record])
     );
-    // Safety cap against infinite loops. Must be high enough to load the
-    // designed maximum collection size (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION,
-    // 100k) — the old flat 50 pages capped every collection at 50×300 = 15,000
-    // records and silently returned only the NEWEST 15k as if complete, dropping
-    // the oldest from view and understating every total.
+    // Loop cap sized for the designed maximum (STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION, 100k): a flat
+    // 50 pages silently returned only the newest 15,000 rows as if complete, understating every total.
     const _maxRecords = (typeof STORAGE_CONFIG !== 'undefined' && STORAGE_CONFIG.MAX_RECORDS_PER_COLLECTION) || 100000;
     const maxPages = Math.ceil(_maxRecords / limit) + 5;
     let lastPageFull = false;
@@ -1456,7 +1444,7 @@ async function ensureEntityMediaLoaded(collection, id) {
       // Refresh LRU order and return a detached object so callers cannot mutate
       // the cached copy while editing their local draft.
       cacheTransientAdCampaignMedia(key, cached);
-      return Security.sanitizeObject(cached);
+      return Security.sanitizeRecord(name, cached);
     }
   }
   if (_pendingEntityMediaLoads.has(key)) return await _pendingEntityMediaLoads.get(key);
@@ -1467,7 +1455,7 @@ async function ensureEntityMediaLoaded(collection, id) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const entity = await apiGetEntity(name, safeId, { timeoutMs: name === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 15000 });
       if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
-      const full = entity?.data ? Security.sanitizeObject(entity.data) : null;
+      const full = entity?.data ? Security.sanitizeRecord(name, entity.data) : null;
       const latest = findCurrent();
       if (!full || !latest || latest._deleted) return latest;
       const responseVersion = Number(full._lastModified);
@@ -1476,7 +1464,7 @@ async function ensureEntityMediaLoaded(collection, id) {
 
       if (name === 'adCampaignRequests') {
         cacheTransientAdCampaignMedia(key, full);
-        return Security.sanitizeObject(full);
+        return Security.sanitizeRecord(name, full);
       }
 
       const target = state[name];
@@ -1504,11 +1492,14 @@ async function ensureEntityMediaLoaded(collection, id) {
 async function apiCreateEntity(collection, record) {
   const omitMedia = LIGHTWEIGHT_MEDIA_COLLECTIONS.has(String(collection || ''));
   const path = `/api/collections/${encodeURIComponent(collection)}${omitMedia ? '?include_media=false' : ''}`;
-  const timeoutMs = String(collection || '') === 'adCampaignRequests' ? ADS_STUDIO_MEDIA_TIMEOUT_MS : 20000;
+  // A create with photos gets the 90 s media budget and one retry, as apiPatchEntity (20 s cut it short).
+  const isStudio = String(collection || '') === 'adCampaignRequests';
+  const timeoutMs = isStudio ? ADS_STUDIO_MEDIA_TIMEOUT_MS : mediaAwareTimeoutMs(record);
+  const retries = (!isStudio && timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS) ? 1 : 2;
   const entity = await requestValidatedServerEntity(collection, 'create', () =>
     withRetry(() =>
       apiJson(path, { method: 'POST', body: { id: record.id, data: record } }, { timeoutMs })
-    , 2, 500)
+    , retries, 500)
   );
   // Customer campaign images stay in the builder/transient LRU. Never reattach
   // them to the collection response, which is persisted to IndexedDB.
@@ -1861,13 +1852,9 @@ async function apiMutateAd(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update'].includes(action)) throw new Error('Invalid ad mutation action');
   const identity = getServerSessionIdentity();
-  // A stable body/idempotency key makes a response-loss retry safe: the server
-  // checks the adFunding idempotency marker BEFORE the version-conflict check
-  // and replays the committed result instead of moving the same funding twice
-  // (the caller pins adId + idempotencyKey + payload per attempt, so retries
-  // resend identical bytes). Bodies carrying adPhotos get the media timeout;
-  // those retry once instead of twice because each retry re-uploads the whole
-  // body from byte 0 and would otherwise saturate a weak uplink for minutes.
+  // A response-loss retry is safe: the server checks the idempotency marker BEFORE the version check
+  // and replays the committed result (the caller pins adId, key and payload per attempt). Photo bodies
+  // get the media timeout and one retry (each retry re-uploads the whole body on a weak uplink).
   const _mutateTimeoutMs = mediaAwareTimeoutMs(payload && payload.data);
   const response = await withRetry(() => apiJson('/api/ads/mutate?include_media=false', {
     method: 'POST',

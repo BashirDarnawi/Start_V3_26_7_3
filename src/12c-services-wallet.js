@@ -693,9 +693,7 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
     const sid = String(serviceId || '').trim();
     if (!sid) return;
     const isRTL = state.language === 'ar';
-    // Cancelling ends EVERY paid period of this service immediately, and
-    // there is no subscription refund. Say so before it happens — a customer
-    // who renewed early would otherwise lose prepaid days to a one-word Yes.
+    // Cancel ends EVERY paid period now, with no refund: said first (an early renewer loses prepaid days).
     const days = Math.max(0, Math.trunc(Number(paidDaysLeft) || 0));
     const warning = days > 0
       ? (isRTL
@@ -713,6 +711,12 @@ async function cancelSubscriptionFromUi(serviceId, paidDaysLeft = 0, paidUntil =
 }
 
 // ---------- Wallet ----------
+
+// A ledger row's title (this page and the studio's Overview); an unknown type shows as itself.
+const WALLET_TX_LABELS = { credit: ['Wallet top-up', 'شحن المحفظة'], transfer: ['Transfer', 'تحويل'], reversal: ['Reversal', 'عكس معاملة'], service_payment: ['Subscription', 'اشتراك'], campaign_payment: ['Campaign budget', 'ميزانية حملة'], campaign_refund: ['Campaign refund', 'استرجاع حملة'], campaign_payment_release: ['Campaign budget returned', 'إرجاع ميزانية حملة'] };
+function walletTxLabel(type, isAr) {
+  return Object.prototype.hasOwnProperty.call(WALLET_TX_LABELS, type) ? WALLET_TX_LABELS[type][isAr ? 1 : 0] : String(type || '');
+}
 
 function renderWalletView() {
   const isRTL = state.language === 'ar';
@@ -750,7 +754,6 @@ function renderWalletView() {
     .slice(0, 50);
 
   const who = id => !id || id === 'system' ? (isRTL ? 'النظام' : 'System') : (userById.get(String(id))?.name || userById.get(String(id))?.email || String(id));
-  const txLabels = { credit: ['Wallet top-up', 'شحن المحفظة'], transfer: ['Transfer', 'تحويل'], reversal: ['Reversal', 'عكس معاملة'], service_payment: ['Subscription', 'اشتراك'], campaign_payment: ['Campaign budget', 'ميزانية حملة'], campaign_refund: ['Campaign refund', 'استرجاع حملة'], campaign_payment_release: ['Campaign budget returned', 'إرجاع ميزانية حملة'] };
   const txRows = txs.map(tx => {
     const isIn = tx.toUserId === uid;
     // The admin sees everyone's rows: a row between two others has no sign.
@@ -764,7 +767,7 @@ function renderWalletView() {
     return `
       <div class="workspace-wallet-row py-3 border-b border-slate-200/60 dark:border-slate-700/60">
         <div class="min-w-0">
-          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(txLabels[tx.type]?.[isRTL ? 1 : 0] || tx.type || 'tx')}</div>
+          <div class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(walletTxLabel(tx.type, isRTL) || 'tx')}</div>
           <div class="text-xs text-slate-500 dark:text-slate-400">${Security.escapeHtml(other)} ${when ? `• ${Security.escapeHtml(when)}` : ''}</div>
           ${memo ? `<div class="text-[11px] text-slate-400 mt-1 break-words">${memo}</div>` : ''}
         </div>
@@ -775,10 +778,7 @@ function renderWalletView() {
     `;
   }).join('') || `<div class="text-sm text-slate-500 dark:text-slate-400 py-6 text-center">${isRTL ? 'لا توجد معاملات بعد' : 'No transactions yet'}</div>`;
 
-  // Renewals APPEND rows, so one service can hold several prepaid periods.
-  // Showing them as separate lines (each with its own Cancel) implied a
-  // per-period control that does not exist — cancel always ends the whole
-  // service. One truthful line per service: the LAST paid date.
+  // Renewals append rows, but Cancel always ends the whole service: one line per service (its LAST paid date).
   const subsByService = new Map();
   for (const s of activeSubs) {
     const sid = String(s.serviceId || '');

@@ -85,6 +85,11 @@ class UpdateUserRequest(BaseModel):
     role: Optional[str] = Field(default=None, min_length=1, max_length=20)
     permissions: Optional[dict[str, list[str]]] = None
     deleted: Optional[bool] = None
+    # What the editor's screen showed: a stale screen gets 409 instead of
+    # silently restoring a role or permission another manager just changed.
+    # Compared under the row lock only; never stored.
+    expectedRole: Optional[str] = Field(default=None, max_length=20)
+    expectedPermissions: Optional[dict[str, list[str]]] = None
 
 
 class EntityCreateRequest(BaseModel):

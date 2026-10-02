@@ -156,6 +156,13 @@ function studioBuilderSync() {
   _studioBuilder.pages = { state: '', list: [], error: '', failedAt: 0, pageId: '', posts: Object.create(null) };
 }
 
+// Sign-out and session expiry (15c resetAdsStudioSessionState): the same reset for any user, so the
+// open draft, its timers and its photos never outlive the session that typed them.
+function studioBuilderReset() {
+  _studioBuilder.forUser = null;  // no user id: the sync below resets
+  studioBuilderSync();
+}
+
 function studioBuilderCurrent(generation) {
   return generation === _studioBuilder.generation && _studioBuilder.forUser === studioBuilderUid();
 }
@@ -439,7 +446,7 @@ function studioBuilderDraftFromCampaign(campaign) {
   const list = value => Array.isArray(value) ? value.slice() : [];
   const draft = {
     ...newAdsStudioDraft(),
-    ...Security.sanitizeObject(campaign),
+    ...Security.sanitizeRecord('adCampaignRequests', campaign),  // the ad words stay as typed
     platforms: list(campaign.platforms),
     locations: list(campaign.locations),
     locationKeys: list(campaign.locationKeys).filter(key => STUDIO_BUILDER_KEY_RE.test(String(key))),
@@ -478,6 +485,8 @@ function studioBuilderOpenSession(kind, draft, extra = {}) {
     kind,
     draft,
     id: String(draft.id),
+    uid: studioBuilderUid(),  // the account and the builder session it was opened in (studioBuilderSaveNow)
+    generation: _studioBuilder.generation,
     created: !!extra.created,
     baseline: extra.created ? Number(extra.baseline) || 0 : 0,
     saved: {},
@@ -744,6 +753,9 @@ function studioBuilderFlush(session = _studioBuilder.session) {
 // One save at a time per draft; a change made meanwhile is saved right after.
 function studioBuilderSaveNow(session) {
   if (!session || ['conflict', 'locked'].includes(session.status)) return null;
+  // Every send passes here (the timers, the retry, the page-hide flush): a draft opened by another
+  // account, or before a sign-out, is never sent as the account signed in now.
+  if (session.uid !== studioBuilderUid() || session.generation !== _studioBuilder.generation) { studioBuilderStopTimers(session); return null; }
   if (session.inFlight) { session.again = true; return session.inFlight; }
   if (!session.dirty) return null;
   if (typeof adsStudioCanCreate === 'function' && !adsStudioCanCreate()) return null;

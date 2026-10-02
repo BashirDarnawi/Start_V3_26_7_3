@@ -1,6 +1,9 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 const { isolatedTestEnvironment, sqliteTestUrl } = require('./lib/test-environment');
 const { bundleManifest } = require('./lib/bundle-manifest');
 
@@ -73,7 +76,7 @@ assert.ok(workflow.includes('overwrite: true'), 'A re-run of all jobs must be ab
 assert.ok(workflow.includes('actions: read'), 'The gate needs permission to read CI runs');
 assert.ok(workflow.includes('npm audit --audit-level=high') && workflow.includes('pip_audit --no-deps'), 'Advisories published after the CI run must still block a release');
 assert.ok(workflow.includes('"${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF_TYPE}" == "tag"'), 'A manual run must never rebuild an existing rollback tag');
-const order = ['Load the smoke-tested image', 'Log in to Docker Hub', 'Publish immutable release image', 'Confirm Docker Hub holds a single linux/amd64 manifest', 'Publish latest image'];
+const order = ['Load the smoke-tested image', 'Log in to Docker Hub', 'Publish immutable release image', 'Confirm Docker Hub holds a single linux/amd64 manifest', 'Refuse to move latest backwards', 'Publish latest image'];
 let cursor = -1;
 for (const step of order) {
   const at = publishJob.indexOf(step);
@@ -81,6 +84,45 @@ for (const step of order) {
   cursor = at;
 }
 assert.ok(workflow.includes("github.event_name == 'push' || inputs.publish_latest"), 'A tag release always moves latest; a manual run honours its option');
+// Re-running an older release run (the gate's red messages suggest it) must
+// never move latest back to older code. The guard compares the time in the
+// release names, padded: tag pushes carry milliseconds, manual runs do not.
+// The step's own script runs here against a stub docker.
+const guardStep = publishJob.slice(publishJob.indexOf('- name: Refuse to move latest backwards'), publishJob.indexOf('- name: Publish latest image'));
+assert.ok(guardStep.includes("if: ${{ github.event_name == 'push' || inputs.publish_latest }}"), 'The latest guard runs exactly when latest would move');
+assert.ok(guardStep.includes('docker buildx imagetools inspect "$IMAGE:latest"') && guardStep.includes('ALBAYAN_RELEASE_SHA='), 'The guard reads the release latest holds on Docker Hub');
+if (['bash', 'jq'].every(tool => spawnSync(tool, ['--version'], { stdio: 'ignore' }).status === 0)) {
+  const guardScript = guardStep.slice(guardStep.indexOf('run: |\n') + 'run: |\n'.length).replace(/^ {10}/gm, '');
+  const stubs = fs.mkdtempSync(path.join(os.tmpdir(), 'albayan-latest-guard-'));
+  fs.writeFileSync(path.join(stubs, 'docker'), '#!/bin/sh\necho "$*" > "$0.args"\n[ -n "$LATEST" ] || exit 1\n'
+    + 'printf \'{"config":{"Env":["PATH=/usr/bin","ALBAYAN_RELEASE_SHA=%s"]}}\' "$LATEST"\n', { mode: 0o755 });
+  const guard = (latest, release) => {
+    const env = { ...process.env, PATH: `${stubs}${path.delimiter}${process.env.PATH}`, IMAGE: 'bashird/albayan', LATEST: latest };
+    delete env.BASH_ENV;
+    return spawnSync('bash', ['-c', guardScript.split('${{ needs.release.outputs.release }}').join(release)], { encoding: 'utf8', env });
+  };
+  try {
+    const tagged = 'release-a12d73f0eaa6-20260930T211810316Z'; // npm run release:github: milliseconds
+    const manual = 'release-b0c1d2e3f4a5-20261001T090000Z'; // the Run workflow button: whole seconds
+    const back = guard(manual, tagged);
+    assert.equal(back.status, 1, `Re-running an older release must not move latest back: ${back.stdout}${back.stderr}`);
+    assert.ok(back.stdout.includes(`latest already holds newer release ${manual}`) && back.stdout.includes('latest did NOT move'), back.stdout);
+    assert.equal(fs.readFileSync(path.join(stubs, 'docker.args'), 'utf8').trim(), 'buildx imagetools inspect bashird/albayan:latest --format {{json .Image}}');
+    for (const [latest, release, status, why] of [
+      [tagged, manual, 0, 'A newer release moves latest'],
+      [tagged, tagged, 0, 'Re-running the release latest already holds is harmless'],
+      ['', tagged, 0, 'No readable latest (the first release) lets latest move'],
+      ['development', tagged, 0, 'An image without a release name lets latest move'],
+      ['release-c0ffee000001-20261001T090001Z', 'release-c0ffee000002-20261001T090000500Z', 1, 'Padded stamps: 09:00:01 is newer than 09:00:00.500'],
+      ['release-c0ffee000002-20261001T090000500Z', 'release-c0ffee000001-20261001T090001Z', 0, 'Padded stamps: 09:00:01 moves latest past 09:00:00.500'],
+      ['release-c0ffee000003-20261002T000000000Z-dirty', tagged, 1, 'A newer laptop -dirty release also counts'],
+    ]) assert.equal(guard(latest, release).status, status, why);
+  } finally {
+    fs.rmSync(stubs, { recursive: true, force: true });
+  }
+} else {
+  console.log('Note: the latest guard script was not run here (it needs bash and jq; CI and macOS have both).');
+}
 
 // CI is the proof the release reuses, so CI must cover everything the local
 // gate covers and stay in the shape the checker expects.
@@ -156,4 +198,29 @@ assert.ok(releaseScript.includes("git(['status', '--porcelain'])") && releaseScr
 assert.match(releaseScript, /release-\$\{sha\}-\$\{stamp\}/, 'Tag name must match the publisher release format');
 assert.ok(!/--allow-dirty/.test(releaseScript), 'GitHub can only build committed source; no dirty override');
 assert.ok(releaseScript.includes("ciState === 'failed'") && releaseScript.includes("ciState === 'cancelled'") && releaseScript.includes('ci-status-for-sha.js'), 'The laptop refuses to tag a commit CI rejected or cancelled');
+// The laptop fallback (npm run release:image:push) must start the exact image
+// before anything is pushed, like the workflow's smoke test (so the code boots
+// on the image's Python 3.12, not the laptop's), and prove CI's PostgreSQL files.
+const publisher = fs.readFileSync(path.join(__dirname, 'publish-image.js'), 'utf8');
+new vm.Script(publisher, { filename: 'publish-image.js' }); // still parses
+const publishFlow = publisher.slice(publisher.indexOf('async function main()'));
+const flowAt = call => {
+  const at = publisher.includes('async function main()') ? publishFlow.indexOf(call) : -1;
+  assert.ok(at >= 0, `publish-image.js main() must run ${call}`);
+  return at;
+};
+assert.ok(flowAt('dockerWithRetries(loadArgs)') < flowAt('await smokeTest()') && flowAt('await smokeTest()') < flowAt('dockerWithRetries(args)'), 'Build with --load, start the image, and only then push');
+assert.ok(/const loadArgs = \[[^\]]*'--load'/.test(publisher) && /const args = \[[^\]]*'type=image,push=true,oci-mediatypes=false'/.test(publisher), 'The first build loads locally; only the second one pushes');
+const smokeTest = publisher.slice(publisher.indexOf('async function smokeTest()'), publisher.indexOf('async function main()'));
+for (const check of ["'run', '--detach'", '/api/health/ready', '`"${release}"`', "'id', '-u'", 'for (const route of SMOKE_ROUTES)', 'finally {\n    removeSmokeContainer();']) {
+  assert.ok(smokeTest.includes(check), `The fallback smoke test must keep: ${check}`);
+}
+const quoted = text => [...text.matchAll(/'([^']+)'/g)].map(m => m[1]);
+assert.deepEqual(quoted((publisher.match(/const SMOKE_ROUTES = \[([^\]]+)\]/) || [])[1] || ''), workflow.match(/for route in (.+); do/)[1].trim().split(/\s+/), 'The fallback fetches the same pages and bundles as the workflow');
+assert.ok(publisher.includes("'imagetools', 'inspect', '--raw'") && publisher.includes("'application/vnd.docker.distribution.manifest.v2+json'"), 'The fallback confirms Docker Hub holds a single Docker v2 manifest');
+const postgresRunner = fs.readFileSync(path.join(__dirname, 'test-postgres-release.js'), 'utf8');
+const postgresFiles = quoted(postgresRunner.match(/const TEST_FILES = \[([^\]]+)\]/)[1]);
+const ciPostgresFiles = ci.match(/pytest -q -p no:cacheprovider -rs ((?:server\/test_\w+\.py ?)+)/)[1].trim().split(/\s+/);
+assert.deepEqual(postgresFiles, ciPostgresFiles, 'npm run test:postgres must prove the same PostgreSQL files as CI');
+assert.ok(postgresFiles.includes('server/test_full_backup_postgres.py'), 'The release runner proves the PostgreSQL backup export too');
 console.log('Build safety checks passed: isolated tests, bundles, styles, artifact coverage and private-data exclusions.');

@@ -296,12 +296,8 @@ function toggleLanguage() {
   if (window.lucide) lucide.createIcons();
 }
 
-// NOTE: the old "scroll performance mode" (setupScrollPerformanceMode toggling
-// body.is-scrolling on every scroll) was REMOVED together with its CSS. Hiding
-// the aurora and re-styling every panel at scroll start/stop forced full-page
-// style recalculations mid-scroll — on weak machines that swallowed touchpad
-// scrolling and flashed the background. Performance mode (body.perf-lite)
-// handles weak devices properly by turning effects off permanently.
+// The old scroll "performance mode" (body.is-scrolling per scroll) was removed: its mid-scroll
+// restyles swallowed touchpad scrolling on weak machines; body.perf-lite turns effects off instead.
 
 // Strip data-lucide from converted SVGs after each createIcons() pass: lucide keeps the
 // attribute, so every later pass rebuilt every icon (full-page DOM churn per render tick).
@@ -413,12 +409,13 @@ function cannotPrintOrDownload() {
   return typeof Platform !== 'undefined' && (Platform.isCapacitor || Platform.isInAppBrowser);
 }
 
-// kind: 'download' | 'print'.
+// kind: 'download' | 'print'. The packaged app never sends people to the web (App Review).
 function inAppLimitationText(kind) {
-  const app = isPackagedMobileApp();
-  return state.language === 'ar'
-    ? `${kind === 'print' ? 'الطباعة' : 'التنزيلات'} لا تعمل ${app ? 'داخل التطبيق — استخدم نسخة الويب في المتصفح' : 'داخل متصفح فيسبوك/إنستغرام المدمج — افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح»)'} ثم أعد المحاولة.`
-    : `${kind === 'print' ? "Printing doesn't" : "Downloads don't"} work ${app ? 'inside the app — use the web version in a browser' : 'inside the Facebook/Instagram in-app browser — open this page in Safari or Chrome (menu -> "Open in browser")'}, then try again.`;
+  const ar = state.language === 'ar', print = kind === 'print';
+  if (isPackagedMobileApp()) return ar ? `${print ? 'الطباعة غير متاحة' : 'التنزيل غير متاح'} داخل التطبيق.` : `${print ? "Printing isn't" : "Downloads aren't"} available in the app.`;
+  return ar
+    ? `${print ? 'الطباعة' : 'التنزيلات'} لا تعمل داخل متصفح فيسبوك/إنستغرام المدمج — افتح الصفحة في Safari أو Chrome (قائمة ⋯ ← «فتح في المتصفح») ثم أعد المحاولة.`
+    : `${print ? "Printing doesn't" : "Downloads don't"} work inside the Facebook/Instagram in-app browser — open this page in Safari or Chrome (menu -> "Open in browser"), then try again.`;
 }
 
 function notifyInAppBrowserLimitation(kind) {

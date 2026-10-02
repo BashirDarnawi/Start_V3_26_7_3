@@ -663,10 +663,15 @@ function studioV2Back() {
   return parent ? studioV2Go(parent) : studioV2Leave();
 }
 
-// For the app's hardware Back key (P2-09 hook): true when the studio moved up a level itself; false on
-// Home or outside the v2 layout, so the app's own Back runs.
+// For the app's hardware Back key (P2-09 hook): true when the studio closed a sheet or moved up a level
+// itself; false on Home or outside the v2 layout, so the app's own Back runs.
 function studioHandleBack() {
   if (typeof state === 'undefined' || state.currentView !== 'ads-studio') return false;
+  // The classic Withdraw, Unlink and Link sheets (15c; the desk draws the last two) are drawn in the
+  // view, not as dialogs: Back closes an open one first, in both layouts.
+  if (typeof _adsStudioWithdrawConfirmId !== 'undefined' && _adsStudioWithdrawConfirmId) { cancelAdsStudioWithdraw(); return true; }
+  if (typeof _adsStudioUnlinkSheet !== 'undefined' && _adsStudioUnlinkSheet) { closeAdsStudioUnlinkSheet(); return true; }
+  if (typeof _adsStudioLinkSheet !== 'undefined' && _adsStudioLinkSheet) { closeAdsStudioLinkSheet(); return true; }
   const frame = studioV2Frame();
   if (!frame) return false;
   return studioV2Parent(studioV2Route(studioV2ReadAddress(), frame), frame) ? studioV2Back() : false;

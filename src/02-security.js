@@ -12,16 +12,11 @@ const RECORD_IDENTIFIER_FIELDS = new Set([
 ]);
 const RECORD_IDENTIFIER_LIST_FIELDS = new Set(['adReceiptIds', 'customerIds', 'linkedCustomerIds', 'receiptIds']);
 
-// PURE-JS CRYPTO FALLBACK: crypto.subtle is missing outside secure contexts (a
-// plain-HTTP LAN origin on iOS Safari / Android Chrome). These SHA-256 and
-// PBKDF2-HMAC-SHA256 routines match Web Crypto exactly and run only then.
+// PURE-JS CRYPTO FALLBACK (no crypto.subtle on a plain-HTTP origin): matches Web Crypto exactly.
 
-// New hashes created on the pure-JS path use fewer iterations (still recorded
-// in the stored `iterations` field, so they verify anywhere) because 600k
-// PBKDF2 iterations in plain JS would block the UI for many seconds.
+// Fewer iterations on the pure-JS path (recorded in `iterations`): 600k would freeze the UI.
 const _ALB_FALLBACK_PBKDF2_ITERATIONS = 60000;
-// Web Crypto runs off the UI thread and can use OWASP's current
-// PBKDF2-HMAC-SHA256 work factor without freezing the browser.
+// Web Crypto runs off the UI thread: OWASP's current work factor.
 const _ALB_NATIVE_PBKDF2_ITERATIONS = 600000;
 
 // SHA-256 round constants (FIPS 180-4)
@@ -149,11 +144,8 @@ const Security = {
   },
   
 
-  // Return a URL safe to put in an href/src, or '#' for an unsafe scheme.
-  // escapeHtml alone does NOT neutralize javascript:/data:/vbscript: URLs, so
-  // any user-supplied link (e.g. a customer profile link stored raw) must pass
-  // through here before rendering. Allows http/https/mailto/tel and
-  // relative / protocol-relative URLs.
+  // A URL safe for an href/src, or '#' (escapeHtml does NOT stop javascript:/data:/vbscript:): every
+  // user link passes here. Allows http/https/mailto/tel and relative URLs.
   safeUrl: (url) => {
     const s = String(url == null ? '' : url).trim();
     if (!s) return '#';
@@ -215,9 +207,7 @@ const Security = {
 
   // Sanitize object recursively
   sanitizeObject: (obj, depth = 0) => {
-    // Never return unsanitized attacker-controlled data when the nesting limit
-    // is exceeded. Dropping an over-deep branch fails closed and still protects
-    // the UI from recursion/stack exhaustion.
+    // Over the nesting limit: the branch is dropped (fails closed, no stack exhaustion).
     if (depth > 10) return null;
     if (obj === null || obj === undefined) return obj;
     if (typeof obj === 'string') return Security.sanitizeInput(obj);
@@ -248,11 +238,32 @@ const Security = {
           if (typeof v === 'string') return Security.sanitizeInput(v, { allowDataUrl: true });
           return Security.sanitizeObject(v, depth + 1);
         });
+      } else if (key === 'adCampaignRequests' && Array.isArray(value)) {
+        sanitized[sanitizedKey] = value.map(v => Security.sanitizeRecord(key, v, depth + 2));  // a whole saved state
       } else {
         sanitized[sanitizedKey] = Security.sanitizeObject(value, depth + 1);
       }
     }
     return sanitized;
+  },
+
+  // Ad words: the server's rule only (NUL, < and >, a leading javascript:/vbscript:); never "data:"
+  // or "on…=" inside them (r8 #15). Plain text, escaped wherever drawn.
+  plainText: (value, max) => {
+    let s = String(value ?? '').replace(/\0/g, '').replace(/[<>]/g, '').trim();
+    while (/^(?:javascript|vbscript):/i.test(s)) s = s.replace(/^(?:javascript|vbscript):\s*/i, '');
+    return (max ? s.slice(0, max) : s).trim();
+  },
+
+  // sanitizeObject for a record of `collection`: an ad request (only) keeps its words by plainText.
+  sanitizeRecord: (collection, obj, depth = 0) => {
+    const out = Security.sanitizeObject(obj, depth);
+    if (collection === 'adCampaignRequests' && out && typeof out === 'object' && !Array.isArray(out)) {
+      for (const k of ['name', 'pageName', 'primaryText', 'headline', 'description', 'notes', 'reviewNote', 'stopReason']) {
+        if (typeof obj[k] === 'string') out[k] = Security.plainText(obj[k]);
+      }
+    }
+    return out;
   },
 
   // JSON with sorted keys (arrays keep order, undefined is skipped): equal data
@@ -291,10 +302,7 @@ const Security = {
     return bytes;
   },
 
-  // Password hashing using Web Crypto API (PBKDF2 by default; legacy SHA-256 supported)
-  // Falls back to pure-JS SHA-256/PBKDF2 when crypto.subtle is unavailable
-  // (insecure http:// origins) — output is byte-identical either way.
-  // Returns: { hash, salt, algo, iterations? }
+  // PBKDF2 (legacy SHA-256 too), pure JS without crypto.subtle (same bytes). { hash, salt, algo, iterations? }
   hashPassword: async (password, salt = null, options = {}) => {
     const algo = options.algo || 'pbkdf2-sha256';
     const pwd = String(password ?? '');
@@ -314,12 +322,8 @@ const Security = {
       return { hash, salt: saltHex, algo: 'sha256' };
     }
 
-    // PBKDF2-SHA256 (recommended). New hashes made on the pure-JS path use a
-    // lower default iteration count (recorded in `iterations`, which every
-    // call site round-trips through user.passwordIterations, so the hash
-    // verifies everywhere — including later under HTTPS with native crypto).
-    // Verification always passes the stored count explicitly, so it is never
-    // affected by this default.
+    // PBKDF2-SHA256. The pure-JS default count is recorded (user.passwordIterations), and a verify
+    // always passes the stored count, so a hash verifies everywhere.
     const iterations = Number.isFinite(options.iterations)
       ? options.iterations
       : (subtle ? _ALB_NATIVE_PBKDF2_ITERATIONS : _ALB_FALLBACK_PBKDF2_ITERATIONS);
@@ -378,9 +382,7 @@ const Security = {
         if (Number.isFinite(n)) iters = n;
       }
     }
-    // Old local backups created before iteration metadata was added used
-    // 310,000 rounds. Preserve that exact verification path, then upgrade the
-    // hash to the current work factor after a successful login.
+    // Old backups without a count used 310,000 rounds: verify so, then upgrade after login.
     if (algo === 'pbkdf2-sha256' && !Number.isFinite(iters)) iters = 310000;
     if (algo === 'pbkdf2-sha256' && (
       !Number.isSafeInteger(iters) || iters < 1 || iters > 10000000
@@ -416,9 +418,8 @@ const Security = {
     return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(id);
   },
 
-  // Validate record ids and relationship ids without rewriting them. Rewriting
-  // would silently break links between customers, receipts, ads and users, so
-  // callers must reject the whole import/server payload when this fails.
+  // Validate record and relationship ids, never rewrite them (that breaks the links between
+  // records): a failure rejects the whole import/server payload.
   validateRecordIdentifiers: (value, path = 'record', depth = 0, validateOwnId = depth === 0) => {
     if (depth > 12 || value === null || value === undefined) return { valid: true };
     if (Array.isArray(value)) {
