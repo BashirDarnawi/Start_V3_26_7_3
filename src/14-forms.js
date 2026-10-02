@@ -52,11 +52,10 @@ function getReceiptPhoneRows() {
   }
   const rows = [];
   getCustomersVisibleToCurrentUser().forEach(c => {
-    // phones is not always there. The server REMOVES every contact field from
-    // customer rows for anyone without customers.viewContacts, so for those
-    // staff c.phones is undefined and the unguarded loop threw, killing the
-    // whole picker. Very old rows predate the field too.
-    if (!c || !Array.isArray(c.phones)) return;
+    if (!c) return;
+    // No phones (the server removes contact fields for staff without customers.viewContacts; very old
+    // rows predate them): one name-only row, so the customer can still be picked, by name.
+    if (!Array.isArray(c.phones)) return rows.push({ phone: '', customer: c });
     c.phones.forEach(phone => {
       rows.push({ phone, customer: c });
     });
@@ -94,7 +93,7 @@ function filterReceiptPhonesNow() {
     const hidden = filtered.length - shown.length;
     dropdown.innerHTML = shown.map(item => `
       <div class="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option rounded transition-colors" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)">
-        <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
+        <div class="text-sm font-medium">${Security.escapeHtml(item.phone || '—')}</div>
         <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(platformLabel(item.customer.platform))}</div>
       </div>
     `).join('') + renderPickerOverflowRow(hidden);
@@ -475,12 +474,8 @@ function _receiptCustomerRiskDebtUSD(receipt) {
   }
   if (own > 0) return own;
 
-  // Zero-value driver (D#) receipts keep the real customer debt on their
-  // linked ads, so the receipt's own fields read 0 and the warning notice was
-  // silently dropped. getReceiptCollectionTarget derives that debt from the
-  // linked ads (last resort only — the receipt's own authoritative fields
-  // above always win), so the warning shows the same debt the receipt card
-  // shows.
+  // A zero-value driver (D#) receipt keeps the customer's debt on its linked ads (its own fields read 0
+  // and the warning was dropped): getReceiptCollectionTarget reads it there, last, as the receipt card does.
   if (typeof getReceiptCollectionTarget === 'function') {
     const target = getReceiptCollectionTarget(receipt);
     return Math.max(Number(target?.debtUSD) || 0, 0);
@@ -773,10 +768,8 @@ function requireReceiptCustomerRiskAcknowledgement(customerId) {
 // ==========================================
 // PAGE CATEGORY PICKER
 // ==========================================
-// Replaces the native <datalist>, which rendered an unstyled OS popup that ran
-// off the screen on phones and listed every raw spelling. Shows how many pages
-// use each category so the popular spelling is the obvious pick, and keeps free
-// text allowed because categories are genuinely open-ended.
+// Replaces the native <datalist> (an unstyled OS popup off the phone screen, every raw spelling):
+// shows how many pages use each category so the popular spelling wins; free text stays allowed.
 const PAGE_CATEGORY_ROW = 'touch-target block w-full min-h-11 text-start px-4 py-3 rounded-lg border-b border-slate-100 dark:border-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-900/30';
 
 function pageCategoryRow(value, title, subtitle, extraClass = '') {
@@ -1082,10 +1075,8 @@ if (!window.__albayanSafeRecordActionsBound) {
   }, true);
 }
 
-// Close dropdowns when clicking outside. CAPTURE phase: the modal panel's
-// onclick="event.stopPropagation()" swallows bubble-phase clicks, so without
-// it this listener never fires for taps inside the form (see the comment on
-// the capture-phase listener at the top of this file).
+// Close dropdowns when clicking outside. CAPTURE phase: the modal panel stops bubbling clicks
+// (see the listener at the top of this file).
 document.addEventListener('click', (e) => {
   const pageDropdown = document.getElementById('page-customer-dropdown');
   const pageSearch = document.getElementById('page-customer-search');
@@ -1172,10 +1163,8 @@ function getNextAutoSerialNumber(paymentMethod) {
     if ((!usesGroupMethod && !isDestroyedRow) || !receipt.serialNumber) return;
     const serial = String(receipt.serialNumber).trim().toUpperCase();
 
-    // A receipt that has a MANUAL method (Cash) got a hand-typed PAPER receipt
-    // number, so its bare digits are NOT a legacy S serial and must not advance
-    // the S counter (a 5-digit paper number would otherwise hijack the whole
-    // series). Only PURE auto-serial receipts count via the legacy branch.
+    // A receipt with a MANUAL method (Cash) has a typed PAPER number: its bare digits are no legacy S
+    // serial and never advance the S counter (one 5-digit paper number would hijack the series).
     const methodsUsed = payments.length
       ? payments.map(p => p && p.method).filter(Boolean)
       : (receiptPaymentMethod && receiptPaymentMethod !== 'Split Payment' ? [receiptPaymentMethod] : []);
@@ -1260,15 +1249,28 @@ function onPaymentMethodChange(selectElement) {
   updateReceiptTotals();
 }
 
+// The stored receipt the open form edits (modalData may hold just the id).
+function _receiptFormStored() {
+  const id = state.modalData?.id;
+  return (id && Array.isArray(state.receipts) ? state.receipts.find(r => r && r.id === id) : null) || state.modalData || {};
+}
+
 // Keep the Receipt Number consistent with the payment methods. reissue=true: the methods
 // CHANGED, so the number follows them even on a saved receipt (cash 12851 -> Bank Transfer
 // takes a B number). reissue=false: the form merely opened; only fill a blank field.
 function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   const serialInput = document.getElementById('receipt-serial');
   if (!serialInput) return;
+  // Not Paid takes no app number (a delivery's D-number comes from the server): only the lock follows.
+  if (document.getElementById('receipt-status')?.value === 'Not Paid') return updateSerialLockState();
 
   const autoMethod = getSelectedAutoSerialMethod();
-  const current = String(serialInput.value || '').trim();
+  let current = String(serialInput.value || '').trim();
+  // Out of delivery mode a D-number is no receipt number: stash it for a switch back, renumber.
+  if (isTempDeliveryReceiptNo(current)) {
+    serialInput.dataset.stashedTemp = current;
+    current = serialInput.value = '';
+  }
   const currentUpper = current.toUpperCase();
   const isEditingSaved = !!state.modalData?.id;
 
@@ -1276,13 +1278,9 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
     const prefix = getAutoSerialPrefix(autoMethod);
     // The number already belongs to this method's counter — keep it.
     const inThisGroup = isAutoSerialNumber(currentUpper) && currentUpper.startsWith(prefix);
-    // A legacy bare-digit number is kept only if the STORED receipt (state.receipts by
-    // id; modalData may hold just the id) was pure S-group: a paper number switched
-    // to LTT is reissued an S-serial.
-    const _storedId = state.modalData?.id;
-    const _stored = (_storedId && Array.isArray(state.receipts)
-      ? state.receipts.find(r => r && r.id === _storedId)
-      : null) || state.modalData || {};
+    // A legacy bare-digit number is kept only if the STORED receipt was pure S-group: a paper
+    // number switched to LTT is reissued an S-serial.
+    const _stored = _receiptFormStored();
     const _storedMethods = Array.isArray(_stored.payments) && _stored.payments.length
       ? _stored.payments.map(p => p && p.method).filter(Boolean)
       : (_stored.paymentMethod && _stored.paymentMethod !== 'Split Payment' ? [_stored.paymentMethod] : []);
@@ -1611,10 +1609,8 @@ function updateReceiptTotals() {
   }
 }
 
-// Helper: compute totals from current payment rows (shared use)
-// `root` scopes which .payment-split-item rows are summed. The receipt modal has one
-// set (default = whole document); the delivery-completion form has TWO independent sets
-// (collected amount + delivery fee), so it passes each container to get its own totals.
+// Totals of the .payment-split-item rows under `root` (default: the whole form; the delivery-completion
+// form passes each of its two sets, collected amount and delivery fee).
 function getPaymentTotalsFromDom(root) {
   const paymentItems = (root || document).querySelectorAll('.payment-split-item');
   let totalR1 = 0;
@@ -1734,11 +1730,14 @@ async function _saveReceiptFromModalInner() {
     showNotification(isArV ? 'خطأ' : 'Error', isArV ? 'الرجاء اختيار عميل عن طريق رقم الهاتف' : 'Please select a customer by phone', 'error');
     return;
   }
+  // Without customers.viewContacts the other customer's phone never reached this device (the server keeps the old one).
+  if (editTarget && customerId !== String(editTarget.customerId || '') && !can('customers', 'viewContacts')) {
+    showNotification(isArV ? 'غير مسموح' : 'Not Allowed', isArV ? 'نقل هذا الوصل إلى عميل آخر يحتاج صلاحية عرض أرقام العملاء.' : 'Moving this receipt to another customer needs the View contacts permission.', 'warning');
+    return;
+  }
 
-  // Re-check immediately before a NEW receipt is saved. Live sync may have
-  // added debt or changed a paid balance after the customer was first chosen;
-  // an earlier acknowledgement is valid only while its exact signature stays
-  // unchanged. Editing an existing receipt never enters this warning flow.
+  // Re-check right before a NEW receipt is saved: live sync may have changed the customer's debt or
+  // balance, and an acknowledgement holds only for its exact signature. Edits never warn.
   if (!editTarget && requireReceiptCustomerRiskAcknowledgement(customerId)) {
     return;
   }
@@ -1831,10 +1830,8 @@ async function _saveReceiptFromModalInner() {
   );
   const photos = state.tempReceiptPhotos || [];
 
-  // A receipt records money that was RECEIVED. Rows with amount 0 are dropped
-  // from payments[] above, so an all-zero form used to save a receipt with NO
-  // payments at all — which then invented a payment method nobody picked. Only
-  // a "Not Paid" receipt may legitimately carry no payment yet.
+  // A receipt records money RECEIVED: an all-zero form saved one with NO payments (and an invented
+  // method). Only a "Not Paid" receipt may carry no payment yet.
   if (payments.length === 0 && status !== 'Not Paid') {
     showNotification(
       isArV ? 'تحقق' : 'Validation',
@@ -1865,9 +1862,11 @@ async function _saveReceiptFromModalInner() {
       return;
     }
     if (!isCurrentUserAdmin()) {
-      statusDetail.allowSerialOverride = false;
+      // Staff cannot add or change a Not Paid receipt's number; one an Admin stored is saved unchanged.
+      const kept = String(editTarget?.status || '') === 'Not Paid' && (editTarget.serialNumber || editTarget.finalReceiptNo || editTarget.statusDetail?.allowSerialOverride) ? editTarget : null;
+      statusDetail.allowSerialOverride = !!kept?.statusDetail?.allowSerialOverride;
       const serialInput = document.getElementById('receipt-serial');
-      if (serialInput && !isTempDelivery) serialInput.value = '';
+      if (serialInput && !isTempDelivery) serialInput.value = kept ? kept.serialNumber || kept.finalReceiptNo || '' : '';
     }
   }
   
@@ -2090,14 +2089,14 @@ async function _saveReceiptFromModalInner() {
     return;
   }
   
-  // Temp delivery receipts: send tempReceiptNo (D#) only; serialNumber stays empty until delivery completion.
-  // Normal receipts: send serialNumber only.
-  const tempReceiptNo = isTempDelivery ? serialNumber : (editTarget?.tempReceiptNo || '');
-  const serialFinal = isTempDelivery ? (editTarget?.serialNumber || editTarget?.finalReceiptNo || '') : serialNumber;
-  // finalReceiptNo must FOLLOW the number the user just entered. It used to
-  // prefer the stored value, so editing a receipt's number changed only
-  // serialNumber while the lists/cards (which show finalReceiptNo first) kept
-  // displaying the OLD number — the edit looked like it never happened.
+  // Temp delivery receipts send their D# as tempReceiptNo (an edit keeps its stored one) and keep a stored
+  // paper number (never a D#: the server refuses that serialNumber). Normal receipts send serialNumber.
+  const tempReceiptNo = isTempDelivery
+    ? (serialNumber || (isTempDeliveryReceiptNo(editTarget?.tempReceiptNo) ? editTarget.tempReceiptNo : ''))
+    : (editTarget?.tempReceiptNo || '');
+  const serialFinal = isTempDelivery ? (isTempDeliveryReceiptNo(editTarget?.serialNumber) ? '' : editTarget?.serialNumber || '') : serialNumber;
+  // finalReceiptNo FOLLOWS the number just entered: preferring the stored one left the lists and cards
+  // (finalReceiptNo first) on the OLD number after an edit.
   const finalReceiptNo = isTempDelivery
     ? (editTarget?.finalReceiptNo || '')
     : (serialFinal || '');
@@ -2112,10 +2111,8 @@ async function _saveReceiptFromModalInner() {
     amountUSD: totalUSD,
     exchangeRate: avgRate,
     amountLocal: totalLYD,
-    // Derived from the rows the user actually chose. When every amount is 0 the
-    // rows are dropped from payments[], and this used to invent 'Cash (USD)' —
-    // a method nobody picked, contradicting the auto-serial that was issued for
-    // the real method. Fall back to the SELECTED method instead.
+    // From the rows the user chose: all-zero rows leave payments[] empty, and inventing 'Cash (USD)'
+    // contradicted the issued auto-serial, so fall back to the SELECTED method.
     paymentMethod: (Array.isArray(payments) && payments.length > 1)
       ? 'Split Payment'
       : (Array.isArray(payments) && payments.length > 0
@@ -2131,9 +2128,7 @@ async function _saveReceiptFromModalInner() {
     startDate: editTarget?.startDate || editTarget?.createdAt || new Date().toISOString(),
     endDate: editTarget?.endDate || editTarget?.createdAt || new Date().toISOString(),
     createdAt: editTarget ? editTarget.createdAt : new Date().toISOString(),
-    // CRITICAL: temp delivery receipts must NOT send serialNumber=D# (server rejects non-digit serial).
-    // Only send serialNumber for normal receipts; temp receipts use tempReceiptNo.
-    serialNumber: isTempDelivery ? '' : serialFinal,
+    serialNumber: serialFinal,  // never a D# (see serialFinal)
     finalReceiptNo: finalReceiptNo,
     tempReceiptNo: tempReceiptNo,
     // A carried "existing balance" receipt is an ordinary Paid receipt, only TAGGED for its badge;
@@ -2341,10 +2336,8 @@ async function _saveReceiptFromModalInner() {
   // Reset modal state FIRST
   state.activeModal = null;
   state.modalData = null;
-  // Clear the modal/id URL params too. Leaving them meant the just-saved (or a
-  // previously edited) receipt id lingered in the URL and could be restored
-  // into state.modalData by a later back/refresh — the exact stale-target the
-  // frozen editTarget id above defends the save against; clear it at the source.
+  // Clear the modal/id URL params too: a lingering receipt id could be restored into state.modalData by
+  // a later back/refresh, the stale target the frozen editTarget id guards against.
   try { clearUrlParams(['modal', 'id']); } catch (_) {}
 
   // Force remove ALL modal elements directly
@@ -2655,6 +2648,11 @@ function updateReceiptStatusUI(status) {
     if (isTempDelivery) {
       serialInput.disabled = true;
       serialInput.readOnly = true;
+      // The receipt's own D-number comes back (after a Paid detour, or over a delivered receipt's paper number).
+      if (!isTempDeliveryReceiptNo(serialInput.value)) {
+        const own = [serialInput.dataset.stashedTemp, _receiptFormStored().tempReceiptNo].find(isTempDeliveryReceiptNo);
+        if (own) serialInput.value = own;
+      }
       const existing = String(serialInput.value || '').trim();
       if (isServerModeEnabled()) {
         // In server mode, the backend generates a unique D{n} safely (no collisions across users/devices).
@@ -2796,10 +2794,8 @@ function getReceiptsForAd(customerId, pageId) {
   return getVisibleRecords(state.receipts || []).filter(r => {
     if (!r || r._deleted) return false;
     if (r.customerId !== customerId) return false;
-    // Receipt credit belongs to the customer, not to one Facebook page. Older
-    // receipts can still carry a legacy pageId, so filtering on it hid valid
-    // replacement funds when an ad was moved to (or created for) another page.
-    // The server uses the same customer-level ownership rule.
+    // Receipt credit belongs to the customer, not a page (as on the server): a legacy pageId filter hid
+    // valid funds for an ad moved to or created for another page.
     const statusLower = String(r.status || '').toLowerCase();
     const isPaid = (r.isPaid === true) || statusLower === 'paid';
     if (!isPaid) return false;
@@ -2824,10 +2820,8 @@ function getReceiptRemainingUSD(receipt) {
 }
 
 function initAdFunding(adData = {}) {
-  // COPY each allocation (not alias — editing the form must not mutate the
-  // saved ad until Save) and snap the amount to 2 decimals for display:
-  // stored values can carry float residue from proportional stop-ad math
-  // (e.g. 50.000000000000001), which otherwise shows raw in the input.
+  // COPY each allocation (the form must not mutate the saved ad before Save) and show 2 decimals:
+  // stop-ad math leaves float residue (50.000000000000001).
   const isUnpaidShopDebt = getAdPaymentState(adData) === 'not_paid'
     && String(adData.collectionMethod || '').toLowerCase() === 'in_shop';
   const sourceAllocations = isUnpaidShopDebt && Array.isArray(adData.dueAllocations)
@@ -3135,10 +3129,8 @@ function handleAdPageChange(preserveFunding = false) {
   renderAdFundingList();
 }
 
-// Admin-only, deliberately warned: unlock the page picker on a Meta-imported
-// ad. The lock exists because a fast unwarned pick once attached an ad to
-// another business's page; the server still refuses a cross-Facebook-page
-// link unless this confirmed flag rides along with the save.
+// Admin-only, deliberately warned: unlock the page picker on a Meta-imported ad (a fast unwarned pick
+// once attached an ad to another business's page); the server needs this confirmed flag too.
 function confirmMetaAdPageChange() {
   if (!isCurrentUserAdmin()) return;
   const isArM = state.language === 'ar';
@@ -3300,6 +3292,17 @@ function selectAdCustomer(customerId, preserveFunding = false) {
   const customerIdInput = document.getElementById('ad-customer-id');
   const prevCustomerId = customerIdInput?.value || '';
   if (customerIdInput) customerIdInput.value = customerId;
+  // Edit keeps the ad's saved customer (its money) though the page now links others: show it, marked.
+  const page = state.pages.find(p => p && p.id === document.getElementById('ad-page')?.value);
+  const saved = state.customers.find(c => c && c.id === customerId);
+  if (page && !(saved && !saved._deleted && (page.customerIds || []).includes(customerId))) {
+    const isArC = state.language === 'ar';
+    const hint = document.getElementById('ad-customer-hint'), display = document.getElementById('ad-customer-display');
+    if (hint) hint.textContent = isArC ? '(العميل المحفوظ)' : '(saved customer)';
+    if (display) display.innerHTML = `<div class="p-2.5 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-900/20">
+      <div class="font-medium text-sm truncate">${Security.escapeHtml(saved?.name || customerId)}</div>
+      <div class="text-[10px] text-amber-700 dark:text-amber-300">${isArC ? 'لم يعد مرتبطاً بهذه الصفحة (محفوظ من الإعلان)' : 'Not linked to this page any more (kept from the saved ad)'}</div></div>`;
+  }
   
   // Update button visuals
   document.querySelectorAll('.ad-customer-btn').forEach(btn => {
@@ -3368,11 +3371,8 @@ function isUnpaidShopReceipt(receipt, customerId = '') {
   return status !== 'Canceled' && status !== 'Lost' && status !== 'Destroyed';
 }
 
-// An unpaid In-Shop receipt is a reusable customer-debt ledger. The server can
-// atomically increase its amount when another ad needs more debt than the
-// receipt currently has available. Keep the eligibility checks strict, but do
-// NOT require a zero balance or zero prior usage: those are precisely the
-// receipts that must remain reusable for later ads.
+// An unpaid In-Shop receipt is a reusable customer-debt ledger the server can atomically grow for a
+// later ad: eligibility stays strict, but a balance or prior usage never disqualifies it.
 function getReusableUnpaidShopReceiptInfo(receipt, customerId = '', dueUsageInput = null, requestedUsageUSD = 0) {
   const notReusable = {
     eligible: false,
@@ -3566,11 +3566,8 @@ function refreshAdTempReceiptOptions() {
     && String(state.modalData?.collectionMethod || '') === collectionMethod;
   if (!receipts.some(r => String(r.id) === current) && !editingSameMode) current = '';
 
-  // The list only holds PENDING delivery receipts. A saved ad whose receipt has
-  // since been delivered would therefore find its own link missing from the
-  // options — and the auto-suggest below would silently RE-LINK the ad to a
-  // different receipt (spending another receipt's money). Keep the ad's own
-  // receipt in the list, marked as no longer pending.
+  // The list holds PENDING delivery receipts only: a saved ad's since-delivered receipt would vanish and
+  // the auto-suggest below would re-link the ad to another receipt's money. Keep it, marked.
   const linkedReceipt = current && editingSameMode
     ? getVisibleRecords(state.receipts).find(r => String(r.id) === current)
     : null;
@@ -3791,20 +3788,15 @@ function onAdTempReceiptChange(receiptId) {
             ? parsedPrefill.toFixed(2)
             : '';
         } else if (replacingSavedReceipt && originalDueAmount > 0) {
-          // Relinking changes the SOURCE, never the ad budget/allocation. Keep
-          // the old due share exactly even if the new receipt is larger. If it
-          // is smaller, save-time capacity validation blocks and asks the user
-          // to choose/add funding instead of silently shrinking the ad.
+          // Relinking changes the SOURCE only: keep the old due share; a smaller receipt is caught by
+          // the save-time capacity check instead of silently shrinking the ad.
           dueInput.value = originalDueAmount.toFixed(2);
           if (isShop) {
             state.tempMixedReceiptTargetUSD = normalizeAdDriverBudgetUSD(state.modalData?.amountUSD);
           }
         } else if (!belongsToThisReceipt) {
-          // Selecting an office receipt is an explicit choice to use it, so
-          // start with its full remaining amount. When the user arrived from
-          // the Paid form's "use an unpaid receipt for the difference" action,
-          // prefill only the exact shortfall instead. Delivery receipts keep
-          // the safer blank default.
+          // Picking an office receipt uses its full remaining amount, or only the exact shortfall when
+          // coming from the Paid form's "unpaid receipt for the difference"; delivery receipts start blank.
           const target = normalizeAdDriverBudgetUSD(state.tempMixedReceiptTargetUSD);
           const paidPart = getTempMergeFundingTotalUSD();
           const shortfall = target > 0 ? Math.max(target - paidPart, 0) : maxDueUSD;
@@ -3922,11 +3914,8 @@ function syncShopDueAllocationToFunding() {
   };
 }
 
-// Initialize merge funding state.
-// When EDITING an ad that already has merged paid funds, seed the working set
-// from the saved allocations so a plain edit preserves them. Without this,
-// tempMergeFunding started empty/disabled and saving wiped the merged funds
-// (shrinking the ad's amountUSD and resurrecting the paid receipt's balance).
+// Initialize merge funding state. Editing an ad with merged paid funds seeds them from its saved
+// allocations: an empty set made a plain save wipe them (shrinking amountUSD, restoring the receipt balance).
 function initMergeFunding() {
   if (!state.tempMergeFunding) {
     const md = state.modalData;
@@ -3959,11 +3948,8 @@ function onAdDueAmountChange() {
   let maxDue = parseFloat(dueInput.dataset.maxDue) || 0;
   let value = Math.max(parseFloat(dueInput.value) || 0, 0);
 
-  // An unpaid In-Shop receipt is a reusable debt ledger, not a one-use gift
-  // card. If the user enters more than its currently free capacity, keep the
-  // full proposed allocation and ask the server to grow only the uncovered
-  // difference atomically. This also enables a pure-unpaid ad with no paid
-  // receipt allocation at all.
+  // An unpaid In-Shop receipt is a reusable debt ledger: past its free capacity keep the full allocation
+  // and let the server grow only the uncovered difference atomically (also a pure-unpaid ad).
   if (document.getElementById('ad-collection-method')?.value === 'in_shop') {
     const receiptId = String(dueInput.dataset.receiptId || '').trim();
     const receipt = getVisibleRecords(state.receipts).find(
@@ -4356,10 +4342,8 @@ function hideAdPageDropdown() {
   if (dropdown) dropdown.classList.add('hidden');
 }
 
-// Hide dropdown when clicking outside. CAPTURE phase: the modal panel's
-// onclick="event.stopPropagation()" swallows bubble-phase clicks, so without
-// it this listener never fires for taps inside the form (see the comment on
-// the capture-phase listener at the top of this file).
+// Hide dropdown when clicking outside. CAPTURE phase: the modal panel stops bubbling clicks
+// (see the listener at the top of this file).
 document.addEventListener('click', function(e) {
   const dropdown = document.getElementById('ad-page-dropdown');
   const search = document.getElementById('ad-page-search');
@@ -4478,11 +4462,9 @@ function getOriginalUnpaidDriverBudgetUSD() {
 function getOriginalUnpaidAdBudgetUSD() {
   const ad = state.modalData;
   if (!ad || getAdPaymentState(ad) !== 'not_paid') return 0;
-  // TERMINAL-aware settle target: a stopped/canceled/completed ad's unpaid
-  // budget is dead (stop already released the unspent part) — only its
-  // COMMITTED total (the stop-reduced allocation rows, e.g. $1.24 of a
-  // stopped $9.00 ad) still holds receipt money, so THAT is the amount the
-  // settle UI must ask for. A live debt settles its budget minus what the company covered.
+  // TERMINAL-aware: a stopped/canceled/completed ad's unpaid budget is dead (stop released the unspent
+  // part); only its COMMITTED total (e.g. $1.24 of a stopped $9.00 ad) still holds receipt money.
+  // A live debt settles its budget minus what the company covered.
   if (adIsTerminalForEdit(ad)) return getAdCommittedFundingTotalUSD(ad);
   return Math.max(Math.round((normalizeAdDriverBudgetUSD(ad.amountUSD) - getAdCompanyCoveredUSD(ad)) * 100) / 100, 0);
 }
@@ -4532,10 +4514,8 @@ function setAdPaymentStatus(status) {
   const previousStatus = hiddenInput.value;
   const previousCollectionMethod = document.getElementById('ad-collection-method')?.value || '';
   if (status === 'paid' && previousStatus === 'not_paid' && previousCollectionMethod === 'in_shop') {
-    // When the unpaid receipt is later collected, the user settles the whole
-    // mixed ad by switching to Paid. Bring BOTH the original paid portion and
-    // the former due portion into the normal paid funding list so the exact
-    // original total is visible and can be validated by the server.
+    // Collecting the unpaid receipt later settles the whole mixed ad as Paid: both the paid and the
+    // former due portions join the paid funding list, so the original total shows and is validated.
     initMergeFunding();
     const totals = new Map();
     for (const row of [
@@ -5744,11 +5724,8 @@ function showCustomerModal() {
 }
 
 function showPageModal() {
-  // TEMPORARY (owner request, Aug 2026): manual page creation is paused so the
-  // team works with Meta-imported pages (blue Meta badge), which arrive linked
-  // to their ads automatically. Set to false to allow manual pages again.
-  // Editing existing pages (editPage) is NOT affected — assigning owners to
-  // imported pages keeps working.
+  // TEMPORARY (owner request, Aug 2026): manual page creation is paused; the team uses Meta-imported
+  // pages, which arrive linked to their ads. false allows manual pages again; editPage is not affected.
   const PAGE_MANUAL_CREATE_PAUSED = true;
   if (PAGE_MANUAL_CREATE_PAUSED) {
     showNotification(

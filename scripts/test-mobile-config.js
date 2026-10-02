@@ -69,6 +69,15 @@ if (!fs.existsSync(path.join(ROOT, extractionRulesFile))) {
   }
 }
 
+// Bug hunt R6 (R6-android-runtime-2): the app lock cannot cover Android's Recents (app switcher)
+// preview, so the last business screen (customers, phones, debts) stayed readable there. Android 13+
+// turns the preview off without blocking the user's own screenshots. No Android SDK here: a static pin.
+const mainActivity = read('android/app/src/main/java/com/albayan/app/MainActivity.java').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+if (!/^import android\.os\.Build;$/m.test(mainActivity) || !/^import android\.os\.Bundle;$/m.test(mainActivity)
+  || !/@Override\s+protected void onCreate\(Bundle (\w+)\)\s*\{\s*super\.onCreate\(\1\);\s*if \(Build\.VERSION\.SDK_INT >= (?:Build\.VERSION_CODES\.TIRAMISU|33)\) \{\s*setRecentsScreenshotEnabled\(false\);\s*\}\s*\}/.test(mainActivity)) {
+  failures.push('Android MainActivity must override onCreate and call setRecentsScreenshotEnabled(false) when SDK_INT >= TIRAMISU (33): the app lock cannot hide the Recents preview.');
+}
+
 const requiredNativeDependencies = [
   '@capacitor/browser', '@capacitor/camera', '@capacitor/clipboard',
   '@capacitor/haptics', '@capacitor/keyboard', '@capacitor/local-notifications',

@@ -1008,6 +1008,35 @@ async function main() {
     await settle();
     assert.ok(!nodes.has('meta-insights-modal'), 'Meta Insights stays closed after Back');
   });
+  // Bug hunt R6 (R6-android-runtime-4): phone Back removed the company-funds dialogs without their closers,
+  // so <body> stayed overflow:hidden (the phone header stopped sticking) and the dialog state stayed behind.
+  await test('R6 android-runtime-4: Android Back closes the company-funds dialogs through their closers; a busy request keeps its dialog', async () => {
+    const androidUserAgent = 'Mozilla/5.0 (Linux; Android 14; SM-A145F; wv) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36';
+    for (const id of ['company-debt-coverage-modal', 'customer-ad-coverage-modal', 'company-coverage-receipt-picker']) {
+      for (const busy of id === 'company-coverage-receipt-picker' ? [false] : [false, true]) {
+        const { sandbox, run } = loadBrowserSource();
+        sandbox.window.Capacitor = { Plugins: {} };
+        sandbox.navigator.userAgent = androidUserAgent;
+        run('Platform._cache = null');
+        let open = true;
+        const dialog = { id, className: 'mobile-dialog-overlay fixed inset-0 z-[80]', isConnected: true, _bodyOverflow: '', focus() {},
+          remove() { open = false; this.isConnected = false; } };
+        sandbox.document.querySelectorAll = selector => (open && selector.includes('.mobile-dialog-overlay') ? [dialog] : []);
+        sandbox.document.getElementById = name => (open && name === id ? dialog : null);
+        const removedListeners = [];
+        sandbox.document.removeEventListener = type => removedListeners.push(type);
+        sandbox.document.body.style.overflow = 'hidden'; // what each opener sets
+        if (id === 'company-debt-coverage-modal') run(`_companyDebtCoverageDialogState = { bodyOverflow: '', opener: null, busy: ${busy}, keyHandler: _handleCompanyDebtCoverageKeydown }`);
+        if (id === 'customer-ad-coverage-modal') run(`_customerAdCoverageDialogState = { bodyOverflow: '', opener: null, busy: ${busy}, keyHandler: _handleCustomerAdCoverageKeydown }`);
+        if (id === 'company-coverage-receipt-picker') dialog._keyHandler = () => {};
+        assert.equal(sandbox.closeTopMobileSurface(), true, `${id}: Back is handled`);
+        assert.equal(open, busy, `${id}: ${busy ? 'a busy request keeps its dialog (like its X)' : 'the dialog closes'}`);
+        assert.equal(sandbox.document.body.style.overflow, busy ? 'hidden' : '', `${id}: before, the page stayed scroll-locked`);
+        assert.equal(run('_companyDebtCoverageDialogState === null && _customerAdCoverageDialogState === null'), !busy, `${id}: before, the dialog state stayed behind`);
+        assert.deepEqual(removedListeners, busy ? [] : ['keydown'], `${id}: its Escape/Tab handler goes with it`);
+      }
+    }
+  });
   await test('r7 M n=2: a slow reply for the previous ad account or search never fills the list of the newer choice', async () => {
     const { sandbox, run } = metaToolsFixture();
     sandbox.metaAdsRenderModal = () => {};
@@ -1754,7 +1783,7 @@ async function main() {
     sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
       { code: 'unpaid_receipts', count: 12, message: 'Receipts are still unpaid' },
       { code: 'ads_need_setup', count: 3, message: 'Ads still need customer, amount, or payment setup' },
-      { code: 'ads_still_running', count: 1, message: 'Meta ads from this month are still running (not stopped or completed)' }] });
+      { code: 'ads_still_running', count: 1, message: 'Ads from this month are still running (not stopped or completed)' }] });
     let prompted = '';
     let alerted = '';
     sandbox.window.prompt = text => { prompted = text; return ''; };
@@ -1793,6 +1822,20 @@ async function main() {
     await sandbox.previewControlCenterMonth();
     assert.ok(alerted.includes('Delivery jobs from this month are still open (2)')
       && alerted.includes("Drivers still hold cash collected for this month's deliveries (1)"), alerted);
+  });
+  await test('R6 ads-lifecycle-1: the month check names every ad still running, not only Meta ads, in English and Arabic', async () => {
+    const { sandbox, state } = controlCenterFixture();
+    sandbox.apiPreviewFinancialPeriod = async () => ({ totals: {}, blockers: [
+      { code: 'ads_still_running', count: 2, message: 'Ads from this month are still running (not stopped or completed)' }] });
+    let alerted = '';
+    sandbox.window.alert = text => { alerted = text; };
+    sandbox.document.getElementById = id => (id === 'control-center-period' ? { value: '2026-08' } : null);
+    await sandbox.previewControlCenterMonth();
+    assert.ok(alerted.includes('Ads from this month are still running (not stopped or completed) (2)') && !alerted.includes('Meta ads'), `before: "Meta ads ..." - ${alerted}`);
+    state.language = 'ar';
+    await sandbox.previewControlCenterMonth();
+    assert.ok(alerted.includes('إعلانات من هذا الشهر لا تزال تعمل (لم تُوقف ولم تكتمل) (2)') && !alerted.includes('ميتا') && !/[A-Za-z]{3,}/.test(alerted), alerted);
+    state.language = 'en';
   });
   await test('r5 MGR n=11 follow-up: the driver job list and the collected-payment chips show 107.25 LYD, not a rounded 107', async () => {
     const { sandbox, state, run } = loadBrowserSource();
@@ -2148,6 +2191,93 @@ async function main() {
       "Paid receipt funding must exactly settle the customer's share of the unpaid ad amount"]) {
       assert.ok(!/[A-Za-z]{3,}/.test(sandbox._serverRefusalText(message).replace('Meta', '')), sandbox._serverRefusalText(message));
     }
+  });
+  await test('R6 ads-lifecycle-2: a Meta ad that runs continuously stays off Reconciliation until it is stopped or Meta pauses it', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    state.serverMode = true;
+    sandbox.isServerModeEnabled = () => true;
+    state.pages = [{ id: 'p1', name: 'Page One', customerIds: ['c1'] }];
+    // Imported with no end time: the server stored end = start, and Facebook keeps delivering.
+    const meta = { id: 'ad_meta', recordType: 'ad', status: 'Active', customerId: 'c1', pageId: 'p1', paymentStatus: 'paid', isPaid: true,
+      amountUSD: 50, amountLocal: 350, exchangeRate: 7, receiptAllocations: [{ receiptId: 'r1', amountUSD: 50 }],
+      startDate: '2026-09-20T00:00:00.000Z', endDate: '2026-09-20T00:00:00.000Z', metaAdId: '120200000000000001', metaImportState: 'complete',
+      metaEffectiveStatus: 'ACTIVE', metaEndTime: '', metaCurrency: 'USD', metaSpendMinor: 1800, metaSyncedAt: new Date().toISOString(),
+      creatorId: 'admin', _lastModified: 5 };
+    const on = '2026-09-22T12:00:00';
+    assert.equal(sandbox.isAdReadyForReconciliation(meta, on), false, 'before: listed as "Ended" while Facebook keeps spending');
+    for (const status of ['IN_PROCESS', 'PENDING_REVIEW', 'PREAPPROVED', 'WITH_ISSUES', 'active']) {
+      assert.equal(sandbox.isAdReadyForReconciliation({ ...meta, metaEffectiveStatus: status }, on), false, status);
+    }
+    assert.equal(sandbox.isAdReadyForReconciliation({ ...meta, status: 'Stopped', stoppedAt: '2026-09-21T10:00:00.000Z', spentUSD: 18 }, on), true, 'a stopped ad is ready the next day');
+    for (const status of ['PAUSED', 'ADSET_PAUSED', 'CAMPAIGN_PAUSED']) {
+      assert.equal(sandbox.isAdReadyForReconciliation({ ...meta, metaEffectiveStatus: status }, on), true, `${status}: Meta stopped delivering`);
+    }
+    // Meta keeps an ad ACTIVE after its real end: an ad with an end time keeps its stored end date.
+    assert.equal(sandbox.isAdReadyForReconciliation({ ...meta, metaEndTime: '2026-09-20T21:00:00Z' }, on), true);
+    const manual = { ...meta, metaAdId: '', metaEffectiveStatus: '', metaSpendMinor: undefined, metaSyncedAt: '' };
+    assert.equal(sandbox.isAdReadyForReconciliation(manual, on), true, 'a manual ad still appears the day after its end');
+    assert.equal(sandbox.isAdReadyForReconciliation(manual, '2026-09-20T12:00:00'), false);
+    // The screen itself: no "Ended" card offering $32.00 back while the ad runs; it appears once Meta pauses it.
+    const day = new Date();
+    day.setDate(day.getDate() - 2);
+    const started = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}T00:00:00.000Z`;
+    state.ads = [{ ...meta, startDate: started, endDate: started }];
+    let html = String(sandbox.renderReconciliationView());
+    assert.ok(!html.includes('data-reconciliation-card="ad_meta"') && !html.includes('$32.00'), 'before: badge "Ended", "Remaining returned to customer $32.00"');
+    state.ads = [{ ...meta, startDate: started, endDate: started, metaEffectiveStatus: 'PAUSED' }];
+    html = String(sandbox.renderReconciliationView());
+    assert.ok(html.includes('data-reconciliation-card="ad_meta"') && html.includes('id="reconciliation-remaining-ad_meta">$32.00<'), 'a paused ad is offered for settlement');
+  });
+  await test('R6 ads-lifecycle-3: Stop Ad shows only on ads that can still be stopped, to staff allowed to stop them; a finished ad says why', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run(realEscape);
+    Object.assign(state, { currentView: 'ads', adSearch: '', adFilters: { status: 'all', payment: 'all', page: 'all' }, adReceiptFilter: '' });
+    state.pages = [{ id: 'p1', name: 'Page One', customerIds: ['c1'] }];
+    const base = { recordType: 'ad', customerId: 'c1', pageId: 'p1', amountUSD: 50, amountLocal: 350, exchangeRate: 7, paymentStatus: 'paid', isPaid: true,
+      receiptAllocations: [], startDate: '2026-09-01T00:00:00.000Z', endDate: '2026-09-05T00:00:00.000Z', creatorId: 'admin', _lastModified: 100 };
+    state.ads = [
+      { ...base, id: 'ad_active', status: 'Active' },
+      { ...base, id: 'ad_refunded', status: 'Canceled', refundType: 'Full', refundAmount: 50, refundStatus: 'Pending', preRefundStatus: 'Active', spentUSD: 0 },
+      { ...base, id: 'ad_lost', status: 'Lost' },
+      { ...base, id: 'ad_stopped', status: 'Stopped', spentUSD: 20, stoppedAt: '2026-09-03T10:00:00.000Z' }
+    ];
+    const withStop = () => {
+      const html = String(sandbox.renderAdsView());
+      return state.ads.map(ad => ad.id).filter(id => html.includes(`onclick="stopAd('${id}')"`));
+    };
+    assert.deepEqual(withStop(), ['ad_active', 'ad_stopped'], 'before: Stop Ad on the refunded and Lost ads too, which the server always refuses');
+    const html = String(sandbox.renderAdsView());
+    assert.ok(html.includes("manageRefund('ad_refunded')") && html.includes("manageRefund('ad_lost')") && html.includes('Edit Stop Details'), 'Refund and Edit Stop Details stay');
+    const asEmployee = permissions => {
+      state.currentUser = { id: 'emp1', name: 'Staff', role: 'Employee', permissions: JSON.parse(JSON.stringify(permissions)) };
+      state.users = [state.currentUser];
+    };
+    asEmployee({ ads: ['view', 'edit', 'changeStatus'] });
+    assert.deepEqual(withStop(), [], 'an Employee without Stop Ads is offered a button that only refuses');
+    asEmployee(run('PERMISSION_TEMPLATES.manager.permissions'));
+    assert.deepEqual(withStop(), ['ad_active', 'ad_stopped'], 'the Manager template stops ads (R6 ads-lifecycle-4)');
+    // Reached another way (an old tab, a dialog left open): say why and open nothing.
+    state.currentUser = { id: 'admin', role: 'Admin', permissions: {} };
+    state.users = [state.currentUser];
+    const opened = [];
+    const notes = [];
+    sandbox.document.body.insertAdjacentHTML = (where, markup) => opened.push(markup);
+    sandbox.showNotification = (title, message, type) => notes.push({ message, type });
+    sandbox.stopAd('ad_refunded');
+    sandbox.stopAd('ad_lost');
+    assert.equal(opened.length, 0, 'before: the Stop dialog opened and the save then failed with 409');
+    assert.deepEqual(notes.map(n => n.message), Array(2).fill('This ad is already finished or refunded, so this change is no longer allowed. Use Refund to adjust its money.'));
+    state.language = 'ar';
+    sandbox.stopAd('ad_refunded');
+    assert.ok(notes.length === 3 && !/[A-Za-z]{3,}/.test(notes[2].message), notes[2]?.message);
+    state.language = 'en';
+    state.ads.push({ ...base, id: 'ad_draft', status: 'Active', customerId: '', amountUSD: 0, paymentStatus: 'pending_setup', metaImportState: 'needs_completion', metaAdId: '120200000000000002' });
+    sandbox.stopAd('ad_draft');
+    assert.equal(notes[3]?.message, 'Complete this imported Meta ad (customer and payment) before stopping it', 'a draft is not "finished or refunded"');
+    assert.equal(opened.length, 0);
+    sandbox.stopAd('ad_stopped');
+    assert.ok(opened.length === 1 && opened[0].includes('Edit Stop Details'), 'a Stopped ad keeps its Edit Stop Details dialog');
   });
   await test('r6 A n=23: the analytics breakdowns count the same receipts and amounts as the KPI cards that open them', async () => {
     const { sandbox, run } = loadBrowserSource();
@@ -5417,6 +5547,300 @@ async function main() {
     assert.equal(sent.length, 2);
   });
 
+  // ---- R6 receipts-flows (bug-hunt round 6): the receipt form driven through its real serial, status and save code ----
+  // `fields`: the rendered form's values (other ids are blank elements); `rows`: its payment rows. Saves are captured.
+  function r6ReceiptForm({ user, customers, receipts = [], modalData = null, fields = {}, rows = [] } = {}) {
+    const fixture = loadBrowserSource();
+    const { sandbox, state, run } = fixture;
+    realRandom(fixture);
+    run('Security').escapeHtml = plainEscape;
+    state.serverMode = true;
+    state.currentUser = user || { id: 'admin', role: 'Admin', permissions: {}, name: 'Office Admin' };
+    state.users = [state.currentUser, { id: 'drv1', role: 'Delivery', name: 'Driver', permissions: {} }];
+    state.customers = customers || [{ id: 'c1', name: 'Customer One', platform: 'Facebook', phones: ['0912345678', '0923456789'] }];
+    state.receipts = receipts;
+    state.activeModal = 'receipt';
+    state.modalData = modalData;
+    const el = (id, value = '') => ({ id, value: String(value), dataset: {}, style: {}, disabled: false, readOnly: false, checked: false, placeholder: '',
+      title: '', textContent: '', innerHTML: '', isConnected: true, classList: fakeClassList(), closest: () => null, querySelector: () => null,
+      querySelectorAll: () => [], setAttribute() {}, getAttribute: () => null, addEventListener() {}, focus() {}, remove() { this.isConnected = false; } });
+    const els = new Map(Object.entries({ 'receipt-editing-id': modalData?.id || '', 'receipt-customer-id': modalData?.customerId || '',
+      'receipt-status': 'Paid', 'paid-collection-value': 'office', 'notpaid-collection-value': 'office', 'receipt-quoted-delivery-fee': '0', ...fields })
+      .map(([id, value]) => [id, el(id, value)]));
+    sandbox.document.getElementById = id => els.get(id) || els.set(id, el(id)).get(id);
+    const rowEls = rows.map(r => {
+      const row = el('');
+      const cells = { '.payment-method': r.method, '.payment-amount': r.amount, '.payment-rate1': r.rate1, '.payment-rate2': r.rate2,
+        '.collection-type': r.collectionType || 'office', '.delivery-person': r.deliveryPersonId || '', '.payment-r1-display': '', '.payment-r2-display': '' };
+      for (const sel of Object.keys(cells)) cells[sel] = Object.assign(el(''), { value: String(cells[sel]), closest: () => row });
+      row.querySelector = sel => cells[sel] || null;
+      return row;
+    });
+    sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? rowEls : []);
+    sandbox.document.querySelector = () => null;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    const saved = [];
+    sandbox.updateRecord = async (array, id, record) => { saved.push(record); return true; };
+    const posted = [];
+    sandbox.apiCreateEntity = async (collection, record) => { posted.push(record); return { id: record.id, data: { ...record } }; };
+    sandbox.requireReceiptCustomerRiskAcknowledgement = () => false;
+    sandbox.addLog = () => {};
+    sandbox.clearUrlParams = () => {};
+    return { ...fixture, rows: rowEls, notes, saved, posted, field: id => sandbox.document.getElementById(id) };
+  }
+
+  await test('R6 receipts-flows-1: a new receipt whose save landed but lost its answer is recognised although the server stored rate 0 as 0.001 and 67.89999999999999 as 67.9', async () => {
+    const { run } = loadBrowserSource();
+    const matches = run('receiptCreateRetryMatches');
+    // What the form sent, and the row the real POST /api/collections/receipts stored for it (its retry then met 409).
+    const sent = { id: 'receipt_ec3e2cd9', recordType: 'receipt', customerId: 'customers_b042f3e1', pageId: '', creatorId: 'user_2519', status: 'Paid',
+      statusDetail: { paidCollection: 'office', paidDeliveryPersonId: '', notPaidCollection: 'office', allowSerialOverride: false, refundAction: '', refundStatus: '', lostResolution: '' },
+      isPaid: true, deliveryStatus: 'Office', deliveryPersonId: '', isReceivedInOffice: true, startDate: '2026-10-02T05:00:00.000Z', endDate: '2026-10-02T05:00:00.000Z',
+      createdAt: '2026-10-02T05:00:00.000Z', receiptType: '', deliveryPlaceName: '', deliveryInstructions: '', quotedDeliveryFee: 0, officeFee: 0, discount: 0,
+      phoneNumber: '', collectionDate: '2026-10-02T05:00:00.000Z', plannedPayments: [], photos: [], amountUSD: 14.3, exchangeRate: 7, amountLocal: 0,
+      paymentMethod: 'LTT', serialNumber: 'S975158', finalReceiptNo: 'S975158', tempReceiptNo: '',
+      payments: [{ method: 'LTT', amount: 100, rate: 0, rate2: 7, collectionType: 'office', deliveryPersonId: '' }] };
+    const stamps = { _lastModified: 1790909910071, _created: 1790909910071, createdBy: 'user_2519', createdByName: 'admin', customerName: 'R6 Cust aed760fb' };
+    const pay = (method, amount, rate, rate2) => [{ method, amount, rate, rate2, collectionType: 'office', deliveryPersonId: '' }];
+    const libyana = { ...sent, paymentMethod: 'Libyana', amountUSD: 10, amountLocal: 67.89999999999999, exchangeRate: 9.7, serialNumber: 'S839034',
+      finalReceiptNo: 'S839034', payments: pay('Libyana', 97, 0.7, 9.7) };
+    const cash = { ...sent, paymentMethod: 'Cash (LYD)', amountUSD: 100, amountLocal: 700, serialNumber: '737664', finalReceiptNo: '737664',
+      payments: pay('Cash (LYD)', 700, 1, 7) };
+    const bank = { ...sent, status: 'Not Paid', isPaid: false, isReceivedInOffice: false, collectionDate: '', paymentMethod: 'Bank Transfer (LYD)',
+      amountUSD: 100, serialNumber: '', finalReceiptNo: '', payments: [], plannedPayments: pay('Bank Transfer (LYD)', 700, 0, 7) };
+    const pairs = {
+      ltt_paid: [sent, { ...sent, ...stamps, payments: pay('LTT', 100, 0.001, 7) }],
+      libyana_paid: [libyana, { ...libyana, ...stamps, amountLocal: 67.9 }],
+      notpaid_bank: [bank, { ...bank, ...stamps, plannedPayments: pay('Bank Transfer (LYD)', 700, 0.001, 7) }],
+      cash_paid: [cash, { ...cash, ...stamps }],
+      split: [{ ...cash, exchangeRate: 9.683333333 }, { ...cash, ...stamps, exchangeRate: 9.6833 }]
+    };
+    for (const [name, [request, stored]] of Object.entries(pairs)) {
+      assert.equal(matches(JSON.parse(JSON.stringify(stored)), request), true, `${name}: before, every Save said "ID already exists"`);
+    }
+    // Another amount or another customer under that id is still another receipt.
+    const [request, stored] = pairs.ltt_paid;
+    assert.equal(matches({ ...stored, payments: pay('LTT', 101, 0.001, 7) }, request), false);
+    assert.equal(matches({ ...stored, customerId: 'customers_other' }, request), false);
+    assert.equal(matches({ ...stored, amountUSD: 14.31 }, request), false);
+    // End to end: the form's first POST stored the row but its answer was lost, so the retry meets 409.
+    const form = r6ReceiptForm({ fields: { 'receipt-customer-id': 'c1', 'receipt-phone-search': '0912345678' },
+      receipts: [{ id: 'old', recordType: 'receipt', status: 'Paid', paymentMethod: 'LTT', serialNumber: 'S41', payments: [{ method: 'LTT', amount: 50 }] }],
+      rows: [{ method: 'LTT', amount: 100, rate1: '0.00', rate2: '7.00' }] });
+    let row = null;
+    form.sandbox.apiCreateEntity = async (collection, record) => {
+      // The server keeps Rate 1 = 0 as 0.001 (validate_exchange_rate) and stamps the row.
+      row = { ...JSON.parse(JSON.stringify(record)), ...stamps, payments: record.payments.map(p => ({ ...p, rate: Math.max(p.rate, 0.001) })) };
+      throw Object.assign(new Error('ID already exists'), { status: 409 });
+    };
+    form.sandbox.apiGetEntity = async (collection, id) => (row && row.id === id ? { id, data: row } : null);
+    form.run('initReceiptSerialOnOpen()');
+    await form.run('_saveReceiptFromModalInner()');
+    assert.equal(row.payments[0].rate, 0.001);
+    assert.ok(!form.notes.some(n => n.type === 'error'), JSON.stringify(form.notes));  // before: "Failed to create receipt: ID already exists"
+    assert.equal(form.notes[form.notes.length - 1].message, 'Receipt created successfully!');
+    assert.equal(form.state.activeModal, null, 'the form closes');
+    assert.ok(form.state.receipts.some(r => r.id === row.id), 'the receipt is listed');
+  });
+
+  await test('R6 receipts-flows-2: editing a Not Paid receipt keeps the D-number and paper number it has, and staff keep an Admin\'s number', async () => {
+    // (a) Underpaid and already delivered (D5, paper 12345, still Not Paid): the office only fixes the phone.
+    const delivered = { id: 'r1', recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false,
+      statusDetail: { notPaidCollection: 'delivery', paidCollection: 'office' }, deliveryStatus: 'Delivered', deliveryPersonId: 'drv1',
+      isReceivedInOffice: false, tempReceiptNo: 'D5', serialNumber: '12345', finalReceiptNo: '12345', receiptType: 'DELIVERY_TEMP',
+      amountLocal: 300, amountUSD: 30, exchangeRate: 10, debtAmountLocal: 500, debtAmountUSD: 50, amountCollectedFromCustomer: 300,
+      paymentResult: 'UNDERPAID', remainingDue: 200, payments: [{ method: 'Cash (LYD)', amount: 300, rate: 1, rate2: 10, collectionType: 'delivery' }],
+      plannedPayments: [{ method: 'Cash (LYD)', amount: 500, rate: 1, rate2: 10, collectionType: 'delivery', deliveryPersonId: 'drv1' }],
+      deliveryPlaceName: 'Hay Andalus', quotedDeliveryFee: 10, phoneNumber: '0912345678', createdBy: 'admin', createdAt: '2026-09-01T10:00:00.000Z', _lastModified: 1000 };
+    const a = r6ReceiptForm({ receipts: [delivered], modalData: delivered,
+      fields: { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'drv1', 'receipt-serial': '12345',
+        'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0912345678' },
+      rows: [{ method: 'Cash (LYD)', amount: 500, rate1: 1, rate2: 10, collectionType: 'delivery', deliveryPersonId: 'drv1' }] });
+    a.run('initReceiptSerialOnOpen()');
+    a.run("updateReceiptStatusUI('Not Paid')");
+    assert.equal(a.field('receipt-serial').value, 'D5', 'before: blank, "assigned when saved"');
+    assert.ok(a.field('receipt-serial').disabled && a.field('receipt-serial').readOnly);
+    a.field('receipt-phone-search').value = '0923456789';
+    await a.run('_saveReceiptFromModalInner()');
+    assert.equal(a.saved.length, 1, JSON.stringify(a.notes));
+    const patch = a.saved[0];
+    assert.deepEqual([patch.tempReceiptNo, patch.serialNumber, patch.finalReceiptNo], ['D5', '12345', '12345'], "before: tempReceiptNo '' and serialNumber ''");
+    assert.equal(patch.phoneNumber, '0923456789');
+    assert.ok(!patch.editHistory.slice(-1)[0].changes.some(c => c.field === 'Serial Number'));
+    // (b) An Admin saved a Not Paid in-shop receipt with its paper number; an Employee with receipts.edit fixes the phone.
+    const numbered = { id: 'r2', recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false,
+      statusDetail: { notPaidCollection: 'office', paidCollection: 'office', allowSerialOverride: true }, deliveryStatus: 'Office', deliveryPersonId: '',
+      isReceivedInOffice: false, tempReceiptNo: '', serialNumber: '385454', finalReceiptNo: '385454', receiptType: '', amountLocal: 700, amountUSD: 100,
+      exchangeRate: 7, payments: [], plannedPayments: [{ method: 'Cash (LYD)', amount: 700, rate: 1, rate2: 7, collectionType: 'office', deliveryPersonId: '' }],
+      phoneNumber: '0912345678', createdBy: 'admin', createdAt: '2026-09-01T10:00:00.000Z', _lastModified: 2000 };
+    const cashier = { id: 'emp1', role: 'Employee', name: 'Cashier', permissions: { receipts: ['view', 'edit', 'add'], customers: ['view', 'viewContacts'] } };
+    const openNumbered = stored => {
+      const f = r6ReceiptForm({ user: cashier, receipts: [stored], modalData: stored,
+        fields: { 'receipt-status': 'Not Paid', 'receipt-serial': stored.serialNumber, 'receipt-phone-search': '0912345678' },
+        rows: [{ method: 'Cash (LYD)', amount: 700, rate1: 1, rate2: 7 }] });
+      f.field('status-not-paid-admin-override').checked = !!stored.statusDetail.allowSerialOverride;  // ticked by the template
+      f.run('initReceiptSerialOnOpen()');
+      f.run("updateReceiptStatusUI('Not Paid')");
+      f.field('receipt-phone-search').value = '0923456789';
+      return f;
+    };
+    const b = openNumbered(numbered);
+    assert.ok(b.field('receipt-serial').disabled, 'staff still cannot type a number');
+    await b.run('_saveReceiptFromModalInner()');
+    assert.equal(b.saved.length, 1, JSON.stringify(b.notes));
+    assert.deepEqual([b.saved[0].serialNumber, b.saved[0].finalReceiptNo, b.saved[0].statusDetail.allowSerialOverride], ['385454', '385454', true],
+      "before: '', '' and false (the paper number was free for another receipt)");
+    // A Not Paid receipt without a number gets none from staff, whatever the field holds.
+    const plain = openNumbered({ ...numbered, serialNumber: '', finalReceiptNo: '', statusDetail: { notPaidCollection: 'office', paidCollection: 'office' } });
+    plain.field('receipt-serial').value = '777';
+    await plain.run('_saveReceiptFromModalInner()');
+    assert.deepEqual([plain.saved[0].serialNumber, plain.saved[0].finalReceiptNo, plain.saved[0].statusDetail.allowSerialOverride], ['', '', false]);
+  });
+
+  await test('R6 receipts-flows-4: the stock Accountant (no View contacts) finds a customer by name, saves a receipt, and cannot move one to another customer', async () => {
+    // The customer rows GET /api/collections/customers returns to this role: every contact field removed.
+    const phoneless = [{ name: 'Picker Cust 5e521363', platform: 'Facebook', _lastModified: 1790910631467, id: 'customers_916bccf7', _created: 1790910631467,
+      createdBy: 'user_9394', createdByName: 'admin', _deleted: false }, { name: 'Other Cust', platform: 'Instagram', id: 'customers_other', _deleted: false }];
+    const asAccountant = f => {
+      f.state.currentUser = { id: 'acct', role: 'Employee', name: 'Accountant', permissions: f.run('PERMISSION_TEMPLATES').accountant.permissions };
+      f.state.users = [f.state.currentUser];
+      return f;
+    };
+    const form = asAccountant(r6ReceiptForm({ customers: phoneless, fields: { 'receipt-serial': '12345' }, rows: [{ method: 'Cash (LYD)', amount: 700, rate1: 1, rate2: 7 }] }));
+    assert.equal(form.run('can')('customers', 'viewContacts'), false);
+    assert.equal(form.run('getReceiptPhoneRows().length'), 2, 'before: 0 rows');
+    form.field('receipt-phone-search').value = 'Picker';
+    form.run('showReceiptPhoneDropdown()');
+    const dropdown = form.field('receipt-phone-dropdown');
+    assert.ok(!dropdown.classList.contains('hidden') && dropdown.innerHTML.includes('Picker Cust 5e521363'), 'before: the dropdown stayed hidden');
+    assert.ok(dropdown.innerHTML.includes('data-phone=""') && dropdown.innerHTML.includes('—') && !dropdown.innerHTML.includes('Other Cust'));
+    assert.equal(form.run("selectReceiptPhone('', 'customers_916bccf7')"), true);  // the row's onclick
+    assert.equal(form.field('receipt-customer-name').value, 'Picker Cust 5e521363');
+    await form.run('_saveReceiptFromModalInner()');
+    assert.equal(form.posted.length, 1, JSON.stringify(form.notes));  // before: "Please select a customer by phone"
+    assert.equal(form.posted[0].customerId, 'customers_916bccf7');
+    assert.equal(form.posted[0].phoneNumber, '');
+    // Editing one of their receipts: the opened form shows the customer's name (the pre-fill needed a phone).
+    const stored = { id: 'r9', recordType: 'receipt', customerId: 'customers_916bccf7', status: 'Paid', isPaid: true, serialNumber: '4521', finalReceiptNo: '4521',
+      amountUSD: 100, amountLocal: 700, exchangeRate: 7, payments: [{ method: 'Cash (LYD)', amount: 700, rate: 1, rate2: 7, collectionType: 'office' }],
+      phoneNumber: '0910000000', createdBy: 'acct', createdAt: '2026-09-01T10:00:00.000Z', _lastModified: 5 };
+    const edit = asAccountant(r6ReceiptForm({ customers: phoneless, receipts: [stored], modalData: stored, fields: { 'receipt-customer-id': '', 'receipt-serial': '4521' },
+      rows: [{ method: 'Cash (LYD)', amount: 700, rate1: 1, rate2: 7 }] }));
+    const timers = [];
+    edit.sandbox.setTimeout = fn => { timers.push(fn); return 1; };
+    edit.sandbox.renderModal();
+    timers.forEach(fn => fn());
+    assert.equal(edit.field('receipt-customer-name').value, 'Picker Cust 5e521363', 'before: blank');
+    assert.equal(edit.field('receipt-customer-id').value, 'customers_916bccf7');
+    // Moving it to another customer would keep the old customer's hidden phone: refused, the form stays open.
+    edit.field('receipt-customer-id').value = 'customers_other';
+    await edit.run('_saveReceiptFromModalInner()');
+    assert.equal(edit.saved.length, 0);
+    assert.equal(edit.notes.pop().message, 'Moving this receipt to another customer needs the View contacts permission.');
+    assert.equal(edit.state.activeModal, 'receipt');
+    edit.field('receipt-customer-id').value = 'customers_916bccf7';
+    await edit.run('_saveReceiptFromModalInner()');
+    assert.equal(edit.saved.length, 1, JSON.stringify(edit.notes));
+    assert.ok(!('phoneNumber' in edit.saved[0]), 'the stored phone is left alone');
+    // Staff who see contacts still get one row per phone.
+    const staff = r6ReceiptForm();
+    assert.deepEqual(Array.from(staff.run('getReceiptPhoneRows()'), r => r.phone), ['0912345678', '0923456789']);
+  });
+
+  await test('R6 receipts-flows-5: delivery receipts on LTT save: a Not Paid receipt takes no shop number, and a D-receipt paid in the shop gets one', async () => {
+    const lastS = { id: 'old', recordType: 'receipt', status: 'Paid', paymentMethod: 'LTT', serialNumber: 'S41', payments: [{ method: 'LTT', amount: 50 }] };
+    // (a) New receipt: Not Paid, Delivery, then the method becomes LTT (the customer pays the driver by LTT).
+    const a = r6ReceiptForm({ receipts: [lastS], fields: { 'receipt-customer-id': 'c1', 'notpaid-delivery-person': 'drv1', 'receipt-delivery-place': 'Hay Andalus',
+      'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0912345678' },
+    rows: [{ method: 'Cash (LYD)', amount: 100, rate1: '1.00', rate2: '7.00', deliveryPersonId: 'drv1' }] });
+    a.run('initReceiptSerialOnOpen()');
+    a.field('receipt-status').value = 'Not Paid';
+    a.run("updateReceiptStatusUI('Not Paid')");
+    a.run("selectNotPaidCollection('delivery')");
+    const method = a.rows[0].querySelector('.payment-method');
+    method.value = 'LTT';
+    a.sandbox.onPaymentMethodChange(method);
+    assert.equal(a.field('receipt-serial').value, '', 'before: S42 in the locked field');
+    await a.run('_saveReceiptFromModalInner()');
+    assert.ok(!a.notes.some(n => n.type === 'error'), JSON.stringify(a.notes));  // before: "Temporary receipt number must look like D12, D13, ..."
+    assert.equal(a.posted.length, 1);
+    assert.deepEqual([a.posted[0].tempReceiptNo, a.posted[0].serialNumber], ['', ''], 'the server gives the D-number');
+    // (b) A pending D5 receipt planned on LTT; the customer pays by LTT in the shop: Paid (In Office).
+    const d5 = { id: 'r5', recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false, statusDetail: { notPaidCollection: 'delivery', paidCollection: 'office' },
+      deliveryStatus: 'Needs Delivery', deliveryPersonId: 'drv1', isReceivedInOffice: false, tempReceiptNo: 'D5', serialNumber: '', finalReceiptNo: '',
+      receiptType: 'DELIVERY_TEMP', amountLocal: 0, amountUSD: 14.3, exchangeRate: 7, debtAmountLocal: 0, debtAmountUSD: 14.3, payments: [],
+      plannedPayments: [{ method: 'LTT', amount: 100, rate: 0, rate2: 7, collectionType: 'delivery', deliveryPersonId: 'drv1' }],
+      deliveryPlaceName: 'Hay Andalus', quotedDeliveryFee: 10, phoneNumber: '0912345678', createdBy: 'admin', createdAt: '2026-09-01T10:00:00.000Z', _lastModified: 3000 };
+    const openD5 = () => {
+      const f = r6ReceiptForm({ receipts: [d5, lastS], modalData: d5, fields: { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery',
+        'notpaid-delivery-person': 'drv1', 'receipt-serial': 'D5', 'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10',
+        'receipt-phone-search': '0912345678' }, rows: [{ method: 'LTT', amount: 100, rate1: 0, rate2: 7, collectionType: 'delivery', deliveryPersonId: 'drv1' }] });
+      f.run('initReceiptSerialOnOpen()');
+      f.run("updateReceiptStatusUI('Not Paid')");
+      assert.equal(f.field('receipt-serial').value, 'D5');
+      f.field('receipt-status').value = 'Paid';
+      f.run("updateReceiptStatusUI('Paid')");
+      return f;
+    };
+    const b = openD5();
+    assert.equal(b.field('receipt-serial').value, 'S42', 'before: D5 stayed in the locked field');
+    await b.run('_saveReceiptFromModalInner()');
+    assert.equal(b.saved.length, 1, JSON.stringify(b.notes));  // before: "Invalid Receipt Number", nothing sent
+    assert.deepEqual([b.saved[0].serialNumber, b.saved[0].finalReceiptNo, b.saved[0].tempReceiptNo], ['S42', 'S42', 'D5']);
+    // (c) Paid, then back to Delivery: the receipt's own D5 returns, never a blank tempReceiptNo.
+    const c = openD5();
+    c.field('receipt-status').value = 'Not Paid';
+    c.run("updateReceiptStatusUI('Not Paid')");
+    assert.equal(c.field('receipt-serial').value, 'D5');
+    await c.run('_saveReceiptFromModalInner()');
+    assert.equal(c.saved[0].tempReceiptNo, 'D5', JSON.stringify(c.notes));
+    // (d) A new Paid LTT receipt still gets its S-number when the form opens.
+    const d = r6ReceiptForm({ receipts: [lastS], fields: { 'receipt-customer-id': 'c1' }, rows: [{ method: 'LTT', amount: 100, rate1: '0.00', rate2: '7.00' }] });
+    d.run('initReceiptSerialOnOpen()');
+    d.run("updateReceiptStatusUI('Paid')");
+    assert.equal(d.field('receipt-serial').value, 'S42');
+  });
+
+  await test('R6 ads-lifecycle-5: Edit Ad shows the customer the ad belongs to, marked, when its page now links another customer', () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security').escapeHtml = plainEscape;
+    const els = new Map();
+    const node = id => els.get(id) || els.set(id, { id, value: '', innerHTML: '', textContent: '', style: {}, dataset: {}, classList: fakeClassList(),
+      querySelector: () => null, querySelectorAll: () => [], appendChild() {}, remove() {}, setAttribute() {}, focus() {} }).get(id);
+    sandbox.document.getElementById = node;
+    sandbox.renderAdFundingList = () => {};
+    sandbox.refreshAdTempReceiptOptions = () => {};
+    state.customers = ['Ahmed (ad owner)', 'Bilal (page owner now)', 'Camil'].map((name, i) => ({ id: `c${'ABC'[i]}`, name, platform: 'Facebook' }));
+    state.pages = [{ id: 'p1', name: 'Shop Page', customerIds: ['cB'] }, { id: 'p2', name: 'Two owners', customerIds: ['cB', 'cC'] }, { id: 'p3', name: 'No owner', customerIds: [] }];
+    // The Edit Ad post-render init (src/15-modals.js): the template's hidden customer id, then the page, then the ad's customer.
+    const openEdit = (pageId, customerId) => {
+      els.clear();
+      state.modalData = { id: 'ad1', customerId, pageId, status: 'Active', paymentStatus: 'paid' };
+      node('ad-customer-id').value = customerId;
+      sandbox.selectAdPage(pageId, true);
+      sandbox.selectAdCustomer(customerId, true);
+      return { card: node('ad-customer-display').innerHTML, hint: node('ad-customer-hint').textContent, saved: node('ad-customer-id').value };
+    };
+    const moved = openEdit('p1', 'cA');
+    assert.ok(moved.card.includes('Ahmed (ad owner)') && !moved.card.includes('Bilal'), `before: the page's customer was shown: ${moved.card}`);
+    assert.ok(moved.card.includes('Not linked to this page any more (kept from the saved ad)'));
+    assert.equal(moved.hint, '(saved customer)', 'before: (auto-selected)');
+    assert.equal(moved.saved, 'cA', 'Save keeps the ad on its own customer');
+    for (const pageId of ['p2', 'p3']) {
+      const other = openEdit(pageId, 'cA');
+      assert.ok(other.card.includes('Ahmed (ad owner)') && other.card.includes('Not linked') && other.saved === 'cA', pageId);
+    }
+    // The ad's customer is the page's only customer: card and hint unchanged.
+    const own = openEdit('p1', 'cB');
+    assert.ok(own.card.includes('Bilal (page owner now)') && !own.card.includes('Not linked'));
+    assert.equal(own.hint, '(auto-selected)');
+    assert.equal(own.saved, 'cB');
+    state.language = 'ar';
+    const ar = openEdit('p1', 'cA');
+    assert.ok(ar.card.includes('لم يعد مرتبطاً بهذه الصفحة (محفوظ من الإعلان)') && ar.hint === '(العميل المحفوظ)');
+  });
+
   await test('R4 display-correctness-1: an audit filter pages past the newest 500 entries, and a partial trail says so with Load older entries', async () => {
     const { sandbox, state, run } = loadBrowserSource();
     run('Security').escapeHtml = plainEscape;
@@ -6100,6 +6524,232 @@ async function main() {
     } finally {
       if (savedTZ === undefined) delete process.env.TZ; else process.env.TZ = savedTZ;
     }
+  });
+
+  // Bug hunt R6 (R6-clothes-second-pass-1): a shipment line left on "— color & size —" for a product with
+  // colors/sizes saved, and receiving it put every piece in a stray "unspecified" stock row (orders refused).
+  await test('R6 clothes-second-pass-1: a shipment line needs a color & size when its product has them, as an order line does; a new or reopened color/size and a product without them still save', async () => {
+    const { sandbox, state, run, notes } = clothesFixture();
+    const fields = { 'clothes-shipment-ref': 'Turkey batch', 'clothes-shipment-date': '2026-10-01', 'clothes-shipment-shipping': '0',
+      'clothes-shipment-editing-id': '', 'clothes-shipment-editing-version': '0' };
+    sandbox.document.getElementById = id => (id in fields ? { value: fields[id] } : null);
+    const sent = [];
+    sandbox.addRecord = async (list, record) => { sent.push(record.lines); return true; };
+    sandbox.updateRecord = async (list, id, updates) => { sent.push(updates.lines); return true; };
+    sandbox.renderModal = () => {};
+    sandbox.updateUrlParams = () => {};
+    state.clothesProducts = [
+      { id: 'p1', name: 'Shirt', costUSD: 2, priceLYD: 20, createdBy: 'admin', variants: [{ color: 'Red', size: 'M', qty: 0 }, { color: 'Blue', size: 'L', qty: 0 }] },
+      { id: 'p2', name: 'Scarf', costUSD: 1, priceLYD: 10, createdBy: 'admin', variants: [] }
+    ];
+    state.clothesShipments = [];
+    const save = line => { run(`_clothesTempShipLines = [${JSON.stringify(line)}]`); return sandbox.saveClothesShipmentFromModal(); };
+    const blank = { productId: 'p1', color: '', size: '', qty: 10, unitCostUSD: '2' };
+    assert.equal(await save(blank), false, 'before: saved with color "", so receiving filled an "unspecified" row');
+    assert.equal(notes.pop()?.message, 'Choose a color & size for "Shirt".');
+    assert.equal(await save({ ...blank, _newVariant: true }), false, '"+ new color/size" chosen with nothing typed');
+    state.language = 'ar';
+    assert.equal(await save(blank), false);
+    assert.equal(notes.pop()?.message, 'اختر اللون والمقاس للمنتج "Shirt".');
+    state.language = 'en';
+    assert.equal(sent.length, 0, 'nothing was sent');
+    assert.equal(await save({ ...blank, color: 'Red', size: 'M' }), true);
+    assert.equal(await save({ ...blank, color: 'Green', size: 'XL', _newVariant: true }), true, 'a new color/size typed');
+    assert.equal(await save({ productId: 'p2', color: '', size: '', qty: 5, unitCostUSD: '1' }), true, 'a product without colors/sizes');
+    // A saved shipment reopened before it is received: its new Green/XL is not on the product yet.
+    state.clothesShipments = [{ id: 's1', status: 'Ordered', createdBy: 'admin', _lastModified: 3, lines: [{ productId: 'p1', color: 'Green', size: 'XL', qty: 3, unitCostUSD: 2 }] }];
+    sandbox.editClothesShipment('s1');
+    fields['clothes-shipment-editing-id'] = 's1';
+    assert.equal(await sandbox.saveClothesShipmentFromModal(), true, 'the reopened Green/XL line still saves');
+    // A product that really has a blank ('', '') row may still receive into it.
+    fields['clothes-shipment-editing-id'] = '';
+    state.clothesProducts[0].variants.push({ color: '', size: '', qty: 4 });
+    assert.equal(await save(blank), true);
+    assert.deepEqual(sent.map(lines => lines.map(l => `${l.productId}:${l.color}/${l.size}x${l.qty}`).join()),
+      ['p1:Red/Mx10', 'p1:Green/XLx10', 'p2:/x5', 'p1:Green/XLx3', 'p1:/x10']);
+  });
+  // R6-clothes-second-pass-2: an account given the Clothes "View all" permissions (platform staff) opened an
+  // empty Clothes System: every screen kept only the records that account created.
+  await test('R6 clothes-second-pass-2: staff with the Clothes "view" permissions see the shop\'s products, shipments and orders; a viewOwn subscriber still sees only their own', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    run('Security').escapeHtml = plainEscape;
+    const staff = { id: 'staff1', name: 'Staff', role: 'Employee',
+      permissions: { clothesProducts: ['view', 'edit'], clothesShipments: ['view'], clothesOrders: ['view', 'add', 'edit'] } };
+    const own = ['viewOwn', 'add', 'editOwn', 'deleteOwn'];
+    const subscriber = { id: 'sub2', name: 'Shop', role: 'Employee', permissions: { clothesProducts: own, clothesShipments: own, clothesOrders: own } };
+    state.users = [staff, subscriber];
+    state.clothesProducts = [{ id: 'cp1', name: 'Owner shirt', costUSD: 2, priceLYD: 20, createdBy: 'owner', variants: [{ color: 'Red', size: 'M', qty: 5 }] }];
+    state.clothesShipments = [{ id: 's1', ref: 'Turkey', status: 'Ordered', createdBy: 'owner', lines: [] }];
+    state.clothesOrders = [{ id: 'o1', orderNo: 7, customerName: 'Walk-in', status: 'New', paymentStatus: 'Not Paid', createdBy: 'owner', lines: [] }];
+    const lines = { innerHTML: '' };
+    sandbox.document.getElementById = id => (id === 'clothes-order-lines' ? lines : null);
+    const counts = () => [sandbox.getVisibleClothesProducts().length, sandbox.getVisibleClothesShipments().length, sandbox.getVisibleClothesOrders().length];
+    state.currentUser = staff;
+    assert.deepEqual(counts(), [1, 1, 1], 'before: 0, 0, 0');
+    assert.ok(!String(sandbox.renderClothesProductsTab()).includes('No products yet'), 'before: "No products yet"');
+    run("_clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }]");
+    sandbox.refreshClothesOrderLines();
+    assert.ok(lines.innerHTML.includes('>Owner shirt</option>'), 'the order form offers the shop\'s product');
+    state.currentUser = subscriber;
+    assert.deepEqual(counts(), [0, 0, 0], 'a subscriber never sees another shop\'s records');
+    state.clothesProducts.push({ id: 'cp2', name: 'Mine', createdBy: 'sub2', variants: [] });
+    assert.equal(sandbox.getVisibleClothesProducts().map(p => p.id).join(), 'cp2');
+  });
+  // R6-clothes-second-pass-3: an Edit tap on a record whose photos were still loading later replaced whatever
+  // form the user had opened meanwhile, so the order, product, ad or receipt being typed was lost.
+  await test('R6 clothes-second-pass-3: a product Edit still loading its photo never replaces an order form opened meanwhile, nor a later Edit (an ad Edit too)', async () => {
+    const { sandbox, state, run } = clothesFixture();
+    const opened = [];
+    sandbox.renderModal = () => opened.push(`${state.activeModal}:${state.modalData ? state.modalData.id : 'new'}`);
+    sandbox.updateUrlParams = () => {};
+    const release = {};
+    sandbox.ensureEntityMediaLoaded = (collection, id) => new Promise(resolve => {
+      const list = collection === 'ads' ? state.ads : state.clothesProducts;
+      release[id] = () => resolve({ ...list.find(r => r.id === id), photo: 'data:image/jpeg;base64,AAAA', _mediaOmitted: false });
+    });
+    const lean = id => ({ id, name: `Shirt ${id}`, createdBy: 'admin', _lastModified: 5, _mediaOmitted: true, _photoCount: 1, variants: [{ color: 'Red', size: 'M', qty: 3 }] });
+    state.clothesProducts = [lean('pA'), { ...lean('pB'), _mediaOmitted: false, photo: 'data:image/jpeg;base64,BBBB' }];
+    state.ads = [{ id: 'adA', createdBy: 'admin', creatorId: 'admin', _mediaOmitted: true, _photoCount: 1 }];
+    let late = sandbox.editClothesProduct('pA');
+    sandbox.showClothesOrderModal();
+    run("_clothesTempOrderLines = [{ productId: 'pA', color: 'Red', size: 'M', qty: 2, priceLYD: '25' }]");
+    release.pA(); await late;
+    assert.equal(state.activeModal, 'clothes-order', 'before: the product form replaced the order being typed');
+    assert.equal(state.modalData, null);
+    assert.equal(run('JSON.stringify(_clothesTempOrderLines)'), JSON.stringify([{ productId: 'pA', color: 'Red', size: 'M', qty: 2, priceLYD: '25' }]));
+    // Edit A (loading) then B (already loaded): B stays open.
+    state.activeModal = null; state.modalData = null;
+    late = sandbox.editClothesProduct('pA');
+    await sandbox.editClothesProduct('pB');
+    release.pA(); await late;
+    assert.equal(state.modalData?.id, 'pB', 'before: A replaced B');
+    // Product A, then an ad, both loading: only the last tap opens, whichever answer comes first.
+    state.activeModal = null; state.modalData = null;
+    late = sandbox.editClothesProduct('pA');
+    const ad = sandbox.editAd('adA');
+    release.pA(); await late;
+    release.adA(); await ad;
+    assert.deepEqual(opened, ['clothes-order:new', 'clothes-product:pB', 'ad:adA']);
+  });
+  await test('R6 clothes-second-pass-3: an ad or receipt Edit still loading its photos never replaces a receipt form opened meanwhile, nor a later Edit; the last tap wins', async () => {
+    const { sandbox, state } = loadBrowserSource();
+    const opened = [];
+    sandbox.renderModal = () => opened.push(`${state.activeModal}:${state.modalData ? state.modalData.id : 'new'}`);
+    sandbox.updateUrlParams = () => {};
+    const release = {};
+    sandbox.ensureEntityMediaLoaded = (collection, id) => new Promise(resolve => {
+      const list = collection === 'ads' ? state.ads : state.receipts;
+      release[id] = () => resolve({ ...list.find(r => r.id === id), photos: ['data:image/jpeg;base64,AAAA'], _mediaOmitted: false });
+    });
+    const lean = { createdBy: 'admin', creatorId: 'admin', _mediaOmitted: true, _photoCount: 1 };
+    state.ads = [{ id: 'adA', ...lean }, { id: 'adB', createdBy: 'admin', creatorId: 'admin' }];
+    state.receipts = [{ id: 'rA', status: 'Not Paid', ...lean }, { id: 'rB', status: 'Not Paid', createdBy: 'admin' }];
+    for (const [edit, modal, a, b] of [['editAd', 'ad', 'adA', 'adB'], ['editReceipt', 'receipt', 'rA', 'rB']]) {
+      state.activeModal = null; state.modalData = null; opened.length = 0;
+      let late = sandbox[edit](a);
+      sandbox.showReceiptModal();  // a new receipt typed while A's photos load
+      release[a](); await late;
+      assert.equal(state.activeModal, 'receipt');
+      assert.equal(state.modalData, null, `before: ${edit} replaced the new receipt form`);
+      state.activeModal = null; state.modalData = null;
+      late = sandbox[edit](a);
+      await sandbox[edit](b);
+      release[a](); await late;
+      assert.equal(state.modalData?.id, b, `before: ${edit} A replaced B`);
+      assert.deepEqual(opened, ['receipt:new', `${modal}:${b}`]);
+    }
+    state.activeModal = null; state.modalData = null; opened.length = 0;
+    const first = sandbox.editAd('adA'), second = sandbox.editReceipt('rA');
+    release.adA(); await first;
+    release.rA(); await second;
+    assert.deepEqual(opened, ['receipt:rA'], 'before: the ad form opened, then the receipt replaced it');
+  });
+  // R6-clothes-second-pass-5: the Orders search by phone missed the same number written another way.
+  await test('R6 clothes-second-pass-5: the Clothes Orders search finds a phone however it was written (091-..., +218 91 ..., 00218...), like the receipt search', async () => {
+    const { state, run } = clothesFixture();
+    const phones = ['0912345678', '091-234-5678', '+218 91 234 5678', '00218912345678'];
+    state.clothesOrders = phones.map((customerPhone, i) => ({ id: `o${i}`, orderNo: i + 1, customerName: `Store ${i + 1}`, customerPhone,
+      status: 'New', paymentStatus: 'Not Paid', lines: [], createdBy: 'admin' }));
+    state.clothesOrders.push({ id: 'o42', orderNo: 42, customerName: 'Walk-in', customerPhone: '0920000000', status: 'New', paymentStatus: 'Not Paid', lines: [], createdBy: 'admin' },
+      { id: 'o5', orderNo: 5, customerName: 'Hana', customerPhone: '0924200000', status: 'New', paymentStatus: 'Not Paid', lines: [], createdBy: 'admin' });
+    const found = q => { run(`_clothesOrderSearch = ${JSON.stringify(q)}`); return run('getFilteredClothesOrders().map(o => o.id).join()'); };
+    assert.equal(found('0912345678'), 'o0,o1,o2,o3', 'before: o0 only');
+    assert.equal(found('091 234 5678'), 'o0,o1,o2,o3', 'before: none');
+    assert.equal(found('+218912345678'), 'o0,o1,o2,o3', 'before: none');
+    assert.equal(found('٠٩١٢٣٤٥٦٧٨'), 'o0,o1,o2,o3', 'Arabic digits');
+    assert.equal(found('Store 2'), 'o1', 'a name search matches no phone');
+    assert.equal(found('0042'), 'o42', 'order #0042 typed as the list shows it stays an order-number search');
+  });
+  // Bug hunt r6 (R6-ios-fresh-install-journey-1): init() applied the theme before loadState() restored it,
+  // so a saved Dark (or System on a dark phone) started light and saved 'light' for the next first paint.
+  await test('R6 ios-fresh-install-journey-1: a saved Dark theme, or System on a dark phone, is painted at start-up and kept for the next first paint; Light stays light', async () => {
+    const boot = async (theme, phoneDark) => {
+      const { sandbox, state, run } = loadBrowserSource();
+      const root = sandbox.document.documentElement;
+      root.classList = fakeClassList();
+      sandbox.window.matchMedia = sandbox.matchMedia = query => ({ matches: phoneDark && query === '(prefers-color-scheme: dark)', addEventListener() {}, addListener() {} });
+      sandbox.URLSearchParams = URLSearchParams;
+      // What saveState() left on the device, and the first paint index.html's inline script made from it.
+      sandbox.localStorage.setItem('albayan_complete_state', JSON.stringify({ language: 'en', theme, serverModeOverride: 'local' }));
+      const painted = theme === 'dark' || (theme === 'system' && phoneDark) ? 'dark' : 'light';
+      sandbox.localStorage.setItem('albayan_theme', painted);
+      if (painted === 'dark') root.classList.add('dark');
+      state.currentUser = null; state.users = []; state.theme = 'light';
+      // No storage or server; the sanitizer's chunked pass waits on timers this sandbox never runs.
+      Object.assign(sandbox, { initIndexedDB: async () => null, apiHealthCheck: async () => false, sanitizeAllCollectionsForRendering: async () => {} });
+      await run('init()');
+      assert.equal(state.theme, theme, 'loadState() restored the saved choice');
+      return { dark: root.classList.contains('dark'), firstPaint: sandbox.localStorage.getItem('albayan_theme'), colorScheme: root.style.colorScheme };
+    };
+    assert.deepEqual(await boot('dark', false), { dark: true, firstPaint: 'dark', colorScheme: 'dark' }, 'before: painted light, and light saved for the next start');
+    assert.deepEqual(await boot('system', true), { dark: true, firstPaint: 'dark', colorScheme: 'dark' });
+    assert.deepEqual(await boot('system', false), { dark: false, firstPaint: 'light', colorScheme: 'light' });
+    assert.deepEqual(await boot('light', true), { dark: false, firstPaint: 'light', colorScheme: 'light' });
+  });
+  // Bug hunt r6 (R6-ios-fresh-install-journey-3): the sign-in "Welcome" toasts escaped the name, and
+  // showNotification escaped it again, so "O'Neil & Sons" read "O&#39;Neil &amp; Sons".
+  await test('R6 ios-fresh-install-journey-3: the Welcome toast after a server, local or passkey sign-in shows a name with \' and & as typed, and markup in a name stays text', async () => {
+    const signIn = async (how, name, language = 'en') => {
+      const { sandbox, state, run } = loadBrowserSource();
+      run('Security').escapeHtml = plainEscape;  // the browser's textContent -> innerHTML, plus quotes
+      delete sandbox.showNotification;  // the helper's stub hides the real one; the context still holds it
+      const toasts = [];
+      const container = { children: [], appendChild: node => toasts.push(node) };
+      const getElementById = sandbox.document.getElementById;
+      sandbox.document.getElementById = id => (id === 'notification-container' ? container : getElementById(id));
+      state.language = language;
+      const user = { id: 'u_1', name, email: 'owner@example.com', role: 'Admin', permissions: {},
+        passwordHash: 'hash', salt: 'salt', passwordAlgo: 'pbkdf2-sha256', passwordIterations: 10000000 };
+      if (how === 'server') {
+        Object.assign(sandbox, { serverLoadAllData: async () => ({ failed: [] }), startServerLiveSync() {}, activateServerCollectionStorage() {} });
+        await sandbox._activateServerSession(user, run('_loginGeneration'));
+      } else if (how === 'local') {
+        state.users = [user];
+        run('Security').verifyPassword = async () => true;
+        await sandbox._handleLocalLoginOnce(user.email, 'secret', run('_loginGeneration'));
+        assert.equal(state.logs[0]?.description, `User ${name} logged in`, 'the audit line keeps the name; its views escape it once');
+      } else {
+        // A stored passkey the device signs for (the WebAuthn checks pass).
+        Object.assign(sandbox, { TextEncoder, TextDecoder, _isPasskeySupported: () => true, _getRpId: () => 'localhost',
+          _listAllStoredPasskeys: () => [{ user, key: { id: 'cred_1', publicKeyJwk: {} } }],
+          _b64urlToBuf: () => new Uint8Array(1), _bufToB64url: () => 'cred_1', _sha256: async () => new Uint8Array(32) });
+        sandbox.crypto.subtle = { importKey: async () => ({}), verify: async () => true };
+        sandbox.navigator.credentials.get = async () => ({ rawId: new Uint8Array(1), response: {
+          clientDataJSON: new TextEncoder().encode(JSON.stringify({ type: 'webauthn.get', origin: sandbox.location.origin })),
+          authenticatorData: new Uint8Array(37), signature: new Uint8Array(1) } });
+        await sandbox.passkeySignIn();
+      }
+      assert.equal(state.currentUser?.id, 'u_1', `the ${how} sign-in went through`);
+      const welcome = toasts.find(node => /Welcome!|مرحباً!/.test(String(node.innerHTML)));
+      return (String(welcome?.innerHTML).match(/<div class="text-xs opacity-80 break-words">([^<]*)<\/div>/) || [])[1];
+    };
+    assert.equal(await signIn('server', "O'Neil & Sons"), 'Logged in as O&#39;Neil &amp; Sons. Loading data...', 'before: O&amp;#39;Neil &amp;amp; Sons');
+    assert.equal(await signIn('server', "O'Neil & Sons", 'ar'), 'تم تسجيل الدخول باسم O&#39;Neil &amp; Sons. جارٍ تحميل البيانات...');
+    assert.equal(await signIn('local', "O'Neil & Sons"), 'Logged in as O&#39;Neil &amp; Sons');
+    assert.equal(await signIn('passkey', "O'Neil & Sons"), 'Logged in as O&#39;Neil &amp; Sons');
+    // Escaped once is still escaped: a name holding markup reaches the toast only as text.
+    const hostile = await signIn('server', '<img src=x onerror=alert(1)>');
+    assert.equal(hostile, 'Logged in as &lt;img src=x onerror=alert(1)&gt;. Loading data...');
   });
   console.log(`\n${passed} review behavior regressions passed.`);
 }

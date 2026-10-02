@@ -136,14 +136,15 @@ def _delivered(actors, collected: float) -> dict:
 
 
 def _form_payload(stored: dict, **overrides) -> dict:
-    """What src/14-forms.js saveReceipt sends for a driver-owned job: the stored status, driver and handover flag echoed."""
+    """What src/14-forms.js saveReceipt sends for a driver-owned job: the stored status, driver, handover flag and numbers echoed."""
     data = {
         "customerId": stored["customerId"], "status": "Not Paid", "isPaid": False,
         "statusDetail": {"notPaidCollection": "delivery"},
         "deliveryStatus": stored["deliveryStatus"], "deliveryPersonId": stored["deliveryPersonId"],
         "isReceivedInOffice": stored.get("isReceivedInOffice") is True,
         "tempReceiptNo": stored["tempReceiptNo"], "finalReceiptNo": stored.get("finalReceiptNo") or "",
-        "serialNumber": "",  # a Not Paid + delivery form is in temp-receipt mode: it never sends the serial
+        # A Not Paid + delivery form is in temp-receipt mode: it echoes the stored D-number and paper number (never a D#).
+        "serialNumber": stored.get("serialNumber") or "",
         "phoneNumber": "0912345678",
     }
     data.update(overrides)
@@ -235,6 +236,26 @@ def test_office_saves_a_form_edit_of_an_underpaid_delivered_d_receipt(actors):
         assert float(after["amountCollectedFromCustomer"]) == 250.0
         assert after["finalReceiptNo"] == stored["finalReceiptNo"]
         assert after["deliveryPersonId"] == actors["driver"]["id"]
+
+
+def test_office_phone_edit_of_an_underpaid_delivered_d_receipt_keeps_its_numbers(actors):
+    # Bug-hunt r6 receipts-flows-2: the form sent "" for tempReceiptNo and serialNumber, which erased them
+    # (and the next edit was handed a new D-number). It now echoes them, and the server keeps all three.
+    receipt = _delivered(actors, 250)
+    stored = receipt["data"]
+    assert stored["status"] == "Not Paid" and stored["paymentResult"] == "UNDERPAID"
+    numbers = {key: stored[key] for key in ("tempReceiptNo", "serialNumber", "finalReceiptNo")}
+    assert numbers["tempReceiptNo"].startswith("D") and numbers["serialNumber"] == numbers["finalReceiptNo"] != ""
+    payload = _form_payload(stored, phoneNumber="0923456789")
+    baseline = receipt["lastModified"]
+    for edit in ("first", "second"):                                   # a second identical edit issues no new D-number
+        saved = client.patch(f"{RECEIPTS}/{receipt['id']}", json={"data": payload, "expectedLastModified": baseline},
+                             cookies=actors["admin"]["cookies"])
+        assert saved.status_code == 200, (edit, saved.text)
+        after = _get(actors, receipt["id"])
+        assert {key: after["data"][key] for key in numbers} == numbers, edit
+        assert after["data"]["phoneNumber"] == "0923456789" and after["data"]["deliveryStatus"] == "Delivered"
+        baseline = after["lastModified"]
 
 
 def test_office_cancels_or_writes_off_a_delivered_d_receipt(actors):

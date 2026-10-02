@@ -2053,6 +2053,36 @@ def test_resync_never_erases_resolved_photo_or_page_name(actors):
     assert stored["metaThumbnailSource"] == "preview"
 
 
+def test_an_imported_draft_takes_metas_end_date_until_staff_complete_it(actors):
+    """R6 ads-lifecycle-2: a draft imported before Meta's schedule was readable stored end = start (the
+    slim list: the import time). The first healthy pass gives it Meta's real end, so the Complete form
+    shows it; startDate stays (it fixes the ad's month). A degraded pass, an ad that runs continuously
+    and a completed ad keep their dates."""
+    start = "2026-09-20T09:00:00Z"
+    draft_id, done_id = "meta_test_draft_end_heal", "meta_test_done_end_kept"
+    draft_meta, done_meta = "777000222333444", "777000222333555"
+    dates = {"startDate": start, "endDate": start, "days": 0, "status": "Active"}
+    _insert_ad(draft_id, actors["admin_id"], metaAdId=draft_meta, metaImportState="needs_completion", **dates)
+    _insert_ad(done_id, actors["admin_id"], metaAdId=done_meta, metaImportState="complete", **dates)
+
+    def _apply(ad_id, meta_id, **changes):
+        snapshot = _snapshot(meta_id)
+        snapshot.update({"metaStartTime": start, "metaEndTime": "2026-09-30T09:00:00Z", **changes})
+        meta_ads.apply_meta_snapshot(ad_id, snapshot, actor_id=None, actor_name="Meta automatic sync",
+                                     expected_last_modified=None, operation_id=None, action="automatic_sync")
+        stored, _ = _stored_ad(ad_id)
+        return stored["startDate"], stored["endDate"], stored["days"]
+
+    try:
+        assert _apply(draft_id, draft_meta, metaAdSetName="") == (start, start, 0)    # degraded: the ad set was not read
+        assert _apply(draft_id, draft_meta, metaEndTime="") == (start, start, 0)      # runs continuously: no end to take
+        assert _apply(draft_id, draft_meta) == (start, "2026-09-30T09:00:00Z", 10)   # before: end stayed = start
+        assert _apply(done_id, done_meta) == (start, start, 0)                        # staff's dates on a completed ad
+    finally:
+        with db_conn() as conn:
+            conn.execute(text("DELETE FROM entities WHERE type='ads' AND id IN (:a,:b)"), {"a": draft_id, "b": done_id})
+
+
 def test_import_page_stores_picture_and_ignores_signature_rotation():
     page_meta_id = "777777777777900"
     base = "https://scontent.xx.fbcdn.net/v/t39.30808-1/999999999_888888888777777_n.jpg"

@@ -6036,6 +6036,13 @@ def apply_meta_snapshot(
                 merged["metaTotalRemainingBudgetMinor"] = _total_remaining_budget(
                     merged.get("metaTotalBudgetMinor"), merged.get("metaSpendMinor")
                 )
+            # A draft imported before Meta's schedule was readable stored end = start (the slim list: the
+            # import time). Until staff complete it, a healthy pass gives it Meta's real end; startDate
+            # stays, since it fixes the ad's month (moving it could land in a closed one).
+            meta_end = _clean_time(snapshot.get("metaEndTime"))
+            if not schedule_unavailable and meta_end and str(data.get("metaImportState") or "") == "needs_completion":
+                data["endDate"] = meta_end
+                data["days"] = _duration_days(data.get("startDate"), meta_end)
             snapshot = merged
         if (
             data.get("metaImportSource") == "meta_ads"

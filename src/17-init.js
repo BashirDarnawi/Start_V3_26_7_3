@@ -8,8 +8,6 @@ async function init() {
     if (loadingStatus) loadingStatus.textContent = msg;
   };
   
-  // Apply theme immediately (prevents white flash in dark mode)
-  applyTheme();
   applyDocumentLanguage();  // the default language now; again after loadState() restores the saved one
   if (typeof setupPhotoPasteSupport === 'function') setupPhotoPasteSupport();
   setupMobileRuntime().catch((error) => {
@@ -65,10 +63,11 @@ async function init() {
   
   setLoadingStatus(state.language === 'ar' ? 'جارٍ تحميل التفضيلات...' : 'Loading preferences...');
   const legacyCollections = loadState();
-  // loadState() restored the saved language: re-apply <html dir/lang>, or an
-  // Arabic install boots with the shell in RTL but every overlay appended to
-  // <body> (receipt chooser, toasts, dialogs) laid out LTR.
+  // loadState() restored the saved language and theme: re-apply both, or an
+  // Arabic install lays out every overlay on <body> (receipt chooser, toasts,
+  // dialogs) LTR, and a saved Dark theme starts (and is saved) light.
   applyDocumentLanguage();
+  applyTheme();
 
   setLoadingStatus(state.language === 'ar' ? 'جارٍ الاتصال بالسيرفر...' : 'Connecting to server...');
   // A silent wait reads as a frozen app: after 3 s say that the connection is
@@ -90,7 +89,7 @@ async function init() {
   let bootProbe = null;
   if (packagedMobileBoot && typeof apiAuthMeProbe === 'function') {
     try { bootProbe = await apiAuthMeProbe(6000); }
-    catch (error) { if (error?.code === 'SERVER_SESSION_CHANGED') { clearTimeout(slowConnectionHint); return; } bootProbe = null; }
+    catch (error) { if (error?.code === 'SERVER_SESSION_CHANGED') { clearTimeout(slowConnectionHint); window.__albayanInitSettled = true; return; } bootProbe = null; }
   }
   let serverOk = bootProbe?.reachable === true ? true : await apiHealthCheck();
   // A sign-out the server never received (offline): finish it now, and never
@@ -210,11 +209,11 @@ async function init() {
       // a second round trip.
       me = hadPendingLogout ? null : ((bootProbe && bootProbe.reachable) ? bootProbe.user : await apiAuthMe());
     } catch (error) {
-      if (error?.code === 'SERVER_SESSION_CHANGED') return;
+      if (error?.code === 'SERVER_SESSION_CHANGED') { window.__albayanInitSettled = true; return; }  // the new session draws its own screen
       authCheckUnavailable = true;
       console.warn('[MobileRuntime] Session verification unavailable:', error?.message || error);
     }
-    if (getAuthMeIdentity() !== authRequestIdentity) return;
+    if (getAuthMeIdentity() !== authRequestIdentity) { window.__albayanInitSettled = true; return; }
     // A successful health response does not guarantee that the session check
     // also reached the server. Treat a network/timeout failure differently
     // from a definitive 401 (which apiAuthMe returns as null).

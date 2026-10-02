@@ -68,8 +68,21 @@ def test_month_snapshot_uses_the_same_money_rules_as_the_analytics_screen(monkey
     assert totals["metaSpendUSD"] == totals["adSpendUSD"]
     assert counts["ads"] == 8                           # the legacy receipt row is not an ad
     blockers = {b["code"]: b["count"] for b in snapshot["blockers"]}
-    # a5 and a8 are Active Meta ads (review loop r4 n=9); the Stopped Meta ad a2 is finished
-    assert blockers == {"ads_need_setup": 1, "unpaid_receipts": 1, "ads_still_running": 2}
+    # a1, a4, a7 and a9 (manual, R6 ads-lifecycle-1) and a5 and a8 (Meta, review loop r4 n=9) are still
+    # Active; the Stopped a2 and the Canceled a3 are finished
+    assert blockers == {"ads_need_setup": 1, "unpaid_receipts": 1, "ads_still_running": 6}
+
+
+def test_month_snapshot_counts_a_running_manual_ad(monkeypatch):
+    # R6 ads-lifecycle-1: closing the month freezes a manual ad too (stop, reconcile, top-up and refund
+    # answer 423 until an unlock), so one still running is a closing problem, not "no problems found".
+    ad = {"id": "m1", "startDate": "2026-09-28", "status": "Active", "paymentStatus": "paid", "customerId": "c", "amountUSD": 100}
+    snapshot = _snapshot_with(monkeypatch, ads=[ad])
+    assert [(b["code"], b["count"]) for b in snapshot["blockers"]] == [("ads_still_running", 1)], snapshot["blockers"]
+    assert snapshot["blockers"][0]["message"] == "Ads from this month are still running (not stopped or completed)"
+    assert snapshot["counts"]["adsStillRunning"] == 1
+    for finished in ("Stopped", "Completed", "Canceled", "Lost"):
+        assert _snapshot_with(monkeypatch, ads=[{**ad, "status": finished, "spentUSD": 40}])["blockers"] == [], finished
 
 
 def test_month_snapshot_blocks_open_deliveries_and_cash_still_with_drivers(monkeypatch):

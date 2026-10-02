@@ -221,6 +221,8 @@ function _nativePhotoFallbackInput(target) {
 }
 
 async function _nativeCameraResultToFile(result) {
+  const inline = result?.dataUrl && _nativeDataUrlToFile(result.dataUrl, `albayan-camera-${Date.now()}`);
+  if (inline) return inline;
   const source = String(result?.webPath || result?.path || '').trim();
   if (!source) return null;
   try {
@@ -302,26 +304,39 @@ async function _deliverNativeCameraResult(result, target, context, attempts = 0)
 }
 
 async function _restoreNativeCameraResult(result, pending, attempts = 0) {
-  const age = Date.now() - Number(pending?.createdAt);
-  if (pending?.version !== 2 || !pending.operationId || !pending.userId || !pending.entityId
-      || !Number.isFinite(age) || age < 0 || age > NATIVE_PHOTO_MAX_AGE_MS
-      || _readNativePhotoPending()?.operationId !== pending.operationId) return false;
-  // A restored WebView: wait only for the saved owner and record, never another open form.
-  const currentId = String(state.currentUser?.id || '');
-  if (currentId && currentId !== pending.userId) return false;
-  const ready = currentId === pending.userId
-    && String(getCollectionStorageScope() || '') === pending.scope
-    && _photoPasteTargetIsAvailable(pending.target)
-    && _nativePhotoEntityId(pending.target) === pending.entityId;
-  if (!ready) {
-    if (attempts >= 40) return false;
-    await new Promise(resolve => setTimeout(resolve, 250));
-    return _restoreNativeCameraResult(result, pending, attempts + 1);
+  const { target, entityId, userId, operationId } = pending || {};
+  const wait = () => new Promise(resolve => setTimeout(resolve, 250));
+  const shown = () => _photoPasteTargetIsAvailable(target) && _nativePhotoEntityId(target) === entityId;
+  const drop = () => { // no form for the photo: only its owner is told
+    _clearNativePhotoPending(operationId);
+    const ar = state.language === 'ar';
+    if (String(state.currentUser?.id || '') === userId) showNotification(ar ? 'التقط الصورة مرة أخرى' : 'Take the photo again',
+      ar ? 'أغلق أندرويد تطبيق البيان أثناء فتح الكاميرا.' : 'Android closed Albayan while the camera was open.', 'warning');
+    return false;
+  };
+  // A restored WebView: while the photo is fresh, wait for its owner's started, unlocked, loaded app.
+  for (;;) {
+    const age = Date.now() - Number(pending?.createdAt), currentId = String(state.currentUser?.id || '');
+    if (pending?.version !== 2 || !operationId || !userId || !(age >= 0)
+        || _readNativePhotoPending()?.operationId !== operationId || (currentId && currentId !== userId)) return false;
+    if (age > NATIVE_PHOTO_MAX_AGE_MS) return drop();
+    if (currentId && window.__albayanInitSettled === true && !_nativeAuthenticationRequired && !_serverLiveSync.startupLoadPending) break;
+    await wait();
   }
-  const guard = _captureNativePhotoContext(pending.target);
-  guard.operationId = pending.operationId;
+  if (String(getCollectionStorageScope() || '') !== pending.scope) return false;
+  if (!entityId) return drop();
+  if (!shown()) {
+    // Reopen the saved record's form (its own checks run), never over another open form.
+    const reopen = target === 'delivery' ? openReceiptDeliveryCompletionModal : MODAL_URL_HANDLERS[target]?.open;
+    if (!reopen || state.activeModal || getTopMobileSurface()) return drop();
+    try { await reopen(entityId); } catch (_) {}
+    while (!shown() && attempts++ < 40) await wait();
+    if (!shown()) return drop();
+  }
+  const guard = _captureNativePhotoContext(target);
+  guard.operationId = operationId;
   guard.requiresPending = true;
-  return _deliverNativeCameraResult(result, pending.target, guard);
+  return _deliverNativeCameraResult(result, target, guard);
 }
 
 async function takeNativePhoto(requestedTarget = '') {
@@ -352,7 +367,8 @@ async function takeNativePhoto(requestedTarget = '') {
       width: 1600,
       height: 1600,
       allowEditing: false,
-      resultType: 'uri',
+      // Android kept each 'uri' capture on the phone; with 'dataUrl' the plugin deletes it.
+      resultType: Platform.isAndroid ? 'dataUrl' : 'uri',
       source: 'CAMERA',
       direction: 'REAR',
       saveToGallery: false,

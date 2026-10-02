@@ -1331,7 +1331,7 @@ async function _activateServerSession(user, loginGeneration) {
       state.currentView = getPostLoginLandingViewForUser(user);
       saveState();
 
-      showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name)}. جارٍ تحميل البيانات...` : `Logged in as ${Security.escapeHtml(user.name)}. Loading data...`, 'success');
+      showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${user.name}. جارٍ تحميل البيانات...` : `Logged in as ${user.name}. Loading data...`, 'success');
       render(); // immediately leave the login screen
 
       // Show loading indicator
@@ -1574,8 +1574,8 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     }
 
     saveState();
-    addAuditLog('Login', user.id, `User ${Security.escapeHtml(user.name)} logged in`);
-    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name)}` : `Logged in as ${Security.escapeHtml(user.name)}`, 'success');
+    addAuditLog('Login', user.id, `User ${user.name} logged in`);
+    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${user.name}` : `Logged in as ${user.name}`, 'success');
     render();
   } else {
     // #region agent log
@@ -1641,6 +1641,7 @@ function resetPerUserListFilters() {
   state.adFilters = { status: 'all', payment: 'all', page: 'all' };
   state.deliveryFilter = {};
   state.auditUserFilter = 'all';
+  if (typeof resetClothesSessionState === 'function') { try { resetClothesSessionState(); } catch (_) {} }  // lazy bundle: never stop the sign-out cleanup
 }
 
 function closeSensitiveAuthenticatedUi() {

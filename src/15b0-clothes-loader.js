@@ -1,10 +1,10 @@
 // ==========================================
 // CLOTHES SYSTEM LAZY LOADER (main bundle)
 // ==========================================
-// The Clothes System ships as its own bundle (clothes.js, see
-// src/manifest.json "lazy") so the main bundle keeps startup headroom.
-// This loader stays in the main bundle: it fetches clothes.js once, renders
-// a bilingual loading/retry card meanwhile, and re-renders when ready.
+// The Clothes System ships as clothes.js (manifest "lazy") for startup headroom.
+// This loader fetches it once, shows a bilingual loading/retry card meanwhile
+// and redraws when it lands, but not before init() settles: its last render()
+// draws it then, and an earlier draw showed the sign-in form (session unknown).
 
 let _clothesBundlePromise = null;
 let _clothesBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
@@ -12,9 +12,7 @@ let _clothesLastFailureAt = 0;
 const _CLOTHES_RETRY_COOLDOWN_MS = 30000;
 
 function _clothesBundleUrl() {
-  // Derive from the script tag that provably loaded: correct under any base
-  // path, Capacitor (capacitor://localhost), and any static host. Version
-  // with the main bundle's ?v= (same deploy = same version) when present.
+  // Beside the script tag that loaded (any base path, Capacitor), same ?v=.
   try {
     const tags = document.querySelectorAll('script[src]');
     for (let i = 0; i < tags.length; i++) {
@@ -50,7 +48,7 @@ function ensureClothesSystemLoaded() {
       if (_clothesBundleState === 'ready' && state.currentView === 'clothes-system') {
         // A deep-linked ?tab= was skipped before the bundle existed.
         try { if (typeof restoreClothesTabFromUrl === 'function') restoreClothesTabFromUrl(); } catch (_) {}
-        try { render(); } catch (_) {}
+        try { if (window.__albayanInitSettled === true) render(); } catch (_) {}
       }
       resolve();
     };
@@ -60,7 +58,7 @@ function ensureClothesSystemLoaded() {
       _clothesBundleState = 'failed';
       _clothesBundlePromise = null;
       _clothesLastFailureAt = Date.now();
-      try { if (state.currentView === 'clothes-system') render(); } catch (_) {}
+      try { if (window.__albayanInitSettled === true && state.currentView === 'clothes-system') render(); } catch (_) {}
       resolve();
     };
     document.head.appendChild(tag);

@@ -1568,6 +1568,12 @@ check('ads use their original table and phone summary while deliveries retain jo
 const securitySrc = read('src/02-security.js');
 const controlCenterSrc = read('src/12b-control-center.js');
 
+check('R6 review: every early return of init() still settles start-up, so bundle loaders and queued deep links can draw',
+  (init.match(/window\.__albayanInitSettled = true; return;/g) || []).length === 3 &&
+  !init.includes("if (error?.code === 'SERVER_SESSION_CHANGED') return;") &&
+  !init.includes('if (getAuthMeIdentity() !== authRequestIdentity) return;') &&
+  liveSync.includes("if (typeof resetClothesSessionState === 'function') { try { resetClothesSessionState(); } catch (_) {} }"));
+
 check('R3/4 review: a receipt the server renumbered is logged under the number it was saved with',
   forms.includes("((saved.serialNumber || serialNumber) ? ' #' + (saved.serialNumber || serialNumber) : '')") &&
   !forms.includes("(serialNumber ? ' #' + serialNumber : '')} for ${customerName}`);\n    } else {"));

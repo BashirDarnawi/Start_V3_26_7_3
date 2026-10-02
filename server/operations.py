@@ -616,12 +616,12 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
         return max(0.0, ceiling - covered)
     # Money the company already absorbed is not "still unpaid" (the receipt keeps its Not Paid status by design).
     unpaid_receipts = [row for row in normal_receipts if _receipt_payment_state(row) == "not_paid" and _customer_outstanding(row) > 0.005]
-    # A Meta ad that is not stopped or completed keeps spending: once its month is closed every
-    # sync write is refused (423, parked for 30 days) and staff cannot finish it until an unlock.
+    # An ad that is not stopped or completed is still running: once its month is closed staff cannot
+    # stop, reconcile, top up or refund it (423) until an unlock, manual or Meta alike, and a Meta
+    # ad's sync writes are refused too (parked for 30 days).
     running_ads = [
         row for row in ads
-        if str(row.get("metaAdId") or "").strip()
-        and str(row.get("status") or "").strip().lower() not in _TERMINAL_AD_STATUSES
+        if str(row.get("status") or "").strip().lower() not in _TERMINAL_AD_STATUSES
     ]
     # Delivery work freezes the same way (423): the driver cannot complete or cancel and the office
     # cannot record the cash handover. Open = the driver-delete guard's statuses; held cash mirrors
@@ -649,7 +649,7 @@ def _period_snapshot(period: str, conn: Any | None = None) -> dict[str, Any]:
     if unpaid_receipts:
         blockers.append({"code": "unpaid_receipts", "count": len(unpaid_receipts), "message": "Receipts are still unpaid"})
     if running_ads:
-        blockers.append({"code": "ads_still_running", "count": len(running_ads), "message": "Meta ads from this month are still running (not stopped or completed)"})
+        blockers.append({"code": "ads_still_running", "count": len(running_ads), "message": "Ads from this month are still running (not stopped or completed)"})
     if open_deliveries:
         blockers.append({"code": "deliveries_open", "count": len(open_deliveries), "message": "Delivery jobs from this month are still open"})
     if cash_with_drivers:

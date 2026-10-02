@@ -497,22 +497,21 @@ check('a customer with contacts redacted does not crash the phone pickers', () =
   // without customers.viewContacts, so `phones` is absent — not empty. Code
   // that iterated it threw a TypeError and took the whole picker (and the
   // receipt form it lives in) down for exactly those users.
-  loginAs(employee({ customers: ['view'], receipts: ['view', 'create'] }));
-  const saved = S.customers;
-  try {
-    S.customers = saved.map(c => {
-      const copy = { ...c };
-      delete copy.phones;
-      return copy;
-    });
-    sandbox.invalidateReceiptPhoneRows?.();
-    const rows = sandbox.getReceiptPhoneRows();
-    assert(Array.isArray(rows), 'getReceiptPhoneRows did not return rows');
-    assert(rows.length === 0, 'redacted customers should contribute no phone rows');
-  } finally {
-    S.customers = saved;
-    sandbox.invalidateReceiptPhoneRows?.();
-  }
+  // R6 receipts-flows-4: each such customer is now ONE name-only row (phone ''), so those staff pick it by
+  // name. Read from src/: this suite loads the generated bundle, which is rebuilt once after all parallel fixes land.
+  const fresh = require('./helpers/load-browser-source')();
+  fresh.state.currentUser = employee({ customers: ['view'], receipts: ['view', 'create'] });
+  fresh.state.users = [ADMIN, fresh.state.currentUser];
+  fresh.state.customers = S.customers.map(c => {
+    const copy = { ...c };
+    delete copy.phones;
+    return copy;
+  });
+  const rows = fresh.run('getReceiptPhoneRows()');
+  assert(Array.isArray(rows), 'getReceiptPhoneRows did not return rows');
+  const visibleCount = fresh.run('getCustomersVisibleToCurrentUser().length');
+  assert(visibleCount > 0 && rows.length === visibleCount && rows.every(r => r.phone === '' && r.customer),
+    'redacted customers should contribute one name-only row each (no phone)');
 });
 
 check('without viewBalance, balances are hidden', () => {
@@ -4822,6 +4821,20 @@ check('Ads Studio reviewers cannot edit or submit customer drafts', () => {
   loginAs(reviewer);
   assert(sandbox.adsStudioCanUse(), 'staff reviewer was incorrectly forced to buy a customer subscription');
   assert(sandbox.getAuthorizedServerSyncCollections(reviewer).includes('adCampaignRequests'), 'review queue was excluded from reviewer live sync');
+});
+
+check('R6 ads-lifecycle-4: the Manager template can stop and reconcile ads (Stop and Reconciliation check ads.stopAd, not changeStatus)', () => {
+  // Read from src/: this suite loads the generated bundle, which is rebuilt once after all parallel fixes land.
+  const fresh = require('./helpers/load-browser-source')();
+  const templates = fresh.run('PERMISSION_TEMPLATES');
+  assert(templates.manager.permissions.ads.includes('stopAd'), 'the Manager template has no Stop Ads grant');
+  for (const [key, template] of Object.entries(templates)) {
+    const ads = (template.permissions && template.permissions.ads) || [];
+    assert(!ads.includes('changeStatus') || ads.includes('stopAd'), `${key} grants Change Status (pause, stop, complete) but not Stop Ads`);
+  }
+  fresh.state.currentUser = { id: 'u-mgr', name: 'Manager', role: 'Employee', permissions: JSON.parse(JSON.stringify(templates.manager.permissions)) };
+  fresh.state.users = [fresh.state.currentUser];
+  assert(fresh.sandbox.canActOnRecord('ads', 'stopAd', 'u-admin'), 'a Manager-template employee is told "You do not have permission to stop ads"');
 });
 
 check('Ads Studio session reset destroys drafts and invalidates pending photos', () => {

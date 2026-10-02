@@ -275,7 +275,7 @@ const PERMISSION_TEMPLATES = {
     color: 'blue',
     permissions: {
       analytics: ['view', 'export', 'viewFinancials'],
-      ads: ['view', 'add', 'edit', 'delete', 'changeStatus', 'assignDelivery', 'viewPhotos', 'uploadPhotos'],
+      ads: ['view', 'add', 'edit', 'delete', 'changeStatus', 'stopAd', 'assignDelivery', 'viewPhotos', 'uploadPhotos'],
       receipts: ['view', 'add', 'edit', 'markCollected', 'viewHistory', 'export'],
       customers: ['view', 'add', 'edit', 'viewBalance', 'viewContacts', 'export'],
       pages: ['view', 'add', 'edit', 'linkCustomers'],
@@ -386,7 +386,7 @@ function hasPermission(userId, module, action) {
   // Admins have all permissions
   if (String(user.role || '').toLowerCase() === 'admin') return true;
   
-  // Check specific permission - ensure permissions object exists
+  // Check the permission map (it must be an object)
   const permissions = user.permissions;
   if (!permissions || typeof permissions !== 'object') return false;
   
@@ -1335,7 +1335,7 @@ async function passkeySignIn() {
     }
     state.currentView = getPostLoginLandingViewForUser(user);
     saveState();
-    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${Security.escapeHtml(user.name || user.email || user.id)}` : `Logged in as ${Security.escapeHtml(user.name || user.email || user.id)}`, 'success');
+    showNotification(state.language === 'ar' ? 'مرحباً!' : 'Welcome!', state.language === 'ar' ? `تم تسجيل الدخول باسم ${user.name || user.email || user.id}` : `Logged in as ${user.name || user.email || user.id}`, 'success');
     render();
   } catch (e) {
     console.error('Passkey sign-in error:', e);

@@ -1263,15 +1263,8 @@ function renderModal() {
           </div>
         `;
       } else {
-        // Build phone list for search
-        const phoneCustomerMap = [];
-        receiptCustomers.forEach(c => {
-          // Staff without customers.viewContacts get customers with no phones (the server strips them).
-          if (!c || !Array.isArray(c.phones)) return;
-          c.phones.forEach(phone => {
-            phoneCustomerMap.push({ phone, customer: c });
-          });
-        });
+        // The picker's rows: one per phone, or one name-only row when the phones are hidden from this role.
+        const phoneCustomerMap = getReceiptPhoneRows();
         
         modalContent = `
           <div class="space-y-3 max-h-[75vh] overflow-y-auto custom-scrollbar pr-1">
@@ -1305,7 +1298,7 @@ function renderModal() {
                 <input
                   type="text"
                   id="receipt-phone-search"
-                  placeholder="${isArR ? 'اكتب رقم الهاتف...' : 'Type phone number...'}"
+                  placeholder="${can('customers', 'viewContacts') ? (isArR ? 'اكتب رقم الهاتف...' : 'Type phone number...') : (isArR ? 'اكتب اسم العميل...' : 'Type the customer name...')}"
                   class="w-full glass-input px-3 py-2 rounded-lg text-sm"
                   oninput="filterReceiptPhones()"
                   onfocus="showReceiptPhoneDropdown()"
@@ -1313,7 +1306,7 @@ function renderModal() {
                 <div id="receipt-phone-dropdown" class="absolute z-20 mt-1 w-full sm:w-80 max-w-[calc(100vw-2rem)] glass-panel rounded-lg shadow-xl max-h-40 overflow-y-auto hidden">
                   ${phoneCustomerMap.slice(0, PICKER_DROPDOWN_LIMIT).map(item => `
                     <div class="touch-target px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" role="button" tabindex="0" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)" onkeydown="if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); selectReceiptPhone(this.dataset.phone, this.dataset.customerId); }">
-                      <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
+                      <div class="text-sm font-medium">${Security.escapeHtml(item.phone || '—')}</div>
                       <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(platformLabel(item.customer.platform))}</div>
                     </div>
                   `).join('')}
@@ -2474,6 +2467,8 @@ function renderModal() {
           const stored = String(state.modalData.phoneNumber || '').trim();
           const phone = (stored && customer.phones.includes(stored)) ? stored : customer.phones[0];
           selectReceiptPhone(phone, customer.id);
+        } else if (customer && !Array.isArray(customer.phones)) {
+          selectReceiptPhone('', customer.id);  // phones hidden from this role: the name still shows
         }
       }
       renderReceiptPhotoPreviews();

@@ -16,9 +16,25 @@ const _patchChains = new Map();
 // Optimistic copy -> the last server-confirmed copy behind it (see updateRecord).
 const _patchConfirmedBase = new WeakMap();
 
+// A sent number as the server stores it (main.py sanitize_json, arrays under their parent's key): amounts
+// 0..1e7 at 2 decimals, rates 0.001..1000 at 4, Python round() (exact tie to even); NaN is sent as null.
+const _SERVER_AMOUNT_KEYS = new Set(['amountUSD', 'amountLocal', 'amount', 'debtAmountUSD', 'debtAmountLocal', 'spentUSD',
+  'spentLocal', 'remainingUSD', 'remainingLocal', 'collectedAmount', 'amountCollectedFromCustomer', 'quotedDeliveryFee',
+  'actualDeliveryFeeCollected', 'deliveryFeeCollected', 'overpaidAmount', 'remainingDue', 'dueAmountToUseUSD', 'dueAmountToUseLYD']);
+function _serverStoredNumbers(v, key = '') {
+  if (Array.isArray(v)) return v.map(x => _serverStoredNumbers(x, key));
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, _serverStoredNumbers(x, k)]));
+  const rate = key === 'rate' || key === 'exchangeRate';
+  if (typeof v !== 'number' || !Number.isFinite(v) || !(rate || _SERVER_AMOUNT_KEYS.has(key))) return v;
+  const x = rate ? Math.min(Math.max(v, 0.001), 1000) : Math.min(Math.max(v, 0), 1e7), p = rate ? 1e4 : 100;
+  const t = x * (rate ? 32 : 8), k = Math.floor(x * p);  // t is odd exactly when x * p ends in .5
+  return Number.isInteger(t) && t % 2 ? (k + k % 2) / p : Number(x.toFixed(rate ? 4 : 2));
+}
+
 function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   if (!serverRecord || !requestedRecord || String(serverRecord.id || '') !== String(requestedRecord.id || '')) return false;
   const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy', 'createdByName']);
+  requestedRecord = _serverStoredNumbers(requestedRecord);  // a lost answer's row holds the stored numbers
   for (const [key, value] of Object.entries(requestedRecord)) {
     if (ignored.has(key) || value === undefined) continue;
     if (Security.stableJson(serverRecord[key]) !== Security.stableJson(value)) return false;  // iPhone replies reorder keys
@@ -68,9 +84,7 @@ function requestUserTombstoneRefresh() {
       rows.forEach((r) => {
         if (r && r.id && typeof r.name === 'string' && r.name) map[String(r.id)] = String(r.name);
       });
-      // REPLACE the map instead of merging: privacy anonymization renames a
-      // tombstone to "Deleted user", and a stale merged entry would
-      // resurrect the old name.
+      // REPLACE, never merge: an anonymized tombstone is renamed "Deleted user"; a merge resurrected the name.
       const next = Security.sanitizeObject(map);
       if (JSON.stringify(state.userTombstones || {}) !== JSON.stringify(next)) {
         state.userTombstones = next;
@@ -276,9 +290,8 @@ function _localAdCommittedMinor(ad, receiptId) {
   const explicit = paid + due + legacyDue;
   if (explicit > 0) return explicit;
 
-  // Once either allocation ledger exists, a missing row means this receipt
-  // committed zero. Falling back to the full ad amount would charge another
-  // receipt for money it never supplied.
+  // With either allocation ledger present, a missing row means zero (the full ad amount would charge
+  // another receipt's money).
   if (Array.isArray(ad?.receiptAllocations) || Array.isArray(ad?.dueAllocations)) return 0;
   const paymentState = typeof getAdPaymentState === 'function'
     ? getAdPaymentState(ad)
@@ -506,8 +519,7 @@ function planLocalReceiptDebtAdUpdates(receiptId, nextReceipt = null) {
     const paid = _localFundingMap(ad.receiptAllocations);
     const moved = paid.get(rid) || 0;
     if (moved <= 0) {
-      // A legacy rowless paid ad charges its whole spend by reference; there
-      // is no allocation row to migrate, so the conversion must refuse.
+      // A legacy rowless paid ad charges its spend by reference: no row to migrate, so refuse.
       if (!Array.isArray(ad.receiptAllocations) && !Array.isArray(ad.dueAllocations)
           && _localAdCommittedMinor(ad, rid) > 0) {
         throw new Error('A receipt funding a legacy pre-allocation ad must remain paid');
@@ -590,9 +602,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
       showNotification('Invalid Record', updatesIdCheck.error, 'error');
       return Promise.resolve(false);
     }
-    // Protected fields never change. createdByName and customerName are creation-time stamps (who
-    // made it once that account is gone; who it is for, for a receipts/ads-only role); the live
-    // customer name still wins on read.
+    // Protected fields never change; createdByName/customerName are creation stamps (the creator once
+    // deleted, the customer for receipts/ads-only roles); the live customer name wins on read.
     const protectedFields = ['id', '_created', 'createdBy', 'createdByName', 'customerName', 'createdAt', 'creatorId'];
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
@@ -616,9 +627,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
     const _oldReceiptStatus = collectionName === 'receipts'
       ? String(old.status || '').trim().toLowerCase()
       : '';
-    // Keep the canonical Paid/Not Paid pair consistent even for legacy callers
-    // that supplied only one side. Canceled/Lost deliberately keep their own
-    // status because they can retain historical money without being "Paid".
+    // Paid/Not Paid stay consistent for legacy callers sending one side; Canceled/Lost keep their own
+    // status (they may hold historical money without being "Paid").
     const _requestedReceiptStatus = collectionName === 'receipts' && sanitizedUpdates.status !== undefined
       ? String(sanitizedUpdates.status || '').trim().toLowerCase()
       : '';
@@ -633,10 +643,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
     const _nextReceiptStatus = collectionName === 'receipts'
       ? String(sanitizedUpdates.status ?? old.status ?? '').trim().toLowerCase()
       : '';
-    // Route EVERY resulting Paid receipt through the cascade endpoint (repairs old Paid
-    // receipts whose ads still carry legacy due rows) — EXCEPT a paid-keeping edit that
-    // touches only the narrow-grant fields the generic PATCH authorizes under
-    // receipts.markCollected / deliveries.* (/settle demands receipts.edit and 403'd them).
+    // EVERY resulting Paid receipt takes the cascade endpoint (it repairs legacy due rows), EXCEPT a
+    // paid-keeping edit of only the narrow-grant fields (markCollected / deliveries.*; /settle 403s them).
     const _RECEIPT_NARROW_GRANT_FIELDS = new Set([
       'collected', 'collectedAmount', 'collectedPayments', 'collectedMatchesReceipt',
       'collectedAt', 'collectedBy', 'isReceivedInOffice', 'receivedInOfficeAt',
@@ -656,11 +664,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
     const _receiptSettlementKey = _settlesReceipt
       ? Security.generateSecureId('receipt-settlement')
       : '';
-    // The REVERSE transition: an edit that explicitly flips a PAID receipt to
-    // Not Paid. Any funding must migrate into the ads' due pool in the SAME
-    // commit (server: /unsettle cascade; local: planLocalReceiptDebtAdUpdates),
-    // conserved to the cent. The server refuses a paid -> not-paid PATCH even
-    // when unfunded; only local mode keeps the ordinary path for those.
+    // The REVERSE transition (a PAID receipt edited to Not Paid) moves its funding into the ads' due pool
+    // in the SAME commit, to the cent (/unsettle; local planLocalReceiptDebtAdUpdates). The server
+    // refuses that PATCH even unfunded; only local mode keeps the ordinary path for those.
     const _convertsReceipt = collectionName === 'receipts'
       && !_settlesReceipt
       && (_oldReceiptStatus === 'paid' || old.isPaid === true)
@@ -697,8 +703,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
           isPaid: false
         });
       } catch (error) {
-        // Same refusals, same localized wording as server mode: the planner
-        // throws the server's own detail strings, describe409 translates them.
+        // Same refusals and wording as server mode (the planner throws server details; describe409 translates).
         const _detail = String(error?.message || '');
         const reason = typeof describe409 === 'function'
           ? describe409({ status: 409, message: _detail }, _detail)
@@ -719,10 +724,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
     // The last SAVED copy behind this edit: a slot still holding a pending
     // PATCH's optimistic copy hands on that copy's own saved base.
     const _confirmedBase = _patchConfirmedBase.get(array[index]) || old;
-    // Ordinary records keep the established optimistic UX. Settlement and its
-    // reverse (debt conversion) are the exceptions: do not paint the receipt
-    // Paid/Not Paid before its linked ads are also committed, because that
-    // briefly presents two contradictory money states.
+    // Optimistic paint, except settlement and its reverse: the receipt is not shown Paid/Not Paid
+    // before its linked ads commit too (two contradictory money states).
     if (!((_settlesReceipt || _convertsReceipt) && isServerModeEnabled())) {
       array[index] = { ...array[index], ...sanitizedUpdates, _lastModified: getMonotonicTime() };
       if (isServerModeEnabled() && collectionName === 'adCampaignRequests' && typeof makeLightweightMediaRecord === 'function') {
@@ -750,8 +753,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
     // Server write-through (always-online multi-user mode)
     if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
       const _patchChainKey = collectionName + ':' + id;
-      // If a PATCH for this record is already in flight, this edit is queued
-      // behind it and must use the FRESH echoed baseline, not the modal snapshot.
+      // A PATCH already in flight for this record: this edit queues behind it on the FRESH echoed baseline.
       const _queuedBehind = _patchChains.has(_patchChainKey);
       const _providedExpected = Number.isFinite(Number(expectedLastModified))
         ? Number(expectedLastModified)
@@ -810,9 +812,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
               saveState();
             }
           }
-          // Settle/convert skipped the optimistic paint, so this echo is the FIRST paint of the
-          // committed multi-entity state: keep the full render. A plain PATCH echo was already
-          // painted; schedule a normal render so a byte-identical echo is a no-DOM-op.
+          // Settle/convert skipped the optimistic paint: this echo is the FIRST paint (full render); a
+          // plain PATCH echo was painted, so a normal render keeps an identical echo DOM-free.
           if (_settlesReceipt || _convertsReceipt) {
             forceFullRender();
           } else {
@@ -841,20 +842,17 @@ function updateRecord(array, id, updates, expectedLastModified) {
                 if (collectionName) markCollectionDirty(collectionName);
                 saveState();
               }
-              // Reload the OPEN modal from the fresh copy (fields AND baseline): refreshing only the stamp
-              // under stale fields let the next Save overwrite the other user's change. Unsaved edits are
-              // discarded — the honest cost of a real conflict.
+              // Reload the OPEN modal from the fresh copy, fields AND baseline (a fresh stamp under stale
+              // fields let the next Save overwrite the other change); unsaved edits are lost.
               if (_latestData && state.modalData && String(state.modalData.id) === String(id)
                   && idx !== -1 && state.activeModal) {
                 state.modalData = array[idx];
                 if (typeof reseedClothesEditState === 'function') { try { reseedClothesEditState(collectionName, array[idx]); } catch (_) {} }  // temp rows + baseline follow
                 try { if (typeof renderModal === 'function') renderModal(); } catch (_) {}
               }
-              // A settle/unsettle whose FIRST attempt committed but whose response was lost lands
-              // here on the manual retry (fresh key, stale baseline 409). Claim "already saved" ONLY
-              // when the stored record matches what THIS save intended field-by-field (volatile
-              // server-stamped keys excluded); a too-strict match only downgrades to the honest
-              // conflict warning, never to a false success.
+              // A settle/unsettle whose first attempt committed but lost its answer meets this 409 on the manual
+              // retry: "already saved" ONLY if the stored record matches this save field by field (volatile
+              // server keys excluded); a miss only shows the honest conflict warning.
               const _volatileMatchKeys = ['_lastModified', 'lastModified', 'updatedAt', 'editHistory', 'editCount', 'collectionDate', 'deliveryHistory', 'customerName', 'createdByName'];
               const _intentMatchesLatest = () => {
                 try {
@@ -954,8 +952,7 @@ function updateRecord(array, id, updates, expectedLastModified) {
         RenderQueue.schedule('patchAbandoned');
         return false;
       };
-      // Chain this PATCH after any in-flight PATCH for the same record, and drop
-      // the chain entry once it settles so a later idle edit starts fresh.
+      // Chain after any in-flight PATCH of this record; the entry is dropped when it settles.
       const _prevPatch = _patchChains.get(_patchChainKey) || Promise.resolve();
       const _thisPatch = _prevPatch.then(ok => (ok === false ? abandonQueued() : sendPatch()), abandonQueued);
       _patchChains.set(_patchChainKey, _thisPatch);
@@ -1111,8 +1108,7 @@ async function flushBatchDeletes(ops) {
       if (e?.status === 404 || e?.status === 405) {
         // Never fall back to fire-and-forget deletes (a partial cascade).
       }
-      // Roll back every local soft-delete, only while the slot still holds
-      // the object this cascade marked (live-sync may hold a newer copy).
+      // Roll back each local soft-delete while the slot still holds the object this cascade marked.
       ops.forEach(o => {
         const idx = o.array.findIndex(x => x && x.id === o.id);
         if (idx !== -1 && (!o.record || o.array[idx] === o.record)) o.array[idx] = o.old;
@@ -1556,10 +1552,8 @@ function getDeliveryReceiptDueUsage(receipt) {
     : {};
   const notPaidCollection = String(statusDetail.notPaidCollection || '').trim().toLowerCase();
 
-  // Capacity: before collection the receipt is worth the debt the driver will collect.
-  // Once collected it is worth what was ACTUALLY collected (amountUSD) — the debt fields
-  // survive as history and must never be read as a second capacity. Over-collecting
-  // legitimately adds real balance; re-reading the stale debt invents it.
+  // Capacity: the debt the driver will collect until collection, then what was ACTUALLY collected
+  // (amountUSD); the debt fields stay as history (re-reading them invents balance).
   const collected = receiptObj.isPaid === true || String(receiptObj.status || '') === 'Paid';
   const isShopReceipt = ['office', 'in_shop', 'shop'].includes(notPaidCollection);
   const totalDueUSD = (collected || isShopReceipt)
@@ -1581,15 +1575,11 @@ function getDeliveryReceiptDueUsage(receipt) {
 
     const paidRows = sumFor(ad.receiptAllocations);
     const dueRows = sumFor(ad.dueAllocations);
-    // Company-covered rows hold pot money exactly like due rows do — the
-    // server refuses to fund new ads from them. They are tracked SEPARATELY
-    // from usedDueUSD because customer-debt math must not double-net them
-    // (customerOutstandingUSD already excludes covered dollars).
+    // Company-covered rows hold pot money like due rows (never funding new ads), kept apart from
+    // usedDueUSD: customerOutstandingUSD already excludes covered dollars.
     const companyRows = sumFor(ad.companyFundingAllocations);
 
-    // The legacy mirror only speaks for a ROWLESS ad: once any positive due
-    // row exists (for this receipt or another), the scalar is the rows' sum,
-    // not additional money.
+    // The legacy mirror speaks only for a ROWLESS ad: with any positive due row it is the rows' sum.
     let legacyDue = 0;
     const hasAnyPositiveDueRow = Array.isArray(ad.dueAllocations)
       && ad.dueAllocations.some(a => (parseFloat(a?.amountUSD) || 0) > 0);
@@ -1635,8 +1625,7 @@ function getReceiptPaymentState(receipt) {
     .replace(/[\s_-]+/g, '');
 
   if (status === 'canceled' || status === 'cancelled') return 'canceled';
-  // A destroyed (torn, never-used) receipt behaves like a canceled one for
-  // every reader: never unpaid debt, never revenue, never needs attention.
+  // A destroyed (torn, never-used) receipt reads as canceled: never debt, revenue or attention.
   if (status === 'destroyed') return 'canceled';
   if (status === 'lost') return 'lost';
   if (status === 'paid') return 'paid';
@@ -1777,8 +1766,7 @@ function isDeliveryReceiptRecord(receipt) {
   return !explicitShop && !!String(receipt.deliveryPersonId || detail.paidDeliveryPersonId || '').trim();
 }
 
-// Returns the CURRENT customer debt source. Collection/reconciliation is a
-// separate concept and must not decide whether the customer owes this money.
+// The CURRENT customer debt source (collection/reconciliation never decides whether money is owed).
 function getReceiptDebtType(receipt) {
   if (!receipt || receipt._deleted) return 'none';
   const receiptType = String(receipt.receiptType || '').trim().toUpperCase();

@@ -4003,8 +4003,8 @@ function renderAdsView() {
                         ${!needsSetup ? `<button type="button" onclick="manageRefund('${ad.id}')" class="text-amber-600 hover:text-amber-700 p-2 md:p-0" title="${isAr ? 'استرجاع' : 'Refund'}">
                           <i data-lucide="arrow-left-circle" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.refundType && ad.refundType !== 'None' ? `<span class="text-xs">!</span>` : ''}
-                        </button>
-                        <button type="button" onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
+                        </button>` : ''}
+                        ${isAdReconciliationEligible(ad) && canActOnRecord('ads', 'stopAd', ad.creatorId) ? `<button type="button" onclick="stopAd('${ad.id}')" class="text-orange-600 hover:text-orange-700 p-2 md:p-0" title="${ad.status === 'Stopped' ? (isAr ? 'تعديل تفاصيل الإيقاف' : 'Edit Stop Details') : (isAr ? 'إيقاف الإعلان' : 'Stop Ad')}">
                           <i data-lucide="${ad.status === 'Stopped' ? 'edit' : 'square'}" class="w-5 h-5 md:w-4 md:h-4"></i>
                           ${ad.status === 'Stopped' ? '<span class="text-xs">!</span>' : ''}
                         </button>` : ''}
@@ -5358,6 +5358,9 @@ function getAdReconciliationStartDay(ad) {
 }
 
 function getAdReconciliationEndDay(ad) {
+  // Meta still delivering an ad with no end time: not ended (its import stored end = start) until a
+  // stop or pause. With an end time, endDate stands: Meta keeps an ad ACTIVE after its real end.
+  if (ad?.metaAdId && !ad.metaEndTime && /^(ACTIVE|IN_PROCESS|PENDING_REVIEW|PREAPPROVED|WITH_ISSUES)$/.test(String(ad.metaEffectiveStatus).toUpperCase())) return null;
   return getAdReconciliationCalendarDay(ad?.endDate);
 }
 

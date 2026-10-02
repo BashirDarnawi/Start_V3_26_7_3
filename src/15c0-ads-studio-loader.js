@@ -1,10 +1,10 @@
 // ==========================================
 // ADS STUDIO LAZY LOADER (main bundle)
 // ==========================================
-// The Ads Studio ships as its own bundle (studio.js, see src/manifest.json
-// "lazy") so the main bundle keeps startup headroom and the studio can grow.
-// This loader stays in the main bundle: it fetches studio.js once, renders a
-// bilingual loading/retry card meanwhile, and re-renders when ready.
+// The Ads Studio ships as studio.js (manifest "lazy") to keep startup headroom.
+// This loader fetches it once, shows a bilingual loading/retry card meanwhile
+// and redraws when it lands, but not before init() settles: its last render()
+// draws it then, and an earlier draw showed the sign-in form (session unknown).
 
 let _studioBundlePromise = null;
 let _studioBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
@@ -12,9 +12,7 @@ let _studioLastFailureAt = 0;
 const _STUDIO_RETRY_COOLDOWN_MS = 30000;
 
 function _studioBundleUrl() {
-  // Derive from the script tag that provably loaded: correct under /studio/,
-  // Capacitor (capacitor://localhost), and any static host. Version with the
-  // main bundle's ?v= (same deploy = same version) when present.
+  // Beside the script tag that loaded (/studio/, Capacitor, any host), same ?v=.
   try {
     const tags = document.querySelectorAll('script[src]');
     for (let i = 0; i < tags.length; i++) {
@@ -50,7 +48,7 @@ function ensureAdsStudioLoaded() {
       if (_studioBundleState === 'ready' && state.currentView === 'ads-studio') {
         // A deep-linked ?tab= was skipped before the bundle existed.
         try { if (typeof restoreAdsStudioTabFromUrl === 'function') restoreAdsStudioTabFromUrl(); } catch (_) {}
-        try { render(); } catch (_) {}
+        try { if (window.__albayanInitSettled === true) render(); } catch (_) {}
       }
       resolve();
     };
@@ -60,7 +58,7 @@ function ensureAdsStudioLoaded() {
       _studioBundleState = 'failed';
       _studioBundlePromise = null;
       _studioLastFailureAt = Date.now();
-      try { if (state.currentView === 'ads-studio') render(); } catch (_) {}
+      try { if (window.__albayanInitSettled === true && state.currentView === 'ads-studio') render(); } catch (_) {}
       resolve();
     };
     document.head.appendChild(tag);

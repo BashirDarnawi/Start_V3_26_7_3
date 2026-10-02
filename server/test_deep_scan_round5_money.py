@@ -178,7 +178,8 @@ def test_cancel_refuses_to_rewrite_an_ad_in_a_closed_month(admin):
     _unpaid_office_receipt(rid, cid, 100, admin)
     _shop_ad(aid, cid, rid, 100, admin, start_date=f"{period}-15")
     ad_before = _entity("ads", aid, admin)
-    closed = client.post("/api/admin/operations/financial-periods/close", json={"period": period, "forceReason": "r5"}, cookies=admin)
+    # The shop ad is still Active, a closing problem since R6 ads-lifecycle-1: close over it with a real reason.
+    closed = client.post("/api/admin/operations/financial-periods/close", json={"period": period, "forceReason": "r5 closes over the Active shop ad"}, cookies=admin)
     assert closed.status_code == 200, closed.text
     try:
         r = _patch("receipts", rid, {"status": "Canceled"}, admin)

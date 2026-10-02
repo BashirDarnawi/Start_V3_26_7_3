@@ -260,17 +260,18 @@ function clothesCanUse() {
   return hasSubscription('clothes_system');
 }
 
-// Multi-tenant isolation: subscribers see ONLY their own records.
-// Admin (platform owner) sees everything.
-function _clothesScopeToOwner(records) {
+// Multi-tenant isolation: subscribers (viewOwn) see ONLY their own records.
+// Admin (platform owner) and staff granted the module's "view" (all) see
+// everything, as the server sends them (get_collection can_view_all).
+function _clothesScopeToOwner(records, module) {
   const visible = getVisibleRecords(records);
-  if (isCurrentUserAdmin()) return visible;
+  if (isCurrentUserAdmin() || (module && can(module, 'view'))) return visible;
   const uid = state.currentUser?.id;
   return visible.filter(r => r && r.createdBy === uid);
 }
 
 function getVisibleClothesProducts() {
-  return _clothesScopeToOwner(state.clothesProducts);
+  return _clothesScopeToOwner(state.clothesProducts, 'clothesProducts');
 }
 
 // Personal settings: ONE record per user, strictly own for everyone
@@ -1076,6 +1077,9 @@ async function editClothesProduct(id) {
   if (!clothesCanUse()) return;
   let product = getVisibleClothesProducts().find(p => p.id === id);
   if (!product) return;
+  // Shared with editAd/editReceipt: a later Edit tap, or a dialog opened while the
+  // photo loads (a new order being typed), wins over this late form.
+  const seq = ++_editTapSeq, openAtTap = state.activeModal;
   // A lean record (server list without photo bytes) must be hydrated first:
   // the edit form round-trips the photo, so it has to open on the full record.
   if (typeof getEntityPhotoCountHint === 'function' && getEntityPhotoCountHint('clothesProducts', product) > 0 &&
@@ -1090,7 +1094,7 @@ async function editClothesProduct(id) {
       );
       return;
     }
-    if (!product) return;
+    if (!product || seq !== _editTapSeq || state.activeModal !== openAtTap) return;
   }
   state.activeModal = 'clothes-product';
   state.modalData = product;
@@ -1439,7 +1443,7 @@ let _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
 let _clothesShipmentsFilterFingerprint = '';
 
 function getVisibleClothesShipments() {
-  return _clothesScopeToOwner(state.clothesShipments);
+  return _clothesScopeToOwner(state.clothesShipments, 'clothesShipments');
 }
 
 function clothesShipmentStatusMeta(statusId) {
@@ -2155,10 +2159,25 @@ async function saveClothesShipmentFromModal() {
     const productId = String(l?.productId || '').trim();
     const qty = Math.max(0, Math.floor(Number(l?.qty) || 0));
     if (!productId || qty === 0) continue;
+    const color = String(l?.color || '').trim();
+    const size = String(l?.size || '').trim();
+    // As on the order form: a product with colors/sizes needs one picked (or a
+    // new one typed), or receiving puts the pieces in a stray "unspecified" row.
+    // A reopened line naming a color/size not received yet is a new one too.
+    const product = getVisibleClothesProducts().find(p => p.id === productId);
+    if (product && Array.isArray(product.variants) && product.variants.length && !color && !size &&
+        (l._newVariant === true || findClothesVariantIndex(product, '', '') === -1)) {
+      showNotification(
+        isAr ? 'تنبيه' : 'Validation',
+        isAr ? `اختر اللون والمقاس للمنتج "${product.name}".` : `Choose a color & size for "${product.name}".`,
+        'error'
+      );
+      return false;
+    }
     lines.push({
       productId,
-      color: String(l?.color || '').trim(),
-      size: String(l?.size || '').trim(),
+      color,
+      size,
       qty,
       unitCostUSD: clothesParseMoney(l?.unitCostUSD)
     });
@@ -2240,8 +2259,24 @@ let _clothesOrderPaymentFilter = 'all';
 let _clothesOrdersShowLimit = CLOTHES_ORDERS_PAGE_SIZE;
 let _clothesOrdersFilterFingerprint = '';
 
+// Every sign-out, session expiry and sign-in (resetPerUserListFilters): the next
+// account never opens a list filtered by the last person's search (a phone).
+function resetClothesSessionState() {
+  for (const timer of ['_clothesProductSearchTimer', '_clothesShipmentSearchTimer', '_clothesOrderSearchTimer']) {
+    if (window[timer]) clearTimeout(window[timer]);
+    window[timer] = null;
+  }
+  _clothesProductSearch = _clothesShipmentSearch = _clothesOrderSearch = '';
+  _clothesShipmentStatusFilter = _clothesOrderStatusFilter = _clothesOrderPaymentFilter = 'all';
+  _clothesProductsShowLimit = CLOTHES_PRODUCTS_PAGE_SIZE;
+  _clothesShipmentsShowLimit = CLOTHES_SHIPMENTS_PAGE_SIZE;
+  _clothesOrdersShowLimit = CLOTHES_ORDERS_PAGE_SIZE;
+  _clothesProductsFilterFingerprint = _clothesShipmentsFilterFingerprint = _clothesOrdersFilterFingerprint = '';
+  _clothesActiveTab = 'dashboard';
+}
+
 function getVisibleClothesOrders() {
-  return _clothesScopeToOwner(state.clothesOrders);
+  return _clothesScopeToOwner(state.clothesOrders, 'clothesOrders');
 }
 
 function clothesOrderStatusMeta(statusId) {
@@ -2554,10 +2589,13 @@ function getFilteredClothesOrders() {
   }
   if (q) {
     const numQ = q.replace(/^#/, '').replace(/^0+/, '');
+    // A phone in any spelling (091-…, +218 91 …, 00218…) once 4+ digits follow the
+    // leading zeros, as on the receipts list: "0042" stays an order-number search.
+    const phoneTail = q.replace(/\D/g, '').replace(/^0+/, '');
     items = items.filter(o => {
       if (numQ && /^\d+$/.test(numQ) && String(Math.floor(Number(o.orderNo) || 0)) === numQ) return true;  // "#0042" or "42"
       if (foldSearchText(o.customerName).includes(q)) return true;
-      if (foldSearchText(o.customerPhone).includes(q)) return true;
+      if (foldSearchText(o.customerPhone).includes(q) || (phoneTail.length >= 4 && customerPhoneMatchesSearch(q, o.customerPhone))) return true;
       const lines = Array.isArray(o.lines) ? o.lines : [];
       return lines.some(line => foldSearchText(clothesProductNameById(line.productId)).includes(q));
     });

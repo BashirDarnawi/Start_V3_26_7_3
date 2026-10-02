@@ -42,6 +42,7 @@ function fixture() {
 
 function cameraFixture(target = 'receipt') {
   const f = fixture();
+  f.sandbox.window.__albayanInitSettled = true; // a started app: a restored photo waits for this
   f.state.activeModal = target;
   f.state.modalData = { id: 'receipt_a' };
   f.makeElement('receipt-photo-previews');
@@ -177,6 +178,7 @@ async function main() {
   for (const invalid of ['different-user', 'expired', 'future', 'legacy-unbound', 'unsaved-form', 'cleared', 'different-server']) {
     await test(`restored native photo rejects ${invalid} context`, async () => {
       const f = cameraFixture('delivery'); const saved = f.persist();
+      const notes = []; f.sandbox.showNotification = (title, message) => notes.push(message);
       if (invalid === 'different-user') f.state.currentUser = { id: 'other_user', role: 'Admin' };
       if (invalid === 'expired') saved.createdAt -= 11 * 60 * 1000;
       if (invalid === 'future') saved.createdAt += 60 * 1000;
@@ -186,6 +188,10 @@ async function main() {
       if (invalid === 'different-server') saved.scope = 'other-server';
       assert.equal(await f.sandbox._restoreNativeCameraResult({}, saved, 40), false);
       assert.equal(f.routes.length, 0);
+      // R6-android-runtime-1: a photo its owner can never place is dropped with one notice; nobody else is told.
+      const dropped = invalid === 'unsaved-form' || invalid === 'expired';
+      assert.deepEqual(notes, dropped ? ['Android closed Albayan while the camera was open.'] : [], 'before: no notice');
+      if (dropped) assert.equal(f.storage.getItem('albayan_native_photo_pending'), null, 'before: the pending key stayed');
     });
   }
   await test('restored camera revalidates user after slow file conversion too', async () => {
@@ -201,6 +207,86 @@ async function main() {
     f.storage.setItem('albayan_native_photo_pending', JSON.stringify({ ...saved, operationId: 'next-op' }));
     f.sandbox._clearNativePhotoPending(saved.operationId);
     assert.equal(JSON.parse(f.storage.getItem('albayan_native_photo_pending')).operationId, 'next-op');
+  });
+  // Bug hunt R6 (R6-android-runtime-1): when Android closed Albayan during the camera round trip, the
+  // restored photo waited 10 s for a form nothing reopened, then vanished (even the required delivery photo).
+  await test('R6 android-runtime-1: a restored photo waits for the started, unlocked app, reopens its delivery form once and attaches there', async () => {
+    const f = cameraFixture('delivery'); const saved = f.persist();
+    f.elements.delete('delivery-complete-modal'); f.elements.delete('delivery-receipt-image-data');
+    f.state.activeModal = null; f.sandbox.window.__albayanInitSettled = false; f.run('_nativeAuthenticationRequired = true');
+    const opened = []; const timers = [];
+    f.sandbox.openReceiptDeliveryCompletionModal = async id => {
+      opened.push(id);
+      f.makeElement('delivery-complete-modal', { receiptId: id }); f.makeElement('delivery-receipt-image-data');
+    };
+    f.sandbox.setTimeout = callback => { timers.push(callback); return 1; };
+    let done = false;
+    const restored = f.sandbox._restoreNativeCameraResult({}, saved).finally(() => { done = true; });
+    const tick = async () => { await flush(); timers.shift()?.(); await flush(); };
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.deepEqual(opened, [], 'nothing opens before start-up has settled');
+    f.sandbox.window.__albayanInitSettled = true;
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.deepEqual(opened, [], 'nothing opens under the app lock');
+    f.run('_nativeAuthenticationRequired = false');
+    for (let i = 0; i < 60 && !done; i += 1) await tick();
+    assert.equal(await restored, true, 'before: false after 40 tries, the dialog never reopened');
+    assert.deepEqual(opened, ['receipt_a']);
+    assert.equal(f.routes.length, 1); assert.equal(f.routes[0].id, 'receipt_a'); assert.equal(f.routes[0].userId, 'admin');
+    assert.equal(f.storage.getItem('albayan_native_photo_pending'), null);
+  });
+  await test('R6 android-runtime-1: a restored photo whose form cannot be reopened is dropped with one notice', async () => {
+    for (const kind of ['refused', 'ads-studio', 'other-form-open']) {
+      const f = cameraFixture('delivery'); const saved = f.persist();
+      f.elements.delete('delivery-complete-modal'); f.elements.delete('delivery-receipt-image-data');
+      f.state.activeModal = kind === 'other-form-open' ? 'receipt' : null;
+      if (kind === 'ads-studio') saved.target = 'ads-studio';
+      const notes = []; f.sandbox.showNotification = (title, message) => notes.push(message);
+      let opened = 0;
+      f.sandbox.openReceiptDeliveryCompletionModal = async () => { opened += 1; }; // its own checks refused
+      f.sandbox.setTimeout = callback => { Promise.resolve().then(callback); return 1; };
+      assert.equal(await f.sandbox._restoreNativeCameraResult({}, saved), false);
+      assert.equal(opened, kind === 'refused' ? 1 : 0, `${kind}: reopened only for its own form with nothing else open`);
+      assert.equal(f.routes.length, 0);
+      assert.deepEqual(notes, ['Android closed Albayan while the camera was open.'], `${kind}: before, no notice`);
+      assert.equal(f.storage.getItem('albayan_native_photo_pending'), null, `${kind}: before, the pending key stayed`);
+    }
+  });
+  // Bug hunt R6 (R6-android-runtime-3): with resultType 'uri' every Android camera photo stayed in
+  // Android/data/com.albayan.app/files/Pictures for good; with 'dataUrl' the plugin deletes its capture.
+  await test('R6 android-runtime-3: the Android camera returns the photo inline and iOS keeps uri; both reach the receipt upload once', async () => {
+    const userAgents = {
+      android: 'Mozilla/5.0 (Linux; Android 14; SM-A145F; wv) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36',
+      ios: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+    };
+    for (const [platform, reply] of [['android', 'dataUrl'], ['ios', 'webPath'], ['android', 'webPath']]) {
+      const f = fixture();
+      f.state.activeModal = 'receipt'; f.state.modalData = { id: 'receipt_a' };
+      f.makeElement('receipt-photo-previews');
+      const uploads = []; const fetched = []; const calls = [];
+      f.sandbox.uploadReceiptPhotos = files => uploads.push(Array.from(files));
+      f.sandbox.atob = value => Buffer.from(value, 'base64').toString('binary');
+      f.sandbox.Blob = function Blob(parts, options = {}) { this.parts = parts; this.type = options.type || ''; };
+      f.sandbox.File = function File(parts, name, options = {}) { this.parts = parts; this.name = name; this.type = options.type || ''; };
+      f.sandbox.fetch = async url => { fetched.push(url); return { blob: async () => new f.sandbox.Blob([], { type: 'image/jpeg' }) }; };
+      const photo = reply === 'dataUrl'
+        ? { dataUrl: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==', format: 'jpeg' }
+        : { webPath: 'https://localhost/_capacitor_file_/photo.jpg', path: 'file:///photo.jpg', format: 'jpeg' };
+      f.sandbox.window.Capacitor = { Plugins: { Camera: { getPhoto: async options => { calls.push(options); return photo; } } } };
+      f.sandbox.navigator.userAgent = userAgents[platform];
+      f.run('Platform._cache = null');
+      assert.equal(await f.sandbox.takeNativePhoto('receipt'), true, `${platform}/${reply}: before, the inline photo was dropped`);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].resultType, platform === 'android' ? 'dataUrl' : 'uri', 'before: Android asked for uri');
+      assert.equal(uploads.length, 1); assert.equal(uploads[0].length, 1);
+      const [file] = uploads[0];
+      assert.match(file.name, /^albayan-camera-\d+\.jpg$/); assert.equal(file.type, 'image/jpeg');
+      if (reply === 'dataUrl') {
+        assert.deepEqual(fetched, []);
+        assert.deepEqual(Array.from(file.parts[0].parts[0]), Array.from(Buffer.from('/9j/4AAQSkZJRg==', 'base64')));
+      } else assert.deepEqual(fetched, [photo.webPath]);
+      assert.equal(f.storage.getItem('albayan_native_photo_pending'), null);
+    }
   });
 
   await test('identity cache and concurrent identity checks share a single same-session request', async () => {
@@ -693,6 +779,163 @@ async function main() {
     notes.length = 0;
     await f.sandbox.handleModalSubmit();
     assert.deepEqual(notes, [['Error', 'Account changed. Sign in again before changing your password.', 'error']]);
+  });
+
+  // Bug hunt R6 (R6-clothes-second-pass-4): the Clothes searches and filters outlived sign-out, so the next
+  // account on a shared device opened Orders filtered by the last person's customer phone ("No results").
+  await test('R6 clothes-second-pass-4: sign-out clears the Clothes searches, filters and tab, so the next account opens Orders unfiltered', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const f = fixture();
+    f.run(fs.readFileSync(path.join(__dirname, '..', 'src', '15b-clothes.js'), 'utf8'));
+    f.run('Security').escapeHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const timers = [];
+    f.sandbox.setTimeout = () => { timers.push(timers.length + 1); return timers.length; };
+    const cleared = [];
+    f.sandbox.clearTimeout = id => cleared.push(id);
+    f.state.currentUser = { id: 'owner1', role: 'Admin', permissions: {} };
+    f.state.clothesOrders = [{ id: 'o1', orderNo: 1, customerName: 'Fatima', customerPhone: '0912345678', status: 'New', paymentStatus: 'Not Paid', lines: [], createdBy: 'owner1' }];
+    f.run(`setClothesOrderStatusFilter('New'); setClothesOrderPaymentFilter('Not Paid'); setClothesShipmentStatusFilter('Arrived');
+      onClothesProductSearchInput({ value: 'secret' }); onClothesShipmentSearchInput({ value: 'Turkey' }); onClothesOrderSearchInput({ value: '0912345678' });
+      _clothesActiveTab = 'orders'; _clothesOrdersShowLimit = 90; _clothesProductsShowLimit = 60;`);
+    const filters = () => f.run(`JSON.stringify([_clothesOrderSearch, _clothesOrderStatusFilter, _clothesOrderPaymentFilter, _clothesProductSearch,
+      _clothesShipmentSearch, _clothesShipmentStatusFilter, _clothesActiveTab, _clothesOrdersShowLimit, _clothesProductsShowLimit])`);
+    assert.equal(filters(), JSON.stringify(['0912345678', 'New', 'Not Paid', 'secret', 'Turkey', 'Arrived', 'orders', 90, 60]));
+    f.sandbox.closeSensitiveAuthenticatedUi();
+    assert.equal(filters(), JSON.stringify(['', 'all', 'all', '', '', 'all', 'dashboard', 30, 30]), 'before: the last person\'s searches, filters and tab');
+    assert.ok([1, 2, 3].every(id => cleared.includes(id)), 'the pending search re-renders are dropped');
+    assert.equal(f.sandbox.window._clothesOrderSearchTimer, null);
+    // The next person signs in and opens Orders.
+    f.state.currentUser = { id: 'sub2', role: 'Employee', permissions: { clothesOrders: ['viewOwn', 'add', 'editOwn', 'deleteOwn'] } };
+    f.state.users = [f.state.currentUser];
+    f.state.clothesOrders = [{ id: 'o9', orderNo: 1, customerName: 'Ali', customerPhone: '0920000000', status: 'On the way', paymentStatus: 'Paid', lines: [], createdBy: 'sub2' }];
+    assert.equal(f.run('getFilteredClothesOrders().length'), 1, 'before: 0 of 1');
+    const html = String(f.run('renderClothesOrdersTab()'));
+    assert.equal((html.match(/id="clothes-order-search"[\s\S]*?value="([^"]*)"/) || [])[1], '', 'before: the old phone in the search box');
+    assert.ok(!html.includes('No results'));
+  });
+  // Bug hunt r6 (R6-ios-fresh-install-journey-2): a lazy bundle (studio, clothes, admin tools) landing, or
+  // the saved browser sign-in request read back from the Keychain, called render() while init() was still
+  // asking the server who is signed in: the loading screen went away and the sign-in form (or the local
+  // "Create Admin" setup) showed until the workspace replaced it, losing anything typed there.
+  // The real init() and render() on a packaged iPhone app; the session answer waits until the test sends it.
+  function coldStartFixture(savedView, keychain = {}) {
+    const f = fixture();
+    const { sandbox, state, run } = f;
+    delete sandbox.render;  // the helper's stub hides the real render(); the context still holds it
+    const realRender = run('render');
+    run('Security').escapeHtml = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const app = { innerHTML: '', offsetHeight: 800, style: { setProperty() {}, removeProperty() {} },
+      classList: { add() {}, remove() {} }, querySelector: () => null, querySelectorAll: () => [] };
+    f.elements.set('app', app);
+    const loading = f.makeElement('app-loading-screen');
+    loading.style.display = 'flex';
+    loading.setAttribute = () => {};
+    f.makeElement('loading-status');
+    run("Platform._cache = Object.assign({}, Platform.detect(), { isCapacitor: true, platform: 'ios', isIOS: true, isMobile: true, isWeb: false })");
+    sandbox.window.Capacitor = { Plugins: {
+      SecureStorage: { internalGetItem: async ({ prefixedKey }) => ({ data: keychain[String(prefixedKey).replace('albayan_secure_v1_', '')] ?? null }),
+        internalSetItem: async () => {}, internalRemoveItem: async () => {} },
+      BiometricAuthNative: { checkBiometry: async () => ({ isAvailable: false }) } } };
+    // What saveState() left on this signed-in phone.
+    f.storage.setItem('albayan_complete_state', JSON.stringify({ language: 'en', theme: 'light', serverMode: true, serverWorkspaceKnown: true, currentView: savedView }));
+    state.currentUser = null; state.serverMode = false; state.users = []; state.currentView = 'services-hub';
+    const asked = deferred();
+    const answer = deferred();
+    Object.assign(sandbox, {
+      URLSearchParams, initIndexedDB: async () => null,
+      apiAuthMeProbe: async () => { asked.resolve(); return answer.promise; },
+      serverLoadAllData: async () => ({ failed: [] }), startServerLiveSync() {}, stopServerLiveSync() {}, restoreModalFromUrl() {},
+      initializeNativeSessionProtection: async () => true
+    });
+    // Every script tag the loaders ask for, by file.
+    const tags = {};
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => {
+      const el = makeElement(tag);
+      let src = '';
+      if (tag === 'script') Object.defineProperty(el, 'src', { set: url => { src = String(url); tags[src] = el; }, get: () => src });
+      return el;
+    };
+    const draws = [];
+    sandbox.render = () => {
+      realRender();
+      draws.push({ signedIn: !!state.currentUser, settled: sandbox.window.__albayanInitSettled === true, html: app.innerHTML, loadingHidden: loading.style.display === 'none' });
+    };
+    const untouched = () => app.innerHTML === '' && loading.style.display === 'flex';
+    return { ...f, app, loading, asked, answer, tags, draws, untouched };
+  }
+  const coldStartAdmin = { id: 'admin_1', name: 'Owner', email: 'owner@example.com', role: 'Admin', permissions: {} };
+  const lazyBundles = [
+    { file: 'studio.js', view: 'ads-studio', ensure: 'ensureAdsStudioLoaded()', ready: { renderAdsStudioView: () => '<div data-testid="lazy-studio"></div>' },
+      marker: 'data-testid="lazy-studio"', failed: "Couldn't load the studio" },
+    { file: 'clothes.js', view: 'clothes-system', ensure: 'ensureClothesSystemLoaded()', ready: { renderClothesSystemView: () => '<div data-testid="lazy-clothes"></div>' },
+      marker: 'data-testid="lazy-clothes"', failed: "Couldn't load the Clothes System" },
+    { file: 'admin-tools.js', view: 'control-center', ensure: 'ensureAdminToolsLoaded()',
+      ready: { renderControlCenterView: () => '<div data-testid="lazy-admin"></div>', showPageMergeDialog() {}, renderProfitabilityPanel: () => '' },
+      marker: 'data-testid="lazy-admin"', failed: "Couldn't load the Control Center" }
+  ];
+  for (const outcome of ['onload', 'onerror']) {
+    for (const [index, bundle] of lazyBundles.entries()) {
+      await test(`R6 ios-fresh-install-journey-2: the ${bundle.file} ${outcome} during a phone cold start waits for init(): no sign-in form, the loading screen stays until the session is known`, async () => {
+        const f = coldStartFixture(bundle.view);
+        const { sandbox, state, run, tags, draws } = f;
+        run(bundle.ensure);  // the boot kick of a deep link: the download starts before init()
+        const booting = run('init()');
+        await f.asked.promise;  // init() now waits for the server's answer
+        assert.equal(state.currentView, bundle.view, 'the saved page was restored');
+        if (outcome === 'onload') Object.assign(sandbox, bundle.ready);
+        tags[bundle.file][outcome]();
+        await flush();
+        assert.deepEqual(draws.map(d => d.html.includes('id="login-form"') ? 'login form' : 'other'), [], 'before: the sign-in form while the session was unknown');
+        assert.ok(f.untouched(), 'the loading screen stays up and nothing is drawn');
+        f.answer.resolve({ reachable: true, user: coldStartAdmin });
+        await booting;
+        assert.ok(draws.length > 0 && draws.every(d => d.signedIn), 'every draw knows who is signed in');
+        const last = draws[draws.length - 1];
+        assert.equal(last.settled, true);
+        assert.ok(last.loadingHidden && last.html.includes('workspace-view-content'));
+        assert.ok(last.html.includes(outcome === 'onload' ? bundle.marker : bundle.failed), 'the settled draw shows what the bundle brought');
+        // Once init() has settled, a bundle that lands still redraws at once.
+        const next = lazyBundles[(index + 1) % lazyBundles.length];
+        state.currentView = next.view;
+        if (!tags[next.file]) run(next.ensure);
+        if (outcome === 'onload') Object.assign(sandbox, next.ready);
+        const before = draws.length;
+        tags[next.file][outcome]();
+        assert.equal(draws.length, before + 1, `the ${next.file} ${outcome} after start-up redraws`);
+        assert.ok(draws[before].html.includes(outcome === 'onload' ? next.marker : next.failed));
+      });
+    }
+  }
+  await test('R6 ios-fresh-install-journey-2: a browser sign-in request read from the Keychain during a cold start draws no "Create Admin (Local)" setup; the request survives into the workspace start-up', async () => {
+    const pending = { state: 'a'.repeat(32), verifier: 'b'.repeat(64), createdAt: Date.now() - 120000 };
+    const f = coldStartFixture('receipts', { albayan_app_login_pending: JSON.stringify(pending) });
+    const { sandbox, run, draws } = f;
+    const storage = deferred();
+    const opening = deferred();
+    sandbox.initIndexedDB = () => { opening.resolve(); return storage.promise; };  // IndexedDB still opening
+    const booting = run('init()');
+    await opening.promise;
+    for (let i = 0; i < 20 && !run('isAppBrowserLoginWaiting()'); i += 1) await flush();
+    assert.equal(run('isAppBrowserLoginWaiting()'), true, 'the Keychain request was read');
+    await flush();
+    assert.deepEqual(draws.map(d => d.html.includes('id="first-run-form"') ? 'Create Admin (Local)' : d.html.includes('id="login-form"') ? 'login form' : 'other'), [],
+      'before: the local first-run setup, drawn before the saved server workspace was even loaded');
+    assert.ok(f.untouched(), 'the loading screen stays up');
+    storage.resolve(null);
+    await f.asked.promise;
+    f.answer.resolve({ reachable: true, user: { id: 'emp_1', name: 'Staff', email: 'staff@example.com', role: 'Employee', permissions: { receipts: ['view'] } } });
+    await booting;
+    assert.ok(draws.length > 0 && draws.every(d => d.signedIn && d.html.includes('workspace-view-content')), 'only the workspace is drawn');
+    assert.equal(draws[draws.length - 1].settled, true);
+    assert.equal(run('isAppBrowserLoginWaiting()'), true, 'the request is kept for the browser\'s return link');
+    // After start-up a request that changes still redraws (the login screen's waiting card follows it).
+    run('_appLoginPendingHydrated = false; _appLoginPendingCache = null;');
+    const before = draws.length;
+    await run('hydrateAppLoginPendingFromSecureStorage()');
+    assert.equal(draws.length, before + 1);
   });
   console.log(`\n${passed} session/privacy regressions passed.`);
 }

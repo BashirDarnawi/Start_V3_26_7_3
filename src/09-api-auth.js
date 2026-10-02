@@ -2739,8 +2739,7 @@ function _appLoginRandomHex(nBytes) {
     for (let i = 0; i < bytes.length; i++) out += (bytes[i] + 256).toString(16).slice(1);
     return out;
   } catch (_) {
-    // Capacitor WebViews always have crypto; this fallback only keeps the
-    // flow alive in exotic test sandboxes.
+    // Only test sandboxes lack crypto (Capacitor WebViews have it).
     let out = '';
     while (out.length < n * 2) out += Math.floor(Math.random() * 16).toString(16);
     return out.slice(0, n * 2);
@@ -2810,7 +2809,8 @@ async function readAppLoginPendingAsync() {
 async function hydrateAppLoginPendingFromSecureStorage() {
   const before = _appLoginPendingCache;
   await readAppLoginPendingAsync();
-  if (before !== _appLoginPendingCache && typeof render === 'function') {
+  // Only once init() settles (its last render() shows it): earlier, no session was known.
+  if (before !== _appLoginPendingCache && window.__albayanInitSettled === true && typeof render === 'function') {
     try { render(); } catch (_) {}
   }
 }

@@ -234,6 +234,28 @@ def test_a_running_meta_ad_blocks_the_close_until_a_force_reason(admin):
         _delete(("ads", running), ("ads", stopped), ("financialClosures", f"financial-close-{period}"))
 
 
+def test_a_running_manual_ad_blocks_the_close_until_a_force_reason(admin):
+    # R6 ads-lifecycle-1. Before: "No closing problems found" (only Meta ads counted), the close went through and
+    # the still-Active ad could not be stopped, reconciled, topped up or refunded (423) until an unlock.
+    period = "2013-09"
+    running = f"r6ops_manual_run_{TAG}"
+    _insert("ads", running, {"recordType": "ad", "customerId": "c1", "amountUSD": 100, "paymentStatus": "paid", "status": "Active",
+                             "startDate": "2013-09-28", "endDate": "2013-10-04"})
+    try:
+        preview = client.get(f"/api/admin/operations/financial-periods/{period}/preview", cookies=admin["cookies"])
+        assert preview.status_code == 200, preview.text
+        assert {b["code"]: b["count"] for b in preview.json()["blockers"]} == {"ads_still_running": 1}, preview.json()["blockers"]
+        refused = client.post("/api/admin/operations/financial-periods/close", json={"period": period}, cookies=admin["cookies"])
+        assert refused.status_code == 409, refused.text
+        assert operations._close_record(period) is None
+        forced = client.post("/api/admin/operations/financial-periods/close",
+                             json={"period": period, "forceReason": "the ad is settled after the close"}, cookies=admin["cookies"])
+        assert forced.status_code == 200, forced.text
+        assert forced.json()["status"] == "closed"
+    finally:
+        _delete(("ads", running), ("financialClosures", f"financial-close-{period}"))
+
+
 def test_an_open_delivery_blocks_the_close_until_a_force_reason(admin):
     # Before: "No closing problems found", the close froze the job and the driver got 423 until an unlock.
     period = "2010-11"

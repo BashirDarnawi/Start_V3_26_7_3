@@ -1,19 +1,17 @@
-// ADMIN TOOLS LAZY LOADER (main bundle): the Control Center and merge tools
-// ship as admin-tools.js (manifest "lazy") to keep the startup budget. This
-// loader fetches it once, warms up when an Admin session renders, shows a
-// bilingual loading/retry card meanwhile; every cross-bundle call is typeof-guarded.
+// ADMIN TOOLS LAZY LOADER (main bundle): the Control Center and merge tools ship
+// as admin-tools.js (manifest "lazy") for the startup budget. Fetched once, warmed
+// when an Admin session renders, a bilingual loading/retry card meanwhile; every
+// cross-bundle call is typeof-guarded. Redraws on arrival only once init() settles
+// (its last render() draws an earlier one; before, render() drew the sign-in form).
 
 let _adminToolsBundlePromise = null;
 let _adminToolsBundleState = 'unloaded'; // 'loading' | 'ready' | 'failed'
-// After a failed download the automatic warm-up backs off for a while so a
-// missing/offline bundle never turns every render into a new request storm.
+// A failed download pauses the warm-up, or every render re-requested it offline.
 let _adminToolsLastFailureAt = 0;
 const _ADMIN_TOOLS_RETRY_COOLDOWN_MS = 30000;
 
 function _adminToolsBundleUrl() {
-  // Derive from the script tag that provably loaded: correct under any base
-  // path, Capacitor (capacitor://localhost), and any static host. Version with
-  // the main bundle's ?v= (same deploy = same version) when present.
+  // Beside the script tag that loaded (any base path, Capacitor), same ?v=.
   try {
     const tags = document.querySelectorAll('script[src]');
     for (let i = 0; i < tags.length; i++) {
@@ -49,7 +47,7 @@ function ensureAdminToolsLoaded() {
     tag.src = _adminToolsBundleUrl();
     tag.onload = () => {
       _adminToolsBundleState = adminToolsBundleReady() ? 'ready' : 'failed';
-      if (_adminToolsBundleState === 'ready' && _ADMIN_TOOLS_VIEWS.has(String(state.currentView || ''))) {
+      if (_adminToolsBundleState === 'ready' && window.__albayanInitSettled === true && _ADMIN_TOOLS_VIEWS.has(String(state.currentView || ''))) {
         try { render(); } catch (_) {}
       }
       resolve();
@@ -60,7 +58,7 @@ function ensureAdminToolsLoaded() {
       _adminToolsBundleState = 'failed';
       _adminToolsBundlePromise = null;
       _adminToolsLastFailureAt = Date.now();
-      try { if (state.currentView === 'control-center') render(); } catch (_) {}
+      try { if (window.__albayanInitSettled === true && state.currentView === 'control-center') render(); } catch (_) {}
       resolve();
     };
     document.head.appendChild(tag);

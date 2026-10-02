@@ -52,14 +52,17 @@ function stopAd(id) {
   const isAr = state.language === 'ar';
   const ad = state.ads.find(a => a.id === id);
   if (!ad) return;
+  // Canceled, Lost, refunded or an unfinished import: the server refuses every stop, so say why.
+  if (!isAdReconciliationEligible(ad)) {
+    showNotification(isAr ? 'غير ممكن' : 'Not possible', isMetaAdSetupPending(ad) ? _serverRefusalText('Complete this imported Meta ad (customer and payment) before stopping it') : describe409({ message: 'terminal or refunded ad' }), 'error');
+    return;
+  }
   
   const customer = state.customers.find(c => c.id === ad.customerId);
   const adAmountUSD = ad.amountUSD || 0;
   const currentSpentUSD = ad.spentUSD || 0;
-  // Start with Meta's latest spend when it is trustworthy, but keep the final
-  // amount editable. Meta can continue charging briefly after an ad is paused
-  // and the owner may have a later statement that is more accurate than the
-  // last sync. The amount explicitly saved here is the final accounting value.
+  // Prefill Meta's trusted spend but keep it editable: Meta may still charge after a pause and the
+  // owner's later statement can be more accurate. The amount saved here is final.
   const metaSpendUSD = metaAdRealSpendUSD(ad);
   const frozenFinalSpendUSD = getFrozenFinalAdSpendUSD(ad);
   const finalSpendFrozen = frozenFinalSpendUSD !== null;
@@ -72,11 +75,8 @@ function stopAd(id) {
     : (metaSpendAuto ? metaSpendUSD : (metaOverspend ? adAmountUSD : currentSpentUSD));
   const isAlreadyStopped = ad.status === 'Stopped';
   const alreadyInformed = ad.remainingCustomerInformed === true;
-  // The checkbox must describe the remainder ACTUALLY on screen. A saved
-  // confirmation for a DIFFERENT remainder (a later Meta sync reported more
-  // spend) must not render as "already informed". Decide the honest initial
-  // state up front, before the user has a chance to correct the amount, exactly
-  // as syncAdCustomerInformedControl would.
+  // The checkbox describes the remainder ON SCREEN: a confirmation saved for another remainder (a
+  // later sync reported more spend) is not "already informed" (as syncAdCustomerInformedControl).
   const initialConfirmation = getAdCustomerConfirmationState(ad, initialSpentUSD, adAmountUSD);
   const informedApplies = initialConfirmation.existingConfirmationApplies;
   const staleConfirmation = alreadyInformed && !informedApplies;
@@ -1058,11 +1058,8 @@ function exportData() {
     showNotification(isAr ? 'النسخة كبيرة جداً' : 'Backup too large', isAr ? 'الملف أكبر من الحد الذي يقبله الاستيراد. قلّل الصور أو استخدم نسخة الخادم.' : 'This file is bigger than the import limit. Reduce photos or use the server backup.', 'warning');
   }
 
-  // In-app browsers and the packaged app cannot download blob files AT ALL
-  // (no download handler), yet the old code toasted 'Exported successfully'
-  // and snoozed the local-backup reminder while NO file was saved. Warn
-  // BEFORE attempting, keep the local auto-backup, offer the clipboard as an
-  // escape hatch, and never claim success or silence the reminder here.
+  // In-app browsers and the packaged app cannot download blobs AT ALL: warn BEFORE trying, keep the
+  // local auto-backup, offer the clipboard, and never claim success or silence the reminder here.
   if (cannotPrintOrDownload()) {
     createAutoBackup(STORAGE_CONFIG.AUTO_BACKUP_INTERVAL);
     const isAr = state.language === 'ar';

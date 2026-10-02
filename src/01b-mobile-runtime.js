@@ -20,9 +20,7 @@ function isPackagedMobileApp() {
   return !!(typeof Platform !== 'undefined' && Platform.isCapacitor);
 }
 
-// Connectivity notices/gate apply to the packaged app AND phone browsers:
-// a phone-browser user whose server is unreachable must see the retryable
-// notice instead of a bare login screen (17-init.js calls this when defined).
+// Packaged app AND phone browsers: an unreachable server gets the retry notice, not a bare login.
 function connectivityUiEnabled() {
   return isPackagedMobileApp() || (typeof Platform !== 'undefined' && Platform.isMobileBrowser === true);
 }
@@ -213,8 +211,7 @@ function getTopMobileSurface() {
 }
 
 function clearGenericMobileModalState(surface) {
-  // A standalone overlay can still own ?modal=&id= (currently the receipt
-  // collection dialog). Never clear an underlying tracked app-modal.
+  // A standalone overlay (receipt collection) may own ?modal=&id=; never clear a tracked app-modal.
   const hasTrackedModalUnderneath = !!(typeof state !== 'undefined' && state.activeModal);
   if (!hasTrackedModalUnderneath) {
     try {
@@ -260,8 +257,7 @@ function closeTopMobileSurface() {
     return true;
   }
 
-  // The Meta dialogs' closers clear the open flag their late loads check;
-  // a bare remove() would let the next load draw the dialog again.
+  // Meta closers clear the open flag late loads check (a bare remove() let a load redraw it).
   if (topSurface.id === 'meta-ads-modal' && typeof closeMetaAdsConnectionModal === 'function') {
     closeMetaAdsConnectionModal();
     return true;
@@ -281,9 +277,21 @@ function closeTopMobileSurface() {
     else topSurface.remove();
     return true;
   }
+  // So do the company-funds closers; mid-request they refuse, and Back then waits like their X.
+  if (topSurface.id === 'company-debt-coverage-modal' && typeof closeCompanyDebtCoverageModal === 'function') {
+    closeCompanyDebtCoverageModal();
+    return true;
+  }
+  if (topSurface.id === 'customer-ad-coverage-modal' && typeof closeCustomerAdDebtCoverageModal === 'function') {
+    closeCustomerAdDebtCoverageModal();
+    return true;
+  }
+  if (topSurface.id === 'company-coverage-receipt-picker' && typeof _closeCompanyCoverageReceiptPicker === 'function') {
+    _closeCompanyCoverageReceiptPicker();
+    return true;
+  }
 
-  // An explicit-decision alert: Back takes the safe "choose another customer" path,
-  // never a bare remove() that leaves the unacknowledged customer selected.
+  // Back takes the alert's safe "choose another customer" path (a remove() kept the customer).
   if (topSurface.id === 'receipt-customer-risk-warning') {
     if (typeof cancelReceiptCustomerRiskWarning === 'function') cancelReceiptCustomerRiskWarning();
     else topSurface.remove();
@@ -299,8 +307,7 @@ function closeTopMobileSurface() {
     return true;
   }
 
-  // Standalone overlays (no activeModal) clean their URL/working state too. The driver
-  // form's crash draft is written first: its debounce timer would find the DOM gone.
+  // Standalone overlays clean URL/state too; the driver draft is saved first (its timer finds no DOM).
   if (topSurface.id === 'delivery-complete-modal' && typeof _flushDeliveryCompletionDraftNow === 'function') {
     try { _flushDeliveryCompletionDraftNow(); } catch (_) {}
   }
@@ -319,8 +326,7 @@ function getMobileLandingView() {
 }
 
 async function handleAndroidBackButton(event = {}) {
-  // Under the app lock Back only backgrounds the app: closing or navigating behind
-  // it threw away a half-filled dialog and its photos.
+  // Under the app lock Back only backgrounds the app (closing behind it lost a half-filled form).
   if (document.getElementById('native-app-lock')) {
     _mobileLastBackAt = 0;
     const App = getCapacitorAppPlugin();
@@ -361,13 +367,11 @@ async function handleAndroidBackButton(event = {}) {
 }
 
 async function setupMobileRuntime() {
-  // Phone browsers get the connectivity notice/gate too; the Android
-  // backButton listener below stays Capacitor-only (plugin guards).
+  // Phone browsers get the connectivity notice/gate too; backButton stays Capacitor-only.
   if (_mobileRuntimeReady || !connectivityUiEnabled()) return;
   _mobileRuntimeReady = true;
 
-  // Install viewport/keyboard handling for phone browsers and the secure
-  // native bridges for packaged iOS/Android before registering deep links.
+  // Viewport/keyboard handling and the native bridges come before the deep links.
   if (typeof setupNativeServices === 'function') {
     await setupNativeServices();
   }
@@ -398,10 +402,9 @@ async function setupMobileRuntime() {
   }
 }
 
-// PHONE BROWSER BACK: tracked #app-modal dialogs push a ?modal= entry, other overlays one
-// same-URL sentinel (body observer; the drawer pushes its own). Back pops it and closes the
-// top surface; X/Cancel consume it via a bookkeeping history.back(); a navigation replaces a
-// sentinel. Capacitor keeps its native backButton; desktop is unchanged.
+// PHONE BROWSER BACK: a tracked #app-modal pushes a ?modal= entry, other overlays a same-URL sentinel
+// (body observer; the drawer its own). Back pops it and closes the top surface; X/Cancel consume it via
+// a bookkeeping history.back(); a navigation replaces a sentinel. Native Back and desktop are unchanged.
 
 let _overlaySentinelDepth = 0;          // sentinels pushed and not yet consumed this session
 let _albayanLastModalUrlPushAt = 0;     // set by updateUrlParams({ modal… }) — see 11-routing-cloud.js
@@ -416,9 +419,8 @@ function isPhoneBrowserHistoryManaged() {
 function pushMobileOverlayHistoryEntry() {
   if (!isPhoneBrowserHistoryManaged()) return;
   try {
-    // Same-URL entry: Back pops it into "close the top overlay". albayanModal
-    // is cleared so closeModal() never takes a sentinel for a tracked modal;
-    // underAlbayanModal marks a ?modal entry directly beneath (late overlay).
+    // Back pops this entry to close the top overlay; albayanModal is cleared (closeModal never takes
+    // it); underAlbayanModal marks a ?modal entry just beneath (late overlay).
     window.history.pushState(
       Object.assign({}, window.history.state || {}, {
         overlaySentinel: true,
@@ -432,8 +434,7 @@ function pushMobileOverlayHistoryEntry() {
 }
 
 function consumeOverlayHistoryEntry() {
-  // Pop the entry that open pushed. The popstate this triggers is pure
-  // bookkeeping (the surface is already closed), so flag it for the router.
+  // Pop open's entry; flag that bookkeeping popstate for the router (the surface is already closed).
   _suppressOverlayPopstateUntil = Date.now() + 800;
   try {
     window.history.back();
@@ -457,8 +458,7 @@ function shouldSuppressOverlayPopstate() {
 function markOverlayPopClose(closed) {
   if (closed) {
     _lastOverlayPopCloseAt = Date.now();
-    // The popped entry was the surface's sentinel/?modal entry. Depth may under-count
-    // after a tracked-modal pop: that only skips an auto-consume, never over-pops.
+    // Back popped the surface's own entry; an under-count after a tracked-modal pop never over-pops.
     if (_overlaySentinelDepth > 0) _overlaySentinelDepth--;
   }
   return !!closed;
@@ -482,8 +482,7 @@ function _overlaySurfaceCount() {
 
 function _lockBodyScrollForOverlay() {
   if (_scrollLockActive) return;
-  // Same media condition as the .mobile-dialog-overlay scroll rules in
-  // style.css — phones and short landscape windows; desktop stays untouched.
+  // The media condition of style.css's dialog scroll rules: phones and short landscape, not desktop.
   try {
     if (!window.matchMedia('(max-width: 900px), (max-height: 500px)').matches) return;
   } catch (_) { return; }
@@ -519,15 +518,12 @@ function _handleOverlayDomChange() {
   _overlayObservedCount = count;
 
   if (count > previous) {
-    // Opened: one sentinel per transition, unless the opener just pushed a ?modal entry
-    // (tracked #app-modal, collect-receipt): a second one would cost an extra Back press.
+    // Opened: one sentinel, unless the opener just pushed a ?modal entry (else Back is needed twice).
     if (Date.now() - _albayanLastModalUrlPushAt > 400) {
       pushMobileOverlayHistoryEntry();
     }
   } else {
-    // Surface(s) closed by their own X/Cancel/backdrop handler. A Back-press
-    // close is excluded via _lastOverlayPopCloseAt (entry already popped),
-    // and an in-flight closeModal consume via _overlayHistoryConsumePending.
+    // Closed by its own X/Cancel/backdrop (a Back close already popped; closeModal consumes its own).
     const backJustClosedIt = Date.now() - _lastOverlayPopCloseAt <= 300;
     const entryState = window.history.state;
     if (isPhoneBrowserHistoryManaged() && !backJustClosedIt && !_overlayHistoryConsumePending()) {
@@ -536,8 +532,7 @@ function _handleOverlayDomChange() {
         consumeOverlayHistoryEntry();
       } else if (entryState && entryState.albayanModal && count === 0
                  && (typeof state === 'undefined' || !state.activeModal)) {
-        // Untracked ?modal surface (collect-receipt) closed by its inline
-        // backdrop/X remove(): its own pushed entry is on top — consume it.
+        // An untracked ?modal surface (collect-receipt) removed by its X/backdrop: consume its entry.
         consumeOverlayHistoryEntry();
       }
     }

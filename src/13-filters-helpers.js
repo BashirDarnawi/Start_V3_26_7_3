@@ -1863,6 +1863,10 @@ function getFilteredCustomers(sharedStatsIndex = null) {
 // HELPER FUNCTIONS FOR VIEWS
 // ==========================================
 
+// Bumped per Edit tap (ads, receipts, clothes): a form that waited for photos
+// opens only for the last tap, while the dialog open at that tap still is open.
+let _editTapSeq = 0;
+
 async function editAd(id) {
   // Permission check for editing ads
   let ad = state.ads.find(a => a.id === id);
@@ -1870,6 +1874,7 @@ async function editAd(id) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الإعلانات' : 'You do not have permission to edit this ad', 'error');
     return;
   }
+  const seq = ++_editTapSeq, openAtTap = state.activeModal;
   if (can('ads', 'viewPhotos') && getAdPhotoCount(ad) > 0 && !isEntityMediaHydrated('ads', ad)) {
     try {
       ad = await ensureEntityMediaLoaded('ads', id);
@@ -1881,7 +1886,7 @@ async function editAd(id) {
       );
       return;
     }
-    if (!ad) return;
+    if (!ad || seq !== _editTapSeq || state.activeModal !== openAtTap) return;
   }
   state.activeModal = 'ad';
   state.modalData = ad;
@@ -1915,6 +1920,7 @@ async function editReceipt(id) {
   }
   if (_blockDestroyedReceiptEdit(receipt)) return;
   if (_blockTransferInEdit(receipt)) return;
+  const seq = ++_editTapSeq, openAtTap = state.activeModal;
   if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
     try {
       receipt = await ensureEntityMediaLoaded('receipts', id);
@@ -1926,7 +1932,7 @@ async function editReceipt(id) {
       );
       return;
     }
-    if (!receipt) return;
+    if (!receipt || seq !== _editTapSeq || state.activeModal !== openAtTap) return;
   }
   state.activeModal = 'receipt';
   state.modalData = receipt;
