@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text
 
-from .db import db_conn, get_engine, json_loads
+from .db import db_conn, get_engine, json_dumps, json_loads
 from .financial_compatibility import (
     project_financial_data,
     receipt_customer_outstanding_minor,
@@ -45,6 +45,7 @@ from .schemas import (
     ReceiptCompanyCoverageResponse,
 )
 from .security import new_id
+from .unpaid_receipt_growth import reconcile_unpaid_receipt_debt
 
 
 RECEIPT_COMPANY_COVERAGE_COLLECTION = "receiptCompanyCoverages"
@@ -121,6 +122,12 @@ class CompanyCoveragePlan:
     ads: tuple[CompanyCoverageAdPlan, ...]
     allocated_minor: int
     unassigned_minor: int
+
+
+# An ad's spend is final only in these states (legacy British spelling kept,
+# as getAdSpendUSD). Everything else -- Active, blank, Pending, Paused, any
+# unknown value -- may still spend less than its budget.
+FINAL_AD_STATUSES = frozenset({"stopped", "completed", "canceled", "cancelled", "lost"})
 
 
 def _move_coverage_baselines(
@@ -425,6 +432,10 @@ def coverable_ad_debt_detail(
     status = str(ad.get("status") or "").strip().lower()
     if status in {"pending", "paused"}:
         return (f"ad_{status}_has_not_spent_yet", 0)
+    if status not in FINAL_AD_STATUSES:
+        # Active / blank / unknown: the budget is not spend yet. Covering it
+        # recorded a company expense for money Meta might never take.
+        return ("ad_active_has_not_finished_spending", 0)
     gap = max(ad_effective_spend_minor(ad) - ad_funded_minor(ad), 0)
     if gap <= 0:
         return ("fully_funded_nothing_left_to_cover", 0)
@@ -510,6 +521,318 @@ def _receipt_still_tracks_debt(receipt: dict[str, Any] | None) -> bool:
     if delivery_status in {"canceled", "cancelled"}:
         return False
     return True
+
+
+BUDGET_BELOW_COMPANY_FUNDS_REFUSAL = (
+    "The ad budget cannot go below the company funds already recorded on it; "
+    "stop the ad at its real spend instead"
+)
+
+
+def company_row_receipt_ids(ad: dict[str, Any] | None) -> set[str]:
+    """Receipts holding this ad's company rows: locked with its funding receipts."""
+    return set(_financial_allocation_map((ad or {}).get("companyFundingAllocations")))
+
+
+def assert_budget_keeps_company_funds(
+    existing: dict[str, Any] | None, amount_minor: int, company_minor: int
+) -> None:
+    """Refuse an edit that LOWERS a budget below recorded company funding.
+
+    A record already below (legacy) stays editable as long as the edit does
+    not lower its amount further.
+    """
+    if not existing or amount_minor >= company_minor:
+        return
+    if amount_minor < _financial_minor(existing.get("amountUSD"), "existing ad amount"):
+        raise HTTPException(status_code=409, detail=BUDGET_BELOW_COMPANY_FUNDS_REFUSAL)
+
+
+def shrink_company_pool(ad: dict[str, Any], keep_minor: int) -> dict[str, Any]:
+    """Pure: the same ad with its company pool lowered to ``keep_minor``.
+
+    Never grows the pool. Receipt-less direct coverage goes back first (no
+    receipt to adjust), then receipt rows from the last receipt id.
+    """
+    release = company_pool_total_minor(ad) - max(int(keep_minor), 0)
+    if release <= 0:
+        return ad
+    updated = dict(ad)
+    direct = _financial_ad_direct_coverage(ad)
+    from_direct = min(direct, release)
+    if from_direct:
+        updated["companyDirectCoverageUSD"] = _financial_usd(direct - from_direct)
+        release -= from_direct
+    if release:
+        rows = _financial_allocation_map(ad.get("companyFundingAllocations"))
+        for receipt_id in sorted(rows, reverse=True):
+            taken = min(rows[receipt_id], release)
+            rows[receipt_id] -= taken
+            release -= taken
+            if release <= 0:
+                break
+        updated["companyFundingAllocations"] = _financial_rows_from_allocation_map(rows)
+        updated["companyFundedUSD"] = _financial_usd(sum(rows.values()))
+    return updated
+
+
+UNTIED_RETURN_REFUSAL = (
+    "Company money on this ad cannot be returned automatically: it sits on a receipt that is still unpaid. "
+    "Settle that receipt first, or keep the spend at or above the company amount"
+)
+
+
+def return_company_money(ad: dict[str, Any], keep_minor: int) -> dict[str, Any]:
+    """``shrink_company_pool`` for a stop/refund (pure; the caller books it).
+
+    Whether the return is allowed is decided by
+    ``restore_released_due_baselines``, which needs the locked receipts: both
+    atomic paths reach it before anything is written.
+    """
+    return shrink_company_pool(ad, keep_minor)
+
+
+def returned_cents_become_customer_debt(row: Any, receipt: dict[str, Any] | None) -> bool:
+    """THE predicate: do company cents returned from this receipt become customer debt on it?
+
+    True for a live (present, not deleted) receipt that still tracks customer
+    debt. Shared by the guard in ``restore_released_due_baselines`` and by
+    ``release_company_coverage`` (the only place that raises a receipt's
+    outstanding for a return), so the two can never disagree. False for a
+    settled, canceled, written-off, deleted or missing receipt: cents returned
+    from there are debt nowhere.
+    """
+    return bool(row) and not bool(row["deleted"]) and _receipt_still_tracks_debt(receipt)
+
+
+def restore_released_due_baselines(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    locked_receipts: dict[str, Any],
+    row_data: Callable[[Any], dict[str, Any]],
+) -> dict[str, Any]:
+    """Pure guard + inverse of ``_move_coverage_baselines`` for cents a stop/refund returns.
+
+    THE RULE. Every cent the company row on receipt X loses either
+    (1) does not become customer debt (``returned_cents_become_customer_debt``
+        is false: X settled, canceled, written off, deleted or missing;
+        receipt-less direct coverage has no receipt at all), or
+    (2) becomes customer debt on X AND is tied back to the ad on X right here:
+        added to the ad's reversible due baselines, so the debt exists once
+        and a later correction upward or a refund undo restores a real due
+        row on X instead of spend backed by nothing.
+    (2) is possible only for a Not Paid In-Shop ad whose linked receipt
+    (``receiptId``) is X and that carries a baseline to write to. Any other
+    return is refused with 409 before anything is written: a company row on a
+    receipt the ad is no longer linked to, an ad whose settled receipt was
+    unsettled after a low stop, a driver ad on its still-pending delivery
+    receipt. All of them become allowed once X is settled or canceled.
+    """
+    rows_before = _financial_allocation_map(before.get("companyFundingAllocations"))
+    rows_after = _financial_allocation_map(after.get("companyFundingAllocations"))
+    can_tie = _financial_ad_payment_status(after) == "not_paid" and str(after.get("collectionMethod") or "") == "in_shop"
+    linked = str(after.get("receiptId") or "")
+    updated = after
+    for receipt_id in sorted(rows_before):
+        cents = rows_before[receipt_id] - rows_after.get(receipt_id, 0)
+        row = locked_receipts.get(receipt_id)
+        if cents <= 0 or not returned_cents_become_customer_debt(row, row_data(row) if row else None):
+            continue
+        tied = False
+        if can_tie and receipt_id == linked:
+            if updated is after:
+                updated = dict(after)
+            baseline = updated.get("stopAllocationBaseline")
+            if isinstance(baseline, dict):
+                due = _financial_allocation_map(baseline.get("due"))
+                due[receipt_id] = due.get(receipt_id, 0) + cents
+                updated["stopAllocationBaseline"] = {**baseline, "due": _financial_rows_from_allocation_map(due)}
+                tied = True
+            if str(updated.get("refundType") or "None") in {"Full", "Partial"} and isinstance(updated.get("refundDueBaseline"), list):
+                due = _financial_allocation_map(updated["refundDueBaseline"])
+                due[receipt_id] = due.get(receipt_id, 0) + cents
+                updated["refundDueBaseline"] = _financial_rows_from_allocation_map(due)
+                tied = True
+        if not tied:
+            raise HTTPException(status_code=409, detail=UNTIED_RETURN_REFUSAL)
+    return updated
+
+
+def release_company_coverage(
+    conn: Any,
+    *,
+    actor_id: str,
+    ad_id: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    locked_receipts: dict[str, Any],
+    trigger: str,
+    ctx: dict[str, Any],
+) -> list[str]:
+    """Book the company money a stop/refund just returned (pool before - after).
+
+    Lowers each covered receipt's ``companyCoveredUSD`` by exactly the cents
+    its company row lost and writes one negative ledger record per receipt
+    (and one for direct coverage). Nothing happens when the pool did not
+    shrink. Runs inside the caller's transaction; receipts are already locked.
+    """
+    rows_before = _financial_allocation_map(before.get("companyFundingAllocations"))
+    rows_after = _financial_allocation_map(after.get("companyFundingAllocations"))
+    released = {
+        receipt_id: amount - rows_after.get(receipt_id, 0)
+        for receipt_id, amount in rows_before.items()
+        if amount > rows_after.get(receipt_id, 0)
+    }
+    direct_released = _financial_ad_direct_coverage(before) - _financial_ad_direct_coverage(after)
+    if not released and direct_released <= 0:
+        return []
+    timestamp = ctx["iso_utc"]()
+    customer_id = str(after.get("customerId") or before.get("customerId") or "")
+    final_minor = _financial_minor(
+        after.get("spentUSD") if after.get("spentUSD") is not None else after.get("amountUSD"),
+        "final ad spend",
+    )
+    updated_receipt_ids: list[str] = []
+    total = 0
+
+    def write_record(amount_minor: int, extra: dict[str, Any]) -> None:
+        record = {
+            "recordType": "companyDebtCoverage",
+            "entryType": "release",
+            "trigger": trigger,
+            "adId": ad_id,
+            "customerId": customer_id,
+            # Signed cents are the ledger value. No ``amountUSD``: the entity
+            # sanitizer clamps negative money fields to 0, which would read as
+            # "nothing happened". The positive mirror is for display only.
+            "amountMinorUSD": -amount_minor,
+            "releasedMinorUSD": amount_minor,
+            "releasedUSD": _financial_usd(amount_minor),
+            "reason": f"Ad {trigger} below recorded company funding",
+            "actorId": actor_id,
+            "adFinalSpendMinorUSD": final_minor,
+            "adCompanyPoolBeforeMinorUSD": company_pool_total_minor(before),
+            "adCompanyPoolAfterMinorUSD": company_pool_total_minor(after),
+            "coveredAt": timestamp,
+            "allocations": [{"adId": ad_id, "amountMinorUSD": -amount_minor}],
+            "customerPayment": False,
+            "countsAsCustomerRevenue": False,
+            "source": "company_funds",
+            **extra,
+        }
+        ctx["insert_entity_in_transaction"](
+            conn, RECEIPT_COMPANY_COVERAGE_COLLECTION, new_id("receiptCompanyCoverage"), record, actor_id
+        )
+
+    for receipt_id in sorted(released):
+        amount = released[receipt_id]
+        total += amount
+        extra: dict[str, Any] = {"receiptId": receipt_id}
+        row = locked_receipts.get(receipt_id)
+        if row and not bool(row["deleted"]):
+            receipt = ctx["financial_row_data"](row)
+            assert_financial_period_open("receipts", receipt, conn=conn)
+            covered_before = (
+                _financial_minor(receipt.get("companyCoveredUSD"), "stored companyCoveredUSD")
+                if receipt.get("companyCoveredUSD") is not None
+                else 0
+            )
+            covered_after = max(covered_before - amount, 0)
+            updated = dict(receipt)
+            updated["companyCoveredUSD"] = _financial_usd(covered_after)
+            # Never on a row any reader may take for Paid (isPaid true beside a
+            # Not Paid status): a positive outstanding there is the marker the
+            # boot repair backfill_covered_settled_receipts keys on.
+            # The summary is kept in step on every Not Paid row; it is customer
+            # DEBT exactly where returned_cents_become_customer_debt holds (the
+            # other Not Paid rows, a transfer-in or a canceled delivery, show
+            # debt nowhere), and there the guard has already tied it to the ad.
+            becomes_debt = returned_cents_become_customer_debt(row, receipt)
+            if (becomes_debt or _receipt_payment_state(receipt) == "not_paid") and not bool(receipt.get("isPaid")):
+                outstanding = receipt_customer_outstanding_minor(updated)
+                if outstanding is None and receipt.get("customerOutstandingUSD") is not None:
+                    # No trustworthy derivation: keep the stored summary in step
+                    # (covered - r, outstanding + r) so the cents do not vanish.
+                    outstanding = _financial_minor(receipt.get("customerOutstandingUSD"), "stored customerOutstandingUSD") + (covered_before - covered_after)
+                if outstanding is not None:
+                    updated["customerOutstandingUSD"] = _financial_usd(outstanding)
+            saved = ctx["clothes_write_row"](conn, row, updated)
+            locked_receipts[receipt_id] = {
+                **dict(row),
+                "data_json": json_dumps(saved["data"]),
+                "last_modified": saved["lastModified"],
+            }
+            updated_receipt_ids.append(receipt_id)
+            extra.update(
+                {
+                    "relatedCoverageId": str(receipt.get("lastCompanyCoverageId") or ""),
+                    "companyCoveredBeforeMinorUSD": covered_before,
+                    "companyCoveredAfterMinorUSD": covered_after,
+                }
+            )
+        else:
+            extra["receiptMissing"] = True
+        write_record(amount, extra)
+    if direct_released > 0:
+        total += direct_released
+        write_record(direct_released, {"coverageScope": "customer_ads"})
+    ctx["audit"](
+        actor_id, "company_coverage_release", "ads", ad_id,
+        f"Company funds returned ${_financial_usd(total):.2f} from ad {ad_id} ({trigger})",
+        {"amountMinorUSD": total, "adId": ad_id, "trigger": trigger, "receiptIds": sorted(released)},
+        conn=conn,
+    )
+    return updated_receipt_ids
+
+
+def shrink_grown_receipt_after_release(
+    conn: Any,
+    actor: dict[str, Any],
+    *,
+    ad_id: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    released_receipt_ids: list[str],
+    already_reconciled: list[str],
+    locked_receipts: dict[str, Any],
+    ad_rows: list[Any],
+    growth_ctx: dict[str, Any],
+) -> list[str]:
+    """Let a SERVER-GROWN In-Shop receipt follow the company money a stop returned.
+
+    A fully covered ad has no due row, so the ordinary stop reconcile never
+    looks at its receipt and the grown amount would only shrink at the next
+    restart repair. Same calculation, same transaction, shrink-only: a
+    hand-written receipt keeps its amount, and nothing the reconcile refuses
+    (settled, transferred, bad rate, would grow) may fail the stop.
+    """
+    linked = str(after.get("receiptId") or "")
+    if (
+        linked not in released_receipt_ids
+        or linked in already_reconciled
+        or _financial_ad_payment_status(after) != "not_paid"
+        or str(after.get("collectionMethod") or "") != "in_shop"
+    ):
+        return []
+    try:
+        prepared = reconcile_unpaid_receipt_debt(
+            conn, actor, None, after, before,
+            locked_receipts=locked_receipts, ad_rows=ad_rows, ad_id=ad_id, ctx=growth_ctx,
+            allow_derived_growth=False, require_receipt_permission=False, also_affected=(linked,),
+        )
+    except HTTPException as error:
+        if error.status_code == 423:
+            raise
+        return []
+    updated: list[str] = []
+    for receipt_id, row, expanded, validation_row in prepared:
+        covered = _financial_minor(expanded.get("companyCoveredUSD") or 0, "stored companyCoveredUSD")
+        if _financial_minor(expanded.get("amountUSD"), "receipt amount") < covered:
+            continue  # never below what the company still covers (unassigned coverage)
+        growth_ctx["write_row"](conn, row, expanded)
+        locked_receipts[receipt_id] = validation_row
+        updated.append(receipt_id)
+    return updated
 
 
 def scan_legacy_link_coverage_gap(

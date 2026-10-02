@@ -248,7 +248,7 @@ def test_legacy_scalar_due_mirror_is_not_offered_by_the_live_feature_either(admi
     reason, minor = coverable_ad_debt_detail(
         {
             "recordType": "ad",
-            "status": "Active",
+            "status": "Completed",  # F-cover: only a finished ad is offered at all
             "paymentStatus": "not_paid",
             "isPaid": False,
             "collectionMethod": "in_shop",
@@ -294,7 +294,7 @@ def test_debt_the_button_already_offers_lands_in_the_coverable_bucket(admin):
     before_bucket = _bucket(_scan(admin), "coverable")
     before_real = _scan(admin)["notOfferedButRealDebtUSD"]
     _customer("unf_cust3", "Plain Ad Debt")
-    _ad("unf_ad3", "unf_cust3", 25.0, receiptAllocations=[])
+    _ad("unf_ad3", "unf_cust3", 25.0, receiptAllocations=[], status="Completed")
     result = _scan(admin)
     after_bucket = _bucket(result, "coverable")
 
@@ -310,7 +310,7 @@ def _driver_ad_detail(receipt: dict | None, spend: float, funded: float):
 
     ad = {
         "recordType": "ad",
-        "status": "Active",
+        "status": "Completed",  # F-cover: a running ad is never offered
         "paymentStatus": "not_paid",
         "isPaid": False,
         "collectionMethod": "driver",
@@ -406,6 +406,7 @@ def test_settled_driver_debt_is_offered_end_to_end_on_the_customer_card(admin):
         collectionMethod="driver",
         linkedDeliveryReceiptId="unf_rcpt11",
         receiptAllocations=[],
+        status="Completed",
     )
 
     response = client.post(
@@ -506,3 +507,18 @@ def test_examples_carry_the_customer_name_and_linked_receipt_status(admin):
     assert match["linkedReceipts"] == [
         {"receiptId": "unf_rcpt6", "status": "Paid"}
     ]
+
+
+def test_running_ad_debt_is_reported_in_its_own_bucket_and_not_offered(admin):
+    """F-cover: the diagnostic names the new rule, so 'why is there no button'
+    stays answerable, and the headline still counts it as debt not offered."""
+    before = _bucket(_scan(admin), "ad_active_has_not_finished_spending")
+    before_real = _scan(admin)["notOfferedButRealDebtUSD"]
+    _customer("unf_cust12", "Running Ad Debt")
+    _ad("unf_ad12", "unf_cust12", 25.0, receiptAllocations=[])
+    result = _scan(admin)
+    after = _bucket(result, "ad_active_has_not_finished_spending")
+    assert after["adCount"] - before["adCount"] == 1
+    assert round(after["unfundedUSD"] - before["unfundedUSD"], 2) == 25.0
+    assert after["countsAsUnofferedDebt"] is True
+    assert round(result["notOfferedButRealDebtUSD"] - before_real, 2) == 25.0

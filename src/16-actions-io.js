@@ -378,6 +378,11 @@ async function confirmStopAd(id, source = 'modal') {
       showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'المبلغ المصروف غير صالح.' : 'Spent amount is invalid.', 'error');
       return;
     }
+    // Company money above the real spend goes back to company funds; never re-applied on its own.
+    const companyOnAdUSD = getAdCompanyCoveredUSD(storedAd);
+    if (spentUSD + 0.005 < companyOnAdUSD && !confirm(isAr
+      ? `أموال الشركة المسجّلة على هذا الإعلان $${companyOnAdUSD.toFixed(2)}، والمصروف الذي أدخلته $${spentUSD.toFixed(2)}.\nسيرجع $${(companyOnAdUSD - spentUSD).toFixed(2)} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
+      : `Company funds recorded on this ad: $${companyOnAdUSD.toFixed(2)}. Spend you entered: $${spentUSD.toFixed(2)}.\n$${(companyOnAdUSD - spentUSD).toFixed(2)} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
     let attempt;
     try {
       // The modal is never re-rendered: send the version it was built from (data-v).
@@ -456,11 +461,9 @@ async function confirmStopAd(id, source = 'modal') {
   const newRemainingUSD = adAmountUSD - spentUSD;
   const remainingDifference = newRemainingUSD - previousRemainingUSD;
 
-  // BUG FIX (double-return): the unspent remainder must be apportioned ONCE
-  // across the ad's whole funding pool, not returned in full by each
-  // allocation block against its own smaller total. Compute the pool now
-  // (before any mutation). mergedPaidAllocations mirrors receiptAllocations
-  // for Not Paid + Driver ads, so it is NOT added to the denominator again.
+  // BUG FIX (double-return): apportion the unspent remainder ONCE across the whole funding pool (computed
+  // before any mutation). mergedPaidAllocations mirrors receiptAllocations for Not Paid + Driver ads, so
+  // it is NOT added to the denominator again.
   const _sumAlloc = (arr) => Array.isArray(arr) ? arr.reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0) : 0;
   const _poolPaid = _sumAlloc(ad.receiptAllocations);
   const _poolDue = (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length)
@@ -472,9 +475,8 @@ async function confirmStopAd(id, source = 'modal') {
   const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
   const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
 
-  // MONEY-MATH: snapshot the funding proportions at the FIRST stop; a low-spend stop shrinks the
-  // live allocations, so a later stop-edit recomputes each share as ORIGINAL share x (new spent /
-  // original pool) — same as adjust-by-difference normally, still right after a zero-spend stop.
+  // MONEY-MATH: snapshot the funding proportions at the FIRST stop (a low-spend stop shrinks the live
+  // allocations): a stop-edit recomputes each share as ORIGINAL share x (new spent / original pool).
   if (!isEditing && !ad.stopAllocationBaseline) {
     const snap = (arr) => Array.isArray(arr)
       ? arr.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }))
@@ -525,10 +527,8 @@ async function confirmStopAd(id, source = 'modal') {
   const _planDue = _planFor(ad.dueAllocations, _baseline ? _baseline.due : []);
   const _planMerged = _planFor(ad.mergedPaidAllocations, _baseline ? _baseline.merged : []);
 
-  // MONEY-MATH: when a stop-edit INCREASES spend, the extra money is re-taken
-  // from the funding receipts — verify each receipt still has that much left
-  // (another ad may have legitimately used the returned funds in the meantime).
-  // Without this check two ads could spend more than a receipt ever contained.
+  // MONEY-MATH: a stop-edit that INCREASES spend re-takes the extra from the funding receipts: check each
+  // still has that much left (another ad may have used it), or two ads could outspend a receipt.
   // Merged entries mirror the paid pool, so validating _planReceipt covers them.
   if (isEditing && remainingDifference < 0) {
     const increaseByReceipt = new Map();
@@ -602,10 +602,8 @@ async function confirmStopAd(id, source = 'modal') {
     delete ad.remainingCustomerInformedBy;
   }
 
-  // Apply the planned allocation amounts (+ audit trail per receipt).
-  // MONEY-MATH: zero-amount entries are intentionally KEPT (not filtered out)
-  // so each receipt's identity survives a zero/low-spend stop and a later
-  // stop-edit can re-charge the same receipts in their original proportions.
+  // Apply the planned allocation amounts (+ audit trail per receipt). MONEY-MATH: zero-amount entries are
+  // KEPT so a later stop-edit can re-charge the same receipts in their original proportions.
   const _applyPlan = (plan, poolLabel) => {
     for (const p of plan) {
       const receipt = state.receipts.find(r => r.id === p.alloc.receiptId);
@@ -736,10 +734,8 @@ async function deleteUser(id) {
     }
   }
 
-  // Delivery work in flight: active missions go back to the assignment pool;
-  // collected cash not yet handed to the office must be pointed out before
-  // the driver disappears from the per-driver lists.
-  // Receipts AND ads: the server refuses the delete while either points at this driver.
+  // Delivery work in flight: active missions return to the assignment pool; cash not yet handed to the
+  // office is pointed out first. Receipts AND ads: the server refuses the delete while either names this driver.
   const activeMissions = [state.receipts, state.ads || []].flatMap(arr => arr.filter(r => r && !r._deleted
     && String(r.deliveryPersonId || '') === String(id)
     && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || ''))).map(r => [arr, r.id]));
@@ -810,16 +806,15 @@ async function updateExchangeRate(value) {
   const rateSaved = await addRecord(state.exchangeRateHistory, record);
   if (!rateSaved) {
     state.defaultExchangeRate = previousRate;
+    deriveDefaultExchangeRateFromHistory();  // a newer rate may have arrived meanwhile: the newest live row wins
     render();
     return;
   }
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
-// Start (or move) the liquidity tracking window. Money-critical and
-// deliberately Admin-only: the chosen date decides which cash counts as "new",
-// so nobody below Admin may move it. Append-only like exchangeRateHistory —
-// every change stays in the history as an audit trail.
+// Start (or move) the liquidity tracking window. Money-critical, Admin-only: the date decides which cash
+// counts as "new". Append-only like exchangeRateHistory: every change stays as an audit trail.
 async function updateLiquidityTrackingStart(value) {
   const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin()) {
@@ -842,10 +837,8 @@ async function updateLiquidityTrackingStart(value) {
     render();
     return;
   }
-  // No backdating. Historical receipts edited before this build can carry
-  // rewritten collection dates; letting the window reach behind today would
-  // count that old, already-spent money as "new" cash. Tracking is about the
-  // future: it starts today or later. (24h slack absorbs timezone offsets.)
+  // No backdating: old receipts can carry rewritten collection dates, and a window reaching behind today
+  // would count spent money as new cash. Tracking starts today or later (24h slack for timezones).
   if (parsed.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
     showNotification(
       isAr ? 'خطأ في الإدخال' : 'Validation',
@@ -895,10 +888,8 @@ function printReceiptCard(btn) {
   const receiptId = card.getAttribute('data-receipt-id') || '';
   card.classList.add('print-target');
   document.body.classList.add('print-single');
-  // Phones re-paginate from the live DOM while the print sheet is open, so
-  // the print marks are re-applied on every beforeprint and torn down only
-  // on the first user interaction (long timer fallback); the marks live in
-  // @media print, so lingering is harmless on screen.
+  // Phones re-paginate from the live DOM while the print sheet is open: re-apply the marks on every
+  // beforeprint, tear down on the first user interaction (long timer fallback); they only act in @media print.
   const applyPrintMarkup = () => {
     if (!card.isConnected && receiptId) {
       const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
@@ -938,10 +929,8 @@ function printCurrentPage() {
 
 function exportData() {
   const isAr = state.language === 'ar';
-  // Local mode can export its complete local workspace. Server mode can only
-  // export the records currently loaded in this browser; that snapshot may be
-  // stale/permission-scoped and the online restore intentionally cannot write
-  // users, wallet ledger, subscriptions or audit history.
+  // Local mode exports its whole workspace. Server mode exports only the loaded records (maybe stale or
+  // permission-scoped); the online restore cannot write users, wallet ledger, subscriptions or audit history.
   if (!isCurrentUserAdmin()) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
@@ -1020,10 +1009,8 @@ function exportData() {
   exportState.clothesSettings = filterVisible(exportState.clothesSettings);
   exportState.adCampaignRequests = filterVisible(exportState.adCampaignRequests);
   if (serverPartialSnapshot) {
-    // Orders, shipments and products are one inventory domain. Exporting only
-    // some of it invites an unsafe partial restore, while clothesOrders itself
-    // is server-transaction controlled. Omit the entire domain from server
-    // reports; local-mode full backups remain unchanged.
+    // Orders, shipments and products are one inventory domain (clothesOrders is server-transaction controlled):
+    // a partial export invites an unsafe restore, so server reports omit it all; local backups are unchanged.
     delete exportState.clothesProducts;
     delete exportState.clothesShipments;
     delete exportState.clothesOrders;

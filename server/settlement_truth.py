@@ -206,6 +206,27 @@ def apply_delivery_completion_truth(
         merged["isPaid"] = False
 
 
+# Collected money and the completion record of a delivered, still Not Paid receipt.
+_DELIVERED_UNPAID_KEPT_FIELDS = (
+    "amountLocal", "amountUSD", "exchangeRate", "payments", "paymentMethod",
+    "amountCollectedFromCustomer", "paymentResult", "overpaidAmount", "remainingDue",
+)
+
+
+def keep_delivered_collected_money(old: dict[str, Any], clean: dict[str, Any]) -> None:
+    """An ordinary edit of a delivered, still Not Paid receipt keeps its collected money.
+    Acts on the incoming update only: the fields are dropped from it, so the merge keeps
+    whatever is stored (present, null or absent). A stored row is never rewritten by itself."""
+    if str(old.get("status") or "") != "Not Paid" or old.get("isPaid") is True:
+        return
+    if str(old.get("deliveryStatus") or "").strip() != "Delivered" and not old.get("deliveredAt"):
+        return
+    if clean.get("isPaid") is True or str(clean.get("status") or "Not Paid") != "Not Paid":
+        return  # settling, cancelling, writing off keep their own rules
+    for field in _DELIVERED_UNPAID_KEPT_FIELDS:
+        clean.pop(field, None)
+
+
 def _reads_as_gross(amount_minor: int, gross_minor: int, net_minor: int) -> bool:
     """Did the office send the GROSS (form prefill / gross payment rows) rather
     than the customer's net cash? The form derives amountUSD from payment rows,

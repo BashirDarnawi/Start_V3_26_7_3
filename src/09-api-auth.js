@@ -2439,6 +2439,18 @@ function reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks) {
   return !!captured;
 }
 
+// The newest live rate row sets the default rate, on a full load and on a live-sync rate delta: deleted
+// rows stay in the array and are skipped, and only a finite rate above zero is taken. True = changed.
+function deriveDefaultExchangeRateFromHistory() {
+  const latest = (Array.isArray(state.exchangeRateHistory) ? state.exchangeRateHistory : [])
+    .filter(row => row && !row._deleted)
+    .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
+  const rate = parseFloat(latest?.rate);
+  if (!Number.isFinite(rate) || rate <= 0 || rate === state.defaultExchangeRate) return false;
+  state.defaultExchangeRate = rate;
+  return true;
+}
+
 async function serverLoadAllData() {
   const loadIdentity = getServerSessionIdentity();
   const loadUserId = String(state.currentUser?.id || '');
@@ -2460,11 +2472,10 @@ async function serverLoadAllData() {
     if (ALBAYAN_DEBUG_MODE) console.warn('[serverLoadAllData] Watermarks unavailable; using since=0 catch-up:', e?.message || e);
   }
   if (loadAborted()) return abortedResult();
-  // Load collections from server.
-  // IMPORTANT: Do not fail the whole app if one collection fails. We'll load what we can and show one warning.
+  // IMPORTANT: one failed collection never fails the whole app: load what we can, show one warning.
   const forbidden = [];
   const failed = [];
-  // If a collection fails to refresh, NEVER wipe existing data (prevents "data disappears then comes back").
+  // A failed refresh NEVER wipes existing data (no "data disappears then comes back").
   const hadCounts = {
     ads: Array.isArray(state.ads) ? state.ads.length : 0,
     receipts: Array.isArray(state.receipts) ? state.receipts.length : 0,
@@ -2527,8 +2538,7 @@ async function serverLoadAllData() {
     }
   };
 
-  // Load collections in parallel for faster initial load
-  // Use higher concurrency for initial load, but still limit to avoid overwhelming server
+  // Parallel for a faster initial load, but bounded so the server is not overwhelmed.
   const results = {};
   const collections = SERVER_SYNC_COLLECTIONS;
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
@@ -2566,8 +2576,7 @@ async function serverLoadAllData() {
     }
   }
 
-  // Only overwrite collections when we actually received new data.
-  // If a collection failed (data === null), keep existing state collection.
+  // Overwrite only with data actually received: a failed collection (data === null) keeps its rows.
   for (const c of collections) {
     const r = results[c];
     if (r && r.data !== null) {
@@ -2578,17 +2587,9 @@ async function serverLoadAllData() {
     }
   }
 
-  // Default exchange rate from latest history record
-  if (Array.isArray(state.exchangeRateHistory) && state.exchangeRateHistory.length > 0) {
-    const latest = state.exchangeRateHistory
-      .slice()
-      .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
-    const rate = parseFloat(latest?.rate);
-    if (!Number.isNaN(rate)) state.defaultExchangeRate = rate;
-  }
+  deriveDefaultExchangeRateFromHistory();
 
-  // Login, manual refresh, and permission reloads must all apply legacy shape
-  // compatibility, not only the initial application startup callback.
+  // Login, manual refresh and permission reloads all apply legacy-shape compatibility, not only startup.
   migrateOldDataFormats();
 
   // Users list for UI (delivery assignment, etc.)
@@ -2610,9 +2611,8 @@ async function serverLoadAllData() {
     failed.push({ collection: 'users', status: e?.status || null, message: e?.message || 'Failed to load users' });
   }
   if (loadAborted()) return abortedResult();
-  // ALWAYS keep the current user (with their login-response permissions) in
-  // state.users — even when the users-list fetch failed. hasPermission and the
-  // sidebar read state.users; without this, a failed fetch locks the whole UI.
+  // ALWAYS keep the current user (with their login-response permissions) in state.users, even when
+  // the users-list fetch failed: hasPermission and the sidebar read it, or that failure locks the UI.
   if (typeof upsertCurrentUserIntoUsers === 'function') upsertCurrentUserIntoUsers();
 
   if (loadAborted()) return abortedResult();
@@ -2640,8 +2640,7 @@ async function serverLoadAllData() {
   // One clean warning (avoid spam). These are user-specific and expected sometimes.
   if (loadAborted()) return abortedResult();
   if (forbidden.length) {
-    // Do not show "limited access" details to non-admin users (avoid leaking internal permission structure).
-    // Admins can still see this warning for troubleshooting.
+    // Admins only (troubleshooting): the details would leak the permission structure to other users.
     if (isCurrentUserAdmin()) {
       showNotification(
         state.language === 'ar' ? 'وصول محدود' : 'Limited Access',

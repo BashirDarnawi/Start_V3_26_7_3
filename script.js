@@ -7228,9 +7228,8 @@ function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
 }
 
 // ---- CREATOR NAME RESOLUTION (survives user deletion) ----
-// Deleted accounts stop syncing (/api/users filters them): records showed "Created by: Unknown".
-// Order: live state.users, the server tombstone directory (id -> name), the record's createdByName.
-// Anonymized accounts return as "Deleted user" with stamps scrubbed, so an erasure never comes back.
+// Deleted accounts stop syncing, so records showed "Created by: Unknown". Order: live state.users,
+// the server tombstone directory, the record's createdByName. Anonymized accounts stay "Deleted user".
 function getKnownUserNameById(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return '';
@@ -7429,10 +7428,9 @@ function _localLegacyDueMinor(ad) {
   return _localFundingMinor(lyd / rate);
 }
 
-// Legacy debt rows kept the promise in dueAmountToUseUSD/LYD, not dueAllocations. Its receipt:
-// a Driver ad's linkedDeliveryReceiptId (the oldest rows: receiptId), an In-Shop ad's receiptId.
-// Settlement and the ad form honor the receiptId fallback, so the balance readers do too.
-// A zero-amount link is provenance only, never money.
+// Legacy debt rows kept the promise in dueAmountToUseUSD/LYD. Its receipt: a Driver ad's
+// linkedDeliveryReceiptId (oldest rows: receiptId), an In-Shop ad's receiptId; balance readers honor
+// that fallback like settlement does. A zero-amount link is provenance only, never money.
 function isAdLegacyDueMirrorForReceipt(ad, receiptId) {
   const rid = String(receiptId || '');
   if (!ad || !rid) return false;
@@ -8331,9 +8329,9 @@ function getRecordType(record) {
   return 'Record';
 }
 
-// ==========================================
+// ====
 // AUDIT LOGGING
-// ==========================================
+// ====
 
 function redactSensitive(obj, depth = 0) {
   if (depth > 12) return null;
@@ -8369,7 +8367,6 @@ function redactSensitive(obj, depth = 0) {
 }
 
 function addAuditLog(action, resourceId, description, metadata = {}) {
-  // Determine severity level based on action type
   const severityMap = {
     'create': 'info',
     'update': 'info',
@@ -8383,7 +8380,6 @@ function addAuditLog(action, resourceId, description, metadata = {}) {
     'security': 'critical'
   };
   
-  // Determine category based on action and metadata
   const categoryMap = {
     'create': 'data',
     'update': 'data',
@@ -8419,15 +8415,14 @@ function addAuditLog(action, resourceId, description, metadata = {}) {
     _archived: false
   };
   
-  // Add to beginning of logs array (newest first)
+  // Newest first
   state.logs.unshift(log);
   
-  // Initialize session ID if not exists
   if (!state.sessionId) {
     state.sessionId = generateId('session');
   }
   
-  // Save to IndexedDB for persistent storage (async, fire-and-forget)
+  // IndexedDB (fire-and-forget)
   if (db) {
     saveLogToIndexedDB(log).catch(e => console.warn('IndexedDB save failed:', e));
   }
@@ -8586,9 +8581,8 @@ function buildReceiptUsageAdIndex(ads = state.ads) {
   return index;
 }
 
-// Compute usage stats for a receipt based on ads funded by this receipt
+// Usage stats of a receipt from the ads it funds
 function getReceiptUsageStats(receipt, adsByReceiptId = null) {
-  // Handle both receipt object and receipt ID
   const receiptObj = typeof receipt === 'string'
     ? (state.receipts || []).find(r => r.id === receipt)
     : receipt;
@@ -8605,7 +8599,6 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
     };
   }
 
-  // Use consistent ID for all comparisons
   const receiptId = String(receiptObj.id || '');
 
   // Ads funded from this receipt: receiptAllocations AND dueAllocations (delivery receipts that
@@ -8627,12 +8620,12 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   // Used = receiptAllocations + dueAllocations: after Delivered, ads drawing its due amount
   // still use the receipt's funds.
   const usedUSD = fundedAds.reduce((sum, ad) => {
-    // Check receiptAllocations first (normal paid receipt usage)
+    // Paid rows
     const receiptAllocSum = Array.isArray(ad.receiptAllocations)
       ? ad.receiptAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
-    // Check dueAllocations (delivery receipt due amount usage - critical for when receipt becomes Paid)
+    // Due rows (still used once the receipt becomes Paid)
     const dueAllocSum = Array.isArray(ad.dueAllocations)
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
@@ -8653,16 +8646,14 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       ? getAdLegacyDueMirrorUSD(ad, receiptId, receiptObj.exchangeRate)
       : 0;
 
-    // Use explicit allocations if available, otherwise fall back to ad spend
     const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage + companyAllocSum;
     if (explicitAllocations > 0) {
       return sum + explicitAllocations;
     }
 
-    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY for legacy ads with no allocation
-    // arrays at all. Present-but-empty arrays (funding receipt deleted) or rows pointing at
-    // OTHER receipts mean this receipt funded nothing; charging the full spend would count
-    // the same dollars on two receipts at once.
+    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY for legacy ads with no allocation arrays at all.
+    // Present-but-empty arrays (funding receipt deleted) or rows on OTHER receipts mean this receipt
+    // funded nothing; charging the full spend would count the same dollars on two receipts.
     const hasAllocationData =
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations) ||
@@ -8681,7 +8672,6 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       return sum;
     }
 
-    // Fall back to spentUSD or amountUSD only if no explicit allocations
     const spend = ad.spentUSD ?? ad.amountUSD ?? 0;
     return sum + spend;
   }, 0);
@@ -8841,9 +8831,11 @@ const _SERVER_REFUSAL_AR = [
   [/^Financial period (\S+) is being closed.*/, 'الشهر $1 قيد الإقفال أو الفتح الآن؛ أعد المحاولة بعد لحظات.'],
   [/^Financial period (\S+) is closed.*/, 'الشهر $1 مُقفل مالياً؛ اطلب من المدير فتحه قبل التعديل.'],
   [/^(Receipt number|serialNumber|\w+ReceiptNo) already exists/, 'رقم الوصل هذا مسجّل لوصل آخر. تأكد من الرقم ثم أعد المحاولة.', 'This receipt number is already used by another receipt. Check the number and try again.'],
-  ['Final spend cannot be less than recorded company funding', 'المصروف النهائي لا يمكن أن يقل عن المبلغ الذي غطّته الشركة لهذا الإعلان. عدّل تغطية الشركة أولاً.'],
+  ['The ad budget cannot go below the company funds already recorded on it', 'لا يمكن إنزال ميزانية الإعلان تحت المبلغ الذي غطّته الشركة له. أوقف الإعلان على مصروفه الحقيقي، وسيرجع الزائد إلى أموال الشركة.', 'The ad budget cannot go below the company money already recorded on it. Stop the ad at its real spend instead; the extra goes back to company funds.'],
+  ['Company money on this ad cannot be returned automatically', 'لا يمكن إرجاع أموال الشركة عن هذا الإعلان تلقائياً لأنها مسجّلة على وصل ما زال غير مدفوع. سدّد ذلك الوصل أولاً، أو أبقِ المصروف مساوياً لمبلغ الشركة أو أعلى منه.'],
   ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.'],
   [/^Receipt (\S+ )?cannot be deleted while linked to .*/, 'هذا الوصل مرتبط بتمويل إعلان أو بتحويل، فلا يمكن حذفه. حرّر هذه الارتباطات أولاً.', 'This receipt is linked to ad funding or a transfer, so it cannot be deleted. Release those links first.'],
+  ['An ad paid from company funds cannot be deleted', 'هذا الإعلان مدفوع من أموال الشركة، لذلك لا يمكن حذفه. أوقفه بدلاً من ذلك.', 'This ad was paid from company funds, so it cannot be deleted. Stop it instead.'],
   ['Customer cannot be deleted while linked records exist', 'لا يمكن حذف العميل لوجود وصولات أو إعلانات مرتبطة به.'],
   ['At least one valid phone number is required', 'رقم هاتف صحيح واحد على الأقل مطلوب (من 7 إلى 15 رقماً).', 'At least one valid phone number is required (7 to 15 digits).'],
   ['This phone number is already linked to another customer', 'رقم الهاتف هذا مسجّل لعميل آخر؛ ابحث عنه واستخدم العميل الموجود.'],
@@ -8980,21 +8972,12 @@ function formatDateShort(date) {
   }
 }
 
-/**
- * Get the effective exchange rate for an ad.
- * Priority order:
- * 1. Linked delivery receipt's exchange rate (if ad is linked to delivery receipt)
- * 2. Weighted average from receipt allocations (if ad has multiple funding receipts)
- * 3. Single funding receipt's exchange rate
- * 4. Ad's own exchange rate
- * 5. Default exchange rate from state
- *
- * This ensures consistent exchange rate calculations across the application.
- */
+/** The ad's effective exchange rate, the same everywhere. Priority: linked delivery receipt's rate; weighted
+ * average of its receipt allocations; single funding receipt's rate; the ad's own rate; the state default. */
 function getEffectiveExchangeRate(ad) {
   if (!ad) return state.defaultExchangeRate || 1;
 
-  // 1. For delivery-linked ads, use the linked receipt's rate
+  // 1. Linked delivery receipt's rate
   if (ad.linkedDeliveryReceiptId) {
     const linkedReceipt = state.receipts.find(r => r.id === ad.linkedDeliveryReceiptId);
     if (linkedReceipt?.exchangeRate) {
@@ -9002,7 +8985,7 @@ function getEffectiveExchangeRate(ad) {
     }
   }
 
-  // 2. Weighted average from receipt allocations (based on amount allocated)
+  // 2. Weighted average of receipt allocations
   if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) {
     let totalAmount = 0;
     let weightedSum = 0;
@@ -9023,7 +9006,7 @@ function getEffectiveExchangeRate(ad) {
     }
   }
 
-  // 3. Also check dueAllocations for delivery receipt funding
+  // 3. dueAllocations
   if (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0) {
     let totalAmount = 0;
     let weightedSum = 0;
@@ -11503,6 +11486,18 @@ function reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks) {
   return !!captured;
 }
 
+// The newest live rate row sets the default rate, on a full load and on a live-sync rate delta: deleted
+// rows stay in the array and are skipped, and only a finite rate above zero is taken. True = changed.
+function deriveDefaultExchangeRateFromHistory() {
+  const latest = (Array.isArray(state.exchangeRateHistory) ? state.exchangeRateHistory : [])
+    .filter(row => row && !row._deleted)
+    .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
+  const rate = parseFloat(latest?.rate);
+  if (!Number.isFinite(rate) || rate <= 0 || rate === state.defaultExchangeRate) return false;
+  state.defaultExchangeRate = rate;
+  return true;
+}
+
 async function serverLoadAllData() {
   const loadIdentity = getServerSessionIdentity();
   const loadUserId = String(state.currentUser?.id || '');
@@ -11524,11 +11519,10 @@ async function serverLoadAllData() {
     if (ALBAYAN_DEBUG_MODE) console.warn('[serverLoadAllData] Watermarks unavailable; using since=0 catch-up:', e?.message || e);
   }
   if (loadAborted()) return abortedResult();
-  // Load collections from server.
-  // IMPORTANT: Do not fail the whole app if one collection fails. We'll load what we can and show one warning.
+  // IMPORTANT: one failed collection never fails the whole app: load what we can, show one warning.
   const forbidden = [];
   const failed = [];
-  // If a collection fails to refresh, NEVER wipe existing data (prevents "data disappears then comes back").
+  // A failed refresh NEVER wipes existing data (no "data disappears then comes back").
   const hadCounts = {
     ads: Array.isArray(state.ads) ? state.ads.length : 0,
     receipts: Array.isArray(state.receipts) ? state.receipts.length : 0,
@@ -11591,8 +11585,7 @@ async function serverLoadAllData() {
     }
   };
 
-  // Load collections in parallel for faster initial load
-  // Use higher concurrency for initial load, but still limit to avoid overwhelming server
+  // Parallel for a faster initial load, but bounded so the server is not overwhelmed.
   const results = {};
   const collections = SERVER_SYNC_COLLECTIONS;
   const CONCURRENCY = SERVER_API.initialLoadConcurrency || 3;
@@ -11630,8 +11623,7 @@ async function serverLoadAllData() {
     }
   }
 
-  // Only overwrite collections when we actually received new data.
-  // If a collection failed (data === null), keep existing state collection.
+  // Overwrite only with data actually received: a failed collection (data === null) keeps its rows.
   for (const c of collections) {
     const r = results[c];
     if (r && r.data !== null) {
@@ -11642,17 +11634,9 @@ async function serverLoadAllData() {
     }
   }
 
-  // Default exchange rate from latest history record
-  if (Array.isArray(state.exchangeRateHistory) && state.exchangeRateHistory.length > 0) {
-    const latest = state.exchangeRateHistory
-      .slice()
-      .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())[0];
-    const rate = parseFloat(latest?.rate);
-    if (!Number.isNaN(rate)) state.defaultExchangeRate = rate;
-  }
+  deriveDefaultExchangeRateFromHistory();
 
-  // Login, manual refresh, and permission reloads must all apply legacy shape
-  // compatibility, not only the initial application startup callback.
+  // Login, manual refresh and permission reloads all apply legacy-shape compatibility, not only startup.
   migrateOldDataFormats();
 
   // Users list for UI (delivery assignment, etc.)
@@ -11674,9 +11658,8 @@ async function serverLoadAllData() {
     failed.push({ collection: 'users', status: e?.status || null, message: e?.message || 'Failed to load users' });
   }
   if (loadAborted()) return abortedResult();
-  // ALWAYS keep the current user (with their login-response permissions) in
-  // state.users — even when the users-list fetch failed. hasPermission and the
-  // sidebar read state.users; without this, a failed fetch locks the whole UI.
+  // ALWAYS keep the current user (with their login-response permissions) in state.users, even when
+  // the users-list fetch failed: hasPermission and the sidebar read it, or that failure locks the UI.
   if (typeof upsertCurrentUserIntoUsers === 'function') upsertCurrentUserIntoUsers();
 
   if (loadAborted()) return abortedResult();
@@ -11704,8 +11687,7 @@ async function serverLoadAllData() {
   // One clean warning (avoid spam). These are user-specific and expected sometimes.
   if (loadAborted()) return abortedResult();
   if (forbidden.length) {
-    // Do not show "limited access" details to non-admin users (avoid leaking internal permission structure).
-    // Admins can still see this warning for troubleshooting.
+    // Admins only (troubleshooting): the details would leak the permission structure to other users.
     if (isCurrentUserAdmin()) {
       showNotification(
         state.language === 'ar' ? 'وصول محدود' : 'Limited Access',
@@ -12771,6 +12753,7 @@ async function refreshServerDataCompatibility() {
   }
   _serverLiveSync.dataCompatibilityVersion = version;
   if (changed) {
+    if (changedCollections.includes('exchangeRateHistory')) deriveDefaultExchangeRateFromHistory();
     assignSequentialNumbers(true, changedCollections);
     _closeCustomerPagesDialogForStateChange();
     saveState();
@@ -12980,18 +12963,15 @@ async function serverLiveSyncOnce() {
       const records = await apiLoadCollectionSince(collection, since);
       return { collection, since, records, ok: true, forbidden: false };
     } catch (e) {
-      // A late failure belongs to the stopped poll, not the replacement
-      // session's cursors, permission results, or connection-health state.
+      // A late failure belongs to the stopped poll, not the new session's cursors, permissions or health.
       if (_syncAborted()) return { collection, since, records: [], ok: false, forbidden: false };
-      // Keep forbidden collections at cursor zero. If permission is granted
-      // later, the next tick obtains the full newly-visible history.
+      // Forbidden collections stay at cursor zero: a later grant then gets the full visible history.
       if (e?.status === 403) {
         _serverLiveSync.collectionCursors[collection] = 0;
         return { collection, since, records: [], ok: true, forbidden: true };
       }
       anyFetchFailed = true;
-      // Remember WHY, so the badge can say "(503)" instead of nothing and a
-      // future failure is diagnosable without DevTools.
+      // Remember WHY: the badge can say "(503)" and a failure is diagnosable without DevTools.
       _serverLiveSync.lastFailure = {
         collection,
         status: Number(e?.status) || 0,
@@ -13024,8 +13004,7 @@ async function serverLiveSyncOnce() {
   const appSettingsDelta = recordsFor('appSettings');
   const dollarPurchasesDelta = recordsFor('dollarPurchases');
 
-  // Logged out (or a new session started) while these fetches were in flight?
-  // Drop the result — applying it would re-fill the just-wiped state.
+  // Logged out (or a new session) while these were in flight: applying them would refill the wiped state.
   if (_syncAborted()) return { ok: false, skipped: true };
 
   // A 403 is an authorization result, not merely an empty delta. Purge the old
@@ -13062,6 +13041,8 @@ async function serverLiveSyncOnce() {
   changed = pagesChanged || changed;
   customerPagesDataChanged = adsChanged || receiptsChanged || customersChanged || pagesChanged || customerPagesDataChanged;
   const exchangeRatesChanged = applyServerDelta('exchangeRateHistory', exhDelta);
+  // An open device follows a new rate at once: new receipts pre-fill state.defaultExchangeRate.
+  if (exchangeRatesChanged && deriveDefaultExchangeRateFromHistory()) changed = true;
   changed = exchangeRatesChanged || changed;
   customerPagesDataChanged = exchangeRatesChanged || customerPagesDataChanged;
   changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
@@ -13104,8 +13085,7 @@ async function serverLiveSyncOnce() {
     ['ads', adsChanged], ['receipts', receiptsChanged], ['customers', customersChanged], ['pages', pagesChanged]
   ].filter(([, didChange]) => didChange).map(([collection]) => collection));
 
-  // Advance only the collection whose request completed. Failed collections
-  // retain their own prior cursor and are retried without blocking others.
+  // Advance only completed collections: a failed one keeps its cursor and is retried without blocking others.
   for (const result of deltaResults) {
     if (!result.ok || result.forbidden) continue;
     // A clean (non-forbidden) result means access is back: leave the purged set, so a later
@@ -24837,11 +24817,8 @@ function buildCustomerStatsIndex() {
   return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, usageByReceipt: buildReceiptUsageAdIndex(state.ads), statsByCustomer: new Map() };
 }
 
-// Status-aware USD "spent" for a single ad — the ONE definition of how much
-// an ad counts as spent, so the customer cards and the analytics panels can
-// never disagree (they used to: analytics counted full amountUSD for every
-// status, so the same customer's "Spend" and "Spent" showed different numbers,
-// and a Stopped ad that spent $100 was counted at its full $500).
+// Status-aware USD "spent" for one ad: the ONE definition, so customer cards and analytics
+// never disagree (analytics once counted a Stopped ad that spent $100 at its full $500).
 function getAdSpendUSD(ad) {
   if (!ad) return 0;
   const status = String(ad.status || '').trim().toLowerCase();
@@ -25395,11 +25372,9 @@ function getCustomerStats(customerId, statsIndex = null) {
       companyFundedLYD += fundedLYD;
       totalSpentLYD += fundedLYD;
     });
-    // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD
-    // is company money against spend that no receipt ever backed. Spent stays
-    // the real ad spend; this credit removes the covered part from the
-    // customer's liability, exactly like the receipt-scoped rows above —
-    // and shares the same real-spend cap.
+    // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD is company money
+    // against spend no receipt backed. Spent stays the real ad spend; this credit removes the covered
+    // part from the customer's liability, like the receipt-scoped rows above, with the same real-spend cap.
     const directUSD = Math.min(
       Math.max(parseFloat(ad.companyDirectCoverageUSD) || 0, 0),
       creditableUSD
@@ -27958,10 +27933,9 @@ function _readDeliveryPaymentRows(containerId) {
   })).filter(p => p.amount > 0);
 }
 
-// ---- Delivery fee: plain LYD cash (no Rate 1 / Rate 2) ---------------------------
-// Flat LYD cash for the driver, NEVER USD ads credit: a LYD amount + method + payer (customer
-// or shop). Stored as deliveryFeePayments[{method, amount, rate, rate2}] for every existing
-// reader: rate 1 (already LYD), rate2 0 (no USD value).
+// ---- Delivery fee: plain LYD cash (no Rate 1 / Rate 2) ----
+// Flat LYD cash for the driver, NEVER USD ads credit: amount + method + payer (customer or shop).
+// Stored as deliveryFeePayments[{method, amount, rate, rate2}]: rate 1 (already LYD), rate2 0 (no USD).
 function _deliveryFeeStoredLyd(receipt) {
   const rows = Array.isArray(receipt?.deliveryFeePayments) ? receipt.deliveryFeePayments : [];
   if (rows.length) {
@@ -29277,11 +29251,8 @@ async function submitCompanyDebtCoverage() {
 }
 
 // ---- Customer-card entry point for company debt coverage (admin only) ----
-// The receipt card already carries its own "Cover with company funds" button;
-// this lets the admin start from the CUSTOMER card instead (user request).
-// One eligible receipt opens the proven coverage dialog directly; several
-// open a small picker first. No new money path — everything funnels into
-// openCompanyDebtCoverageModal and the one transactional endpoint.
+// One eligible receipt opens the coverage dialog directly; several open a picker first.
+// No new money path: all go through openCompanyDebtCoverageModal and its one endpoint.
 
 function getCustomerCompanyCoverableReceipts(customerId) {
   const normalizedId = String(customerId || '');
@@ -29328,12 +29299,9 @@ function _legacyDueReceiptIdForAd(ad) {
   return String(ad.linkedDeliveryReceiptId || '');
 }
 
-// RECEIPT-LESS ad-spend debt company funds may cover, mirroring the server's
-// coverable_ad_debt_minor exactly: Not Paid, non-driver ads only; a rowless
-// legacy ad that references any receipt is charged against that receipt by
-// the usage fallback and is excluded here. Gap per ad:
-// effective spend − paid rows − due rows − company rows − direct coverage
-// − the legacy scalar due mirror.
+// RECEIPT-LESS ad debt company funds may cover; mirrors the server's coverable_ad_debt_minor exactly:
+// Not Paid, non-driver ads; a rowless legacy ad naming any receipt is that receipt's debt (usage fallback).
+// Gap = effective spend − paid − due − company rows − direct coverage − the legacy scalar due mirror.
 // statsIndex (one render's buildCustomerStatsIndex): only this customer's ads, in the same order, so every
 // sum is bit-identical; an empty id (ads without a customer) and the dialogs read the live lists in full.
 function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
@@ -29352,14 +29320,9 @@ function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
     if (!ad || ad.recordType === 'receipt') return;
     if (String(ad.customerId || ad.customer || '') !== normalizedId) return;
     if (getAdPaymentState(ad) !== 'not_paid') return;
-    // While the delivery is still live this money is the customer's own cash,
-    // which the driver collects at the door and the delivery receipt accounts
-    // for — never ours to cover. Once that receipt has been COLLECTED AND
-    // SETTLED (Paid), the collection path is closed for good and whatever the
-    // settlement did not fund is debt that was never collected. Keyed on Paid
-    // rather than "no longer tracks debt": a canceled or lost delivery
-    // RELEASED its debt, so nothing is owed there at all. Mirrors the
-    // server's coverable_ad_debt_detail.
+    // A live delivery's money is the customer's cash (the driver collects it): never ours to cover. Once
+    // that receipt is collected and settled (Paid), what it did not fund is uncollected debt. Keyed on Paid:
+    // a canceled or lost delivery RELEASED its debt. Mirrors the server's coverable_ad_debt_detail.
     if (String(ad.collectionMethod || '') === 'driver') {
       const deliveryReceiptId = String(ad.linkedDeliveryReceiptId || ad.receiptId || '').trim();
       if (!deliveryReceiptId) return;
@@ -29374,19 +29337,18 @@ function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
       || String(ad.receiptId || '').trim()
       || String(ad.linkedDeliveryReceiptId || '').trim()
     )) return;
+    // Only FINAL spend is coverable (server FINAL_AD_STATUSES): a running ad's budget is not spend yet.
+    if (!['stopped', 'completed', 'canceled', 'cancelled', 'lost'].includes(String(ad.status || '').trim().toLowerCase())) return;
     // STATUS-AWARE spend (getAdSpendUSD) — the same number the customer
     // card's "Spent" shows. The server's coverable_ad_debt_minor mirrors
-    // this exactly; a pending/paused ad has no coverable debt.
+    // this exactly.
     const effective = Math.max(getAdSpendUSD(ad), 0);
     const sumRows = list => (Array.isArray(list) ? list : [])
       .reduce((s, row) => s + Math.max(Number(row?.amountUSD) || 0, 0), 0);
     const direct = Math.max(Number(ad.companyDirectCoverageUSD) || 0, 0);
-    // The legacy scalar mirror is REAL provided funding whenever no due row
-    // exists (stopping a legacy ad leaves exactly that shape: dueAllocations
-    // emptied to [] with the surviving amount in dueAmountToUseUSD). Ignoring
-    // it offered company money for dollars already committed against the
-    // receipt — which the receipt-level button could then cover a second
-    // time. Mirrors the server's ad_funded_minor.
+    // The legacy scalar mirror is REAL funding when no due row exists (a stopped legacy ad: dueAllocations
+    // [] with the amount in dueAmountToUseUSD); ignoring it let the receipt button cover those dollars a
+    // second time. Mirrors the server's ad_funded_minor.
     const dueRowsTotal = sumRows(ad.dueAllocations);
     const legacyDue = dueRowsTotal > 0
       ? 0
@@ -29719,8 +29681,8 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
     showNotification(
       isAr ? 'لا يوجد دين مؤهل' : 'No eligible debt',
       isAr
-        ? 'لا يوجد لهذا العميل دين وصولات أو دين إعلانات يمكن تغطيته من أموال الشركة.'
-        : 'This customer has no receipt debt or ad debt that company funds can cover.',
+        ? 'لا يوجد لهذا العميل دين وصولات أو دين إعلانات يمكن تغطيته من أموال الشركة. دين الإعلان الذي ما زال يعمل يُغطّى بعد إيقافه على مصروفه الحقيقي.'
+        : 'This customer has no receipt debt or ad debt that company funds can cover. Debt on an ad that is still running can be covered after the ad is stopped at its real spend.',
       'warning'
     );
     return false;
@@ -30111,10 +30073,9 @@ function showReceiptModal(carried = false) {
   renderModal();
 }
 
-// ---- New-Receipt type chooser -------------------------------------------
-// "New Receipt" first asks WHICH kind: normal (money received now) or "existing balance" (spent
-// partly elsewhere: only what's LEFT is recorded). The options sit far apart in very different
-// colours, so the wrong one is hard to pick by accident.
+// ---- New-Receipt type chooser ----
+// Asks WHICH kind first: normal (money received now) or "existing balance" (only what's LEFT
+// is recorded); far apart and in different colours, so the wrong one is hard to pick.
 function showNewReceiptChooser() {
   if (!currentUserHasPermission('receipts', 'add')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
@@ -30264,17 +30225,30 @@ async function _saveDestroyedReceipt(buttonEl) {
   render();
 }
 
+// Delivered but still Not Paid: its amounts and payment rows are the cash the driver collected.
+// They change only through the completion and settle flows (server: keep_delivered_collected_money).
+function _isDeliveredUnpaid(r) {
+  return !!r && r.status === 'Not Paid' && r.isPaid !== true && (r.deliveryStatus === 'Delivered' || !!r.deliveredAt);
+}
+function _blockDeliveredUnpaidMoneyEdit(receipt) {
+  if (!_isDeliveredUnpaid(receipt)) return false;
+  const isAr = state.language === 'ar';
+  showNotification(isAr ? 'غير ممكن هنا' : 'Not here', isAr
+    ? 'هذا الوصل تم توصيله لكنه لم يُدفع بالكامل بعد. لا يمكن تعديل المبلغ المُحصَّل من هنا: عندما يدفع العميل الباقي افتح «تعديل الوصل» وحوِّله إلى مدفوع.'
+    : 'This receipt was delivered but is not fully paid yet. Its collected money cannot be edited here: when the customer pays the rest, open Edit Receipt and mark it Paid.', 'warning');
+  return true;
+}
 
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
   if (!receipt) return;
-  // The split-payment editor rewrites receipt money (server enforces receipts.edit),
-  // so gate it the same way editReceipt does — canActOnRecord keeps editOwn semantics.
+  // This editor rewrites receipt money: gated like editReceipt (canActOnRecord keeps editOwn).
   if (!canActOnRecord('receipts', 'edit', receipt.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   if (_blockTransferInEdit(receipt)) return;
+  if (_blockDeliveredUnpaidMoneyEdit(receipt)) return;
 
   state.activeModal = 'split-payments';
   state.modalData = receipt;
@@ -30282,11 +30256,8 @@ function manageSplitPayments(receiptId) {
   renderModal();
 }
 
-// A top-up adds budget to a LIVE ad. Terminal or refunded ads must NOT be
-// toppable: topping up a refunded ad grew its allocation rows but left the
-// refund's frozen baseline stale, so re-saving the refund erased the top-up's
-// charge and freed that money to be spent again — fabricated receipt balance
-// (audit round-3 #1).
+// A top-up adds budget to a LIVE ad only: on a refunded ad it left the refund's frozen
+// baseline stale, and re-saving the refund freed that money to be spent again.
 function _isAdToppable(ad) {
   if (!ad) return false;
   if (['Canceled', 'Completed', 'Lost', 'Stopped'].includes(String(ad.status || ''))) return false;
@@ -31092,22 +31063,20 @@ function onSplitMethodChange(sel) {
 }
 
 async function saveSplitPayments() {
-  // Read the target from the frozen hidden field, not the mutable global, so a
-  // stray navigation can't redirect this save onto a different receipt.
+  // Target from the frozen hidden field, so a stray navigation can't redirect this save.
   const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
   if (!receiptId || !state.receipts.some(r => r && !r._deleted && String(r.id) === String(receiptId))) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تحديد الوصل' : 'Could not identify the receipt', 'error');
     return;
   }
-  // Defense-in-depth: re-check receipts.edit before writing (the modal can be
-  // restored via updateUrlParams), mirroring editReceipt's canActOnRecord guard.
+  // Re-check receipts.edit before writing (the modal can be restored via updateUrlParams).
   const _permReceipt = state.receipts.find(r => r && String(r.id) === String(receiptId));
   if (!canActOnRecord('receipts', 'edit', _permReceipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
-  // Double-tap guard: a second Save while the first PATCH is in flight would
-  // commit an identical duplicate PATCH and show a second "Saved" toast.
+  if (_blockDeliveredUnpaidMoneyEdit(_permReceipt)) return;
+  // Double-tap guard: a second Save in flight would commit a duplicate PATCH.
   const actionKey = String(receiptId);
   if (_deliveryActionInFlight.has(actionKey)) return;
   _deliveryActionInFlight.add(actionKey);
@@ -31872,7 +31841,6 @@ function showReceiptPhoneDropdown() {
 function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUsers) {
   const isArF = state.language === 'ar';
   const esc = v => Security.escapeHtml(String(v));  // stored row values land inside attributes
-  // BUG FIX: Check if array exists and has elements before accessing
   if (!Array.isArray(existingPayments) || existingPayments.length === 0) {
     return `<div class="text-xs text-slate-400 p-4">${isArF ? 'لا توجد دفعات معدة' : 'No payments configured'}</div>`;
   }
@@ -31881,7 +31849,6 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
   
   if (!isSplit) {
     const payment = existingPayments[0];
-    // Single Payment Mode - Compact & Integrated
     return `
       <div id="receipt-payments-container" class="space-y-3">
         <div class="p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm payment-split-item">
@@ -31969,7 +31936,6 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
       </div>
     `;
   } else {
-    // Split Payment Mode - All Payments First, Then Totals at Bottom
     const paymentCardsHTML = existingPayments.map((payment, idx) => `
       <div class="p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm payment-split-item">
         <div class="flex items-center justify-between mb-3">
@@ -32072,7 +32038,6 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
   }
 }
 
-// Function to collect current payment data from DOM
 function getReceiptPaymentData() {
   const container = document.getElementById('receipt-payments-container');
   if (!container) return [];
@@ -32085,9 +32050,7 @@ function getReceiptPaymentData() {
     payments.push({
       method: item.querySelector('.payment-method').value,
       amount: parseFloat(item.querySelector('.payment-amount').value) || 0,
-      // Read Rate 1 as the preview does (`|| 0`) so a zero-rate method's
-      // auto-filled 0.00 is honored instead of being replaced by the default
-      // rate (which squared the stored exchange rate). See saveReceiptFromModal.
+      // Rate 1 reads as the preview (`|| 0`): see saveReceiptFromModal.
       rate: parseFloat(item.querySelector('.payment-rate1').value) || 0,
       rate2: rate2Value !== '' && rate2Value !== null ? parseFloat(rate2Value) : state.defaultExchangeRate,
       collectionType: item.querySelector('.collection-type').value,
@@ -32098,10 +32061,8 @@ function getReceiptPaymentData() {
   return payments;
 }
 
-// Add new payment split
 function addReceiptPaymentSplit() {
   const currentPayments = getReceiptPaymentData();
-  // BUG FIX: Check if PAYMENT_METHODS array exists and has elements
   if (!Array.isArray(PAYMENT_METHODS) || PAYMENT_METHODS.length === 0) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'طرق الدفع غير معدة' : 'Payment methods not configured', 'error');
     return;
@@ -32116,25 +32077,21 @@ function addReceiptPaymentSplit() {
     deliveryPersonId: '' 
   });
   
-  // Re-render the financial section
   const financialSection = document.getElementById('receipt-financial-section');
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   if (financialSection) {
     financialSection.innerHTML = renderReceiptFinancials(currentPayments, currentPayments, deliveryUsers);
     
-    // Refresh icons and update totals
     if (window.lucide) lucide.createIcons();
     updateReceiptTotals();
     updateAutoSerialForReceipt();
   }
 }
 
-// Remove payment split
 function removeReceiptPaymentSplit(btn) {
   const item = btn.closest('.payment-split-item');
   if (item) {
-    // If it's the last one in a list of > 1, we need to re-render to switch back to compact mode
     const container = document.getElementById('receipt-payments-container');
     const count = container.querySelectorAll('.payment-split-item').length;
     
@@ -32152,7 +32109,6 @@ function removeReceiptPaymentSplit(btn) {
         updateAutoSerialForReceipt();
       }
     } else {
-      // Just remove it normally
       item.remove();
       updateReceiptTotals();
       updateAutoSerialForReceipt();
@@ -32844,13 +32800,10 @@ document.addEventListener('click', (e) => {
 }, true);
 
 // Rate 1 to SHOW for a stored payment row.
-// MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
-// every zero-rate method (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)).
-// The old `payment.rate || state.defaultExchangeRate` treated that 0 as
-// "missing" and re-rendered the market rate, so simply reopening such a receipt
-// (or adding/removing a split row) showed an inflated LYD total — and saving it
-// again REWROTE amountLocal/exchangeRate with money the customer never paid.
-// Only a genuinely absent rate falls back to the default.
+// MONEY-MATH: 0 is a REAL rate: the app fills Rate 1 with 0.00 for every zero-rate method
+// (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)). Reading that 0 as "missing" re-rendered
+// the market rate, so reopening such a receipt showed an inflated LYD total and saving it REWROTE
+// amountLocal/exchangeRate with money never paid. Only a genuinely absent rate uses the default.
 function paymentRate1Value(payment) {
   const r = payment ? payment.rate : undefined;
   if (r === undefined || r === null || r === '') {
@@ -32861,7 +32814,6 @@ function paymentRate1Value(payment) {
   return r;
 }
 
-// Get default Rate 1 based on payment method
 function getDefaultRate1(paymentMethod) {
   const zeroRateMethods = ['Bank Transfer', 'Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Sadad', 'USDT', 'Cash (USD)', 'LTT'];
   const oneRateMethods = ['Cash (LYD)', 'Transfer Office'];
@@ -33073,15 +33025,10 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   updateSerialLockState();
 }
 
-// Round UP to 2 decimal places (credit is granted in the customer's favour).
-// Example: 90.100143062 -> 90.11.
-//
-// MONEY-MATH: it must NOT round up on binary floating-point residue. 291 / 9.7
-// is 30.000000000000004 in JS, so the old Math.ceil(v * 100) turned an exact
-// $30.00 into $30.01 — and the "+0.01 when it has decimals" rule below then
-// made it $30.02, which in turn made the stored exchange rate 291/30.02 = 9.69
-// instead of the 9.70 the user typed. Treat a value that is within a
-// hair of a cent boundary as being ON it, then ceil.
+// Round UP to 2 decimal places (credit is granted in the customer's favour): 90.100143062 -> 90.11.
+// MONEY-MATH: never round up on float residue. 291 / 9.7 is 30.000000000000004 in JS; a plain ceil
+// made an exact $30.00 into $30.01 (then $30.02, rate 9.69 for a typed 9.70). A value within a
+// hair of a cent boundary is ON it, then ceil.
 const MONEY_EPSILON = 1e-6;
 
 // The rate to STORE on a receipt.
@@ -33098,10 +33045,26 @@ function receiptExchangeRate(payments, totalLYD, totalUSD) {
 }
 
 // A delivered receipt with unedited rows keeps its stored money (old driver rows may carry another Rate 2).
-function _keepsStoredMoney(r, payments) {
-  return r?.status === 'Paid' && r.deliveryStatus === 'Delivered' && r.exchangeRate > 0
-    && payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + ''
-      === (r.payments || []).filter(p => p.amount > 0).map(p => [p.method, +p.amount, +p.rate, +p.rate2]) + '';
+// Rows read as the form template fills them: a missing rate (or, in the form, method) is not an edit.
+function _shownRows(rows, inForm) {
+  const n = v => parseFloat(v) || 0;
+  const method = m => { const o = paymentMethodOptions(m); return o.includes(m) ? m : o[0]; };
+  return (rows || []).filter(p => p.amount > 0).map(p => [inForm ? method(p.method) : p.method, +p.amount, n(paymentRate1Value(p)), n(p.rate2 !== undefined ? p.rate2 : state.defaultExchangeRate)]) + '';
+}
+// What the open receipt form's rows were filled with: live sync may move the default rate before the save.
+let _receiptFormRows = null;
+function _fillReceiptFormRows(receiptData) {
+  const rows = getReceiptFormPayments(receiptData);
+  _receiptFormRows = { id: String(receiptData?.id), rows: _shownRows(rows, true) };
+  return rows;
+}
+// `inForm`: the receipt form compares with what it was filled with; the split editor with the stored rows.
+function _rowsAsStored(r, payments, inForm) {
+  const filled = inForm && _receiptFormRows?.id === String(r?.id) ? _receiptFormRows.rows : _shownRows(r?.payments);
+  return payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + '' === filled;
+}
+function _keepsStoredMoney(r, payments, inForm) {
+  return r?.status === 'Paid' && r.deliveryStatus === 'Delivered' && r.exchangeRate > 0 && _rowsAsStored(r, payments, inForm);
 }
 
 // A Not Paid receipt may intentionally have no money rows yet. Keep payments[]
@@ -33277,11 +33240,9 @@ function updateReceiptTotals() {
     let r2Raw = 0;
     if (rate2 > 0) {
       if (usdBasedMethods.includes(paymentMethod)) {
-        // USD-based methods: R2 = R1 / Rate 2
         // BUG FIX: Prevent division by zero
         r2Raw = rate2 > 0 ? (r1 / rate2) : 0;
       } else {
-        // Normal methods: R2 = Amount / Rate 2
         // BUG FIX: Prevent division by zero
         r2Raw = rate2 > 0 ? (amount / rate2) : 0;
       }
@@ -33497,7 +33458,6 @@ async function _saveReceiptFromModalInner() {
     return;
   }
   
-  // Collect all payment splits
   const paymentItems = document.querySelectorAll('.payment-split-item');
   const payments = [];
   const enteredPaymentRows = [];
@@ -33527,8 +33487,6 @@ async function _saveReceiptFromModalInner() {
     }
   });
   
-  // Calculate totals using the same logic as updateReceiptTotals
-  // R1 = amount * rate1, R2 depends on payment method
   const usdBasedMethods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
   
   let totalR1 = 0; // Total PAID (LYD)
@@ -33540,10 +33498,8 @@ async function _saveReceiptFromModalInner() {
     
     if (p.rate2 > 0) {
       if (usdBasedMethods.includes(p.method)) {
-        // USD-based methods: R2 = R1 / Rate 2
         r2 = r1 / p.rate2;
       } else {
-        // Normal methods: R2 = Amount / Rate 2
         r2 = p.amount / p.rate2;
       }
       // Apply ceiling rounding to individual R2 (always round up to 2 decimal places)
@@ -33565,7 +33521,7 @@ async function _saveReceiptFromModalInner() {
   // A single payment keeps the exchange rate exactly as typed (LYD/USD showed 9.69 for
   // 9.70: the credit rounds in the customer's favour); a split keeps the average.
   const status = document.getElementById('receipt-status').value || 'Paid';
-  const _keepMoney = status === 'Paid' && _keepsStoredMoney(editTarget, payments);
+  const _keepMoney = status === 'Paid' && _keepsStoredMoney(editTarget, payments, true);
   const totalLYD = _keepMoney ? +editTarget.amountLocal || 0 : totalR1;
   const totalUSD = _keepMoney ? +editTarget.amountUSD || 0 : totalR2;
   // Not Paid rows are a collection plan for customer debt, not money already
@@ -33912,6 +33868,20 @@ async function _saveReceiptFromModalInner() {
     payments: persistedPayments,
     photos
   };
+  let _keptStoredDebt = false;
+  if (status === 'Not Paid' && _isDeliveredUnpaid(editTarget)) {
+    ['amountUSD', 'amountLocal', 'exchangeRate', 'paymentMethod', 'payments'].forEach(k => {
+      if (editTarget[k] === undefined) delete receipt[k]; else receipt[k] = editTarget[k];
+    });
+    // An older row has no stored plan, so the form rows were seeded from the COLLECTED rows. Left
+    // untouched they are not a new plan: the stored debt stays (it became 300 of 500, the rest vanished).
+    if (!(Array.isArray(editTarget.plannedPayments) && editTarget.plannedPayments.length) && _rowsAsStored(editTarget, payments, true)) {
+      _keptStoredDebt = true;
+      ['debtAmountLocal', 'debtAmountUSD', 'plannedPayments'].forEach(k => {
+        if (editTarget[k] === undefined) delete receipt[k]; else receipt[k] = editTarget[k];
+      });
+    }
+  }
   if (_hideContacts) ['phoneNumber', 'deliveryPlaceName'].forEach(k => { if (!receipt[k]) delete receipt[k]; });
 
   // Customer NAME stamp (never contacts) for roles that cannot load customers, like
@@ -33993,7 +33963,7 @@ async function _saveReceiptFromModalInner() {
     const oldPayments = String(oldReceipt.status || '') === 'Not Paid'
       ? (oldReceipt.plannedPayments || oldReceipt.payments || [])
       : (oldReceipt.payments || []);
-    const newPayments = status === 'Not Paid'
+    const newPayments = _keptStoredDebt ? oldPayments : status === 'Not Paid'
       ? (receipt.plannedPayments || [])
       : (receipt.payments || []);
     if (Security.stableJson(oldPayments) !== Security.stableJson(newPayments)) {  // key order is not a change
@@ -38067,8 +38037,8 @@ function renderModal() {
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
-      // Settle target for the funding hint, in step with getOriginalUnpaidAdBudgetUSD and the save
-      // check: a LIVE debt's budget minus company coverage, a TERMINAL ad's committed total only.
+      // Settle target for the hint, as getOriginalUnpaidAdBudgetUSD and the save check: a LIVE debt's
+      // budget minus company coverage, a TERMINAL ad's committed total only.
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
         : Math.max(Number(adData.amountUSD || 0) - getAdCompanyCoveredUSD(adData), 0);
@@ -38821,7 +38791,7 @@ function renderModal() {
       const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
-      const existingPayments = getReceiptFormPayments(receiptData);
+      const existingPayments = _fillReceiptFormRows(receiptData);
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
@@ -40085,7 +40055,6 @@ function renderModal() {
       renderAdFundingList();
       refreshAdFundingSummary();
       renderAdPhotoPreviews();
-      // Initialize financial details for unpaid flows
       if (initialPaymentStatus !== 'paid') {
         updateAdUnpaidTotals();
       }
@@ -40469,8 +40438,8 @@ function _relinkBaselineUpdates(liveAd, pools) {
   return updates;
 }
 
-// Local mirror of the server's relink/settle history entry: these money moves skip the ordinary edit
-// path (which appends history), so they were missing from the history viewer.
+// Local mirror of the server's relink/settle history entry: these moves skip the ordinary edit path,
+// so they were missing from the history viewer.
 function _relinkHistoryUpdates(liveAd, pools, isSettle) {
   const oldIds = new Set();
   ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
@@ -40843,8 +40812,7 @@ async function handleModalSubmit() {
         if (adChangedUnderOpenForm(state.modalData, liveAd)) throw Object.assign(new Error('Conflict: ad has changed'), { status: 409 });
         if (liveAd) state.modalData = submitData = liveAd;
       }
-      // A terminal/refunded ad still takes a relink or a settle, so "cannot edit" waits for the funding
-      // form: the terminal-ad branch below allows only those ("Ad Finished — use Refund").
+      // A terminal/refunded ad still takes a relink or a settle: "cannot edit" waits for the terminal-ad branch below.
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -40868,7 +40836,6 @@ async function handleModalSubmit() {
       const selectedUnpaidReceiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '').trim();
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
       
-      // Get amount based on payment status
       let amountUSD = 0;
       let collectionPayments = [];
       if (paymentStatus === 'paid') {
@@ -40916,7 +40883,6 @@ async function handleModalSubmit() {
       const endDate = document.getElementById('ad-end-date')?.value;
       const days = parseInt(document.getElementById('ad-days')?.value) || undefined;
       
-      // Get page ID
       const pageId = document.getElementById('ad-page')?.value || '';
       if (!pageId) {
         const modalAd = state.modalData || {};
@@ -40938,7 +40904,6 @@ async function handleModalSubmit() {
         return;
       }
       
-      // Get customer ID from searchable dropdown hidden field
       const customerId = document.getElementById('ad-customer-id')?.value;
       if (!customerId) {
         showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
@@ -40992,7 +40957,6 @@ async function handleModalSubmit() {
           totalAllocated += allocAmount;
         }
 
-        // Validate total allocations make sense (should be > 0)
         if (totalAllocated <= 0 && !coveredSettle) {
           showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'إجمالي مبلغ التخصيص يجب أن يكون أكبر من صفر.' : 'Total allocation amount must be greater than zero.', 'error');
           return;
@@ -41002,8 +40966,8 @@ async function handleModalSubmit() {
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
         const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
-        // A LIVE debt settles its budget minus company coverage. A TERMINAL ad's budget is dead: its paid
-        // funding must equal the COMMITTED total ($1.24 of a stopped $9.00 ad), as getOriginalUnpaidAdBudgetUSD.
+        // A LIVE debt settles its budget minus company coverage; a TERMINAL ad (dead budget) settles its
+        // COMMITTED total ($1.24 of a stopped $9.00 ad), as getOriginalUnpaidAdBudgetUSD.
         const requiredSettleUSD = isTerminalSettle
           ? getAdCommittedFundingTotalUSD(state.modalData)
           : getOriginalUnpaidAdBudgetUSD();
@@ -41082,7 +41046,6 @@ async function handleModalSubmit() {
         allocations = [];
       }
 
-      // Additional validation when not paid
       if (paymentStatus === 'not_paid') {
         if (!collectionMethod) {
           showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء اختيار طريقة تحصيل الدفع.' : 'Please choose how payment will be collected.', 'error');
@@ -41203,7 +41166,6 @@ async function handleModalSubmit() {
             }
           }
           
-          // Create due allocation
           if (dueAmountToUseUSD > 0) {
             dueAllocations.push({
               receiptId: linkedReceiptId,
@@ -41505,11 +41467,9 @@ async function handleModalSubmit() {
       }
 
       if (isEdit) {
-        // Track changes for edit history
         const oldAd = state.modalData;
         const changes = [];
         
-        // Fields to track for changes
         const fieldsToTrack = [
           { key: 'customerId', label: 'Customer', format: (v) => state.customers.find(c => c.id === v)?.name || v },
           { key: 'pageId', label: 'Page', format: (v) => state.pages.find(p => p.id === v)?.name || v },
@@ -41536,7 +41496,6 @@ async function handleModalSubmit() {
           }
         });
         
-        // Track receipt allocations changes
         const oldAllocations = oldAd.receiptAllocations || [];
         const newAllocations = allocations || [];
         if (Security.stableJson(oldAllocations) !== Security.stableJson(newAllocations)) {  // key order is not a change
@@ -41547,7 +41506,6 @@ async function handleModalSubmit() {
           });
         }
         
-        // Track ad links changes
         const oldLinks = oldAd.adLinks || (oldAd.adLink ? [oldAd.adLink] : []);
         const newLinks = adLinkInputs || [];
         if (JSON.stringify(oldLinks) !== JSON.stringify(newLinks)) {
@@ -41602,7 +41560,6 @@ async function handleModalSubmit() {
         showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الإعلان بنجاح' : 'Ad created successfully', 'success');
         addLog('create', 'ad', savedAd.id, `Created ad with ${allocations.length} receipt link(s)`);
         
-        // Log receipt usage for each allocation
         if (isPaid && allocations.length > 0) {
           for (const alloc of allocations) {
             addAuditLog('receipt', alloc.receiptId, `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, { kind: 'usage',
@@ -41615,7 +41572,6 @@ async function handleModalSubmit() {
       }
       
       if (!submitIsCurrent()) return render();
-      // Clear temp state
       state.tempAdFunding = { allocations: [] };
       state.tempAdPhotos = [];
       state.tempAdPrimaryPhotoIndex = 0;
@@ -42020,9 +41976,8 @@ function closeModal() {
   if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
   if (typeof _clothesDraftId !== 'undefined') _clothesDraftId = '';  // the next new Clothes form gets a new id
   
-  // Clear URL params: consume an opener's history entry (albayanModal stamp) with history.back()
-  // (replaceState left a dead hardware-Back press), unless Back already popped it
-  // (_closingSurfaceFromPopstate) or an earlier closeModal's pop is pending (would move the user).
+  // Clear URL params: history.back() consumes an opener's history entry (albayanModal stamp; replaceState left a
+  // dead Back press), unless Back already popped it (_closingSurfaceFromPopstate) or an earlier pop is pending.
   const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
     && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;
@@ -42070,9 +42025,8 @@ function closeModal() {
   }, 50);
 }
 
-// ---- Delete-cascade helpers ----
-// A deleted receipt updates every record referencing it (or money goes wrong); shared by
-// deleteReceipt and deleteCustomer so both clean up the same way.
+// Delete-cascade helpers: a deleted receipt updates every record referencing it (or money goes wrong);
+// deleteReceipt and deleteCustomer share them.
 
 // Remove every funding reference to `receiptId` from visible ads (allocation
 // rows, merged mirror, direct id fields). Returns how many ads were touched.
@@ -42225,18 +42179,16 @@ async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
 }
 
 async function deleteCustomer(id) {
-  // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
   }
   const customer = state.customers.find(c => c.id === id);
   const customerName = customer?.name || 'Unknown';
-  // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
   // Server mode cannot unwind a customer's ads, receipts, transfers and funding links safely through
-  // separate requests: refuse before any change (a cascade endpoint could make it atomic).
+  // separate requests: refuse before any change.
   if (isServerModeEnabled() && (linkedReceipts.length > 0 || linkedAds.length > 0)) {
     showNotification(
       state.language === 'ar' ? 'لا يمكن الحذف' : 'Cannot Delete Customer',
@@ -42304,7 +42256,6 @@ async function deleteCustomer(id) {
 }
 
 async function deletePage(id) {
-  // Permission check
   if (!currentUserHasPermission('pages', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
@@ -42327,7 +42278,6 @@ async function deletePage(id) {
 }
 
 async function deleteReceipt(id) {
-  // Permission check
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
@@ -42335,7 +42285,6 @@ async function deleteReceipt(id) {
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
   const amountUSD = receipt?.amountUSD?.toFixed(2) || '0.00';
-  // Check for linked ads
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
@@ -42402,34 +42351,47 @@ async function deleteReceipt(id) {
 }
 
 async function deleteAd(id) {
-  // Permission check
   const ad = state.ads.find(a => a.id === id);
+  const isAr = state.language === 'ar';
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
+    return;
+  }
+  // The server refuses this (409): a company expense keeps its ad. Cents, as the server compares.
+  if (ad && Math.round(getAdCompanyCoveredUSD(ad) * 100) > 0) {
+    showNotification(isAr ? 'لا يمكن الحذف' : 'Cannot delete', _serverRefusalText('An ad paid from company funds cannot be deleted'), 'warning');
     return;
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
   const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
-  // Say where the money goes: a deleted ad's allocations stop counting against the receipts, so
-  // its funded amount is available again.
+  // Say where the money goes: a deleted ad's allocations stop counting, so its funded amount is free again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
     : 0;
-  let warning = state.language === 'ar'
+  let warning = isAr
     ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}`
     : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}`;
   if (fundedUSD > 0) {
-    warning += state.language === 'ar'
+    warning += isAr
       ? `\n\n↩️ سيعود $${fundedUSD.toFixed(2)} إلى رصيد وصل(وصولات) التمويل.`
       : `\n\n↩️ $${fundedUSD.toFixed(2)} will return to the funding receipt(s) balance.`;
   }
-  warning += state.language === 'ar'
+  // Unpaid In-Shop: the server takes this ad's debt off the open receipt at once (due rows, else the legacy mirror).
+  if (ad?.paymentStatus === 'not_paid' && ad.collectionMethod === 'in_shop' && ad.receiptId) {
+    const rows = (Array.isArray(ad.dueAllocations) ? ad.dueAllocations : []).filter(r => r?.receiptId === ad.receiptId);
+    const dueUSD = rows.length ? _relinkPoolSum(rows) : Number(ad.dueAmountToUseUSD) || 0;
+    if (Math.round(dueUSD * 100) > 0) warning += isAr
+      ? `\n\n↩️ سيُزال دين هذا الإعلان غير المدفوع (حتى $${dueUSD.toFixed(2)}) من وصل العميل المفتوح.`
+      : `\n\n↩️ This ad's unpaid debt (up to $${dueUSD.toFixed(2)}) will be removed from the customer's open receipt.`;
+  }
+  warning += isAr
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
     : `\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     if (!await deleteRecord(state.ads, id)) return;
-    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
+    if (isServerModeEnabled() && typeof serverLiveSyncTick === 'function') serverLiveSyncTick().catch(() => {});  // the shrunken receipt arrives now
+    showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
     render();
   }
 }
@@ -43841,6 +43803,11 @@ async function confirmStopAd(id, source = 'modal') {
       showNotification(isAr ? 'خطأ' : 'Error', isAr ? 'المبلغ المصروف غير صالح.' : 'Spent amount is invalid.', 'error');
       return;
     }
+    // Company money above the real spend goes back to company funds; never re-applied on its own.
+    const companyOnAdUSD = getAdCompanyCoveredUSD(storedAd);
+    if (spentUSD + 0.005 < companyOnAdUSD && !confirm(isAr
+      ? `أموال الشركة المسجّلة على هذا الإعلان $${companyOnAdUSD.toFixed(2)}، والمصروف الذي أدخلته $${spentUSD.toFixed(2)}.\nسيرجع $${(companyOnAdUSD - spentUSD).toFixed(2)} إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟`
+      : `Company funds recorded on this ad: $${companyOnAdUSD.toFixed(2)}. Spend you entered: $${spentUSD.toFixed(2)}.\n$${(companyOnAdUSD - spentUSD).toFixed(2)} will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?`)) return;
     let attempt;
     try {
       // The modal is never re-rendered: send the version it was built from (data-v).
@@ -43919,11 +43886,9 @@ async function confirmStopAd(id, source = 'modal') {
   const newRemainingUSD = adAmountUSD - spentUSD;
   const remainingDifference = newRemainingUSD - previousRemainingUSD;
 
-  // BUG FIX (double-return): the unspent remainder must be apportioned ONCE
-  // across the ad's whole funding pool, not returned in full by each
-  // allocation block against its own smaller total. Compute the pool now
-  // (before any mutation). mergedPaidAllocations mirrors receiptAllocations
-  // for Not Paid + Driver ads, so it is NOT added to the denominator again.
+  // BUG FIX (double-return): apportion the unspent remainder ONCE across the whole funding pool (computed
+  // before any mutation). mergedPaidAllocations mirrors receiptAllocations for Not Paid + Driver ads, so
+  // it is NOT added to the denominator again.
   const _sumAlloc = (arr) => Array.isArray(arr) ? arr.reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0) : 0;
   const _poolPaid = _sumAlloc(ad.receiptAllocations);
   const _poolDue = (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length)
@@ -43935,9 +43900,8 @@ async function confirmStopAd(id, source = 'modal') {
   const returnFraction = _poolTotal > 0 ? Math.min(Math.max(newRemainingUSD, 0) / _poolTotal, 1) : 0;
   const adjustFraction = _poolTotal > 0 ? Math.abs(remainingDifference) / _poolTotal : 0;
 
-  // MONEY-MATH: snapshot the funding proportions at the FIRST stop; a low-spend stop shrinks the
-  // live allocations, so a later stop-edit recomputes each share as ORIGINAL share x (new spent /
-  // original pool) — same as adjust-by-difference normally, still right after a zero-spend stop.
+  // MONEY-MATH: snapshot the funding proportions at the FIRST stop (a low-spend stop shrinks the live
+  // allocations): a stop-edit recomputes each share as ORIGINAL share x (new spent / original pool).
   if (!isEditing && !ad.stopAllocationBaseline) {
     const snap = (arr) => Array.isArray(arr)
       ? arr.map(a => ({ receiptId: a.receiptId, amountUSD: parseFloat(a.amountUSD) || 0 }))
@@ -43988,10 +43952,8 @@ async function confirmStopAd(id, source = 'modal') {
   const _planDue = _planFor(ad.dueAllocations, _baseline ? _baseline.due : []);
   const _planMerged = _planFor(ad.mergedPaidAllocations, _baseline ? _baseline.merged : []);
 
-  // MONEY-MATH: when a stop-edit INCREASES spend, the extra money is re-taken
-  // from the funding receipts — verify each receipt still has that much left
-  // (another ad may have legitimately used the returned funds in the meantime).
-  // Without this check two ads could spend more than a receipt ever contained.
+  // MONEY-MATH: a stop-edit that INCREASES spend re-takes the extra from the funding receipts: check each
+  // still has that much left (another ad may have used it), or two ads could outspend a receipt.
   // Merged entries mirror the paid pool, so validating _planReceipt covers them.
   if (isEditing && remainingDifference < 0) {
     const increaseByReceipt = new Map();
@@ -44065,10 +44027,8 @@ async function confirmStopAd(id, source = 'modal') {
     delete ad.remainingCustomerInformedBy;
   }
 
-  // Apply the planned allocation amounts (+ audit trail per receipt).
-  // MONEY-MATH: zero-amount entries are intentionally KEPT (not filtered out)
-  // so each receipt's identity survives a zero/low-spend stop and a later
-  // stop-edit can re-charge the same receipts in their original proportions.
+  // Apply the planned allocation amounts (+ audit trail per receipt). MONEY-MATH: zero-amount entries are
+  // KEPT so a later stop-edit can re-charge the same receipts in their original proportions.
   const _applyPlan = (plan, poolLabel) => {
     for (const p of plan) {
       const receipt = state.receipts.find(r => r.id === p.alloc.receiptId);
@@ -44199,10 +44159,8 @@ async function deleteUser(id) {
     }
   }
 
-  // Delivery work in flight: active missions go back to the assignment pool;
-  // collected cash not yet handed to the office must be pointed out before
-  // the driver disappears from the per-driver lists.
-  // Receipts AND ads: the server refuses the delete while either points at this driver.
+  // Delivery work in flight: active missions return to the assignment pool; cash not yet handed to the
+  // office is pointed out first. Receipts AND ads: the server refuses the delete while either names this driver.
   const activeMissions = [state.receipts, state.ads || []].flatMap(arr => arr.filter(r => r && !r._deleted
     && String(r.deliveryPersonId || '') === String(id)
     && !['', 'Delivered', 'Canceled', 'Office'].includes(String(r.deliveryStatus || ''))).map(r => [arr, r.id]));
@@ -44273,16 +44231,15 @@ async function updateExchangeRate(value) {
   const rateSaved = await addRecord(state.exchangeRateHistory, record);
   if (!rateSaved) {
     state.defaultExchangeRate = previousRate;
+    deriveDefaultExchangeRateFromHistory();  // a newer rate may have arrived meanwhile: the newest live row wins
     render();
     return;
   }
   showNotification(state.language === 'ar' ? 'تم التحديث' : 'Updated', state.language === 'ar' ? 'تم تحديث سعر الصرف' : 'Exchange rate updated', 'success');
 }
 
-// Start (or move) the liquidity tracking window. Money-critical and
-// deliberately Admin-only: the chosen date decides which cash counts as "new",
-// so nobody below Admin may move it. Append-only like exchangeRateHistory —
-// every change stays in the history as an audit trail.
+// Start (or move) the liquidity tracking window. Money-critical, Admin-only: the date decides which cash
+// counts as "new". Append-only like exchangeRateHistory: every change stays as an audit trail.
 async function updateLiquidityTrackingStart(value) {
   const isAr = state.language === 'ar';
   if (!isCurrentUserAdmin()) {
@@ -44305,10 +44262,8 @@ async function updateLiquidityTrackingStart(value) {
     render();
     return;
   }
-  // No backdating. Historical receipts edited before this build can carry
-  // rewritten collection dates; letting the window reach behind today would
-  // count that old, already-spent money as "new" cash. Tracking is about the
-  // future: it starts today or later. (24h slack absorbs timezone offsets.)
+  // No backdating: old receipts can carry rewritten collection dates, and a window reaching behind today
+  // would count spent money as new cash. Tracking starts today or later (24h slack for timezones).
   if (parsed.getTime() < Date.now() - 24 * 60 * 60 * 1000) {
     showNotification(
       isAr ? 'خطأ في الإدخال' : 'Validation',
@@ -44358,10 +44313,8 @@ function printReceiptCard(btn) {
   const receiptId = card.getAttribute('data-receipt-id') || '';
   card.classList.add('print-target');
   document.body.classList.add('print-single');
-  // Phones re-paginate from the live DOM while the print sheet is open, so
-  // the print marks are re-applied on every beforeprint and torn down only
-  // on the first user interaction (long timer fallback); the marks live in
-  // @media print, so lingering is harmless on screen.
+  // Phones re-paginate from the live DOM while the print sheet is open: re-apply the marks on every
+  // beforeprint, tear down on the first user interaction (long timer fallback); they only act in @media print.
   const applyPrintMarkup = () => {
     if (!card.isConnected && receiptId) {
       const live = document.querySelector('[data-receipt-card="true"][data-receipt-id="' + (window.CSS && CSS.escape ? CSS.escape(receiptId) : receiptId) + '"]');
@@ -44401,10 +44354,8 @@ function printCurrentPage() {
 
 function exportData() {
   const isAr = state.language === 'ar';
-  // Local mode can export its complete local workspace. Server mode can only
-  // export the records currently loaded in this browser; that snapshot may be
-  // stale/permission-scoped and the online restore intentionally cannot write
-  // users, wallet ledger, subscriptions or audit history.
+  // Local mode exports its whole workspace. Server mode exports only the loaded records (maybe stale or
+  // permission-scoped); the online restore cannot write users, wallet ledger, subscriptions or audit history.
   if (!isCurrentUserAdmin()) {
     showNotification(
       state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied',
@@ -44483,10 +44434,8 @@ function exportData() {
   exportState.clothesSettings = filterVisible(exportState.clothesSettings);
   exportState.adCampaignRequests = filterVisible(exportState.adCampaignRequests);
   if (serverPartialSnapshot) {
-    // Orders, shipments and products are one inventory domain. Exporting only
-    // some of it invites an unsafe partial restore, while clothesOrders itself
-    // is server-transaction controlled. Omit the entire domain from server
-    // reports; local-mode full backups remain unchanged.
+    // Orders, shipments and products are one inventory domain (clothesOrders is server-transaction controlled):
+    // a partial export invites an unsafe restore, so server reports omit it all; local backups are unchanged.
     delete exportState.clothesProducts;
     delete exportState.clothesShipments;
     delete exportState.clothesOrders;

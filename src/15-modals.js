@@ -478,8 +478,8 @@ function renderModal() {
         && adData.collectionMethod === 'in_shop'
         && Array.isArray(adData.dueAllocations)
         && adData.dueAllocations.some(row => row && row.receiptId && Number(row.amountUSD) > 0);
-      // Settle target for the funding hint, in step with getOriginalUnpaidAdBudgetUSD and the save
-      // check: a LIVE debt's budget minus company coverage, a TERMINAL ad's committed total only.
+      // Settle target for the hint, as getOriginalUnpaidAdBudgetUSD and the save check: a LIVE debt's
+      // budget minus company coverage, a TERMINAL ad's committed total only.
       const adSettleTargetUSD = adIsTerminalForEdit(adData)
         ? getAdCommittedFundingTotalUSD(adData)
         : Math.max(Number(adData.amountUSD || 0) - getAdCompanyCoveredUSD(adData), 0);
@@ -1232,7 +1232,7 @@ function renderModal() {
       const receiptCustomers = getCustomersVisibleToCurrentUser();
       const receiptData = state.modalData || {};
       const isAdminReceipt = isCurrentUserAdmin();
-      const existingPayments = getReceiptFormPayments(receiptData);
+      const existingPayments = _fillReceiptFormRows(receiptData);
       const receiptDeliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const isArR = state.language === 'ar';
       // Copy (not alias) the live record's photos so add/remove in the modal
@@ -2496,7 +2496,6 @@ function renderModal() {
       renderAdFundingList();
       refreshAdFundingSummary();
       renderAdPhotoPreviews();
-      // Initialize financial details for unpaid flows
       if (initialPaymentStatus !== 'paid') {
         updateAdUnpaidTotals();
       }
@@ -2880,8 +2879,8 @@ function _relinkBaselineUpdates(liveAd, pools) {
   return updates;
 }
 
-// Local mirror of the server's relink/settle history entry: these money moves skip the ordinary edit
-// path (which appends history), so they were missing from the history viewer.
+// Local mirror of the server's relink/settle history entry: these moves skip the ordinary edit path,
+// so they were missing from the history viewer.
 function _relinkHistoryUpdates(liveAd, pools, isSettle) {
   const oldIds = new Set();
   ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
@@ -3254,8 +3253,7 @@ async function handleModalSubmit() {
         if (adChangedUnderOpenForm(state.modalData, liveAd)) throw Object.assign(new Error('Conflict: ad has changed'), { status: 409 });
         if (liveAd) state.modalData = submitData = liveAd;
       }
-      // A terminal/refunded ad still takes a relink or a settle, so "cannot edit" waits for the funding
-      // form: the terminal-ad branch below allows only those ("Ad Finished — use Refund").
+      // A terminal/refunded ad still takes a relink or a settle: "cannot edit" waits for the terminal-ad branch below.
       if (_adPhotoUploadsInFlight > 0) {
         showNotification(
           isArSubAd ? 'جاري تجهيز الصور' : 'Preparing photos',
@@ -3279,7 +3277,6 @@ async function handleModalSubmit() {
       const selectedUnpaidReceiptId = String(document.getElementById('ad-linked-receipt-id')?.value || '').trim();
       const adLinkInputs = Array.from(document.querySelectorAll('.ad-link-input')).map(i => (i.value || '').trim()).filter(Boolean);
       
-      // Get amount based on payment status
       let amountUSD = 0;
       let collectionPayments = [];
       if (paymentStatus === 'paid') {
@@ -3327,7 +3324,6 @@ async function handleModalSubmit() {
       const endDate = document.getElementById('ad-end-date')?.value;
       const days = parseInt(document.getElementById('ad-days')?.value) || undefined;
       
-      // Get page ID
       const pageId = document.getElementById('ad-page')?.value || '';
       if (!pageId) {
         const modalAd = state.modalData || {};
@@ -3349,7 +3345,6 @@ async function handleModalSubmit() {
         return;
       }
       
-      // Get customer ID from searchable dropdown hidden field
       const customerId = document.getElementById('ad-customer-id')?.value;
       if (!customerId) {
         showNotification(isArSubAd ? 'خطأ' : 'Error', isArSubAd ? 'الرجاء اختيار عميل' : 'Please select a customer', 'error');
@@ -3403,7 +3398,6 @@ async function handleModalSubmit() {
           totalAllocated += allocAmount;
         }
 
-        // Validate total allocations make sense (should be > 0)
         if (totalAllocated <= 0 && !coveredSettle) {
           showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'إجمالي مبلغ التخصيص يجب أن يكون أكبر من صفر.' : 'Total allocation amount must be greater than zero.', 'error');
           return;
@@ -3413,8 +3407,8 @@ async function handleModalSubmit() {
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
         const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
-        // A LIVE debt settles its budget minus company coverage. A TERMINAL ad's budget is dead: its paid
-        // funding must equal the COMMITTED total ($1.24 of a stopped $9.00 ad), as getOriginalUnpaidAdBudgetUSD.
+        // A LIVE debt settles its budget minus company coverage; a TERMINAL ad (dead budget) settles its
+        // COMMITTED total ($1.24 of a stopped $9.00 ad), as getOriginalUnpaidAdBudgetUSD.
         const requiredSettleUSD = isTerminalSettle
           ? getAdCommittedFundingTotalUSD(state.modalData)
           : getOriginalUnpaidAdBudgetUSD();
@@ -3493,7 +3487,6 @@ async function handleModalSubmit() {
         allocations = [];
       }
 
-      // Additional validation when not paid
       if (paymentStatus === 'not_paid') {
         if (!collectionMethod) {
           showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'الرجاء اختيار طريقة تحصيل الدفع.' : 'Please choose how payment will be collected.', 'error');
@@ -3614,7 +3607,6 @@ async function handleModalSubmit() {
             }
           }
           
-          // Create due allocation
           if (dueAmountToUseUSD > 0) {
             dueAllocations.push({
               receiptId: linkedReceiptId,
@@ -3916,11 +3908,9 @@ async function handleModalSubmit() {
       }
 
       if (isEdit) {
-        // Track changes for edit history
         const oldAd = state.modalData;
         const changes = [];
         
-        // Fields to track for changes
         const fieldsToTrack = [
           { key: 'customerId', label: 'Customer', format: (v) => state.customers.find(c => c.id === v)?.name || v },
           { key: 'pageId', label: 'Page', format: (v) => state.pages.find(p => p.id === v)?.name || v },
@@ -3947,7 +3937,6 @@ async function handleModalSubmit() {
           }
         });
         
-        // Track receipt allocations changes
         const oldAllocations = oldAd.receiptAllocations || [];
         const newAllocations = allocations || [];
         if (Security.stableJson(oldAllocations) !== Security.stableJson(newAllocations)) {  // key order is not a change
@@ -3958,7 +3947,6 @@ async function handleModalSubmit() {
           });
         }
         
-        // Track ad links changes
         const oldLinks = oldAd.adLinks || (oldAd.adLink ? [oldAd.adLink] : []);
         const newLinks = adLinkInputs || [];
         if (JSON.stringify(oldLinks) !== JSON.stringify(newLinks)) {
@@ -4013,7 +4001,6 @@ async function handleModalSubmit() {
         showNotification(state.language === 'ar' ? 'تمت الإضافة' : 'Success', state.language === 'ar' ? 'تم إنشاء الإعلان بنجاح' : 'Ad created successfully', 'success');
         addLog('create', 'ad', savedAd.id, `Created ad with ${allocations.length} receipt link(s)`);
         
-        // Log receipt usage for each allocation
         if (isPaid && allocations.length > 0) {
           for (const alloc of allocations) {
             addAuditLog('receipt', alloc.receiptId, `Ad ${savedAd.id} allocated $${alloc.amountUSD.toFixed(2)}`, { kind: 'usage',
@@ -4026,7 +4013,6 @@ async function handleModalSubmit() {
       }
       
       if (!submitIsCurrent()) return render();
-      // Clear temp state
       state.tempAdFunding = { allocations: [] };
       state.tempAdPhotos = [];
       state.tempAdPrimaryPhotoIndex = 0;
@@ -4431,9 +4417,8 @@ function closeModal() {
   if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
   if (typeof _clothesDraftId !== 'undefined') _clothesDraftId = '';  // the next new Clothes form gets a new id
   
-  // Clear URL params: consume an opener's history entry (albayanModal stamp) with history.back()
-  // (replaceState left a dead hardware-Back press), unless Back already popped it
-  // (_closingSurfaceFromPopstate) or an earlier closeModal's pop is pending (would move the user).
+  // Clear URL params: history.back() consumes an opener's history entry (albayanModal stamp; replaceState left a
+  // dead Back press), unless Back already popped it (_closingSurfaceFromPopstate) or an earlier pop is pending.
   const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
     && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;
@@ -4481,9 +4466,8 @@ function closeModal() {
   }, 50);
 }
 
-// ---- Delete-cascade helpers ----
-// A deleted receipt updates every record referencing it (or money goes wrong); shared by
-// deleteReceipt and deleteCustomer so both clean up the same way.
+// Delete-cascade helpers: a deleted receipt updates every record referencing it (or money goes wrong);
+// deleteReceipt and deleteCustomer share them.
 
 // Remove every funding reference to `receiptId` from visible ads (allocation
 // rows, merged mirror, direct id fields). Returns how many ads were touched.
@@ -4636,18 +4620,16 @@ async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
 }
 
 async function deleteCustomer(id) {
-  // Permission check
   if (!currentUserHasPermission('customers', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف العملاء' : 'You do not have permission to delete customers', 'error');
     return;
   }
   const customer = state.customers.find(c => c.id === id);
   const customerName = customer?.name || 'Unknown';
-  // Check for linked receipts/ads
   const linkedReceipts = state.receipts.filter(r => r.customerId === id && !r._deleted);
   const linkedAds = state.ads.filter(a => a.customerId === id && !a._deleted);
   // Server mode cannot unwind a customer's ads, receipts, transfers and funding links safely through
-  // separate requests: refuse before any change (a cascade endpoint could make it atomic).
+  // separate requests: refuse before any change.
   if (isServerModeEnabled() && (linkedReceipts.length > 0 || linkedAds.length > 0)) {
     showNotification(
       state.language === 'ar' ? 'لا يمكن الحذف' : 'Cannot Delete Customer',
@@ -4715,7 +4697,6 @@ async function deleteCustomer(id) {
 }
 
 async function deletePage(id) {
-  // Permission check
   if (!currentUserHasPermission('pages', 'delete')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الصفحات' : 'You do not have permission to delete pages', 'error');
     return;
@@ -4738,7 +4719,6 @@ async function deletePage(id) {
 }
 
 async function deleteReceipt(id) {
-  // Permission check
   const receipt = state.receipts.find(r => r.id === id);
   if (!canActOnRecord('receipts', 'delete', receipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الوصولات' : 'You do not have permission to delete this receipt', 'error');
@@ -4746,7 +4726,6 @@ async function deleteReceipt(id) {
   }
   const serialNo = receipt?.serialNumber || receipt?.tempReceiptNo || receipt?.finalReceiptNo || id.slice(0, 8);
   const amountUSD = receipt?.amountUSD?.toFixed(2) || '0.00';
-  // Check for linked ads
   const linkedAds = state.ads.filter(a =>
     (a.receiptId === id || a.linkedDeliveryReceiptId === id || a.fundingReceiptId === id ||
      (Array.isArray(a.receiptAllocations) && a.receiptAllocations.some(alloc => alloc.receiptId === id)) ||
@@ -4813,34 +4792,47 @@ async function deleteReceipt(id) {
 }
 
 async function deleteAd(id) {
-  // Permission check
   const ad = state.ads.find(a => a.id === id);
+  const isAr = state.language === 'ar';
   if (!canActOnRecord('ads', 'delete', ad?.creatorId)) {
-    showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
+    showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا يوجد صلاحية لحذف الإعلانات' : 'You do not have permission to delete this ad', 'error');
+    return;
+  }
+  // The server refuses this (409): a company expense keeps its ad. Cents, as the server compares.
+  if (ad && Math.round(getAdCompanyCoveredUSD(ad) * 100) > 0) {
+    showNotification(isAr ? 'لا يمكن الحذف' : 'Cannot delete', _serverRefusalText('An ad paid from company funds cannot be deleted'), 'warning');
     return;
   }
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
   const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
-  // Say where the money goes: a deleted ad's allocations stop counting against the receipts, so
-  // its funded amount is available again.
+  // Say where the money goes: a deleted ad's allocations stop counting, so its funded amount is free again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
     : 0;
-  let warning = state.language === 'ar'
+  let warning = isAr
     ? `هل أنت متأكد من حذف هذا الإعلان؟\n\nالعميل: ${customerName}\nالمبلغ: $${amountUSD}`
     : `Are you sure you want to delete this ad?\n\nCustomer: ${customerName}\nAmount: $${amountUSD}`;
   if (fundedUSD > 0) {
-    warning += state.language === 'ar'
+    warning += isAr
       ? `\n\n↩️ سيعود $${fundedUSD.toFixed(2)} إلى رصيد وصل(وصولات) التمويل.`
       : `\n\n↩️ $${fundedUSD.toFixed(2)} will return to the funding receipt(s) balance.`;
   }
-  warning += state.language === 'ar'
+  // Unpaid In-Shop: the server takes this ad's debt off the open receipt at once (due rows, else the legacy mirror).
+  if (ad?.paymentStatus === 'not_paid' && ad.collectionMethod === 'in_shop' && ad.receiptId) {
+    const rows = (Array.isArray(ad.dueAllocations) ? ad.dueAllocations : []).filter(r => r?.receiptId === ad.receiptId);
+    const dueUSD = rows.length ? _relinkPoolSum(rows) : Number(ad.dueAmountToUseUSD) || 0;
+    if (Math.round(dueUSD * 100) > 0) warning += isAr
+      ? `\n\n↩️ سيُزال دين هذا الإعلان غير المدفوع (حتى $${dueUSD.toFixed(2)}) من وصل العميل المفتوح.`
+      : `\n\n↩️ This ad's unpaid debt (up to $${dueUSD.toFixed(2)}) will be removed from the customer's open receipt.`;
+  }
+  warning += isAr
     ? `\n\n⚠️ لا يمكن التراجع عن هذا الإجراء!`
     : `\n\n⚠️ This action cannot be undone!`;
   if (confirm(warning)) {
     if (!await deleteRecord(state.ads, id)) return;
-    showNotification(state.language === 'ar' ? 'تم الحذف' : 'Deleted', state.language === 'ar' ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
+    if (isServerModeEnabled() && typeof serverLiveSyncTick === 'function') serverLiveSyncTick().catch(() => {});  // the shrunken receipt arrives now
+    showNotification(isAr ? 'تم الحذف' : 'Deleted', isAr ? 'تم حذف الإعلان' : 'Ad deleted', 'success');
     render();
   }
 }

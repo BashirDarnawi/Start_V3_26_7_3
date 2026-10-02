@@ -117,7 +117,6 @@ function showReceiptPhoneDropdown() {
 function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUsers) {
   const isArF = state.language === 'ar';
   const esc = v => Security.escapeHtml(String(v));  // stored row values land inside attributes
-  // BUG FIX: Check if array exists and has elements before accessing
   if (!Array.isArray(existingPayments) || existingPayments.length === 0) {
     return `<div class="text-xs text-slate-400 p-4">${isArF ? 'لا توجد دفعات معدة' : 'No payments configured'}</div>`;
   }
@@ -126,7 +125,6 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
   
   if (!isSplit) {
     const payment = existingPayments[0];
-    // Single Payment Mode - Compact & Integrated
     return `
       <div id="receipt-payments-container" class="space-y-3">
         <div class="p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm payment-split-item">
@@ -214,7 +212,6 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
       </div>
     `;
   } else {
-    // Split Payment Mode - All Payments First, Then Totals at Bottom
     const paymentCardsHTML = existingPayments.map((payment, idx) => `
       <div class="p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm payment-split-item">
         <div class="flex items-center justify-between mb-3">
@@ -317,7 +314,6 @@ function renderReceiptFinancials(payments, existingPayments, receiptDeliveryUser
   }
 }
 
-// Function to collect current payment data from DOM
 function getReceiptPaymentData() {
   const container = document.getElementById('receipt-payments-container');
   if (!container) return [];
@@ -330,9 +326,7 @@ function getReceiptPaymentData() {
     payments.push({
       method: item.querySelector('.payment-method').value,
       amount: parseFloat(item.querySelector('.payment-amount').value) || 0,
-      // Read Rate 1 as the preview does (`|| 0`) so a zero-rate method's
-      // auto-filled 0.00 is honored instead of being replaced by the default
-      // rate (which squared the stored exchange rate). See saveReceiptFromModal.
+      // Rate 1 reads as the preview (`|| 0`): see saveReceiptFromModal.
       rate: parseFloat(item.querySelector('.payment-rate1').value) || 0,
       rate2: rate2Value !== '' && rate2Value !== null ? parseFloat(rate2Value) : state.defaultExchangeRate,
       collectionType: item.querySelector('.collection-type').value,
@@ -343,10 +337,8 @@ function getReceiptPaymentData() {
   return payments;
 }
 
-// Add new payment split
 function addReceiptPaymentSplit() {
   const currentPayments = getReceiptPaymentData();
-  // BUG FIX: Check if PAYMENT_METHODS array exists and has elements
   if (!Array.isArray(PAYMENT_METHODS) || PAYMENT_METHODS.length === 0) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'طرق الدفع غير معدة' : 'Payment methods not configured', 'error');
     return;
@@ -361,25 +353,21 @@ function addReceiptPaymentSplit() {
     deliveryPersonId: '' 
   });
   
-  // Re-render the financial section
   const financialSection = document.getElementById('receipt-financial-section');
   const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
   
   if (financialSection) {
     financialSection.innerHTML = renderReceiptFinancials(currentPayments, currentPayments, deliveryUsers);
     
-    // Refresh icons and update totals
     if (window.lucide) lucide.createIcons();
     updateReceiptTotals();
     updateAutoSerialForReceipt();
   }
 }
 
-// Remove payment split
 function removeReceiptPaymentSplit(btn) {
   const item = btn.closest('.payment-split-item');
   if (item) {
-    // If it's the last one in a list of > 1, we need to re-render to switch back to compact mode
     const container = document.getElementById('receipt-payments-container');
     const count = container.querySelectorAll('.payment-split-item').length;
     
@@ -397,7 +385,6 @@ function removeReceiptPaymentSplit(btn) {
         updateAutoSerialForReceipt();
       }
     } else {
-      // Just remove it normally
       item.remove();
       updateReceiptTotals();
       updateAutoSerialForReceipt();
@@ -1089,13 +1076,10 @@ document.addEventListener('click', (e) => {
 }, true);
 
 // Rate 1 to SHOW for a stored payment row.
-// MONEY-MATH: 0 is a REAL rate — the app itself fills Rate 1 with 0.00 for
-// every zero-rate method (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)).
-// The old `payment.rate || state.defaultExchangeRate` treated that 0 as
-// "missing" and re-rendered the market rate, so simply reopening such a receipt
-// (or adding/removing a split row) showed an inflated LYD total — and saving it
-// again REWROTE amountLocal/exchangeRate with money the customer never paid.
-// Only a genuinely absent rate falls back to the default.
+// MONEY-MATH: 0 is a REAL rate: the app fills Rate 1 with 0.00 for every zero-rate method
+// (Bank Transfer LYD/USD, Sadad, USDT, LTT, Cash (USD)). Reading that 0 as "missing" re-rendered
+// the market rate, so reopening such a receipt showed an inflated LYD total and saving it REWROTE
+// amountLocal/exchangeRate with money never paid. Only a genuinely absent rate uses the default.
 function paymentRate1Value(payment) {
   const r = payment ? payment.rate : undefined;
   if (r === undefined || r === null || r === '') {
@@ -1106,7 +1090,6 @@ function paymentRate1Value(payment) {
   return r;
 }
 
-// Get default Rate 1 based on payment method
 function getDefaultRate1(paymentMethod) {
   const zeroRateMethods = ['Bank Transfer', 'Bank Transfer (LYD)', 'Bank Transfer (USD)', 'Sadad', 'USDT', 'Cash (USD)', 'LTT'];
   const oneRateMethods = ['Cash (LYD)', 'Transfer Office'];
@@ -1318,15 +1301,10 @@ function syncReceiptSerialWithPaymentMethods({ reissue = false } = {}) {
   updateSerialLockState();
 }
 
-// Round UP to 2 decimal places (credit is granted in the customer's favour).
-// Example: 90.100143062 -> 90.11.
-//
-// MONEY-MATH: it must NOT round up on binary floating-point residue. 291 / 9.7
-// is 30.000000000000004 in JS, so the old Math.ceil(v * 100) turned an exact
-// $30.00 into $30.01 — and the "+0.01 when it has decimals" rule below then
-// made it $30.02, which in turn made the stored exchange rate 291/30.02 = 9.69
-// instead of the 9.70 the user typed. Treat a value that is within a
-// hair of a cent boundary as being ON it, then ceil.
+// Round UP to 2 decimal places (credit is granted in the customer's favour): 90.100143062 -> 90.11.
+// MONEY-MATH: never round up on float residue. 291 / 9.7 is 30.000000000000004 in JS; a plain ceil
+// made an exact $30.00 into $30.01 (then $30.02, rate 9.69 for a typed 9.70). A value within a
+// hair of a cent boundary is ON it, then ceil.
 const MONEY_EPSILON = 1e-6;
 
 // The rate to STORE on a receipt.
@@ -1343,10 +1321,26 @@ function receiptExchangeRate(payments, totalLYD, totalUSD) {
 }
 
 // A delivered receipt with unedited rows keeps its stored money (old driver rows may carry another Rate 2).
-function _keepsStoredMoney(r, payments) {
-  return r?.status === 'Paid' && r.deliveryStatus === 'Delivered' && r.exchangeRate > 0
-    && payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + ''
-      === (r.payments || []).filter(p => p.amount > 0).map(p => [p.method, +p.amount, +p.rate, +p.rate2]) + '';
+// Rows read as the form template fills them: a missing rate (or, in the form, method) is not an edit.
+function _shownRows(rows, inForm) {
+  const n = v => parseFloat(v) || 0;
+  const method = m => { const o = paymentMethodOptions(m); return o.includes(m) ? m : o[0]; };
+  return (rows || []).filter(p => p.amount > 0).map(p => [inForm ? method(p.method) : p.method, +p.amount, n(paymentRate1Value(p)), n(p.rate2 !== undefined ? p.rate2 : state.defaultExchangeRate)]) + '';
+}
+// What the open receipt form's rows were filled with: live sync may move the default rate before the save.
+let _receiptFormRows = null;
+function _fillReceiptFormRows(receiptData) {
+  const rows = getReceiptFormPayments(receiptData);
+  _receiptFormRows = { id: String(receiptData?.id), rows: _shownRows(rows, true) };
+  return rows;
+}
+// `inForm`: the receipt form compares with what it was filled with; the split editor with the stored rows.
+function _rowsAsStored(r, payments, inForm) {
+  const filled = inForm && _receiptFormRows?.id === String(r?.id) ? _receiptFormRows.rows : _shownRows(r?.payments);
+  return payments.map(p => [p.method, p.amount, p.rate, p.rate2]) + '' === filled;
+}
+function _keepsStoredMoney(r, payments, inForm) {
+  return r?.status === 'Paid' && r.deliveryStatus === 'Delivered' && r.exchangeRate > 0 && _rowsAsStored(r, payments, inForm);
 }
 
 // A Not Paid receipt may intentionally have no money rows yet. Keep payments[]
@@ -1522,11 +1516,9 @@ function updateReceiptTotals() {
     let r2Raw = 0;
     if (rate2 > 0) {
       if (usdBasedMethods.includes(paymentMethod)) {
-        // USD-based methods: R2 = R1 / Rate 2
         // BUG FIX: Prevent division by zero
         r2Raw = rate2 > 0 ? (r1 / rate2) : 0;
       } else {
-        // Normal methods: R2 = Amount / Rate 2
         // BUG FIX: Prevent division by zero
         r2Raw = rate2 > 0 ? (amount / rate2) : 0;
       }
@@ -1742,7 +1734,6 @@ async function _saveReceiptFromModalInner() {
     return;
   }
   
-  // Collect all payment splits
   const paymentItems = document.querySelectorAll('.payment-split-item');
   const payments = [];
   const enteredPaymentRows = [];
@@ -1772,8 +1763,6 @@ async function _saveReceiptFromModalInner() {
     }
   });
   
-  // Calculate totals using the same logic as updateReceiptTotals
-  // R1 = amount * rate1, R2 depends on payment method
   const usdBasedMethods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
   
   let totalR1 = 0; // Total PAID (LYD)
@@ -1785,10 +1774,8 @@ async function _saveReceiptFromModalInner() {
     
     if (p.rate2 > 0) {
       if (usdBasedMethods.includes(p.method)) {
-        // USD-based methods: R2 = R1 / Rate 2
         r2 = r1 / p.rate2;
       } else {
-        // Normal methods: R2 = Amount / Rate 2
         r2 = p.amount / p.rate2;
       }
       // Apply ceiling rounding to individual R2 (always round up to 2 decimal places)
@@ -1810,7 +1797,7 @@ async function _saveReceiptFromModalInner() {
   // A single payment keeps the exchange rate exactly as typed (LYD/USD showed 9.69 for
   // 9.70: the credit rounds in the customer's favour); a split keeps the average.
   const status = document.getElementById('receipt-status').value || 'Paid';
-  const _keepMoney = status === 'Paid' && _keepsStoredMoney(editTarget, payments);
+  const _keepMoney = status === 'Paid' && _keepsStoredMoney(editTarget, payments, true);
   const totalLYD = _keepMoney ? +editTarget.amountLocal || 0 : totalR1;
   const totalUSD = _keepMoney ? +editTarget.amountUSD || 0 : totalR2;
   // Not Paid rows are a collection plan for customer debt, not money already
@@ -2157,6 +2144,20 @@ async function _saveReceiptFromModalInner() {
     payments: persistedPayments,
     photos
   };
+  let _keptStoredDebt = false;
+  if (status === 'Not Paid' && _isDeliveredUnpaid(editTarget)) {
+    ['amountUSD', 'amountLocal', 'exchangeRate', 'paymentMethod', 'payments'].forEach(k => {
+      if (editTarget[k] === undefined) delete receipt[k]; else receipt[k] = editTarget[k];
+    });
+    // An older row has no stored plan, so the form rows were seeded from the COLLECTED rows. Left
+    // untouched they are not a new plan: the stored debt stays (it became 300 of 500, the rest vanished).
+    if (!(Array.isArray(editTarget.plannedPayments) && editTarget.plannedPayments.length) && _rowsAsStored(editTarget, payments, true)) {
+      _keptStoredDebt = true;
+      ['debtAmountLocal', 'debtAmountUSD', 'plannedPayments'].forEach(k => {
+        if (editTarget[k] === undefined) delete receipt[k]; else receipt[k] = editTarget[k];
+      });
+    }
+  }
   if (_hideContacts) ['phoneNumber', 'deliveryPlaceName'].forEach(k => { if (!receipt[k]) delete receipt[k]; });
 
   // Customer NAME stamp (never contacts) for roles that cannot load customers, like
@@ -2238,7 +2239,7 @@ async function _saveReceiptFromModalInner() {
     const oldPayments = String(oldReceipt.status || '') === 'Not Paid'
       ? (oldReceipt.plannedPayments || oldReceipt.payments || [])
       : (oldReceipt.payments || []);
-    const newPayments = status === 'Not Paid'
+    const newPayments = _keptStoredDebt ? oldPayments : status === 'Not Paid'
       ? (receipt.plannedPayments || [])
       : (receipt.payments || []);
     if (Security.stableJson(oldPayments) !== Security.stableJson(newPayments)) {  // key order is not a change

@@ -1,6 +1,7 @@
 """Stop/relink financial regressions; isolated local fixtures, never live data."""
 
 import pytest
+from server.company_debt_coverage import company_pool_total_minor
 from sqlalchemy import text
 
 from server import test_receipt_relink as relink
@@ -91,16 +92,18 @@ def test_stop_cannot_leave_more_company_funding_than_real_spend(actors, spent):
     assert result.status_code == 200, result.text
     ad = result.json()["updatedAds"][0]
     result = coverage._stop(aid, spent, tag + "_stop", ad["lastModified"], actors["admin"])
-    if spent < 4000:
-        assert result.status_code == 409, result.text
-        assert "company" in result.text.lower()
-        assert coverage._entity("ads", aid, actors["admin"])["data"] == ad["data"]
-    else:
-        assert result.status_code == 200, result.text
-        saved = result.json()["ad"]["data"]
-        funded = sum(round(row["amountUSD"] * 100) for field in ("receiptAllocations", "dueAllocations", "companyFundingAllocations") for row in saved[field])
-        assert funded == spent
-        assert saved["companyFundingAllocations"] == [{"receiptId": rid, "amountUSD": 40}]
+    # F-cover: the invariant is unchanged (company funding never exceeds real
+    # spend); below 40 it is now kept by RETURNING the extra, not by refusing.
+    assert result.status_code == 200, result.text
+    saved = result.json()["ad"]["data"]
+    funded = sum(round(row["amountUSD"] * 100) for field in ("receiptAllocations", "dueAllocations", "companyFundingAllocations") for row in saved[field])
+    assert funded == spent
+    kept = min(spent, 4000)
+    assert saved["companyFundingAllocations"] == ([{"receiptId": rid, "amountUSD": kept / 100}] if kept else [])
+    covered = coverage._entity("receipts", rid, actors["admin"])["data"]
+    assert round(covered["companyCoveredUSD"] * 100) == kept
+    assert round(covered["customerOutstandingUSD"] * 100) == 10000 - kept
+    assert covered["amountUSD"] == 100
 
 
 def test_restop_insufficient_paid_receipt_rolls_back_all_fields(admin):
@@ -201,13 +204,15 @@ def test_inconsistent_old_settlement_cannot_manufacture_paid_funding():
 
 
 @pytest.mark.parametrize("company_field", ["companyFundingAllocations", "companyDirectCoverageUSD"])
-def test_raw_old_company_funding_is_preserved_when_stop_is_refused(company_field):
+def test_stop_below_company_funding_returns_the_extra_without_touching_its_input(company_field):
     ad = {"status": "Active", "paymentStatus": "not_paid", "collectionMethod": "in_shop",
           "receiptId": "due", "amountUSD": 100, "exchangeRate": 5,
           "receiptAllocations": [], "dueAllocations": [{"receiptId": "due", "amountUSD": 60}]}
     ad[company_field] = ([{"receiptId": "due", "amountUSD": 40}] if company_field == "companyFundingAllocations" else 40)
     raw = json_dumps(ad)
-    with pytest.raises(HTTPException) as error:
-        _financial_apply_stop(ad, 3999)
-    assert error.value.status_code == 409
+    # F-cover: no longer refused. The pure planner hands back a NEW dict whose
+    # company pool equals the real spend; the stored row it was given is intact.
+    plan = _financial_apply_stop(ad, 3999)
+    assert company_pool_total_minor(plan) == 3999
+    assert plan["dueAllocations"] == [] and plan["spentUSD"] == 39.99
     assert json_dumps(ad) == raw

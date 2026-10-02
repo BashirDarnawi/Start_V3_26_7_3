@@ -43,9 +43,8 @@ function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
 }
 
 // ---- CREATOR NAME RESOLUTION (survives user deletion) ----
-// Deleted accounts stop syncing (/api/users filters them): records showed "Created by: Unknown".
-// Order: live state.users, the server tombstone directory (id -> name), the record's createdByName.
-// Anonymized accounts return as "Deleted user" with stamps scrubbed, so an erasure never comes back.
+// Deleted accounts stop syncing, so records showed "Created by: Unknown". Order: live state.users,
+// the server tombstone directory, the record's createdByName. Anonymized accounts stay "Deleted user".
 function getKnownUserNameById(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return '';
@@ -244,10 +243,9 @@ function _localLegacyDueMinor(ad) {
   return _localFundingMinor(lyd / rate);
 }
 
-// Legacy debt rows kept the promise in dueAmountToUseUSD/LYD, not dueAllocations. Its receipt:
-// a Driver ad's linkedDeliveryReceiptId (the oldest rows: receiptId), an In-Shop ad's receiptId.
-// Settlement and the ad form honor the receiptId fallback, so the balance readers do too.
-// A zero-amount link is provenance only, never money.
+// Legacy debt rows kept the promise in dueAmountToUseUSD/LYD. Its receipt: a Driver ad's
+// linkedDeliveryReceiptId (oldest rows: receiptId), an In-Shop ad's receiptId; balance readers honor
+// that fallback like settlement does. A zero-amount link is provenance only, never money.
 function isAdLegacyDueMirrorForReceipt(ad, receiptId) {
   const rid = String(receiptId || '');
   if (!ad || !rid) return false;
@@ -1146,9 +1144,9 @@ function getRecordType(record) {
   return 'Record';
 }
 
-// ==========================================
+// ====
 // AUDIT LOGGING
-// ==========================================
+// ====
 
 function redactSensitive(obj, depth = 0) {
   if (depth > 12) return null;
@@ -1184,7 +1182,6 @@ function redactSensitive(obj, depth = 0) {
 }
 
 function addAuditLog(action, resourceId, description, metadata = {}) {
-  // Determine severity level based on action type
   const severityMap = {
     'create': 'info',
     'update': 'info',
@@ -1198,7 +1195,6 @@ function addAuditLog(action, resourceId, description, metadata = {}) {
     'security': 'critical'
   };
   
-  // Determine category based on action and metadata
   const categoryMap = {
     'create': 'data',
     'update': 'data',
@@ -1234,15 +1230,14 @@ function addAuditLog(action, resourceId, description, metadata = {}) {
     _archived: false
   };
   
-  // Add to beginning of logs array (newest first)
+  // Newest first
   state.logs.unshift(log);
   
-  // Initialize session ID if not exists
   if (!state.sessionId) {
     state.sessionId = generateId('session');
   }
   
-  // Save to IndexedDB for persistent storage (async, fire-and-forget)
+  // IndexedDB (fire-and-forget)
   if (db) {
     saveLogToIndexedDB(log).catch(e => console.warn('IndexedDB save failed:', e));
   }
@@ -1401,9 +1396,8 @@ function buildReceiptUsageAdIndex(ads = state.ads) {
   return index;
 }
 
-// Compute usage stats for a receipt based on ads funded by this receipt
+// Usage stats of a receipt from the ads it funds
 function getReceiptUsageStats(receipt, adsByReceiptId = null) {
-  // Handle both receipt object and receipt ID
   const receiptObj = typeof receipt === 'string'
     ? (state.receipts || []).find(r => r.id === receipt)
     : receipt;
@@ -1420,7 +1414,6 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
     };
   }
 
-  // Use consistent ID for all comparisons
   const receiptId = String(receiptObj.id || '');
 
   // Ads funded from this receipt: receiptAllocations AND dueAllocations (delivery receipts that
@@ -1442,12 +1435,12 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   // Used = receiptAllocations + dueAllocations: after Delivered, ads drawing its due amount
   // still use the receipt's funds.
   const usedUSD = fundedAds.reduce((sum, ad) => {
-    // Check receiptAllocations first (normal paid receipt usage)
+    // Paid rows
     const receiptAllocSum = Array.isArray(ad.receiptAllocations)
       ? ad.receiptAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
 
-    // Check dueAllocations (delivery receipt due amount usage - critical for when receipt becomes Paid)
+    // Due rows (still used once the receipt becomes Paid)
     const dueAllocSum = Array.isArray(ad.dueAllocations)
       ? ad.dueAllocations.filter(a => String(a.receiptId || '') === receiptId).reduce((s, a) => s + (parseFloat(a.amountUSD) || 0), 0)
       : 0;
@@ -1468,16 +1461,14 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       ? getAdLegacyDueMirrorUSD(ad, receiptId, receiptObj.exchangeRate)
       : 0;
 
-    // Use explicit allocations if available, otherwise fall back to ad spend
     const explicitAllocations = receiptAllocSum + dueAllocSum + legacyDueUsage + companyAllocSum;
     if (explicitAllocations > 0) {
       return sum + explicitAllocations;
     }
 
-    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY for legacy ads with no allocation
-    // arrays at all. Present-but-empty arrays (funding receipt deleted) or rows pointing at
-    // OTHER receipts mean this receipt funded nothing; charging the full spend would count
-    // the same dollars on two receipts at once.
+    // MONEY-MATH: fall back to spentUSD/amountUSD ONLY for legacy ads with no allocation arrays at all.
+    // Present-but-empty arrays (funding receipt deleted) or rows on OTHER receipts mean this receipt
+    // funded nothing; charging the full spend would count the same dollars on two receipts.
     const hasAllocationData =
       Array.isArray(ad.receiptAllocations) ||
       Array.isArray(ad.dueAllocations) ||
@@ -1496,7 +1487,6 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       return sum;
     }
 
-    // Fall back to spentUSD or amountUSD only if no explicit allocations
     const spend = ad.spentUSD ?? ad.amountUSD ?? 0;
     return sum + spend;
   }, 0);
@@ -1656,9 +1646,11 @@ const _SERVER_REFUSAL_AR = [
   [/^Financial period (\S+) is being closed.*/, 'الشهر $1 قيد الإقفال أو الفتح الآن؛ أعد المحاولة بعد لحظات.'],
   [/^Financial period (\S+) is closed.*/, 'الشهر $1 مُقفل مالياً؛ اطلب من المدير فتحه قبل التعديل.'],
   [/^(Receipt number|serialNumber|\w+ReceiptNo) already exists/, 'رقم الوصل هذا مسجّل لوصل آخر. تأكد من الرقم ثم أعد المحاولة.', 'This receipt number is already used by another receipt. Check the number and try again.'],
-  ['Final spend cannot be less than recorded company funding', 'المصروف النهائي لا يمكن أن يقل عن المبلغ الذي غطّته الشركة لهذا الإعلان. عدّل تغطية الشركة أولاً.'],
+  ['The ad budget cannot go below the company funds already recorded on it', 'لا يمكن إنزال ميزانية الإعلان تحت المبلغ الذي غطّته الشركة له. أوقف الإعلان على مصروفه الحقيقي، وسيرجع الزائد إلى أموال الشركة.', 'The ad budget cannot go below the company money already recorded on it. Stop the ad at its real spend instead; the extra goes back to company funds.'],
+  ['Company money on this ad cannot be returned automatically', 'لا يمكن إرجاع أموال الشركة عن هذا الإعلان تلقائياً لأنها مسجّلة على وصل ما زال غير مدفوع. سدّد ذلك الوصل أولاً، أو أبقِ المصروف مساوياً لمبلغ الشركة أو أعلى منه.'],
   ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.'],
   [/^Receipt (\S+ )?cannot be deleted while linked to .*/, 'هذا الوصل مرتبط بتمويل إعلان أو بتحويل، فلا يمكن حذفه. حرّر هذه الارتباطات أولاً.', 'This receipt is linked to ad funding or a transfer, so it cannot be deleted. Release those links first.'],
+  ['An ad paid from company funds cannot be deleted', 'هذا الإعلان مدفوع من أموال الشركة، لذلك لا يمكن حذفه. أوقفه بدلاً من ذلك.', 'This ad was paid from company funds, so it cannot be deleted. Stop it instead.'],
   ['Customer cannot be deleted while linked records exist', 'لا يمكن حذف العميل لوجود وصولات أو إعلانات مرتبطة به.'],
   ['At least one valid phone number is required', 'رقم هاتف صحيح واحد على الأقل مطلوب (من 7 إلى 15 رقماً).', 'At least one valid phone number is required (7 to 15 digits).'],
   ['This phone number is already linked to another customer', 'رقم الهاتف هذا مسجّل لعميل آخر؛ ابحث عنه واستخدم العميل الموجود.'],
@@ -1795,21 +1787,12 @@ function formatDateShort(date) {
   }
 }
 
-/**
- * Get the effective exchange rate for an ad.
- * Priority order:
- * 1. Linked delivery receipt's exchange rate (if ad is linked to delivery receipt)
- * 2. Weighted average from receipt allocations (if ad has multiple funding receipts)
- * 3. Single funding receipt's exchange rate
- * 4. Ad's own exchange rate
- * 5. Default exchange rate from state
- *
- * This ensures consistent exchange rate calculations across the application.
- */
+/** The ad's effective exchange rate, the same everywhere. Priority: linked delivery receipt's rate; weighted
+ * average of its receipt allocations; single funding receipt's rate; the ad's own rate; the state default. */
 function getEffectiveExchangeRate(ad) {
   if (!ad) return state.defaultExchangeRate || 1;
 
-  // 1. For delivery-linked ads, use the linked receipt's rate
+  // 1. Linked delivery receipt's rate
   if (ad.linkedDeliveryReceiptId) {
     const linkedReceipt = state.receipts.find(r => r.id === ad.linkedDeliveryReceiptId);
     if (linkedReceipt?.exchangeRate) {
@@ -1817,7 +1800,7 @@ function getEffectiveExchangeRate(ad) {
     }
   }
 
-  // 2. Weighted average from receipt allocations (based on amount allocated)
+  // 2. Weighted average of receipt allocations
   if (Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length > 0) {
     let totalAmount = 0;
     let weightedSum = 0;
@@ -1838,7 +1821,7 @@ function getEffectiveExchangeRate(ad) {
     }
   }
 
-  // 3. Also check dueAllocations for delivery receipt funding
+  // 3. dueAllocations
   if (Array.isArray(ad.dueAllocations) && ad.dueAllocations.length > 0) {
     let totalAmount = 0;
     let weightedSum = 0;

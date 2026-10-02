@@ -692,6 +692,99 @@ async function main() {
     await f.tick();
     assert.equal(f.server.loads.ads, 5, 'a new session replaces at once');
   });
+  // Owner-approved 2026-10-02 (F-rate): live sync stored a new rate row but never moved
+  // state.defaultExchangeRate, so an open device kept pre-filling the old rate on new receipts until it
+  // was restarted. The newest live row now sets it after a rate delta, exactly as on a full load; both
+  // skip deleted rows (tombstones stay in the array) and refuse a rate that is not a number above zero.
+  const rateRow = (id, rate, minute, extra = {}) => ({ id, rate, date: `2026-10-02T09:${String(minute).padStart(2, '0')}:00.000Z`, userId: 'admin', _lastModified: 1000 + minute, ...extra });
+  function rateSyncFixture() {
+    const f = syncFixture(); const renders = []; const server = { rates: [] };
+    const employee = { id: 'emp1', name: 'Employee', role: 'Employee', permissions: {} };
+    f.state.currentUser = employee; f.state.users = [employee];
+    f.state.exchangeRateHistory = [rateRow('rate_old', 5, 0)]; f.state.defaultExchangeRate = 5;
+    f.sandbox.__renders = renders;
+    f.run('RenderQueue.schedule = reason => { globalThis.__renders.push(reason); };');
+    f.sandbox.apiLoadCollectionSince = async name => (name === 'exchangeRateHistory' ? server.rates.splice(0) : []);
+    const tick = async () => assert.equal((await f.sandbox.serverLiveSyncOnce()).ok, true);
+    return { ...f, renders, server, tick };
+  }
+  await test('F-rate: a rate saved on another device becomes the default rate of an already-open device on its next poll', async () => {
+    const f = rateSyncFixture();
+    f.server.rates = [rateRow('rate_new', 5.5, 5)];
+    await f.tick();
+    assert.deepEqual(Array.from(f.state.exchangeRateHistory, row => row.id), ['rate_new', 'rate_old']);
+    assert.equal(f.state.defaultExchangeRate, 5.5, 'before: new receipts kept pre-filling 5.00 until a restart');
+    assert.deepEqual(f.renders, ['liveSync(delta)'], 'Settings is redrawn with the new rate');
+    // An older row that arrives late changes the history, not the rate: the newest date wins.
+    f.server.rates = [rateRow('rate_late', 5.2, 3)];
+    await f.tick();
+    assert.equal(f.state.exchangeRateHistory.length, 3);
+    assert.equal(f.state.defaultExchangeRate, 5.5);
+    // Only a rate delta re-reads the history: a quiet poll leaves the rate in use alone.
+    f.state.defaultExchangeRate = 7;
+    await f.tick();
+    assert.equal(f.state.defaultExchangeRate, 7);
+  });
+  await test('F-rate: a deleted or unusable rate row never sets the default rate on a poll: the newest live row does', async () => {
+    const f = rateSyncFixture();
+    f.server.rates = [rateRow('rate_new', 5.5, 5), rateRow('rate_gone', 6, 9, { _deleted: true })];
+    await f.tick();
+    assert.equal(f.state.exchangeRateHistory.length, 3, 'the tombstone stays in the array');
+    assert.equal(f.state.defaultExchangeRate, 5.5, 'before: 5.00 stayed; the deleted 6.00 must never be taken');
+    // The newest row is deleted afterwards: the rate goes back to the newest row that is still live.
+    f.server.rates = [rateRow('rate_new', 5.5, 5, { _deleted: true, _lastModified: 2000 })];
+    await f.tick();
+    assert.equal(f.state.defaultExchangeRate, 5);
+    // A newest row whose rate is not a number above zero is refused: the rate in use stays.
+    for (const [minute, bad] of [[30, 0], [31, -5.5], [32, 'abc']]) {
+      f.server.rates = [rateRow(`rate_bad_${minute}`, bad, minute)];
+      await f.tick();
+      assert.equal(f.state.defaultExchangeRate, 5, `a rate of ${bad} was taken`);
+    }
+    assert.equal(f.state.exchangeRateHistory.length, 6);
+  });
+  await test('F-rate: a full load follows the same rule: the newest live row wins, a deleted row is skipped, a rate that is not above zero is refused', async () => {
+    // The default Admin fixture: an account that may manage rates receives deleted rows in a full load.
+    const load = async rows => {
+      const f = loadBrowserSource();
+      f.sandbox.isServerModeEnabled = () => true;
+      f.sandbox.apiGetSyncWatermarks = async () => null;
+      f.sandbox.apiLoadCollectionAll = async name => (name === 'exchangeRateHistory' ? rows : []);
+      f.sandbox.apiListUsersForUi = async () => [f.state.currentUser];
+      f.sandbox.queueNativeReminderSync = () => {};
+      assert.deepEqual(plain(await f.sandbox.serverLoadAllData()), { failed: [], forbidden: [] });
+      return f.state.defaultExchangeRate;  // 5 before the load (load-browser-source)
+    };
+    assert.equal(await load([rateRow('rate_old', 5, 0), rateRow('rate_new', 5.5, 5)]), 5.5);
+    assert.equal(await load([rateRow('rate_gone', 6, 9, { _deleted: true }), rateRow('rate_new', 5.5, 5)]), 5.5, 'before: the deleted 6.00 became the rate');
+    // A refused rate leaves the rate in use untouched: there is no fallback to an older row.
+    for (const bad of [0, -5.5]) assert.equal(await load([rateRow('rate_bad', bad, 9), rateRow('rate_new', 5.5, 5)]), 5, `before: ${bad} became the rate`);
+    assert.equal(await load([]), 5, 'no rate row: the rate in use stays');
+  });
+  await test('F-rate: a failed own rate save puts back the newest live rate, not a stale one, when another device\'s rate arrived meanwhile', async () => {
+    const f = rateSyncFixture();
+    f.state.currentUser = { id: 'admin', name: 'Admin', role: 'Admin', permissions: {} }; f.state.users = [f.state.currentUser];
+    f.sandbox.render = () => {}; f.sandbox.showNotification = () => {};
+    // While the create is in flight a poll delivers another device's 5.50; then the create fails (its local row is gone).
+    f.sandbox.addRecord = async () => { f.state.exchangeRateHistory.unshift(rateRow('rate_other', 5.5, 5)); return false; };
+    await f.sandbox.updateExchangeRate('5.6');
+    assert.equal(f.state.defaultExchangeRate, 5.5, 'before: the stale 5.00 was put back');
+    // Nothing newer arrived: the rate in use before the failed save is back.
+    f.sandbox.addRecord = async () => false;
+    await f.sandbox.updateExchangeRate('5.9');
+    assert.equal(f.state.defaultExchangeRate, 5.5);
+  });
+  await test('F-rate: the full-history compatibility refresh also moves the default rate to the newest live row', async () => {
+    const f = loadBrowserSource();
+    f.sandbox.isServerModeEnabled = () => true;
+    f.state.exchangeRateHistory = [rateRow('rate_old', 5, 0)]; f.state.defaultExchangeRate = 5;
+    f.sandbox.apiGetSyncWatermarks = async () => ({ dataCompatibilityVersion: 7 });
+    f.sandbox.apiLoadCollectionSince = async name => (name === 'exchangeRateHistory' ? [rateRow('rate_old', 5, 0), rateRow('rate_new', 5.5, 5)] : []);
+    f.sandbox.render = () => {};
+    await f.sandbox.refreshServerDataCompatibility();
+    assert.equal(f.state.exchangeRateHistory.length, 2);
+    assert.equal(f.state.defaultExchangeRate, 5.5, 'before: 5.00 stayed until the next rate delta or full load');
+  });
   console.log(`\n${passed} sync/persistence work regressions passed; ${failed} failed.`);
   if (failed) process.exitCode = 1;
 }

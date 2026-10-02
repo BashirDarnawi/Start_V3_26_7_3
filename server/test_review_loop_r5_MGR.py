@@ -100,10 +100,14 @@ def test_n13_n14_n17_server_refusals_the_manager_translates_still_match_its_rule
     details = [closed.group(1).replace("{period}", period), busy.group(1).replace("{period}", period)]
     for text in ("serialNumber already exists", "finalReceiptNo already exists", "tempReceiptNo already exists",
                  "Receipt number already exists",
-                 "Final spend cannot be less than recorded company funding; reconcile company coverage separately first",
                  "Spent amount exceeds the ad's funding baseline"):
         assert f'"{text}"' in main_src, f"server text changed: {text}"
         details.append(text)
+    # F-cover: a stop below company funding is no longer refused; the budget
+    # refusal that replaced it lives with the coverage rules.
+    from server.company_debt_coverage import BUDGET_BELOW_COMPANY_FUNDS_REFUSAL
+    assert "Final spend cannot be less than recorded company funding" not in main_src
+    details.append(BUDGET_BELOW_COMPANY_FUNDS_REFUSAL)
     missing = [detail for detail in details if not _translated(detail, rules)]
     assert not missing, missing
     # The two closed-month texts must hit DIFFERENT rules (closed vs. busy retry).

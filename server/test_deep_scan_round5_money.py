@@ -146,13 +146,16 @@ def test_deleting_a_canceled_covered_receipt_keeps_the_company_money_on_the_ad(a
     assert _cover(rid, 3000, f"r5c-cover-{TAG}", admin).status_code == 200
     assert _patch("receipts", rid, {"status": "Canceled"}, admin).status_code == 200
     before = _entity("ads", aid, admin)["data"]
-    assert coverable_ad_debt_detail(before) == ("coverable", 7000)
+    # F-cover: a running ad offers nothing; the SAME ad finished offers its 70.
+    assert coverable_ad_debt_detail(before) == ("ad_active_has_not_finished_spending", 0)
+    assert coverable_ad_debt_detail({**before, "status": "Completed"}) == ("coverable", 7000)
     deleted = client.delete(f"/api/collections/receipts/{rid}", cookies=admin)
     assert deleted.status_code == 200, deleted.text
     after = _entity("ads", aid, admin)["data"]
     assert after.get("companyFundingAllocations") in ([], None)
     assert round(float(after.get("companyDirectCoverageUSD") or 0) * 100) == 3000   # moved, not lost
-    assert coverable_ad_debt_detail(after) == ("coverable", 7000)                     # not offered twice
+    assert coverable_ad_debt_detail(after) == ("ad_active_has_not_finished_spending", 0)
+    assert coverable_ad_debt_detail({**after, "status": "Completed"}) == ("coverable", 7000)   # not offered twice
 
 
 def test_office_settle_of_a_covered_receipt_still_nets_the_covered_share(admin):

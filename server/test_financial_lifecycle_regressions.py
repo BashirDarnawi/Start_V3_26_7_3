@@ -11,6 +11,8 @@ from server.main import _financial_apply_refund, _financial_apply_stop, _financi
 from server.company_debt_coverage import plan_company_debt_coverage
 from server.settlement_truth import apply_coverage_settlement_truth
 from server.main import _financial_due_total
+from server.db import db_conn, json_loads
+from sqlalchemy import text
 
 
 @pytest.fixture(scope="module")
@@ -151,16 +153,30 @@ def test_coverage_still_reserves_unpaid_capacity(actors):
     assert result.status_code == 409, result.text
 
 
-@pytest.mark.parametrize("refund_type,amount", [("Full", 100), ("Partial", 61)])
-def test_refund_cannot_erase_committed_company_money(actors, refund_type, amount):
-    tag = "lifecycle_company_refund_" + refund_type
+@pytest.mark.parametrize("refund_type,amount,kept", [("Full", 100, 0), ("Partial", 61, 39), ("Partial", 60, 40)])
+def test_refund_books_returned_company_money_instead_of_erasing_it(actors, refund_type, amount, kept):
+    """F-cover: a refund past the customer's share used to be refused (409)
+    because nothing could book the company money it returned. It now returns
+    exactly the cents above the remaining spend and books them."""
+    tag = f"lifecycle_company_refund_{refund_type}_{amount}"
     cid, rid, aid, receipt, ad = _setup(tag, actors)
     result = t._cover(rid, 4000, tag + "_cover", receipt["lastModified"], actors["admin"])
     assert result.status_code == 200, result.text
     ad = result.json()["updatedAds"][0]
     result = _update(ad, {"refundType": refund_type, "refundAmount": amount}, tag + "_refund", actors)
-    assert result.status_code == 409, result.text
-    assert t._entity("ads", aid, actors["admin"])["data"] == ad["data"]
+    assert result.status_code == 200, result.text
+    saved = result.json()["ad"]["data"]
+    assert saved["spentUSD"] == 100 - amount
+    assert _funded_minor(saved) == round(saved["spentUSD"] * 100) == kept * 100   # never more company money than real spend
+    assert saved["dueAllocations"] == []
+    covered = t._entity("receipts", rid, actors["admin"])["data"]
+    assert covered["companyCoveredUSD"] == kept and covered["customerOutstandingUSD"] == 200 - kept
+    assert covered["amountUSD"] == 200
+    with db_conn() as conn:
+        rows = [json_loads(r["data_json"]) for r in conn.execute(text(
+            "SELECT data_json FROM entities WHERE type='receiptCompanyCoverages'")).mappings().all()]
+    released = [r["amountMinorUSD"] for r in rows if r.get("adId") == aid and r.get("entryType") == "release"]
+    assert released == ([-(40 - kept) * 100] if kept < 40 else [])
 
 
 @pytest.mark.parametrize("settle", [False, True])

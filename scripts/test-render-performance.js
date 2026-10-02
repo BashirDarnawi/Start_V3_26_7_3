@@ -410,7 +410,9 @@ function coverableDebtFixture() {
   f.state.ads = [];
   f.state.receipts = [];
   f.state.customers.forEach(({ id }, i) => {
-    const ad = (suffix, fields) => f.state.ads.push({ id: `${id}_${suffix}`, customerId: id, status: 'Active',
+    // 'Completed' with no spentUSD reads its budget as spend, so every amount below is unchanged
+    // (F-cover: only a finished ad is offered; the running one at the end must stay out).
+    const ad = (suffix, fields) => f.state.ads.push({ id: `${id}_${suffix}`, customerId: id, status: 'Completed',
       paymentStatus: 'not_paid', exchangeRate: 5, createdAt: '2026-01-01', ...fields });
     f.state.receipts.push({ id: `${id}_open`, customerId: id, status: 'Not Paid', isPaid: false, amountUSD: 7, exchangeRate: 5 },
       { id: `${id}_paid`, customerId: id, status: 'Paid', isPaid: true, amountUSD: 3, exchangeRate: 5 });
@@ -426,11 +428,12 @@ function coverableDebtFixture() {
     ad('gone', { collectionMethod: 'in_shop', amountUSD: 99, receiptAllocations: [], _deleted: true });
     ad('mirror', { recordType: 'receipt', amountUSD: 99 });
     ad('paid', { collectionMethod: 'in_shop', paymentStatus: 'paid', amountUSD: 99, receiptAllocations: [] });
+    ad('running', { collectionMethod: 'in_shop', status: 'Active', amountUSD: 77, receiptAllocations: [], dueAllocations: [] });
   });
   // A deleted settled copy listed first is skipped, and of two live rows with one id the first decides.
   f.state.receipts.unshift({ id: 'c3_open', customerId: 'c3', status: 'Paid', isPaid: true, _deleted: true },
     { id: 'c4_paid', customerId: 'c4', status: 'Not Paid', isPaid: false });
-  f.state.ads.push({ id: 'no_customer', status: 'Active', paymentStatus: 'not_paid', collectionMethod: 'in_shop', amountUSD: 8, receiptAllocations: [] });
+  f.state.ads.push({ id: 'no_customer', status: 'Completed', paymentStatus: 'not_paid', collectionMethod: 'in_shop', amountUSD: 8, receiptAllocations: [] });
   return f;
 }
 
@@ -446,6 +449,7 @@ test('R5 performance-phone-5: Admin customer cards reuse the render index for co
   assert.equal(sandbox.getCustomerCoverableAdDebt('c4', index).ads.some(row => row.ad.id === 'c4_drv_paid'), false, 'the first c4_paid row is unpaid');
   assert.equal(sandbox.getCustomerCoverableAdDebt('', index).totalUSD, 8, 'an empty id still finds ads without a customer');
   assert.ok(sandbox.getCustomerCoverableAdDebt('c1', index).totalUSD > 0);
+  assert.equal(sandbox.getCustomerCoverableAdDebt('c1', index).ads.some(row => row.ad.id === 'c1_running'), false, 'a running ad is never offered');
   const read = sandbox.getVisibleRecords;
   const reads = { ads: 0, receipts: 0 };
   sandbox.getVisibleRecords = list => {

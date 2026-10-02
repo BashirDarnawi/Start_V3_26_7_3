@@ -1701,7 +1701,8 @@ async function main() {
     const busy = sandbox._serverRefusalText('Financial period 2026-08 is being closed or unlocked; retry after it finishes');
     assert.ok(busy.includes('2026-08') && !/[A-Za-z]/.test(busy), busy);
     for (const message of ['serialNumber already exists', 'Receipt number already exists', 'finalReceiptNo already exists', 'tempReceiptNo already exists',
-      'Final spend cannot be less than recorded company funding; reconcile company coverage separately first', "Spent amount exceeds the ad's funding baseline"]) {
+      'The ad budget cannot go below the company funds already recorded on it; stop the ad at its real spend instead', "Spent amount exceeds the ad's funding baseline",
+      'Company money on this ad cannot be returned automatically: it sits on a receipt that is still unpaid. Settle that receipt first, or keep the spend at or above the company amount']) {
       const text = sandbox.describe409({ status: 409, message }, 'x');
       assert.ok(!/[A-Za-z]/.test(text), text);
     }
@@ -5475,6 +5476,70 @@ async function main() {
     assert.equal(asked.length, 0);
     assert.equal(calls.length, 2);
   });
+  // F-bundle (owner-approved money rule, 2 October 2026): "Add a bundle" turned an empty or unreadable price
+  // into a 0 LYD "best value" bundle without a word; once saved, customers got every included system for free.
+  await test('F-bundle: "Add a bundle" with an empty, unreadable or negative price adds nothing and says "Enter the bundle price" (Arabic too); a free bundle is added only after a yes; a typed 150 is added as 150.00 LYD "best value"', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['admin-tools.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    run(realEscape);
+    sandbox.isServerModeEnabled = () => true;
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => { notes.push({ title, message, type }); };
+    let renders = 0;
+    sandbox.render = () => { renders += 1; };
+    const asked = [];
+    let answer = false;
+    sandbox.window.confirm = text => { asked.push(String(text)); return answer; };
+    // The add-bundle boxes, all filled in but the price; two systems are ticked.
+    const boxes = { 'plan-new-id': { value: 'pro_bundle' }, 'plan-new-name': { value: 'Pro Bundle' }, 'plan-new-name-ar': { value: 'الباقة الاحترافية' },
+      'plan-new-price': { value: '' }, 'plan-new-days': { value: '30' }, 'plan-new-svc-clothes_system': { checked: true }, 'plan-new-svc-ad_maker': { checked: true } };
+    sandbox.document.getElementById = id => boxes[id] || null;
+    const add = price => {
+      run('_planManager.plans = []; _planManager.dirty = false;');
+      notes.length = 0; asked.length = 0; renders = 0;
+      boxes['plan-new-price'].value = price;
+      sandbox.planManagerAddBundle();
+      return JSON.parse(run('JSON.stringify(_planManager.plans)'));
+    };
+    // '' is an empty box, and also what a number box hands back for text it cannot read ("abc").
+    // The raw texts are refused as well, should a box ever pass them through.
+    for (const price of ['', '   ', 'abc', '1,234.50', '-5', 'Infinity', '1e307', '10000000001']) {  // 1e307 became priceMinor Infinity (saved as null)
+      assert.deepEqual(add(price), [], `before: a price of "${price}" still added a bundle (0 LYD, "best value")`);
+      assert.deepEqual(notes.map(note => [note.title, note.type]), [['Enter the bundle price', 'warning']], `"${price}": one warning`);
+      assert.ok(asked.length === 0 && renders === 0 && run('_planManager.dirty') === false, `"${price}": no question, no redraw, Save stays off`);
+    }
+    state.language = 'ar';
+    add('');
+    assert.equal(notes[0]?.title, 'أدخل سعر الباقة');
+    assert.ok(!/[A-Za-z]{3,}/.test(`${notes[0]?.title} ${notes[0]?.message}`), JSON.stringify(notes));
+    state.language = 'en';
+    // A typed price is added as typed (a comma decimal too; rounded, not cut: 19.99 * 100 is 1998.99...), with no question.
+    const [bundle] = add('150');
+    assert.equal(bundle.priceMinor, 15000);
+    assert.equal(bundle.badge, 'best_value');
+    assert.deepEqual(bundle.serviceIds, ['clothes_system', 'ad_maker']);
+    assert.ok(asked.length === 0 && notes.length === 0 && renders === 1 && run('_planManager.dirty') === true, 'added, redrawn once and marked unsaved');
+    assert.equal(add('150,5')[0].priceMinor, 15050);
+    assert.equal(add('19.99')[0].priceMinor, 1999);
+    // A free bundle stays possible, but only as a choice: "no" adds nothing, "yes" adds it.
+    assert.deepEqual(add('0'), [], 'before: a 0 price was added without a question');
+    assert.ok(asked.length === 1 && asked[0].includes('free for customers'), JSON.stringify(asked));
+    assert.ok(notes.length === 0 && renders === 0 && run('_planManager.dirty') === false, 'a "no" leaves the list alone');
+    assert.deepEqual(add('0.004'), [], 'a price that would be stored as 0.00 LYD is a free bundle too');
+    assert.equal(asked.length, 1);
+    state.language = 'ar';
+    add('0');
+    assert.ok(asked.length === 1 && asked[0].includes('مجانية') && !/[A-Za-z]{3,}/.test(asked[0]), JSON.stringify(asked));
+    state.language = 'en';
+    answer = true;
+    const [free] = add('0');
+    assert.equal(asked.length, 1, 'asked once');
+    assert.equal(free.priceMinor, 0);
+    assert.ok(renders === 1 && run('_planManager.dirty') === true);
+    // The price box says it must be filled in.
+    assert.ok(/<input id="plan-new-price"[^>]*\srequired\s/.test(String(sandbox.renderPlanManagerSection())), 'the price box is marked required');
+  });
   await test('R3 admin-tools-2: the profit snapshot reads the receipts list once per build, and every number matches the old per-allocation search', async () => {
     const { sandbox, state, run } = loadBrowserSource();
     run(fs.readFileSync(path.join(__dirname, '..', 'src', '12a-analytics-profit.js'), 'utf8'));
@@ -6128,6 +6193,213 @@ async function main() {
     assert.deepEqual([patch.tempReceiptNo, patch.serialNumber, patch.finalReceiptNo], ['D5', '12345', '12345'], "before: tempReceiptNo '' and serialNumber ''");
     assert.equal(patch.phoneNumber, '0923456789');
     assert.ok(!patch.editHistory.slice(-1)[0].changes.some(c => c.field === 'Serial Number'));
+    // F-underpaid: the PATCH echoes the collected money as stored; the rows on screen (the plan) drive only the plan and the debt.
+    assert.deepEqual([patch.amountLocal, patch.amountUSD, patch.exchangeRate], [300, 30, 10], 'before: 500, 50, 10 (the plan replaced the collected cash)');
+    assert.equal(JSON.stringify(patch.payments), JSON.stringify(delivered.payments), 'before: [] (the driver\'s payment line was deleted)');
+    assert.ok(!('paymentMethod' in patch), 'the stored row has no paymentMethod, so none is sent');
+    assert.deepEqual(Array.from(patch.plannedPayments, p => p.amount), [500]);
+    assert.deepEqual([patch.debtAmountLocal, patch.debtAmountUSD], [500, 50]);
+    assert.deepEqual(Array.from(patch.editHistory.slice(-1)[0].changes, c => c.field), ['Phone Number'], 'before: a false "Amount" change was logged');
+    a.state.receipts = [{ ...delivered, ...patch, deliveredAt: '2026-09-02T10:00:00.000Z' }];  // the server stamps deliveredAt on the completion
+    const underpaidStats = a.run("getCustomerStats('c1')");
+    assert.deepEqual([underpaidStats.totalPaidUSD, underpaidStats.balanceUSD], [30, -20], 'before: 50 and 0 (the $20 debt vanished)');
+    // The split-payments editor refuses a delivered, still Not Paid receipt, in both languages.
+    const underpaidEn = 'This receipt was delivered but is not fully paid yet. Its collected money cannot be edited here: when the customer pays the rest, open Edit Receipt and mark it Paid.';
+    const underpaidAr = 'هذا الوصل تم توصيله لكنه لم يُدفع بالكامل بعد. لا يمكن تعديل المبلغ المُحصَّل من هنا: عندما يدفع العميل الباقي افتح «تعديل الوصل» وحوِّله إلى مدفوع.';
+    a.state.receipts = [delivered];
+    a.sandbox.renderModal = () => {};
+    a.sandbox.updateUrlParams = () => {};
+    for (const [lang, title, message] of [['en', 'Not here', underpaidEn], ['ar', 'غير ممكن هنا', underpaidAr]]) {
+      a.state.language = lang;
+      a.state.activeModal = null;
+      a.notes.length = 0;
+      a.run("manageSplitPayments('r1')");
+      assert.equal(a.state.activeModal, null, 'before: the split-payments editor opened');
+      assert.deepEqual(a.notes, [{ title, message, type: 'warning' }]);
+      // A restored editor cannot save either: nothing is sent.
+      a.field('split-payments-receipt-id').value = 'r1';
+      a.notes.length = 0;
+      await a.run('saveSplitPayments()');
+      assert.equal(a.saved.length, 1, 'no second PATCH');
+      assert.deepEqual(a.notes, [{ title, message, type: 'warning' }]);
+    }
+    a.state.language = 'en';
+    // A delivery receipt the driver has not delivered yet still sends the row totals (the rule does not reach it).
+    const pending = { ...delivered, id: 'r3', deliveryStatus: 'Needs Delivery', serialNumber: '', finalReceiptNo: '', amountLocal: 500, amountUSD: 50, payments: [] };
+    for (const k of ['amountCollectedFromCustomer', 'paymentResult', 'remainingDue']) delete pending[k];
+    const p = r6ReceiptForm({ receipts: [pending], modalData: pending,
+      fields: { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'drv1', 'receipt-serial': 'D5',
+        'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0912345678' },
+      rows: [{ method: 'Cash (LYD)', amount: 600, rate1: 1, rate2: 10, collectionType: 'delivery', deliveryPersonId: 'drv1' }] });
+    p.run('initReceiptSerialOnOpen()');
+    p.run("updateReceiptStatusUI('Not Paid')");
+    await p.run('_saveReceiptFromModalInner()');
+    assert.equal(p.saved.length, 1, JSON.stringify(p.notes));
+    assert.deepEqual([p.saved[0].amountLocal, p.saved[0].amountUSD, p.saved[0].payments.length, p.saved[0].plannedPayments[0].amount], [600, 60, 0, 600]);
+    p.state.activeModal = null;
+    p.sandbox.renderModal = () => {};
+    p.sandbox.updateUrlParams = () => {};
+    p.run("manageSplitPayments('r3')");
+    assert.equal(p.state.activeModal, 'split-payments', 'the split editor still opens for it');
+    // A Delivered + Paid receipt still follows _keepsStoredMoney: unedited rows keep the stored money, edited rows are recomputed.
+    const paidDelivered = { ...delivered, id: 'r4', status: 'Paid', isPaid: true, amountLocal: 300, amountUSD: 30, exchangeRate: 10, debtAmountLocal: 300, debtAmountUSD: 30,
+      paymentResult: 'PAID_EXACT', remainingDue: 0, collectionDate: '2026-09-02T10:00:00.000Z', plannedPayments: [],
+      payments: [{ method: 'Cash (LYD)', amount: 300, rate: 1, rate2: 7, collectionType: 'delivery' }] };
+    const openPaid = amount => r6ReceiptForm({ receipts: [paidDelivered], modalData: paidDelivered,
+      fields: { 'receipt-status': 'Paid', 'paid-collection-value': 'office', 'receipt-serial': '12345', 'receipt-phone-search': '0923456789' },
+      rows: [{ method: 'Cash (LYD)', amount, rate1: 1, rate2: 7, collectionType: 'delivery' }] });
+    const kept = openPaid(300);
+    await kept.run('_saveReceiptFromModalInner()');
+    assert.equal(kept.saved.length, 1, JSON.stringify(kept.notes));
+    assert.deepEqual([kept.saved[0].amountLocal, kept.saved[0].amountUSD, kept.saved[0].exchangeRate, kept.saved[0].payments[0].amount], [300, 30, 10, 300]);
+    const retyped = openPaid(350);
+    await retyped.run('_saveReceiptFromModalInner()');
+    assert.equal(retyped.saved.length, 1, JSON.stringify(retyped.notes));
+    assert.deepEqual([retyped.saved[0].amountLocal, retyped.saved[0].amountUSD, retyped.saved[0].payments[0].amount], [350, 50, 350]);
+    // F-underpaid (repair): an older delivered receipt has NO stored plan, so the form rows are seeded from the collected
+    // rows. A phone-only edit must keep the stored debt: before, it sent debt 300 / 30 and the customer's $20 vanished.
+    const legacy = { ...delivered, id: 'r5' };
+    delete legacy.plannedPayments;
+    const openLegacy = (row, amount) => r6ReceiptForm({ receipts: [row], modalData: row,
+      fields: { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'drv1', 'receipt-serial': '12345',
+        'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0923456789' },
+      rows: [{ method: 'Cash (LYD)', amount, rate1: 1, rate2: 10, collectionType: 'delivery' }] });
+    const legacySave = async (row, amount) => {
+      const form = openLegacy(row, amount);
+      form.run('initReceiptSerialOnOpen()');
+      form.run("updateReceiptStatusUI('Not Paid')");
+      await form.run('_saveReceiptFromModalInner()');
+      assert.equal(form.saved.length, 1, JSON.stringify(form.notes));
+      return { form, patch: form.saved[0] };
+    };
+    for (const row of [legacy, { ...legacy, plannedPayments: [] }]) {
+      assert.deepEqual(Array.from(a.sandbox.getReceiptFormPayments(row), p => p.amount), [300], 'the form shows the collected row');
+      const { form, patch: lp } = await legacySave(row, 300);
+      assert.deepEqual([lp.debtAmountLocal, lp.debtAmountUSD], [500, 50], 'before: 300, 30 (the debt shrank to the collected cash)');
+      assert.deepEqual([lp.amountLocal, lp.amountUSD, JSON.stringify(lp.payments)], [300, 30, JSON.stringify(row.payments)]);
+      assert.equal(JSON.stringify(lp.plannedPayments), JSON.stringify(row.plannedPayments), 'before: the collected row was saved as the plan');
+      assert.equal('plannedPayments' in lp, 'plannedPayments' in row);
+      assert.deepEqual(Array.from(lp.editHistory.slice(-1)[0].changes, c => c.field), ['Phone Number']);
+      form.state.receipts = [{ ...row, ...lp, customerOutstandingUSD: 20, deliveredAt: '2026-09-02T10:00:00.000Z' }];
+      assert.equal(form.run("getCustomerStats('c1')").receiptDebtUSD, 20, 'the $20 is still owed');
+    }
+    // The same with nothing collected and no plan (rows seed as one 0 row): the debt stays 500 / 50, before: 0 / 0.
+    const legacyZero = { ...legacy, id: 'r6', amountLocal: 0, amountUSD: 0, payments: [], amountCollectedFromCustomer: 0, remainingDue: 500 };
+    const zero = (await legacySave(legacyZero, 0)).patch;
+    assert.deepEqual([zero.debtAmountLocal, zero.debtAmountUSD, zero.amountLocal, zero.amountUSD], [500, 50, 0, 0], 'before: debt 0 / 0');
+    assert.ok(!('plannedPayments' in zero));
+    // Rows the office really retyped are a plan again: the debt follows them (the approved rule), the collected money does not.
+    const retypedLegacy = (await legacySave(legacy, 600)).patch;
+    assert.deepEqual([retypedLegacy.debtAmountLocal, retypedLegacy.debtAmountUSD, retypedLegacy.plannedPayments[0].amount], [600, 60, 600]);
+    assert.deepEqual([retypedLegacy.amountLocal, retypedLegacy.amountUSD], [300, 30]);
+    // F-underpaid (repair 2): a stored row with no Rate 1 (missing or null) or no Rate 2 shows the template's defaults in the
+    // form. Untouched, it is still the stored row: before, the phone edit sent debt 300 / 30 and wrote a 'Payments' line.
+    const sparseRows = {
+      'no rate key': { method: 'Cash (LYD)', amount: 300, rate2: 10, collectionType: 'delivery' },
+      'rate null': { method: 'Cash (LYD)', amount: 300, rate: null, rate2: 10, collectionType: 'delivery' },
+      'no rate2 key': { method: 'Cash (LYD)', amount: 300, rate: 1, collectionType: 'delivery' }
+    };
+    const sparseSave = async (stored, typedRate2) => {
+      const row = { ...legacy, id: 'r7', payments: [stored] };
+      const probe = r6ReceiptForm();
+      probe.state.defaultExchangeRate = 10;
+      // The values renderReceiptFinancials writes into the Rate 1 / Rate 2 inputs for this stored row.
+      const shown = { rate1: String(probe.sandbox.paymentRate1Value(stored)), rate2: String(stored.rate2 !== undefined ? stored.rate2 : probe.state.defaultExchangeRate) };
+      const form = r6ReceiptForm({ receipts: [row], modalData: row,
+        fields: { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'drv1', 'receipt-serial': '12345',
+          'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0923456789' },
+        rows: [{ method: 'Cash (LYD)', amount: 300, rate1: shown.rate1, rate2: typedRate2 === undefined ? shown.rate2 : typedRate2, collectionType: 'delivery' }] });
+      form.state.defaultExchangeRate = 10;
+      form.run('initReceiptSerialOnOpen()');
+      form.run("updateReceiptStatusUI('Not Paid')");
+      await form.run('_saveReceiptFromModalInner()');
+      assert.equal(form.saved.length, 1, JSON.stringify(form.notes));
+      return { row, shown, patch: form.saved[0] };
+    };
+    for (const [name, stored] of Object.entries(sparseRows)) {
+      const { row, shown, patch: sp } = await sparseSave(stored);
+      assert.deepEqual([shown.rate1, shown.rate2], ['1', '10'], name);
+      assert.deepEqual([sp.debtAmountLocal, sp.debtAmountUSD], [500, 50], `${name}: before 300, 30 (the customer's $20 vanished)`);
+      assert.deepEqual([sp.amountLocal, sp.amountUSD, JSON.stringify(sp.payments)], [300, 30, JSON.stringify(row.payments)], name);
+      assert.ok(!('plannedPayments' in sp), `${name}: before, the collected row was saved as the plan`);
+      assert.deepEqual(Array.from(sp.editHistory.slice(-1)[0].changes, c => c.field), ['Phone Number'], `${name}: before, a 'Payments' line too`);
+      // A Rate 2 the office really retyped on the same row is a plan again: the debt follows it.
+      const moved = (await sparseSave(stored, 5)).patch;
+      assert.deepEqual([moved.debtAmountLocal, moved.debtAmountUSD, moved.plannedPayments[0].rate2], [300, 60, 5], name);
+      assert.deepEqual([moved.amountLocal, moved.amountUSD], [300, 30], name);
+      assert.ok(moved.editHistory.slice(-1)[0].changes.some(c => c.field === 'Payments'), name);
+    }
+    // F-underpaid (repair 3): live sync moves the default rate while the form is open (10 at open, 10.5 at save). "Untouched"
+    // means "still what the form was filled with": before, the stored side was re-read with the NEW default, so the phone edit
+    // sent debt 300 / 30 (the $20 vanished) and a Rate really typed as 10.5 passed as untouched.
+    assert.ok(fs.readFileSync(path.join(__dirname, '..', 'src', '15-modals.js'), 'utf8').includes('const existingPayments = _fillReceiptFormRows(receiptData);'),
+      'the receipt modal remembers the rows it fills');
+    const movedSave = async (row, typed = {}) => {
+      const paid = row.status === 'Paid';
+      const form = r6ReceiptForm({ receipts: [row], modalData: row,
+        fields: paid ? { 'receipt-status': 'Paid', 'paid-collection-value': 'office', 'receipt-serial': '12345', 'receipt-phone-search': '0923456789' }
+          : { 'receipt-status': 'Not Paid', 'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'drv1', 'receipt-serial': '12345',
+            'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0923456789' },
+        rows: [{ method: '', amount: '', rate1: '', rate2: '' }] });
+      form.state.defaultExchangeRate = 10;
+      // Open: what renderModal does. The row's inputs take the values the real template writes.
+      const filled = form.sandbox._fillReceiptFormRows(row);
+      const html = form.sandbox.renderReceiptFinancials(filled, filled, []);
+      const input = cls => new RegExp(`class="${cls}[^"]*" value="([^"]*)"`).exec(html)[1];
+      const shown = { '.payment-method': (/<option value="([^"]*)" selected>/.exec(html) || /<option value="([^"]*)"/.exec(html))[1],
+        '.payment-amount': input('payment-amount'), '.payment-rate1': input('payment-rate1'), '.payment-rate2': input('payment-rate2'),
+        '.collection-type': input('collection-type') };
+      for (const [sel, value] of Object.entries({ ...shown, ...typed })) form.rows[0].querySelector(sel).value = value;
+      form.state.defaultExchangeRate = 10.5;
+      if (!paid) {
+        form.run('initReceiptSerialOnOpen()');
+        form.run("updateReceiptStatusUI('Not Paid')");
+      }
+      await form.run('_saveReceiptFromModalInner()');
+      assert.equal(form.saved.length, 1, JSON.stringify(form.notes));
+      return { shown, patch: form.saved[0], form };
+    };
+    const fields = patch => Array.from(patch.editHistory.slice(-1)[0].changes, c => c.field);
+    const movedRows = {
+      'no rate2 key': [{ method: 'Cash (LYD)', amount: 300, rate: 1, collectionType: 'delivery' }, ['Cash (LYD)', '300', '1', '10'], '.payment-rate2', [300, 28.59]],
+      'no rate key, default-rate method': [{ method: 'Cheque', amount: 300, rate2: 10, collectionType: 'delivery' }, ['Cheque', '300', '10', '10'], '.payment-rate1', [3150, 30]]
+    };
+    for (const [name, [stored, inputs, typedCell, typedDebt]] of Object.entries(movedRows)) {
+      const row = { ...legacy, id: 'r8', payments: [stored] };
+      const { shown, patch: mp } = await movedSave(row);
+      assert.deepEqual([shown['.payment-method'], shown['.payment-amount'], shown['.payment-rate1'], shown['.payment-rate2']], inputs, name);
+      assert.deepEqual([mp.debtAmountLocal, mp.debtAmountUSD], [500, 50], `${name}: before, the debt followed the collected row (the customer's $20 vanished)`);
+      assert.deepEqual([mp.amountLocal, mp.amountUSD, JSON.stringify(mp.payments)], [300, 30, JSON.stringify(row.payments)], name);
+      assert.ok(!('plannedPayments' in mp), `${name}: before, the collected row was saved as the plan`);
+      assert.deepEqual(fields(mp), ['Phone Number'], `${name}: before, a 'Payments' line too`);
+      // The office really types the new default into that input: an edit (before: taken as untouched, the typed rate was dropped).
+      const typed = (await movedSave(row, { [typedCell]: '10.5' })).patch;
+      assert.deepEqual([typed.debtAmountLocal, typed.debtAmountUSD], typedDebt, name);
+      assert.equal(typed.plannedPayments[0][typedCell === '.payment-rate1' ? 'rate' : 'rate2'], 10.5, name);
+      assert.deepEqual([typed.amountLocal, typed.amountUSD], [300, 30], name);
+      assert.ok(fields(typed).includes('Payments'), name);
+    }
+    // A stored row with no method: the select shows its first option. Untouched, the debt stays (before: taken as edited).
+    const noMethod = { ...legacy, id: 'r9', payments: [{ amount: 300, rate: 1, rate2: 10, collectionType: 'delivery' }] };
+    const nm = await movedSave(noMethod);
+    assert.equal(nm.shown['.payment-method'], 'Cash (LYD)');
+    assert.deepEqual([nm.patch.debtAmountLocal, nm.patch.debtAmountUSD, 'plannedPayments' in nm.patch], [500, 50, false]);
+    assert.deepEqual([nm.patch.amountLocal, nm.patch.amountUSD, JSON.stringify(nm.patch.payments)], [300, 30, JSON.stringify(noMethod.payments)]);
+    const nmTyped = (await movedSave(noMethod, { '.payment-amount': '400' })).patch;
+    assert.deepEqual([nmTyped.debtAmountLocal, nmTyped.debtAmountUSD, nmTyped.plannedPayments[0].amount], [400, 40, 400]);
+    // Delivered + Paid, the driver's row has no Rate 2: untouched keeps the stored money, a typed rate is an edit.
+    const paidSparse = { ...paidDelivered, id: 'r10', amountUSD: 40, exchangeRate: 7.5, payments: [{ method: 'Cash (LYD)', amount: 300, rate: 1, collectionType: 'delivery' }] };
+    const pk = (await movedSave(paidSparse)).patch;
+    assert.deepEqual([pk.amountLocal, pk.amountUSD, pk.exchangeRate], [300, 40, 7.5], 'before: recomputed as 300 / 30 at rate 10');
+    const pt = (await movedSave(paidSparse, { '.payment-rate2': '10.5' })).patch;
+    assert.deepEqual([pt.amountLocal, pt.amountUSD, pt.exchangeRate, pt.payments[0].rate2], [300, 28.59, 10.5, 10.5], 'before: the typed rate was dropped (300 / 40 kept)');
+    // Another receipt opened afterwards never meets the first one's remembered rows, and the split editor keeps reading the stored rows.
+    const other = await movedSave({ ...legacy, id: 'r11' });
+    other.form.sandbox._fillReceiptFormRows({ ...legacy, id: 'r12', payments: [{ method: 'Cash (LYD)', amount: 999, rate: 1, rate2: 10 }] });
+    const asForm = [{ method: 'Cash (LYD)', amount: 300, rate: 1, rate2: 10 }];
+    assert.equal(other.form.sandbox._rowsAsStored({ ...legacy, id: 'r11' }, asForm, true), true, 'no memory for this receipt: the stored rows');
+    assert.equal(other.form.sandbox._rowsAsStored({ ...legacy, id: 'r12', payments: asForm }, asForm, true), false, 'r12 was filled with 999');
+    assert.equal(other.form.sandbox._rowsAsStored({ ...legacy, id: 'r12', payments: asForm }, asForm), true, 'the split editor: stored rows');
     // (b) An Admin saved a Not Paid in-shop receipt with its paper number; an Employee with receipts.edit fixes the phone.
     const numbered = { id: 'r2', recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false,
       statusDetail: { notPaidCollection: 'office', paidCollection: 'office', allowSerialOverride: true }, deliveryStatus: 'Office', deliveryPersonId: '',
@@ -7210,6 +7482,39 @@ async function main() {
     // Escaped once is still escaped: a name holding markup reaches the toast only as text.
     const hostile = await signIn('server', '<img src=x onerror=alert(1)>');
     assert.equal(hostile, 'Logged in as &lt;img src=x onerror=alert(1)&gt;. Loading data...');
+  });
+  await test('F-cover: stopping an ad below its company money asks first; nothing is sent on No', async () => {
+    // Returned company money is never re-applied on its own, so a typo must be caught before the request.
+    const run = async (answer, spent, lang = 'en') => {
+      const { sandbox, state } = loadBrowserSource();
+      state.language = lang;
+      const nodes = { 'stop-ad-spent': { value: spent }, 'stop-ad-customer-informed': { checked: true, disabled: false }, 'stop-ad-submit': { disabled: false },
+        'stop-ad-modal': { remove() {}, dataset: { v: '5' } } };
+      sandbox.document.getElementById = id => nodes[id] || null;
+      state.ads = [{ id: 'adS', customerId: 'c1', status: 'Active', paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop', amountUSD: 100, companyDirectCoverageUSD: 60,
+        companyFundingAllocations: [{ receiptId: 'r1', amountUSD: 40 }], receiptAllocations: [], dueAllocations: [], _lastModified: 5 }];
+      const asked = []; const bodies = [];
+      sandbox.confirm = text => { asked.push(text); return answer; };
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.showNotification = () => {};
+      sandbox.apiStopAd = async (id, body) => { bodies.push(body); return { ad: { id: 'adS', data: { ...state.ads[0], status: 'Stopped' }, lastModified: 6 }, updatedReceipts: [] }; };
+      sandbox.applyValidatedServerEntityBatch = entries => [entries[entries.length - 1].entity.data];
+      await sandbox.confirmStopAd('adS');
+      return { asked, calls: bodies.length };
+    };
+    const refused = await run(false, '99.87');
+    assert.equal(refused.calls, 0, 'No must not send the stop');
+    assert.equal(refused.asked.length, 1);
+    assert.equal(refused.asked[0], 'Company funds recorded on this ad: $100.00. Spend you entered: $99.87.\n'
+      + '$0.13 will go back to company funds and will not be re-applied automatically if you correct the amount later.\nIs the spent amount correct?');
+    const accepted = await run(true, '99.87');
+    assert.deepEqual([accepted.asked.length, accepted.calls], [1, 1], 'Yes sends the stop once');
+    const full = await run(false, '100.00');
+    assert.deepEqual([full.asked.length, full.calls], [0, 1], 'a spend that keeps all company money is not questioned');
+    const arabic = await run(false, '99.87', 'ar');
+    assert.equal(arabic.calls, 0);
+    assert.equal(arabic.asked[0], 'أموال الشركة المسجّلة على هذا الإعلان $100.00، والمصروف الذي أدخلته $99.87.\n'
+      + 'سيرجع $0.13 إلى أموال الشركة ولن يُعاد تلقائياً إذا صحّحت المبلغ لاحقاً.\nهل المبلغ المصروف صحيح؟');
   });
   console.log(`\n${passed} review behavior regressions passed.`);
 }

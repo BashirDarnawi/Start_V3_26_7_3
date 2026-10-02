@@ -627,11 +627,8 @@ function buildCustomerStatsIndex() {
   return { adsByCustomer, receiptsByCustomer, pagesByCustomer, committedUSDByReceiptId, usageByReceipt: buildReceiptUsageAdIndex(state.ads), statsByCustomer: new Map() };
 }
 
-// Status-aware USD "spent" for a single ad — the ONE definition of how much
-// an ad counts as spent, so the customer cards and the analytics panels can
-// never disagree (they used to: analytics counted full amountUSD for every
-// status, so the same customer's "Spend" and "Spent" showed different numbers,
-// and a Stopped ad that spent $100 was counted at its full $500).
+// Status-aware USD "spent" for one ad: the ONE definition, so customer cards and analytics
+// never disagree (analytics once counted a Stopped ad that spent $100 at its full $500).
 function getAdSpendUSD(ad) {
   if (!ad) return 0;
   const status = String(ad.status || '').trim().toLowerCase();
@@ -1185,11 +1182,9 @@ function getCustomerStats(customerId, statsIndex = null) {
       companyFundedLYD += fundedLYD;
       totalSpentLYD += fundedLYD;
     });
-    // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD
-    // is company money against spend that no receipt ever backed. Spent stays
-    // the real ad spend; this credit removes the covered part from the
-    // customer's liability, exactly like the receipt-scoped rows above —
-    // and shares the same real-spend cap.
+    // CUSTOMER-LEVEL coverage of receipt-less ad debt: companyDirectCoverageUSD is company money
+    // against spend no receipt backed. Spent stays the real ad spend; this credit removes the covered
+    // part from the customer's liability, like the receipt-scoped rows above, with the same real-spend cap.
     const directUSD = Math.min(
       Math.max(parseFloat(ad.companyDirectCoverageUSD) || 0, 0),
       creditableUSD
@@ -3748,10 +3743,9 @@ function _readDeliveryPaymentRows(containerId) {
   })).filter(p => p.amount > 0);
 }
 
-// ---- Delivery fee: plain LYD cash (no Rate 1 / Rate 2) ---------------------------
-// Flat LYD cash for the driver, NEVER USD ads credit: a LYD amount + method + payer (customer
-// or shop). Stored as deliveryFeePayments[{method, amount, rate, rate2}] for every existing
-// reader: rate 1 (already LYD), rate2 0 (no USD value).
+// ---- Delivery fee: plain LYD cash (no Rate 1 / Rate 2) ----
+// Flat LYD cash for the driver, NEVER USD ads credit: amount + method + payer (customer or shop).
+// Stored as deliveryFeePayments[{method, amount, rate, rate2}]: rate 1 (already LYD), rate2 0 (no USD).
 function _deliveryFeeStoredLyd(receipt) {
   const rows = Array.isArray(receipt?.deliveryFeePayments) ? receipt.deliveryFeePayments : [];
   if (rows.length) {
@@ -5067,11 +5061,8 @@ async function submitCompanyDebtCoverage() {
 }
 
 // ---- Customer-card entry point for company debt coverage (admin only) ----
-// The receipt card already carries its own "Cover with company funds" button;
-// this lets the admin start from the CUSTOMER card instead (user request).
-// One eligible receipt opens the proven coverage dialog directly; several
-// open a small picker first. No new money path — everything funnels into
-// openCompanyDebtCoverageModal and the one transactional endpoint.
+// One eligible receipt opens the coverage dialog directly; several open a picker first.
+// No new money path: all go through openCompanyDebtCoverageModal and its one endpoint.
 
 function getCustomerCompanyCoverableReceipts(customerId) {
   const normalizedId = String(customerId || '');
@@ -5118,12 +5109,9 @@ function _legacyDueReceiptIdForAd(ad) {
   return String(ad.linkedDeliveryReceiptId || '');
 }
 
-// RECEIPT-LESS ad-spend debt company funds may cover, mirroring the server's
-// coverable_ad_debt_minor exactly: Not Paid, non-driver ads only; a rowless
-// legacy ad that references any receipt is charged against that receipt by
-// the usage fallback and is excluded here. Gap per ad:
-// effective spend − paid rows − due rows − company rows − direct coverage
-// − the legacy scalar due mirror.
+// RECEIPT-LESS ad debt company funds may cover; mirrors the server's coverable_ad_debt_minor exactly:
+// Not Paid, non-driver ads; a rowless legacy ad naming any receipt is that receipt's debt (usage fallback).
+// Gap = effective spend − paid − due − company rows − direct coverage − the legacy scalar due mirror.
 // statsIndex (one render's buildCustomerStatsIndex): only this customer's ads, in the same order, so every
 // sum is bit-identical; an empty id (ads without a customer) and the dialogs read the live lists in full.
 function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
@@ -5142,14 +5130,9 @@ function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
     if (!ad || ad.recordType === 'receipt') return;
     if (String(ad.customerId || ad.customer || '') !== normalizedId) return;
     if (getAdPaymentState(ad) !== 'not_paid') return;
-    // While the delivery is still live this money is the customer's own cash,
-    // which the driver collects at the door and the delivery receipt accounts
-    // for — never ours to cover. Once that receipt has been COLLECTED AND
-    // SETTLED (Paid), the collection path is closed for good and whatever the
-    // settlement did not fund is debt that was never collected. Keyed on Paid
-    // rather than "no longer tracks debt": a canceled or lost delivery
-    // RELEASED its debt, so nothing is owed there at all. Mirrors the
-    // server's coverable_ad_debt_detail.
+    // A live delivery's money is the customer's cash (the driver collects it): never ours to cover. Once
+    // that receipt is collected and settled (Paid), what it did not fund is uncollected debt. Keyed on Paid:
+    // a canceled or lost delivery RELEASED its debt. Mirrors the server's coverable_ad_debt_detail.
     if (String(ad.collectionMethod || '') === 'driver') {
       const deliveryReceiptId = String(ad.linkedDeliveryReceiptId || ad.receiptId || '').trim();
       if (!deliveryReceiptId) return;
@@ -5164,19 +5147,18 @@ function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
       || String(ad.receiptId || '').trim()
       || String(ad.linkedDeliveryReceiptId || '').trim()
     )) return;
+    // Only FINAL spend is coverable (server FINAL_AD_STATUSES): a running ad's budget is not spend yet.
+    if (!['stopped', 'completed', 'canceled', 'cancelled', 'lost'].includes(String(ad.status || '').trim().toLowerCase())) return;
     // STATUS-AWARE spend (getAdSpendUSD) — the same number the customer
     // card's "Spent" shows. The server's coverable_ad_debt_minor mirrors
-    // this exactly; a pending/paused ad has no coverable debt.
+    // this exactly.
     const effective = Math.max(getAdSpendUSD(ad), 0);
     const sumRows = list => (Array.isArray(list) ? list : [])
       .reduce((s, row) => s + Math.max(Number(row?.amountUSD) || 0, 0), 0);
     const direct = Math.max(Number(ad.companyDirectCoverageUSD) || 0, 0);
-    // The legacy scalar mirror is REAL provided funding whenever no due row
-    // exists (stopping a legacy ad leaves exactly that shape: dueAllocations
-    // emptied to [] with the surviving amount in dueAmountToUseUSD). Ignoring
-    // it offered company money for dollars already committed against the
-    // receipt — which the receipt-level button could then cover a second
-    // time. Mirrors the server's ad_funded_minor.
+    // The legacy scalar mirror is REAL funding when no due row exists (a stopped legacy ad: dueAllocations
+    // [] with the amount in dueAmountToUseUSD); ignoring it let the receipt button cover those dollars a
+    // second time. Mirrors the server's ad_funded_minor.
     const dueRowsTotal = sumRows(ad.dueAllocations);
     const legacyDue = dueRowsTotal > 0
       ? 0
@@ -5509,8 +5491,8 @@ function openCustomerCompanyDebtCoverage(customerId, opener = null) {
     showNotification(
       isAr ? 'لا يوجد دين مؤهل' : 'No eligible debt',
       isAr
-        ? 'لا يوجد لهذا العميل دين وصولات أو دين إعلانات يمكن تغطيته من أموال الشركة.'
-        : 'This customer has no receipt debt or ad debt that company funds can cover.',
+        ? 'لا يوجد لهذا العميل دين وصولات أو دين إعلانات يمكن تغطيته من أموال الشركة. دين الإعلان الذي ما زال يعمل يُغطّى بعد إيقافه على مصروفه الحقيقي.'
+        : 'This customer has no receipt debt or ad debt that company funds can cover. Debt on an ad that is still running can be covered after the ad is stopped at its real spend.',
       'warning'
     );
     return false;
@@ -5901,10 +5883,9 @@ function showReceiptModal(carried = false) {
   renderModal();
 }
 
-// ---- New-Receipt type chooser -------------------------------------------
-// "New Receipt" first asks WHICH kind: normal (money received now) or "existing balance" (spent
-// partly elsewhere: only what's LEFT is recorded). The options sit far apart in very different
-// colours, so the wrong one is hard to pick by accident.
+// ---- New-Receipt type chooser ----
+// Asks WHICH kind first: normal (money received now) or "existing balance" (only what's LEFT
+// is recorded); far apart and in different colours, so the wrong one is hard to pick.
 function showNewReceiptChooser() {
   if (!currentUserHasPermission('receipts', 'add')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
@@ -6054,17 +6035,30 @@ async function _saveDestroyedReceipt(buttonEl) {
   render();
 }
 
+// Delivered but still Not Paid: its amounts and payment rows are the cash the driver collected.
+// They change only through the completion and settle flows (server: keep_delivered_collected_money).
+function _isDeliveredUnpaid(r) {
+  return !!r && r.status === 'Not Paid' && r.isPaid !== true && (r.deliveryStatus === 'Delivered' || !!r.deliveredAt);
+}
+function _blockDeliveredUnpaidMoneyEdit(receipt) {
+  if (!_isDeliveredUnpaid(receipt)) return false;
+  const isAr = state.language === 'ar';
+  showNotification(isAr ? 'غير ممكن هنا' : 'Not here', isAr
+    ? 'هذا الوصل تم توصيله لكنه لم يُدفع بالكامل بعد. لا يمكن تعديل المبلغ المُحصَّل من هنا: عندما يدفع العميل الباقي افتح «تعديل الوصل» وحوِّله إلى مدفوع.'
+    : 'This receipt was delivered but is not fully paid yet. Its collected money cannot be edited here: when the customer pays the rest, open Edit Receipt and mark it Paid.', 'warning');
+  return true;
+}
 
 function manageSplitPayments(receiptId) {
   const receipt = state.receipts.find(a => a.id === receiptId);
   if (!receipt) return;
-  // The split-payment editor rewrites receipt money (server enforces receipts.edit),
-  // so gate it the same way editReceipt does — canActOnRecord keeps editOwn semantics.
+  // This editor rewrites receipt money: gated like editReceipt (canActOnRecord keeps editOwn).
   if (!canActOnRecord('receipts', 'edit', receipt.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
   if (_blockTransferInEdit(receipt)) return;
+  if (_blockDeliveredUnpaidMoneyEdit(receipt)) return;
 
   state.activeModal = 'split-payments';
   state.modalData = receipt;
@@ -6072,11 +6066,8 @@ function manageSplitPayments(receiptId) {
   renderModal();
 }
 
-// A top-up adds budget to a LIVE ad. Terminal or refunded ads must NOT be
-// toppable: topping up a refunded ad grew its allocation rows but left the
-// refund's frozen baseline stale, so re-saving the refund erased the top-up's
-// charge and freed that money to be spent again — fabricated receipt balance
-// (audit round-3 #1).
+// A top-up adds budget to a LIVE ad only: on a refunded ad it left the refund's frozen
+// baseline stale, and re-saving the refund freed that money to be spent again.
 function _isAdToppable(ad) {
   if (!ad) return false;
   if (['Canceled', 'Completed', 'Lost', 'Stopped'].includes(String(ad.status || ''))) return false;
@@ -6882,22 +6873,20 @@ function onSplitMethodChange(sel) {
 }
 
 async function saveSplitPayments() {
-  // Read the target from the frozen hidden field, not the mutable global, so a
-  // stray navigation can't redirect this save onto a different receipt.
+  // Target from the frozen hidden field, so a stray navigation can't redirect this save.
   const receiptId = (document.getElementById('split-payments-receipt-id')?.value || '').trim() || state.modalData?.id;
   if (!receiptId || !state.receipts.some(r => r && !r._deleted && String(r.id) === String(receiptId))) {
     showNotification(state.language === 'ar' ? 'خطأ' : 'Error', state.language === 'ar' ? 'تعذّر تحديد الوصل' : 'Could not identify the receipt', 'error');
     return;
   }
-  // Defense-in-depth: re-check receipts.edit before writing (the modal can be
-  // restored via updateUrlParams), mirroring editReceipt's canActOnRecord guard.
+  // Re-check receipts.edit before writing (the modal can be restored via updateUrlParams).
   const _permReceipt = state.receipts.find(r => r && String(r.id) === String(receiptId));
   if (!canActOnRecord('receipts', 'edit', _permReceipt?.createdBy)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لتعديل الوصولات' : 'You do not have permission to edit this receipt', 'error');
     return;
   }
-  // Double-tap guard: a second Save while the first PATCH is in flight would
-  // commit an identical duplicate PATCH and show a second "Saved" toast.
+  if (_blockDeliveredUnpaidMoneyEdit(_permReceipt)) return;
+  // Double-tap guard: a second Save in flight would commit a duplicate PATCH.
   const actionKey = String(receiptId);
   if (_deliveryActionInFlight.has(actionKey)) return;
   _deliveryActionInFlight.add(actionKey);

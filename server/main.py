@@ -93,6 +93,7 @@ from .receipt_references import (
 )
 from .ad_final_spend import confirm_final_ad_spend, final_spend_audit_metadata
 from .financial_relink_baseline import settled_relink_stop_baseline
+from .ad_delete import batch_ad_receipt_ids as _batch_ad_receipt_ids, delete_ad_atomic as _delete_ad_atomic, release_batch_ads_for_delete as _release_batch_ads_for_delete
 from .unpaid_receipt_growth import (
     UNPAID_RECEIPT_DEBT_INCREASE_FIELD as _UNPAID_RECEIPT_DEBT_INCREASE_FIELD,
     parse_unpaid_receipt_debt_increase as _parse_unpaid_receipt_debt_increase,
@@ -108,14 +109,21 @@ from .startup_financial_scan import (
 from .company_debt_coverage import (
     RECEIPT_COMPANY_COVERAGE_COLLECTION,
     RECEIPT_COMPANY_COVERAGE_MUTATION_COLLECTION,
+    assert_budget_keeps_company_funds,
     company_pool_total_minor,
+    company_row_receipt_ids,
     create_company_debt_coverage_router,
+    release_company_coverage,
+    restore_released_due_baselines,
+    return_company_money,
+    shrink_grown_receipt_after_release,
     protect_company_coverage_fields,
     release_company_rows_for_receipt_delete,
 )
 from .settlement_truth import (
     apply_coverage_settlement_truth as _apply_coverage_settlement_truth,
     apply_delivery_completion_truth as _apply_delivery_completion_truth,
+    keep_delivered_collected_money as _keep_delivered_collected_money,
 )
 from .unpaid_receipt_payment_plan import (
     canonicalize_unpaid_in_shop_payment_plan as _canonicalize_unpaid_in_shop_payment_plan,
@@ -7655,6 +7663,7 @@ def _financial_derive_ad(
                 amount_minor = existing_amount_minor
         linked_id = ""
 
+    assert_budget_keeps_company_funds(existing, amount_minor, company_minor)
     rate = _financial_rate(base.get("exchangeRate"))
     local_minor = int(
         (Decimal(amount_minor) * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
@@ -7744,11 +7753,8 @@ def _financial_apply_refund(
         refund_amount = effective_minor
     if refund_amount > effective_minor:
         raise HTTPException(status_code=400, detail="Refund exceeds the ad's unrefunded amount")
-    if refund_type != "None" and effective_minor - refund_amount < company_pool_total_minor(existing):
-        raise HTTPException(
-            status_code=409,
-            detail="Refund exceeds the customer-funded share; company funding must be reconciled separately",
-        )
+    if refund_type != "None":  # refunded company money goes back to the company (booked by the caller)
+        result = return_company_money(result, effective_minor - refund_amount)
 
     current_paid = _financial_allocations(existing.get("receiptAllocations"), "receiptAllocations")
     current_due = _financial_allocations(existing.get("dueAllocations"), "dueAllocations")
@@ -8245,7 +8251,7 @@ def _unpaid_receipt_growth_ctx() -> dict[str, Any]:
         "assert_financial_period_open": assert_financial_period_open, "json_dumps": json_dumps,
         "financial_active_rows": _financial_active_rows, "lock_row": _clothes_lock_row,
         "financial_active_row_batches": _financial_active_row_batches,
-        "write_row": _clothes_write_row,
+        "write_row": _clothes_write_row, "financial_receipt_ids": _financial_receipt_ids,
         "postgres": str(get_engine().dialect.name or "") == "postgresql",
     }
 
@@ -8347,7 +8353,7 @@ def _ad_mutation_atomic(
             # row locks. Re-reading the ad after the locks detects any race.
             discovery = dict(initial_data)
             discovery.update(clean_request)
-            receipt_ids = _financial_receipt_ids(discovery) | _financial_receipt_ids(initial_data)
+            receipt_ids = _financial_receipt_ids(discovery) | _financial_receipt_ids(initial_data) | company_row_receipt_ids(initial_data)
             if debt_increase is not None:
                 receipt_ids.add(str(debt_increase["receiptId"]))
             locked_receipts = _financial_lock_receipts(conn, receipt_ids, postgres=postgres)
@@ -8371,7 +8377,7 @@ def _ad_mutation_atomic(
                     actor, "ads", "edit", record_creator_id=str(creator or "")
                 ):
                     raise HTTPException(status_code=403, detail="Forbidden")
-                if _financial_receipt_ids(existing) - set(locked_receipts):
+                if (_financial_receipt_ids(existing) | company_row_receipt_ids(existing)) - set(locked_receipts):
                     raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
 
             enforce_ad_photo_mutation_permissions(
@@ -8428,7 +8434,7 @@ def _ad_mutation_atomic(
             if is_refund:
                 if existing is None:
                     raise HTTPException(status_code=409, detail="Conflict: ad has changed")
-                saved_data = _financial_apply_refund(actor, clean_request, existing)
+                saved_data = restore_released_due_baselines(existing, _financial_apply_refund(actor, clean_request, existing), locked_receipts, _financial_row_data)
                 _financial_validate_ad_plan(
                     saved_data,
                     locked_receipts=locked_receipts,
@@ -8549,6 +8555,8 @@ def _ad_mutation_atomic(
             for receipt_id, receipt_row, receipt_data, _validation_row in receipt_reconciliations:
                 _clothes_write_row(conn, receipt_row, receipt_data)
                 updated_receipt_ids.append(receipt_id)
+            if is_refund and existing is not None:
+                updated_receipt_ids += release_company_coverage(conn, actor_id=actor_id, ad_id=ad_id, before=existing, after=saved_data, locked_receipts=locked_receipts, trigger="refund", ctx=_COMPANY_DEBT_COVERAGE_CTX)
             if body.action == "create":
                 saved = _insert_entity_in_transaction(conn, "ads", ad_id, saved_data, actor_id)
             else:
@@ -8654,10 +8662,9 @@ def _financial_apply_stop(ad: dict[str, Any], spent_minor: int) -> dict[str, Any
     pool_total = sum(entry[2] for entry in entries)
     company_minor = company_pool_total_minor(ad)  # company money is spend capacity too (never re-planned)
     if spent_minor < company_minor:
-        raise HTTPException(
-            status_code=409,
-            detail="Final spend cannot be less than recorded company funding; reconcile company coverage separately first",
-        )
+        # Company money above the real spend goes back to the company; the
+        # caller books it (release_company_coverage) in the same transaction.
+        ad, company_minor = return_company_money(ad, spent_minor), spent_minor
     if pool_total > 0 and spent_minor > pool_total + company_minor:  # coverage alone (receipt canceled) must not cap the real spend
         raise HTTPException(status_code=409, detail="Spent amount exceeds the ad's funding baseline")
     customer_spent = max(spent_minor - company_minor, 0)  # only the customer's pools shrink on a stop
@@ -8798,7 +8805,7 @@ def _ad_stop_atomic(
                 raise HTTPException(status_code=403, detail="Forbidden")  # stop only an ad you can see (viewOwn + stopAd)
             assert_financial_period_open("ads", initial_data, conn=conn)
             locked_receipts = _financial_lock_receipts(
-                conn, _financial_receipt_ids(initial_data), postgres=postgres
+                conn, _financial_receipt_ids(initial_data) | company_row_receipt_ids(initial_data), postgres=postgres
             )
             ad_row = _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
             if not ad_row or bool(ad_row["deleted"]):
@@ -8808,7 +8815,7 @@ def _ad_stop_atomic(
             ad = _financial_row_data(ad_row)
             if not is_within_delivery_scope(actor, ad):
                 raise HTTPException(status_code=403, detail="Forbidden")
-            if _financial_receipt_ids(ad) - set(locked_receipts):
+            if (_financial_receipt_ids(ad) | company_row_receipt_ids(ad)) - set(locked_receipts):
                 raise HTTPException(status_code=409, detail="Conflict: ad funding has changed")
             status = str(ad.get("status") or "")
             completed_too_early = status == "Completed" and not _financial_ad_reconciliation_ready(ad)
@@ -8858,7 +8865,11 @@ def _ad_stop_atomic(
                 plan.pop("remainingCustomerInformedAt", None)
                 plan.pop("remainingCustomerInformedBy", None)
             ad_rows = _financial_active_rows(conn, "ads")
+            plan = restore_released_due_baselines(ad, plan, locked_receipts, _financial_row_data)
+            released_receipt_ids = release_company_coverage(conn, actor_id=actor_id, ad_id=ad_id, before=ad, after=plan, locked_receipts=locked_receipts, trigger="stop", ctx=_COMPANY_DEBT_COVERAGE_CTX)
             updated_receipt_ids = _reconcile_stopped_unpaid_receipt_debt(conn, actor, plan, ad, locked_receipts=locked_receipts, ad_rows=ad_rows, ad_id=ad_id, ctx=_unpaid_receipt_growth_ctx())
+            updated_receipt_ids += shrink_grown_receipt_after_release(conn, actor, ad_id=ad_id, before=ad, after=plan, released_receipt_ids=released_receipt_ids, already_reconciled=updated_receipt_ids, locked_receipts=locked_receipts, ad_rows=ad_rows, growth_ctx=_unpaid_receipt_growth_ctx())
+            updated_receipt_ids = list(dict.fromkeys([*released_receipt_ids, *updated_receipt_ids]))
             _financial_validate_ad_plan(
                 plan,
                 locked_receipts=locked_receipts,
@@ -9485,6 +9496,7 @@ def _financial_patch_receipt_atomic(
     completion_recorded_by: str | None = None,
     hidden_contacts: bool = False,
     auto_serial: bool = False,
+    keep_collected_money: bool = False,
     _startup_bounded_ad_scan: bool = False,
     _startup_scan_result: dict[str, int] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
@@ -9564,6 +9576,8 @@ def _financial_patch_receipt_atomic(
                 if _covered_before > 0:  # its ad rows were released on cancel; reopening would let the company pay the same debt twice
                     raise HTTPException(status_code=409, detail="A canceled receipt the company already covered cannot be reopened; record a new receipt")
             _financial_normalize_receipt_paid_pair(old, clean)
+            if keep_collected_money:  # the generic PATCH only: completion, settle and unsettle own this money
+                _keep_delivered_collected_money(old, clean)
             if convert_funding_to_debt:
                 # Explicit paid -> not_paid conversion (the exact REVERSE of the
                 # settle cascade). Refuse the cases whose money history must not
@@ -12376,7 +12390,7 @@ def update_collection_item(
         saved, _updated_ads, _replayed = _financial_patch_receipt_atomic(
             user, entity_id, updates_to_save, body.expectedLastModified,
             hidden_contacts=not user_has_permission(user, "customers", "viewContacts"),
-            auto_serial=True,
+            auto_serial=True, keep_collected_money=True,
         )
     else:
         saved = patch_entity(
@@ -12932,7 +12946,8 @@ def batch_delete_entities(
     skipped = 0
     stamps: dict[str, int] = {}
     postgres = str(get_engine().dialect.name or "") == "postgresql"
-    financial_batch = any(col in {"receipts", "customers"} for col, _ in normalized)
+    financial_batch = any(col in {"receipts", "customers", "ads"} for col, _ in normalized)
+    batch_ad_ids = {eid for col, eid in normalized if col == "ads"}
     guard = (nullcontext() if postgres else _SQLITE_FINANCIAL_LOCK) if financial_batch else nullcontext()
     with guard:
         with db_conn() as conn:
@@ -12956,7 +12971,11 @@ def batch_delete_entities(
                         receipt_data = _financial_row_data(receipt_row)
                         if str(receipt_data.get("customerId") or "") in customer_ids:
                             receipt_ids.add(str(receipt_row["id"]))
-                locked_receipts = _financial_lock_receipts(conn, receipt_ids, postgres=postgres)
+                # The ads' receipts are locked too (receipts -> ads -> customers) but are
+                # neither reference-checked nor deleted: only receipt_ids are.
+                growth_ctx = _unpaid_receipt_growth_ctx()
+                all_locked_receipts = _financial_lock_receipts(conn, receipt_ids | _batch_ad_receipt_ids(conn, batch_ad_ids, growth_ctx), postgres=postgres)
+                locked_receipts = {receipt_id: all_locked_receipts[receipt_id] for receipt_id in receipt_ids}
                 # ONE pass for the whole batch. Per receipt this helper scans
                 # BOTH the ads and receipts tables, so a 500-item delete used
                 # to run 1,000 unbounded scans inside this locked transaction,
@@ -12976,11 +12995,10 @@ def batch_delete_entities(
                             status_code=409,
                             detail=f"Receipt {receipt_id} cannot be deleted while linked to {reason}",
                         )
-                if customer_ids:
-                    # Lock order receipts -> ads -> customers, as patch_entity, merge and
-                    # ad mutate take it: customers first could deadlock an ad move.
-                    for ad_id in sorted({eid for (col, eid) in normalized if col == "ads"}):
-                        _clothes_lock_row(conn, "ads", ad_id, postgres=postgres)
+                # Lock order receipts -> ads -> customers, as patch_entity, merge and
+                # ad mutate take it: customers first could deadlock an ad move.
+                # Locks the batch's ads, refuses a company-funded one, releases their receipt debt.
+                _release_batch_ads_for_delete(conn, user, batch_ad_ids, locked_receipts=all_locked_receipts, skip_receipt_ids=receipt_ids, ctx=growth_ctx)
                 for customer_id in sorted(customer_ids):
                     _clothes_lock_row(conn, "customers", customer_id, postgres=postgres)
                 # SECURITY/INTEGRITY: match the single-delete atomic guard so the
@@ -13122,6 +13140,10 @@ def delete_collection_item(
               {k: (deleted_receipt.get("data") or {}).get(k) for k in ("amountUSD", "amountLocal", "customerId", "status", "serialNumber")})
         return {"ok": True, "lastModified": deleted_receipt["lastModified"]}
 
+    if collection == "ads":  # receipts -> ad locks; releases the ad's grown receipt debt in the same transaction
+        deleted_ad = _delete_ad_atomic(user, entity_id, ctx=_unpaid_receipt_growth_ctx(), sqlite_guard=_SQLITE_FINANCIAL_LOCK)
+        audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {"releasedReceiptIds": deleted_ad["updatedReceiptIds"]})
+        return {"ok": True, "lastModified": deleted_ad["lastModified"]}
     stamp = soft_delete_entity(collection, entity_id, str(user.get("id") or "system"))
     audit(str(user.get("id")), "delete", collection, entity_id, f"Deleted {collection} {entity_id}", {})
     return {"ok": True, "lastModified": stamp}

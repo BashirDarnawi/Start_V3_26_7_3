@@ -502,6 +502,7 @@ def reconcile_unpaid_receipt_debt(
     ctx: dict[str, Any],
     allow_derived_growth: bool = False,
     require_receipt_permission: bool = True,
+    also_affected: tuple[str, ...] = (),
 ) -> list[tuple[str, Any, dict[str, Any], Any]]:
     """Prepare exact managed debt while preserving the receipt's manual base.
 
@@ -562,7 +563,7 @@ def reconcile_unpaid_receipt_debt(
     new_managed_id, new_managed_minor = managed_in_shop_due(proposed_ad, new_due)
     affected_ids = {
         receipt_id
-        for receipt_id in (old_managed_id, new_managed_id)
+        for receipt_id in (old_managed_id, new_managed_id, *also_affected)
         if receipt_id
     }
     if not affected_ids:

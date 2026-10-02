@@ -31,6 +31,7 @@ SCHEMA_RE = re.compile(r"^albayan_fin_review_[0-9a-f]{32}$")
 TEST_DATABASE_RE = re.compile(r"^(?:albayan_test|test_albayan)(?:_[a-z0-9_]+)?$")
 SCENARIOS = ("refund", "company_budget", "debt_growth", "concurrent_funding",
              "coverage_lifecycle", "coverage_lock_order", "coverage_overlaps", "period_lock_protocol",
+             "ad_delete_vs_receipt_coverage", "ad_delete_vs_stop",
              "legacy_compatibility", "legacy_backfills",
              "campaign_submit_serialisation", "campaign_withdraw_vs_approve", "campaign_approval_self_release",
              "campaign_submit_vs_sibling_approval", "studio_privacy_scrub")
@@ -214,7 +215,7 @@ def _coverage_lock_order(t, actors) -> None:
     from sqlalchemy import event
     from server.db import get_engine
 
-    cid, aid = "pg_coverage_lock_c", "pg_coverage_lock_a"
+    cid, aid, done = "pg_coverage_lock_c", "pg_coverage_lock_a", "pg_coverage_lock_done"
     t._customer(cid, actors)
     created = t.client.post("/api/ads/mutate", json={
         "action": "create", "adId": aid, "idempotencyKey": "pg-coverage-lock-create",
@@ -223,6 +224,17 @@ def _coverage_lock_order(t, actors) -> None:
     }, cookies=actors["admin"])
     assert created.status_code == 200, created.text
     ad = created.json()["ad"]
+    # Company funds cover FINISHED ads only, and a finished ad takes no ordinary edit. So the $100
+    # debt sits on a second ad, stopped at its full budget, while the edit holds the running one:
+    # coverage locks EVERY ad of the customer in id order, so it still waits for the edited ad.
+    finished = t.client.post("/api/ads/mutate", json={
+        "action": "create", "adId": done, "idempotencyKey": "pg-coverage-lock-create-done",
+        "data": {"customerId": cid, "paymentStatus": "not_paid", "collectionMethod": "in_shop",
+                 "exchangeRate": 5, "collectionPayments": [{"method": "Cash (USD)", "amount": 100, "rate": 1, "rate2": 1}]},
+    }, cookies=actors["admin"])
+    assert finished.status_code == 200, finished.text
+    stopped = t._stop(done, 10000, "pg-coverage-lock-stop", finished.json()["ad"]["lastModified"], actors["admin"])
+    assert stopped.status_code == 200, stopped.text
     ad_held, coverage_attempted_ad = Event(), Event()
     holder = []
 
@@ -263,7 +275,8 @@ def _coverage_lock_order(t, actors) -> None:
         assert [status for status, _ in results] == [200, 200], results
         saved = t._entity("ads", aid, actors["admin"])["data"]
         assert saved["notes"] == "Concurrent note edit"
-        assert saved["companyDirectCoverageUSD"] == 40
+        assert not saved.get("companyDirectCoverageUSD")  # still running: none of its budget is covered
+        assert t._entity("ads", done, actors["admin"])["data"]["companyDirectCoverageUSD"] == 40
     finally:
         event.remove(engine, "before_cursor_execute", before_lock)
         event.remove(engine, "after_cursor_execute", after_lock)
@@ -286,6 +299,9 @@ def _coverage_overlaps(t, actors) -> None:
                      "exchangeRate": 5, "collectionPayments": [{"method": "Cash (USD)", "amount": 100, "rate": 1, "rate2": 1}]},
         }, cookies=actors["admin"])
         assert created.status_code == 200, created.text
+        # Company funds cover FINISHED ads only: the receipt-less ad ends at its full $100 first.
+        stopped = t._stop(tag + "_gap", 10000, tag + "_gap_stop", created.json()["ad"]["lastModified"], actors["admin"])
+        assert stopped.status_code == 200, stopped.text
         if operation == "receipt_cover":
             competing_path = f"/api/receipts/{rid}/company-coverages"
             payload = {"amountMinorUSD": 4000, "expectedLastModified": receipt["lastModified"],
@@ -458,6 +474,275 @@ def _legacy_backfills(actors) -> None:
         assert raw() == after
 
 
+_AD_DELETE_COMPANY_DETAIL = "An ad paid from company funds cannot be deleted; stop it instead"
+
+
+def _money_race(t, actors, calls, hold_receipt_id=None):
+    """Two admin requests at once; returns [(status, body)] in the order of ``calls``.
+
+    Free race (``hold_receipt_id`` None): both wait on a barrier and start together.
+    Forced order: the first call starts alone and, once it holds the receipt's row lock,
+    waits until the second call queues on that same row. Both sides of these races lock
+    the receipt first, so the first call provably wins and the second runs behind it.
+    """
+    from fastapi.testclient import TestClient
+    from sqlalchemy import event
+    from server.db import get_engine
+
+    barrier = Barrier(2)
+
+    def send(call, together):
+        method, path, body = call
+        client = TestClient(t.app, headers={"Origin": "http://testserver"}, raise_server_exceptions=False)
+        try:
+            if together:
+                barrier.wait(timeout=10)
+            response = client.request(method, path, json=body, cookies=actors["admin"])
+            try:
+                return response.status_code, response.json()
+            except ValueError:
+                return response.status_code, response.text
+        finally:
+            client.close()
+
+    if hold_receipt_id is None:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(send, call, True) for call in calls]
+            return [future.result(timeout=40) for future in futures]
+
+    held, queued, holder = Event(), Event(), []
+
+    def receipt_lock(statement, parameters):
+        return ("FOR UPDATE" in statement and isinstance(parameters, dict)
+                and parameters.get("type") == "receipts" and parameters.get("id") == hold_receipt_id)
+
+    def before_lock(conn, cursor, statement, parameters, context, executemany):
+        if receipt_lock(statement, parameters) and holder and conn is not holder[0]:
+            queued.set()
+
+    def after_lock(conn, cursor, statement, parameters, context, executemany):
+        if receipt_lock(statement, parameters) and not holder:
+            holder.append(conn)
+            held.set()
+            queued.wait(8)
+
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", before_lock)
+    event.listen(engine, "after_cursor_execute", after_lock)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(send, calls[0], False)
+            assert held.wait(8), "The first request never locked the receipt"
+            second = pool.submit(send, calls[1], False)
+            results = [first.result(timeout=40), second.result(timeout=40)]
+        assert queued.is_set(), ("The second request never queued on the receipt lock", results)
+        return results
+    finally:
+        event.remove(engine, "before_cursor_execute", before_lock)
+        event.remove(engine, "after_cursor_execute", after_lock)
+
+
+def _company_money(customer_id: str, receipt_id: str) -> dict:
+    """The customer's company money, read straight from the rows; asserts it adds up.
+
+    Ledger sum (coverages minus returns) == company money on LIVE ads + coverage that sits
+    on no ad == the receipt's company share; a deleted ad never carries company money.
+    """
+    from server.company_debt_coverage import company_pool_total_minor
+    from server.db import db_conn, json_loads
+
+    with db_conn() as conn:
+        rows = conn.execute(text(
+            "SELECT type, id, deleted, data_json FROM entities "
+            "WHERE type IN ('ads', 'receipts', 'receiptCompanyCoverages')"
+        )).mappings().all()
+    found = {"ledger": 0, "unassigned": 0, "live": {}, "deleted": {}, "receipt": None}
+    for row in rows:
+        data = json_loads(row["data_json"]) or {}
+        if row["type"] == "receipts":
+            if row["id"] == receipt_id:
+                found["receipt"] = data
+        elif data.get("customerId") != customer_id:
+            continue
+        elif row["type"] == "ads":
+            found["deleted" if row["deleted"] else "live"][row["id"]] = company_pool_total_minor(data)
+        elif not row["deleted"]:
+            found["ledger"] += int(data.get("amountMinorUSD") or 0)
+            found["unassigned"] += int(data.get("unassignedAmountMinorUSD") or 0)
+    assert found["receipt"] is not None, found
+    found["covered"] = round(float(found["receipt"].get("companyCoveredUSD") or 0) * 100)
+    found["gross"] = round(float(found["receipt"].get("amountUSD") or 0) * 100)
+    assert not any(found["deleted"].values()), ("company money left on a deleted ad", found)
+    assert found["ledger"] == sum(found["live"].values()) + found["unassigned"], found
+    assert found["ledger"] == found["covered"] <= found["gross"], found
+    return found
+
+
+def _grown_due_ad(t, actors, ad_id: str, customer_id: str, receipt_id: str, due: float, grow: float) -> dict:
+    """An unpaid In-Shop ad whose debt the server adds to the customer's open receipt."""
+    receipt = t._entity("receipts", receipt_id, actors["admin"])
+    created = t.client.post("/api/ads/mutate", json={
+        "action": "create", "adId": ad_id, "idempotencyKey": ad_id + "-create",
+        "data": {"customerId": customer_id, "paymentStatus": "not_paid", "collectionMethod": "in_shop",
+                 "exchangeRate": 5, "receiptId": receipt_id, "receiptAllocations": [],
+                 "dueAllocations": [{"receiptId": receipt_id, "amountUSD": due}],
+                 "unpaidReceiptDebtIncrease": {"receiptId": receipt_id, "amountUSD": grow,
+                                               "expectedLastModified": receipt["lastModified"]}},
+    }, cookies=actors["admin"])
+    assert created.status_code == 200, created.text
+    return created.json()["ad"]
+
+
+def _ad_deleted(ad_id: str) -> bool:
+    from server.db import db_conn
+
+    with db_conn() as conn:
+        return bool(conn.execute(text("SELECT deleted FROM entities WHERE type = 'ads' AND id = :id"),
+                                 {"id": ad_id}).scalar_one())
+
+
+def _ad_delete_vs_receipt_coverage(t, actors) -> None:
+    """F-addelete: "cover the receipt" against "delete the unpaid ad on it", on real row locks.
+
+    Both lock the receipt first (delete: receipts -> ad; coverage: receipt -> ads), so one
+    simply runs behind the other. Three shapes, each raced freely twice and once in each
+    forced order (12 rounds):
+      grown   $10 hand-written receipt grown to $50 by a $50 ad; cover $50 / delete the ad.
+              Cover first: the delete answers 409 and the company row stays on the live ad.
+              Delete first: the receipt is back at $10 and the stale coverage answers 409.
+      written $50 hand-written receipt with a $50 ad; cover $50 / delete the ad.
+              Cover first: as above. Delete first: the receipt is untouched, so the coverage
+              lands on the receipt's own debt, on no ad.
+      sibling ads A $50 + B $30 grew a $0 receipt to $80; cover $50 (lands on A) / delete B.
+              Cover first: B is deleted afterwards and the receipt follows to $50, covered 50.
+              Delete first: the receipt is $50 and the stale coverage answers 409.
+    Never a company row on a deleted ad, never a deadlock or a 500; the ledger always
+    equals the company money on live ads plus the coverage on no ad.
+    """
+    admin = actors["admin"]
+    seen = set()
+    for n in range(12):
+        shape = ("grown", "written", "sibling")[n % 3]
+        order = (None, None, "cover", "delete")[n // 3]
+        tag = f"pg_delcov_{n}"
+        cid, rid, aid, bid = tag + "_c", tag + "_r", tag + "_a", tag + "_b"
+        t._customer(cid, actors)
+        if shape == "grown":
+            t._unpaid_receipt(rid, cid, 10, actors)
+            _grown_due_ad(t, actors, aid, cid, rid, 50, 40)
+            target = aid
+        elif shape == "written":
+            t._unpaid_receipt(rid, cid, 50, actors)
+            t._create_ad(aid, cid, rid, 50, actors)
+            target = aid
+        else:
+            t._unpaid_receipt(rid, cid, 0, actors)
+            _grown_due_ad(t, actors, aid, cid, rid, 50, 50)
+            _grown_due_ad(t, actors, bid, cid, rid, 30, 30)
+            target = bid
+        receipt = t._entity("receipts", rid, admin)
+        assert receipt["data"]["amountUSD"] == (80 if shape == "sibling" else 50), receipt
+        cover = ("POST", f"/api/receipts/{rid}/company-coverages", {
+            "amountMinorUSD": 5000, "expectedLastModified": receipt["lastModified"],
+            "idempotencyKey": tag + "_cover", "reason": "Isolated delete race"})
+        delete = ("DELETE", f"/api/collections/ads/{target}", None)
+        if order == "delete":
+            deleted, covered = _money_race(t, actors, [delete, cover], hold_receipt_id=rid)
+        else:
+            covered, deleted = _money_race(t, actors, [cover, delete], hold_receipt_id=rid if order else None)
+        outcome = (covered[0], deleted[0])
+        context = (shape, order, covered, deleted)
+        money = _company_money(cid, rid)  # conservation first: it holds whatever the outcome
+        if shape == "sibling":
+            cover_won = outcome == (200, 200)
+            assert cover_won or outcome == (409, 200), context
+            assert _ad_deleted(bid) and not _ad_deleted(aid), context
+            assert money["gross"] == 5000 and money["unassigned"] == 0, (context, money)
+            assert money["live"] == {aid: 5000 if cover_won else 0} and money["ledger"] == (5000 if cover_won else 0), (context, money)
+        else:
+            cover_won = outcome == (200, 409)
+            assert cover_won or outcome == ((409, 200) if shape == "grown" else (200, 200)), context
+            if cover_won:
+                assert deleted[1]["detail"] == _AD_DELETE_COMPANY_DETAIL, context
+                assert not _ad_deleted(aid), context
+                assert money["live"] == {aid: 5000} and money["ledger"] == 5000 and money["unassigned"] == 0, (context, money)
+                assert money["gross"] == 5000, (context, money)
+            elif shape == "grown":
+                assert _ad_deleted(aid) and money["live"] == {} and money["ledger"] == 0, (context, money)
+                assert money["gross"] == 1000 and money["receipt"]["amountLocal"] == 50, (context, money)
+            else:
+                assert _ad_deleted(aid) and money["live"] == {}, (context, money)
+                assert money["ledger"] == money["unassigned"] == 5000 and money["gross"] == 5000, (context, money)
+        if order:
+            assert cover_won == (order == "cover"), context
+        seen.add((shape, cover_won))
+    # The forced rounds alone reach both outcomes of every shape.
+    assert len(seen) == 6, seen
+
+
+def _ad_delete_vs_stop(t, actors) -> None:
+    """F-cover + F-addelete: "stop the ad below its company money" against "delete the ad".
+
+    Both lock the receipt, then the ad. Three shapes, each raced freely twice and once in
+    each forced order (12 rounds); the company covered the whole ad while it ran:
+      keep    $100 ad on a $100 hand-written receipt, stopped at $30: $70 goes back.
+      grown   $50 ad that grew a $0 receipt to $50, stopped at $20: $30 goes back and the
+              receipt follows to $20.
+      zero    the $100 ad stopped at $0: all company money goes back.
+    The stop always lands. The delete is refused (409) whenever the ad still holds company
+    money when it gets the locks: always for keep and grown (company money remains after
+    the stop), and for zero unless the stop committed first, in which case the ad holds no
+    company money any more and is deleted. Never a deadlock, a 500 or company money on a
+    deleted ad; ledger = coverage minus the return = company money left on the live ad.
+    """
+    admin = actors["admin"]
+    zero_outcomes = set()
+    for n in range(12):
+        shape = ("keep", "grown", "zero")[n % 3]
+        order = (None, None, "stop", "delete")[n // 3]
+        tag = f"pg_delstop_{n}"
+        cid, rid, aid = tag + "_c", tag + "_r", tag + "_a"
+        budget, spent = {"keep": (10000, 3000), "grown": (5000, 2000), "zero": (10000, 0)}[shape]
+        t._customer(cid, actors)
+        if shape == "grown":
+            t._unpaid_receipt(rid, cid, 0, actors)
+            _grown_due_ad(t, actors, aid, cid, rid, budget / 100, budget / 100)
+        else:
+            t._unpaid_receipt(rid, cid, budget / 100, actors)
+            t._create_ad(aid, cid, rid, budget / 100, actors)
+        receipt = t._entity("receipts", rid, admin)
+        covered = t._cover(rid, budget, tag + "_cover", receipt["lastModified"], admin)
+        assert covered.status_code == 200, covered.text
+        ad = covered.json()["updatedAds"][0]
+        assert ad["id"] == aid and _company_money(cid, rid)["live"] == {aid: budget}
+        stop = ("POST", f"/api/ads/{aid}/stop", {
+            "spentMinorUSD": spent, "customerInformed": True,
+            "idempotencyKey": tag + "_stop", "expectedLastModified": ad["lastModified"]})
+        delete = ("DELETE", f"/api/collections/ads/{aid}", None)
+        if order == "delete":
+            deleted, stopped = _money_race(t, actors, [delete, stop], hold_receipt_id=rid)
+        else:
+            stopped, deleted = _money_race(t, actors, [stop, delete], hold_receipt_id=rid if order else None)
+        context = (shape, order, stopped, deleted)
+        money = _company_money(cid, rid)
+        assert stopped[0] == 200, context
+        assert money["ledger"] == spent and money["unassigned"] == 0, (context, money)
+        if deleted[0] == 409:
+            assert deleted[1]["detail"] == _AD_DELETE_COMPANY_DETAIL, context
+            assert not _ad_deleted(aid) and money["live"] == {aid: spent}, (context, money)
+            assert t._entity("ads", aid, admin)["data"]["status"] == "Stopped", context
+        else:
+            # Only a stop that returned ALL the company money leaves a deletable ad.
+            assert shape == "zero" and deleted[0] == 200, context
+            assert _ad_deleted(aid) and money["live"] == {}, (context, money)
+        assert money["gross"] == (spent if shape == "grown" else budget), (context, money)
+        if shape == "zero":
+            zero_outcomes.add(deleted[0])
+            if order:
+                assert deleted[0] == (200 if order == "stop" else 409), context
+    assert zero_outcomes == {200, 409}, zero_outcomes
+
+
 def _run_scenario(scenario: str) -> None:
     if scenario not in SCENARIOS:
         raise ValueError("Unknown PostgreSQL financial test scenario")
@@ -511,6 +796,10 @@ def _run_scenario(scenario: str) -> None:
                 _coverage_lock_order(t, actors)
             elif scenario == "coverage_overlaps":
                 _coverage_overlaps(t, actors)
+            elif scenario == "ad_delete_vs_receipt_coverage":
+                _ad_delete_vs_receipt_coverage(t, actors)
+            elif scenario == "ad_delete_vs_stop":
+                _ad_delete_vs_stop(t, actors)
             elif scenario == "period_lock_protocol":
                 _period_lock_protocol(t, actors)
             elif scenario == "legacy_compatibility":

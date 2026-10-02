@@ -295,12 +295,22 @@ function planManagerAddBundle() {
     showNotification(ccText('Duplicate id', 'معرّف مكرر'), ccText('A plan with this id already exists.', 'توجد خطة بهذا المعرّف بالفعل.'), 'warning');
     return;
   }
+  // An empty or unreadable price (a number box reports '' for "abc") must never silently
+  // become a free bundle (as in planManagerSetField); a 0 LYD one is added only after a yes.
+  const rawPrice = read('plan-new-price').replace(',', '.');
+  const parsedPrice = Number(rawPrice);
+  if (rawPrice === '' || !Number.isFinite(parsedPrice) || parsedPrice < 0 || parsedPrice > 1e10) {  // the server takes up to 1e12 minor
+    showNotification(ccText('Enter the bundle price', 'أدخل سعر الباقة'), ccText('Type the price in LYD as a number, for example 150. Nothing was added.', 'اكتب السعر بالدينار كرقم، مثلاً 150. لم تتم إضافة الباقة.'), 'warning');
+    return;
+  }
+  const priceMinor = Math.max(0, Math.round(parsedPrice * 100));
+  if (priceMinor === 0 && !window.confirm(ccText('This bundle will be free for customers - add it anyway?', 'ستكون هذه الباقة مجانية للعملاء - هل تريد إضافتها على أي حال؟'))) return;
   _planManager.plans.push({
     id: rawId,
     serviceIds: services,
     name,
     nameAr,
-    priceMinor: Math.max(0, Math.round((Number(read('plan-new-price').replace(',', '.')) || 0) * 100)),
+    priceMinor,
     currency: 'LYD',
     durationDays: Math.max(1, Math.min(3660, Math.trunc(Number(read('plan-new-days')) || 30))),
     badge: services.length > 1 ? 'best_value' : null,
@@ -379,7 +389,7 @@ function renderPlanManagerSection() {
           <summary class="cursor-pointer select-none font-bold text-slate-700 dark:text-slate-200">${ccText('Add a bundle (one subscription, many systems)', 'إضافة باقة (اشتراك واحد لعدة أنظمة)')}</summary>
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="text-xs font-bold text-slate-500">${ccText('Bundle id (letters/numbers/underscore)', 'معرّف الباقة (حروف إنجليزية/أرقام/شرطة سفلية)')}<input id="plan-new-id" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="pro_bundle" /></label>
-            <label class="text-xs font-bold text-slate-500">${ccText('Price (LYD)', 'السعر (د.ل)')}<input id="plan-new-price" type="number" min="0" step="0.01" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
+            <label class="text-xs font-bold text-slate-500">${ccText('Price (LYD)', 'السعر (د.ل)')}<input id="plan-new-price" type="number" min="0" step="0.01" required class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="150.00" /></label>
             <label class="text-xs font-bold text-slate-500">${ccText('Name (English)', 'الاسم (بالإنجليزية)')}<input id="plan-new-name" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="Pro Bundle" /></label>
             <label class="text-xs font-bold text-slate-500">${ccText('Name (Arabic)', 'الاسم (بالعربية)')}<input id="plan-new-name-ar" dir="rtl" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" placeholder="الباقة الاحترافية" /></label>
             <label class="text-xs font-bold text-slate-500">${ccText('Duration (days)', 'المدة (بالأيام)')}<input id="plan-new-days" type="number" min="1" max="3660" value="30" class="mt-1 min-h-11 w-full rounded-xl border border-slate-300 px-3 dark:border-slate-700 dark:bg-slate-900" /></label>

@@ -420,6 +420,7 @@ async function refreshServerDataCompatibility() {
   }
   _serverLiveSync.dataCompatibilityVersion = version;
   if (changed) {
+    if (changedCollections.includes('exchangeRateHistory')) deriveDefaultExchangeRateFromHistory();
     assignSequentialNumbers(true, changedCollections);
     _closeCustomerPagesDialogForStateChange();
     saveState();
@@ -629,18 +630,15 @@ async function serverLiveSyncOnce() {
       const records = await apiLoadCollectionSince(collection, since);
       return { collection, since, records, ok: true, forbidden: false };
     } catch (e) {
-      // A late failure belongs to the stopped poll, not the replacement
-      // session's cursors, permission results, or connection-health state.
+      // A late failure belongs to the stopped poll, not the new session's cursors, permissions or health.
       if (_syncAborted()) return { collection, since, records: [], ok: false, forbidden: false };
-      // Keep forbidden collections at cursor zero. If permission is granted
-      // later, the next tick obtains the full newly-visible history.
+      // Forbidden collections stay at cursor zero: a later grant then gets the full visible history.
       if (e?.status === 403) {
         _serverLiveSync.collectionCursors[collection] = 0;
         return { collection, since, records: [], ok: true, forbidden: true };
       }
       anyFetchFailed = true;
-      // Remember WHY, so the badge can say "(503)" instead of nothing and a
-      // future failure is diagnosable without DevTools.
+      // Remember WHY: the badge can say "(503)" and a failure is diagnosable without DevTools.
       _serverLiveSync.lastFailure = {
         collection,
         status: Number(e?.status) || 0,
@@ -673,8 +671,7 @@ async function serverLiveSyncOnce() {
   const appSettingsDelta = recordsFor('appSettings');
   const dollarPurchasesDelta = recordsFor('dollarPurchases');
 
-  // Logged out (or a new session started) while these fetches were in flight?
-  // Drop the result — applying it would re-fill the just-wiped state.
+  // Logged out (or a new session) while these were in flight: applying them would refill the wiped state.
   if (_syncAborted()) return { ok: false, skipped: true };
 
   // A 403 is an authorization result, not merely an empty delta. Purge the old
@@ -711,6 +708,8 @@ async function serverLiveSyncOnce() {
   changed = pagesChanged || changed;
   customerPagesDataChanged = adsChanged || receiptsChanged || customersChanged || pagesChanged || customerPagesDataChanged;
   const exchangeRatesChanged = applyServerDelta('exchangeRateHistory', exhDelta);
+  // An open device follows a new rate at once: new receipts pre-fill state.defaultExchangeRate.
+  if (exchangeRatesChanged && deriveDefaultExchangeRateFromHistory()) changed = true;
   changed = exchangeRatesChanged || changed;
   customerPagesDataChanged = exchangeRatesChanged || customerPagesDataChanged;
   changed = applyServerDelta('clothesProducts', clothesProductsDelta) || changed;
@@ -753,8 +752,7 @@ async function serverLiveSyncOnce() {
     ['ads', adsChanged], ['receipts', receiptsChanged], ['customers', customersChanged], ['pages', pagesChanged]
   ].filter(([, didChange]) => didChange).map(([collection]) => collection));
 
-  // Advance only the collection whose request completed. Failed collections
-  // retain their own prior cursor and are retried without blocking others.
+  // Advance only completed collections: a failed one keeps its cursor and is retried without blocking others.
   for (const result of deltaResults) {
     if (!result.ok || result.forbidden) continue;
     // A clean (non-forbidden) result means access is back: leave the purged set, so a later

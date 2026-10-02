@@ -603,6 +603,61 @@ async function main() {
     S.customerFinancialFilter = 'all';
   });
 
+  await must('C5d. company funds are offered for FINISHED ads only: a running ad offers $0, the same ad stopped offers its real spend', () => {
+    // Server twin: coverable_ad_debt_detail -> ('ad_active_has_not_finished_spending', 0).
+    const base = {
+      amountUSD: 100, amountLocal: 500, paymentStatus: 'not_paid', isPaid: false,
+      collectionMethod: 'in_shop', receiptAllocations: [], dueAllocations: []
+    };
+    for (const status of ['Active', '', 'Scheduled', 'Pending', 'Paused']) {
+      resetState();
+      const ad = makeAd({ ...base, id: 'ad_c5d' });
+      ad.status = status; delete ad.spentUSD;
+      const offered = sandbox.getCustomerCoverableAdDebt('c1');
+      assert(near(offered.totalUSD, 0) && offered.ads.length === 0,
+        `status "${status}" must offer $0 (budget is not spend yet), got ${usd(offered.totalUSD)}`);
+    }
+    for (const [status, spentUSD, want] of [['Stopped', 99.87, 99.87], ['Completed', 99.87, 99.87], ['Canceled', 40, 40], ['Lost', undefined, 100], ['cancelled', 12.5, 12.5]]) {
+      resetState();
+      const ad = makeAd({ ...base, id: 'ad_c5d' });
+      ad.status = status;
+      if (spentUSD === undefined) delete ad.spentUSD; else ad.spentUSD = spentUSD;
+      const offered = sandbox.getCustomerCoverableAdDebt('c1');
+      assert(near(offered.totalUSD, want), `finished (${status}) must offer its real spend ${usd(want)}, got ${usd(offered.totalUSD)}`);
+    }
+  });
+
+  await must('C5e. company money returned at a lower stop: company credit == real spend, the unspent 0.13 is plain receipt debt again', () => {
+    // Server shape after stopping a $100 fully covered ad at $99.87: the ad's
+    // company row and the receipt's companyCoveredUSD both drop to 99.87 and
+    // the receipt (still a $100 promise) reports 0.13 outstanding.
+    resetState();
+    const r = {
+      id: 'receipt_c5e', recordType: 'receipt', customerId: 'c1',
+      amountUSD: 100, amountLocal: 500, debtAmountUSD: 100, debtAmountLocal: 500, exchangeRate: 5,
+      status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+      statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [],
+      companyCoveredUSD: 99.87, customerOutstandingUSD: 0.13, companyCoverageCount: 1
+    };
+    S.receipts.push(r);
+    const ad = makeAd({
+      id: 'ad_c5e', amountUSD: 100, amountLocal: 500, spentUSD: 99.87,
+      paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop',
+      receiptId: r.id, receiptAllocations: [], dueAllocations: [], dueAmountToUseUSD: 0,
+      companyFundingAllocations: [{ receiptId: r.id, amountUSD: 99.87 }], companyFundedUSD: 99.87, customerDueUSD: 0
+    });
+    ad.status = 'Stopped';
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalSpentUSD, 99.87), `Spent is the real spend, got ${usd(stats.totalSpentUSD)}`);
+    assert(near(stats.companyFundedUSD, 99.87), `company credit equals the real spend, got ${usd(stats.companyFundedUSD)}`);
+    assert(near(stats.receiptDebtUSD, 0.13), `the unspent 0.13 of the receipt is plain debt, got ${usd(stats.receiptDebtUSD)}`);
+    assert(near(stats.balanceUSD, -0.13), `customer owes exactly 0.13, got ${usd(stats.balanceUSD)}`);
+    assert(near(sandbox.getCustomerCoverableAdDebt('c1').totalUSD, 0), 'nothing left on the ad itself to cover');
+    // ONE POT on the receipt: committed (company row) never exceeds its capacity (the $100 promise).
+    const committed = ad.companyFundingAllocations.reduce((sum, row) => sum + row.amountUSD, 0);
+    assert(committed <= r.amountUSD + 0.005 && near(committed, r.companyCoveredUSD), 'company row == receipt companyCoveredUSD <= capacity');
+  });
+
   await must('C6. a Rate 1 = 0 receipt (Bank Transfer LYD, Sadad, LTT) counts its LYD on BOTH sides: no fake LYD debt (r6 C n=8)', () => {
     resetState();
     // The receipt form stores these methods with amountLocal 0 and amountUSD = amount / rate2.
@@ -1157,6 +1212,107 @@ async function main() {
     assert(near(snap.liabilityUSD, 35), 'the collected-but-underpaid money is owed to the customer');
   });
 
+  // F-underpaid: 500 LYD / $50 job at rate 10, the driver collected 300 LYD.
+  // `extra`: the server also stores customerOutstandingUSD 20 on such a row. The customer card nets that
+  // field against the debt differently (an older reader rule, not part of F-underpaid), so the fixed
+  // numbers below are pinned on the row without it and the server-shaped row is pinned as "unchanged by the edit".
+  function underpaidDelivered(extra = {}) {
+    return {
+      id: 'receipt_l8b', recordType: 'receipt', customerId: 'c1', status: 'Not Paid', isPaid: false,
+      statusDetail: { notPaidCollection: 'delivery', paidCollection: 'office' },
+      deliveryStatus: 'Delivered', deliveredAt: '2026-07-10T10:00:00.000Z', deliveryPersonId: 'drv1', isReceivedInOffice: false,
+      tempReceiptNo: 'D5', serialNumber: '12345', finalReceiptNo: '12345', receiptType: 'DELIVERY_TEMP',
+      amountLocal: 300, amountUSD: 30, exchangeRate: 10, debtAmountLocal: 500, debtAmountUSD: 50,
+      amountCollectedFromCustomer: 300, paymentResult: 'UNDERPAID', remainingDue: 200,
+      payments: [{ method: 'Cash (LYD)', amount: 300, rate: 1, rate2: 10, collectionType: 'delivery' }],
+      plannedPayments: [{ method: 'Cash (LYD)', amount: 500, rate: 1, rate2: 10, collectionType: 'delivery', deliveryPersonId: 'drv1' }],
+      deliveryPlaceName: 'Hay Andalus', quotedDeliveryFee: 10, phoneNumber: '0912345678', transfers: [],
+      createdBy: ADMIN.id, createdAt: '2026-06-20T10:00:00.000Z', _lastModified: 1000, ...extra
+    };
+  }
+  function assertUnderpaidMoney(label) {
+    const stats = getCustomerStats('c1');
+    assert(near(stats.totalPaidUSD, 30), `${label}: the customer paid the $30 the driver collected, got ${usd(stats.totalPaidUSD)}`);
+    assert(near(stats.balanceUSD, -20), `${label}: the customer still owes $20, got ${usd(stats.balanceUSD)}`);
+    const snap = sandbox.getLiquiditySnapshot();
+    assert(near(snap.collectedUSD, 30), `${label}: the company holds $30 of collected cash, got ${usd(snap.collectedUSD)}`);
+  }
+
+  await must('L8b. an underpaid delivery (300 of 500 LYD) reads as $30 paid, $20 still owed, $30 collected', () => {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    S.receipts.push(underpaidDelivered());
+    assertUnderpaidMoney('stored');
+  });
+
+  // Drive the real receipt form on `stored`, changing only the phone; returns the row the server would store.
+  async function phoneOnlyEdit(stored) {
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    S.serverMode = true;
+    S.users = [ADMIN, { id: 'drv1', role: 'Delivery', name: 'Driver', permissions: {} }];
+    S.customers = [{ id: 'c1', name: 'Cust One', platform: 'Facebook', phones: ['0912345678', '0923456789'], profileLinks: [] }];
+    S.receipts.push(stored);
+    S.modalData = stored;
+    S.activeModal = 'receipt';
+    // The rendered receipt form: every field as the template fills it; the rows are the PLAN (500 LYD).
+    const field = (value = '') => ({ ...makeElement(), value: String(value), disabled: false, readOnly: false, isConnected: true,
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false } });
+    const fields = new Map(Object.entries({
+      'receipt-editing-id': stored.id, 'receipt-customer-id': 'c1', 'receipt-status': 'Not Paid', 'paid-collection-value': 'office',
+      'notpaid-collection-value': 'delivery', 'notpaid-delivery-person': 'drv1', 'receipt-serial': '12345',
+      'receipt-delivery-place': 'Hay Andalus', 'receipt-quoted-delivery-fee': '10', 'receipt-phone-search': '0912345678'
+    }).map(([id, value]) => [id, field(value)]));
+    const cells = { '.payment-method': 'Cash (LYD)', '.payment-amount': 500, '.payment-rate1': 1, '.payment-rate2': 10,
+      '.collection-type': 'delivery', '.delivery-person': 'drv1', '.payment-r1-display': '', '.payment-r2-display': '' };
+    const row = field();
+    for (const sel of Object.keys(cells)) cells[sel] = Object.assign(field(cells[sel]), { closest: () => row });
+    row.querySelector = sel => cells[sel] || null;
+    const kept = { updateRecord: sandbox.updateRecord, addLog: sandbox.addLog, clearUrlParams: sandbox.clearUrlParams,
+      requireReceiptCustomerRiskAcknowledgement: sandbox.requireReceiptCustomerRiskAcknowledgement };
+    const keptDoc = { querySelectorAll: sandbox.document.querySelectorAll, querySelector: sandbox.document.querySelector };
+    let sent = null;
+    try {
+      sandbox.document.getElementById = id => fields.get(id) || fields.set(id, field()).get(id);
+      sandbox.document.querySelectorAll = sel => (sel === '.payment-split-item' ? [row] : []);
+      sandbox.document.querySelector = () => null;
+      sandbox.updateRecord = async (array, id, record) => { sent = record; return true; };
+      sandbox.addLog = () => {};
+      sandbox.clearUrlParams = () => {};
+      sandbox.requireReceiptCustomerRiskAcknowledgement = () => false;
+      sandbox.initReceiptSerialOnOpen();
+      sandbox.updateReceiptStatusUI('Not Paid');
+      fields.get('receipt-phone-search').value = '0923456789';  // the only thing the office changes
+      await sandbox._saveReceiptFromModalInner();
+    } finally {
+      Object.assign(sandbox, kept);
+      Object.assign(sandbox.document, keptDoc);
+      sandbox.document.getElementById = () => null;
+    }
+    assert(sent, 'the form sent its PATCH');
+    assert(sent.phoneNumber === '0923456789', 'the phone change is in the PATCH');
+    const merged = { ...stored, ...sent };  // what the server stores: the PATCH merged over the stored row
+    assert(merged.amountLocal === 300 && merged.amountUSD === 30 && merged.payments.length === 1 && Number(merged.payments[0].amount) === 300,
+      `the collected 300 LYD / $30 and the driver's payment line survive the edit, got ${merged.amountLocal} / ${merged.amountUSD} / ${JSON.stringify(merged.payments)}`);
+    S.receipts = [merged];
+    return merged;
+  }
+
+  await must('L8c. a phone-only edit of that receipt in the receipt form keeps $30 paid, $20 owed, $30 collected', async () => {
+    await phoneOnlyEdit(underpaidDelivered());
+    assertUnderpaidMoney('after the edit');
+    // The same receipt as the server stores it (with customerOutstandingUSD 20): the edit moves none of the customer's numbers.
+    const serverRow = underpaidDelivered({ customerOutstandingUSD: 20 });
+    resetState();
+    startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
+    S.receipts.push(serverRow);
+    const before = JSON.stringify([getCustomerStats('c1'), sandbox.getLiquiditySnapshot().collectedUSD]);
+    await phoneOnlyEdit(serverRow);
+    const after = JSON.stringify([getCustomerStats('c1'), sandbox.getLiquiditySnapshot().collectedUSD]);
+    assert(before === after, `the edit changed the customer's numbers:\n        before ${before}\n        after  ${after}`);
+    assert(near(getCustomerStats('c1').totalPaidUSD, 30) && near(sandbox.getLiquiditySnapshot().collectedUSD, 30), 'paid and collected stay $30');
+  });
+
   await must('L9. growing a PRE-WINDOW ad by an ordinary edit counts the dated growth (capped at real spend)', () => {
     resetState();
     startLiquidityTracking('2026-07-01T00:00:00.000Z', '2026-07-01T08:00:00.000Z');
@@ -1217,6 +1373,98 @@ async function main() {
     assert(near(getReceiptUsageStats(paid).remainingUSD, 100), 'untouched paid receipt must be fully available');
     assert(getReceiptUsageStats(paid).usageStatus === 'Unused', 'untouched paid receipt must read Unused');
     assert(near(getDeliveryReceiptDueUsage(del).remainingDueUSD, 100), 'untouched due credit must be fully available');
+  });
+
+  // F-addelete: the real deleteAd() against a stubbed server. `serverTick` plays the live-sync answer
+  // (the receipt the server shrank in the same step as the delete).
+  async function driveDeleteAd(adId, serverTick = () => {}) {
+    const kept = { apiDeleteEntity: sandbox.apiDeleteEntity, serverLiveSyncTick: sandbox.serverLiveSyncTick, confirm: sandbox.confirm };
+    const seen = { serverCalls: [], confirms: [], notes: [] };
+    const before = notes.length;
+    S.serverMode = true;
+    try {
+      sandbox.apiDeleteEntity = async (collection, id) => { seen.serverCalls.push(`${collection}/${id}`); return { ok: true, lastModified: Date.now() }; };
+      sandbox.serverLiveSyncTick = async () => { serverTick(); };
+      sandbox.confirm = text => { seen.confirms.push(String(text)); return true; };
+      await sandbox.deleteAd(adId);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    } finally {
+      Object.assign(sandbox, kept);
+      S.serverMode = false;
+    }
+    seen.notes = notes.slice(before);
+    return seen;
+  }
+
+  await must('A-del-1. an ad paid from company funds cannot be deleted; an ad with no company money can', async () => {
+    const shapes = [
+      ['company funding rows', { companyFundingAllocations: [{ receiptId: 'receipt_x', coverageId: 'cov1', amountUSD: 50 }] }, 50],
+      ['direct company coverage', { companyDirectCoverageUSD: 20 }, 20]
+    ];
+    for (const lang of ['en', 'ar']) {
+      for (const [label, fields, covered] of shapes) {
+        resetState();
+        S.language = lang;
+        const ad = makeAd({ id: 'ad_del1', amountUSD: 50, spentUSD: 50, status: 'Completed', paymentStatus: 'not_paid', isPaid: false, ...fields });
+        assert(near(sandbox.getAdCompanyCoveredUSD(ad), covered), `${label}: the company paid ${usd(covered)}, got ${usd(sandbox.getAdCompanyCoveredUSD(ad))}`);
+        const seen = await driveDeleteAd(ad.id);
+        assert(!ad._deleted, `${label} (${lang}): an ad the company paid for must stay, but it was deleted`);
+        assert(seen.serverCalls.length === 0, `${label} (${lang}): no delete may reach the server, got ${seen.serverCalls.join(', ')}`);
+        assert(seen.confirms.length === 0, `${label} (${lang}): the refusal comes before the confirm`);
+        const want = lang === 'ar'
+          ? ['لا يمكن الحذف', 'هذا الإعلان مدفوع من أموال الشركة، لذلك لا يمكن حذفه. أوقفه بدلاً من ذلك.']
+          : ['Cannot delete', 'This ad was paid from company funds, so it cannot be deleted. Stop it instead.'];
+        assert(seen.notes.some(n => n.t === want[0] && n.m === want[1] && n.k === 'warning'),
+          `${label} (${lang}): the refusal must say why, got ${JSON.stringify(seen.notes)}`);
+      }
+    }
+    // The server's own 409 reads the same in both languages.
+    S.language = 'ar';
+    assert(sandbox._serverRefusalText('An ad paid from company funds cannot be deleted; stop it instead') === 'هذا الإعلان مدفوع من أموال الشركة، لذلك لا يمكن حذفه. أوقفه بدلاً من ذلك.', 'the server refusal has its Arabic text');
+    S.language = 'en';
+    assert(sandbox._serverRefusalText('An ad paid from company funds cannot be deleted; stop it instead') === 'This ad was paid from company funds, so it cannot be deleted. Stop it instead.', 'the server refusal has its plain English text');
+
+    // No company money (absent, null, empty rows, sub-cent residue): deletable as before.
+    for (const [label, fields] of [['no company fields', {}], ['null direct coverage', { companyDirectCoverageUSD: null }],
+      ['empty rows and zero', { companyFundingAllocations: [], companyDirectCoverageUSD: 0 }], ['sub-cent residue', { companyDirectCoverageUSD: 0.004 }]]) {
+      resetState();
+      const ad = makeAd({ id: 'ad_del1_free', amountUSD: 50, spentUSD: 50, paymentStatus: 'not_paid', isPaid: false, ...fields });
+      const seen = await driveDeleteAd(ad.id);
+      assert(ad._deleted === true, `${label}: an ad with no company money is deleted`);
+      assert(seen.serverCalls.join() === 'ads/ad_del1_free', `${label}: exactly one delete reaches the server, got ${seen.serverCalls.join(', ')}`);
+    }
+  });
+
+  await must('A-del-2. deleting an unpaid In-Shop ad leaves only the hand-written $10 as debt, and nothing for the company to cover', async () => {
+    for (const shape of ['due row', 'legacy mirror']) {
+      resetState();
+      // A $10 hand-written open receipt that the server grew to $50 for a $50 unpaid In-Shop ad.
+      const r = { id: 'receipt_del2', recordType: 'receipt', customerId: 'c1', amountUSD: 50, amountLocal: 250, exchangeRate: 5,
+        debtAmountUSD: 50, debtAmountLocal: 250, status: 'Not Paid', isPaid: false, deliveryStatus: 'Office',
+        statusDetail: { notPaidCollection: 'office' }, payments: [], transfers: [], createdAt: new Date().toISOString() };
+      S.receipts.push(r);
+      const ad = makeAd({ id: 'ad_del2', amountUSD: 50, paymentStatus: 'not_paid', isPaid: false, collectionMethod: 'in_shop', receiptId: r.id,
+        receiptAllocations: [], ...(shape === 'due row' ? { dueAllocations: [{ receiptId: r.id, amountUSD: 50 }] } : {}), dueAmountToUseUSD: 50, dueAmountToUseLYD: 250 });
+      assert(near(getCustomerStats('c1').balanceUSD, -50), `${shape}: pre-condition, ONE $50 debt, got ${usd(getCustomerStats('c1').balanceUSD)}`);
+
+      // The server releases the ad's $40 in the same step; the sync tick delivers the shrunken receipt.
+      const seen = await driveDeleteAd(ad.id, () => Object.assign(r, { amountUSD: 10, amountLocal: 50, debtAmountUSD: 10, debtAmountLocal: 50 }));
+      assert(ad._deleted === true && seen.serverCalls.join() === 'ads/ad_del2', `${shape}: the ad is deleted through the server`);
+      const stats = getCustomerStats('c1');
+      assert(near(stats.receiptDebtUSD, 10), `${shape}: only the hand-written $10 stays as receipt debt at once, got ${usd(stats.receiptDebtUSD)}`);
+      assert(near(stats.balanceUSD, -10), `${shape}: the customer owes $10, got ${usd(stats.balanceUSD)}`);
+      const coverable = sandbox.getCustomerCoverableAdDebt('c1');
+      assert(near(coverable.totalUSD, 0) && coverable.ads.length === 0, `${shape}: a deleted ad leaves no ad debt for company funds, got ${usd(coverable.totalUSD)}`);
+      assert(seen.confirms.length === 1 && seen.confirms[0].includes("This ad's unpaid debt (up to $50.00) will be removed from the customer's open receipt."),
+        `${shape}: the confirm must say the debt leaves the receipt, got ${JSON.stringify(seen.confirms)}`);
+    }
+    // A paid ad, or one with no due on its receipt, promises nothing in the confirm.
+    resetState();
+    const paid = paidReceipt('receipt_del2p', 100);
+    const paidAd = makeAd({ id: 'ad_del2p', amountUSD: 60, receiptAllocations: [{ receiptId: paid.id, amountUSD: 60 }] });
+    const seenPaid = await driveDeleteAd(paidAd.id);
+    assert(seenPaid.confirms.length === 1 && !seenPaid.confirms[0].includes('unpaid debt') && seenPaid.confirms[0].includes('$60.00 will return'),
+      `a paid ad's confirm names its returned funding only, got ${JSON.stringify(seenPaid.confirms)}`);
   });
 
   console.log('\n--- REFUNDS (real saveRefund, driven through the modal inputs) ---');
