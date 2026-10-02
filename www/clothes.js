@@ -25,8 +25,13 @@ const CLOTHES_PRODUCTS_PAGE_SIZE = 30;
 // conflict (or duplicate a create); replaying the same key returns the original
 // atomic result instead.
 const _clothesPendingOrderMutations = new Map();
+// The open NEW product/shipment/order form's id (cleared when a form opens or closes): a re-press
+// after a lost answer meets its own committed row (409), never a second record or a second stock take.
+let _clothesDraftId = '';
 
-function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, operationData) {
+// draftId: a create's pinned order id. A changed re-press mints only a new key, so the server
+// answers 409 for the committed first Save; an unchanged one replays the same key as before.
+function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, operationData, draftId = '') {
   const act = String(action || '');
   const id = String(orderId || '');
   const slot = act === 'create' ? 'create' : `${act}:${id}`;
@@ -36,7 +41,7 @@ function getClothesOrderMutationAttempt(action, orderId, expectedLastModified, o
   const attempt = {
     slot,
     fingerprint,
-    orderId: id || Security.generateSecureId('clothes_order'),
+    orderId: id || String(draftId || '') || Security.generateSecureId('clothes_order'),
     idempotencyKey: ensureOperationIdempotencyKey('', `clothes-${act || 'order'}`)
   };
   _clothesPendingOrderMutations.set(slot, attempt);
@@ -157,6 +162,8 @@ function clothesServerDetailText(detail) {
 }
 
 function showClothesShipmentMutationError(error) {
+  // No answer: the change may have gone through, so say so instead of the engine's 'Load failed'.
+  if (_isConnectionFailure(error)) return showNotification(..._serverRefusalToast('save', 'clothesShipments', error), 'error');
   const isAr = clothesIsAr();
   const detail = clothesServerDetailText(Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 }));
   showNotification(
@@ -167,6 +174,7 @@ function showClothesShipmentMutationError(error) {
 }
 
 function showClothesOrderMutationError(error) {
+  if (_isConnectionFailure(error)) return showNotification(..._serverRefusalToast('save', 'clothesOrders', error), 'error');
   const isAr = clothesIsAr();
   const detail = clothesServerDetailText(Security.sanitizeInput(String(error?.message || ''), { maxLength: 240 }));
   showNotification(
@@ -1034,6 +1042,7 @@ function showClothesProductModal() {
   if (!clothesCanUse()) return;
   state.activeModal = 'clothes-product';
   state.modalData = null;
+  _clothesDraftId = '';
   _clothesTempVariants = [{ color: '', size: '', qty: 0 }];
   _clothesTempPhoto = null;
   _clothesPhotoDirty = false;
@@ -1398,7 +1407,7 @@ async function saveClothesProductFromModal() {
     if (!saved) return false;
     showNotification(isAr ? 'تم الحفظ' : 'Saved', isAr ? 'تم تحديث المنتج بنجاح.' : 'Product updated successfully.', 'success');
   } else {
-    const saved = await addRecord(state.clothesProducts, { ...payload, createdAt: new Date().toISOString() });
+    const saved = await addRecord(state.clothesProducts, { ...payload, id: (_clothesDraftId ||= Security.generateSecureId('clothesProducts')), createdAt: new Date().toISOString() });
     if (!saved) return false;
     showNotification(isAr ? 'تمت الإضافة' : 'Added', isAr ? 'تمت إضافة المنتج بنجاح.' : 'Product added successfully.', 'success');
   }
@@ -1927,6 +1936,7 @@ function showClothesShipmentModal() {
   if (!clothesCanUse()) return;
   state.activeModal = 'clothes-shipment';
   state.modalData = null;
+  _clothesDraftId = '';
   _clothesTempShipLines = [{ productId: '', color: '', size: '', qty: 0, unitCostUSD: '' }];
   updateUrlParams({ modal: 'clothes-shipment', id: 'new' }); // URL tracking
   renderModal();
@@ -2184,6 +2194,7 @@ async function saveClothesShipmentFromModal() {
   } else {
     const saved = await addRecord(state.clothesShipments, {
       ...payload,
+      id: (_clothesDraftId ||= Security.generateSecureId('clothesShipments')),
       status: 'Ordered',
       stockApplied: false,
       receivedAt: null,
@@ -2787,6 +2798,7 @@ function showClothesOrderModal() {
   if (!clothesCanUse()) return;
   state.activeModal = 'clothes-order';
   state.modalData = null;
+  _clothesDraftId = '';
   _clothesTempOrderLines = [{ productId: '', color: '', size: '', qty: 1, priceLYD: '' }];
   _clothesOrderEditBaseline = 0;
   updateUrlParams({ modal: 'clothes-order', id: 'new' }); // URL tracking
@@ -3267,7 +3279,8 @@ async function saveClothesOrderFromModal() {
     try {
       const action = editTarget ? 'update' : 'create';
       const expectedLastModified = editTarget ? (_clothesOrderEditBaseline || getClothesOrderExpectedLastModified(editTarget)) : null;  // the version the form was opened on
-      attempt = getClothesOrderMutationAttempt(action, editTarget?.id || '', expectedLastModified, payload);
+      attempt = getClothesOrderMutationAttempt(action, editTarget?.id || '', expectedLastModified, payload,
+        editTarget ? '' : (_clothesDraftId ||= Security.generateSecureId('clothes_order')));
       const request = {
         action,
         orderId: attempt.orderId,

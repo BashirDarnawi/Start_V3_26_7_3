@@ -578,8 +578,7 @@ function renderMobileOnboarding() {
 }
 
 // ---------- compact list rows (Receipts · Customers · Pages · Team) ----------
-// One-line summary rows; each expands in place to the app's full card, so
-// every existing button keeps working as before.
+// One-line summary rows; each expands in place to the app's full card (every button still works).
 
 const _shellExpanded = new Set();
 const _shellCollapsed = new Set();
@@ -815,8 +814,8 @@ function shellCustomerRow(customer, stats, card, meta = {}) {
   const phones = Array.isArray(meta.phones) ? meta.phones.filter(Boolean) : [];
   const sub = meta.canSeeContacts
     ? (phones.length ? `<span dir="ltr">${shellEsc(phones[0])}</span>${phones.length > 1 ? ` +${phones.length - 1}` : ''}` : (isAr ? 'لا يوجد هاتف' : 'No phone'))
-    : shellEsc(customer?.platform || '');
-  let trailing = shellPill(shellEsc(customer?.platform || ''), 'slate');
+    : shellEsc(platformLabel(customer?.platform));
+  let trailing = shellPill(shellEsc(platformLabel(customer?.platform)), 'slate');
   let tone = 'blue';
   if (meta.canSeeBalance && stats) {
     const bal = customerBalanceView(stats);

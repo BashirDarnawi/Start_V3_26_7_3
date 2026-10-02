@@ -201,6 +201,11 @@ function trStatus(value) {
   return STATUS_TRANSLATIONS_AR[s] || s;
 }
 
+// A customer's platform for display only (stored and <option> values stay English); brand names stay.
+function platformLabel(p) {
+  return state.language === 'ar' && p === 'Phone' ? 'هاتف' : String(p || '');
+}
+
 // Payment channel names: Libyana/Madar/LTT/Sadad/USDT are proper names and
 // stay as-is; only the generic words are localized.
 const METHOD_TRANSLATIONS_AR = {
@@ -256,11 +261,8 @@ function applyTheme() {
   // dark-theme user never sees a light flash on startup.
   try { localStorage.setItem('albayan_theme', isDark ? 'dark' : 'light'); } catch (_) {}
 
-  // The two media-keyed theme-color metas in index.html track the OS scheme
-  // for first paint only. Once the app theme is applied, pin BOTH metas to
-  // it so the browser toolbar / installed-PWA status bar matches the in-app
-  // theme (drop the media filter; identical content on both makes
-  // duplicate-meta precedence irrelevant). Values mirror index.html's pair.
+  // index.html's two media-keyed theme-color metas follow the OS for first paint only: pin BOTH to the
+  // app theme (media filter dropped, same content) so the toolbar / PWA status bar match. As index.html.
   try {
     const themeMetas = document.querySelectorAll('meta[name="theme-color"]');
     for (let i = 0; i < themeMetas.length; i++) {
@@ -343,10 +345,8 @@ const IconQueue = {
         // Full scan needed
         lucide.createIcons();
       } else {
-        // Scoped scan — `root` is the option the bundled lucide actually
-        // supports ({icons, nameAttr, attrs, root, inTemplates}); the old
-        // `nodes:` option does not exist upstream and silently fell back to
-        // a FULL document scan once per queued container.
+        // Scoped scan: `root` is what the bundled lucide supports; the old `nodes:` does not exist and
+        // silently fell back to a FULL document scan per queued container.
         for (const c of containers) {
           if (c instanceof Element) {
             lucide.createIcons({ root: c });

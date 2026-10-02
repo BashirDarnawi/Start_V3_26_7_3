@@ -2,10 +2,8 @@
 // SEARCH & FILTER FUNCTIONS
 // ==========================================
 
-// Return one canonical payment state for both current and historical ads.
-// Older imports used spaces, hyphens, "unpaid", and apostrophes, while some
-// records only have the legacy isPaid boolean.  An explicit status wins over
-// isPaid so a stale boolean can never make a known customer debt look paid.
+// One canonical payment state for current and historical ads (old spellings, or only the
+// legacy isPaid). An explicit status wins: a stale isPaid never makes a known debt look paid.
 function getAdPaymentState(ad) {
   const rawStatus = String(ad?.paymentStatus ?? '')
     .trim()
@@ -27,9 +25,8 @@ function getAdPaymentState(ad) {
   return 'paid';
 }
 
-// Canonical client-side record scope. The server is authoritative and already
-// returns scoped collections, but this guard also protects local mode, stale
-// offline caches, and permission changes that happen before the next reload.
+// Canonical client-side record scope. The server already returns scoped collections; this
+// also covers local mode, stale offline caches and a permission change before the next reload.
 function getRecordsVisibleToCurrentUser(moduleName, records) {
   const visible = getVisibleRecords(Array.isArray(records) ? records : []);
   if (isCurrentUserAdmin() || currentUserHasPermission(moduleName, 'view')) return visible;
@@ -66,11 +63,8 @@ function getReceiptCustomerReferenceId(receipt) {
   return customerId || String(receipt?.customer || '').trim();
 }
 
-// One canonical relationship reader for Receipt -> Ads navigation. This is a
-// history drill-down, not a money calculation, so it includes both live links
-// and frozen stop/refund funding baselines. settledReceiptId is settlement
-// provenance rather than a funding relationship and intentionally does not
-// match.
+// The one Receipt -> Ads navigation reader: a history drill-down (not money), so live links and
+// frozen stop/refund baselines both count; settledReceiptId (provenance) deliberately does not.
 function getAdLinkedReceiptIds(ad) {
   if (!ad || ad._deleted || ad.recordType === 'receipt') return [];
   const ids = new Set();
@@ -137,9 +131,8 @@ function clearReceiptCustomerFilter() {
   render();
 }
 
-// Open one exact receipt from a warning or drill-down without relying on a
-// customer name/serial search. The permission-scoped receipt list is checked
-// first so a guessed id can never reveal a cached record.
+// Open one exact receipt (no name/serial search); the permission-scoped list is checked
+// first, so a guessed id never reveals a cached record.
 function openReceiptRecord(receiptId) {
   const rid = String(receiptId || '').trim();
   const receipt = Security.isValidRecordId(rid)
@@ -202,9 +195,8 @@ function clearAdReceiptFilter() {
   render();
 }
 
-// Meta-first automation creates a financially neutral draft. Keep that state
-// separate from "not paid": a draft has no customer debt until a person opens
-// it, chooses the customer/payment/receipt details, and successfully saves it.
+// A Meta-imported draft is financially neutral, not "not paid": no customer debt until a
+// person completes it (customer, payment, receipt) and saves.
 function isMetaAdSetupPending(ad) {
   if (!ad || typeof ad !== 'object') return false;
   return String(ad.metaImportState || '').toLowerCase() === 'needs_completion'
@@ -239,10 +231,8 @@ function getFilteredAds(customersById = null) {
     filtered = filtered.filter(ad => String(ad.pageId || '') === String(f.page));
   }
 
-  // Read the search term from state (kept in sync by the debounced input handler).
-  // Fall back to the DOM only if state hasn't been set yet.
-  // foldSearchText on BOTH sides: Arabic-keyboard digits (٠-٩) and unhamza'd
-  // Arabic spellings must match the ASCII/canonical stored values.
+  // Read the search term from state (the debounced input keeps it), else the DOM. foldSearchText
+  // on BOTH sides: Arabic digits (٠-٩) and unhamza'd spellings match the stored values.
   const searchTerm = foldSearchText(
     state.adSearch != null ? state.adSearch : (document.getElementById('ad-search')?.value || '')
   ).trim();
@@ -253,9 +243,8 @@ function getFilteredAds(customersById = null) {
     const custMap = customersById || new Map(state.customers.map(c => [c.id, c]));
     const pageMap = new Map((state.pages || []).map(p => [p.id, p]));
     const canSearchContacts = can('customers', 'viewContacts');
-    // The table renders Meta page/ad IDs with a leading '#'; a copied
-    // "#123456" search must still match the stored bare digits. A lone "#"
-    // must not match everything, so keep the original term as fallback.
+    // A copied "#123456" (the table prints IDs with '#') matches the bare digits; a lone "#"
+    // keeps the original term, so it never matches everything.
     const idTerm = searchTerm.replace(/^#/, '') || searchTerm;
     const phoneDigitsTerm = searchTerm.replace(/\D/g, '').replace(/^0+/, '');  // "+218 91…" and "0912…" both match
     filtered = filtered.filter(ad => {
@@ -286,10 +275,8 @@ function getFilteredAds(customersById = null) {
 // CUSTOMER VALIDATION FUNCTIONS
 // ==========================================
 
-// Customer identity is phone-based, but the historical data has several
-// shapes (`phone`, `phoneNumber`, `phones[]`, and object entries) and several
-// spellings of a Libyan number. Keep this canonicalizer in one place so create,
-// edit, duplicate discovery and the server all agree that these are identical:
+// Customer identity is phone-based across every stored shape (phone, phoneNumber, phones[],
+// objects) and spelling; one canonicalizer so create, edit, duplicates and the server agree:
 //   0912345678 / 218912345678 / +218 91 234 5678 / 00218-91-234-5678
 function getCustomerPhoneValue(entry) {
   if (entry === null || entry === undefined) return '';
@@ -341,12 +328,10 @@ function customerPhoneMatchesSearch(term, phone) {
   return !!key && ((!!tail && key.includes(tail)) || (digits.length >= 9 && normalizeCustomerPhoneKey(digits) === key));
 }
 
-// Compare-time search normalizer for BOTH query and haystack (never stored
-// values): Arabic-Indic/Persian digits -> ASCII, lowercase Latin, hamza alif
-// forms -> ا, ة -> ه, ى -> ي, tashkeel/tatweel stripped; NFKC first (guarded).
-// Memoised in two generations (bounded at 2 x MAX, degrades gracefully).
-// `var` + lazy creation ON PURPOSE: foldSearchText is hoisted and may run
-// before this line; `const` state would throw during startup.
+// Compare-time search normalizer for query AND haystack (never stored values): Arabic-Indic/Persian
+// digits -> ASCII, lowercase Latin, alif forms -> ا, ة -> ه, ى -> ي, no tashkeel/tatweel; NFKC first.
+// Two-generation memo (bounded). `var` + lazy creation ON PURPOSE: foldSearchText is hoisted and may
+// run before this line, where `const` state would throw.
 var _foldCache = null; // { cur: Map, prev: Map }
 
 function foldSearchText(value) {
@@ -387,10 +372,8 @@ function _foldSearchTextUncached(value) {
 // ==========================================
 // PAGE CATEGORY VOCABULARY
 // ==========================================
-// Categories are free text from staff AND the Meta importer, so raw values
-// drift: Arabic spelling variants of one word ("حج وعمرة"/"حج وعمره"), double
-// spaces, typos that spread once suggested. One key per real category with the
-// MOST-USED spelling winning, so the picker teaches the right spelling.
+// Categories are free text (staff and the Meta importer) that drifts: Arabic spelling variants,
+// double spaces, typos. One key per category; the MOST-USED spelling wins, so the picker teaches it.
 function pageCategoryKey(value) {
   return foldSearchText(value).replace(/\s+/g, ' ').trim();
 }
@@ -449,9 +432,8 @@ function getCustomerPhoneEntries(customer) {
   return entries;
 }
 
-// Repeated spellings inside the same form are not useful, but they should not
-// make a beginner repair the form manually. Preserve the first formatting and
-// silently save each real number once.
+// Repeated spellings in one form: keep the first formatting and save each real number once
+// (never make a beginner repair the form).
 function dedupeCustomerPhoneValues(phones) {
   const seen = new Set();
   const result = [];
@@ -662,10 +644,8 @@ function getAdSpendUSD(ad) {
 }
 
 // ---------------- Liquidity coverage (owner solvency tracking) ----------------
-// The business historically spent customer deposits. From an admin-chosen start
-// date the app tracks NEW cash actually received and NEW ad spending, and
-// compares the net against everything still owed to customers — so the owner
-// sees whether the fresh money can cover the outstanding customer credit.
+// Deposits were historically spent: from an admin-chosen start date, NEW cash received minus
+// NEW ad spending is set against all customer credit still owed (can fresh money cover it?).
 
 // Newest liquidity record wins. state.appSettings is append-only exactly like
 // exchangeRateHistory, so the history of changes is the audit trail.
@@ -704,19 +684,15 @@ function getLiquiditySnapshot() {
       && ['full', 'partial'].includes(String(detail.refundAction || ''))
       && String(detail.refundStatus || '') !== 'refunded';
     if ((status === 'Canceled' || status === 'Lost' || status === 'Destroyed') && !refundOwed) continue;
-    // Cash-bearing receipts: Paid ones, plus UNDERPAID delivery completions —
-    // there the completion flow rewrote amountUSD to the actually-collected
-    // cash and stamped deliveredAt, even though the status stays Not Paid.
+    // Cash-bearing: Paid, plus UNDERPAID completions (amountUSD rewritten to the cash
+    // collected, deliveredAt stamped, the status still Not Paid).
     const underpaidCollected = !!r.deliveredAt && String(r.paymentResult || '') === 'UNDERPAID';
     if (!(r.isPaid === true || status === 'Paid' || underpaidCollected)) continue;
-    // Owed to customers: the unused credit on every paid receipt INCLUDING
-    // transfer-ins — each receipt's remaining already subtracts its own usage
-    // and outgoing transfers, so summing stays transfer-neutral.
+    // Owed to customers: unused credit on every paid receipt, transfer-ins INCLUDED (each
+    // remaining nets its usage and outgoing transfers: the sum is transfer-neutral).
     liabilityUSD += Math.max(getReceiptUsageStats(r, _usageIndex).remainingUSD || 0, 0);
     if (!tracking) continue;
-    // New cash only: a transfer moves existing money between receipts and a
-    // CARRIED_BALANCE receipt records pre-tracking credit — neither is money
-    // that newly arrived in the window.
+    // New cash only: not a transfer (existing money moving) nor CARRIED_BALANCE (older credit).
     if (isTransferInReceipt(r)) continue;
     if (String(r.receiptType || '') === 'CARRIED_BALANCE') continue;
     const paidAtMs = new Date(getReceiptPaidDate(r) || 0).getTime();
@@ -736,9 +712,8 @@ function getLiquiditySnapshot() {
       if (Number.isFinite(adDateMs) && adDateMs >= sinceMs) {
         adSpendUSD += spend;
       } else {
-        // An old ad grown inside the window spends new money only for the
-        // dated growth — top-ups plus ordinary budget increases recorded in
-        // amountAdjustments — and never more than the ad actually spent.
+        // An old ad grown in the window spends new money only for its dated growth (top-ups +
+        // amountAdjustments increases), never more than it actually spent.
         const sumDatedRows = (rows, key) => (Array.isArray(rows) ? rows : []).reduce((sum, t) => {
           const tMs = new Date(t?.date || 0).getTime();
           return Number.isFinite(tMs) && tMs >= sinceMs ? sum + (parseFloat(t?.[key]) || 0) : sum;
@@ -767,14 +742,12 @@ function getLiquiditySnapshot() {
   };
 }
 
-// Normalize current and historical page links. Current pages use customerIds;
-// old exports used one scalar customerId. Comparing normalized strings also
-// protects imported numeric-looking ids from silently disappearing.
+// Page links, current (customerIds) and old (one scalar customerId), compared as strings so
+// imported numeric-looking ids never silently disappear.
 function getPageCustomerIds(page) {
   if (!page || page._deleted) return [];
-  // Once the modern array exists it is authoritative, including when it is
-  // empty. Falling back to the old scalar only when the array is absent keeps
-  // a removed/reassigned legacy customer from being linked again forever.
+  // The array, once present, is authoritative even empty: the old scalar is read only when it is
+  // absent, so a removed/reassigned legacy customer is never linked again.
   const rawIds = Array.isArray(page.customerIds)
     ? [...page.customerIds]
     : (page.customerId !== undefined && page.customerId !== null && String(page.customerId).trim()
@@ -791,14 +764,11 @@ function getLinkedPagesForCustomer(customerId) {
   );
 }
 
-// Linked unpaid debt uses its receipt as the authoritative rate. Otherwise,
-// prefer the exact historical rate recorded by amountLocal/amountUSD: it is
-// more reliable than today's default for independent or already-paid ads.
+// Linked unpaid debt takes its receipt's rate; otherwise the historical amountLocal/amountUSD
+// rate beats today's default for independent or already-paid ads.
 function getAdSpendExchangeRate(ad) {
-  // For an unpaid Driver/In-Shop ad, its linked debt receipt is the currency
-  // source of truth. This order also repairs historical rows immediately after
-  // an admin corrects the receipt from (for example) 9.50 to 9.70, instead of
-  // leaving the customer card, receipt card and Ads table disagreeing forever.
+  // An unpaid Driver/In-Shop ad's debt receipt is the currency truth: an admin's rate fix there
+  // (9.50 -> 9.70) repairs the customer card, receipt card and Ads table at once.
   const paymentState = getAdPaymentState(ad);
   const collectionMethod = String(ad?.collectionMethod || '');
   if (paymentState === 'not_paid' && ['driver', 'in_shop'].includes(collectionMethod)) {
@@ -834,11 +804,9 @@ function getAdSpendLYD(ad) {
   return Math.round(getAdSpendUSD(ad) * getAdSpendExchangeRate(ad) * 100) / 100;
 }
 
-// Read model for a Not Paid receipt's amount (a zero-value D receipt keeps the
-// debt on its linked ad: a collection target only, never paid credit/usage).
-// GROSS target = original debt, no coverage netting: history writes and
-// capacity reads only. Everything the customer/driver SEES or COLLECTS must
-// use getReceiptCollectionTarget below, which nets out company funds.
+// A Not Paid receipt's GROSS target (a zero-value D receipt's debt sits on its linked ad: a
+// target, never paid credit/usage): history writes and capacity reads only. Anything shown
+// or collected uses getReceiptCollectionTarget below, net of company funds.
 function getReceiptGrossCollectionTarget(receipt, ads = state.ads) {
   const empty = {
     amountUSD: 0,
@@ -888,9 +856,8 @@ function getReceiptGrossCollectionTarget(receipt, ads = state.ads) {
     return finish(storedAmountUSD, storedAmountLocal, 'receipt_amount');
   }
 
-  // Only a current unpaid Driver receipt may derive a missing target from ads.
-  // In-Shop receipts already carry an explicit receipt amount. Paid/cancelled
-  // receipts and historical stop/refund baselines are intentionally excluded.
+  // Only a current unpaid Driver receipt derives a missing target from ads (In-Shop carries
+  // its amount; Paid/cancelled and stop/refund baselines are excluded).
   if (getReceiptDebtType(receipt) !== 'delivery') return empty;
   const receiptId = String(receipt.id || '');
   const customerId = String(receipt.customerId || '');
@@ -928,16 +895,13 @@ function getReceiptGrossCollectionTarget(receipt, ads = state.ads) {
   return finish(amountUSD, amountLocal, linkedAds.length ? 'linked_ads' : 'none', linkedAds);
 }
 
-// The customer's REMAINING share of a receipt debt: gross minus what the
-// company has already covered. This is the one number every collection flow
-// (driver completion, mark-collected, WhatsApp dispatch, CSV, cards) may show
-// or collect — a driver must never demand dollars the company already paid.
+// The customer's REMAINING share (gross minus company coverage): the one number every
+// collection flow may show or collect; a driver never demands dollars the company paid.
 function getReceiptCollectionTarget(receipt, ads = state.ads) {
   const gross = getReceiptGrossCollectionTarget(receipt, ads);
   const coveredUSD = Math.max(parseFloat(receipt?.companyCoveredUSD) || 0, 0);
-  // The server-stored outstanding is the exact remaining share: it nets BOTH
-  // company coverage and any cash a driver already collected (Delivered but
-  // UNDERPAID). Prefer it whenever present; fall back to gross minus covered.
+  // The server's outstanding nets coverage AND cash a driver already collected (UNDERPAID):
+  // preferred when present, else gross minus covered.
   const storedOutstanding = Number(receipt?.customerOutstandingUSD);
   const hasStoredOutstanding = receipt?.customerOutstandingUSD != null
     && Number.isFinite(storedOutstanding);
@@ -964,9 +928,8 @@ function getReceiptLinkedDebtStats(receipt, ads = state.ads) {
   return getReceiptCollectionTarget(receipt, ads);
 }
 
-// One authoritative, customer-scoped summary for the Customers drill-down.
-// Filtering by BOTH ids is essential: a Facebook page can be shared by several
-// customers, and page-only totals would charge one customer's ads to another.
+// The Customers drill-down summary, filtered by BOTH ids: a page shared by several customers
+// would otherwise charge one customer's ads to another.
 function getCustomerPageSpendSummary(customerId, pageId) {
   const normalizedCustomerId = String(customerId || '').trim();
   const normalizedPageId = String(pageId || '').trim();
@@ -1342,9 +1305,8 @@ function renderCustomerPageSpendingDetail(summary, permissions = {}) {
   const canViewAds = permissions.canViewAds !== undefined ? permissions.canViewAds : can('ads', 'view');
   const canViewBalance = permissions.canViewBalance !== undefined ? permissions.canViewBalance : can('customers', 'viewBalance');
   const lastAdText = summary.lastAdDate
-    // appDateLocale() (not the raw device locale): an English UI on an ar-SA
-    // device otherwise renders this one stat as a Hijri year with Arabic-Indic
-    // digits, unlike every other lastAdDate in the app.
+    // appDateLocale(), not the device locale: an ar-SA phone showed this one date as a Hijri
+    // year with Arabic-Indic digits under an English UI.
     ? new Date(summary.lastAdDate).toLocaleDateString(appDateLocale())
     : (isAr ? 'أبداً' : 'Never');
   const pageName = Security.escapeHtml(summary.pageName || '');
@@ -1557,9 +1519,8 @@ function closeCustomerPagesDialog(restoreFocus = true) {
   if (restoreFocus && focusTarget?.focus) focusTarget.focus();
 }
 
-// Every ad that ran on one page, newest first. Role scoping and deleted rows
-// are handled by getAdsVisibleToCurrentUser, so this never leaks an ad the
-// current user is not allowed to see.
+// Every ad that ran on one page, newest first; getAdsVisibleToCurrentUser scopes it (no
+// deleted rows, never an ad the current user may not see).
 function getAdsForPage(pageId) {
   const wanted = String(pageId || '').trim();
   if (!wanted) return [];
@@ -1655,11 +1616,8 @@ function showPageAdsDialog(pageId, triggerButton) {
   dialog.focus();
 }
 
-// The same page added twice — usually a hand-made row beside a Meta import, or
-// two spellings of one name. Grouped by the Arabic-aware key the category
-// picker already uses, so حج وعمرة / حج وعمره / extra spaces collapse into one
-// group. Meta page ids are already de-duplicated by the server on import, so
-// name is the case a person has to resolve.
+// The same page added twice (a hand-made row beside a Meta import, or two spellings of one name),
+// grouped by the category picker's Arabic-aware key; the server already de-duplicates Meta page ids.
 function findDuplicatePageGroups(pages = state.pages) {
   const active = getVisibleRecords(Array.isArray(pages) ? pages : [])
     .filter(page => page && !page._deleted && page.id);
@@ -1684,10 +1642,8 @@ function closePageDuplicatesDialog(restoreFocus = true) {
   if (restoreFocus && target?.focus) target.focus();
 }
 
-// Shows what repeats and lets you open each page. Combining two pages stays a
-// decision a person makes one at a time — the Merge button only appears on the
-// hand-made row of a group that has exactly ONE Meta page to merge into, and it
-// opens a dialog that spells out what moves before anything is written.
+// Shows what repeats. Merging stays a person's one-at-a-time decision: Merge appears only on the
+// hand-made row of a group with exactly ONE Meta page, and its dialog says what moves first.
 function showPageDuplicates(focusPageId, triggerButton) {
   const isAr = state.language === 'ar';
   const wanted = String(focusPageId || '');
@@ -1711,9 +1667,7 @@ function showPageDuplicates(focusPageId, triggerButton) {
         <div class="min-w-0">
           <h2 id="page-duplicates-dialog-title" class="text-xl font-bold text-slate-800 dark:text-white truncate">${isAr ? 'صفحات مكررة' : 'Duplicate pages'}</h2>
           <p class="text-sm text-slate-500 break-words">${groups.length ? (isAr ? `${groups.length} مجموعة متطابقة بالاسم` : `${groups.length} group${groups.length > 1 ? 's' : ''} with the same name`) : (isAr ? 'لا يوجد تكرار' : 'Nothing repeated')}${(() => {
-            // Says up front how many of these can simply be folded into their
-            // Meta page, so the owner does not have to open every group to find
-            // the ones worth acting on.
+            // How many fold straight into their Meta page, so the owner need not open every group.
             const mergeable = typeof countPageMergeGroups === 'function' ? countPageMergeGroups() : 0;
             if (!mergeable) return '';
             return isAr
@@ -1742,9 +1696,8 @@ function showPageDuplicates(focusPageId, triggerButton) {
             <h3 class="font-bold text-slate-800 dark:text-white break-words mb-2">${Security.escapeHtml(group[0]?.name || '')} <span class="text-xs font-normal text-slate-500">(${group.length})</span></h3>
             <div class="space-y-2">
               ${(() => {
-                // The one Meta row of this group, if the group has exactly one.
-                // It is the only page the others may be merged INTO: it owns the
-                // metaPageId the server keeps writing to.
+                // The group's one Meta row (if exactly one): the only merge target, as it owns
+                // the metaPageId the server keeps writing to.
                 const metaPagesInGroup = group.filter(item => String(item?.metaPageId || '').trim());
                 const mergeTargetId = metaPagesInGroup.length === 1 && isCurrentUserAdmin()
                   ? String(metaPagesInGroup[0].id)
@@ -1826,11 +1779,8 @@ function getCustomersVisibleToCurrentUser() {
   if (isCurrentUserAdmin() || currentUserHasPermission('customers', 'view')) return customers;
   if (!currentUserHasPermission('customers', 'viewOwn')) return [];
 
-  // The backend defines a delivery user's "own" customers as customers
-  // referenced by deliveries assigned to that driver, not customers the driver
-  // originally created. Server-mode customer collections are already scoped by
-  // that rule. Mirror it in local mode so the phone app and local testing behave
-  // the same way without hiding an assigned customer's card/search result.
+  // A driver's "own" customers are those its assigned deliveries reference (not ones it created):
+  // the server already scopes them that way, and local mode mirrors the rule.
   if (isDeliveryRole(state.currentUser?.role)) {
     if (isServerModeEnabled()) return customers;
     const userId = String(state.currentUser?.id || '');
@@ -1939,11 +1889,9 @@ async function editAd(id) {
   renderModal();
 }
 
-// Transferred-in receipts mirror money deducted from their SOURCE receipt.
-// Editing their amount/payments would break that mirror in either direction
-// (invent money the sender never gave, or silently zero it), so edits are
-// blocked: to change a transfer, delete the transferred-in receipt (the money
-// returns to the source) and transfer again.
+// A transferred-in receipt mirrors money taken from its SOURCE: editing it would invent or
+// zero that money, so it is blocked. To change a transfer, delete the transferred-in receipt
+// (the money returns to the source) and transfer again.
 function _blockTransferInEdit(receipt) {
   if (String(receipt?.receiptType || '') !== 'TRANSFER_IN') return false;
   const src = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
@@ -2026,6 +1974,15 @@ function editUser(id) {
 // ADVANCED PERMISSIONS MANAGEMENT
 // ==========================================
 
+// The Manager's Arabic text ships in the lazy admin-tools.js (permissionTextAr); English until it loads.
+function permText(kind, key, field) {
+  const ar = state.language === 'ar' && typeof permissionTextAr === 'function' ? permissionTextAr()[kind]?.[key] : null;
+  if (ar) return ar[field === 'description' ? 1 : 0];
+  const [mk, pk] = String(key).split('.');
+  const en = kind === 'templates' ? PERMISSION_TEMPLATES[mk] : kind === 'perms' ? PERMISSION_MODULES[mk]?.permissions?.[pk] : PERMISSION_MODULES[mk];
+  return String(en?.[field] || '');
+}
+
 function showPermissionsModal(userId) {
   if (!canManageUsersAction('managePermissions')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'تحتاج صلاحية إدارة الصلاحيات' : 'Requires the Manage Permissions permission', 'error');
@@ -2048,6 +2005,13 @@ function showPermissionsModal(userId) {
   const userPermissions = user.permissions || {};
   const permSummary = getPermissionSummary(userPermissions);
   const unheldTitle = state.language === 'ar' ? 'لا تملك هذه الصلاحية' : 'You do not hold this permission';
+  // Arabic: load the text (any managePermissions holder may), then redraw if still open for this user.
+  if (state.language === 'ar' && typeof permissionTextAr !== 'function') {
+    ensureAdminToolsLoaded().then(() => {
+      const open = document.getElementById('app-modal');
+      if (typeof permissionTextAr === 'function' && open?.dataset?.modalType === 'permissions' && open.dataset.userId === String(userId)) showPermissionsModal(userId);
+    });
+  }
 
   // Preserve scroll position so toggling permissions doesn't jump to the top
   let prevScrollTop = 0;
@@ -2078,7 +2042,7 @@ function showPermissionsModal(userId) {
               <h2 class="text-2xl font-bold">${state.language === 'ar' ? 'إدارة الصلاحيات' : 'Permissions Manager'}</h2>
               <div class="flex items-center space-x-2 mt-1">
                 <span class="text-white/80">${Security.escapeHtml(user.name || '')}</span>
-                <span class="px-2 py-0.5 rounded-full bg-white/20 text-xs font-medium">${Security.escapeHtml(user.role || '')}</span>
+                <span class="px-2 py-0.5 rounded-full bg-white/20 text-xs font-medium">${Security.escapeHtml(shellRoleLabel(user.role, state.language === 'ar'))}</span>
               </div>
             </div>
           </div>
@@ -2113,8 +2077,8 @@ function showPermissionsModal(userId) {
             ${Object.entries(PERMISSION_TEMPLATES).map(([key, template]) => `
               <button onclick="applyPermissionTemplate('${userId}', '${key}')" class="p-3 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-${template.color}-500 hover:bg-${template.color}-50 dark:hover:bg-${template.color}-900/20 transition-all text-center group">
                 <i data-lucide="${template.icon}" class="w-5 h-5 mx-auto mb-1 text-${template.color}-600 group-hover:scale-110 transition-transform"></i>
-                <div class="text-xs font-bold text-slate-700 dark:text-slate-300">${template.name}</div>
-                <div class="text-[10px] text-slate-500 line-clamp-1">${template.description}</div>
+                <div class="text-xs font-bold text-slate-700 dark:text-slate-300">${Security.escapeHtml(permText('templates', key, 'name'))}</div>
+                <div class="text-[10px] text-slate-500 line-clamp-1">${Security.escapeHtml(permText('templates', key, 'description'))}</div>
               </button>
             `).join('')}
           </div>
@@ -2137,8 +2101,8 @@ function showPermissionsModal(userId) {
                       <i data-lucide="${moduleConfig.icon}" class="w-5 h-5 text-${moduleConfig.color}-600 dark:text-${moduleConfig.color}-400"></i>
                     </div>
                     <div>
-                      <h4 class="font-bold text-slate-800 dark:text-white">${moduleConfig.name}</h4>
-                      <p class="text-xs text-slate-500">${moduleConfig.description}</p>
+                      <h4 class="font-bold text-slate-800 dark:text-white">${Security.escapeHtml(permText('modules', moduleKey, 'name'))}</h4>
+                      <p class="text-xs text-slate-500">${Security.escapeHtml(permText('modules', moduleKey, 'description'))}</p>
                     </div>
                   </div>
                   <div class="flex items-center space-x-3">
@@ -2163,8 +2127,8 @@ function showPermissionsModal(userId) {
                           class="mt-0.5 w-4 h-4 rounded border-slate-300 text-${moduleConfig.color}-600 focus:ring-${moduleConfig.color}-500 cursor-pointer"
                         />
                         <div class="flex-1">
-                          <div class="text-sm font-medium text-slate-700 dark:text-slate-300 group-hover:text-${moduleConfig.color}-600">${permConfig.label}</div>
-                          <div class="text-[10px] text-slate-500">${permConfig.description}</div>
+                          <div class="text-sm font-medium text-slate-700 dark:text-slate-300 group-hover:text-${moduleConfig.color}-600">${Security.escapeHtml(permText('perms', `${moduleKey}.${permKey}`, 'label'))}</div>
+                          <div class="text-[10px] text-slate-500">${Security.escapeHtml(permText('perms', `${moduleKey}.${permKey}`, 'description'))}</div>
                         </div>
                       </label>
                     `;
@@ -2278,7 +2242,9 @@ function _targetOutranksEditor(user, reset) {
 }
 
 function _denyUnheldGrant(grant, userId) {
-  showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not allowed', state.language === 'ar' ? `لا يمكنك منح صلاحية لا تملكها: ${grant}` : `Cannot grant a permission you do not hold: ${grant}`, 'error');
+  // Arabic names the grant (an unknown legacy key stays as is); English keeps the key.
+  const mk = String(grant).split('.')[0];
+  showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not allowed', state.language === 'ar' ? `لا يمكنك منح صلاحية لا تملكها: ${permText('modules', mk, 'name') || mk} — ${permText('perms', grant, 'label') || grant}` : `Cannot grant a permission you do not hold: ${grant}`, 'error');
   _syncPermissionBoxes(userId);
 }
 
@@ -2387,7 +2353,7 @@ function applyPermissionTemplate(userId, templateKey) {
     template: templateKey
   });
 
-  showNotification(state.language === 'ar' ? 'تم تطبيق القالب' : 'Template Applied', state.language === 'ar' ? `تم تطبيق صلاحيات "${template.name}" على ${user.name}` : `${template.name} permissions applied to ${user.name}`, 'success');
+  showNotification(state.language === 'ar' ? 'تم تطبيق القالب' : 'Template Applied', state.language === 'ar' ? `تم تطبيق صلاحيات "${permText('templates', templateKey, 'name')}" على ${user.name}` : `${template.name} permissions applied to ${user.name}`, 'success');
   _syncPermissionBoxes(userId);
 }
 
@@ -2562,20 +2528,17 @@ async function updateDeliveryStatus(itemId, status) {
     removeDeliveryMission(itemId);
     return;
   }
-  // An admin may complete a TEMP delivery RECEIPT (D#): the completion modal +
-  // server hold them to the driver's proof rules. Ad deliveries and normal
-  // receipts stay driver-only, so a mis-tap cannot silently settle money.
+  // An admin may complete a TEMP delivery receipt (D#), under the driver's proof rules; ad
+  // deliveries and normal receipts stay driver-only (a mis-tap never settles money).
   const _adminDeliversReceipt = isCurrentUserAdmin() && state.receipts.some(r => r && !r._deleted && String(r.id) === String(itemId) && isTempDeliveryReceiptNo(r.tempReceiptNo));
   if (s === 'Delivered' && !_adminDeliversReceipt && String(state.currentUser?.role || '').toLowerCase() !== 'delivery') {
     showNotification(state.language === 'ar' ? 'غير مسموح' : 'Not Allowed', state.language === 'ar' ? 'فقط سائق التوصيل المعيَّن يمكنه تحديد هذا التوصيل كـ"تم التوصيل".' : 'Only the assigned delivery driver can mark this delivery as Delivered.', 'warning');
     return;
   }
   if (s === 'Delivered') {
-    // Defense in depth (only a driver or admin reaches here): route through the validated
-    // collection flow instead of a bare status write. For a temp D# receipt
-    // markAsCollected opens the proof modal (final receipt no. + photo +
-    // collected amount); a direct deliveryStatus write skipped that and left
-    // the delivery inconsistent / raised a raw server error.
+    // Defense in depth (driver or admin only): the validated collection flow, not a bare status
+    // write. For a temp D# receipt markAsCollected opens the proof modal (final no. + photo +
+    // amount); the direct write skipped it, leaving the delivery inconsistent.
     await markAsCollected(itemId);
     return;
   }
@@ -2984,10 +2947,9 @@ function _receiptFinalNoExists(serial, excludeId) {
 }
 
 // ---- IMAGE COMPRESSION (shared by all photo uploads) ----
-// A 3-6MB camera photo stored as a base64 data URL inflates every save, sync
-// payload and export; max 1280px JPEG (~80%) keeps receipts readable at
-// 10-20x less. PNG/WebP stay PNG only with a transparent pixel; on ANY
-// failure the original data URL is kept so a photo is never lost.
+// A 3-6MB camera photo as a base64 data URL bloats every save, sync and export: max 1280px JPEG
+// (~80%) stays readable at 10-20x less. PNG/WebP stay PNG only with a transparent pixel; ANY
+// failure keeps the original, so a photo is never lost.
 const IMAGE_MAX_DIMENSION = 1280;
 const IMAGE_JPEG_QUALITY = 0.8;
 
@@ -3061,9 +3023,8 @@ async function compressImageToDataUrl(file) {
 // ==========================================
 // RECEIPT PHOTO VIEWER
 // ==========================================
-// Normal receipt uploads are stored in photos[], while completed delivery
-// receipts also keep a legacy receiptImage field. Read both so the same viewer
-// works everywhere and older receipt photos do not disappear from the UI.
+// Uploads live in photos[]; completed deliveries also keep a legacy receiptImage. The viewer reads
+// both, so older receipt photos never disappear.
 function isSafeReceiptPhotoSource(value) {
   const source = String(value || '').trim();
   // Keep this aligned with the server's MAX_DATA_URL_LENGTH. Matching the
@@ -3499,10 +3460,8 @@ function _deliveryDraftKey(receiptId) {
   return _DELIVERY_DRAFT_PREFIX + String(receiptId || '');
 }
 
-// Flush the pending debounced draft write now: opening the camera backgrounds
-// the WebView and suspends timers before the 500ms debounce fires, so
-// visibilitychange:hidden / pagehide is the last reliable moment to write.
-// _saveDeliveryCompletionDraftNow() self-guards (no completion modal -> no-op).
+// Flush the debounced draft now: the camera backgrounds the WebView and suspends timers before the
+// 500ms debounce, so hidden/pagehide is the last reliable moment. No modal: a no-op.
 function _flushDeliveryCompletionDraftNow() {
   if (_deliveryDraftSaveTimer) {
     clearTimeout(_deliveryDraftSaveTimer);
@@ -3678,9 +3637,8 @@ function updateReceiptDeliveryCompletionComputed() {
   }, 500);
 }
 
-// Snapshot of {id, lastMod} captured when the delivery-completion modal opens,
-// used as the conflict baseline on submit (the receipt object is re-resolved
-// fresh at save time so its live _lastModified can't be trusted).
+// {id, lastMod} at modal open: the submit's conflict baseline (the receipt is re-resolved at
+// save, so its live _lastModified can't be trusted).
 let _deliveryCompletionOpen = null;
 
 // ---- Delivery completion: the receipt's split-payment rows ----
@@ -3688,18 +3646,15 @@ let _deliveryCompletionOpen = null;
 // (R2) totals of the collected and the fee containers.
 const _DELIVERY_USD_METHODS = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
 
-// Rate 1 turns the entered amount into LYD (R1 = amount x rate1), and the debt
-// comparison is done in LYD. getDefaultRate1 returns 0 for methods where a RECEIPT
-// expects a hand-entered negotiated rate — but a delivery is plain cash collection, so a
-// 0 default would silently record 0 LYD collected. Give a correct LYD conversion instead:
-// USD-denominated methods convert at the exchange rate, LYD-denominated ones are 1:1.
+// Rate 1 turns the amount into LYD (R1, compared with the debt). getDefaultRate1's 0 (a
+// receipt's hand-entered rate) would record 0 LYD collected here: USD methods convert at the
+// exchange rate, LYD ones 1:1.
 function _deliveryDefaultRate1(method) {
   const r = getDefaultRate1(method);
   if (r > 0) return r;
   if (!_DELIVERY_USD_METHODS.includes(method)) return 1;
-  // The server judges the collected LYD against the receipt's OWN rate. A
-  // customer paying exactly the dollar debt must not read as over- or
-  // under-paid because today's default rate differs from the receipt's.
+  // The server judges collected LYD at the receipt's OWN rate: paying exactly the dollar debt
+  // never reads as over/underpaid because today's default rate differs.
   return _deliveryReceiptRate() || 1;
 }
 
@@ -3717,8 +3672,7 @@ function _deliveryPaymentRowHtml(payment, opts = {}) {
   const method = p.method || PAYMENT_METHODS[0];
   const amount = (p.amount === undefined || p.amount === null) ? '' : p.amount;
   const rate1 = (p.rate1 === undefined || p.rate1 === null || p.rate1 === '') ? _deliveryDefaultRate1(method) : p.rate1;
-  // Rate 2 turns the amount into USD. Always seed it with the exchange rate (never 0) so
-  // the USD value is computed for every method — a delivery always has a USD equivalent.
+  // Rate 2 (to USD) is always seeded with the exchange rate, never 0: every delivery has a USD value.
   const rate2 = (p.rate2 === undefined || p.rate2 === null || p.rate2 === '')
     ? _deliveryReceiptRate()
     : p.rate2;
@@ -3789,12 +3743,9 @@ function _readDeliveryPaymentRows(containerId) {
 }
 
 // ---- Delivery fee: plain LYD cash (no Rate 1 / Rate 2) ---------------------------
-// The delivery fee is flat LYD cash handed to the driver. It must NEVER become
-// USD ads credit, so the fee input is a simple LYD amount + method + who paid
-// it (customer vs shop) instead of a full split-payment row with rates. The
-// stored shape stays deliveryFeePayments[{method, amount, rate, rate2}] so every
-// existing reader keeps working: the simplified row writes rate 1 (amount is
-// already LYD) and rate2 0 (a fee has no USD value).
+// Flat LYD cash for the driver, NEVER USD ads credit: a LYD amount + method + payer (customer
+// or shop). Stored as deliveryFeePayments[{method, amount, rate, rate2}] for every existing
+// reader: rate 1 (already LYD), rate2 0 (no USD value).
 function _deliveryFeeStoredLyd(receipt) {
   const rows = Array.isArray(receipt?.deliveryFeePayments) ? receipt.deliveryFeePayments : [];
   if (rows.length) {
@@ -3859,10 +3810,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
     if (!receipt || (!isAdminCompletion && String(receipt.deliveryPersonId || '') !== String(state.currentUser?.id || ''))) return;
   }
 
-  // Freeze the receipt's _lastModified at modal-open time. submitReceipt-
-  // DeliveryCompletion re-resolves the receipt fresh at save, and live-sync
-  // replaces the array slot, so without this snapshot a concurrent admin edit
-  // would be silently clobbered instead of producing a 409 + reload.
+  // Freeze _lastModified at open: the save re-resolves the receipt and live sync replaces the
+  // slot, so without this a concurrent admin edit is clobbered instead of a 409 + reload.
   _deliveryCompletionOpen = { id: String(receipt.id), lastMod: receipt._lastModified || 0 };
 
   const customer = state.customers.find(c => c && !c._deleted && String(c.id) === String(receipt.customerId));
@@ -3874,10 +3823,9 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   const place = String(receipt.deliveryPlaceName || '').trim();
   let deliveryReceiptPhoto = getDeliveryReceiptPhotoSource(receipt);
 
-  // Initial rows. Re-completing an already-delivered receipt reloads its stored payment
-  // rows; a fresh completion seeds one Cash (LYD) row for the collected amount (empty, so
-  // the driver types what they actually collected) and one for the fee (pre-filled with
-  // the quoted fee). Cash (LYD) => Rate1 1, Rate2 the receipt's own rate.
+  // Initial rows: a re-completion reloads its stored rows; a fresh one seeds an empty Cash (LYD)
+  // collected row (the driver types what was collected) and a fee row at the quoted fee.
+  // Cash (LYD) => Rate1 1, Rate2 the receipt's own rate.
   const _dRate = _deliveryReceiptRate();
   const _cashLyd = PAYMENT_METHODS.includes('Cash (LYD)') ? 'Cash (LYD)' : PAYMENT_METHODS[0];
   let _storedCollected = Array.isArray(receipt.payments) && receipt.payments.length
@@ -3891,10 +3839,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   let feePaidBy = receipt.deliveryFeePaidBy === 'shop' ? 'shop' : 'customer';
   let notesSeed = String(receipt.driverNotes || '');
 
-  // Rehydrate a crash-recovery draft (Android camera round-trips can kill the
-  // tab — see _saveDeliveryCompletionDraftNow). Only a draft written against
-  // this exact server copy (same _lastModified) and younger than 24h is used;
-  // the draft's photo is re-validated before it can reach the DOM.
+  // Rehydrate a crash-recovery draft (the Android camera can kill the tab): only one written on
+  // this exact copy (same _lastModified), under 24h old; its photo is re-validated first.
   _pruneDeliveryCompletionDrafts();
   const _draft = _readDeliveryCompletionDraft(receipt);
   if (_draft) {
@@ -3924,10 +3870,8 @@ async function openReceiptDeliveryCompletionModal(receiptId) {
   modal.id = 'delivery-complete-modal';
   modal.dataset.receiptId = String(receipt.id);
   modal.className = 'mobile-dialog-overlay fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in';
-  // NO backdrop-dismiss here. On phones the overlay is the scroll surface, and
-  // the habitual "tap outside the input to dismiss the keyboard" gesture lands
-  // on the backdrop — one stray tap must never destroy a mid-delivery form
-  // (typed data + proof photo). Close paths: the header X and Android Back.
+  // NO backdrop-dismiss: on phones "tap outside to hide the keyboard" lands on the overlay, and a
+  // stray tap must never destroy the form (typed data + proof photo). Close: header X, Android Back.
 
   modal.innerHTML = `
     <div class="glass-panel rounded-2xl p-6 w-full max-w-lg animate-slide-up" onclick="event.stopPropagation()">
@@ -4136,9 +4080,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   // Normalize Arabic-Indic digits at the save-time read too so the /^\d+$/
   // validation below and the stored value are always ASCII-consistent.
   const finalNo = normalizeDigitsAscii(document.getElementById('delivery-final-receipt-no')?.value || '').trim();
-  // Collected money is split-payment rows (same math as a receipt): R1 = LYD, R2 = USD.
-  // The fee is a plain LYD amount + method + payer. Only the COLLECTED rows feed
-  // the USD (ads credit) math — the fee never converts to USD.
+  // Collected money = split-payment rows (receipt math: R1 LYD, R2 USD), the only USD (ads
+  // credit) source; the fee is a plain LYD amount + method + payer, never USD.
   const collectedTotals = getPaymentTotalsFromDom(document.getElementById('delivery-collected-payments'));
   const collected = collectedTotals.totalR1;                 // LYD collected (vs debt)
   const collectedUSDFromRows = collectedTotals.totalR2;      // USD value of what was collected
@@ -4194,8 +4137,7 @@ async function submitReceiptDeliveryCompletion(receiptId) {
   const feeCmp = compareFees(quoted, actualFee);
 
   const rate = Number(receipt.exchangeRate || state.defaultExchangeRate || 1) || 1;
-  // USD value comes from the payment rows (each method's Rate2). Fall back to the
-  // single-rate conversion only if the rows produced no USD (e.g. all rates left blank).
+  // USD from the rows (each method's Rate2); the single-rate conversion only when they give none.
   const collectedUSD = collectedUSDFromRows > 0
     ? collectedUSDFromRows
     : (rate > 0 ? (collected / rate) : 0);
@@ -4241,10 +4183,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     isPaid: newIsPaid,
     amountLocal: collected,
     amountUSD: collectedUSD,
-    // The collected money as split-payment rows (same shape a receipt stores), so the
-    // delivery becomes a proper receipt recording HOW it was paid; the fee keeps its own
-    // method row. amountCollectedFromCustomer (the single LYD total) still drives the
-    // server's debt comparison, so a server that ignores these arrays still works.
+    // The collected money as receipt-shaped payment rows (HOW it was paid; the fee keeps its own
+    // row). The server's debt check still reads amountCollectedFromCustomer (one LYD total), so a
+    // server that ignores these arrays still works.
     payments: collectedPayments,
     deliveryFeePayments: feePayments,
     paymentMethod: collectedPayments.length > 1
@@ -4258,6 +4199,16 @@ async function submitReceiptDeliveryCompletion(receiptId) {
     const btn = document.getElementById('delivery-complete-submit');
     if (btn) btn.disabled = true;
     try {
+      // Older photos trimmed from memory while the form was open: reload them, or this save drops them.
+      if (getReceiptPhotoCount(receipt) > 0 && !isEntityMediaHydrated('receipts', receipt)) {
+        const full = await ensureEntityMediaLoaded('receipts', receipt.id).catch(() => null);
+        if (!full || !isEntityMediaHydrated('receipts', full)) {
+          showNotification(isArDrv ? 'تعذر تحميل الصور' : 'Photos unavailable', isArDrv ? 'تعذر تحميل صور الوصل. تحقق من الاتصال ثم حاول مرة أخرى.' : 'Could not load the existing receipt photos. Check the connection and try again.', 'error');
+          if (btn) btn.disabled = false;
+          return;
+        }
+        updates.photos = [imgData, ...(Array.isArray(full.photos) ? full.photos.filter(Boolean) : [])].slice(0, 6);
+      }
       // Use the modal-open snapshot as the conflict baseline (not the fresh,
       // possibly live-synced receipt._lastModified) so a concurrent admin edit
       // 409s instead of being silently overwritten.
@@ -4274,12 +4225,9 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       const idx = state.receipts.findIndex(r => r && !r._deleted && String(r.id) === String(receipt.id));
       if (idx !== -1) state.receipts[idx] = saved;
       markCollectionDirty('receipts');
-      // Close the form and paint success IMMEDIATELY. The old code awaited a
-      // full (driver-scoped) ads re-download here, freezing a dead "Mark
-      // Delivered" button for seconds on field networks. The exact local
-      // reclassification plan — the same one the offline fallback uses —
-      // keeps the linked ads visually consistent until the authoritative
-      // background refresh lands.
+      // Close the form and paint success IMMEDIATELY (awaiting the ads re-download froze a dead
+      // button for seconds on field networks); the exact local plan, as offline, keeps the linked
+      // ads consistent until the background refresh lands.
       const paidNow = typeof getReceiptPaymentState === 'function'
         ? getReceiptPaymentState(saved) === 'paid'
         : (saved.isPaid === true || String(saved.status || '') === 'Paid');
@@ -4292,10 +4240,8 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       forceFullRender();
       showNotification(state.language === 'ar' ? 'تم التوصيل' : 'Delivered', state.language === 'ar' ? 'تم إكمال التوصيل وحفظه' : 'Delivery completed and saved', 'success');
       if (paidNow) {
-        // Authoritative ads refresh WITHOUT awaiting (allowPaidLocalFallback
-        // stays false — the exact local plan above was already applied, so a
-        // failed refresh must not re-apply it). apiLoadCollectionAll's own
-        // session-identity guard prevents a post-logout state.ads stomp.
+        // Ads refresh WITHOUT awaiting (allowPaidLocalFallback stays false: the local plan is applied,
+        // a failed refresh must not re-apply it); its identity guard stops a post-logout stomp.
         refreshAdsAfterReceiptServerCascade(saved).then((adRefresh) => {
           if (adRefresh && adRefresh.consistent) {
             saveState();
@@ -4431,15 +4377,15 @@ async function submitReceiptDeliveryCompletion(receiptId) {
       }
       const netMessage = describeNetworkError(e);
       if (netMessage) {
-        // Keep the raw engine string ('Load failed', 'Failed to fetch'…) in
-        // the console; the toast must be bilingual and actionable for the
-        // Arabic-first drivers this flow targets.
+        // Raw engine text ('Load failed'…) to the console; the driver reads a bilingual toast.
         try { console.warn('[deliveryCompletion] Network failure:', e?.message || e); } catch (_) {}
         showNotification(state.language === 'ar' ? 'مشكلة في الاتصال' : 'Connection problem', netMessage, 'error');
       } else {
-        const status = e?.status ? `HTTP ${e.status}` : '';
-        const detail = (e?.payload && typeof e.payload === 'object' && e.payload.detail) ? e.payload.detail : (e?.message || 'Request failed');
-        showNotification(state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error', (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status ? status + ' - ' : ''}${detail}`, 'error');
+        // A 4xx is a rule refusal: its reason (translated), never "Server Error" or "HTTP n" (as _serverRefusalToast).
+        const status = Number(e?.status) || 0;
+        const refused = status > 399 && status < 500;
+        const detail = _serverRefusalText(typeof e?.payload?.detail === 'string' ? e.payload.detail : (e?.message || 'Request failed'));
+        showNotification(refused ? (state.language === 'ar' ? 'غير مسموح' : 'Not Allowed') : (state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error'), (state.language === 'ar' ? 'فشل حفظ التوصيل: ' : 'Failed to save delivery: ') + `${status && !refused ? `HTTP ${status} - ` : ''}${detail}`, 'error');
       }
       if (btn) btn.disabled = false;
       return;
@@ -4561,11 +4507,9 @@ async function submitReceiptDeliveryCancel(receiptId) {
       }
     }
     _clearDeliveryCompletionDraft(receipt.id);
-    // Both overlays close in ONE task, so the body overlay observer
-    // (01b-mobile-runtime) would consume only one of the two history
-    // sentinels and strand the other (dead Back press + scroll reset). Mirror
-    // closeModal's go(-2): consume both here and flag the popstate as
-    // bookkeeping (the observer's _overlayHistoryConsumePending() gate).
+    // Both overlays close in ONE task: the overlay observer (01b-mobile-runtime) would consume one
+    // history sentinel and strand the other (dead Back + scroll reset). As closeModal's go(-2):
+    // consume both, flagging the popstate as bookkeeping (_overlayHistoryConsumePending()).
     const cancelModalEl = document.getElementById('delivery-cancel-modal');
     const completeModalEl = document.getElementById('delivery-complete-modal');
     if (cancelModalEl && completeModalEl
@@ -4593,10 +4537,8 @@ async function submitReceiptDeliveryCancel(receiptId) {
       releasedAds > 0 && !isServerModeEnabled() ? 'warning' : 'success'
     );
     if (isServerModeEnabled()) {
-      // Refresh the linked ads WITHOUT blocking the close: the receipt PATCH
-      // already committed, the cancel UI only reads receipt.deliveryStatus
-      // (updated by the echo above), and ads reconcile seconds later — or via
-      // delta live-sync, exactly what the Sync-pending toast promises.
+      // Refresh the linked ads WITHOUT blocking the close: the PATCH committed, the cancel UI reads
+      // only receipt.deliveryStatus (echoed above), and ads reconcile later or via live sync.
       const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
       saveState();
       refreshAdsAfterReceiptServerCascade(savedReceipt).then((adRefresh) => {
@@ -4659,9 +4601,7 @@ function updateReceiptSearch(value) {
   const clean = Security.sanitizeInput(v, { maxLength: 200 });
   state.receiptSearch = clean;
   if (_receiptSearchTimer) clearTimeout(_receiptSearchTimer);
-  // Small debounce to keep typing smooth (same pattern as the customers view).
-  // Only the results below the search box are re-rendered, so the input keeps
-  // focus naturally — no full-page rebuild, no refocus hack.
+  // Debounced (as the customers view); only the results re-render, so the input keeps focus.
   _receiptSearchTimer = setTimeout(() => {
     _receiptSearchTimer = null;
     updateReceiptsViewFiltered();
@@ -4707,9 +4647,8 @@ function clearReceiptSearch() {
 }
 
 function applyReceiptQuickFilter(mode) {
-  // Quick filters are intentionally mutually exclusive so a beginner never
-  // gets an empty list from a hidden combination. Keep the typed search term,
-  // then reset only the dropdown dimensions before applying the chosen view.
+  // Quick filters are intentionally mutually exclusive (no empty list from a hidden
+  // combination): keep the search term, reset only the dropdowns, then apply the view.
   state.receiptStatusFilter = 'all';
   state.receiptPaymentFilter = 'all';
   state.receiptDateFilter = 'all';
@@ -4765,8 +4704,7 @@ function clearAllReceiptFilters() {
 // ==========================================
 // COMPANY FUNDS DEBT COVERAGE (admin only)
 // ==========================================
-// This is intentionally separate from receipt collection. It records a
-// company expense against customer debt, never customer-paid cash or revenue.
+// Not collection: a company expense against customer debt, never customer cash or revenue.
 let _companyDebtCoverageDialogState = null;
 
 function _getCompanyCoverableOutstandingUSD(receipt, collectionTarget = null) {
@@ -4776,15 +4714,12 @@ function _getCompanyCoverableOutstandingUSD(receipt, collectionTarget = null) {
   if (receipt.customerOutstandingUSD != null && Number.isFinite(stored)) {
     return Math.max(Math.round(stored * 100) / 100, 0);
   }
-  // The collection target is already net of company coverage. A Delivered
-  // (UNDERPAID) receipt has additionally received real customer cash — its
-  // amountUSD after completion — which is not outstanding either.
+  // The target is net of coverage; a Delivered (UNDERPAID) receipt's real cash (its amountUSD
+  // after completion) is not outstanding either.
   const target = collectionTarget || getReceiptCollectionTarget(receipt);
-  // The server sizes receipt-level coverage from the receipt's OWN amount and
-  // debt fields (_financial_due_total). A zero-value delivery receipt whose
-  // debt exists only as linked driver ads has no coverable liability there —
-  // every request 409s — so offer nothing until delivery completion freezes
-  // the debt onto the receipt itself.
+  // The server sizes coverage from the receipt's OWN amount/debt (_financial_due_total): a
+  // zero-value delivery receipt whose debt is only on linked driver ads 409s every request, so
+  // offer nothing until completion freezes the debt onto the receipt.
   if (target.source === 'linked_ads') return 0;
   let fallback = Number(target.amountUSD) || 0;
   if (String(receipt.deliveryStatus || '').trim().toLowerCase() === 'delivered') {
@@ -5183,11 +5118,21 @@ function _legacyDueReceiptIdForAd(ad) {
 // the usage fallback and is excluded here. Gap per ad:
 // effective spend − paid rows − due rows − company rows − direct coverage
 // − the legacy scalar due mirror.
-function getCustomerCoverableAdDebt(customerId) {
+// statsIndex (one render's buildCustomerStatsIndex): only this customer's ads, in the same order, so every
+// sum is bit-identical; an empty id (ads without a customer) and the dialogs read the live lists in full.
+function getCustomerCoverableAdDebt(customerId, statsIndex = null) {
   const normalizedId = String(customerId || '');
   const rows = [];
   let totalUSD = 0;
-  getVisibleRecords(state.ads || []).forEach(ad => {
+  const lookup = statsIndex || {};  // first visible receipt per id: built once per render (or per call)
+  const visibleReceipt = id => {
+    if (!lookup.visibleReceiptById) {
+      lookup.visibleReceiptById = new Map();
+      for (const r of getVisibleRecords(state.receipts || [])) if (!lookup.visibleReceiptById.has(String(r.id))) lookup.visibleReceiptById.set(String(r.id), r);
+    }
+    return lookup.visibleReceiptById.get(id);
+  };
+  (statsIndex?.adsByCustomer && normalizedId ? statsIndex.adsByCustomer.get(normalizedId) || [] : getVisibleRecords(state.ads || [])).forEach(ad => {
     if (!ad || ad.recordType === 'receipt') return;
     if (String(ad.customerId || ad.customer || '') !== normalizedId) return;
     if (getAdPaymentState(ad) !== 'not_paid') return;
@@ -5202,8 +5147,7 @@ function getCustomerCoverableAdDebt(customerId) {
     if (String(ad.collectionMethod || '') === 'driver') {
       const deliveryReceiptId = String(ad.linkedDeliveryReceiptId || ad.receiptId || '').trim();
       if (!deliveryReceiptId) return;
-      const linkedReceipt = getVisibleRecords(state.receipts || [])
-        .find(r => r && String(r.id) === deliveryReceiptId);
+      const linkedReceipt = visibleReceipt(deliveryReceiptId);
       if (!linkedReceipt || getReceiptPaymentState(linkedReceipt) !== 'paid') return;
     }
     const hasArrays = Array.isArray(ad.receiptAllocations)
@@ -5930,11 +5874,9 @@ function toggleReceiptCollected(receiptId) {
   else openCollectReceiptModal(receiptId);
 }
 
-// "Existing balance" mode for the NEXT new receipt. It uses the exact same receipt
-// form as a normal receipt (all payment methods, serial, collection, delivery, phone,
-// photos); the only difference is the saved receipt is tagged CARRIED_BALANCE (its own
-// colour + badge) and the amount entered is understood as the customer's REMAINING
-// balance. Reset every time the modal opens so a normal receipt is never tagged.
+// "Existing balance" mode for the NEXT new receipt: the normal receipt form, saved tagged
+// CARRIED_BALANCE (own colour + badge), its amount being the customer's REMAINING balance. Reset
+// on every modal open, so a normal receipt is never tagged.
 let _newReceiptCarried = false;
 
 function showReceiptModal(carried = false) {
@@ -5954,11 +5896,9 @@ function showReceiptModal(carried = false) {
 }
 
 // ---- New-Receipt type chooser -------------------------------------------
-// Clicking "New Receipt" first asks WHICH kind of receipt: a normal one
-// (money received now) or an "existing balance" one (a customer who already
-// spent part of his money elsewhere — we only record what's LEFT). The two
-// options are deliberately far apart with very different colours so the wrong
-// one is hard to pick by accident.
+// "New Receipt" first asks WHICH kind: normal (money received now) or "existing balance" (spent
+// partly elsewhere: only what's LEFT is recorded). The options sit far apart in very different
+// colours, so the wrong one is hard to pick by accident.
 function showNewReceiptChooser() {
   if (!currentUserHasPermission('receipts', 'add')) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لإنشاء وصولات' : 'You do not have permission to create receipts', 'error');
@@ -6438,9 +6378,8 @@ function getMetaAdHistoryEntries(ad) {
     });
 }
 
-// Who completed a Meta-imported draft (its "Created by" is the importer, never a person): the
-// server's metaImportCompletedBy stamp, else the first human edit in its history (Meta sync
-// rows excluded, so an automatic budget/spend update is never mistaken for a person).
+// Who completed a Meta-imported draft ("Created by" is the importer, never a person): the
+// server's metaImportCompletedBy stamp, else the first human edit (Meta sync rows never count).
 function getAdCompletedByName(ad) {
   if (!ad || typeof ad !== 'object') return '';
   const stampedId = String(ad.metaImportCompletedBy || '').trim();
@@ -6578,11 +6517,41 @@ function showAdEditHistory(adId) {
   lucide.createIcons();
 }
 
+// Arabic for Meta's codes and the server's fixed Meta texts, for the ad row's Meta panel, its
+// history and the Meta Sync dialog. Display only: tones, tooltips and stored values stay raw.
+const _META_STATUS_AR = { ACTIVE: 'نشط', PAUSED: 'متوقف مؤقتاً', CAMPAIGN_PAUSED: 'الحملة متوقفة', ADSET_PAUSED: 'المجموعة الإعلانية متوقفة',
+  IN_PROCESS: 'قيد المعالجة', WITH_ISSUES: 'به مشكلات', DISAPPROVED: 'مرفوض', PENDING_REVIEW: 'قيد المراجعة', PREAPPROVED: 'مقبول مبدئياً',
+  PENDING_BILLING_INFO: 'بانتظار بيانات الدفع', ARCHIVED: 'مؤرشف', DELETED: 'محذوف', UNKNOWN: 'غير معروف' };
+function metaAdsStatusLabel(status, isAr) {
+  const code = String(status || '');
+  return (isAr && _META_STATUS_AR[code.toUpperCase()]) || code;
+}
+// By error class (metaSyncErrorCode is 'class' or 'class:providerCode'); anything else gets the generic line.
+const _META_SYNC_ERROR_AR = { __proto__: null, authorization: 'رفض Meta الإذن؛ أعد ربط رمز الوصول.', not_found: 'إعلان Meta غير موجود أو لم يعد متاحاً.',
+  temporary: 'تعذر الوصول إلى Meta الآن؛ سيعيد البيان المحاولة.', invalid_response: 'رد Meta غير صالح.', invalid_request: 'طلب غير صالح إلى Meta.',
+  duplicate_link: 'إعلان آخر مرتبط بإعلان Meta نفسه؛ ألغِ ربط أحدهما.', pending_enrichment: 'باقي تفاصيل Meta تُحمَّل تلقائياً.',
+  insights_unavailable: 'تعذرت قراءة نتائج Meta؛ بقيت أرقام الصرف كما هي.' };
+function metaAdsSyncErrorText(ad, isAr) {
+  const text = String(ad?.metaSyncError || '');
+  const kind = String(ad?.metaSyncErrorCode || '').split(':')[0].replace(/^(timeout|network)$/, 'temporary');
+  return isAr && text ? _META_SYNC_ERROR_AR[kind] || 'تعذرت مزامنة Meta لهذا الإعلان.' : text;
+}
+// server/meta_ads.py: _HISTORY_FIELDS, the import row, activity rows, the sync actors, common event types.
+const _META_HISTORY_AR = { __proto__: null, 'Meta ad name': 'اسم إعلان Meta', 'Meta creative': 'تصميم Meta', 'Meta campaign': 'حملة Meta',
+  'Meta ad set': 'المجموعة الإعلانية في Meta', 'Meta ad account': 'حساب إعلانات Meta', 'Meta configured status': 'حالة Meta المضبوطة',
+  'Meta live status': 'حالة Meta الفعلية', 'Meta daily budget': 'ميزانية Meta اليومية', 'Meta lifetime budget': 'ميزانية Meta الكلية',
+  'Meta start time': 'بداية Meta', 'Meta end time': 'نهاية Meta', 'Meta ad imported': 'استيراد إعلان Meta', 'Not in Albayan': 'غير موجود في البيان',
+  'Needs completion': 'يحتاج إلى إكمال', 'Meta activity': 'نشاط Meta', 'Meta value': 'قيمة Meta', Updated: 'تم التحديث',
+  'Meta automatic sync': 'مزامنة Meta التلقائية', 'Meta automatic import': 'استيراد Meta التلقائي',
+  create_ad: 'إنشاء إعلان', update_ad_run_status: 'تغيير حالة تشغيل الإعلان', update_ad_creative: 'تغيير تصميم الإعلان' };
+
 function showMetaAdHistory(adId) {
   const ad = state.ads.find(a => String(a.id || '') === String(adId || ''));
   if (!ad) return;
   const isAr = state.language === 'ar';
   const history = getMetaAdHistoryEntries(ad);
+  // Unknown text (Meta's own names and labels) shows as stored.
+  const tr = (text, field) => !isAr ? text : /^Meta (live|configured) status$/.test(field) ? metaAdsStatusLabel(text, true) : _META_HISTORY_AR[text] || text;
   const account = String(ad.metaAdAccountName || '').trim() || (ad.metaAdAccountId ? `#${ad.metaAdAccountId}` : (isAr ? 'حساب Meta' : 'Meta account'));
   const emptyText = isAr
     ? 'لا توجد تغييرات Meta محفوظة بعد. ستظهر التغييرات هنا بعد اكتشافها في المزامنة.'
@@ -6592,14 +6561,14 @@ function showMetaAdHistory(adId) {
     const sourceLabel = exactActivity
       ? (isAr ? 'سجل نشاط Meta' : 'Meta activity')
       : (entry.source === 'meta_import' ? (isAr ? 'استيراد Meta' : 'Meta import') : (isAr ? 'اكتشفته المزامنة' : 'Detected by sync'));
-    const eventLabel = entry.eventType ? entry.eventType.split('_').join(' ') : '';
+    const eventLabel = entry.eventType ? tr(entry.eventType).split('_').join(' ') : '';
     return `<article class="rounded-xl border border-blue-100 bg-blue-50/40 p-3 dark:border-blue-900 dark:bg-blue-950/20 sm:p-4">
       <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(entry.editedBy)}</p></div>
+        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><span class="rounded-full bg-blue-600 px-2 py-1 text-[10px] font-black text-white">${isAr ? 'تغيير' : 'Change'} #${history.length - index}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">${sourceLabel}</span></div><p class="mt-2 break-words text-xs font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(tr(entry.editedBy))}</p></div>
         <time class="text-xs text-slate-500">${Security.escapeHtml(_formatAdEditHistoryDate(entry.editedAt, isAr))}</time>
       </div>
       ${(eventLabel || entry.tool) ? `<div class="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">${eventLabel ? `<span>${Security.escapeHtml(eventLabel)}</span>` : ''}${entry.tool ? `<span>• ${Security.escapeHtml(entry.tool)}</span>` : ''}</div>` : ''}
-      <div class="mt-3 space-y-2">${entry.changes.length ? entry.changes.map(change => `<div class="rounded-lg border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900"><div class="font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(change.field)}</div><div class="mt-2 flex flex-wrap items-center gap-2 text-xs"><span class="max-w-full break-words rounded bg-rose-100 px-2 py-1 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">${Security.escapeHtml(change.from)}</span><i data-lucide="arrow-right" class="h-3 w-3 shrink-0 text-slate-400"></i><span class="max-w-full break-words rounded bg-emerald-100 px-2 py-1 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">${Security.escapeHtml(change.to)}</span></div></div>`).join('') : `<p class="text-xs text-slate-500">${isAr ? 'تفاصيل هذا التغيير القديم غير متاحة.' : 'Details for this older change are unavailable.'}</p>`}</div>
+      <div class="mt-3 space-y-2">${entry.changes.length ? entry.changes.map(raw => ({ field: tr(raw.field), from: tr(raw.from, raw.field), to: tr(raw.to, raw.field) })).map(change => `<div class="rounded-lg border border-slate-200 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900"><div class="font-bold text-slate-700 dark:text-slate-200">${Security.escapeHtml(change.field)}</div><div class="mt-2 flex flex-wrap items-center gap-2 text-xs"><span class="max-w-full break-words rounded bg-rose-100 px-2 py-1 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">${Security.escapeHtml(change.from)}</span><i data-lucide="arrow-right" class="h-3 w-3 shrink-0 text-slate-400"></i><span class="max-w-full break-words rounded bg-emerald-100 px-2 py-1 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">${Security.escapeHtml(change.to)}</span></div></div>`).join('') : `<p class="text-xs text-slate-500">${isAr ? 'تفاصيل هذا التغيير القديم غير متاحة.' : 'Details for this older change are unavailable.'}</p>`}</div>
     </article>`;
   }).join('') : `<div class="rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500 dark:border-slate-700">${emptyText}</div>`;
 
@@ -6614,9 +6583,8 @@ function showMetaAdHistory(adId) {
   lucide.createIcons();
 }
 
-// A lost response after a commit: an identical retry keeps the target id, key and
-// version until both receipts are applied. The version is not in the fingerprint (sync
-// bumps it; the key replays first); each dialog open is a new intent.
+// A lost answer after a commit: an identical retry keeps target id, key and version until both
+// receipts apply (the version is not fingerprinted: sync bumps it); each open is a new intent.
 const _pendingReceiptTransferAttempts = new Map();
 let _receiptTransferOpens = 0;
 
@@ -6717,10 +6685,8 @@ async function saveReceiptTransfer() {
   const rate = receipt.exchangeRate || state.defaultExchangeRate || 1;
   const nowIso = new Date().toISOString();
   const amountLocal = Math.round(amountUSD * rate * 100) / 100;
-  // Destination customer's display NAME (never phone/contact) for the local
-  // path: stamped onto the target receipt and onto the transfer row rendered on
-  // the source receipt card, so a receipts-only role can read who received the
-  // transfer. Server mode stamps both authoritatively in the transfer endpoint.
+  // Local path: the destination's NAME (never phone/contact) on the target receipt and the source
+  // card's transfer row, so a receipts-only role sees who got it (the server stamps both itself).
   const _transferToName = String((state.customers || []).find(c => c && String(c.id) === String(targetCustomerId))?.name || '');
 
   // The transfer ARRIVES as a real TRANSFER_IN receipt for the target, linked to the
@@ -6826,9 +6792,8 @@ async function saveReceiptTransfer() {
   const updatedTransfers = [...(receipt.transfers || []), transfer];
   const sourceSaved = await updateRecord(state.receipts, receipt.id, { transfers: updatedTransfers });
   if (!sourceSaved) {
-    // Local-device storage has no transaction API. Best-effort compensation
-    // prevents the created target receipt from minting money if source save
-    // fails. Server mode never enters this two-write path.
+    // No local transactions: if the source save fails, undo the target receipt so it never
+    // mints money (server mode never takes this two-write path).
     await deleteRecord(state.receipts, inReceipt.id);
     return;
   }
@@ -6937,13 +6902,11 @@ async function saveSplitPayments() {
   paymentItems.forEach(item => {
     const method = item.querySelector('.split-method').value;
     const amount = parseFloat(item.querySelector('.split-amount').value) || 0;
-    // Rate 1 reads identically to the live preview (`|| 0`) — see the note in
-    // saveReceiptFromModal. The old `|| defaultExchangeRate` fallback squared
-    // the stored exchangeRate for zero-rate methods on a no-op Save.
+    // Rate 1 reads as the live preview (`|| 0`, see saveReceiptFromModal): the old
+    // `|| defaultExchangeRate` squared exchangeRate for zero-rate methods on a no-op Save.
     const rate = parseFloat(item.querySelector('.split-rate').value) || 0;
-    // 0/blank Rate 2 means "no USD ads credit" (matches saveReceiptFromModal),
-    // NOT "fall back to the LYD rate" — the old fallback fabricated ads credit
-    // out of a zero-rate receipt on a no-op Save.
+    // 0/blank Rate 2 = "no USD ads credit" (as saveReceiptFromModal), never the LYD rate: that
+    // fallback fabricated ads credit out of a zero-rate receipt on a no-op Save.
     const rate2 = parseFloat(item.querySelector('.split-rate2')?.value) || 0;
     const collectionType = item.querySelector('.split-collection').value;
     const deliveryPersonId = item.querySelector('.split-delivery-person')?.value || '';
@@ -6960,10 +6923,8 @@ async function saveSplitPayments() {
     }
   });
 
-  // Recompute the receipt totals from the edited payments using the SAME
-  // logic as saveReceipt (src/14-forms.js). Previously this saved only the
-  // payments array and left amountUSD/amountLocal/exchangeRate stale, so the
-  // receipt's money totals no longer matched its own payment lines.
+  // Recompute the totals from the edited payments with saveReceipt's logic (src/14-forms.js):
+  // saving only the payments left amountUSD/amountLocal/exchangeRate stale.
   const usdBasedMethods = ['USDT', 'Bank Transfer (USD)', 'Cash (USD)'];
   let totalR1 = 0; // Total PAID (LYD)
   let totalR2 = 0; // Total ADS CREDIT (USD)
@@ -6986,10 +6947,8 @@ async function saveSplitPayments() {
   if (_keep) { totalR1 = +_keep.amountLocal || 0; totalR2 = +_keep.amountUSD || 0; }
   const avgRate = _keep ? +_keep.exchangeRate : receiptExchangeRate(payments, totalR1, totalR2);
 
-  // Money already committed cannot be edited away: ads funded from this
-  // receipt plus money transferred to other customers set the floor for the
-  // new total. Below it, ads/transfers would hold money the receipt no longer
-  // contains.
+  // Committed money is the floor: ads funded from this receipt plus transfers out (below it,
+  // they would hold money the receipt no longer contains).
   const committedStats = getReceiptUsageStats(state.receipts.find(r => r.id === receiptId));
   const committedUSD = Math.round(((committedStats.usedUSD || 0) + (committedStats.transferredUSD || 0)) * 100) / 100;
   if (totalR2 < committedUSD - 0.01) {
@@ -7003,9 +6962,8 @@ async function saveSplitPayments() {
     return;
   }
 
-  // Keep the receipt NUMBER consistent with the new method mix — the main
-  // receipt form enforces this (syncReceiptSerialWithPaymentMethods), but this
-  // editor bypassed it, orphaning auto-serials and colliding the next number.
+  // The receipt NUMBER follows the method mix, as in the main form
+  // (syncReceiptSerialWithPaymentMethods); this editor bypassed it, orphaning auto-serials.
   const _existing = state.receipts.find(r => r.id === receiptId);
   const _curSerial = String(_existing?.serialNumber || '').trim().toUpperCase();
   const _methods = payments.map(p => p.method).filter(Boolean);
@@ -7021,9 +6979,8 @@ async function saveSplitPayments() {
       if (_next) { _serialUpdate.serialNumber = _next; _serialUpdate.finalReceiptNo = _next; }
     }
   } else if (isAutoSerialNumber(_curSerial)) {
-    // Now includes a manual (Cash) method but the stored number is an app-issued
-    // auto-serial. A paper number can't be entered here — send the user to the
-    // full Edit Receipt form instead of leaving a mismatched number.
+    // A manual (Cash) method with an app-issued auto-serial: no paper number can be typed here,
+    // so send the user to Edit Receipt rather than keep a mismatched number.
     showNotification(
       state.language === 'ar' ? 'غير ممكن هنا' : 'Not here',
       state.language === 'ar'
@@ -7034,18 +6991,15 @@ async function saveSplitPayments() {
     return;
   }
 
-  // Pass the modal-open snapshot as the conflict baseline so a concurrent edit
-  // (another user, or a driver completing the delivery) 409s + reloads instead
-  // of being silently overwritten. state.modalData is the frozen open-time
-  // object (live-sync replaces the array slot, not state.modalData).
+  // The modal-open snapshot is the conflict baseline: a concurrent edit (a user, a driver's
+  // completion) 409s + reloads, never overwritten (live sync never swaps state.modalData).
   const _splitOpenLastMod = (state.modalData && String(state.modalData.id) === String(receiptId))
     ? state.modalData._lastModified
     : _existing?._lastModified;
   const savedOk = await updateRecord(state.receipts, receiptId, {
     payments,
-    // The top-level method is DERIVED from the rows — without this it kept the
-    // method the receipt was created with and contradicted its own payments
-    // (breaking the receipts payment-method filter and the printed receipt).
+    // The top-level method is DERIVED from the rows (a stale one broke the payment-method filter
+    // and the printed receipt).
     paymentMethod: payments.length > 1
       ? 'Split Payment'
       : (payments[0]?.method || ''),
@@ -7202,9 +7156,8 @@ function removeTopUp(index) {
   renderModal();
 }
 
-// HTTP 409 disambiguation: only a detail starting with "Conflict:" is a
-// version conflict; every other 409 is a rule refusal and must show the
-// server's real reason instead of "changed on another device".
+// HTTP 409: only a "Conflict:" detail is a version conflict; any other 409 is a rule refusal
+// showing the server's real reason, never "changed on another device".
 function isVersionConflict409(error) {
   return error?.status === 409 && /^conflict:/i.test(String(error?.message || '').trim());
 }
@@ -7275,40 +7228,43 @@ function describe409(error, conflictText) {
   return _serverRefusalText(detail) || conflictText;
 }
 
+// The ad whose top-ups / refund are sending: a re-tap, even on a re-drawn modal, waits for that answer.
+let _topUpsSavingId = null;
+let _refundSavingId = null;
+function _markSaveBusy(button, busy) {
+  if (!button) return;
+  button.disabled = busy;
+  if (busy) button.setAttribute('aria-busy', 'true'); else button.removeAttribute('aria-busy');
+}
+
 async function saveTopUps() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId);
   if (!ad) return;
-  // Defense-in-depth: a view-only role must never persist a budget top-up via a
-  // restored modal / direct call. Silent close mirrors the _isAdToppable defense
-  // just below; manageTopUps already surfaces the Access Denied notification.
+  // Defense-in-depth: a view-only role never saves a top-up via a restored modal / direct call (silent
+  // close; manageTopUps already shows Access Denied).
   if (!canActOnRecord('ads', 'edit', ad.creatorId || ad.createdBy)) { closeModal(); return; }
-  // Defense-in-depth: never charge/extend a terminal or refunded ad (see
-  // _isAdToppable). manageTopUps already blocks opening the modal for these.
+  // Defense-in-depth: never charge/extend a terminal or refunded ad (manageTopUps blocks opening it).
   if (!_isAdToppable(ad)) { closeModal(); return; }
   const isArTU = state.language === 'ar';
+  if (_topUpsSavingId === adId) { showNotification(isArTU ? 'تعذر حفظ التعبئة' : 'Top-ups Not Saved', adSaveBusyError().message, 'warning'); return; }
   // tempTopUps comes from the ad AS OPENED (state.modalData; live-sync swaps only the array
   // slot), so save against THAT version — the live one silently erased a colleague's top-up.
   const openLastMod = Number(state.modalData._lastModified);
 
-  // Forgiving save: anything still typed in the form counts as a top-up too
-  // (the user should not need to click "Add Top-up" before "Save Top-ups").
-  // Built WITHOUT touching tempTopUps so a failed balance check below leaves
-  // the modal's working list exactly as the user sees it.
+  // Anything still typed counts as a top-up too (no "Add Top-up" needed before Save), built WITHOUT
+  // touching tempTopUps so a failed balance check leaves the working list as the user sees it.
   const pending = _readTopUpForm();
   const allTopUps = (pending ? [...tempTopUps, pending] : tempTopUps).map(t => ({ ...t }));
 
-  // tempTopUps is the COMPLETE working list (seeded from ad.topUps on open,
-  // plus/minus edits). initialAmountUSD / initialEndDate are the values BEFORE
-  // any top-up, so the new totals are base + EVERY top-up — removing a top-up
-  // later correctly shrinks both the amount and the end date again.
+  // tempTopUps is the COMPLETE working list; initialAmountUSD / initialEndDate are the values BEFORE any
+  // top-up, so the totals are base + EVERY top-up (removing one shrinks the amount and end date again).
   const baseAmountUSD = ad.initialAmountUSD || ad.amountUSD;
   const totalTopUps = allTopUps.reduce((sum, t) => sum + (parseFloat(t.amount) || 0), 0);
   const newAmountUSD = Math.round((baseAmountUSD + totalTopUps) * 100) / 100;
 
-  // Balance guard (user request): top-up money comes from the receipts that
-  // fund this ad — not from thin air — so the net NEW money (delta) cannot
-  // exceed what those receipts still hold.
+  // Balance guard: top-up money comes from this ad's funding receipts, so the net NEW money (delta)
+  // cannot exceed what they still hold.
   const funding = getAdFundingAvailability(ad);
   const delta = Math.round((newAmountUSD - (parseFloat(ad.amountUSD) || 0)) * 100) / 100;
   if (funding && delta > 0.009 && delta > funding.totalRemaining + 0.01) {
@@ -7371,6 +7327,9 @@ async function saveTopUps() {
     updates.receiptAllocations = allocations;
   }
 
+  const saveBtn = document.querySelector('button[onclick="saveTopUps()"]');
+  _topUpsSavingId = adId;
+  _markSaveBusy(saveBtn, true);
   try {
     if (isServerModeEnabled()) {
       await saveAdThroughAtomicServer(
@@ -7404,6 +7363,9 @@ async function saveTopUps() {
       conflict ? 'warning' : 'error'
     );
     return;
+  } finally {
+    _topUpsSavingId = null;
+    _markSaveBusy(saveBtn, false);
   }
 
   tempTopUps = [];
@@ -7439,12 +7401,12 @@ function toggleRefundAmount(refundType) {
 async function saveRefund() {
   const adId = state.modalData.id;
   const ad = state.ads.find(a => a.id === adId) || state.modalData;
-  // Defense-in-depth: block a view-only role from persisting a refund via a
-  // restored modal / direct call, mirroring editAd's canActOnRecord('ads','edit').
+  // Defense-in-depth: a view-only role never saves a refund via a restored modal / direct call (as editAd).
   if (!canActOnRecord('ads', 'edit', ad?.creatorId)) {
     showNotification(state.language === 'ar' ? 'تم رفض الوصول' : 'Access Denied', state.language === 'ar' ? 'لا يوجد صلاحية لاسترجاع الإعلانات' : 'You do not have permission to refund this ad', 'error');
     return;
   }
+  if (_refundSavingId === adId) { showNotification(state.language === 'ar' ? 'تعذر حفظ الاسترجاع' : 'Refund Not Saved', adSaveBusyError().message, 'warning'); return; }
   const refundType = document.getElementById('refund-type').value;
   let refundAmount = parseFloat(document.getElementById('refund-amount').value) || 0;
   const refundStatus = document.getElementById('refund-status').value;
@@ -7461,10 +7423,8 @@ async function saveRefund() {
     canceledBy: refundType !== 'None' ? state.currentUser?.id : state.modalData.canceledBy
   };
 
-  // Refunds are IDEMPOTENT: the target is always rebuilt from the frozen
-  // refundAllocationBaseline (mirrors confirmStopAd), never re-subtracted.
-  // Reduce a frozen baseline array by `amount` from the tail; returns the
-  // rebuilt array and how much refund is still unspent.
+  // Refunds are IDEMPOTENT: rebuilt from the frozen refundAllocationBaseline (like confirmStopAd), never
+  // re-subtracted. This reduces a baseline by `amount` from the tail: [rebuilt rows, refund left].
   const _reduceFromBaseline = (baseline, amount) => {
     const arr = baseline.map(a => ({ ...a }));
     let refund = amount;
@@ -7489,11 +7449,8 @@ async function saveRefund() {
       updates.refundDueBaseline = null;
     }
   } else {
-    // A refund frees the ad's WHOLE funding. Return paid-receipt allocations
-    // first, then delivery-DUE allocations for the remainder. Previously only
-    // receiptAllocations were reduced, so an ad funded from delivery due credit
-    // kept that credit locked forever after a full refund (audit round-3 #5).
-    // Both use frozen baselines so re-saving a refund is idempotent.
+    // A refund frees the ad's WHOLE funding: paid-receipt allocations first, then delivery-DUE ones
+    // (reducing only the paid ones kept due credit locked forever), both from frozen baselines (idempotent).
     let remaining = refundAmount;
     if ((Array.isArray(ad.receiptAllocations) && ad.receiptAllocations.length) || Array.isArray(ad.refundAllocationBaseline)) {
       let baseline = Array.isArray(ad.refundAllocationBaseline) ? ad.refundAllocationBaseline : null;
@@ -7516,11 +7473,9 @@ async function saveRefund() {
       const { arr } = _reduceFromBaseline(dueBaseline, remaining);
       updates.dueAllocations = arr;
     }
-    // ROWLESS legacy ads keep their due money only in the dueAmountToUse*
-    // mirror, so the branch above never runs for them and a refund left the
-    // mirror locking the receipt's credit forever. Stand the due baseline up
-    // from the mirror — like the server's _financial_apply_refund — so the
-    // refund releases it and an undo can restore it as a real row.
+    // ROWLESS legacy ads keep due money only in the dueAmountToUse* mirror (the branch above never ran and
+    // the credit stayed locked): build the due baseline from it, like the server's _financial_apply_refund,
+    // so the refund releases it and an undo restores a real row.
     const legacyRid = String(ad.linkedDeliveryReceiptId || ad.receiptId || '');
     if (!Array.isArray(ad.refundDueBaseline) && !Array.isArray(updates.dueAllocations)
         && remaining > 0.001 && legacyRid && isAdLegacyDueMirrorForReceipt(ad, legacyRid)) {
@@ -7533,19 +7488,14 @@ async function saveRefund() {
       }
     }
   }
-  // Keep the legacy dueAmountToUse* mirror in step with the rows we just wrote.
-  // saveAd always writes dueAmountToUseUSD, and the usage readers fall back to it the
-  // moment an ad's due rows sum to zero. Leaving it at its pre-refund value is exactly
-  // why a FULL refund never returned the credit while a partial one did: the bug bites
-  // only at the zero boundary. The rows are the truth; the mirror must follow them.
+  // Keep the legacy dueAmountToUse* mirror equal to the rows just written: readers fall back to it once the
+  // due rows sum to zero, so a stale value made a FULL refund return no credit. The rows are the truth.
   if (Array.isArray(updates.dueAllocations)) {
     const dueUSD = updates.dueAllocations
       .reduce((sum, a) => sum + (parseFloat(a.amountUSD) || 0), 0);
     updates.dueAmountToUseUSD = Math.round(dueUSD * 100) / 100;
-    // The LYD half is read only when the USD half is zero, and nothing else in the app
-    // keeps it current. migrateOldDataFormats has already folded any legacy LYD value
-    // into a real row, so clearing it here cannot lose information — while leaving a
-    // stale value would silently re-lock the credit we are returning.
+    // The LYD half is read only when the USD half is zero and nothing keeps it current; migrateOldDataFormats
+    // already folded legacy LYD into a row, so clearing it loses nothing (a stale value re-locks the credit).
     updates.dueAmountToUseLYD = 0;
   }
   // Derived from the ad amount (not compounding). Undoing (None) restores the
@@ -7554,6 +7504,9 @@ async function saveRefund() {
     ? Math.max(Math.round((amountUSD - refundAmount) * 100) / 100, 0)
     : undefined;
 
+  const saveBtn = document.querySelector('button[onclick="saveRefund()"]');
+  _refundSavingId = adId;
+  _markSaveBusy(saveBtn, true);
   try {
     if (isServerModeEnabled()) {
       await saveAdThroughAtomicServer(
@@ -7576,6 +7529,9 @@ async function saveRefund() {
       conflict ? 'warning' : 'error'
     );
     return;
+  } finally {
+    _refundSavingId = null;
+    _markSaveBusy(saveBtn, false);
   }
   showNotification(state.language === 'ar' ? 'تم الحفظ' : 'Saved', state.language === 'ar' ? `تم تطبيق الاسترجاع (${trStatus(refundType)})` : `Refund ${refundType} applied`, refundType !== 'None' ? 'warning' : 'success');
   closeModal();

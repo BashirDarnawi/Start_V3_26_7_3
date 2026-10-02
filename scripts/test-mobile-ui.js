@@ -7424,6 +7424,40 @@ check('mobile stylesheet braces are balanced', openBraces === closeBraces,
   const linkOff = html();
   check('Studio v2 page-link request: while the Help service is off the form gives way to the contact card, and nothing is sent',
     !loadError && linkOff.includes('data-testid="studio-pg-link-off"') && !linkOff.includes('studio-pg-link-form') && linkOff.includes('data-testid="studio-help-contact"') && calls('POST', '/api/studio/tickets').length === 2);
+  // Review loop R5 (studio v2 second pass 4): a SENT link request is dropped once its confirmation is left (the
+  // phone's Back or the header arrow, a deep link), so "Ask us to link a page" opens a new, empty form for the next
+  // page; before, the old confirmation came back and a second page (the Instagram account) could not be asked for.
+  // A draft that was not sent yet is kept.
+  meReply(meBase);
+  run('_studioPg.slots.pages.loadedAt = Date.now();');  // the list is fresh: leaving to it reads nothing
+  const linkName = page => (/id="studio-pg-link-name"[^>]*\svalue="([^"]*)"/.exec(page) || [])[1];
+  const linkUrl = page => (/id="studio-pg-link-url"[^>]*\svalue="([^"]*)"/.exec(page) || [])[1];
+  const linkAgainCases = [];
+  for (const leave of ['back', 'link']) {
+    openAt('/studio?tab=replies&section=pages');
+    run("studioPgGo('pages', 'link');");
+    run("studioPgLinkPick('platform', 'fb'); studioPgLinkSet('name', 'My Shop Facebook'); studioPgLinkSet('link', 'https://facebook.com/myshop');");
+    reply('/api/studio/tickets', { ticket: { id: 'tkt_' + 'c'.repeat(40), number: 'T-000777', subject: 'Link my page: My Shop Facebook', category: 'page', status: 'open' }, message: { id: 'tkm_y', text: 'y' } });
+    run('studioPgLinkSend();');
+    const sent = html();
+    if (leave === 'back') run('studioV2Back();'); else openAt('/studio?tab=replies&section=pages');
+    const left = html();
+    if (leave === 'back') run("studioPgGo('pages', 'link');"); else openAt('/studio?tab=replies&section=pages&id=link');
+    const again = html();
+    linkAgainCases.push(
+      sent.includes('data-testid="studio-pg-link-done"') && sent.includes('T-000777'),
+      left.includes('data-testid="studio-pg" data-section="pages" data-id=""') && !left.includes('studio-pg-link-done'),
+      again.includes('data-testid="studio-pg-link-form"') && !again.includes('studio-pg-link-done') && !again.includes('T-000777')
+        && linkName(again) === '' && linkUrl(again) === '' && again.includes('data-testid="studio-pg-link-platform-fb" aria-pressed="false"'));
+  }
+  // An unsent draft survives the same Back.
+  run("studioPgLinkSet('name', 'Sara Instagram');");
+  run('studioV2Back();');
+  run("studioPgGo('pages', 'link');");
+  linkAgainCases.push(linkName(html()) === 'Sara Instagram' && html().includes('data-testid="studio-pg-link-form"'));
+  check('Studio v2 page-link request (review loop R5): after a request is sent and its confirmation is left (Back or a deep link), "Ask us to link a page" opens a new empty form, never the old confirmation; an unsent draft is kept',
+    !loadError && linkAgainCases.every(Boolean) && calls('POST', '/api/studio/tickets').length === 4, loadError || `cases ${failed(linkAgainCases)}`);
+  run('_studioPg.link = null;');
 
   // Rules: master switch, honest channel labels, pageRefs with the removed page, on/off, the editor.
   meReply(meBase);

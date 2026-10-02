@@ -57,6 +57,7 @@
     "admin-tools.js": [
       "12a-analytics-profit.js",
       "12b-control-center.js",
+      "12b1-permission-text-ar.js",
       "13b-merge-tools.js"
     ],
     "meta-tools.js": [

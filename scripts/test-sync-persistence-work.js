@@ -118,6 +118,24 @@ function quotaBackupsDb(quotaBytes) {
   return fake;
 }
 
+// Bug hunt r5 (R5-performance-phone-2): server-mode receipts with two ~50 KB photos each.
+const bigPhoto = tag => `data:image/jpeg;base64,${tag}${'A'.repeat(50 * 1024)}`;
+const leanReceipt = (id, version = 10) => ({ id, customerId: 'c1', amountUSD: 10, amountLocal: 50, exchangeRate: 5, _lastModified: version, _mediaOmitted: true, _photoCount: 2 });
+const fullReceipt = (id, version = 10) => {
+  const { _mediaOmitted, _photoCount, ...rest } = leanReceipt(id, version);
+  return { ...rest, photos: [bigPhoto(`${id}a`), bigPhoto(`${id}b`)] };
+};
+const holdsPhotos = row => ['photos', 'receiptImage', 'adPhotos', 'metaThumbnailData'].some(field => Object.prototype.hasOwnProperty.call(row, field));
+function mediaFixture({ local = false } = {}) {
+  const f = loadBrowserSource();
+  if (!local) {
+    f.state.serverMode = true;
+    f.sandbox.activateServerCollectionStorage({ id: 'admin' });
+  }
+  f.run('db = {};');
+  return f;
+}
+
 async function main() {
   await test('edits before a collection write starts need 2 writes, not 3, and save latest records', async () => {
     const f = persistenceFixture();
@@ -439,6 +457,240 @@ async function main() {
     await drain();
     assert.equal(fake.refused, 1);
     assert.equal(fake.rows.size, 0, 'a refused copy leaves no stale copy holding the space');
+  });
+  // Bug hunt r5 (R5-performance-phone-2): every photo opened on a server-mode phone stayed in memory
+  // and in its saved copy for good, so each later save and app start got slower.
+  await test('R5 performance-phone-2: after opening 20 receipts\' photos at most 8 rows keep them in memory; the receipt open in a form keeps its photos', async () => {
+    const f = mediaFixture();
+    f.state.receipts = Array.from({ length: 20 }, (_, i) => leanReceipt(`r${i}`));
+    const gets = [], dirty = [];
+    f.sandbox.apiGetEntity = async (collection, id) => { gets.push(id); return { id, data: fullReceipt(id) }; };
+    const mark = f.sandbox.markCollectionDirty;
+    f.sandbox.markCollectionDirty = name => { dirty.push(name); return mark(name); };
+    for (let i = 0; i < 20; i += 1) {
+      const opened = await f.sandbox.ensureEntityMediaLoaded('receipts', `r${i}`);
+      assert.equal(opened.photos.length, 2, `r${i} came back without its photos`);
+      if (i === 0) f.state.modalData = opened;  // Edit Receipt stays open on the first one
+    }
+    const held = f.state.receipts.filter(holdsPhotos).map(row => row.id);
+    console.log(`        Receipts holding photos after opening 20: ${held.length}`);
+    assert.ok(held.length <= 8, `before: ${held.length} opened receipts kept their photos`);
+    assert.ok(held.includes('r0'), 'the receipt open in the form lost its photos');
+    assert.ok(held.includes('r19'), 'the newest receipt lost its photos');
+    for (const row of f.state.receipts.filter(row => !holdsPhotos(row))) {
+      assert.equal(row._mediaOmitted, true); assert.equal(row._photoCount, 2);
+    }
+    assert.deepEqual(dirty, [], 'a same-version photo load rewrote the whole saved collection');
+    // A trimmed receipt opened again is fetched again, with its photos.
+    const again = await f.sandbox.ensureEntityMediaLoaded('receipts', 'r1');
+    assert.equal(again.photos.length, 2);
+    assert.equal(gets.filter(id => id === 'r1').length, 2);
+    // A newer revision than the cached row is still written to the saved copy.
+    f.state.receipts.push(leanReceipt('r20', 10));
+    f.sandbox.apiGetEntity = async (collection, id) => ({ id, data: fullReceipt(id, 12) });
+    await f.sandbox.ensureEntityMediaLoaded('receipts', 'r20');
+    assert.deepEqual([...dirty], ['receipts']);
+  });
+  await test('R5 performance-phone-2: a row with a save in flight or a delete pending is never swapped (its rollback needs that object)', async () => {
+    const f = mediaFixture();
+    f.state.receipts = Array.from({ length: 12 }, (_, i) => leanReceipt(`r${i}`));
+    f.sandbox.apiGetEntity = async (collection, id) => ({ id, data: fullReceipt(id) });
+    await f.sandbox.ensureEntityMediaLoaded('receipts', 'r0');
+    await f.sandbox.ensureEntityMediaLoaded('receipts', 'r1');
+    const saving = f.state.receipts[0], deleting = f.state.receipts[1];
+    f.run("_patchChains.set('receipts:r0', Promise.resolve())");
+    deleting._deleted = true;
+    for (let i = 2; i < 12; i += 1) await f.sandbox.ensureEntityMediaLoaded('receipts', `r${i}`);
+    assert.equal(f.state.receipts[0], saving, 'the row being saved was swapped');
+    assert.equal(f.state.receipts[1], deleting, 'the row being deleted was swapped');
+    f.run("_patchChains.delete('receipts:r0')");
+    await f.sandbox.ensureEntityMediaLoaded('receipts', 'r2');
+    assert.equal(holdsPhotos(f.state.receipts[0]), false, 'once saved, the row is trimmed like any other');
+  });
+  await test('R5 performance-phone-2: a server cache is saved without photo bytes but with the counts; memory keeps the open photos', async () => {
+    const f = mediaFixture();
+    const puts = [];
+    f.sandbox.idbGet = async () => null;
+    f.sandbox.idbAtomicWrite = async rows => { puts.push(...rows); return true; };
+    f.state.receipts = [fullReceipt('r1'), leanReceipt('r2'), { id: 'r3', amountUSD: 5 }];
+    assert.equal(await f.sandbox.saveCollectionToIndexedDB('receipts', f.state.receipts), true);
+    const saved = puts[0].data;
+    console.log(`        Saved receipts copy: ${JSON.stringify(saved).length} characters`);
+    assert.ok(!saved.some(holdsPhotos), 'before: the saved copy carried the photo bytes');
+    assert.deepEqual(plain(saved[0]), { ...plain(leanReceipt('r1')) });
+    assert.deepEqual(plain(saved.slice(1)), plain(f.state.receipts.slice(1)));
+    assert.equal(puts[0].checksum, f.run('DataIntegrity.calculateChecksum')(saved));
+    assert.equal(f.state.receipts[0].photos.length, 2, 'the in-memory row lost its photos');
+    // An ad's archived Facebook image is stripped too, and the row keeps the lean-list marker.
+    puts.length = 0;
+    await f.sandbox.saveCollectionToIndexedDB('ads', [{ id: 'a1', adPhotos: [bigPhoto('a')], metaThumbnailData: bigPhoto('m'), metaThumbnailArchivedFrom: 'https://example.test/x.jpg' }]);
+    assert.deepEqual(plain(puts[0].data), [{ id: 'a1', metaThumbnailArchivedFrom: 'https://example.test/x.jpg', _mediaOmitted: true, _photoCount: 1 }]);
+  });
+  await test('R5 performance-phone-2: a server cache saved with photos loads lean and is rewritten once; a local workspace keeps every photo', async () => {
+    for (const local of [false, true]) {
+      const f = mediaFixture({ local });
+      const dirty = [], puts = [];
+      f.sandbox.markCollectionDirty = name => dirty.push(name);
+      f.sandbox.idbGet = async () => null;
+      f.sandbox.idbAtomicWrite = async rows => { puts.push(...rows); return true; };
+      f.sandbox.loadCollectionFromIndexedDB = async name => (name === 'receipts' ? [fullReceipt('r1'), leanReceipt('r2')] : null);
+      await f.sandbox.loadCollectionsFromStorage(null);
+      if (local) {
+        assert.equal(f.state.receipts[0].photos.length, 2, 'local mode lost a photo on load');
+        assert.deepEqual(dirty, []);
+        // Local mode: memory and the saved copy keep every photo, however many are opened.
+        f.state.receipts = Array.from({ length: 20 }, (_, i) => fullReceipt(`r${i}`));
+        for (let i = 0; i < 20; i += 1) f.sandbox.noteHydratedMedia('receipts', `r${i}`);
+        assert.equal(f.state.receipts.filter(holdsPhotos).length, 20, 'local mode trimmed photos from memory');
+        await f.sandbox.saveCollectionToIndexedDB('receipts', f.state.receipts);
+        assert.equal(puts[0].data.filter(holdsPhotos).length, 20, 'local mode saved a receipt without its photos');
+      } else {
+        assert.deepEqual(plain(f.state.receipts), [plain(leanReceipt('r1')), plain(leanReceipt('r2'))], 'before: the old cache\'s photos stayed in memory');
+        assert.deepEqual(dirty, ['receipts'], 'the cleaned collection must be rewritten once');
+      }
+    }
+  });
+  await test('R5 performance-phone-2: Mark Delivered on a receipt whose photos were trimmed reloads them and sends the old photos with the proof', async () => {
+    const f = mediaFixture();
+    const elements = new Map();
+    const element = (id, props = {}) => elements.set(id, { id, value: '', dataset: {}, disabled: false, querySelectorAll: () => [], remove() {}, ...props });
+    f.sandbox.document.getElementById = id => elements.get(id) || null;
+    const proof = bigPhoto('proof');
+    element('delivery-final-receipt-no', { value: '45873' });
+    element('delivery-collected-payments'); element('delivery-fee-amount', { value: '0' }); element('delivery-driver-notes');
+    element('delivery-receipt-image-data', { dataset: { imageData: proof } });
+    element('delivery-complete-submit');
+    const lean = { ...leanReceipt('r1'), status: 'Not Paid', isPaid: false, deliveryStatus: 'In Progress', deliveryPersonId: 'admin' };
+    const { _mediaOmitted, _photoCount, ...stored } = lean;
+    const full = { ...stored, photos: fullReceipt('r1').photos };
+    f.state.receipts = [lean];
+    f.sandbox.apiGetEntity = async (collection, id) => ({ id, data: full });
+    const sent = [], toasts = [];
+    f.sandbox.apiPatchEntity = async (collection, id, updates) => { sent.push(updates); return { id, data: { ...full, ...updates, _lastModified: 11 } }; };
+    f.sandbox.showNotification = title => toasts.push(title);
+    await f.sandbox.submitReceiptDeliveryCompletion('r1');
+    assert.equal(sent.length, 1, 'the delivery was not sent');
+    assert.deepEqual([...sent[0].photos], [proof, ...full.photos], 'before: the save replaced the older photos with the proof alone');
+    assert.equal(sent[0].receiptImage, proof);
+    // The photos cannot be loaded: nothing is sent, the driver is told, and the button works again.
+    f.state.receipts = [lean];
+    f.sandbox.apiGetEntity = async () => { throw new TypeError('Load failed'); };
+    toasts.length = 0;
+    await f.sandbox.submitReceiptDeliveryCompletion('r1');
+    assert.equal(sent.length, 1, 'a delivery without the older photos was sent');
+    assert.deepEqual(toasts, ['Photos unavailable']);
+    assert.equal(elements.get('delivery-complete-submit').disabled, false);
+  });
+  // Bug hunt r5 (R5-error-paths-offline-3): settling or converting a Paid receipt with photos had the
+  // 20 s budget and three tries; a photo body now gets the 90 s budget and one retry, as any photo save.
+  await test('R5 error-paths-offline-3: settle and convert with a photo get the 90 s budget and one retry; without photos 20 s and two retries', async () => {
+    const f = syncFixture(); const seen = [];
+    f.sandbox.setTimeout = fn => { fn(); return 1; };  // withRetry's backoff runs at once
+    f.sandbox.apiJson = async (path, options, timeout) => { seen.push(timeout?.timeoutMs); throw new TypeError('Load failed'); };
+    const photo = `data:image/jpeg;base64,${'A'.repeat(4000)}`;
+    for (const name of ['apiSettleReceipt', 'apiUnsettleReceipt']) {
+      for (const [data, expected] of [[{ photos: [photo] }, { calls: 2, timeouts: [90000] }], [{ notes: 'cash' }, { calls: 3, timeouts: [20000] }]]) {
+        seen.length = 0;
+        const error = await f.sandbox[name]({ receiptId: 'r1', expectedLastModified: 10, idempotencyKey: 'settle-key-1', data }).then(() => null, e => e);
+        assert.equal(error?.message, 'Load failed');
+        assert.deepEqual({ calls: seen.length, timeouts: [...new Set(seen)] }, expected, `${name} ${data.photos ? 'with' : 'without'} a photo`);
+      }
+    }
+  });
+  // Bug hunt r5 (R5-performance-phone-3): a driver's phone re-downloaded every job ever assigned to it about
+  // every 6 s. The poll now reads the tiny assigned-scope watermarks and replaces only when they move, after
+  // Refresh, when that read fails, or every 60 s (an unassignment or a delete lowers no maximum).
+  function driverSyncFixture() {
+    const f = syncFixture();
+    const driver = { id: 'drv1', name: 'Driver', role: 'Delivery', permissions: {} };
+    f.state.currentUser = driver; f.state.users = [driver];
+    f.sandbox.refreshCurrentUserPermissions = async () => false;
+    f.sandbox.updateSyncIndicator = () => {};
+    f.sandbox.__now = Date.UTC(2026, 9, 2, 9, 0, 0);
+    f.run('Date.now = () => globalThis.__now;');
+    let version = 1000;
+    const server = { ads: [], receipts: [], customers: [], marksFail: false, markGets: 0, loads: { ads: 0, receipts: 0, customers: 0 } };
+    server.put = (collection, row) => {
+      version += 1;
+      server[collection] = server[collection].filter(old => old.id !== row.id).concat({ ...row, _lastModified: version });
+    };
+    server.drop = (collection, id) => { server[collection] = server[collection].filter(row => row.id !== id); };
+    const newest = rows => rows.reduce((max, row) => Math.max(max, row._lastModified), 0);
+    f.sandbox.apiJson = async path => {
+      if (path.startsWith('/api/sync/watermarks')) {
+        server.markGets += 1;
+        if (server.marksFail) throw new TypeError('Load failed');
+        return { watermarks: { ads: newest(server.ads), receipts: newest(server.receipts), customers: newest(server.customers) }, dataCompatibilityVersion: 3 };
+      }
+      const url = new URL(`http://test${path}`);
+      const collection = decodeURIComponent(url.pathname.split('/')[3]);
+      server.loads[collection] += 1;
+      return server[collection].map((row, i) => ({ id: row.id, data: { ...row }, createdAt: 1000 + i, lastModified: row._lastModified, deleted: false }))
+        .reverse().slice(0, Number(url.searchParams.get('limit')));
+    };
+    for (let i = 1; i <= 5; i += 1) {
+      server.put('customers', { id: `c${i}`, name: `Customer ${i}` });
+      server.put('receipts', { id: `r${i}`, recordType: 'receipt', customerId: `c${i}`, deliveryPersonId: 'drv1', deliveryStatus: 'Delivered',
+        status: 'Paid', isPaid: true, amountUSD: 10, amountLocal: 50, exchangeRate: 5, createdAt: '2026-09-01T00:00:00.000Z' });
+    }
+    const tick = async () => { const result = await f.sandbox.serverLiveSyncOnce(); f.sandbox.__now += 3000; return result; };
+    const ids = () => Array.from(f.state.receipts, row => row.id).sort();
+    return { ...f, server, tick, ids };
+  }
+  await test('R5 performance-phone-3: an idle driver poll reads the watermarks each tick and replaces its jobs only once a minute', async () => {
+    const f = driverSyncFixture();
+    for (let i = 0; i <= 20; i += 1) assert.equal((await f.tick()).ok, true);  // 0 s .. 60 s, a tick every 3 s
+    console.log(`        One idle minute: ${f.server.markGets} watermark reads, ${f.server.loads.receipts} full receipt downloads`);
+    assert.equal(f.server.markGets, 21);
+    assert.equal(f.server.loads.receipts, 2, 'before: the whole history again about every 6 s');
+    assert.deepEqual(f.server.loads, { ads: 2, receipts: 2, customers: 2 });
+    assert.deepEqual(f.ids(), ['r1', 'r2', 'r3', 'r4', 'r5']);
+    assert.ok(f.state.serverLastSyncAt && f.state.serverLastSyncErrorAt === null, 'a quiet tick still counts as synced');
+  });
+  await test('R5 performance-phone-3: a raised or lowered watermark replaces on the very next tick, and an unassigned job leaves within 60 s', async () => {
+    const f = driverSyncFixture();
+    await f.tick();  // 0 s: first replace
+    f.server.put('receipts', { id: 'r6', recordType: 'receipt', customerId: 'c1', deliveryPersonId: 'drv1', deliveryStatus: 'Needs Delivery',
+      status: 'Not Paid', isPaid: false, amountUSD: 10, amountLocal: 50, exchangeRate: 5, statusDetail: { notPaidCollection: 'delivery' } });
+    await f.tick();  // 3 s: the 5 s list cache must not hide the new job
+    assert.ok(f.ids().includes('r6'), 'the new job reaches the phone on the next tick');
+    assert.equal(f.server.loads.receipts, 2);
+    await f.tick();
+    assert.equal(f.server.loads.receipts, 2, 'nothing moved: no download');
+    f.server.drop('receipts', 'r6');  // the newest row leaves the scope: the maximum drops
+    await f.tick();
+    assert.ok(!f.ids().includes('r6'));
+    assert.equal(f.server.loads.receipts, 3);
+    f.server.drop('receipts', 'r2');  // an older row leaves: the maximum does not move
+    const replacedAt = f.sandbox.__now - 3000;
+    while (f.ids().includes('r2') && f.sandbox.__now - replacedAt <= 63000) await f.tick();
+    assert.ok(!f.ids().includes('r2'), 'the unassigned job is gone within 60 s');
+    assert.equal(f.server.loads.receipts, 4);
+    assert.deepEqual(f.ids(), ['r1', 'r3', 'r4', 'r5']);
+  });
+  await test('R5 performance-phone-3: Refresh, a failed watermark read and a new session each make the next poll replace', async () => {
+    const f = driverSyncFixture();
+    await f.tick(); await f.tick();
+    assert.equal(f.server.loads.ads, 1);
+    await f.sandbox.refreshDeliveryDashboard();  // reloads receipts + customers itself
+    assert.equal(f.server.loads.receipts, 2);
+    await f.tick();
+    assert.equal(f.server.loads.ads, 2, 'the next poll after Refresh replaces (ads included)');
+    await f.tick();
+    assert.equal(f.server.loads.ads, 2);
+    f.server.marksFail = true;
+    const marks = f.server.markGets;
+    assert.equal((await f.tick()).ok, true);
+    assert.equal(f.server.markGets, marks + 1);
+    assert.equal(f.server.loads.ads, 3, 'a failed watermark read falls back to the full replace');
+    f.server.marksFail = false;
+    await f.tick();
+    assert.equal(f.server.loads.ads, 4, 'no watermarks were recorded by the fallback');
+    await f.tick();
+    assert.equal(f.server.loads.ads, 4);
+    f.sandbox.advanceServerSessionEpoch();
+    await f.tick();
+    assert.equal(f.server.loads.ads, 5, 'a new session replaces at once');
   });
   console.log(`\n${passed} sync/persistence work regressions passed; ${failed} failed.`);
   if (failed) process.exitCode = 1;

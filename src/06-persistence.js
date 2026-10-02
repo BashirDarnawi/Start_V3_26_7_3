@@ -373,11 +373,8 @@ function saveState() {
     toSave.logs = logsForStorage; // Only store recent logs in localStorage
     // Never persist full user object in localStorage (sessionStorage is the source of truth)
     delete toSave.currentUser;
-    // Persist large collections in IndexedDB only. CRITICAL: if IndexedDB is
-    // unavailable (db === null — e.g. some private-browsing modes and older
-    // WebViews), keep the collections inside this localStorage snapshot.
-    // Deleting them here with no IndexedDB would leave business data in
-    // memory only, and it would vanish on the next reload.
+    // Collections persist in IndexedDB only. CRITICAL: without it (db === null: some private modes,
+    // older WebViews) they stay in this snapshot, or business data would vanish on the next reload.
     const serverBacked = (typeof isServerModeEnabled === 'function') && isServerModeEnabled();
     delete toSave._collectionsInline;  // never re-emit a marker loaded from an older snapshot
     if (db || serverBacked) {
@@ -649,11 +646,8 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
         loaded = await loadCollectionFromIndexedDB(name);
       } catch (e) {
         if (e && e.code === 'IDB_COLLECTION_CORRUPT') {
-          // The IndexedDB copy is incomplete. Prefer the legacy localStorage
-          // snapshot if present (it may be complete); otherwise keep the partial
-          // records we could read. Either way the collection stays flagged
-          // corrupted so it is NOT re-saved over the intact chunks, and we warn
-          // the user to restore a backup.
+          // An incomplete IndexedDB copy: prefer the legacy snapshot (it may be complete), else the
+          // partial rows. It stays flagged corrupted (NOT re-saved over the intact chunks); we warn.
           if (Array.isArray(legacy[name])) {
             state[name] = legacy[name];
           } else if (Array.isArray(e.partialData)) {
@@ -674,7 +668,9 @@ async function loadCollectionsFromStorage(legacyCollections = null) {
       if (db) await saveCollectionToIndexedDB(name, state[name]);
       else _inlineSnapshotAdopted = true;
     } else if (loaded !== null && loaded !== undefined) {
-      state[name] = loaded;
+      // A server cache saved before lean saves may hold photo bytes: drop them and rewrite it once.
+      state[name] = getCollectionStorageScope() === 'local' ? loaded : leanServerMediaRows(name, loaded);
+      if (state[name] !== loaded) markCollectionDirty(name);
     } else if (Array.isArray(legacy[name])) {
       // Legacy migration path: seed IndexedDB from localStorage snapshot
       state[name] = legacy[name];

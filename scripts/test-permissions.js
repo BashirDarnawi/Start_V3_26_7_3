@@ -6639,6 +6639,117 @@ checkAsync('R4 concurrency-idempotency-3: a toggle sends the map it was made on,
   }
 });
 
+// Bug hunt r5 (R5-i18n-arabic-sweep-1): in Arabic the Permissions Manager was all English (14 sections,
+// 98 permissions, 9 templates, the role badge), so an Arabic-only manager could grant phone numbers,
+// money figures or delete rights by mistake. The Arabic text ships in the lazy admin-tools.js (no room
+// in the startup bundle). A source-built sandbox, so this runs the same before and after a rebuild.
+checkAsync('R5 i18n-arabic-sweep-1: the Permissions Manager reads Arabic in Arabic (sections, permissions, templates, role badge, toasts), shows English until admin-tools.js loads, and stays unchanged in English', async () => {
+  const loadBrowserSource = require('./helpers/load-browser-source');
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+  const adminToolsFiles = manifest.lazy['admin-tools.js'];
+  assert(adminToolsFiles.includes('12b1-permission-text-ar.js') && !manifest.files.includes('12b1-permission-text-ar.js'), 'the Arabic text must ship in the lazy admin-tools.js, not the startup bundle');
+  const escape = v => (v == null ? '' : String(v)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const loadAdminTools = f => { for (const file of adminToolsFiles) f.run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')); };
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const ADMIN_R5 = { id: 'adm', name: 'Owner', role: 'Admin', permissions: {} };
+  // A non-admin holding users.managePermissions: the Manager is theirs to open, so is the text.
+  const MANAGER = { id: 'mgr', name: 'Mona', role: 'Employee', permissions: { users: ['view', 'managePermissions'], customers: ['view'] } };
+  const fixture = (language, withAdminTools) => {
+    const f = loadBrowserSource();
+    f.run('Security').escapeHtml = escape;
+    const els = new Map(); const scripts = []; const notes = []; const audit = [];
+    f.sandbox.URLSearchParams = URLSearchParams;
+    f.sandbox.document.createElement = tag => {
+      const el = { tagName: tag, id: '', style: {}, dataset: {}, classList: { add() {}, remove() {} }, setAttribute() {}, querySelector: () => null,
+        querySelectorAll: () => [], remove() { if (els.get(this.id) === this) els.delete(this.id); } };
+      if (tag === 'script') scripts.push(el);
+      return el;
+    };
+    f.sandbox.document.getElementById = id => els.get(id) || null;
+    f.sandbox.document.body.appendChild = el => { if (el && el.id) els.set(el.id, el); };
+    f.sandbox.document.head.appendChild = () => {};
+    f.run('IconQueue').schedule = () => {};
+    Object.assign(f.sandbox, {
+      showNotification: (title, message) => notes.push({ title, message }), addAuditLog: (action, id, line) => audit.push(line),
+      markCollectionDirty: () => {}, flushDirtyCollections: async () => {}, scheduleServerUserUpdate: () => Promise.resolve(true)
+    });
+    const target = { id: 'emp1', name: 'Sara', role: 'Employee', permissions: { receipts: ['viewOwn'] } };
+    Object.assign(f.state, { language, currentUser: MANAGER, users: [MANAGER, ADMIN_R5, target] });
+    if (withAdminTools) loadAdminTools(f);
+    return { ...f, els, scripts, notes, audit, modal: () => String(els.get('app-modal')?.innerHTML || '') };
+  };
+  const ENGLISH = ['View Own Receipts', 'Delete Customers', 'View Contacts', 'Sales Agent', 'Full Administrator', 'Customer relationship management', 'Ads Studio — Campaign Requests', 'Stop running ads and return funds'];
+  const arabic = s => typeof s === 'string' && /[؀-ۿ]/.test(s) && !/[A-Za-z]{3,}/.test(s.replace(/CSV|PDF/g, ''));
+
+  // (a) Every section, permission and template has an Arabic name and description; no stale key.
+  let f = fixture('ar', true);
+  const text = f.run('PERMISSION_TEXT_AR'); const modules = f.run('PERMISSION_MODULES'); const templates = f.run('PERMISSION_TEMPLATES');
+  const permKeys = Object.entries(modules).flatMap(([mk, cfg]) => Object.keys(cfg.permissions).map(pk => `${mk}.${pk}`));
+  const missing = [
+    ...Object.keys(modules).filter(k => !(text.modules[k] || []).every(arabic) || text.modules[k].length !== 2).map(k => 'modules.' + k),
+    ...permKeys.filter(k => !(text.perms[k] || []).every(arabic) || text.perms[k].length !== 2).map(k => 'perms.' + k),
+    ...Object.keys(templates).filter(k => !(text.templates[k] || []).every(arabic) || text.templates[k].length !== 2).map(k => 'templates.' + k)
+  ];
+  assert(Object.keys(modules).length === 14 && permKeys.length === 98 && Object.keys(templates).length === 9, 'the permission catalog changed size: update this check');
+  assert(!missing.length, 'no Arabic for: ' + missing.join(', '));
+  const stale = [...Object.keys(text.modules).filter(k => !modules[k]), ...Object.keys(text.perms).filter(k => !permKeys.includes(k)), ...Object.keys(text.templates).filter(k => !templates[k])];
+  assert(!stale.length, 'Arabic keys 04-permissions.js lacks: ' + stale.join(', '));
+
+  // (b) Arabic, the bundle loaded: every label, the templates and the role badge.
+  f.sandbox.showPermissionsModal('emp1');
+  let html = f.modal();
+  for (const english of ENGLISH) assert(!html.includes(english), `before: the Arabic Manager shows "${english}"`);
+  assert(html.includes('rounded-full bg-white/20 text-xs font-medium">موظف</span>'), 'the role badge is not Arabic');
+  for (const ar of ['عرض أرقام التواصل', 'حذف العملاء', 'عرض وصولاته فقط', 'مندوب مبيعات', 'مدير بصلاحيات كاملة', 'إدارة علاقات العملاء']) assert(html.includes(ar), 'missing ' + ar);
+  assert(!f.scripts.length, 'loaded bundle requested again');
+  // A refused template names the grant in Arabic, never the raw key.
+  f.sandbox.applyPermissionTemplate('emp1', 'salesAgent');
+  const refusal = f.notes.pop();
+  assert(refusal && refusal.message === 'لا يمكنك منح صلاحية لا تملكها: التحليلات — عرض التحليلات', 'before: the refusal named analytics.view: ' + JSON.stringify(refusal));
+  // (c) An applied template toasts its Arabic name; the audit trail stays English.
+  f.state.currentUser = ADMIN_R5;
+  f.sandbox.applyPermissionTemplate('emp1', 'salesAgent');
+  const applied = f.notes.pop();
+  assert(applied && applied.message === 'تم تطبيق صلاحيات "مندوب مبيعات" على Sara', 'before: the toast named "Sales Agent": ' + JSON.stringify(applied));
+  assert(f.audit.pop() === 'Applied permission template "Sales Agent" to Sara', 'the audit line changed language');
+
+  // (d) Arabic before admin-tools.js arrives: English meanwhile, the bundle asked for (a non-admin may), then redrawn in Arabic.
+  f = fixture('ar', false);
+  f.sandbox.showPermissionsModal('emp1');
+  html = f.modal();
+  assert(html.includes('View Own Receipts') && html.includes('Full Administrator') && html.includes('>موظف</span>'), 'no English fallback while the text loads');
+  assert(f.scripts.length === 1 && /admin-tools\.js$/.test(String(f.scripts[0].src)), 'the Arabic text was never requested for a managePermissions holder');
+  loadAdminTools(f);
+  f.scripts[0].onload();
+  await settle();
+  html = f.modal();
+  for (const english of ENGLISH) assert(!html.includes(english), `after the bundle loaded the Manager still shows "${english}"`);
+  assert(html.includes('عرض أرقام التواصل'), 'the Manager was not redrawn in Arabic');
+  // Closed before the text arrived: nothing re-opens.
+  f = fixture('ar', false);
+  f.sandbox.showPermissionsModal('emp1');
+  f.els.delete('app-modal');
+  loadAdminTools(f);
+  f.scripts[0].onload();
+  await settle();
+  assert(!f.els.has('app-modal'), 'a closed Manager re-opened when its text arrived');
+  // The bundle cannot load: English stays.
+  f = fixture('ar', false);
+  f.sandbox.showPermissionsModal('emp1');
+  f.scripts[0].onerror();
+  await settle();
+  assert(f.modal().includes('View Own Receipts'), 'the English fallback vanished when the bundle failed');
+
+  // (e) English is unchanged.
+  f = fixture('en', true);
+  f.sandbox.showPermissionsModal('emp1');
+  html = f.modal();
+  for (const english of ENGLISH) assert(html.includes(english), `English lost "${english}"`);
+  assert(html.includes('rounded-full bg-white/20 text-xs font-medium">Employee</span>') && !/[؀-ۿ]/.test(html), 'English shows Arabic');
+  f.sandbox.applyPermissionTemplate('emp1', 'salesAgent');
+  assert(f.notes.pop()?.message === 'Cannot grant a permission you do not hold: analytics.view', 'the English refusal changed');
+});
+
 // ---------- report ----------
 async function reportResults() {
   for (const { name, fn } of asyncChecks) {

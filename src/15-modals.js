@@ -116,8 +116,8 @@ function selectCustomerMergeDuplicate(customerId) {
   renderModal();
 }
 
-// Prepare a detached history update. Never push into the live ad's array:
-// a conflict or failed server request must not leave a ghost edit in state.
+// A detached history update, never pushed into the live ad's array (a conflict or failed
+// request would leave a ghost edit in state).
 function buildAdEditHistoryUpdates(oldAd, changes, editorName = state.currentUser?.name || 'Unknown', editedAt = new Date().toISOString()) {
   const editHistory = Array.isArray(oldAd?.editHistory)
     ? oldAd.editHistory.map(entry => {
@@ -196,8 +196,7 @@ function decorateAppModalPanel(panel, { kind, isEdit, isArabic } = {}) {
   const closeActions = Array.from(panel.querySelectorAll('button[onclick]')).filter(button =>
     /^\s*closeModal\(\)\s*;?\s*$/.test(button.getAttribute('onclick') || '')
   );
-  // Ad, user and subscription panels already have a header X. Reuse it,
-  // retaining its handler, rather than adding another competing close action.
+  // Ad, user and subscription panels have a header X: reuse it (and its handler), no second close.
   let closeButton = closeActions.find(button => button.querySelector('[data-lucide="x"], [data-lucide="x-circle"]'));
   if (!closeButton) {
     closeButton = document.createElement('button');
@@ -264,7 +263,7 @@ function renderModal() {
           <div>
             <label class="block text-sm font-medium mb-2">${state.language === 'ar' ? 'المنصة *' : 'Platform *'}</label>
             <select id="customer-platform" class="w-full glass-input px-4 py-2 rounded-xl">
-              ${PLATFORMS.map(p => `<option value="${p}" ${custData.platform === p ? 'selected' : ''}>${p}</option>`).join('')}
+              ${PLATFORMS.map(p => `<option value="${p}" ${custData.platform === p ? 'selected' : ''}>${platformLabel(p)}</option>`).join('')}
             </select>
           </div>
 
@@ -446,9 +445,7 @@ function renderModal() {
         : getVisibleRecords(state.pages);
       const deliveryUsers = getVisibleRecords(state.users).filter(u => isDeliveryRole(u.role));
       const adData = state.modalData || {};
-      // Copy (not alias) the live record's photos — the receipt modal already
-      // does this (see state.tempReceiptPhotos below). Aliasing meant adding or
-      // removing a photo mutated the SAVED ad immediately, even on Cancel.
+      // Copy (not alias) the photos, like the receipt modal: aliasing changed the SAVED ad even on Cancel.
       _adPhotoUploadGeneration++;
       _adPhotoUploadsInFlight = 0;
       state.tempAdPhotos = (!isEdit || can('ads', 'viewPhotos')) ? getAdPhotoSources(adData) : [];
@@ -469,10 +466,9 @@ function renderModal() {
       // unlink, which left unlinked drafts locked though the server accepts any page.
       const adIsMetaLinked = String(adData.metaAdId || '').trim() !== ''
         || String(adData.metaPageId || '').trim() !== '';
-      // Meta reveals a page's NAME later than its id, so a fresh draft can carry metaPageId with pageId
-      // still empty. The lock keys on the ad's own Facebook identity, never on this browser's local link
-      // (an open picker then attached an imported ad to another business's page); a matching local page
-      // (by Facebook id) is used directly.
+      // A fresh Meta draft can carry metaPageId before pageId. The lock keys on the ad's own Facebook
+      // identity, never this browser's local link (an open picker attached an imported ad to another
+      // business's page); a local page with that Facebook id is used directly.
       const adMetaPageId = String(adData.metaPageId || '').trim();
       const metaResolvedPage = (!adLinkedPage && adMetaPageId)
         ? state.pages.find(p => p && !p._deleted && String(p.metaPageId || '').trim() === adMetaPageId)
@@ -739,9 +735,8 @@ function renderModal() {
                       // A Meta-linked ad's budget is Meta's real planned total (read-only), so the
                       // customer's debt never drifts from what Meta runs.
                       const metaBudgetRaw = metaAdAutoBudgetUSD(adData);
-                      // ...EXCEPT when Meta's total is below money already reserved on this ad's
-                      // receipts: locked lower, the funding<=budget guard refused EVERY save with no
-                      // way out but silently releasing receipt credit. Stay manual and say why.
+                      // ...EXCEPT below money already reserved on this ad's receipts: locked lower, the
+                      // funding<=budget guard refused EVERY save. Stay manual and say why.
                       const committedUSD = getAdCommittedFundingTotalUSD(adData);
                       const metaBudgetBlocked = metaBudgetRaw > 0 && committedUSD > metaBudgetRaw + 0.005;
                       const metaBudget = metaBudgetBlocked ? 0 : metaBudgetRaw;
@@ -989,8 +984,8 @@ function renderModal() {
       const userData = state.modalData || {};
       const isAdminEditor = isCurrentUserAdmin();
       const isSelfEdit = isEdit && String(userData.id || '') === String(state.currentUser?.id || '');
-      // Server rules: users.changeRole picks non-admin roles, never your own; only an Admin grants Admin.
-      // A colleague who holds a grant you lack cannot be re-roled or have their password reset by you (server rule).
+      // Server rules: users.changeRole picks non-admin roles, never your own; only an Admin grants Admin;
+      // a colleague holding a grant you lack is never re-roled or password-reset by you.
       const targetOutranks = isEdit && !isAdminEditor && _targetOutranksEditor(userData);
       const canPickRole = isAdminEditor || (!isSelfEdit && canManageUsersAction('changeRole') && !targetOutranks);
       const canOpenPerms = canManageUsersAction('managePermissions');
@@ -1197,7 +1192,7 @@ function renderModal() {
                   ${pageCustomers.slice(0, PICKER_DROPDOWN_LIMIT).map(c => `
                     <div class="customer-option px-4 py-3 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg cursor-pointer transition-colors border-b border-slate-100 dark:border-slate-800 last:border-0" data-record-action="select-page-customer" data-record-id="${Security.escapeHtml(String(c.id || ''))}" data-admin="${isAdminPage}">
                       <div class="font-medium text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</div>
-                      <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(c.platform || '')} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
+                      <div class="text-xs text-slate-500 mt-1">${Security.escapeHtml(platformLabel(c.platform))} • ${Security.escapeHtml(c.phones?.[0] || (isArP ? 'لا يوجد هاتف' : 'No phone'))}</div>
                     </div>
                   `).join('')}
                 </div>
@@ -1210,7 +1205,7 @@ function renderModal() {
                     <div class="flex items-center justify-between p-3 bg-white dark:bg-slate-800 rounded-lg border border-indigo-200 dark:border-indigo-800 page-customer-item" data-customer-id="${Security.escapeHtml(String(cid || ''))}">
                       <div>
                         <div class="font-medium text-sm text-slate-800 dark:text-white">${Security.escapeHtml(customer.name || '')}</div>
-                        <div class="text-xs text-slate-500">${Security.escapeHtml(customer.platform || '')}</div>
+                        <div class="text-xs text-slate-500">${Security.escapeHtml(platformLabel(customer.platform))}</div>
                       </div>
                       <button type="button" data-record-action="remove-page-customer" data-record-id="${Security.escapeHtml(String(cid || ''))}" class="text-rose-500 hover:text-rose-700">
                         <i data-lucide="x-circle" class="w-4 h-4"></i>
@@ -1271,9 +1266,7 @@ function renderModal() {
         // Build phone list for search
         const phoneCustomerMap = [];
         receiptCustomers.forEach(c => {
-          // Not every customer carries phones: the server strips all contact
-          // fields for staff without customers.viewContacts, and the loop
-          // threw for them instead of just showing no phone suggestions.
+          // Staff without customers.viewContacts get customers with no phones (the server strips them).
           if (!c || !Array.isArray(c.phones)) return;
           c.phones.forEach(phone => {
             phoneCustomerMap.push({ phone, customer: c });
@@ -1321,7 +1314,7 @@ function renderModal() {
                   ${phoneCustomerMap.slice(0, PICKER_DROPDOWN_LIMIT).map(item => `
                     <div class="touch-target px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 cursor-pointer phone-option" role="button" tabindex="0" data-phone="${Security.escapeHtml(item.phone)}" data-customer-id="${Security.escapeHtml(item.customer.id)}" onclick="selectReceiptPhone(this.dataset.phone, this.dataset.customerId)" onkeydown="if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); selectReceiptPhone(this.dataset.phone, this.dataset.customerId); }">
                       <div class="text-sm font-medium">${Security.escapeHtml(item.phone)}</div>
-                      <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(item.customer.platform)}</div>
+                      <div class="text-xs text-slate-500">${Security.escapeHtml(item.customer.name)} - ${Security.escapeHtml(platformLabel(item.customer.platform))}</div>
                     </div>
                   `).join('')}
                 </div>
@@ -1832,9 +1825,8 @@ function renderModal() {
       break;
     case 'top-ups':
       const topUpAd = state.modalData;
-      // Render from the working copy (tempTopUps) so existing AND just-added
-      // top-ups both show and can be removed. The "New total" is computed live
-      // from the base amount + the working list.
+      // Render the working copy (tempTopUps): existing and just-added top-ups show and can be removed;
+      // "New total" is the base amount + the working list.
       const existingTopUps = tempTopUps;
       const topUpBase = topUpAd.initialAmountUSD || topUpAd.amountUSD;
       const topUpWorkingTotal = existingTopUps.reduce((sum, t) => sum + (t.amount || 0), 0);
@@ -1845,8 +1837,8 @@ function renderModal() {
       const topUpBaseEndOk = topUpBaseEnd && !isNaN(new Date(topUpBaseEnd).getTime());
       const topUpNewEnd = topUpBaseEndOk ? new Date(new Date(topUpBaseEnd).getTime() + topUpWorkingDays * 86400000) : null;
       const isArTU = state.language === 'ar';
-      // Receipt money still spendable given the working list — shown so the
-      // user always knows how much they CAN top up (null = not receipt-funded).
+      // Receipt money still spendable for the working list: how much they CAN top up (null = not
+      // receipt-funded).
       const topUpAvailable = _topUpAvailableNow(existingTopUps);
 
       modalContent = `
@@ -2155,8 +2147,8 @@ function renderModal() {
       break;
     }
     case 'subscription-lock': {
-      // Paywall sheet: plans only from the server catalog, purchases through
-      // handleSubscribePlan; a short wallet is sent to Charge wallet (the shortfall).
+      // Paywall: server-catalog plans only, bought via handleSubscribePlan; a short wallet goes to
+      // Charge wallet (the shortfall).
       const lockServiceId = state.modalData?.serviceId || '';
       const lockSubscribeToId = state.modalData?.subscribeToId || lockServiceId;
       const lockServiceName = state.modalData?.serviceName || 'Service';
@@ -2242,9 +2234,8 @@ function renderModal() {
             ${isRTL ? 'هذه الخدمة غير متاحة للاشتراك حالياً. تواصل مع الإدارة.' : 'This service is not currently sold. Contact the administrator.'}
           </div>`;
       } else if (isServerModeEnabled()) {
-        // Server mode with no plans yet: the catalog is still loading or the
-        // fetch failed. NEVER offer a purchase button here — it would take
-        // real money while showing no price at all.
+        // Server mode, no plans yet (loading or failed): NEVER offer a purchase button here — it
+        // would take real money while showing no price at all.
         plansBody = `
           <div class="mb-2 rounded-2xl border border-slate-200 dark:border-slate-700 p-5 text-center text-sm text-slate-500">
             <div class="w-6 h-6 mx-auto mb-2 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
@@ -2470,10 +2461,8 @@ function renderModal() {
   if (state.activeModal === 'receipt') {
     setTimeout(() => {
       updateReceiptTotals();
-      // Auto-serial: fill the number for a NEW receipt whose payment method is
-      // auto-numbered, and lock the field whenever such a method is selected
-      // (including when EDITING a receipt that already uses one). Opening the
-      // form never renumbers an existing receipt.
+      // Auto-serial: a NEW receipt with an auto-numbered method gets its number and the field locks for
+      // such a method (editing too); opening the form never renumbers an existing receipt.
       initReceiptSerialOnOpen();
       updateReceiptStatusUI(document.getElementById('receipt-status')?.value || 'Paid');
       // Pre-populate customer if editing. Use the RECEIPT's own stored phone —
@@ -2559,12 +2548,13 @@ function renderModal() {
         await handleModalSubmit();
       } catch (err) {
         console.error('Modal submit error:', err);
-        // Surface the server's actual reason (e.g. "A user with this email
-        // already exists") instead of a generic message that hides it; known rules in Arabic.
+        // The server's own reason (e.g. "A user with this email already exists"), known rules in
+        // Arabic; a dropped connection says the save may have gone through, never raw 'Load failed'.
         const detail = _serverRefusalText(err?.message);
+        const net = _isConnectionFailure(err) && _serverRefusalToast('save', '', err);
         showNotification(
-          state.language === 'ar' ? 'خطأ' : 'Error',
-          detail || (state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes'),
+          net ? net[0] : (state.language === 'ar' ? 'خطأ' : 'Error'),
+          net ? net[1] : (detail || (state.language === 'ar' ? 'فشل حفظ التغييرات' : 'Failed to save changes')),
           'error'
         );
       } finally {
@@ -2593,6 +2583,14 @@ function getAdMutationFingerprint(action, adId, expectedLastModified, data) {
   return JSON.stringify({ action, adId, expectedLastModified: expectedLastModified ?? null, data: stable });
 }
 
+// A different Save of an ad while one is still sending: refused, never handed the first one's answer.
+function adSaveBusyError(code) {
+  const isAr = state.language === 'ar';
+  return Object.assign(new Error(isAr
+    ? 'حفظ آخر لهذا الإعلان ما زال قيد الإرسال. انتظر حتى ينتهي، ثم راجع الإعلان واحفظ تغييرك مرة أخرى.'
+    : 'Another save of this ad is still being sent. Wait for it to finish, check the ad, then save your change again.'), { code });
+}
+
 // pinnedAdId: the open New Ad form's id. A changed re-submit after a lost answer keeps it (fresh key):
 // a first Save that went through answers 409, never a second ad.
 function getAdMutationAttempt(action, adId, expectedLastModified, data, pinnedAdId = '') {
@@ -2603,7 +2601,7 @@ function getAdMutationAttempt(action, adId, expectedLastModified, data, pinnedAd
   const fingerprint = getAdMutationFingerprint(act, existingId, expectedLastModified, data);
   const prior = _pendingAdMutationAttempts.get(slot);
   if (prior?.fingerprint === fingerprint && (!pinned || prior.adId === pinned)) return prior;
-  if (prior?.promise) return prior;
+  if (prior?.promise) throw adSaveBusyError('AD_SAVE_BUSY');  // the in-flight slot stays the first Save's
   const attempt = {
     slot,
     fingerprint,
@@ -2753,9 +2751,8 @@ async function saveAdThroughAtomicServer(action, adId, expectedLastModified, dat
   }
 }
 
-// A terminal ad (Stopped/Canceled/Completed/Lost or refunded) refuses every edit but a
-// receipt RELINK and its SETTLE variant; these mirror the server's _financial_apply_relink
-// to recognize such a save and apply it in local mode.
+// A terminal ad (Stopped/Canceled/Completed/Lost or refunded) takes only a receipt RELINK or its
+// SETTLE variant; these mirror the server's _financial_apply_relink (and apply it in local mode).
 function adIsTerminalForEdit(ad) {
   const status = String((ad && ad.status) || '');
   const refundType = String((ad && ad.refundType) || '');
@@ -2779,8 +2776,8 @@ function _relinkNormalizePool(rows) {
     }));
 }
 
-// The new pools when the save moves the ad onto a DIFFERENT receipt, each pool's total kept to the
-// cent; else null (not a relink). Omitted old receipts are freed. The server re-checks; this gates UX.
+// New pools when the save moves the ad onto a DIFFERENT receipt (each total kept to the cent), else
+// null; omitted old receipts are freed. The server re-checks: this gates UX.
 function computeTerminalRelinkPools(liveAd, adUpdates) {
   const oldPaid = _relinkNormalizePool(liveAd && liveAd.receiptAllocations);
   const oldDue = _relinkNormalizePool(liveAd && liveAd.dueAllocations);
@@ -2799,10 +2796,8 @@ function computeTerminalRelinkPools(liveAd, adUpdates) {
   return { paid: newPaid, due: newDue };
 }
 
-// The ad's CURRENT committed funding total across both pools. For a terminal
-// ad this is what still holds receipt money (stop already released the
-// unspent budget), so it is the exact amount a settle must move — e.g. $1.24
-// of a stopped $9.00 ad, never the dead $9.00 budget.
+// The ad's CURRENT committed funding in both pools: for a terminal ad, what still holds receipt money
+// (stop released the rest), so exactly what a settle moves ($1.24 of a stopped $9.00 ad, never $9.00).
 function getAdCommittedFundingTotalUSD(ad) {
   const paid = _relinkPoolSum(_relinkNormalizePool(ad && ad.receiptAllocations));
   const due = _relinkPoolSum(_relinkNormalizePool(ad && ad.dueAllocations));
@@ -2901,9 +2896,8 @@ function _relinkBaselineUpdates(liveAd, pools) {
   return updates;
 }
 
-// Local-mode mirror of the server's relink/settle history entry: these money
-// moves bypass the ordinary edit path (which appends history client-side), so
-// without this they were invisible in the history viewer.
+// Local mirror of the server's relink/settle history entry: these money moves skip the ordinary edit
+// path (which appends history), so they were missing from the history viewer.
 function _relinkHistoryUpdates(liveAd, pools, isSettle) {
   const oldIds = new Set();
   ['receiptAllocations', 'dueAllocations', 'mergedPaidAllocations'].forEach(field => {
@@ -3096,7 +3090,11 @@ async function handleModalSubmit() {
         try {
           await apiChangePassword(currentPw, newPw);
         } catch (e) {
-          showNotification(isArCP ? 'خطأ' : 'Error', e.message || (isArCP ? 'فشل تغيير كلمة المرور' : 'Failed to change password'), 'error');
+          // The server's three known answers in Arabic; anything else keeps its text.
+          const cpAr = !isArCP ? '' : e?.status === 429 ? `محاولات كثيرة لتغيير كلمة المرور. الرجاء الانتظار ${Math.ceil((e.retryAfter || 60) / 60)} دقيقة.`
+            : e?.status === 409 ? 'تغيّر الحساب. سجّل الدخول مرة أخرى قبل تغيير كلمة المرور.'
+            : /^Invalid current password/i.test(String(e?.message || '')) ? 'كلمة المرور الحالية غير صحيحة.' : '';
+          showNotification(isArCP ? 'خطأ' : 'Error', cpAr || e.message || (isArCP ? 'فشل تغيير كلمة المرور' : 'Failed to change password'), 'error');
           return;
         }
         closeModal();  // the server signed every device out, this one too
@@ -3214,8 +3212,9 @@ async function handleModalSubmit() {
       // A blank phone passes `required` but is filtered out above: without this the customer had no
       // phone. Hidden contacts (no viewContacts) are not edited here; the server keeps them.
       const hideContacts = isEdit && !can('customers', 'viewContacts');
-      if (!hideContacts && phones.length === 0) {
-        showNotification(isAr ? 'خطأ في الإدخال' : 'Validation Error', isAr ? 'رقم هاتف واحد على الأقل مطلوب' : 'At least one phone number is required', 'error');
+      // The server's rule: at least one phone of 7 to 15 digits (a typed "0" went out and came back in English).
+      if (!hideContacts && !phones.some(p => { const n = normalizeCustomerPhoneKey(p).length; return n >= 7 && n <= 15; })) {
+        showNotification(isAr ? 'خطأ في الإدخال' : 'Validation Error', _serverRefusalText('At least one valid phone number is required'), 'error');
         return;
       }
 
@@ -3252,7 +3251,7 @@ async function handleModalSubmit() {
         showNotification(isAr ? 'تم التحديث' : 'Updated', isAr ? 'تم تحديث العميل بنجاح' : 'Customer updated successfully', 'success');
       } else {
         const customer = {
-          id: generateId('cust'),
+          id: ((submitForm?.dataset || {}).draftId ||= generateId('cust')),
           name: custName,
           phones: phones,
           platform: document.getElementById('customer-platform').value,
@@ -3434,9 +3433,8 @@ async function handleModalSubmit() {
         const settlingUnpaidDebt = isEdit
           && getAdPaymentState(state.modalData) === 'not_paid';
         const isTerminalSettle = settlingUnpaidDebt && adIsTerminalForEdit(state.modalData);
-        // A LIVE debt settles its budget minus company coverage. A TERMINAL ad's budget is dead (stop
-        // released the rest): the paid funding must equal its COMMITTED total (e.g. $1.24 of a stopped
-        // $9.00 ad), as getOriginalUnpaidAdBudgetUSD does for the hint and autofill.
+        // A LIVE debt settles its budget minus company coverage. A TERMINAL ad's budget is dead: its paid
+        // funding must equal the COMMITTED total ($1.24 of a stopped $9.00 ad), as getOriginalUnpaidAdBudgetUSD.
         const requiredSettleUSD = isTerminalSettle
           ? getAdCommittedFundingTotalUSD(state.modalData)
           : getOriginalUnpaidAdBudgetUSD();
@@ -3459,9 +3457,7 @@ async function handleModalSubmit() {
 
         for (const [receiptId, plannedTotal] of totalsByReceipt.entries()) {
           const receipt = state.receipts.find(r => String(r.id) === String(receiptId));
-          // Soft-deleted receipts stay in state.receipts with _deleted=true —
-          // money can NOT be drawn from a deleted receipt (a stale open modal
-          // could still reference one deleted meanwhile on another device).
+          // A soft-deleted receipt (kept with _deleted; maybe deleted on another device) gives no money.
           if (!receipt || receipt._deleted) {
             showNotification(isArSubAd ? 'تنبيه' : 'Validation', isArSubAd ? 'أحد الوصولات المختارة مفقود أو تم حذفه.' : 'One of the selected receipts is missing or was deleted.', 'error');
             return;
@@ -3582,9 +3578,8 @@ async function handleModalSubmit() {
         }
       }
       
-      // Capture the promised amount from a linked unpaid receipt. Delivery uses
-      // linkedDeliveryReceiptId; In Shop uses receiptId while sharing the same
-      // due-allocation ledger so neither can spend receipt money twice.
+      // The promise of a linked unpaid receipt (Delivery: linkedDeliveryReceiptId; In Shop: receiptId)
+      // shares one due ledger, so neither spends receipt money twice.
       let dueAmountToUseUSD = 0;
       let linkedDeliveryReceiptId = '';
       let dueAllocations = [];
@@ -3649,9 +3644,8 @@ async function handleModalSubmit() {
         }
       }
       
-      // Capture real paid receipt allocations mixed into a Not Paid ad. Driver
-      // and In Shop share the same safe UI working state; the server stores
-      // In Shop rows canonically in receiptAllocations (without a legacy mirror).
+      // Real paid receipt allocations mixed into a Not Paid ad (Driver and In Shop share this UI state;
+      // the server stores In Shop rows in receiptAllocations, with no legacy mirror).
       let mergedAllocations = [];
       if (paymentStatus === 'not_paid'
           && (collectionMethod === 'driver' || collectionMethod === 'in_shop')
@@ -3779,8 +3773,8 @@ async function handleModalSubmit() {
         amountLocal: adAmountLocalForSave(amountUSD, exchangeRate),
         paymentMethod: (isPaid ? '' : (collectionPayments[0]?.method || '')) || '',
         status: state.modalData?.status || 'Active',
-        // If Not Paid + Driver AND linked to a temp delivery receipt, the delivery is tracked on the receipt (not on the ad),
-        // so we keep the ad out of the Delivery dashboard to avoid duplicates.
+        // Not Paid + Driver on a temp delivery receipt: the receipt carries the delivery, so the ad
+        // stays off the Delivery dashboard (no duplicates).
         deliveryStatus: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? 'Office' : (state.modalData?.deliveryStatus || 'Office'),
         deliveryPersonId: (paymentStatus === 'not_paid' && collectionMethod === 'driver') ? '' : (state.modalData?.deliveryPersonId || ''),
         receiptId: resolveAdPrimaryReceiptId({
@@ -3819,9 +3813,8 @@ async function handleModalSubmit() {
         mergedPaidAllocations: collectionMethod === 'driver' ? mergedAllocations : []
       };
       if (unpaidReceiptDebtIncrease) {
-        // Request-only instruction. The server atomically grows the reusable
-        // unpaid receipt by only the new shortfall and saves the ad; this field
-        // is never stored on the ad.
+        // Request-only (never stored on the ad): the server grows the reusable unpaid receipt by
+        // only the new shortfall and saves the ad, atomically.
         adUpdates.unpaidReceiptDebtIncrease = unpaidReceiptDebtIncrease;
       }
       if (isServerModeEnabled() && document.getElementById('ad-meta-page-override')?.value === '1') {
@@ -3830,9 +3823,8 @@ async function handleModalSubmit() {
         adUpdates.confirmMetaPageOverride = true;
       }
 
-      // Customer NAME stamp (never contacts) for roles that cannot load customers, like
-      // createdByName. Local mode only: in server mode buildServerAdMutationData strips it
-      // and the server stamps it.
+      // Customer NAME stamp (never contacts) for roles that cannot load customers, like createdByName;
+      // local mode only (buildServerAdMutationData strips it and the server stamps it).
       if (customerId) {
         const _adCustomer = (state.customers || []).find(c => c && String(c.id) === String(customerId));
         if (_adCustomer && _adCustomer.name) adUpdates.customerName = String(_adCustomer.name);
@@ -3965,7 +3957,8 @@ async function handleModalSubmit() {
         fieldsToTrack.forEach(field => {
           const oldVal = oldAd[field.key];
           const newVal = adUpdates[field.key];
-          if (String(oldVal || '') !== String(newVal || '')) {
+          // A date changes only when the day the form shows does ('…T00:00:00Z' from a top-up, Meta times).
+          if (/Date$/.test(field.key) ? _localDateInputValue(oldVal) !== _localDateInputValue(newVal) : String(oldVal || '') !== String(newVal || '')) {
             changes.push({
               field: field.label,
               from: field.format(oldVal),
@@ -4059,18 +4052,15 @@ async function handleModalSubmit() {
       state.tempAdPrimaryPhotoIndex = 0;
       state.tempAdPrimaryPhotoDirty = false;
       
-      // RETURN, not break: `break` falls into the shared `closeModal();
-      // render();` tail, and a SECOND closeModal rewinds a second history entry
-      // (traversal is async, so history.state still shows the ?modal entry) —
-      // which jumped the user out of the view they were working in.
+      // RETURN, not break: the shared tail's SECOND closeModal rewound another history entry (traversal
+      // is async), jumping the user out of the view they were working in.
       closeModal();
       render();
       return;
       } catch (error) {
         console.error('Error saving ad:', error);
-        // "Changed on another device" is reserved for real version conflicts
-        // ("Conflict: …"). Other 409s are business-rule refusals whose actual
-        // reason must reach the user (see describe409).
+        // "Changed on another device" only for real version conflicts ("Conflict: …"); any other 409 is
+        // a rule refusal whose reason must reach the user (describe409).
         const conflict = isVersionConflict409(error);
         if (conflict && isEdit && submitIsCurrent() && await reloadAdFormAfterConflict(submitData, submitIsCurrent)) return;
         if (!isEdit && error?.status === 409 && /^ad id already exists/i.test(String(error?.message || '').trim())
@@ -4134,8 +4124,8 @@ async function handleModalSubmit() {
         return;
       }
 
-      // Email must be unique (the server 409s; local mode did not, and login then always found the
-      // FIRST match, locking the other user out): no other non-deleted user may hold it.
+      // Unique email, as the server 409s (locally a duplicate locked one user out: login always
+      // found the FIRST match).
       {
         const _editingUserId = state.modalData?.id;
         const dup = (state.users || []).some(u =>
@@ -4388,7 +4378,7 @@ async function handleModalSubmit() {
         addLog('update', 'page', submitData.id, `Updated page: ${pageName}`);
       } else {
         const page = {
-          id: generateId('page'),
+          id: ((submitForm?.dataset || {}).draftId ||= generateId('page')),  // one per open form: a re-press after a lost answer meets its own row
           name: pageName,
           category: pageCategory,
           customerIds: selectedCustomers,
@@ -4464,12 +4454,11 @@ function closeModal() {
 
   if (typeof _clothesTempShipLines !== 'undefined') _clothesTempShipLines = [];
   if (typeof _clothesTempOrderLines !== 'undefined') _clothesTempOrderLines = [];
+  if (typeof _clothesDraftId !== 'undefined') _clothesDraftId = '';  // the next new Clothes form gets a new id
   
-  // Clear URL params. If the opener pushed a history entry (albayanModal
-  // stamp), consume it with history.back() instead of replaceState (which
-  // left a dead hardware-Back press). Skipped when Back already popped it
-  // (_closingSurfaceFromPopstate) or a pop from an earlier closeModal in
-  // this tick has not landed yet: consuming again would move the user.
+  // Clear URL params: consume an opener's history entry (albayanModal stamp) with history.back()
+  // (replaceState left a dead hardware-Back press), unless Back already popped it
+  // (_closingSurfaceFromPopstate) or an earlier closeModal's pop is pending (would move the user).
   const consumeAlreadyPending = typeof _overlayHistoryConsumePending === 'function'
     && _overlayHistoryConsumePending();
   let consumedModalHistoryEntry = false;
@@ -4478,9 +4467,8 @@ function closeModal() {
     if (topHistoryEntry && topHistoryEntry.albayanModal) {
       consumedModalHistoryEntry = consumeOverlayHistoryEntry();
     } else if (topHistoryEntry && topHistoryEntry.overlaySentinel && topHistoryEntry.underAlbayanModal) {
-      // Phone browsers: a late overlay's sentinel sits ON TOP of the dialog's
-      // ?modal entry, so consume BOTH (else a later Back resurrects the dialog);
-      // go(-2)'s popstate is bookkeeping. Sentinels never exist on desktop/app.
+      // Phones: a late overlay's sentinel sits ON TOP of the ?modal entry: consume BOTH (else Back
+      // resurrects the dialog); go(-2)'s popstate is bookkeeping (no sentinels on desktop/app).
       _suppressOverlayPopstateUntil = Date.now() + 800;
       try {
         window.history.go(-2);
@@ -4491,10 +4479,7 @@ function closeModal() {
       }
     }
   }
-  // Always clean the URL when this call did not consume an entry: if a pending
-  // pop somehow never lands, ?modal= must not survive a closed dialog (a
-  // refresh would reopen it). Rewriting an entry that is about to be popped is
-  // harmless.
+  // Clean the URL when nothing was consumed: a ?modal= surviving a closed dialog reopens it on refresh.
   if (!consumedModalHistoryEntry) clearUrlParams(['modal', 'id']);
   
   // Force remove ALL modals - be very aggressive
@@ -4525,7 +4510,7 @@ function closeModal() {
 }
 
 // ---- Delete-cascade helpers ----
-// A deleted receipt updates every record that references it, or money numbers go wrong. Shared by
+// A deleted receipt updates every record referencing it (or money goes wrong); shared by
 // deleteReceipt and deleteCustomer so both clean up the same way.
 
 // Remove every funding reference to `receiptId` from visible ads (allocation
@@ -4549,8 +4534,8 @@ async function cleanupAdFundingLinks(receiptId) {
       const kept = ad.dueAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.dueAllocations.length) updates.dueAllocations = kept;
     }
-    // Company-covered rows die with the receipt (a dangling row kept counting). They are
-    // server-owned: the server strips them in its delete; only local mode edits them here.
+    // Company-covered rows die with the receipt (a dangling one kept counting); server-owned, so
+    // only local mode edits them here.
     if (!isServerModeEnabled() && Array.isArray(ad.companyFundingAllocations)) {
       const kept = ad.companyFundingAllocations.filter(alloc => alloc.receiptId !== receiptId);
       if (kept.length !== ad.companyFundingAllocations.length) updates.companyFundingAllocations = kept;
@@ -4627,9 +4612,8 @@ async function releaseCanceledDeliveryDueFunding(receiptId) {
   return touched;
 }
 
-// If `receipt` is a transferred-in receipt, give the UNSPENT money back to the source by
-// shrinking/removing the paired transfers[] entry. Run BEFORE cleanupAdFundingLinks (the
-// spent amount is read from the allocations it strips). Returns the source or null.
+// A transferred-in receipt gives its UNSPENT money back to the source (shrinks/removes the paired
+// transfers[] entry). Run BEFORE cleanupAdFundingLinks (it strips the spent amounts). Source or null.
 async function undoTransferIntoReceipt(receipt) {
   if (!receipt || String(receipt.receiptType || '') !== 'TRANSFER_IN') return null;
   const source = state.receipts.find(r => r && !r._deleted && String(r.id) === String(receipt.transferFromReceiptId || ''));
@@ -4659,8 +4643,8 @@ async function undoTransferIntoReceipt(receipt) {
   return source;
 }
 
-// A deleted transfer SOURCE takes its paired TRANSFER_IN receipts with it, or the other customers keep
-// money that no longer exists. Follows chained transfers (`seen` stops cycles); returns how many went.
+// A deleted transfer SOURCE takes its TRANSFER_IN receipts (else others keep money that no longer
+// exists), following chained transfers (`seen` stops cycles); returns how many went.
 async function cascadeDeleteOutgoingTransfers(receipt, seen, deleteOpts) {
   seen = seen || new Set();
   if (!receipt || seen.has(String(receipt.id))) return 0;
@@ -4723,9 +4707,8 @@ async function deleteCustomer(id) {
     }
   }
   if (confirm(warning)) {
-    // Cascade delete: ADS first (releases the money they spent so the transfer undo below
-    // returns the full unspent amount), then receipts, via deleteRecord (rollback, toast,
-    // audit); every soft-delete is pushed as ONE all-or-nothing batch.
+    // Cascade delete: ADS first (frees their spend so the transfer undo returns all unspent money),
+    // then receipts, via deleteRecord (rollback, toast, audit); ONE all-or-nothing batch.
     const batchDeleteOps = { collectServerOps: [] };
     for (const ad of linkedAds) {
       if (!await deleteRecord(state.ads, ad.id, batchDeleteOps)) return;
@@ -4840,8 +4823,8 @@ async function deleteReceipt(id) {
       : `\n\n⚠️ This receipt transferred money to ${outgoingTargets.length} receipt(s) of other customers — those will be deleted too, because their money's source is being removed.`;
   }
   if (confirm(warning)) {
-    // Clean every record that references this receipt (shared with deleteCustomer); the
-    // transfer undo reads spent amounts, so it runs first. One all-or-nothing server batch.
+    // Clean every record referencing this receipt (as deleteCustomer), the transfer undo first
+    // (it reads spent amounts); one all-or-nothing server batch.
     const batchDeleteOps = { collectServerOps: [] };
     const returnedTo = await undoTransferIntoReceipt(receipt);
     await cleanupAdFundingLinks(id);
@@ -4867,9 +4850,8 @@ async function deleteAd(id) {
   const customer = state.customers.find(c => c.id === ad?.customerId);
   const customerName = customer?.name || 'Unknown';
   const amountUSD = ad?.amountUSD?.toFixed(2) || '0.00';
-  // Reassure the user about where the money goes: allocations of a deleted ad
-  // stop counting against the receipts, so the funded amount becomes available
-  // again automatically.
+  // Say where the money goes: a deleted ad's allocations stop counting against the receipts, so
+  // its funded amount is available again.
   const fundedUSD = Array.isArray(ad?.receiptAllocations)
     ? Math.round(ad.receiptAllocations.reduce((s, a) => s + (parseFloat(a?.amountUSD) || 0), 0) * 100) / 100
     : 0;

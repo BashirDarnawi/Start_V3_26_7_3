@@ -21,10 +21,8 @@ const SERVER_API = {
   requestTimeoutMs: 15000, // 15s for better reliability on slow connections
   // Live sync: automatically refresh changes from other users in server mode (no manual refresh).
   liveSyncEnabled: true,
-  // NOTE: the poll loop in src/10-live-sync.js reads this ONCE when it creates
-  // its setInterval (and already skips ticks while the tab is hidden, with an
-  // immediate catch-up sync on visibilitychange). Failure backoff therefore
-  // has to live in that loop — a dynamic getter here would never be re-read.
+  // Read ONCE when src/10-live-sync.js creates its setInterval (hidden tabs skip ticks and catch up on
+  // visibilitychange): failure backoff lives in that loop; a getter here is never re-read.
   liveSyncIntervalMs: 3000, // 3 seconds for faster real-time sync between devices
   usersSyncIntervalMs: 30000, // 30 seconds for users list
   // IMPORTANT: Keep this modest to avoid huge responses that can OOM-kill small ECS tasks.
@@ -529,18 +527,10 @@ async function apiLogin(email, password, rememberMe = false) {
   // long-lived session (ALBAYAN_SESSION_REMEMBER_MS, default 30 days) instead
   // of the standard one. Older servers simply ignore the extra field.
   const payload = { email, password, rememberMe: rememberMe === true };
-  try {
+  // A 429 (the server's, or the cooldown above) is toasted once, by _handleLoginOnce.
   const res = await apiJson('/api/auth/login', { method: 'POST', body: payload }, { timeoutMs: 12000 });
   if (res?.user) rememberServerHasUsers();
   return res?.user || null;
-  } catch (e) {
-    // If rate limited, show a user-friendly message
-    if (e?.status === 429) {
-      const minutes = Math.ceil((e.retryAfter || 60) / 60);
-      showNotification(state.language === 'ar' ? 'محاولات كثيرة جداً' : 'Too Many Attempts', state.language === 'ar' ? `الرجاء الانتظار ${minutes} دقيقة قبل المحاولة مرة أخرى.` : `Please wait ${minutes} minute(s) before trying again.`, 'error');
-    }
-    throw e;
-  }
 }
 
 // Does the server still need its first admin? Used so the login page can offer
@@ -734,9 +724,8 @@ function isEntityMediaHydrated(collection, record) {
   return _inlineMediaFields(collection).some(field => Object.prototype.hasOwnProperty.call(record, field));
 }
 
-// A same-version IndexedDB/state record may safely donate its already-loaded
-// photo bodies to a lightweight response. Never do this across revisions: an
-// equally-sized replacement photo would otherwise show stale bytes.
+// A same-version record in memory may donate its loaded photos to a lean response; never across
+// revisions (an equally-sized replacement photo would show stale bytes).
 function mergeMatchingVersionInlineMedia(collection, incoming, current) {
   if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
   if (String(collection || '') === 'adCampaignRequests') return incoming;
@@ -756,9 +745,8 @@ function mergeMatchingVersionInlineMedia(collection, incoming, current) {
   return merged;
 }
 
-// A successful mutation tells us exactly which media fields changed. Reattach
-// those known bytes to the lightweight response so the server does not need to
-// echo the same base64 payload back over the network.
+// A successful mutation knows which media fields changed: reattach those bytes to the lean response
+// (no base64 echo over the network) and count the row among the few kept in memory.
 function mergeMutationInlineMedia(collection, incoming, knownRecord) {
   if (!incoming || typeof incoming !== 'object' || incoming._mediaOmitted !== true) return incoming;
   if (!knownRecord || typeof knownRecord !== 'object') return incoming;
@@ -770,8 +758,46 @@ function mergeMutationInlineMedia(collection, incoming, knownRecord) {
     merged[field] = Array.isArray(value) ? value.slice() : value;
     copied = true;
   }
-  if (copied) merged._mediaOmitted = false;
+  if (copied) {
+    merged._mediaOmitted = false;
+    noteHydratedMedia(collection, merged.id);
+  }
   return merged;
+}
+
+// Server mode keeps photo bytes on the server: the device's saved copy holds lean rows only (the
+// list shape), and at most 8 opened rows per collection keep their photos in memory.
+function _holdsInlineMedia(collection, row) {
+  return !!row && _inlineMediaFields(collection).some(field => Object.prototype.hasOwnProperty.call(row, field));
+}
+function leanMediaRow(collection, row) {
+  return { ...makeLightweightMediaRecord(collection, row), _mediaOmitted: true, _photoCount: getEntityPhotoCountHint(collection, row) };
+}
+// The same array when no row holds photo bytes.
+function leanServerMediaRows(collection, rows) {
+  const holds = row => _holdsInlineMedia(collection, row);
+  return Array.isArray(rows) && LIGHTWEIGHT_MEDIA_COLLECTIONS.has(collection) && rows.some(holds)
+    ? rows.map(row => (holds(row) ? leanMediaRow(collection, row) : row)) : rows;
+}
+const _hydratedMediaIds = new Map();  // collection -> ids, oldest first
+function noteHydratedMedia(collection, id) {
+  const name = String(collection || ''), rows = state[name], key = String(id || '');
+  if (!key || !LIGHTWEIGHT_MEDIA_COLLECTIONS.has(name) || !Array.isArray(rows) || getCollectionStorageScope() === 'local') return;
+  const ids = (_hydratedMediaIds.get(name) || []).filter(other => other !== key).concat(key);
+  // Kept: a row open in a form or the main-photo picker, or with a save in flight (its rollback needs that object).
+  const open = [state.modalData?.id, document.getElementById('delivery-complete-modal')?.dataset?.receiptId,
+    document.querySelector('#ad-primary-photo-picker [data-ad-id]')?.dataset?.adId].map(String);
+  for (let i = 0; ids.length > 8 && i < ids.length - 1;) {
+    const old = ids[i];
+    if (open.includes(old) || _patchChains.has(`${name}:${old}`)) { i++; continue; }
+    ids.splice(i, 1);
+    for (const list of [rows, _collectionCache[name]?.data]) {
+      const at = Array.isArray(list) ? list.findIndex(row => row && String(row.id) === old) : -1;
+      // A deleted row may still roll back to this very object.
+      if (at !== -1 && !list[at]._deleted && _holdsInlineMedia(name, list[at])) list[at] = leanMediaRow(name, list[at]);
+    }
+  }
+  _hydratedMediaIds.set(name, ids);
 }
 
 // Server watermarks captured BEFORE a full load (several requests, not one snapshot): a delta cursor
@@ -1059,13 +1085,9 @@ function cancelPendingRequests() {
   _pendingRequests.clear();
 }
 
-// The document is leaving (reload, Back, a link). WebKit: beforeunload ->
-// in-flight loads stop quietly -> a request STARTED after that is refused and
-// logged as "Fetch API cannot load ... access control checks" -> pagehide.
-// So: abort reads while it is still quiet and start none afterwards (apiFetch
-// answers AbortError, which loaders treat as "the page moved on"). A navigation
-// can be abandoned (offline reload, a download), so the latch lets go after a
-// while and on a back/forward-cache restore.
+// The page is leaving (reload, Back, a link): after beforeunload WebKit refuses and logs any request
+// STARTED, so abort reads now and start none (AbortError = "the page moved on"). An abandoned
+// navigation (offline reload, a download): the latch lets go after a while and on a bfcache restore.
 let _documentLeaving = false;
 let _documentLeavingTimer = null;
 function isDocumentLeaving() { return _documentLeaving; }
@@ -1099,10 +1121,8 @@ function isRefreshThrottled() {
   return false;
 }
 
-// The page is going away (refresh/Back/link). beforeunload runs BEFORE WebKit
-// stops this document's loads, so our reads abort quietly there; pagehide
-// FIRST flushes any debounce-pending user updates (permission grants) with
-// keepalive so they are not silently lost with the page.
+// Page going away: reads abort quietly at beforeunload (before WebKit stops our loads); pagehide
+// first flushes debounce-pending user updates (permission grants) with keepalive.
 try {
   window.addEventListener('beforeunload', markDocumentLeaving);
   window.addEventListener('pagehide', () => {
@@ -1214,10 +1234,8 @@ function applyValidatedServerEntityBatch(entries, reason = 'serverMutation') {
       && Number.isFinite(currentLastModified)
       && incomingLastModified < currentLastModified;
 
-    // A slower request can finish after live sync (or another mutation) has
-    // already installed a newer server revision. Never let that delayed reply
-    // roll a repaired receipt/ad back in this tab. Equal revisions remain safe
-    // to apply because idempotent replays may restore omitted inline media.
+    // A delayed reply never rolls back a newer revision live sync or another mutation installed;
+    // an equal one still applies (an idempotent replay may restore omitted inline media).
     if (isOlder) {
       resolved.push(current);
       continue;
@@ -1295,12 +1313,9 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         if (beforeCreatedAt !== null && beforeId) {
           path += `&before_created_at=${encodeURIComponent(String(beforeCreatedAt))}&before_id=${encodeURIComponent(beforeId)}`;
         }
-        // Same cadence as always (3 attempts, 300 ms then 600 ms apart: a
-        // request is never re-issued immediately, which WebKit reports as a
-        // page error when a navigation is tearing the page down). Two
-        // refinements: a timed-out page is slow, not broken, so the next
-        // attempt gets a doubled budget; a read the leaving page cancelled is
-        // not retried at all.
+        // 3 attempts 300/600 ms apart (an immediate re-issue is a WebKit page error during teardown).
+        // A timed-out page is slow, not broken: double its budget; a read the leaving page cancelled
+        // is never retried.
         let budget = timeoutMs;
         const items = await withRetry(async () => {
           try {
@@ -1325,9 +1340,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
           entity.data = mergeMatchingVersionInlineMedia(collection, entity.data, currentById.get(String(entity.id)));
           if (String(collection || '') === 'adCampaignRequests') entity.data = makeLightweightMediaRecord(collection, entity.data);
           lastEntity = entity;
-          // Defensive only: keyset pages should not overlap, but a record can
-          // be updated while pagination is running. Keep one ID and prefer the
-          // newest server version rather than rendering duplicates.
+          // Defensive: a row updated mid-pagination can repeat; keep one per id, the newest version.
           mergeServerEntityDataById(all, indexById, entity);
         }
 
@@ -1348,10 +1361,8 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
         beforeCreatedAt = nextCreatedAt;
         beforeId = nextId;
       } catch (pageError) {
-        // A failed later page is never authoritative, even if it happens to
-        // contain more rows than the current cache. Propagate an explicit
-        // incomplete result so no caller can replace/persist complete state
-        // with a prefix of the server collection.
+        // A failed later page is never authoritative (even with more rows than the cache): an
+        // explicit incomplete error, so no caller replaces or persists state with a prefix.
         const incompleteError = pageError instanceof Error ? pageError : new Error('Collection page failed');
         incompleteError.code = incompleteError.code || 'INCOMPLETE_COLLECTION_LOAD';
         incompleteError.collection = collection;
@@ -1361,9 +1372,7 @@ async function apiLoadCollectionAll(collection, { forceRefresh = false, includeM
       }
     }
 
-    // If we stopped because we hit the page cap while the last page was still
-    // full, the server has MORE records than we fetched — do not treat this as
-    // an authoritative complete load (don't cache), and warn loudly.
+    // Stopped at the page cap on a full page: the server has MORE rows. Not a complete load (no cache).
     if (lastPageFull && pageCount >= maxPages) {
       console.warn(`[apiLoadCollectionAll] ${collection}: hit ${maxPages}-page cap (${all.length} records) with a full final page — collection exceeds the supported maximum and was truncated.`);
       const capError = new Error(`${collection} exceeds the supported maximum; refusing truncated data`);
@@ -1403,10 +1412,8 @@ async function apiGetEntity(collection, id, { timeoutMs = 15000 } = {}) {
 }
 
 const _pendingEntityMediaLoads = new Map();
-// Ads Studio creative bodies are deliberately ephemeral. Keeping every opened
-// campaign in state would copy base64 into IndexedDB and grow without bound on
-// a reviewer device. A tiny session-scoped LRU avoids repeat downloads without
-// persisting customer media.
+// Ads Studio creatives stay ephemeral: a tiny session LRU saves repeat downloads without keeping
+// customer media in state (IndexedDB would grow without bound on a reviewer device).
 const _transientAdCampaignMedia = new Map();
 const MAX_TRANSIENT_AD_CAMPAIGN_MEDIA = 3;
 
@@ -1475,8 +1482,9 @@ async function ensureEntityMediaLoaded(collection, id) {
         const cachedIndex = _collectionCache[name].data.findIndex(record => record && String(record.id) === safeId);
         if (cachedIndex !== -1) _collectionCache[name].data[cachedIndex] = full;
       }
-      markCollectionDirty(name);
-      saveState();
+      // The saved copy is lean either way: only a newer revision needs rewriting.
+      if (responseVersion !== latestVersion) markCollectionDirty(name);
+      noteHydratedMedia(name, safeId);
       return full;
     }
     return findCurrent();
@@ -1630,11 +1638,13 @@ async function apiSettleReceipt(payload) {
   const identity = getServerSessionIdentity();
   // A stable body/idempotency key makes a response-loss retry safe: the server
   // replays the committed result instead of moving the same funding twice.
+  // Photos get the 90 s budget and one retry, as apiPatchEntity.
+  const timeoutMs = mediaAwareTimeoutMs(body.data);
   const response = await withRetry(() => apiJson(
     `/api/receipts/${encodeURIComponent(receiptId)}/settle?include_media=false`,
     { method: 'POST', body },
-    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
-  ), 2, 500);
+    { timeoutMs }
+  ), timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS ? 1 : 2, 500);
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   if (!response || typeof response !== 'object' || Array.isArray(response) || !Array.isArray(response.updatedAds)) {
     const error = new Error('Invalid receipt settlement response');
@@ -1686,12 +1696,13 @@ async function apiUnsettleReceipt(payload) {
   if (!body.idempotencyKey) throw new Error('Receipt conversion idempotency key is required');
 
   const identity = getServerSessionIdentity();
-  // Replay-safe retry, as in apiSettleReceipt.
+  // Replay-safe retry and photo budget, as in apiSettleReceipt.
+  const timeoutMs = mediaAwareTimeoutMs(body.data);
   const response = await withRetry(() => apiJson(
     `/api/receipts/${encodeURIComponent(receiptId)}/unsettle?include_media=false`,
     { method: 'POST', body },
-    { timeoutMs: TIME_CONSTANTS.API_TIMEOUT_LONG_MS }
-  ), 2, 500);
+    { timeoutMs }
+  ), timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS ? 1 : 2, 500);
   if (serverSessionIdentityChanged(identity)) throw makeSessionChangedError();
   if (!response || typeof response !== 'object' || Array.isArray(response) || !Array.isArray(response.updatedAds)) {
     const error = new Error('Invalid receipt conversion response');
@@ -2061,20 +2072,17 @@ async function apiMetaAccountFunds(refresh = false) {
 }
 
 async function apiMetaPartnerPages(refresh = false) {
-  // Meta Business Partner "active pages" metric: pages with over 100 USD ad
-  // spend in the last 90 days. A plain GET serves the cached statistics; a
-  // refresh re-scans the accounts server-side, so it is a same-origin POST.
+  // Meta Business Partner "active pages": over 100 USD ad spend in 90 days. GET serves the cached
+  // figures; a refresh re-scans the accounts server-side (a same-origin POST).
   const response = refresh
     ? await apiJson('/api/meta-ads/partner-pages/refresh', { method: 'POST', body: {} }, { timeoutMs: 120000 })
     : await apiJson('/api/meta-ads/partner-pages', { method: 'GET' }, { timeoutMs: 120000 });
   return response && typeof response === 'object' ? response : {};
 }
 
-// Merge two duplicate customers and every relationship that points at the
-// duplicate in ONE server transaction. Generic PATCH + DELETE calls are not
-// safe here: a timeout between requests could leave pages, receipts or ads
-// split across both identities. The idempotency key makes a response-loss retry
-// return the same committed result instead of running the merge twice.
+// Merge two duplicate customers and everything pointing at the duplicate in ONE server transaction
+// (separate calls could split pages, receipts or ads across both on a timeout). The idempotency key
+// makes a response-loss retry return the committed result, never a second merge.
 async function apiMergeCustomers(payload) {
   const keepCustomerId = String(payload?.keepCustomerId || '');
   const duplicateCustomerId = String(payload?.duplicateCustomerId || '');
@@ -2166,9 +2174,8 @@ async function apiStopAd(adId, payload) {
   };
 }
 
-// Clothes orders and their stock changes must commit together. Generic
-// collection POST/PATCH/DELETE calls cannot provide that guarantee, so every
-// server-mode order action uses this one idempotent transaction boundary.
+// Clothes orders and their stock changes must commit together. Every server-mode order action uses
+// this one idempotent transaction (generic collection calls cannot).
 async function apiMutateClothesOrder(payload) {
   const action = String(payload?.action || '');
   if (!['create', 'update', 'status', 'payment', 'delete'].includes(action)) {
@@ -2226,9 +2233,8 @@ async function apiMutateClothesShipment(payload) {
   return { shipment, updatedProducts, replayed: response.replayed === true };
 }
 
-// Ads Studio workflow transitions are server-controlled. Customers may save
-// draft fields through the collection API, but only these endpoints can move
-// a request into review or record a staff decision.
+// Ads Studio transitions are server-controlled: drafts save through the collection API, but only
+// these endpoints move a request into review or record a staff decision.
 async function apiSubmitAdCampaignRequest(campaignId, expectedLastModified, operationId) {
   const identity = getServerSessionIdentity();
   const body = { expectedLastModified, operationId };
@@ -2324,12 +2330,8 @@ async function apiPatchEntity(collection, id, updates, expectedLastModified) {
   const local = (Array.isArray(state[collection]) ? state[collection] : [])
     .find(row => row && String(row.id) === String(id));
   const path = `/api/collections/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${omitMedia ? '?include_media=false' : ''}`;
-  // Delivery-completion PATCHes embed the driver's required base64 proof
-  // photo (plus re-sent existing photos) and can never finish inside 20s on a
-  // slow uplink, so image-carrying bodies get the 90s media budget. Those
-  // retry once instead of twice: each retry re-uploads the whole body from
-  // byte 0, and three 90s uploads would hold a weak uplink ~4.5 minutes.
-  // adCampaignRequests keeps its shipped 90s + 2-retries behavior unchanged.
+  // Photo bodies (a delivery proof plus re-sent photos) get the 90 s budget and retry once: each retry
+  // re-uploads from byte 0. adCampaignRequests keeps 90 s and two retries.
   const _isAdsStudioPatch = String(collection || '') === 'adCampaignRequests';
   const timeoutMs = _isAdsStudioPatch ? ADS_STUDIO_MEDIA_TIMEOUT_MS : mediaAwareTimeoutMs(updates);
   const _patchRetries = (!_isAdsStudioPatch && timeoutMs === ADS_STUDIO_MEDIA_TIMEOUT_MS) ? 1 : 2;
@@ -2382,26 +2384,22 @@ async function apiDeleteEntity(collection, id) {
   , 2, 500);
 }
 
-// Soft-delete several records in ONE all-or-nothing server transaction.
-// Used by cascade deletes (customer + receipts + ads + linked transfer
-// receipts) so a flaky connection can never leave a cascade half-applied.
+// Soft-delete several records in ONE all-or-nothing transaction: a cascade (customer, receipts,
+// ads, linked transfers) is never left half-applied by a flaky connection.
 async function apiBatchDeleteEntities(items) {
   return await withRetry(() =>
     apiJson('/api/batch/delete', { method: 'POST', body: { items } }, { timeoutMs: 30000 })
   , 2, 500);
 }
 
-// Transactional whole-backup import: the server replaces every listed
-// collection inside one database transaction — a failure anywhere rolls back
-// everything, so the server can never be left half backup / half current.
+// Whole-backup import in ONE server transaction: a failure anywhere rolls everything back (never
+// half backup, half current).
 async function apiAdminBulkImport(collections) {
   return await apiJson('/api/admin/import', { method: 'POST', body: { collections } }, { timeoutMs: 120000 });
 }
 
-// A single global delta cursor is safe to reseed only when EVERY collection
-// in the full snapshot completed. If (for example) receipts failed while ads
-// succeeded with a newer timestamp, advancing to the ads timestamp would make
-// the next receipt delta permanently skip older unseen receipt changes.
+// Reseed the one global delta cursor only when EVERY collection completed: receipts failing while ads
+// succeeded later would move it past unseen receipt changes for good.
 function reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks) {
   if (typeof _serverLiveSync !== 'object' || !_serverLiveSync) return false;
   const loaded = results && typeof results === 'object' ? results : {};
@@ -2423,10 +2421,8 @@ function reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks) {
     // A failed collection keeps its previous cursor (normally zero on a new
     // session) so the next poll retries from the same safe position.
     if (!entry || entry.ok === false || entry.data === null) continue;
-    // No pre-load watermark (old server/temporary endpoint failure) means zero,
-    // intentionally forcing one complete catch-up delta after the full load.
-    // Never derive this cursor from snapshot rows: those requests are not an
-    // atomic snapshot and their maxima are unsafe as a boundary.
+    // No pre-load watermark (old server, endpoint failure): zero, one full catch-up delta. Never
+    // from snapshot rows: those requests are no atomic snapshot, their maxima no safe boundary.
     const cursor = captured && Number.isSafeInteger(Number(captured[name]))
       ? Math.max(0, Number(captured[name]))
       : 0;
@@ -2454,10 +2450,8 @@ async function serverLoadAllData() {
   );
   const abortedResult = () => ({ failed: [], forbidden: [], aborted: true });
   if (loadAborted()) return abortedResult();
-  // Capture a safe boundary before issuing any collection request. If an older
-  // server does not expose the endpoint (or it is temporarily unavailable),
-  // leave this null: successful collections will be seeded at zero and the
-  // live poller's first pass becomes a safe full catch-up.
+  // A safe boundary before any collection request; null without the endpoint (older server, outage):
+  // collections then seed at zero and the poller's first pass is a full catch-up.
   let preLoadWatermarks = null;
   try {
     preLoadWatermarks = await apiGetSyncWatermarks();
@@ -2629,10 +2623,8 @@ async function serverLoadAllData() {
     state.serverLastSyncErrorAt = new Date().toISOString();
   }
 
-  // Authoritatively (re)seed the live-sync cursor from server-issued timestamps.
-  // This is the ONLY skew-free source: the freshly-loaded arrays carry the
-  // server's last_modified, so re-seeding here corrects a cursor that
-  // startServerLiveSync may have estimated too high from a clock-skewed device.
+  // Reseed the live-sync cursor from the server's last_modified (the ONLY skew-free source): it fixes
+  // a cursor startServerLiveSync estimated too high on a clock-skewed device.
   try {
     if (loadAborted()) return abortedResult();
     reseedServerCursorFromFullLoad(results, failed, preLoadWatermarks);
@@ -2714,9 +2706,8 @@ async function serverLoadAllData() {
 // ?app_login=1, mints the handoff code, renders "return to app".
 
 const APP_LOGIN_DEEP_LINK = 'albayan://auth';
-// Native app: the pending {state, verifier} is kept in Keychain/Keystore so
-// Android can restore the activity without exposing it to web storage. The
-// browser build retains a localStorage fallback for its non-native flow.
+// Native app: the pending {state, verifier} lives in Keychain/Keystore (Android restores the activity
+// without web storage); the browser build keeps a localStorage fallback.
 const APP_LOGIN_PENDING_KEY = 'albayan_app_login_pending';
 // Web page: the app's sign-in request {state, challenge} while the user
 // authenticates. sessionStorage: tab-scoped and gone when the tab closes.
@@ -2756,9 +2747,8 @@ function _appLoginRandomHex(nBytes) {
   }
 }
 
-// SHA-256 of a string as lowercase hex. Uses WebCrypto (always present in
-// the app WebViews' secure context) with the pure-JS fallback from
-// 02-security.js for insecure test/LAN origins.
+// SHA-256 hex: WebCrypto (the app WebViews' secure context), else the 02-security.js pure-JS fallback
+// (insecure test/LAN origins).
 async function _appLoginSha256Hex(value) {
   const data = new TextEncoder().encode(String(value));
   let digest;
@@ -2866,9 +2856,8 @@ async function _openInSystemBrowser(url) {
   if (isPackagedMobileApp() && typeof openNativeBrowser === 'function') {
     return await openNativeBrowser(url);
   }
-  // Capacitor routes external-origin _blank navigations to the real system
-  // browser (Safari / Chrome) — the same mechanism the login screen's
-  // privacy-policy links already rely on in the packaged app.
+  // Capacitor opens external-origin _blank navigations in Safari/Chrome, as the login screen's
+  // privacy-policy links already do in the packaged app.
   try {
     const win = window.open(url, '_blank');
     if (win) return true;
@@ -3077,9 +3066,8 @@ async function setupAppLoginDeepLinks() {
     // Cold start: the deep link may have LAUNCHED the app instead of
     // resuming it — the listener above never fires for that first URL.
     if (App.getLaunchUrl) {
-      // Capacitor keeps the last opened URL for the life of the native process,
-      // so a WebView reload (Retry, Reload buttons) would replay a link this
-      // session already handled. sessionStorage lives exactly as long.
+      // Capacitor keeps the last opened URL for the native process's life: a WebView reload would
+      // replay a handled link. sessionStorage lives exactly as long.
       const launch = await App.getLaunchUrl();
       if (launch && launch.url && !_isAppLoginLaunchHandled(launch.url)) handleAppLoginDeepLink(launch.url);
     }

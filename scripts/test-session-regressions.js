@@ -630,6 +630,70 @@ async function main() {
     const answered = await send(new AbortController());
     assert.equal(answered.status, 403);
   });
+  // Bug hunt r5 (R5-i18n-arabic-sweep-5): a login lockout showed two toasts, one of them the
+  // server's English sentence; Change password answered a wrong current password, its lockout
+  // and "Account changed" in English.
+  await test('R5 i18n-arabic-sweep-5: a login lockout is one Arabic toast (server 429 and the cooldown alike); a 409 and the Change password refusals read Arabic', async () => {
+    const f = fixture();
+    const notes = [];
+    const latin = /[A-Za-z]/;
+    const text = note => `${note[0]} ${note[1]}`;
+    f.sandbox.showNotification = (title, message, type) => notes.push([title, message, type]);
+    f.sandbox.isServerModeEnabled = () => true;
+    f.sandbox.console = { ...f.sandbox.console, warn() {} };
+    Object.assign(f.state, { language: 'ar', serverMode: true, currentUser: null });
+    let reply = { status: 429, detail: 'Too many login attempts. Please wait 14 minute(s) before trying again.' };
+    let requests = 0;
+    f.sandbox.apiFetch = async () => {
+      requests += 1;
+      return { ok: false, status: reply.status, statusText: '', headers: { get: k => (k === 'Retry-After' ? '898' : null) }, text: async () => JSON.stringify({ detail: reply.detail }) };
+    };
+    await f.sandbox.handleLogin('staff@example.com', 'wrong-pass-1', false);
+    assert.equal(notes.length, 1, 'before: two toasts, one of them the server sentence: ' + JSON.stringify(notes));
+    assert.ok(!latin.test(text(notes[0])) && notes[0][1].includes('15 دقيقة'), JSON.stringify(notes[0]));
+    // A second try inside the cooldown never reaches the server and still says it once, in Arabic.
+    notes.length = 0;
+    await f.sandbox.handleLogin('staff@example.com', 'wrong-pass-1', false);
+    assert.equal(requests, 1);
+    assert.equal(notes.length, 1, JSON.stringify(notes));
+    assert.ok(!latin.test(text(notes[0])) && notes[0][0] === 'محاولات كثيرة جداً', JSON.stringify(notes[0]));
+    // The account changed between the password check and the session: Arabic, not the server sentence.
+    f.run('_rateLimitCooldown.login = { until: 0, retryAfter: 0 }');
+    reply = { status: 409, detail: 'Account changed during login. Please try again.' };
+    notes.length = 0;
+    await f.sandbox.handleLogin('staff@example.com', 'right-pass-1', false);
+    assert.deepEqual(notes, [['فشل تسجيل الدخول', 'تغيّر الحساب أثناء تسجيل الدخول. حاول مرة أخرى.', 'error']]);
+    // English keeps one lockout toast too.
+    f.run('_rateLimitCooldown.login = { until: 0, retryAfter: 0 }');
+    reply = { status: 429, detail: 'Too many login attempts. Please wait 14 minute(s) before trying again.' };
+    f.state.language = 'en';
+    notes.length = 0;
+    await f.sandbox.handleLogin('staff@example.com', 'wrong-pass-1', false);
+    assert.deepEqual(notes, [['Too Many Attempts', 'Please wait 15 minute(s) before trying again.', 'error']]);
+    // Change password: the wrong current password, its lockout and a changed account.
+    f.makeElement('cp-current').value = 'MistypedOld123!';
+    f.makeElement('cp-new').value = 'BrandNewPass123';
+    f.makeElement('cp-confirm').value = 'BrandNewPass123';
+    f.run('db = null');
+    const user = { id: 'u_staff1', name: 'Staff One', role: 'Employee', permissions: {} };
+    for (const [error, expected] of [
+      [{ status: 403, message: 'Invalid current password' }, 'كلمة المرور الحالية غير صحيحة.'],
+      [{ status: 429, retryAfter: 120, message: 'Too many password change attempts. Please wait 2 minute(s) and try again.' }, 'محاولات كثيرة لتغيير كلمة المرور. الرجاء الانتظار 2 دقيقة.'],
+      [{ status: 409, message: 'Account changed. Sign in again before changing your password.' }, 'تغيّر الحساب. سجّل الدخول مرة أخرى قبل تغيير كلمة المرور.']
+    ]) {
+      Object.assign(f.state, { language: 'ar', currentUser: user, users: [user], activeModal: 'change-password', modalData: {} });
+      f.sandbox.apiChangePassword = async () => { throw Object.assign(new Error(error.message), error); };
+      notes.length = 0;
+      await f.sandbox.handleModalSubmit();
+      assert.deepEqual(notes, [['خطأ', expected, 'error']], `HTTP ${error.status}`);
+      assert.equal(f.state.activeModal, 'change-password', 'the dialog stays open for another try');
+    }
+    // English keeps the server's own sentence.
+    f.state.language = 'en';
+    notes.length = 0;
+    await f.sandbox.handleModalSubmit();
+    assert.deepEqual(notes, [['Error', 'Account changed. Sign in again before changing your password.', 'error']]);
+  });
   console.log(`\n${passed} session/privacy regressions passed.`);
 }
 

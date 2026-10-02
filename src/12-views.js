@@ -9,9 +9,8 @@ let _renderInProgress = false;
 let _savedScrollPosition = { top: 0, left: 0 };
 let _resetScrollOnNextRender = false;
 
-// The value a <select> would show if the user hadn't touched it — the option
-// the rendered HTML marked selected (or the first option). SELECTs have no
-// defaultValue property, so the dirty-field snapshot in render() needs this.
+// A <select>'s untouched value (the option the HTML marked selected, else the first): selects have
+// no defaultValue, and render()'s dirty-field snapshot needs one.
 function _selectDefaultValue(sel) {
   for (let i = 0; i < sel.options.length; i++) {
     if (sel.options[i].defaultSelected) return sel.options[i].value;
@@ -106,10 +105,8 @@ function render() {
                              _lastRenderedUserId === currentUserId &&
                              isLoggedIn;
 
-    // Preflight a same-view update before taking a layout lock or touching the
-    // DOM. Overlapping live-sync polls normally produce identical view HTML;
-    // in that case rendering must be a true no-op so hover, icons, focus, and
-    // scroll remain completely undisturbed.
+    // Preflight a same-view update before any layout lock or DOM work: identical HTML (the usual
+    // live-sync poll) must be a true no-op, leaving hover, icons, focus and scroll alone.
     let viewContainer = null;
     let nextViewHTML = null;
     if (canPartialUpdate) {
@@ -117,9 +114,8 @@ function render() {
       if (viewContainer) {
         nextViewHTML = renderView();
         if (nextViewHTML === _lastViewHTML) {
-          // Clicking the already-active desktop navigation item is still real
-          // navigation: consume its pending reset now. Leaving the flag set
-          // would make an unrelated later sync jump the page to the top.
+          // Clicking the active desktop nav item is still navigation: consume its pending reset now,
+          // or a later sync would jump the page to the top.
           if (_resetScrollOnNextRender) {
             _resetScrollOnNextRender = false;
             window.scrollTo({ left: 0, top: 0, behavior: 'instant' });
@@ -150,17 +146,13 @@ function render() {
 
     if (!state.currentUser) {
       const localFirstRun = !isServerModeEnabled() && (!Array.isArray(state.users) || state.users.length === 0);
-      // An empty local workspace with the albayan_had_data sentinel cookie is
-      // NOT a first run — the browser evicted this origin's storage (iOS ITP
-      // 7-day wipe, Android storage pressure). Showing "create your first
-      // admin" would silently bury the loss; offer backup restore instead.
+      // An empty local workspace with the albayan_had_data cookie is NOT a first run: the browser
+      // evicted its storage (iOS ITP 7-day wipe, Android pressure); offer backup restore, not setup.
       const storageLoss = localFirstRun && !state._storageLossAcknowledged &&
         typeof albayanDetectStorageLoss === 'function' && albayanDetectStorageLoss();
-      // IndexedDB never answered this boot (open watchdog / onblocked) while
-      // the sentinel cookie proves a local workspace exists on this device:
-      // the data is almost certainly still stored, just unreadable this
-      // session (init froze the collections against overwrite). Never present
-      // that as a fresh install — offer a reload instead.
+      // IndexedDB never answered this boot (watchdog / onblocked) though the cookie proves a local
+      // workspace: the data is still stored, just unreadable now (init froze the collections), so
+      // offer a reload, never a fresh install.
       const storageUnavailable = !storageLoss && localFirstRun &&
         !state._storageLossAcknowledged &&
         window.__albayanIdbOpenInconclusive === true &&
@@ -182,9 +174,8 @@ function render() {
       _lastRenderedUserId = null;
       _lastViewHTML = null;
     } else {
-      // Preserve keyboard focus + caret across the innerHTML swap. Without
-      // this, a background live-sync render() (every 3s) recreates the DOM and
-      // steals focus while the user is typing in e.g. the receipts search box.
+      // Keep focus + caret across the swap: a live-sync render() every 3 s would otherwise steal
+      // focus from someone typing (e.g. the receipts search).
       const _focusBefore = _captureFocusState();
 
       // For main app, try to update only the content area if possible
@@ -195,9 +186,8 @@ function render() {
           // Only swap on a real change (see _lastViewHTML).
           if (newViewHTML !== _lastViewHTML) {
             _lastViewHTML = newViewHTML;
-            // A live-sync tick may swap the view mid-entry: snapshot dirty fields
-            // and restore them only when the new HTML kept the SAME default, so a
-            // render that intentionally emits a new value/checked always wins.
+            // A live-sync swap mid-entry: restore dirty fields only where the new HTML kept the SAME
+            // default, so a render that emits a new value/checked wins.
             const _dirtyFields = [];
             viewContainer.querySelectorAll('input[id], textarea[id], select[id]').forEach(el => {
               if (el.type === 'checkbox' || el.type === 'radio') {
@@ -220,9 +210,8 @@ function render() {
                 el.value = s.value;
               }
             });
-            // A same-view content change is an UPDATE, not navigation, so it must not
-            // re-play the view's entry animation. Strip it synchronously (before paint,
-            // so it never starts). Open modals live on document.body and are untouched.
+            // A same-view change is an UPDATE: strip the entry animation before paint so it never
+            // replays (modals live on document.body, untouched).
             viewContainer
               .querySelectorAll('.animate-fade-in-up, .animate-fade-in, .animate-slide-up')
               .forEach(el => el.classList.remove('animate-fade-in-up', 'animate-fade-in', 'animate-slide-up'));
@@ -329,11 +318,8 @@ function acknowledgeStorageLoss() {
   render();
 }
 
-// Shown instead of first-run setup when the IndexedDB open never settled this
-// boot (watchdog / onblocked) while the sentinel cookie proves a local
-// workspace exists on this device. Unlike renderStorageLossRecovery, nothing
-// was deleted — the data is still stored, this session just could not read
-// it — so the primary action is a reload, not a backup restore.
+// Instead of first-run setup when IndexedDB never opened this boot but the cookie proves a local
+// workspace: unlike renderStorageLossRecovery nothing was deleted, so the action is a reload.
 function renderStorageUnavailableNotice() {
   const isAr = state.language === 'ar';
   return `
@@ -593,10 +579,8 @@ function attachFirstRunHandlers() {
   });
 }
 
-// SAVED SIGN-IN ACCOUNTS (device-local chooser): localStorage key
-// 'albayan_saved_accounts' holds at most 5 {name, email, lastUsedAt} entries —
-// never a credential or record id (read and write re-pick those three fields);
-// all wrapped in try/catch so private mode simply shows no chooser.
+// SAVED SIGN-IN ACCOUNTS (device-local chooser): at most 5 {name, email, lastUsedAt}, never a
+// credential or record id (reads and writes re-pick those fields); private mode shows no chooser.
 const ALBAYAN_SAVED_ACCOUNTS_KEY = 'albayan_saved_accounts';
 const ALBAYAN_SAVED_ACCOUNTS_MAX = 5;
 
@@ -762,9 +746,8 @@ function renderLoginFooterLinks(isRTL) {
           <p class="mt-2 text-center text-[11px] text-slate-400">© ${new Date().getFullYear()} ${t('appName')}</p>`;
 }
 
-// "اختر حسابًا" — device-local account chooser shown before the form when
-// this device has signed in before. Purely presentational: picking a card only
-// prefills the email; the user still authenticates normally.
+// "اختر حسابًا": the device-local account chooser before the form; picking a card only prefills the
+// email (the user still signs in normally).
 function renderLoginAccountChooser(savedAccounts, bannersHTML, isRTL) {
   const cards = savedAccounts.map(acc => {
     const safeEmail = Security.escapeHtml(acc.email);
@@ -883,10 +866,8 @@ function nativeLoginUseBrowser() {
   render();
 }
 
-// The packaged app's default sign-in surface (SYSTEM-BROWSER login):
-// one primary button that opens the hosted login page in Safari/Chrome,
-// a waiting card while the browser round-trip is in flight, and an
-// explicit fallback link to the classic in-app form.
+// The packaged app's SYSTEM-BROWSER sign-in: a button opening the hosted login in Safari/Chrome, a
+// waiting card during the round-trip, and a fallback link to the in-app form.
 function renderNativeAppLogin(bannersHTML, isRTL) {
   const waiting = typeof isAppBrowserLoginWaiting === 'function' && isAppBrowserLoginWaiting();
   const exchanging = typeof isAppBrowserLoginExchanging === 'function' && isAppBrowserLoginExchanging();
@@ -954,9 +935,8 @@ function renderLogin() {
   // credential endpoints, so its login draws no Passkey button (a disabled one read as unfinished).
   const passkeySupported = !isServerModeEnabled()
     && !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext);
-  // Insecure origins (plain http:// on a LAN IP) hide crypto.subtle and
-  // clipboard/passkey APIs. Login still works via the pure-JS crypto fallback
-  // (02-security.js), but tell the user why security features are degraded.
+  // Plain http:// (a LAN IP) hides crypto.subtle and clipboard/passkeys: login still works (pure-JS
+  // fallback in 02-security.js), but say why security features are degraded.
   const webCryptoOk = !!(globalThis.crypto && globalThis.crypto.subtle);
   const passkeyHint = isRTL ? 'يمكنك استخدام بصمة/Face ID (Passkey) إذا تم إعدادها مسبقاً.' : 'You can use a Passkey (Face ID / Touch ID) if you already set one up.';
 
@@ -1253,9 +1233,8 @@ function loadWorkspaceFilterPanels() {
 }
 
 function isWorkspaceFilterPanelExpanded(view) {
-  // One complete workspace, with optional disclosure of the SAME filters.
-  // Do not force them open based on the old Simple/Advanced preference: on a
-  // phone that put a screenful of controls in front of every receipt or ad.
+  // One workspace with optional disclosure of the SAME filters, never forced open by the old
+  // Simple/Advanced preference (on a phone that was a screenful of controls).
   const panels = loadWorkspaceFilterPanels();
   if (typeof panels[view] === 'boolean') return panels[view];
   // Default: open on wide screens, folded on phones.
@@ -1430,9 +1409,8 @@ function renderSidebar() {
     { id: 'settings', icon: 'settings', label: 'settings' },
   ];
 
-  // Clothes System entry for non-admins holding clothes permissions. Admins
-  // reach it via the Services Hub; without this, a permissioned employee has
-  // no way to open it unless it happens to be their landing view.
+  // Clothes System entry for non-admins with clothes permissions (admins use the Services Hub);
+  // otherwise only their landing view could open it.
   if (!isAdminRole(state.currentUser?.role)) {
     allNavItems.push({ id: 'clothes-system', icon: 'shirt', label: 'clothesSystem' });
   }
@@ -1447,9 +1425,8 @@ function renderSidebar() {
     // Admin sees everything
     if (isAdminRole(state.currentUser?.role)) return true;
 
-    // Delivery role: dashboard + deliveries always available (their permission
-    // records may be minimal); anything ELSE they were explicitly granted still
-    // shows through the permission check below (union, not replacement).
+    // Delivery role: dashboard + deliveries always (permission records may be minimal); any other
+    // explicit grant still shows through the check below (union, not replacement).
     if (isDeliveryRole(state.currentUser?.role)) {
       if (item.id === 'delivery-dashboard' || item.id === 'deliveries') return true;
     }
@@ -1867,10 +1844,14 @@ function renderAnalyticsView() {
     // customer isn't ranked by a different number here than on their card.
     spendByCustomer[ad.customerId] = (spendByCustomer[ad.customerId] || 0) + getAdSpendUSD(ad);
   });
+  // One lookup per render, first row per id (like the .find scans it replaces): a scan per record slowed Home.
+  const customersById = new Map();
+  for (const c of state.customers || []) if (c && !customersById.has(c.id)) customersById.set(c.id, c);
+  const customerName = id => customersById.get(id)?.name || (isAr ? 'غير معروف' : 'Unknown');
   const topCustomers = Object.entries(spendByCustomer)
     .map(([customerId, spend]) => ({
       customerId,
-      name: state.customers.find(c => c.id === customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'),
+      name: customerName(customerId),
       spend
     }))
     .sort((a, b) => b.spend - a.spend)
@@ -1882,11 +1863,17 @@ function renderAnalyticsView() {
     if (!ad.pageId) return;
     adsByPage[ad.pageId] = (adsByPage[ad.pageId] || 0) + 1;
   });
+  const livePageById = new Map(), deletedPageById = new Map();
+  for (const p of state.pages || []) {
+    if (!p) continue;
+    const byId = p._deleted ? deletedPageById : livePageById;
+    if (!byId.has(String(p.id))) byId.set(String(p.id), p);
+  }
   const topPages = Object.entries(adsByPage)
     .map(([pageId, count]) => {
       // Live pages only, a deleted page's row tagged: a NEW page may reuse the name under another id.
-      const livePage = state.pages.find(p => p && !p._deleted && String(p.id) === String(pageId));
-      const deletedPage = livePage ? null : state.pages.find(p => p && p._deleted && String(p.id) === String(pageId));
+      const livePage = livePageById.get(String(pageId));
+      const deletedPage = livePage ? null : deletedPageById.get(String(pageId));
       const deletedName = deletedPage?.name || '';
       return {
         pageId,
@@ -1900,10 +1887,10 @@ function renderAnalyticsView() {
     .slice(0, 5);
 
   // Recent activity (ads + receipts)
-  const recentItems = [
-    ...ads.map(ad => ({ type: isAr ? 'إعلان' : 'Ad', name: state.customers.find(c => c.id === ad.customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'), value: ad.amountUSD || 0, status: ad.status || 'Pending', at: ad.createdAt })),
-    ...receipts.map(r => ({ type: isAr ? 'وصل' : 'Receipt', name: state.customers.find(c => c.id === r.customerId)?.name || (isAr ? 'غير معروف' : 'Unknown'), value: r.amountUSD || 0, status: r.status || 'Paid', at: r.createdAt }))
-  ].sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0)).slice(0, 6);
+  const recentItems = [  // each time read once; the stable sort keeps the old order
+    ...ads.map(ad => ({ type: isAr ? 'إعلان' : 'Ad', name: customerName(ad.customerId), value: ad.amountUSD || 0, status: ad.status || 'Pending', at: ad.createdAt })),
+    ...receipts.map(r => ({ type: isAr ? 'وصل' : 'Receipt', name: customerName(r.customerId), value: r.amountUSD || 0, status: r.status || 'Paid', at: r.createdAt }))
+  ].map(item => ({ item, t: new Date(item.at || 0).getTime() })).sort((a, b) => b.t - a.t).slice(0, 6).map(entry => entry.item);
 
   const renderProgress = (label, value, target, color) => {
     const pct = target > 0 ? Math.min(100, (value / target) * 100) : 0;
@@ -2283,9 +2270,8 @@ function updateCustomersViewFiltered() {
     if (window.lucide) lucide.createIcons();
     return;
   }
-  // Build the fresh view HTML off-screen, then swap in only the grid + count so
-  // the search input keeps its caret (same approach as updateReceiptsViewFiltered).
-  // renderCustomersView owns the pagination fingerprint/slice + Load-more button.
+  // Build the view off-screen and swap in only the grid + count, so the search keeps its caret
+  // (like updateReceiptsViewFiltered); renderCustomersView owns paging and Load more.
   const tpl = document.createElement('template');
   tpl.innerHTML = renderCustomersView();
   const src = tpl.content;
@@ -2361,7 +2347,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
           // Receipt outstanding (in-shop AND delivery) plus receipt-less
           // ad-spend debt: the one number the company-funds button offers.
           const coverableAdDebtUSD = isCurrentUserAdmin()
-            ? getCustomerCoverableAdDebt(c.id).totalUSD
+            ? getCustomerCoverableAdDebt(c.id, statsIndex).totalUSD
             : 0;
           const coverableDebtUSD = Math.round((coverableDebtReceipts.reduce(
             (sum, r) => sum + _getCompanyCoverableOutstandingUSD(r), 0
@@ -2382,7 +2368,7 @@ function renderCustomersGrid(customers, statsIndex, duplicateCustomerIds) {
                   <h3 class="font-bold text-lg text-slate-800 dark:text-white">${Security.escapeHtml(c.name || '')}</h3>
                   </div>
                   <div class="flex min-w-0 flex-wrap items-center gap-2 mt-1">
-                    <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(c.platform || '')}</span>
+                    <span class="text-xs px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full">${Security.escapeHtml(platformLabel(c.platform))}</span>
                     ${linkedReceiptsButton}
                     ${linkedPagesButton}
                     ${duplicateCustomerIds.has(String(c.id)) ? `<button type="button" onclick="showCustomerDuplicateMerge('${Security.escapeHtml(String(c.id || ''))}')" class="min-h-11 px-3 py-2 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-bold inline-flex items-center gap-1.5 hover:bg-amber-200 dark:hover:bg-amber-900/50" aria-haspopup="dialog" title="${isAr ? 'دمج سجل العميل المكرر بأمان' : 'Safely merge this duplicate customer'}"><i data-lucide="copy" class="w-4 h-4"></i><span>${isAr ? 'مكرر' : 'Duplicate'}</span></button>` : ''}
@@ -3035,10 +3021,8 @@ function renderReceiptsView() {
           // account deletion (see resolveCreatorDisplayName).
           const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(receipt, isArV)));
           
-          // Colour the card by kind so "existing balance" receipts stand out
-          // from normal "new" ones at a glance (matches the New-Receipt chooser
-          // colours). border-inline-start keeps the stripe on the leading edge
-          // in both LTR and RTL.
+          // Colour by kind ("existing balance" vs "new", the New-Receipt chooser colours);
+          // border-inline-start keeps the stripe leading in LTR and RTL.
           const _typeAccent = receipt.receiptType === 'CARRIED_BALANCE' ? '#d97706' : '#7c3aed';
           if (String(receipt.status || '') === 'Destroyed') {
             // Destroyed = a locked number: minimal red card, delete-only.
@@ -3088,9 +3072,8 @@ function renderReceiptsView() {
                     </span>
                     ${receipt.receiptType === 'TRANSFER_IN' ? (() => {
                       const srcR = state.receipts.find(x => x.id === receipt.transferFromReceiptId);
-                      // Prefer the LIVE source receipt's current customer over the
-                      // snapshot taken at transfer time — the source may have been
-                      // reassigned to a different customer since.
+                      // The LIVE source receipt's customer beats the transfer-time snapshot
+                      // (the source may have been reassigned since).
                       const srcCust = state.customers.find(c => c.id === (srcR?.customerId || receipt.transferFromCustomerId))
                         || state.customers.find(c => c.id === receipt.transferFromCustomerId);
                       const srcNo = srcR ? (srcR.serialNumber || srcR.finalReceiptNo || srcR.tempReceiptNo || '') : '';
@@ -3415,9 +3398,8 @@ function renderPagesView() {
   const pageOwnerFilter = state.pageOwnerFilter === 'needs-owner' ? 'needs-owner' : 'all';
   const pageNeedsOwner = page => getPageCustomerIds(page).length === 0;
   const needsOwnerCount = allPages.filter(pageNeedsOwner).length;
-  // FIRST-wins, matching the Array.find() this replaces in the card loop
-  // below (new Map(array.map(...)) would be last-wins). Identical while ids
-  // are unique; this only decides which record wins if they ever collide.
+  // FIRST-wins like the Array.find() it replaced (new Map(array.map(...)) is last-wins); this only
+  // matters if ids ever collide.
   const customersById = new Map();
   (state.customers || []).forEach(customer => {
     const key = String(customer.id);
@@ -3833,7 +3815,7 @@ function renderAdsView() {
                   : isAdPaid
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-rose-600 dark:text-rose-400';
-                // createdBy (creatorId legacy); the name survives account deletion (resolveCreatorDisplayName).
+                // createdBy (legacy creatorId); the name survives account deletion.
                 const creatorName = Security.escapeHtml(String(resolveCreatorDisplayName(ad, isAr)));
                 // An imported ad is "created by" the automation, so name the
                 // person who actually did the setup. Hidden when it would only
@@ -4895,6 +4877,17 @@ function showDeliveryDetails(itemId) {
   IconQueue.schedule(modal);
 }
 
+// Paged like the Deliveries log: every job ever assigned at once froze a driver's phone on each redraw.
+// The limit outlives live-sync redraws; a new filter, sign-in or driver starts again at 30.
+const DELIVERY_DASHBOARD_PAGE_SIZE = 30;
+let _deliveryDashboardShowLimit = DELIVERY_DASHBOARD_PAGE_SIZE;
+let _deliveryDashboardScope = '';
+
+function loadMoreDeliveryDashboard() {
+  _deliveryDashboardShowLimit += DELIVERY_DASHBOARD_PAGE_SIZE;
+  render();
+}
+
 function renderDeliveryDashboard() {
   const isAr = state.language === 'ar';
   const filterStatus = String(state.deliveryDashboardFilterStatus || 'all');
@@ -4926,11 +4919,23 @@ function renderDeliveryDashboard() {
   const cashHeldByDriver = heldByDriver.reduce((sum, ad) => sum + _getCollectedCashLocal(ad), 0);
 
   let visibleDeliveries = myDeliveries;
-  if (filterStatus === 'Needs Delivery') visibleDeliveries = myDeliveries.filter(d => d.deliveryStatus === 'Needs Delivery');
-  if (filterStatus === 'In Progress') visibleDeliveries = myDeliveries.filter(d => d.deliveryStatus === 'In Progress');
-  if (filterStatus === 'Delivered') visibleDeliveries = myDeliveries.filter(d => d.deliveryStatus === 'Delivered');
+  if (filterStatus === 'Needs Delivery') visibleDeliveries = needsDelivery;
+  if (filterStatus === 'In Progress') visibleDeliveries = inProgress;
+  if (filterStatus === 'Delivered') visibleDeliveries = delivered;
   // "Held" filter shows items driver is holding (delivered but not handed to office)
   if (filterStatus === 'Held') visibleDeliveries = heldByDriver;
+  if (visibleDeliveries === myDeliveries) {  // open jobs, then held cash, first (each newest first): never an old open job on page 2
+    const first = new Set([...needsDelivery, ...inProgress, ...heldByDriver]);
+    visibleDeliveries = [...first, ...myDeliveries.filter(d => !first.has(d))];
+  }
+  const scope = JSON.stringify([uid, _serverLiveSync.sessionEpoch]);
+  if (scope !== _deliveryDashboardScope) {
+    _deliveryDashboardScope = scope;
+    _deliveryDashboardShowLimit = DELIVERY_DASHBOARD_PAGE_SIZE;
+  }
+  const remainingDeliveries = visibleDeliveries.length - _deliveryDashboardShowLimit;
+  const customersById = new Map();
+  for (const c of state.customers || []) if (c && !customersById.has(c.id)) customersById.set(c.id, c);
   
   return `
     <div class="space-y-4 md:space-y-6 animate-fade-in-up px-2 md:px-0 max-w-full overflow-x-hidden">
@@ -4970,8 +4975,9 @@ function renderDeliveryDashboard() {
         </div>
         ${visibleDeliveries.length === 0 ? `<p class="text-center text-slate-500 py-8">${isAr ? 'لا توجد توصيلات لهذا الفلتر' : 'No deliveries for this filter'}</p>` : `
           <div class="space-y-3 w-full">
-            ${visibleDeliveries.map(ad => {
-              const customer = state.customers.find(c => c.id === ad.customerId);
+            ${visibleDeliveries.slice(0, _deliveryDashboardShowLimit).map(ad => {
+              const customer = customersById.get(ad.customerId);
+              const amounts = _deliveryDisplayAmounts(ad);
               const phone = String(ad.phoneNumber || customer?.phones?.[0] || '').trim();
               const wa = phone ? buildWhatsAppLink(phone) : '';
               const displayFinalNo = ad.finalReceiptNo || ad.serialNumber || '';
@@ -5026,7 +5032,7 @@ function renderDeliveryDashboard() {
                         </div>
                       ` : ''}
                       <div class="flex flex-wrap items-center gap-1.5 md:gap-2 mt-2">
-                        <span class="text-xs font-bold text-emerald-600">$${Number(_deliveryDisplayAmounts(ad).usd || 0).toFixed(2)} (${Number(_deliveryDisplayAmounts(ad).local || 0).toFixed(2)} LYD)</span>
+                        <span class="text-xs font-bold text-emerald-600">$${Number(amounts.usd || 0).toFixed(2)} (${Number(amounts.local || 0).toFixed(2)} LYD)</span>
                         <span class="payment-badge text-[10px] md:text-xs">${Security.escapeHtml(trMethod(ad.paymentMethod || ''))}</span>
                         <span class="delivery-${(ad.deliveryStatus || '').toLowerCase().replace(' ', '')} px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold">${Security.escapeHtml(trStatus(ad.deliveryStatus || ''))}</span>
                         ${(() => {
@@ -5084,6 +5090,7 @@ function renderDeliveryDashboard() {
               `;
             }).join('')}
           </div>
+          ${remainingDeliveries > 0 ? `<div class="flex justify-center pt-3"><button type="button" onclick="loadMoreDeliveryDashboard()" class="workspace-load-more"><i data-lucide="chevron-down" class="h-4 w-4"></i>${isAr ? `عرض المزيد (${remainingDeliveries} متبقي)` : `Load more (${remainingDeliveries} remaining)`}</button></div>` : ''}
         `}
       </div>
     </div>
@@ -5094,6 +5101,7 @@ function setDeliveryDashboardFilter(status) {
   const next = String(status || 'all');
   // Don't toggle back to 'all' on double-click - stay on selected filter
   state.deliveryDashboardFilterStatus = next;
+  _deliveryDashboardShowLimit = DELIVERY_DASHBOARD_PAGE_SIZE;
   render();
   if (window.lucide) lucide.createIcons();
 }
@@ -5115,6 +5123,7 @@ async function refreshDeliveryDashboard() {
     // Clear cache to force fresh data
     _collectionCache.receipts = { data: null, timestamp: 0, identity: '' };
     _collectionCache.customers = { data: null, timestamp: 0, identity: '' };
+    _serverLiveSync.deliveryMarks = null;  // the next poll replaces all three lists too
 
     // Force immediate sync from server
     const [receipts, customers] = await Promise.all([
@@ -5262,11 +5271,8 @@ async function submitDeliveryCancel(itemType, itemId) {
     // ads instead of issuing stale generic ad PATCHes (which are forbidden).
     let releasedAds = 0;
     if (isServerModeEnabled()) {
-      // Refresh the linked ads WITHOUT blocking the close (same non-blocking
-      // pattern as the driver cancel path): the receipt PATCH already
-      // committed, this view only reads receipt.deliveryStatus (updated by
-      // the echo above), and ads reconcile seconds later — or via delta
-      // live-sync, exactly what the Sync-pending toast promises.
+      // Refresh the linked ads WITHOUT blocking the close (like the driver cancel): the receipt PATCH
+      // committed, this view reads only its deliveryStatus, and ads reconcile soon or via live sync.
       const savedReceipt = state.receipts.find(row => row && String(row.id) === String(receipt.id)) || receipt;
       saveState();
       deferredServerAdsRefresh = () => {
@@ -5324,9 +5330,8 @@ async function submitDeliveryCancel(itemType, itemId) {
   if (deferredServerAdsRefresh) deferredServerAdsRefresh();
 }
 
-// Reconciliation uses the earliest valid terminal day: the scheduled end day
-// or an earlier manual stop day. Facebook gets the rest of that calendar day
-// to finalize delayed spend, and the ad appears on the following local day.
+// Reconciliation day = the earliest terminal day (scheduled end or an earlier stop); Facebook gets
+// the rest of that day to finalize spend, so the ad appears the next local day.
 function getAdReconciliationCalendarDay(value) {
   const raw = String(value || '').trim();
   if (!raw) return null;
@@ -5401,12 +5406,10 @@ function isAdReadyForReconciliation(ad, now = new Date()) {
   return today.getTime() >= available.getTime();
 }
 
-// One source of truth for the numbers a reconciliation card SHOWS. A linked ad
-// reconciles against Meta's own synced spend, so the "customer informed" state
-// must be judged against THAT remainder: a confirmation saved for a different
-// remainder is stale, and the ad still needs attention (it must not be badged
-// as done, nor sorted to the bottom, nor lock its checkbox — the readonly Meta
-// input means the input listener can never reset the control by itself).
+// The numbers a reconciliation card SHOWS. A linked ad reconciles against Meta's synced spend, so
+// "customer informed" is judged against THAT remainder: a confirmation for another remainder is
+// stale and the ad still needs attention (not badged done, sorted last or checkbox-locked; the
+// readonly Meta input can never reset that control).
 function getAdReconciliationDisplayState(ad) {
   const amountUSD = Math.max(Number(ad?.amountUSD) || 0, 0);
   const parsedSpent = Number(ad?.spentUSD);
@@ -6379,10 +6382,8 @@ async function exportAuditLogs(format) {
   showNotification(state.language === 'ar' ? 'اكتمل التصدير' : 'Export Complete', state.language === 'ar' ? `تم تصدير سجلات التدقيق بصيغة ${format.toUpperCase()}` : `Audit logs exported as ${format.toUpperCase()}`, 'success');
 }
 
-// Returns true when the download was actually started, false when it was
-// refused up-front (in-app browser, packaged app). Callers must gate their
-// success toasts on the return value: those shells swallow blob
-// <a download> clicks silently, so an unconditional toast lies to the user.
+// True when the download started, false when refused up-front (in-app browser, packaged app):
+// callers gate their success toast on it, since those shells silently swallow blob downloads.
 function downloadFile(content, filename, mimeType) {
   if (cannotPrintOrDownload()) {
     notifyInAppBrowserLimitation('download');

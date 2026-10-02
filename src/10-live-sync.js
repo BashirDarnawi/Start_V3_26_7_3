@@ -11,6 +11,7 @@ const _serverLiveSync = {
   // Signature of the last delivery-role payload, so identical polls don't
   // force a full re-render every 3s (which snapped dropdowns shut on phones).
   lastDeliverySig: null,
+  deliveryMarks: null,  // { sig, at }: the driver's watermarks (and epochs) at the last complete replace
   // Highest _lastModified seen in a real server response; seeds the delta cursor.
   // A client stamp from a fast clock would skip others' updates (15s look-back).
   serverWatermark: 0,
@@ -127,9 +128,8 @@ function getServerCollectionVisibilityScope(user, collection) {
   if (role === 'delivery' && ['ads', 'receipts', 'customers'].includes(name)) return 'assigned';
   const modulePermissions = user.permissions?.[name];
   if (!Array.isArray(modulePermissions)) return 'none';
-  // Review access is deliberately narrower than ordinary view-all access: the
-  // server omits unfinished customer drafts. Keeping this scope distinct also
-  // forces cache/IndexedDB purge when an employee changes from view to review.
+  // Review access is narrower than view-all (the server omits unfinished drafts); a distinct
+  // scope also purges caches/IndexedDB when an employee moves from view to review.
   if (name === 'adCampaignRequests' && modulePermissions.some(action => String(action).toLowerCase() === 'review')) return 'review';
   if (modulePermissions.some(action => String(action).toLowerCase() === 'view')) return 'all';
   if (modulePermissions.some(action => String(action).toLowerCase() === 'viewown')) return 'own';
@@ -149,18 +149,14 @@ function getAuthorizedServerSyncCollections(user = state.currentUser) {
     if (collection.startsWith('clothes') && !isAdminRole(user?.role)) {
       return hasSubscription('clothes_system');
     }
-    // adCampaignRequests deliberately keeps syncing after a subscription
-    // lapses: those rows can hold the customer's captured budget, and the
-    // server no longer gates reads either (permission scope still decides
-    // what is visible). Purging them would hide the Stop-and-refund path.
+    // adCampaignRequests keep syncing after a subscription lapses (reads are not gated): they can
+    // hold the customer's captured budget, and purging them would hide the Stop-and-refund path.
     return true;
   });
 }
 
-// Remove data the current authorization scope may no longer expose. Clearing
-// only the in-memory array is insufficient: a reload would rehydrate the old
-// broader result from IndexedDB, and the five-second request cache could do the
-// same without a page reload.
+// Remove data the current scope may no longer expose from memory, IndexedDB and the 5 s request
+// cache (either of the last two would bring the old broader result back).
 async function clearServerCollectionsForVisibility(collections) {
   const identity = getServerSessionIdentity();
   const names = Array.from(new Set((collections || []).map(String)))
@@ -257,9 +253,8 @@ async function apiLoadCollectionSince(collection, sinceMs) {
   return all;
 }
 
-// Cheap change-detection fingerprint for a fetched collection. Only reads each
-// record's id and _lastModified (tiny), never the heavy base64 photo fields, so
-// it is orders of magnitude cheaper than JSON.stringify of the full payload.
+// Cheap change fingerprint of a fetched collection: ids and _lastModified only, never the base64
+// photos (far cheaper than JSON.stringify of the payload).
 function _cheapSyncSig(arr) {
   if (!Array.isArray(arr)) return 'n';
   let h = 0;
@@ -280,9 +275,8 @@ function _deltaRecordVersion(record) {
   return Number.isFinite(version) ? version : null;
 }
 
-// Delta windows overlap on purpose, so most polled rows replay what is in memory.
-// Replace a row only for a newer revision (or the equal-revision delete tie below);
-// keeping its identity otherwise avoids a whole-view render every 3s.
+// Delta windows overlap, so most polled rows replay memory: replace a row only for a newer revision
+// (or the delete tie below); keeping its identity avoids a whole-view render every 3 s.
 function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false) {
   const incomingVersion = _deltaRecordVersion(incoming);
   const currentVersion = _deltaRecordVersion(current);
@@ -291,15 +285,12 @@ function _shouldApplyDeltaRecord(incoming, current, refreshEqualVersion = false)
     if (incomingVersion > currentVersion) return true;
     if (incomingVersion < currentVersion) return false;
 
-    // A generic server delete can land in the same millisecond as the write it
-    // deletes. In that tie, deletion must win or the active row can survive on
-    // this client forever. Replayed tombstones remain no-ops, and an equal-
-    // version active record can never resurrect a tombstone.
+    // A delete can land in the same millisecond as the write it deletes: the delete wins that tie (or
+    // the row survives here forever); a replayed tombstone stays a no-op and is never resurrected.
     if (incoming._deleted === true && current?._deleted !== true) return true;
     if (current?._deleted === true && incoming._deleted !== true) return false;
-    // A deployment can improve the read projection without changing stored
-    // accounting or timestamps. Only its one-time compatibility refresh may
-    // accept changed data at the same revision; ordinary polls stay no-ops.
+    // A deployment may change the read projection at the same revision: only its one-time
+    // compatibility refresh accepts that; ordinary polls stay no-ops.
     return refreshEqualVersion && JSON.stringify(incoming) !== JSON.stringify(current);
   }
   if (incomingVersion !== null) return true;
@@ -437,9 +428,8 @@ async function refreshServerDataCompatibility() {
   return { ok: true, refreshed: true };
 }
 
-// Customer page spending and the delivery WhatsApp preview are body-mounted, so
-// a render cannot refresh them: close them on any authoritative state change.
-// Never restore focus here (sync or logout may have replaced that button).
+// Body-mounted, so a render cannot refresh them: close customer page spending and the delivery
+// WhatsApp preview on any authoritative change, never restoring focus (that button may be gone).
 function _closeCustomerPagesDialogForStateChange() {
   let closed = false;
   const shareDialog = document.getElementById('delivery-whatsapp-share-dialog');
@@ -482,7 +472,7 @@ function _accessNarrowed(before, after) {
 async function reloadServerDataForAccessChange(accessBefore, isAborted) {
   const scopeChanges = getServerVisibilityScopeChanges(accessBefore, state.currentUser);
   if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.clear();
-  _serverLiveSync.lastDeliverySig = null;
+  _serverLiveSync.lastDeliverySig = _serverLiveSync.deliveryMarks = null;
   if (_accessNarrowed(accessBefore, state.currentUser)) closeSensitiveAuthenticatedUi();
   _authMeRequestGeneration += 1;
   _sessionRequest = null;
@@ -508,9 +498,8 @@ async function serverLiveSyncOnce() {
   if (!SERVER_API.liveSyncEnabled) return { ok: false, skipped: true };
   if (document.visibilityState === 'hidden') return { ok: true, skipped: true };
 
-  // Snapshot the session epoch. After any await we bail if the user logged out
-  // (epoch bumped / currentUser cleared) so a late response can't resurrect the
-  // wiped state — the "logout wipe undone by an in-flight sync" bug.
+  // After any await, bail if the session or poller changed: a late response must not refill the
+  // state a logout just wiped.
   const _sessionEpoch = _serverLiveSync.sessionEpoch;
   const _pollerEpoch = _serverLiveSync.pollerEpoch;
   const _sessionIdentity = getServerSessionIdentity();
@@ -557,9 +546,23 @@ async function serverLiveSyncOnce() {
   // Delivery users: do a small "replace" sync of only assigned deliveries + linked customers.
   // This guarantees removals (unassigned items) disappear without needing manual refresh.
   if (roleLower === 'delivery') {
+    // A full download every ~6 s wasted a phone's data: a tiny watermark read gates it. Replace when the
+    // marks moved, none are recorded (first poll, Refresh, new session/poller/access), the read failed,
+    // or after 60 s (an unassignment or delete lowers no maximum).
+    let marks = null;
+    try { marks = await apiGetSyncWatermarks(); } catch (_) {}
+    if (_syncAborted()) return { ok: false, skipped: true };
+    const markSig = marks && `${_sessionEpoch}:${_pollerEpoch}|${marks.ads || 0}|${marks.receipts || 0}|${marks.customers || 0}`;
+    const last = _serverLiveSync.deliveryMarks, nowMs = Date.now();
+    if (markSig && last?.sig === markSig && nowMs >= last.at && nowMs - last.at < 60000) {
+      state.serverLastSyncAt = new Date().toISOString();
+      state.serverLastSyncErrorAt = null;
+      return { ok: true };
+    }
     const safeAll = async (collection) => {
       try {
-        return await apiLoadCollectionAll(collection);
+        // Past the 5 s list cache: lists loaded before this read could miss what moved it.
+        return await apiLoadCollectionAll(collection, { forceRefresh: !!markSig });
       } catch (e) {
         // Network errors during sync - don't break the app, just return null
         if (ALBAYAN_DEBUG_MODE) console.warn(`[safeAll] Failed to load ${collection}:`, e?.message || e);
@@ -577,9 +580,8 @@ async function serverLiveSyncOnce() {
     if (_syncAborted()) return { ok: false, skipped: true };
     const deliveryFetchFailed = !Array.isArray(ads) || !Array.isArray(receipts) || !Array.isArray(customers);
 
-    // "Changed" means the fetched payload differs from the previous one (state
-    // is mutated in place, so compare a CHEAP count + id/_lastModified hash of
-    // the raw arrays; stringifying photo-bearing payloads every 3 s stalled the UI).
+    // "Changed" = the payload differs from the last one (state is mutated in place), by a cheap count +
+    // id/_lastModified hash (stringifying photo-bearing payloads every 3 s stalled the UI).
     let sig = null;
     try {
       sig = _cheapSyncSig(ads) + '|' + _cheapSyncSig(receipts) + '|' + _cheapSyncSig(customers);
@@ -593,6 +595,7 @@ async function serverLiveSyncOnce() {
       }
       if (sig !== null) _serverLiveSync.lastDeliverySig = sig;
     }
+    _serverLiveSync.deliveryMarks = markSig && !deliveryFetchFailed ? { sig: markSig, at: nowMs } : null;
     
     if (changed) assignSequentialNumbers(true, ['ads', 'receipts', 'customers']);
 
@@ -603,9 +606,8 @@ async function serverLiveSyncOnce() {
       state.serverLastSyncAt = new Date().toISOString();
       state.serverLastSyncErrorAt = null;
     }
-    // Always re-render when data changed (not just cursor) - ensures edits from admin show immediately.
-    // The delivery replacement includes ads/customers, so an open customer-page
-    // summary would otherwise keep showing the pre-sync snapshot above the new view.
+    // Re-render on any data change so admin edits show at once; the replacement includes ads and
+    // customers, so close an open customer-page summary (it would keep the old snapshot).
     if (changed) {
       _closeCustomerPagesDialogForStateChange();
       RenderQueue.schedule('liveSync(delivery)');
@@ -613,9 +615,8 @@ async function serverLiveSyncOnce() {
     return { ok: !deliveryFetchFailed };
   }
 
-  // Each collection owns its cursor (requests are not one snapshot: a newer ad
-  // could advance past an older receipt update). Forbidden/unsubscribed
-  // endpoints are skipped; a newly granted collection catches up from zero.
+  // Each collection owns its cursor (a newer ad could pass an older receipt update); forbidden or
+  // unsubscribed ones are skipped, and a newly granted one catches up from zero.
   const deltaCollections = getAuthorizedServerSyncCollections();
   const entitlementBefore = _serverLiveSync.serviceEntitlements || getServerServiceEntitlementSnapshot();
   if (!_serverLiveSync.collectionCursors || typeof _serverLiveSync.collectionCursors !== 'object') {
@@ -649,9 +650,8 @@ async function serverLiveSyncOnce() {
       return { collection, since, records: [], ok: false, forbidden: false };
     }
   };
-  // Bounded fan-out. Firing all 14 collections at once exceeded the server's
-  // connection cap (uvicorn --limit-concurrency) from a SINGLE tab, and the
-  // excess came back as raw 503s — the real source of the red sync badge.
+  // Bounded fan-out: all 14 at once passed the server's connection cap (uvicorn --limit-concurrency)
+  // from one tab, and the excess came back as 503s (the red sync badge).
   const deltaResults = await _runWithConcurrency(
     deltaCollections, SERVER_API.liveSyncConcurrency || 4, safeSince, _syncAborted
   );
@@ -757,9 +757,8 @@ async function serverLiveSyncOnce() {
   // retain their own prior cursor and are retried without blocking others.
   for (const result of deltaResults) {
     if (!result.ok || result.forbidden) continue;
-    // A collection that now returns a clean (non-forbidden) result is authorized
-    // again, so drop it from the purged set: a later re-revoke must purge and
-    // re-render exactly once more, not be silently swallowed by the guard.
+    // A clean (non-forbidden) result means access is back: leave the purged set, so a later
+    // re-revoke purges and re-renders once more.
     if (_serverLiveSync.purgedForbidden instanceof Set) _serverLiveSync.purgedForbidden.delete(result.collection);
     const maxDelta = _maxLastModifiedFromArray(result.records);
     _serverLiveSync.collectionCursors[result.collection] = Math.max(result.since, maxDelta);
@@ -784,9 +783,8 @@ async function serverLiveSyncOnce() {
           if (u && u.id) byId.set(u.id, u);
         }
         if (state.currentUser?.id) byId.set(state.currentUser.id, { ...byId.get(state.currentUser.id), ...state.currentUser });
-        // Records with a debounce-pending server update (admin mid-edit in the
-        // Permissions Manager) must keep the LOCAL version — the fetched list
-        // may predate the pending PATCH and would silently revert the edits.
+        // A user with a debounce-pending PATCH (Permissions Manager mid-edit) keeps the LOCAL row:
+        // the fetched list may predate it and would revert the edits.
         try {
           if (typeof _serverUserUpdate === 'object' && _serverUserUpdate?.pending?.size) {
             for (const uid of _serverUserUpdate.pending.keys()) {
@@ -797,9 +795,8 @@ async function serverLiveSyncOnce() {
         } catch (_) {}
         state.users = Array.from(byId.values());
       }
-      // Also refresh current user's permissions (so they don't need to re-login
-      // for new permissions). Either change must trigger a re-render — without
-      // it, a locked sidebar stays locked even after the data recovers.
+      // Refresh the current user's permissions too (no re-login for new ones); either change
+      // re-renders, or a locked sidebar stays locked after the data recovers.
       const accessBefore = Security.sanitizeObject(state.currentUser || {});
       const permsChanged = await refreshCurrentUserPermissions();
       if (_syncAborted()) return { ok: false, skipped: true };
@@ -967,9 +964,7 @@ function _paintSyncIndicator(status) {
       break;
     case 'error':
       indicator.className = 'sync-status-indicator fixed bottom-4 right-4 z-40 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg transition-all duration-300 bg-rose-100 text-rose-700 dark:bg-rose-900/50 dark:text-rose-300 cursor-pointer';
-      // Say WHY when we know: "(503)" points straight at the server cap,
-      // "(network)" at the connection. Logical margin (me-) keeps the dot on
-      // the correct side in RTL.
+      // Say WHY: "(503)" is the server cap, "(network)" the connection; me- keeps the dot right in RTL.
       const failure = _serverLiveSync.lastFailure;
       const why = failure
         ? (failure.status ? ` (${failure.status})` : (state.language === 'ar' ? ' (الشبكة)' : ' (network)'))
@@ -1032,9 +1027,8 @@ async function manualSyncData() {
 window.manualSyncData = manualSyncData;
 
 function stopServerLiveSync() {
-  // Stop/restart invalidates only poll ticks. Authentication identity is
-  // advanced explicitly at login/logout boundaries; changing it here made
-  // startup abort its own cookie-session full load.
+  // Stop/restart voids only poll ticks; the auth identity moves only at login/logout (moving it
+  // here aborted startup's own cookie-session full load).
   _serverLiveSync.pollerEpoch = (_serverLiveSync.pollerEpoch || 0) + 1;
   if (_serverLiveSync.timer) {
     clearInterval(_serverLiveSync.timer);
@@ -1065,10 +1059,8 @@ function startServerLiveSync() {
   stopServerLiveSync();
   _serverLiveSync.startedForUserId = uid;
   _serverLiveSync.serviceEntitlements = getServerServiceEntitlementSnapshot();
-  // Seed from the server watermark (authoritative, skew-free); serverLoadAllData
-  // re-seeds when it completes. Only a COMPLETE full load may seed a non-zero
-  // cursor: after a throttled start or one failed collection begin at zero so
-  // nothing below another collection's newer timestamp is missed.
+  // Seed from the server watermark (skew-free; serverLoadAllData re-seeds). Only a COMPLETE full load
+  // may seed a non-zero cursor, so a failed collection never hides rows below another's timestamp.
   _serverLiveSync.cursor = _serverLiveSync.fullLoadCursorReady
     ? (_serverLiveSync.serverWatermark || 0)
     : 0;
@@ -1168,11 +1160,8 @@ function handleLogin(email, password, rememberMe) {
 
 async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
   // #region agent log
-  // Hypothesis H-LOGIN: Login failures are caused by one of:
-  // (a) user not found due to stored email whitespace/case issues
-  // (b) password verification mismatch due to iterations stored as string (PBKDF2)
-  // (c) user has missing password data from old backups
-  // Log only non-PII metadata (counts/booleans/types).
+  // Hypothesis H-LOGIN (stored email whitespace/case, PBKDF2 iterations stored as a string, or a
+  // backup without password data): log only non-PII metadata (counts/booleans/types).
   try {
     if (typeof window.__albayanDebugEmit === 'function') {
       window.__albayanDebugEmit('H-LOGIN', 'script.js:handleLogin', 'start', {
@@ -1185,8 +1174,8 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
   // #endregion
 
   if (isServerModeEnabled()) {
-    // IMPORTANT: Successful login should never be shown as "Login Failed" due to a later data-load error.
-    // We'll render immediately after auth, then load data in a separate guarded step.
+    // A later data-load error never reads as "Login Failed": render right after auth, then load
+    // data in a separate guarded step.
     try {
       // #region agent log
       try {
@@ -1212,9 +1201,8 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
         return;
       }
 
-      // SYSTEM-BROWSER APP LOGIN (Phase 2): this browser tab was opened BY
-      // the packaged app to sign in. Hand the session back to the app with a
-      // one-time code instead of loading the workspace here.
+      // SYSTEM-BROWSER APP LOGIN (Phase 2): a tab the packaged app opened to sign in hands the
+      // session back with a one-time code instead of loading the workspace here.
       if (typeof maybeCompleteAppLoginHandoff === 'function') {
         const handedOff = await maybeCompleteAppLoginHandoff(user, true); // fresh login: this tab's session is short-lived
         if (handedOff) return true;
@@ -1235,9 +1223,8 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
         }
       } catch (_) {}
       // #endregion
-      // Fresh server with no users yet — show the first-run setup screen so the
-      // owner can create the first admin from the browser (no shell needed).
-      // The server returns 503 with a "not initialized" hint in that case.
+      // A fresh server (503 "not initialized"): the first-run setup screen, so the owner creates
+      // the first admin from the browser (no shell needed).
       const _msg = String(e?.message || '');
       if (e?.status === 503 && /not initialized|no users/i.test(_msg)) {
         const setupStatus = await apiNeedsSetup();
@@ -1273,6 +1260,16 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
         );
         return;
       }
+      // One toast for a lockout, the server's 429 and apiLogin's own cooldown alike (never its English detail).
+      if (e?.status === 429) {
+        const minutes = Math.ceil((e.retryAfter || 60) / 60);
+        showNotification(state.language === 'ar' ? 'محاولات كثيرة جداً' : 'Too Many Attempts', state.language === 'ar' ? `الرجاء الانتظار ${minutes} دقيقة قبل المحاولة مرة أخرى.` : `Please wait ${minutes} minute(s) before trying again.`, 'error');
+        return;
+      }
+      if (e?.status === 409) {
+        showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', state.language === 'ar' ? 'تغيّر الحساب أثناء تسجيل الدخول. حاول مرة أخرى.' : 'Account changed during sign-in. Please try again.', 'error');
+        return;
+      }
       showNotification(state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login Failed', e?.message || (state.language === 'ar' ? 'فشل تسجيل الدخول' : 'Login failed'), 'error');
       return;
     }
@@ -1281,9 +1278,8 @@ async function _handleLoginOnce(email, password, loginGeneration, rememberMe) {
   return _handleLocalLoginOnce(email, password, loginGeneration);
 }
 
-// Everything that happens AFTER the server has authenticated a user —
-// shared by the password login above and the system-browser app login
-// exchange (completeAppBrowserLogin), so the two flows can never drift.
+// Everything AFTER the server authenticated a user, shared by the password login and the app
+// login exchange (completeAppBrowserLogin) so the two flows never drift.
 async function _activateServerSession(user, loginGeneration) {
       // Abort/detach every request and response cache belonging to the prior
       // anonymous/user identity before activating this login.
@@ -1311,9 +1307,8 @@ async function _activateServerSession(user, loginGeneration) {
           for (const name of PERSISTED_COLLECTIONS) state[name] = [];
         }
       }
-      // Seed state.users immediately: the first render happens BEFORE
-      // serverLoadAllData, and hasPermission/sidebar read state.users — on a
-      // fresh device it would otherwise be empty and show "No access granted".
+      // Seed state.users now: the first render precedes serverLoadAllData and hasPermission and
+      // the sidebar read it (a fresh device showed "No access granted").
       upsertCurrentUserIntoUsers();
       // #region agent log
       try {
@@ -1558,10 +1553,8 @@ async function _handleLocalLoginOnce(email, password, loginGeneration) {
     }
     
     state.currentView = getPostLoginLandingViewForUser(user);
-    // Upgrade legacy hashes to PBKDF2 after successful login. Also re-hash
-    // PBKDF2 hashes created with fewer iterations (pure-JS fallback on
-    // insecure http:// origins uses 60k) at full strength once native
-    // crypto.subtle is available.
+    // After a successful login, upgrade legacy hashes to PBKDF2 and re-hash low-iteration ones (the
+    // pure-JS fallback on http:// origins uses 60k) at full strength once crypto.subtle is available.
     const _subtleAvailable = !!(globalThis.crypto && globalThis.crypto.subtle);
     const _needsAlgoUpgrade = (user.passwordAlgo || 'sha256') !== 'pbkdf2-sha256';
     const _needsIterationUpgrade = !_needsAlgoUpgrade && _subtleAvailable &&
@@ -1629,10 +1622,8 @@ function showSessionTransitionOverlay(message) {
   return overlay;
 }
 
-// Body-mounted dialogs are not descendants of #app. Re-rendering the login
-// page alone cannot remove them. Keep sensitive surfaces/drafts in one teardown
-// path, run synchronously before storage/network waits, and do not restore focus
-// to an old account's button or navigate browser history during teardown.
+// Body-mounted dialogs outlive a login-page render: tear sensitive surfaces and drafts down in one
+// path, synchronously before storage/network waits, without restoring focus or touching history.
 const AUTHENTICATED_DIALOG_IDS = Object.freeze([
   'app-modal', 'duplicate-receipt-warning', 'customer-pages-dialog', 'page-ads-dialog',
   'page-duplicates-dialog', 'page-merge-dialog', 'merge-all-dialog', 'ad-merge-dialog',
@@ -1734,9 +1725,8 @@ function resetAuthenticatedServerCaches() {
   // A body-mounted full-screen photo must never survive logout or expiry. Do
   // not restore focus to a control that belonged to the previous user.
   if (typeof closeReceiptPhotoViewer === 'function') closeReceiptPhotoViewer(false);
-  // Ads Studio keeps an unsaved draft and compressed photos in memory. Reset
-  // them with every auth transition so one customer can never inherit another
-  // customer's unfinished work after logout or session expiry.
+  // Ads Studio's unsaved draft and photos live in memory: reset on every auth transition, so no
+  // customer inherits another's unfinished work.
   if (typeof resetAdsStudioSessionState === 'function') resetAdsStudioSessionState();
   // Meta insights (partner pages / spend statistics) are admin-only server
   // data: never let them survive logout or a session switch.
@@ -1771,9 +1761,8 @@ function discardPendingServerUserUpdates() {
 }
 
 async function wipeAuthenticatedServerDataFromClient() {
-  // This helper is also used by the session-expiry path, which does not pass
-  // through the normal logout function. Remove body-mounted financial data
-  // before clearing auth/state or awaiting IndexedDB writes.
+  // Also the session-expiry path (no normal logout): remove body-mounted financial data before
+  // clearing auth/state or awaiting IndexedDB writes.
   closeSensitiveAuthenticatedUi();
   const collections = Array.isArray(PERSISTED_COLLECTIONS)
     ? PERSISTED_COLLECTIONS
@@ -1832,10 +1821,8 @@ async function _handleLogoutOnce() {
     if (state.currentUser) {
       addAuditLog('Logout', state.currentUser.id, `User ${Security.escapeHtml(state.currentUser.name)} logged out`);
     }
-    // Stop new sync work immediately, but keep the authenticated identity until
-    // pending user edits and the logout request have settled. Rendering the
-    // login screen before apiLogout completed allowed that delayed request to
-    // delete a newly-created replacement session.
+    // Stop new sync work now, but keep the identity until pending edits and the logout request
+    // settle: a login screen drawn before apiLogout completed let it delete a new session.
     stopServerLiveSync();
     let pendingUpdates = null;
     try { pendingUpdates = flushPendingUserUpdates(); } catch (_) {}

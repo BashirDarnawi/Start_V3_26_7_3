@@ -85,8 +85,8 @@ function metaAdCurrencyIsKnownUSD(ad) {
 }
 
 function metaAdAutoBudgetUSD(ad) {
-  // Meta's REAL planned total in dollars: a linked ad's automatic budget, so a typed one cannot
-  // drift from what Meta runs. 0 when unknown: not linked, not known USD, or open-ended (no end).
+  // Meta's REAL planned total in dollars (a linked ad's automatic budget: a typed one can't drift);
+  // 0 when unknown: not linked, not known USD, or open-ended (no end).
   if (!ad?.metaAdId) return 0;
   if (!metaAdCurrencyIsKnownUSD(ad)) return 0;
   const minor = metaAdsPlannedTotalMinor(ad);
@@ -112,8 +112,7 @@ function renderMetaAdPageSummary(ad, adPage, adPageDeleted, isAr) {
   const pageId = String(ad?.metaPageId || adPage?.metaPageId || '').trim();
   const localName = String(adPage?.name || '').trim();
   const metaName = String(ad?.metaPageName || adPage?.metaPageName || '').trim();
-  // Never display the imported placeholder ("Facebook Page 123…") as if it
-  // were the page's name: it just repeats the page ID a second time.
+  // Never show the imported placeholder ("Facebook Page 123…") as the page's name: it repeats the ID.
   const realLocalName = metaAdsIsPlaceholderPageName(localName, pageId) ? '' : localName;
   const realMetaName = metaAdsIsPlaceholderPageName(metaName, pageId) ? '' : metaName;
   const pageName = realLocalName || realMetaName;
@@ -180,8 +179,7 @@ function renderAdPageAvatar(ad, adPage, isAr, besideTile = true) {
   const label = pageName
     ? (isAr ? `صورة صفحة ${pageName}` : `${pageName} page picture`)
     : (isAr ? 'صورة صفحة فيسبوك' : 'Facebook Page picture');
-  // is-solo: no photo tile renders beside the avatar (manual ad without
-  // uploads), so the tile-centering offset would just push it out of line.
+  // is-solo: no photo tile beside the avatar (a manual ad without uploads), so no centering offset.
   return `<span class="ad-page-avatar${besideTile ? '' : ' is-solo'}" role="img" title="${Security.escapeHtml(label)}" aria-label="${Security.escapeHtml(label)}">
     <img src="${Security.escapeHtml(url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="adPageAvatarError(this)">
   </span>`;
@@ -381,20 +379,20 @@ function renderMetaAdStatusSummary(ad, isAr) {
   const liveStatus = String(ad.metaEffectiveStatus || ad.metaConfiguredStatus || 'UNKNOWN');
   const synced = metaAdsFormatDate(ad.metaSyncedAt, true);
   const errorCode = String(ad.metaSyncErrorCode || '');
-  // Throttling is one shared Meta pause, not this ad's failure: hide old per-ad errors here; the
-  // Meta Sync dialog shows the single retry state.
+  // A throttle is one shared Meta pause, not this ad's failure: hidden here (the Meta Sync dialog
+  // shows the single retry state).
   const providerThrottle = errorCode.toLowerCase().includes('rate_limited');
   const error = providerThrottle ? '' : String(ad.metaSyncError || '');
   const accountName = String(ad.metaAdAccountName || '').trim();
   const accountId = String(ad.metaAdAccountId || '').trim();
   const historyCount = typeof getMetaAdHistoryCount === 'function' ? getMetaAdHistoryCount(ad) : (Number(ad.metaChangeCount) || 0);
   return `<div data-role="meta-ad-status" class="mt-2 max-w-[15rem] rounded-lg border border-blue-100 bg-blue-50/70 p-2 text-[10px] leading-4 dark:border-blue-900 dark:bg-blue-950/30">
-    <div class="flex flex-wrap items-center gap-1"><span class="font-bold text-blue-700 dark:text-blue-300">Meta</span><span class="rounded-full px-1.5 py-0.5 font-bold ${metaAdsStatusTone(liveStatus)}">${Security.escapeHtml(liveStatus)}</span></div>
+    <div class="flex flex-wrap items-center gap-1"><span class="font-bold text-blue-700 dark:text-blue-300">Meta</span><span class="rounded-full px-1.5 py-0.5 font-bold ${metaAdsStatusTone(liveStatus)}">${Security.escapeHtml(metaAdsStatusLabel(liveStatus, isAr))}</span></div>
     ${ad.metaAdName ? `<div class="mt-1 truncate font-medium text-slate-700 dark:text-slate-200" title="${Security.escapeHtml(ad.metaAdName)}">${Security.escapeHtml(ad.metaAdName)}</div>` : ''}
     ${(accountName || accountId) ? `<div data-role="meta-ad-account" class="mt-1 flex items-start gap-1 text-slate-600 dark:text-slate-300" title="${Security.escapeHtml(accountName || `Ad account ${accountId}`)}"><i data-lucide="briefcase-business" class="mt-0.5 h-3 w-3 shrink-0"></i><span class="min-w-0 break-words"><strong>${isAr ? 'حساب الإعلانات' : 'Ad account'}:</strong> ${Security.escapeHtml(accountName || `#${accountId}`)}${accountName && accountId ? ` <span class="text-slate-400">#${Security.escapeHtml(accountId)}</span>` : ''}</span></div>` : ''}
     ${synced ? `<div class="text-slate-500">${isAr ? 'آخر مزامنة' : 'Last sync'}: ${Security.escapeHtml(synced)}</div>` : ''}
     <button type="button" data-meta-history-ad-id="${Security.escapeHtml(String(ad.id || ''))}" onclick="showMetaAdHistory(this.dataset.metaHistoryAdId)" class="meta-ad-history-button" title="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}" aria-label="${isAr ? 'عرض سجل تغييرات Meta' : 'View Meta change history'}"><i data-lucide="history" class="h-3.5 w-3.5"></i><span>${isAr ? 'سجل Meta' : 'Meta history'}</span><strong>${historyCount}</strong></button>
-    ${error ? `<div class="mt-1 text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(error)}">${Security.escapeHtml(error)}${errorCode ? ` <span class="font-mono opacity-70">[${Security.escapeHtml(errorCode)}]</span>` : ''}</div>` : ''}
+    ${error ? `<div class="mt-1 text-rose-600 dark:text-rose-300" title="${Security.escapeHtml(isAr && errorCode ? `${error} [${errorCode}]` : error)}">${Security.escapeHtml(metaAdsSyncErrorText(ad, isAr))}${errorCode && !isAr ? ` <span class="font-mono opacity-70">[${Security.escapeHtml(errorCode)}]</span>` : ''}</div>` : ''}
   </div>`;
 }
 

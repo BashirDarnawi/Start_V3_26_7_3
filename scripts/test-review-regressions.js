@@ -3168,6 +3168,14 @@ async function main() {
     assert.deepEqual(pageWrites, [], 'no page PATCH may go out before the atomic delete');
     assert.deepEqual(state.pages[0].customerIds, ['c1', 'c2']);
     assert.ok(!state.customers[0]._deleted, 'the refused delete rolled back');
+    // R5 error-paths-offline-4: the refusal names its rule (in Arabic too), not "Server Error" and the English sentence.
+    const toasts = [];
+    sandbox.showNotification = (title, message) => toasts.push([title, message]);
+    state.language = 'ar';
+    await sandbox.deleteCustomer('c1');
+    assert.deepEqual(toasts, [['غير مسموح', 'فشل حذف العميل: لا يمكن حذف العميل لوجود وصولات أو إعلانات مرتبطة به. — تم التراجع عن الحذف بالكامل.']]);
+    assert.ok(!state.customers[0]._deleted);
+    state.language = 'en';
     sandbox.apiBatchDeleteEntities = async () => ({ stamps: {} });
     await sandbox.deleteCustomer('c1');
     assert.deepEqual(pageWrites, ['p1']);
@@ -3919,6 +3927,246 @@ async function main() {
     await sandbox.adsStudioLoadPagePosts('p1');
     assert.equal(run('_studioWallet.methodsFailed'), true);
     assert.equal(run('_adsStudioPostPicker.posts.p1.state'), 'failed');
+  });
+
+  // ---- Review loop R5, studio v2 second pass. The lazy studio.js sources on top of the startup files, signed in
+  // as a customer with the plan, with a fake browser history wired to the real router (setupUrlRouting; history.go
+  // moves on a timer, as in a browser), queued timers and render() drawing the studio view. me: the /me reply
+  // already known (the new studio), or null for a read still to come.
+  const studioV2Me = { ui: 'v2', staffDesk: 'classic', isAdmin: false, isStaff: false, services: { help: true, stopRequest: true, tiktok: false }, intake: { open: true }, contact: {}, serviceHours: {} };
+  function studioRouterFixture(me = studioV2Me) {
+    const fixture = loadBrowserSource();
+    const { sandbox, state, run } = fixture;
+    Object.assign(sandbox, { URLSearchParams, URL, AbortController });
+    sandbox.window.URLSearchParams = URLSearchParams;
+    sandbox.performance = sandbox.window.performance = { getEntriesByType: () => [{ type: 'navigate', name: 'http://localhost/ads-studio' }], now: () => 0 };
+    let timers = [];
+    let seq = 0;
+    sandbox.setTimeout = sandbox.window.setTimeout = (fn, ms) => { seq += 1; timers.push({ id: seq, fn, ms: Number(ms) || 0 }); return seq; };
+    sandbox.clearTimeout = sandbox.window.clearTimeout = id => { timers = timers.filter(timer => timer.id !== id); };
+    const location = sandbox.window.location;
+    const entries = [{ state: { view: 'ads-studio' }, url: '/ads-studio?tab=home' }];
+    let index = 0;
+    const apply = url => { const next = new URL(url, 'http://localhost'); location.pathname = next.pathname; location.search = next.search; location.href = next.href; };
+    apply(entries[0].url);
+    const listeners = [];
+    sandbox.window.addEventListener = (type, fn, capture) => { if (type === 'popstate') listeners.push({ fn, capture: !!capture }); };
+    const pop = () => [...listeners.filter(l => l.capture), ...listeners.filter(l => !l.capture)].forEach(l => l.fn({ state: entries[index].state }));
+    sandbox.window.history = {
+      get state() { return entries[index].state; },
+      get length() { return entries.length; },
+      pushState(value, _title, url) { entries.splice(index + 1); entries.push({ state: value, url: url || entries[index].url }); index += 1; apply(entries[index].url); },
+      replaceState(value, _title, url) { entries[index] = { state: value, url: url || entries[index].url }; apply(entries[index].url); },
+      go(delta) { const to = Math.max(0, Math.min(entries.length - 1, index + Number(delta || 0))); if (to !== index) { index = to; apply(entries[index].url); sandbox.setTimeout(pop, 0); } },
+      back() { this.go(-1); }
+    };
+    sandbox.history = sandbox.window.history;
+    let html = '';
+    // The builder asks the document whether its screen is drawn already (studioBuilderEntering).
+    sandbox.document.querySelector = selector => {
+      const m = /^\[data-testid="([^"]+)"\]$/.exec(selector);
+      return m && html.includes(`data-testid="${m[1]}"`) ? { getAttribute: () => null } : null;
+    };
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'src', 'manifest.json'), 'utf8'));
+    for (const file of manifest.lazy['studio.js']) run(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'));
+    run('Security').escapeHtml = plainEscape;
+    state.currentUser = { id: 'cust1', name: 'Customer One', role: 'Employee', permissions: { adCampaignRequests: ['viewOwn', 'add', 'editOwn', 'submitOwn', 'deleteOwn', 'stopOwn'] }, subscriptions: ['ad_maker'] };
+    state.users = [state.currentUser];
+    state.currentView = 'ads-studio';
+    state.adCampaignRequests = [];
+    state.walletTransactions = [];
+    state.serviceSubscriptions = [{ id: 'sub1', userId: 'cust1', serviceId: 'ad_maker', status: 'active', expiresAt: new Date(Date.now() + 20 * 86400000).toISOString() }];
+    state.serverMode = true;
+    sandbox.isServerModeEnabled = () => true;
+    run('hasSubscription = () => true');
+    sandbox.refreshAdsStudioLimits = () => {};
+    sandbox.render = () => {
+      html = state.currentView === 'ads-studio' ? String(run('renderAdsStudioView()')) : '';
+      run(`_lastRenderedView = ${JSON.stringify(state.currentView)}`);
+    };
+    sandbox.forceFullRender = sandbox.render;
+    const calls = [];
+    const replies = Object.create(null);
+    sandbox.apiJson = async (url, options = {}) => {
+      calls.push(`${String(options.method || 'GET')} ${url}`);
+      const reply = replies[url];
+      if (typeof reply === 'function') return reply(options);
+      if (reply !== undefined) return JSON.parse(JSON.stringify(reply));
+      throw Object.assign(new Error(`Unexpected call ${url}`), { status: 404 });
+    };
+    replies['/api/studio/wallet/summary'] = { usd: { availableMinor: 100000, reservedMinor: 0 }, pendingPayments: [] };
+    replies['/api/studio/campaigns/summary'] = {};
+    replies['/api/studio/ad-options'] = { goals: [], locations: [{ key: 'libya', labelEn: 'All of Libya', labelAr: 'كل ليبيا' }] };
+    replies['/api/studio/pages'] = { pages: [] };
+    // The builder's saves and its send, as the server answers them.
+    let saved = null;
+    sandbox.apiCreateEntity = async (_collection, data) => { saved = { ...data, status: 'Draft', createdBy: 'cust1', _lastModified: 1000 }; return { id: data.id, data: saved, lastModified: 1000 }; };
+    sandbox.apiPatchEntity = async (_collection, id, changes, base) => { saved = { ...saved, ...changes, _lastModified: base + 1 }; return { id, data: saved, lastModified: base + 1 }; };
+    sandbox.apiSubmitAdCampaignRequest = async (id, expected) => { saved = { ...saved, status: 'Submitted', totalBudgetMinorUSD: 5000, _lastModified: expected + 1 }; return { id, data: saved, lastModified: expected + 1 }; };
+    run('setupUrlRouting()');
+    if (me) {
+      replies['/api/studio/me'] = me;
+      run(`_studioMe.forUser = 'cust1'; _studioMe.value = studioCleanMe(${JSON.stringify(me)}); _studioMe.loadedAt = Date.now();`);
+    }
+    // Runs the timers due now (and those they start), letting the promises settle between rounds.
+    const flush = async () => {
+      for (let round = 0; round < 20; round++) {
+        for (let i = 0; i < 4; i++) await settle();
+        const due = timers.filter(timer => timer.ms <= 0);
+        if (!due.length) return;
+        timers = timers.filter(timer => timer.ms > 0);
+        due.forEach(timer => timer.fn());
+      }
+    };
+    const draw = () => { sandbox.render(); return html; };
+    const later = ms => run(`Date.now = (n => () => n + ${Number(ms)})(Date.now())`);
+    return { ...fixture, calls, replies, flush, draw, later, html: () => html, url: () => location.pathname + location.search };
+  }
+
+  await test('R5 studio-v2-second-pass-1: a failed or slow first /me never swaps the classic wizard, and the text and photo typed in it, for the new studio mid-task; an idle classic screen or an empty wizard still switches, and the next visit opens the new studio', async () => {
+    for (const how of ['failed', 'slow', 'idle', 'empty']) {
+      const f = studioRouterFixture(null);
+      const { sandbox, state, run } = f;
+      let release = null;
+      let answer = null;
+      if (how === 'slow') {
+        sandbox.window.localStorage.setItem('albayan.studio.v2.layout.cust1', 'customer');  // the last visit was the new studio
+        f.replies['/api/studio/me'] = () => new Promise(resolve => { release = resolve; });
+      } else {
+        f.replies['/api/studio/me'] = () => (answer ? Promise.resolve(answer) : Promise.reject(new TypeError('Failed to fetch')));
+      }
+      f.draw(); await f.flush(); f.draw();
+      if (how === 'slow') {
+        assert.ok(f.html().includes('data-testid="studio-v2-loading"'), 'a known new-studio customer waits for /me a moment');
+        f.later(3200);  // longer than the wait: the classic screens
+        f.draw();
+      }
+      assert.ok(!f.html().includes('studio-v2-frame') && !f.html().includes('studio-v2-loading'), `${how}: the classic screens`);
+      let draft = null;
+      if (how !== 'idle') {
+        run("setAdsStudioTab('builder')");  // Create Campaign (a ?tab=builder link opens the same empty draft)
+        if (how !== 'empty') run("adsStudioSetDraftField('primaryText', 'Our new menu, delivery all over Tripoli'); _adsStudioDraft.creativeImages = ['data:image/jpeg;base64,/9j/4AAQ'];");
+        draft = run('_adsStudioDraft');
+        assert.ok(f.draw().includes('id="ads-studio-wizard-step"'), 'the classic wizard');
+      }
+      // The line recovers and /me says the new studio: the slow read answers, a failed one is read again a minute later.
+      if (how === 'slow') { release(studioV2Me); f.replies['/api/studio/me'] = studioV2Me; } else { answer = studioV2Me; f.later(61000); f.draw(); }
+      await f.flush(); f.draw();
+      if (how === 'idle' || how === 'empty') {
+        // Nothing of the customer's is on screen (an idle classic screen, or a wizard with nothing typed in it):
+        // the new studio comes as soon as /me answers.
+        assert.ok(f.html().includes('data-testid="studio-v2-frame"'), `${how}: the new studio comes when /me answers`);
+        if (how === 'empty') assert.ok(f.html().includes('data-testid="studio-builder"'), 'on its own request builder');
+        continue;
+      }
+      assert.equal(run('_adsStudioDraft'), draft, `${how}: before, the new studio's builder replaced the classic draft`);
+      assert.equal(draft.primaryText, 'Our new menu, delivery all over Tripoli');
+      assert.equal(draft.creativeImages.length, 1);
+      assert.ok(f.html().includes('id="ads-studio-wizard-step"') && !f.html().includes('studio-v2-frame'), `${how}: before, the screen switched to the new studio under the customer`);
+      // The next /me read (every 5 minutes) changes nothing for this visit either.
+      f.later(6 * 60000); f.draw(); await f.flush(); f.draw();
+      assert.ok(f.html().includes('id="ads-studio-wizard-step"') && run('_adsStudioDraft') === draft, `${how}: the re-read kept the classic wizard`);
+      // Leaving the studio and coming back: the new studio (and the next page load starts there too).
+      state.currentView = 'customers'; f.draw();
+      state.currentView = 'ads-studio';
+      sandbox.window.history.replaceState({ view: 'ads-studio' }, '', '/ads-studio?tab=dashboard');
+      f.draw(); await f.flush();
+      assert.ok(f.draw().includes('data-testid="studio-v2-frame"'), `${how}: the next visit opens the new studio`);
+      assert.equal(sandbox.window.localStorage.getItem('albayan.studio.v2.layout.cust1'), 'customer');
+    }
+  });
+
+  await test('R5 studio-v2-second-pass-2: the builder reads the linked pages and their posts again (a page linked or a post published later shows up), keeps the list on screen meanwhile, and offers Refresh', async () => {
+    const f = studioRouterFixture();
+    const { run } = f;
+    const reads = url => f.calls.filter(call => call === `GET ${url}`).length;
+    const page = (id, name) => ({ id, name, hasFacebook: true, hasInstagram: false, healthy: true });
+    const post = (id, text) => ({ id, platform: 'fb', excerpt: text, imageUrl: '', permalink: `https://www.facebook.com/123/posts/${id.split('_')[1]}`, createdAt: '2026-09-28T10:00:00Z' });
+    const posts = list => ({ pageId: 'spg_1', posts: list, checkedAt: '2026-09-28T10:00:00Z', platforms: { fb: { state: 'ok' } } });
+    f.draw();
+    // (a) Nothing is linked yet: the page picker (a full request) and "Promote a post" say so, with Refresh.
+    run("studioHomeGoal('messages')"); await f.flush();
+    assert.equal(run('studioBuilderNext()'), true);
+    await f.flush();
+    assert.ok(f.draw().includes('No page is linked to your account yet. Write the page name'), f.html());
+    assert.ok(f.html().includes('data-testid="studio-builder-pages-refresh" onclick="studioBuilderRetryPages()"'), 'before: no Refresh in the page picker');
+    run("studioHomeGoal('promote')"); await f.flush();
+    assert.ok(f.draw().includes('No page is linked to your account yet, so paste the link'), f.html());
+    assert.ok(f.html().includes('data-testid="studio-builder-pages-refresh" onclick="studioBuilderRetryPages()"'), 'before: no Refresh under "No page is linked"');
+    // The team links the page; 6 minutes later a new request reads the pages again and lists the page's posts.
+    f.replies['/api/studio/pages'] = { pages: [page('spg_1', 'My Shop')] };
+    f.replies['/api/studio/pages/spg_1/recent-posts'] = posts([post('123_1', 'Old post')]);
+    run('studioBuilderDone()'); await f.flush();
+    f.later(6 * 60000);
+    run("studioHomeGoal('promote')"); await f.flush();
+    assert.equal(run('_studioBuilder.pages.list.length'), 1, 'before: the builder kept the empty list of its first read');
+    assert.ok(!f.draw().includes('No page is linked') && f.html().includes('data-testid="studio-builder-post-0"') && f.html().includes('Old post'), f.html());
+    assert.ok(f.html().includes('data-testid="studio-builder-posts-refresh" onclick="studioBuilderRetryPosts()"'), 'before: no Refresh under a loaded post list');
+    // (b) 11 minutes on, a new post and a second page: both lists are old and read again (the posts without
+    // ?refresh=1, so the server's own 10-minute cache decides), the old ones staying on screen meanwhile.
+    f.replies['/api/studio/pages'] = { pages: [page('spg_1', 'My Shop'), page('spg_2', 'Second Shop')] };
+    f.replies['/api/studio/pages/spg_1/recent-posts'] = posts([post('123_2', 'NEW Eid offer'), post('123_1', 'Old post')]);
+    const before = { pages: reads('/api/studio/pages'), posts: reads('/api/studio/pages/spg_1/recent-posts') };
+    f.later(11 * 60000);
+    const waiting = f.draw();
+    assert.ok(waiting.includes('Old post') && !waiting.includes('Loading your recent posts') && !waiting.includes('Loading your linked pages'), waiting);
+    await f.flush();
+    assert.equal(reads('/api/studio/pages') - before.pages, 1, 'before: the pages were never read again');
+    assert.equal(reads('/api/studio/pages/spg_1/recent-posts') - before.posts, 1, 'before: the posts were never read again');
+    assert.ok(f.draw().includes('NEW Eid offer') && f.html().includes('Second Shop'), 'before: the new post and the second page never appeared');
+    // A re-read the app cancels (it moved on, R3 studio-client-5) keeps the posts on screen while they are asked again.
+    let cancelled = false;
+    let second = null;
+    f.replies['/api/studio/pages/spg_1/recent-posts'] = () => {
+      if (cancelled) return new Promise(resolve => { second = resolve; });
+      cancelled = true;
+      f.sandbox.cancelPendingRequests();
+      return Promise.reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+    };
+    f.later(11 * 60000);
+    f.draw(); await f.flush();
+    assert.ok(cancelled && typeof second === 'function', 'the cancelled re-read is asked again');
+    assert.ok(f.draw().includes('NEW Eid offer') && !f.html().includes('Loading your recent posts'), 'a cancelled re-read blanked the post list');
+    second(posts([post('123_2', 'NEW Eid offer'), post('123_1', 'Old post')]));
+    await f.flush();
+    // (c) Refresh reads the pages at once; the picker keeps its list until the answer.
+    let release = null;
+    f.replies['/api/studio/pages'] = () => new Promise(resolve => { release = resolve; });
+    run('studioBuilderRetryPages()');
+    assert.equal(typeof release, 'function', 'Refresh reads the pages');
+    assert.ok(f.draw().includes('NEW Eid offer') && f.html().includes('Second Shop') && !f.html().includes('Loading your linked pages'), 'Refresh blanked the picker');
+    release({ pages: [page('spg_1', 'My Shop')] });
+    await f.flush();
+    assert.ok(!f.draw().includes('Second Shop') && f.html().includes('NEW Eid offer'), f.html());
+  });
+
+  await test('R5 studio-v2-second-pass-3: after "Send request" one Back (the header arrow and the phone\'s Back, or the browser\'s own) goes Home, never through the old steps showing "Sent for review" again', async () => {
+    for (const goal of ['messages', 'promote']) {
+      for (const how of ['app', 'browser']) {
+        const f = studioRouterFixture();
+        const { sandbox, run } = f;
+        const kind = goal === 'promote' ? 'boost' : 'full';
+        const steps = kind === 'boost' ? 3 : 6;
+        f.draw();
+        run(`studioHomeGoal('${goal}')`); await f.flush();
+        run("Object.assign(_studioBuilder.session.draft, { pageName: 'My shop', primaryText: 'Offer', creativeImages: ['data:image/png;base64,iVBORw0KGgo='], destination: 'https://example.com', sourcePostRef: 'https://www.facebook.com/123/posts/456', budgetMinorUSD: 5000 });");
+        for (let step = 1; step < steps; step++) {
+          assert.equal(run('studioBuilderNext()'), true, `${goal}: Next on step ${step}`);
+          await f.flush();
+        }
+        run('_studioBuilder.session.rights = true;');
+        assert.equal(await run('studioBuilderSend(null)'), true, `${goal}: sent`);
+        await f.flush();
+        assert.ok(f.draw().includes('data-testid="studio-builder-sent"'), 'Sent for review');
+        assert.equal(f.url(), `/ads-studio?tab=builder&section=${kind}&step=${steps}`);
+        if (how === 'app') assert.equal(run('studioHandleBack()'), true);  // the phone's Back; the header arrow is studioV2Back
+        else sandbox.window.history.go(-1);  // the browser's own Back: one entry
+        await f.flush();
+        assert.equal(f.url(), '/ads-studio?tab=home', `${goal}, ${how} Back: before, it showed "Sent for review" again on step ${steps - 1}`);
+        assert.ok(f.draw().includes('data-testid="studio-home"') && !f.html().includes('studio-builder-sent'), f.html());
+        assert.equal(run('studioHandleBack()'), false, 'on Home the app\'s own Back runs next');
+      }
+    }
   });
 
   // ---- r8 O: misc (retries across an account switch, per-user filters, a dead IndexedDB connection) ----
@@ -5393,6 +5641,466 @@ async function main() {
     assert.ok(details('d1').includes("assignDelivery('d1'"));
   });
 
+  // Bug hunt r5 (R5-i18n-arabic-sweep-2): drivers read the server's English delivery refusals, and
+  // Mark Delivered titled a rule refusal (an amount typed with extra zeros, a closed month) "Server error".
+  await test('R5 i18n-arabic-sweep-2: delivery refusals read Arabic with no English status names; Mark Delivered calls a 4xx "Not allowed" with its reason, never "Server error" or "HTTP n"', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    const latin = /[A-Za-z]/;
+    state.language = 'ar';
+    const toast = sandbox._serverRefusalToast('save', 'receipts', { status: 400, message: "Cannot change status from 'Canceled' - this is a terminal state" });
+    assert.ok(!latin.test(toast.join(' ')) && toast[1].includes('ملغي'), JSON.stringify(toast));
+    const already = sandbox.describe409({ status: 409, message: "Delivery is already 'Canceled'" }, '');
+    assert.ok(!latin.test(already) && already.includes('ملغي'), already);
+    for (const detail of [
+      "Cannot change delivery status from 'Delivered' - this is a terminal state",
+      'An accepted delivery job cannot move back to Needs Delivery; cancel it or delete the mission',
+      "Cannot change status from 'Delivered' to 'Needs Delivery' - a delivery job cannot be reopened or moved backwards",
+      'A finished delivery job keeps its driver',
+      'Assign an active delivery user',
+      'deliveryPersonId must be an active delivery user'
+    ]) {
+      const text = sandbox._serverRefusalText(detail);
+      assert.ok(text && !latin.test(text), `${detail} -> ${text}`);
+    }
+    // Mark Delivered: the server refuses, the job itself is unchanged (still this driver's, In Progress).
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.isServerModeEnabled = () => true;
+    state.serverMode = true;
+    const driver = { id: 'drv1', name: 'Ali', role: 'Delivery', permissions: { deliveries: ['viewOwn', 'accept', 'complete', 'markCollected'] } };
+    state.currentUser = driver; state.users = [driver];
+    const job = { id: 'r2', customerId: 'c1', status: 'Not Paid', isPaid: false, amountUSD: 50, amountLocal: 250, exchangeRate: 5,
+      tempReceiptNo: 'D12', receiptType: 'DELIVERY_TEMP', deliveryStatus: 'In Progress', deliveryPersonId: 'drv1',
+      statusDetail: { notPaidCollection: 'delivery' }, _lastModified: 1001 };
+    state.receipts = [job];
+    run("getPaymentTotalsFromDom = () => ({ totalR1: 25000, totalR2: 0 }); _readDeliveryFeeLyd = () => 10; _readDeliveryFeePaidBy = () => 'customer'; _readDeliveryPaymentRows = () => [{ method: 'Cash (LYD)', amount: 25000, rate: 1, rate2: 0 }];");
+    const field = value => ({ value, dataset: { imageData: 'data:image/jpeg;base64,/9j/AAAA' }, disabled: false, remove() {} });
+    const els = { 'delivery-final-receipt-no': field('88002'), 'delivery-receipt-image-data': field(''), 'delivery-driver-notes': field(''), 'delivery-fee-method': field('Cash (LYD)'), 'delivery-complete-submit': field('') };
+    sandbox.document.getElementById = id => els[id] || null;
+    sandbox.apiGetEntity = async () => ({ data: { ...job } });
+    const refuse = async (status, detail) => {
+      notes.length = 0;
+      sandbox.apiPatchEntity = async () => { throw Object.assign(new Error(detail), { status, payload: { detail } }); };
+      await sandbox.submitReceiptDeliveryCompletion('r2');
+      assert.equal(notes.length, 1, JSON.stringify(notes));
+      assert.equal(els['delivery-complete-submit'].disabled, false, 'the driver can fix the amount and tap again');
+      return notes[0];
+    };
+    let note = await refuse(400, 'Collected amount far exceeds the delivery debt; office confirmation required');
+    assert.equal(note.title, 'غير مسموح', 'before: "Server error"');
+    assert.ok(note.message.includes('أصفار زائدة') && !latin.test(note.message), note.message);
+    note = await refuse(423, 'Financial period 2026-09 is closed. An Admin must unlock it before editing.');
+    assert.equal(note.title, 'غير مسموح');
+    assert.equal(note.message, 'فشل حفظ التوصيل: ' + sandbox._serverRefusalText('Financial period 2026-09 is closed. An Admin must unlock it before editing.'));
+    assert.ok(note.message.includes('مُقفل') && !note.message.includes('HTTP'), note.message);
+    // A real server failure keeps its title and status.
+    note = await refuse(500, 'Internal Server Error');
+    assert.deepEqual([note.title, note.message], ['خطأ في الخادم', 'فشل حفظ التوصيل: HTTP 500 - Internal Server Error']);
+    // English: the same rule, with the hint in English.
+    state.language = 'en';
+    note = await refuse(400, 'Collected amount far exceeds the delivery debt; office confirmation required');
+    assert.deepEqual([note.title, note.message], ['Not Allowed', 'Failed to save delivery: The collected amount is far above the delivery debt. Check the amount (extra zeros?) or ask the office to confirm.']);
+    assert.equal(sandbox._serverRefusalText("Delivery is already 'Canceled'"), "Delivery is already 'Canceled'", 'English keeps the server sentence');
+  });
+
+  // Bug hunt r5 (R5-i18n-arabic-sweep-3): the Meta panel on every Meta-linked ad showed raw Meta status
+  // codes and the server's English sync sentences, and its Meta change-history dialog was English.
+  await test('R5 i18n-arabic-sweep-3: in Arabic the Meta panel, its history and the Meta Sync rows name Meta statuses and sync problems in Arabic; the tooltip keeps the server sentence; English is unchanged', async () => {
+    const { sandbox, state, run } = metaToolsFixture();
+    run('Security').escapeHtml = plainEscape;
+    const visible = html => String(html).replace(/<[^>]*>/g, ' ');
+    sandbox.isServerModeEnabled = () => true;
+    state.serverMode = true;
+    const metaAd = (id, status, error, code) => ({ id, customerId: 'c1', status: 'Active', paymentStatus: 'paid', isPaid: true, amountUSD: 50, exchangeRate: 5, amountLocal: 250,
+      createdAt: '2026-09-25', metaAdId: `1202100000${id.slice(-1)}`, metaAdName: 'Summer sale', metaAdAccountName: 'Shop account', metaAdAccountId: '1234567890',
+      metaCurrency: 'USD', metaEffectiveStatus: status, metaSyncedAt: '2026-09-26T10:00:00Z', metaSyncError: error, metaSyncErrorCode: code,
+      metaChangeHistory: [
+        { editedAt: '2026-09-26T10:00:00Z', editedBy: 'Meta automatic sync', source: 'snapshot',
+          changes: [{ field: 'Meta live status', from: 'ACTIVE', to: 'CAMPAIGN_PAUSED' }, { field: 'Meta daily budget', from: '5.00 USD', to: '7.00 USD' }] },
+        { editedAt: '2026-09-27T10:00:00Z', editedBy: 'Meta automatic import', source: 'meta_import', eventType: 'create_ad',
+          changes: [{ field: 'Meta ad imported', from: 'Not in Albayan', to: 'Needs completion' }] }] });
+    state.ads = [
+      metaAd('m1', 'CAMPAIGN_PAUSED', 'Meta did not answer in time. Albayan will retry.', 'timeout'),
+      metaAd('m2', 'WITH_ISSUES', 'Meta authorization failed. Reconnect the access token.', 'authorization:190'),
+      metaAd('m3', 'PENDING_REVIEW', 'Meta could not return the requested ad information.', 'request_failed:100'),
+      metaAd('m4', 'ACTIVE', 'Meta is temporarily limiting synchronization. Albayan will retry.', 'rate_limited:17')
+    ];
+    state.language = 'ar';
+    let html = String(sandbox.renderAdsView());
+    for (const english of ['CAMPAIGN_PAUSED', 'WITH_ISSUES', 'PENDING_REVIEW', '[timeout]', 'Meta did not answer', 'Meta authorization failed', 'authorization:190', 'temporarily limiting']) {
+      assert.ok(!visible(html).includes(english), `before: the Arabic Ads list shows "${english}"`);
+    }
+    for (const arabic of ['الحملة متوقفة', 'به مشكلات', 'قيد المراجعة', 'تعذر الوصول إلى Meta الآن؛ سيعيد البيان المحاولة.', 'رفض Meta الإذن؛ أعد ربط رمز الوصول.', 'تعذرت مزامنة Meta لهذا الإعلان.']) {
+      assert.ok(html.includes(arabic), arabic);
+    }
+    assert.ok(html.includes('title="Meta did not answer in time. Albayan will retry. [timeout]"'), 'the tooltip keeps the server sentence and its code');
+    assert.ok(/bg-amber-100[^"]*">الحملة متوقفة</.test(html) && /bg-rose-100[^"]*">به مشكلات</.test(html), 'the tone stays keyed on the raw code');
+    // The history dialog: the server's field names, Meta statuses, actors and event type.
+    let dialog = '';
+    sandbox.document.body.insertAdjacentHTML = (_, markup) => { dialog = markup; };
+    sandbox.showMetaAdHistory('m1');
+    for (const english of ['Meta live status', 'CAMPAIGN_PAUSED', 'ACTIVE', 'Meta daily budget', 'Meta automatic sync', 'Meta automatic import', 'Not in Albayan', 'Needs completion', 'create ad']) {
+      assert.ok(!visible(dialog).includes(english), `before: the Arabic Meta history shows "${english}"`);
+    }
+    for (const arabic of ['حالة Meta الفعلية', 'نشط', 'الحملة متوقفة', 'ميزانية Meta اليومية', 'مزامنة Meta التلقائية', 'استيراد Meta التلقائي', 'غير موجود في البيان', 'إنشاء إعلان']) {
+      assert.ok(dialog.includes(arabic), arabic);
+    }
+    assert.ok(dialog.includes('5.00 USD') && dialog.includes('Summer sale'), "Meta's own values and names stay as stored");
+    // The Meta Sync dialog's ad rows (lazy meta-tools.js).
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    run("metaAdsUi.open = true; metaAdsUi.loading = false; metaAdsUi.loadingAds = false; metaAdsUi.status = { configured: true }; metaAdsUi.targetAdId = 'm1';"
+      + " metaAdsUi.accounts = []; metaAdsUi.selectedAccountId = '1234567890'; metaAdsUi.ads = [{ id: '120210000099', name: 'Winter', effectiveStatus: 'DISAPPROVED' }];");
+    sandbox.metaAdsRenderModal();
+    const rows = String(made.find(el => el.id === 'meta-ads-modal')?.innerHTML || '');
+    assert.ok(rows.includes('مرفوض') && !visible(rows).includes('DISAPPROVED'), 'before: the Meta Sync row shows DISAPPROVED');
+    // English stays exactly as it was.
+    state.language = 'en';
+    html = String(sandbox.renderAdsView());
+    assert.ok(visible(html).includes('CAMPAIGN_PAUSED') && html.includes('Meta did not answer in time. Albayan will retry. <span class="font-mono opacity-70">[timeout]</span>'));
+    assert.ok(!visible(html).includes('temporarily limiting'), 'a shared Meta throttle stays hidden on the row');
+    sandbox.showMetaAdHistory('m1');
+    assert.ok(visible(dialog).includes('Meta live status') && visible(dialog).includes('CAMPAIGN_PAUSED') && visible(dialog).includes('Meta automatic sync') && visible(dialog).includes('create ad'));
+  });
+
+  // ---- Bug hunt R5 (saves-errors): a second Save while sending, one id per open new form, refusals and dropped connections, ad dates ----
+  const r5Ids = sandbox => { let n = 0; sandbox.crypto.getRandomValues = arr => { for (let i = 0; i < arr.length; i += 1) arr[i] = (n++ * 37 + i) & 255; return arr; }; };
+  await test('R5 error-paths-offline-1: a second, different Save of an ad (or of its stop) while the first is still sending is refused, never reported as saved', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    r5Ids(sandbox);
+    state.serverMode = true;
+    sandbox.isServerModeEnabled = () => true;
+    const calls = [];
+    const pending = [];
+    sandbox.apiMutateAd = payload => {
+      calls.push(JSON.parse(JSON.stringify(payload)));
+      return new Promise(resolve => pending.push(() => {
+        const version = Date.now();
+        resolve({ ad: { id: payload.adId, data: { ...payload.data, id: payload.adId, _lastModified: version }, lastModified: version }, updatedReceipts: [] });
+      }));
+    };
+    const outcome = promise => promise.then(() => 'saved', error => error.code || error.message);
+    // Edit Ad: changed values while the first update is sending.
+    const first = sandbox.saveAdThroughAtomicServer('update', 'ad1', 5, { customerId: 'c1', adLinks: ['https://fb.example/a'] });
+    const second = outcome(sandbox.saveAdThroughAtomicServer('update', 'ad1', 5, { customerId: 'c1', adLinks: ['https://fb.example/b'] }));
+    pending.shift()();
+    await first;
+    assert.equal(await second, 'AD_SAVE_BUSY', 'before: the second Save got the first one\'s answer, so it was reported as saved');
+    assert.equal(calls.length, 1);
+    // New Ad: a different ad saved after cancelling a slow one is refused, and its form is not pinned to the first ad.
+    const formA = { dataset: {} };
+    const formB = { dataset: {} };
+    const created = sandbox.saveAdThroughAtomicServer('create', '', null, { customerId: 'c1', adLinks: ['https://fb.example/a'] }, formA);
+    const other = outcome(sandbox.saveAdThroughAtomicServer('create', '', null, { customerId: 'c2', adLinks: ['https://fb.example/c'] }, formB));
+    pending.shift()();
+    await created;
+    assert.equal(await other, 'AD_SAVE_BUSY');
+    assert.equal(formB.dataset.draftAdId, undefined, 'before: the second New Ad form took the first ad\'s id');
+    assert.equal(calls.length, 2);
+    // The same Save pressed twice still shares one request.
+    const once = sandbox.saveAdThroughAtomicServer('update', 'ad2', 5, { adLinks: ['https://fb.example/d'] });
+    const twice = sandbox.saveAdThroughAtomicServer('update', 'ad2', 5, { adLinks: ['https://fb.example/d'] });
+    pending.shift()();
+    assert.deepEqual([(await once).id, (await twice).id], ['ad2', 'ad2']);
+    assert.equal(calls.length, 3);
+    // Stop: a changed spend while the first stop is sending.
+    const stopAd = { id: 'ad_stop', _lastModified: 7 };
+    const stop = sandbox.getAdStopAttempt(stopAd, 1250, false);
+    stop.promise = new Promise(() => {});
+    assert.equal(sandbox.getAdStopAttempt(stopAd, 1250, false), stop, 'the same stop still shares its request');
+    assert.throws(() => sandbox.getAdStopAttempt(stopAd, 1300, false), error => error.code === 'AD_STOP_BUSY' && /still being sent/.test(error.message),
+      'before: the changed spend was handed the first stop\'s answer');
+    // Top-ups pressed again with a changed amount while the first save is sending.
+    state.receipts = [{ id: 'r1', customerId: 'c1', status: 'Paid', isPaid: true, amountUSD: 200, amountLocal: 1000, exchangeRate: 5, payments: [], transfers: [], _lastModified: 1 }];
+    const topAd = { id: 'adT', customerId: 'c1', status: 'Active', paymentStatus: 'paid', isPaid: true, exchangeRate: 5, amountUSD: 50, amountLocal: 250,
+      initialAmountUSD: 50, topUps: [], receiptAllocations: [{ receiptId: 'r1', amountUSD: 50 }], _lastModified: 100 };
+    state.ads = [topAd];
+    state.modalData = topAd;
+    state.activeModal = 'top-ups';
+    const notes = [];
+    let closes = 0;
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.closeModal = () => { closes += 1; };
+    const button = { disabled: false, attrs: {}, setAttribute(key, value) { this.attrs[key] = value; }, removeAttribute(key) { delete this.attrs[key]; } };
+    sandbox.document.querySelector = selector => (selector === 'button[onclick="saveTopUps()"]' || selector === 'button[onclick="saveRefund()"]' ? button : null);
+    run("tempTopUps = [{ date: '2026-09-01T00:00:00.000Z', amount: 10, extendDays: 0, note: 'A' }]");
+    const firstTopUp = sandbox.saveTopUps();
+    run("tempTopUps = [{ date: '2026-09-01T00:00:00.000Z', amount: 30, extendDays: 0, note: 'B' }]");
+    const secondTopUp = sandbox.saveTopUps();
+    await settle();
+    const busyWhileSending = [button.disabled, button.attrs['aria-busy']];  // the refused re-tap leaves it busy
+    pending.shift()();
+    await Promise.all([firstTopUp, secondTopUp]);
+    const saved = notes.filter(note => note.type === 'success');
+    assert.equal(saved.length, 1, `before: the changed second tap was reported as saved: ${JSON.stringify(notes)}`);
+    assert.ok(saved[0].message.includes('$60.00'), saved[0].message);
+    assert.equal(closes, 1);
+    assert.equal(calls.length, 4, 'the changed top-up never went out');
+    assert.ok(notes.some(note => note.title === 'Top-ups Not Saved' && /still being sent/.test(note.message)), JSON.stringify(notes));
+    assert.deepEqual(busyWhileSending, [true, 'true'], 'the Save button stays busy while the first save is sending');
+    assert.equal(button.disabled, false);
+    assert.ok(!('aria-busy' in button.attrs));
+    // Refund: the same rule.
+    const refundAd = { ...topAd, id: 'adR', _lastModified: 200 };
+    state.ads.push(refundAd);
+    state.modalData = refundAd;
+    state.activeModal = 'refund';
+    const inputs = { 'refund-type': 'Partial', 'refund-amount': '10', 'refund-status': 'Pending' };
+    sandbox.document.getElementById = id => (id in inputs ? { value: inputs[id] } : null);
+    notes.length = 0;
+    closes = 0;
+    const firstRefund = sandbox.saveRefund();
+    inputs['refund-amount'] = '20';
+    const secondRefund = sandbox.saveRefund();
+    await settle();
+    const refundBusy = [button.disabled, button.attrs['aria-busy']];
+    pending.shift()();
+    await Promise.all([firstRefund, secondRefund]);
+    assert.equal(notes.filter(note => note.title === 'Saved').length, 1, `before: both refunds were reported as applied: ${JSON.stringify(notes)}`);
+    assert.equal(closes, 1);
+    assert.equal(calls.length, 5);
+    assert.ok(notes.some(note => note.title === 'Refund Not Saved' && /still being sent/.test(note.message)), JSON.stringify(notes));
+    assert.deepEqual(refundBusy, [true, 'true'], 'a refused re-tap must not free the Save button while the first refund is sending');
+    assert.equal(button.disabled, false);
+  });
+  await test('R5 error-paths-offline-2: a re-press after a lost answer meets its own committed row: one page, customer, product, shipment and order, and one stock take', async () => {
+    for (const lost of ['Load failed', 'timeout']) {
+      const { sandbox, state, run, notes } = clothesFixture();
+      r5Ids(sandbox);
+      sandbox.URLSearchParams = URLSearchParams;
+      state.serverMode = true;
+      sandbox.isServerModeEnabled = () => true;
+      sandbox.console = { ...sandbox.console, error() {}, warn() {} };
+      const loseAnswer = () => (lost === 'timeout' ? Object.assign(new DOMException('The request timed out', 'AbortError'), { noRetry: true }) : new TypeError('Load failed'));
+      // The server: a create commits, then its answer is lost once; a known id answers 409. Copies come back with their keys reordered (iPhone).
+      const rows = new Map();
+      const reorder = value => (Array.isArray(value) ? value.map(reorder) : (value && typeof value === 'object'
+        ? Object.fromEntries(Object.keys(value).reverse().map(key => [key, reorder(value[key])])) : value));
+      let dropNext = true;
+      sandbox.apiCreateEntity = async (collection, record) => {
+        const key = `${collection}/${record.id}`;
+        if (rows.has(key)) throw Object.assign(new Error('ID already exists'), { status: 409 });
+        rows.set(key, JSON.parse(JSON.stringify(record)));
+        if (dropNext) { dropNext = false; throw loseAnswer(); }
+        return { id: record.id, data: record };
+      };
+      sandbox.apiGetEntity = async (collection, id) => ({ id, data: reorder(rows.get(`${collection}/${id}`)) });
+      const count = collection => [...rows.keys()].filter(key => key.startsWith(`${collection}/`)).length;
+      // A new page, Save pressed twice.
+      let form = { id: 'modal-form', dataset: {} };
+      const fields = { 'page-name': 'Albayan Shop', 'page-category': 'Shop' };
+      sandbox.document.getElementById = id => (id === 'modal-form' ? (state.activeModal ? form : null) : (id in fields ? { value: fields[id] } : null));
+      sandbox.document.querySelectorAll = selector => (selector === '.page-customer-item' ? [{ getAttribute: () => 'c1' }] : []);
+      state.activeModal = 'page';
+      state.modalData = null;
+      await sandbox.handleModalSubmit();
+      assert.equal(state.activeModal, 'page', 'the form stays open after the lost answer');
+      await sandbox.handleModalSubmit();
+      assert.equal(count('pages'), 1, `before: a second page was created (${lost})`);
+      assert.deepEqual(state.pages.map(page => page.name), ['Albayan Shop']);
+      assert.equal(state.activeModal, null, 'the second press found its own first Save and closed the form');
+      // The first press said the save may have gone through (R5 error-paths-offline-4).
+      assert.ok(notes.some(note => note.title === 'Connection problem' && /may have gone through/.test(note.message) && !/Load failed|nothing was saved/i.test(note.message)), JSON.stringify(notes));
+      // A fresh form gets a fresh id.
+      form = { id: 'modal-form', dataset: {} };
+      fields['page-name'] = 'Second Page';
+      state.activeModal = 'page';
+      await sandbox.handleModalSubmit();
+      assert.equal(count('pages'), 2);
+      // A new customer, Save pressed twice.
+      form = { id: 'modal-form', dataset: {} };
+      const customerFields = { 'customer-name': 'Huda', 'customer-platform': 'Phone', 'customer-joindate': '2026-09-30' };
+      sandbox.document.getElementById = id => (id === 'modal-form' ? (state.activeModal ? form : null) : (id in customerFields ? { value: customerFields[id] } : null));
+      sandbox.document.querySelectorAll = selector => (selector === '.customer-phone' ? [{ value: '0912345678' }] : []);
+      state.activeModal = 'customer';
+      dropNext = true;
+      await sandbox.handleModalSubmit();
+      assert.equal(state.activeModal, 'customer');
+      await sandbox.handleModalSubmit();
+      assert.equal(count('customers'), 1, `before: a second customer was created (${lost})`);
+      assert.equal(state.activeModal, null);
+      // A Clothes product with two variants (the stored copy has its keys in another order).
+      const productFields = { 'clothes-product-name': 'Shirt', 'clothes-product-cost': '5', 'clothes-product-price': '50' };
+      sandbox.document.getElementById = id => (id in productFields ? { value: productFields[id] } : null);
+      run("_clothesDraftId = ''; _clothesTempVariants = [{ color: 'Red', size: 'M', qty: 2 }, { color: 'Blue', size: 'L', qty: 1 }]; _clothesTempPhoto = null;");
+      dropNext = true;
+      assert.equal(await sandbox.saveClothesProductFromModal(), false);
+      assert.equal(await sandbox.saveClothesProductFromModal(), true, `before: a second product, or its reordered copy was refused (${lost})`);
+      assert.equal(count('clothesProducts'), 1);
+      assert.equal(state.clothesProducts.length, 1);
+      // A Clothes shipment.
+      const shipmentFields = { 'clothes-shipment-ref': 'SH-1', 'clothes-shipment-date': '2026-09-30' };
+      sandbox.document.getElementById = id => (id in shipmentFields ? { value: shipmentFields[id] } : null);
+      run(`_clothesDraftId = ''; _clothesTempShipLines = [{ productId: '${state.clothesProducts[0].id}', color: 'Red', size: 'M', qty: 4, unitCostUSD: '3' }];`);
+      dropNext = true;
+      assert.equal(await sandbox.saveClothesShipmentFromModal(), false);
+      assert.equal(await sandbox.saveClothesShipmentFromModal(), true);
+      assert.equal(count('clothesShipments'), 1, `before: a second shipment (${lost})`);
+      // A Clothes order: the phone is fixed before Save is pressed again; the stock is taken once.
+      state.clothesProducts.push({ id: 'p1', name: 'Dress', costUSD: 5, priceLYD: 20, variants: [{ color: 'Red', size: 'M', qty: 5 }], createdBy: 'admin' });
+      const orderFields = { 'clothes-order-customer': 'Sara', 'clothes-order-phone': '0911111111', 'clothes-order-fee': '0', 'clothes-order-paystatus': 'Not Paid', 'clothes-order-paid': '0' };
+      sandbox.document.getElementById = id => (id in orderFields ? { value: orderFields[id] } : null);
+      const orderLines = "_clothesTempOrderLines = [{ productId: 'p1', color: 'Red', size: 'M', qty: 2, priceLYD: 20 }];";
+      run(`_clothesDraftId = ''; ${orderLines}`);
+      const orders = new Map();
+      const replies = new Map();
+      const sentOrders = [];
+      let stockTakes = 0;
+      dropNext = true;
+      sandbox.applyClothesOrderMutationResponse = response => response.order.data;
+      sandbox.apiMutateClothesOrder = async request => {
+        sentOrders.push(JSON.parse(JSON.stringify(request)));
+        if (replies.has(request.idempotencyKey)) return replies.get(request.idempotencyKey);
+        if (orders.has(request.orderId)) throw Object.assign(new Error('Order ID already exists'), { status: 409 });
+        orders.set(request.orderId, request.data);
+        stockTakes += 1;
+        const reply = { order: { id: request.orderId, data: { ...request.data, id: request.orderId }, lastModified: Date.now() }, updatedProducts: [] };
+        replies.set(request.idempotencyKey, reply);
+        if (dropNext) { dropNext = false; throw loseAnswer(); }
+        return reply;
+      };
+      notes.length = 0;
+      assert.equal(await sandbox.saveClothesOrderFromModal(), false);
+      const firstPressNotes = notes.splice(0);
+      orderFields['clothes-order-phone'] = '0922222222';
+      assert.equal(await sandbox.saveClothesOrderFromModal(), false);
+      assert.equal(sentOrders.length, 2);
+      assert.equal(sentOrders[1].orderId, sentOrders[0].orderId, `before: a new order id, so the stock was taken twice (${lost})`);
+      assert.notEqual(sentOrders[1].idempotencyKey, sentOrders[0].idempotencyKey);
+      assert.equal(stockTakes, 1);
+      assert.ok(notes.some(note => note.message.includes('already saved by your first Save')), JSON.stringify(notes));
+      assert.ok(firstPressNotes.some(note => note.title === 'Connection problem' && !/Load failed/.test(note.message)), JSON.stringify(firstPressNotes));
+      // Closing the form: the next new order is a new order.
+      sandbox.closeModal();
+      run(orderLines);
+      orderFields['clothes-order-customer'] = 'Mona';
+      assert.equal(await sandbox.saveClothesOrderFromModal(), true);
+      assert.notEqual(sentOrders[2].orderId, sentOrders[0].orderId);
+      assert.equal(stockTakes, 2);
+    }
+  });
+  await test('R5 error-paths-offline-4: refusals and dropped connections read in Arabic with the real reason, never "Server Error", an internal id or "Load failed"', async () => {
+    const { sandbox, state, run } = loadBrowserSource();
+    run('Security.escapeHtml = s => String(s ?? "")');
+    state.language = 'ar';
+    state.serverMode = true;
+    sandbox.isServerModeEnabled = () => true;
+    sandbox.console = { ...sandbox.console, error() {} };
+    const notes = [];
+    sandbox.showNotification = (title, message, type) => notes.push({ title, message, type });
+    sandbox.addAuditLog = () => {};
+    // A receipt delete in a closed month (the batch delete path).
+    state.receipts = [{ id: 'receipt_123', recordType: 'receipt', customerId: 'c1', amountUSD: 10, amountLocal: 50, exchangeRate: 5, status: 'Paid', isPaid: true,
+      serialNumber: '7001', payments: [], transfers: [], createdBy: 'admin', _lastModified: 3 }];
+    sandbox.apiBatchDeleteEntities = async () => { throw Object.assign(new Error('Financial period 2026-09 is closed. An Admin must unlock it before editing.'), { status: 423 }); };
+    await sandbox.deleteReceipt('receipt_123');
+    let note = notes[notes.length - 1];
+    assert.equal(note.title, 'غير مسموح', `before: "Server Error" with the English sentence: ${JSON.stringify(notes)}`);
+    assert.ok(note.message.includes('مُقفل') && note.message.includes('تم التراجع عن الحذف بالكامل') && !/Financial period|Server/.test(note.message), note.message);
+    assert.ok(!state.receipts[0]._deleted, 'the refused delete rolled back');
+    // The batch wording carries the receipt's internal id: it never reaches the toast.
+    sandbox.apiBatchDeleteEntities = async () => { throw Object.assign(new Error('Receipt receipt_123 cannot be deleted while linked to ad funding'), { status: 409 }); };
+    await sandbox.deleteReceipt('receipt_123');
+    note = notes[notes.length - 1];
+    assert.ok(!note.message.includes('receipt_') && !/[A-Za-z]{3,}/.test(note.message), note.message);
+    state.language = 'en';
+    assert.equal(sandbox._serverRefusalText('Receipt cannot be deleted while linked to outgoing transfer'),
+      'This receipt is linked to ad funding or a transfer, so it cannot be deleted. Release those links first.');
+    state.language = 'ar';
+    // An expired session says so.
+    sandbox.apiBatchDeleteEntities = async () => { throw Object.assign(new Error('Not authenticated'), { status: 401 }); };
+    await sandbox.deleteReceipt('receipt_123');
+    assert.equal(notes[notes.length - 1].title, 'انتهت الجلسة');
+    // A dropped connection: "may have gone through", never "Load failed", "Server Error" or "nothing was saved".
+    const lost = sandbox._serverRefusalToast('save', 'receipts', new TypeError('Load failed'));
+    assert.equal(lost[0], 'مشكلة في الاتصال', `before: ${lost.join(' | ')}`);
+    assert.ok(!/Load failed|خطأ في الخادم|لم يتم الحفظ/.test(lost.join(' ')) && lost[1].includes('ما أدخلته ما زال في النموذج'), lost.join(' | '));
+    // An app refusal raised while the phone is offline is no lost answer: it keeps its own words.
+    sandbox.navigator.onLine = false;
+    const busy = sandbox._serverRefusalToast('save', 'ads', sandbox.adSaveBusyError('AD_SAVE_BUSY'));
+    assert.ok(busy[1].includes('ما زال قيد الإرسال') && busy[0] !== 'مشكلة في الاتصال', busy.join(' | '));
+    assert.equal(sandbox._serverRefusalToast('save', 'receipts', new TypeError('Load failed'))[0], 'مشكلة في الاتصال');
+    sandbox.navigator.onLine = true;
+    const lostDelete = sandbox._serverRefusalToast('delete', 'customers', Object.assign(new DOMException('The request timed out', 'AbortError'), { noRetry: true }));
+    assert.equal(lostDelete[0], 'مشكلة في الاتصال');
+    assert.ok(lostDelete[1].includes('تأكيد الحذف') && !lostDelete[1].includes('النموذج'), lostDelete[1]);
+    // The shared form submit handler (any form whose save throws): the same connection text.
+    let submit = null;
+    const form = { id: 'modal-form', dataset: {}, addEventListener: (type, handler) => { if (type === 'submit') submit = handler; } };
+    sandbox.document.getElementById = id => (id === 'modal-form' ? form : null);
+    state.activeModal = 'customer';
+    state.modalData = null;
+    sandbox.renderModal();
+    assert.equal(typeof submit, 'function');
+    sandbox.handleModalSubmit = async () => { throw new TypeError('Load failed'); };
+    notes.length = 0;
+    await submit({ preventDefault() {}, submitter: null });
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].title, 'مشكلة في الاتصال', `before: "Error" / "Load failed": ${JSON.stringify(notes)}`);
+    assert.ok(!notes[0].message.includes('Load failed'), notes[0].message);
+    // Customer form: a phone the server would refuse is refused here, in Arabic, before anything is sent.
+    const fixture = loadBrowserSource();
+    const f = fixture.sandbox;
+    f.URLSearchParams = URLSearchParams;
+    fixture.state.language = 'ar';
+    let added = 0;
+    f.addRecord = async () => { added += 1; return true; };
+    const formNotes = [];
+    f.showNotification = (title, message) => formNotes.push({ title, message });
+    const customerFields = { 'customer-name': 'Ali', 'customer-platform': 'Phone', 'customer-joindate': '' };
+    let typedPhone = '0';
+    f.document.getElementById = id => (id in customerFields ? { value: customerFields[id] } : null);
+    f.document.querySelectorAll = selector => (selector === '.customer-phone' ? [{ value: typedPhone }] : []);
+    fixture.state.activeModal = 'customer';
+    fixture.state.modalData = null;
+    await f.handleModalSubmit();
+    assert.equal(added, 0, 'before: "0" was sent and the server\'s English refusal came back');
+    assert.ok(formNotes.some(n => n.title === 'خطأ في الإدخال' && n.message === 'رقم هاتف صحيح واحد على الأقل مطلوب (من 7 إلى 15 رقماً).'), JSON.stringify(formNotes));
+    typedPhone = '091 234 5678';
+    fixture.state.activeModal = 'customer';
+    await f.handleModalSubmit();
+    assert.equal(added, 1, 'a real number still saves');
+    // The platform "Phone" reads "هاتف" on the customer card and in the form; the stored value stays "Phone".
+    state.customers = [{ id: 'c9', name: 'Huda', platform: 'Phone', phones: ['0912345678'], createdBy: 'admin', _lastModified: 1 }];
+    sandbox.document.getElementById = () => null;
+    const view = String(sandbox.renderCustomersView());
+    assert.ok(view.includes('rounded-full">هاتف</span>') && !view.includes('>Phone<'), 'before: the card said "Phone"');
+    const row = String(sandbox.shellCustomerRow(state.customers[0], null, '', { canSeeContacts: false, canSeeBalance: false }));
+    assert.ok(row.includes('هاتف') && !row.includes('Phone'), 'the summary row (no contacts or balance access) names the platform in Arabic');
+    const made = [];
+    const makeElement = sandbox.document.createElement;
+    sandbox.document.createElement = tag => { const el = makeElement(tag); made.push(el); return el; };
+    state.activeModal = 'customer';
+    state.modalData = state.customers[0];
+    sandbox.renderModal();
+    const markup = made.map(el => String(el.innerHTML || '')).join('\n');
+    assert.ok(markup.includes('<option value="Phone" selected>هاتف</option>') && markup.includes('<option value="Facebook" >Facebook</option>'), 'the option value stays "Phone"');
+  });
+  await test('R5 dates-timezones-1: after a top-up, saving an unchanged ad writes no fake Start/End Date change into its history', async () => {
+    const savedTZ = process.env.TZ;
+    process.env.TZ = 'Africa/Tripoli';
+    try {
+      // The server stores a top-up's end date with whole seconds; a Meta ad starts at a real UTC time (00:30 Tripoli).
+      const ad = () => ({ ...r34AdV1(), adLinks: ['https://fb.example/new'], adLink: 'https://fb.example/new',
+        startDate: '2026-09-30T22:30:00Z', endDate: '2026-10-07T00:00:00Z', days: 6, editCount: 0 });
+      const t = r34AdForm(ad());
+      Object.assign(t.fields, { 'ad-start-date': '2026-10-01', 'ad-end-date': '2026-10-07', 'ad-days': '6' });
+      await t.sandbox.handleModalSubmit();
+      assert.equal(t.sent.length, 1, JSON.stringify(t.notes));
+      const rows = sent => (sent.data.editHistory || []).flatMap(entry => entry.changes || []).map(change => change.field);
+      assert.deepEqual(rows(t.sent[0]), [], 'before: "End Date 07/10/2026 -> 07/10/2026" and a Start Date row nobody made');
+      assert.equal(t.sent[0].data.editCount, 0);
+      // A real change of the end date is still recorded, once.
+      const real = r34AdForm(ad());
+      Object.assign(real.fields, { 'ad-start-date': '2026-10-01', 'ad-end-date': '2026-10-09', 'ad-days': '8' });
+      await real.sandbox.handleModalSubmit();
+      assert.deepEqual(rows(real.sent[0]), ['End Date']);
+      assert.equal(real.sent[0].data.editCount, 1);
+    } finally {
+      if (savedTZ === undefined) delete process.env.TZ; else process.env.TZ = savedTZ;
+    }
+  });
   console.log(`\n${passed} review behavior regressions passed.`);
 }
 

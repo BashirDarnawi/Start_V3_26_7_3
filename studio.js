@@ -6162,7 +6162,7 @@ function studioParsePhone(raw) {
 //             wallet (the classic Overview with the payment confirmations); a "Team desk" header
 //             button opens the classic review;
 //   Team desk: tab=review&section=requests|launch|settle|tickets|health|more.
-// Back (PLAN.md §5.1): builder step N -> N-1; a detail (&id=) -> its list; any other tab -> Home
+// Back (PLAN.md §5.1): builder step N -> N-1 (Home once the request is sent); a detail (&id=) -> its list; any other tab -> Home
 // (the desk: its Requests); Home -> leaves the studio: back to the app's screen it was opened from,
 // else to the studio's way out (adsStudioBackTarget), else no button. The browser history mirrors
 // that chain: every studio entry carries history.state.studioV2.chain (the keys from Home to itself).
@@ -6426,9 +6426,28 @@ function studioV2OnMe(me) {
     if (me) _studioV2.layout = null;
   }
   if (!_studioV2.shown) return;
+  // A first answer that comes late (it failed, or took longer than the wait) while the classic wizard
+  // holds the customer's work: classic is pinned for this visit, so the typed text and photos stay on
+  // screen; the new layout comes at the next entry (studioV2NoteVisit).
+  const pin = _studioV2.layout;
+  if (me && _studioV2.shown === 'classic' && !(pin && pin.uid === uid && pin.session === studioMeSession()) && studioV2ClassicWizardBusy()) {
+    _studioV2.layout = Object.freeze({ uid, session: studioMeSession(), ui: 'classic', staffDesk: 'classic', isStaff: me.isStaff, isAdmin: me.isAdmin });
+    return;
+  }
   const want = studioV2Wanted();
   if (want !== _studioV2.shown) studioV2Rerender();
   else if (want === 'classic' && studioV2Layout() && !studioV2ClassicTabKnown(_adsStudioActiveTab)) studioV2Rerender();
+}
+
+// The classic wizard (15c) holds the customer's own input: typed words, a photo, a later step, or a
+// saved request being edited. Its fresh empty draft (a ?tab=builder link opens one) holds nothing.
+function studioV2ClassicWizardBusy() {
+  try {
+    const d = _adsStudioActiveTab === 'builder' ? _adsStudioDraft : null;
+    if (!d) return false;
+    return !!_adsStudioEditingId || Number(_adsStudioWizardStep) > 1 || (Array.isArray(d.creativeImages) && d.creativeImages.length > 0)
+      || ['name', 'pageName', 'primaryText', 'headline', 'description', 'destination', 'notes', 'sourcePostRef'].some(key => String(d[key] || '').trim() !== '');
+  } catch (_) { return false; }
 }
 
 // A tab the classic layout can draw: its pinned tabs, plus the service tabs a later screen file
@@ -6544,6 +6563,8 @@ function studioV2Parent(route, frame) {
     return route.section === 'requests' ? null : studioV2Home('staff');
   }
   if (route.tab === 'home') return null;
+  // "Sent for review" (15l): the builder's step entries hold nothing any more; Back goes Home at once.
+  if (route.tab === 'builder' && typeof studioBuilderSentShown === 'function' && studioBuilderSentShown()) return studioV2Home('customer');
   if (route.tab === 'builder' && route.step > 1) return { ...route, step: route.step - 1 };
   if (route.id) return { ...route, id: '' };
   return studioV2Home('customer');
@@ -8478,6 +8499,8 @@ const STUDIO_BUILDER_SAVE_DELAY_MS = 1200;
 const STUDIO_BUILDER_PRESETS = Object.freeze([2000, 3500, 6000, 10000, 15000]);  // suggested totals ($20 … $150)
 const STUDIO_BUILDER_RETRY_MS = Object.freeze([4000, 10000, 30000]);
 const STUDIO_BUILDER_WALLET_MAX_AGE_MS = 30000;
+const STUDIO_BUILDER_PAGES_FRESH_MS = 5 * 60 * 1000;   // the linked pages are read again after this long
+const STUDIO_BUILDER_POSTS_FRESH_MS = 10 * 60 * 1000;  // a page's posts too (studio_posts.py CACHE_FRESH_SECONDS)
 const STUDIO_BUILDER_ENTRY_MS = 5000;           // a start/edit/fix call owns the next draw for this long
 const STUDIO_BUILDER_MEMORY_KEY = 'albayan.studio.builder.';  // + user id: the open draft (this tab only)
 const STUDIO_BUILDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
@@ -8547,10 +8570,10 @@ const _studioBuilder = {
   opening: null,      // {id, token} while an existing request loads
   memoryTried: false,
   lastRoute: null,    // {id, kind, step}: where the open draft was last drawn (studioBuilderPlace)
-  sent: null,         // {id, totalMinor, name} after a send, until a new request starts
+  sent: null,         // {id, totalMinor, name, step (where its panel was first drawn), leaving} after a send, until a new request starts
   submit: null,       // the send in flight
   options: { state: '', goals: null, locations: null, failedAt: 0 },
-  pages: { state: '', list: [], error: '', failedAt: 0, pageId: '', posts: Object.create(null) },
+  pages: { state: '', list: [], error: '', failedAt: 0, loadedAt: 0, refreshing: false, pageId: '', posts: Object.create(null) },
   focusTimer: null,
   listening: false
 };
@@ -8591,7 +8614,7 @@ function studioBuilderSync() {
   _studioBuilder.sent = null;
   _studioBuilder.submit = null;
   _studioBuilder.options = { state: '', goals: null, locations: null, failedAt: 0 };
-  _studioBuilder.pages = { state: '', list: [], error: '', failedAt: 0, pageId: '', posts: Object.create(null) };
+  _studioBuilder.pages = { state: '', list: [], error: '', failedAt: 0, loadedAt: 0, refreshing: false, pageId: '', posts: Object.create(null) };
 }
 
 // Sign-out and session expiry (15c resetAdsStudioSessionState): the same reset for any user, so the
@@ -8738,26 +8761,45 @@ function studioBuilderCleanPages(reply) {
   return pages;
 }
 
-// GET /api/studio/pages: the customer's linked pages (once; a failure is tried again after a minute).
+// GET /api/studio/pages: the customer's linked pages. A list is read again after 5 minutes, and when a
+// request opens (studioBuilderStart / Edit) or on Refresh (force): in the background, the list on
+// screen stays until the new one comes ('loading' would blank the picker). A failure is tried again
+// after a minute (a failed re-read keeps the list it had).
 async function studioBuilderLoadPages(force = false) {
   const pages = _studioBuilder.pages;
-  if (pages.state === 'loading' || (!force && (pages.state === 'done' || (pages.state === 'failed' && Date.now() - pages.failedAt < 60000)))) return;
+  const shown = pages.state === 'done';
+  if (pages.state === 'loading' || (shown && pages.refreshing)) return;
+  const age = Date.now() - pages.loadedAt;
+  const resting = (pages.state === 'failed' || shown) && Date.now() - pages.failedAt < 60000;
+  if (!force && ((shown && age >= 0 && age < STUDIO_BUILDER_PAGES_FRESH_MS) || resting)) return;
   const generation = _studioBuilder.generation;
-  pages.state = 'loading';
-  pages.error = '';
+  if (shown) pages.refreshing = true;
+  else {
+    pages.state = 'loading';
+    pages.error = '';
+  }
   let list = null;
   let error = '';
   let aborted = false;
   const signal = studioReadSignal();
   try { list = studioBuilderCleanPages(await studioApi('/api/studio/pages', { method: 'GET' })); } catch (e) { error = (e && e.studio && e.studio.text) || ''; aborted = studioBuilderAborted(e, signal); }
   if (!studioBuilderCurrent(generation)) return;
-  if (aborted) { pages.state = ''; studioBuilderRedraw(); return; }
+  if (shown) pages.refreshing = false;
+  if (aborted) {
+    if (!shown) pages.state = '';
+    studioBuilderRedraw();
+    return;
+  }
   if (list) {
     pages.list = list;
     pages.state = 'done';
+    pages.loadedAt = Date.now();
+    pages.failedAt = 0;
     const session = _studioBuilder.session;
     const chosen = session ? String(session.draft.connectedAssetId || '') : '';
     if (!list.some(page => page.id === pages.pageId)) pages.pageId = (list.find(page => page.id === chosen) || list[0] || { id: '' }).id;
+  } else if (shown) {
+    pages.failedAt = Date.now();
   } else {
     pages.state = 'failed';
     pages.error = error;
@@ -8766,14 +8808,16 @@ async function studioBuilderLoadPages(force = false) {
   studioBuilderRedraw();
 }
 
-// GET /api/studio/pages/{id}/recent-posts (the classic normalizer keeps only safe fields).
+// GET /api/studio/pages/{id}/recent-posts (the classic normalizer keeps only safe fields). A list older
+// than 10 minutes is read again (without ?refresh=1; its posts stay on screen meanwhile).
 async function studioBuilderLoadPosts(pageId, force = false) {
   const pages = _studioBuilder.pages;
   const id = String(pageId || '');
   if (!STUDIO_BUILDER_ID_RE.test(id)) return;
   const current = pages.posts[id];
   if (current && current.state === 'loading') return;
-  if (!force && current && (current.state === 'done' || (current.state === 'failed' && Date.now() - current.at < 60000))) return;
+  const age = current ? Date.now() - current.at : 0;
+  if (!force && current && ((current.state === 'done' && age >= 0 && age < STUDIO_BUILDER_POSTS_FRESH_MS) || (current.state === 'failed' && age < 60000))) return;
   const generation = _studioBuilder.generation;
   pages.posts[id] = { state: 'loading', posts: current ? current.posts : [], platforms: current ? current.platforms : {}, checkedAt: current ? current.checkedAt : '', error: '', at: Date.now() };
   let result = null;
@@ -8784,7 +8828,12 @@ async function studioBuilderLoadPosts(pageId, force = false) {
   } catch (e) {
     error = (e && e.studio && e.studio.text) || '';
     if (studioBuilderAborted(e, signal)) {
-      if (studioBuilderCurrent(generation)) { delete pages.posts[id]; studioBuilderRedraw(); }
+      // Not read yet: a list read before stays on screen (re-read later); nothing read asks again at the next draw.
+      if (studioBuilderCurrent(generation)) {
+        if (current && current.state === 'done') pages.posts[id] = current;
+        else delete pages.posts[id];
+        studioBuilderRedraw();
+      }
       return;
     }
   }
@@ -9784,6 +9833,7 @@ function studioBuilderStart(kind, options = {}) {
   studioBuilderOpenSession(k, studioBuilderNewDraft(k, options && typeof options === 'object' ? options : {}), {});
   studioBuilderForget();
   _studioBuilder.entryAt = Date.now();
+  studioBuilderLoadPages(true);  // a page linked since the last request shows up (read in the background)
   return studioV2Go({ tab: 'builder', section: k, step: 1 });
 }
 
@@ -9846,6 +9896,7 @@ async function studioBuilderEdit(campaignId, options = {}) {
     const step = place ? place.step : (Number.isSafeInteger(asked) && asked >= 1 ? Math.min(asked, steps) : 1);
     _studioBuilder.sent = null;
     _studioBuilder.entryAt = Date.now();
+    studioBuilderLoadPages(true);  // as studioBuilderStart: the linked pages are read again
     return studioV2Go({ tab: 'builder', section: session.kind, step });
   };
   const current = _studioBuilder.session;
@@ -9959,6 +10010,12 @@ function studioBuilderViewSent() {
 
 function studioBuilderDone() {
   return studioV2Go({ tab: 'home' });
+}
+
+// True while the builder shows "Sent for review": its step entries hold nothing any more, so the
+// shell's Back goes Home in one move (15h studioV2Parent).
+function studioBuilderSentShown() {
+  return !!(_studioBuilder.sent && !_studioBuilder.session);
 }
 
 // A version conflict: take the other device's version, or keep this one on top of it.
@@ -10194,6 +10251,12 @@ function studioBuilderNote(text, tone = '', icon = 'info') {
   return `<p class="studio-b-note${tone ? ` is-${tone}` : ''}">${studioV2Icon(icon)}<span>${text}</span></p>`;
 }
 
+// "Refresh" under a list read from the server (the linked pages, a page's posts): the way to a page or
+// a post that came after the last read.
+function studioBuilderRefreshLink(onclick, testid, busy) {
+  return `<button type="button" class="studio-b-link" data-testid="${testid}" onclick="${onclick}"${busy ? ' disabled' : ''}>${studioV2Icon('refresh-cw')}<span>${studioEsc(studioBuilderT('Refresh', 'تحديث'))}</span></button>`;
+}
+
 function studioBuilderInputHtml(id, field, value, options = {}) {
   const attrs = [
     `id="${id}"`, `class="studio-b-input"`, `type="${options.type || 'text'}"`, `value="${studioEsc(value)}"`,
@@ -10246,7 +10309,8 @@ function studioBuilderPagePicker(session, key) {
       return studioBuilderChoice(page.name || studioBuilderT('Page', 'صفحة'), `${where}${health}`, d.connectedAssetId === page.id, `studioBuilderChoosePage(${index})`, page.ig && !page.fb ? 'instagram' : 'facebook', `studio-builder-page-${index}`);
     }).join('')}${studioBuilderChoice(studioBuilderT('Another page', 'صفحة أخرى'), studioBuilderT('Not linked yet: write its name.', 'غير مرتبطة بعد: اكتب اسمها.'), manual && (session.otherPage || !!String(d.pageName || '').trim()), 'studioBuilderOtherPage()', 'pencil', 'studio-builder-page-other')}</div>`;
   } else {
-    body = studioBuilderNote(studioEsc(studioBuilderT('No page is linked to your account yet. Write the page name, and ask us to link it so you can pick posts from a list.', 'لا توجد صفحة مرتبطة بحسابك بعد. اكتب اسم الصفحة، واطلب منا ربطها لتختار منشوراتك من قائمة.')), '', 'info');
+    body = studioBuilderNote(studioEsc(studioBuilderT('No page is linked to your account yet. Write the page name, and ask us to link it so you can pick posts from a list.', 'لا توجد صفحة مرتبطة بحسابك بعد. اكتب اسم الصفحة، واطلب منا ربطها لتختار منشوراتك من قائمة.')), '', 'info')
+      + studioBuilderRefreshLink('studioBuilderRetryPages()', 'studio-builder-pages-refresh', pages.refreshing);
   }
   const showName = manual && (pages.state !== 'done' || !pages.list.length || session.otherPage || !!String(d.pageName || '').trim());
   const nameBox = showName ? `
@@ -10550,7 +10614,8 @@ function studioBuilderPostPicker(session) {
         ? studioBuilderNote(studioEsc(studioBuilderT('No recent posts on this page. Post something and try again, or choose "A new ad without a post".', 'لا توجد منشورات حديثة على هذه الصفحة. انشر شيئاً ثم أعد المحاولة، أو اختر «إعلان جديد بدون منشور».')), '', 'info')
           + `<button type="button" class="studio-b-link" onclick="studioBuilderRetryPosts()">${studioV2Icon('refresh-cw')}<span>${studioEsc(studioBuilderT('Try again', 'أعد المحاولة'))}</span></button>`
         : '';
-      list = `${problem}${empty}${posts ? `<div class="studio-b-posts">${posts}</div>` : ''}`;
+      const refresh = posts && !problem ? studioBuilderRefreshLink('studioBuilderRetryPosts()', 'studio-builder-posts-refresh', entry.state === 'loading') : '';
+      list = `${problem}${empty}${posts ? `<div class="studio-b-posts">${posts}</div>` : ''}${refresh}`;
     }
     list = pageChips + list;
     if (!fallback) list += `<button type="button" class="studio-b-link" data-testid="studio-builder-paste-link" onclick="studioBuilderShowPasteLink()">${studioV2Icon('link')}<span>${studioEsc(studioBuilderT('Paste a post link instead', 'الصق رابط منشور بدلاً من ذلك'))}</span></button>`;
@@ -10561,7 +10626,8 @@ function studioBuilderPostPicker(session) {
       + `<button type="button" class="studio-b-link" onclick="studioBuilderRetryPages()">${studioV2Icon('refresh-cw')}<span>${studioEsc(studioBuilderT('Try again', 'أعد المحاولة'))}</span></button>`;
   } else {
     list = studioBuilderNote(studioEsc(studioBuilderT('No page is linked to your account yet, so paste the link of the post below. Ask us to link your page to pick posts from a list next time.', 'لا توجد صفحة مرتبطة بحسابك بعد، فالصق رابط المنشور بالأسفل. اطلب منا ربط صفحتك لتختار منشوراتك من قائمة في المرة القادمة.')), '', 'info')
-      + `<button type="button" class="studio-b-link" data-testid="studio-builder-request-link" onclick="studioBuilderOpenPages()">${studioV2Icon('link')}<span>${studioEsc(studioBuilderT('Ask us to link your page', 'اطلب منا ربط صفحتك'))}</span></button>`;
+      + `<button type="button" class="studio-b-link" data-testid="studio-builder-request-link" onclick="studioBuilderOpenPages()">${studioV2Icon('link')}<span>${studioEsc(studioBuilderT('Ask us to link your page', 'اطلب منا ربط صفحتك'))}</span></button>`
+      + studioBuilderRefreshLink('studioBuilderRetryPages()', 'studio-builder-pages-refresh', pages.refreshing);
   }
   const link = fallback ? `
             <div class="studio-b-sub">
@@ -10863,7 +10929,21 @@ function studioBuilderRender(address) {
   const fresh = b.entryAt && Date.now() - b.entryAt < STUDIO_BUILDER_ENTRY_MS;
   b.entryAt = 0;
   if (!fresh && studioBuilderEntering()) studioBuilderOnEnter(kind);
-  if (b.sent && !b.session) return studioBuilderSentPanel({ ...address, step: clamp(address.step) }, kind);
+  if (b.sent && !b.session) {
+    // The browser's own Back walks the old step entries one at a time: a step other than the one the
+    // panel was first drawn on goes Home in one move (once), as the in-app Back does.
+    const step = clamp(address.step);
+    if (!b.sent.step) b.sent.step = step;
+    else if (b.sent.step !== step && !b.sent.leaving && typeof setTimeout === 'function') {
+      b.sent.leaving = true;
+      setTimeout(() => {
+        try {
+          if (studioBuilderSentShown() && studioV2Route(studioV2ReadAddress(), 'customer').tab === 'builder') studioV2Go(studioV2Home('customer'));
+        } catch (_) { /* the panel's Home button still goes */ }
+      }, 0);
+    }
+    return studioBuilderSentPanel({ ...address, step }, kind);
+  }
   if (!b.session) {
     const memory = studioBuilderMemory();
     if (memory && memory.kind === kind && !b.memoryTried) {

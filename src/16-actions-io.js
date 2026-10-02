@@ -300,7 +300,7 @@ function getAdStopAttempt(ad, spentMinorUSD, customerInformed = false) {
   const fingerprint = JSON.stringify({ adId, spentMinorUSD, customerInformed: customerInformed === true, expectedLastModified });
   const prior = _pendingAdStopAttempts.get(adId);
   if (prior?.fingerprint === fingerprint) return prior;
-  if (prior?.promise) return prior;
+  if (prior?.promise) throw adSaveBusyError('AD_STOP_BUSY');
   const attempt = {
     slot: adId,
     fingerprint,
@@ -326,9 +326,8 @@ async function confirmStopAd(id, source = 'modal') {
     showNotification(isAr ? 'تم رفض الوصول' : 'Access Denied', isAr ? 'لا توجد صلاحية لتسوية هذا الإعلان' : 'You do not have permission to reconcile this ad', 'error');
     return;
   }
-  // Work on a detached copy. Mutating the live record before updateRecord()
-  // captured its rollback snapshot made a failed server PATCH impossible to
-  // undo and still allowed the success path to continue.
+  // Work on a detached copy: mutating the live record before updateRecord() took its rollback snapshot
+  // made a failed server PATCH impossible to undo (and the success path still ran).
   const ad = {
     ...storedAd,
     receiptAllocations: Array.isArray(storedAd.receiptAllocations) ? storedAd.receiptAllocations.map(a => ({ ...a })) : storedAd.receiptAllocations,

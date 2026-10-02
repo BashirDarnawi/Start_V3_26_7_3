@@ -10,11 +10,8 @@ function getMonotonicTime() {
   return Date.now();
 }
 
-// Per-record PATCH chains (server mode). Keyed by `${collection}:${id}` so a
-// rapid second edit to the same record waits for the first PATCH's echo (which
-// carries the server's authoritative _lastModified) and uses THAT as its
-// concurrency baseline — instead of the first edit's client timestamp, which
-// the server never stored and which always produced a false 409.
+// Per-record PATCH chains (server mode), keyed `${collection}:${id}`: a rapid second edit waits for the
+// first PATCH's echo and uses its server _lastModified as the baseline (the client stamp was a false 409).
 const _patchChains = new Map();
 // Optimistic copy -> the last server-confirmed copy behind it (see updateRecord).
 const _patchConfirmedBase = new WeakMap();
@@ -24,18 +21,15 @@ function serverRecordMatchesCreateRetry(serverRecord, requestedRecord) {
   const ignored = new Set(['_lastModified', '_created', '_deleted', 'createdAt', 'createdBy', 'createdByName']);
   for (const [key, value] of Object.entries(requestedRecord)) {
     if (ignored.has(key) || value === undefined) continue;
-    if (JSON.stringify(serverRecord[key]) !== JSON.stringify(value)) return false;
+    if (Security.stableJson(serverRecord[key]) !== Security.stableJson(value)) return false;  // iPhone replies reorder keys
   }
   return true;
 }
 
 // ---- CREATOR NAME RESOLUTION (survives user deletion) ----
-// Soft-deleted accounts stop syncing to clients (/api/users filters them),
-// so their records rendered "Created by: Unknown". Order: 1. live user in
-// state.users (local mode keeps deleted users) 2. server tombstone directory
-// (id -> name) 3. the createdByName stamp on the record. Privacy-anonymized
-// accounts come back as "Deleted user" with their stamps scrubbed
-// server-side, so a verified erasure is never resurrected by this chain.
+// Deleted accounts stop syncing (/api/users filters them): records showed "Created by: Unknown".
+// Order: live state.users, the server tombstone directory (id -> name), the record's createdByName.
+// Anonymized accounts return as "Deleted user" with stamps scrubbed, so an erasure never comes back.
 function getKnownUserNameById(userId) {
   const uid = String(userId || '').trim();
   if (!uid) return '';
@@ -53,9 +47,8 @@ function resolveCreatorDisplayName(record, isAr) {
   if (known) return known;
   const stamped = String(record?.createdByName || '').trim();
   if (stamped) return stamped;
-  // Unresolvable creator id: ask the server for its deleted-users directory
-  // (throttled) so records created BEFORE the createdByName stamp existed
-  // regain their creator's name on the follow-up render.
+  // Unknown creator id: fetch the deleted-users directory (throttled) so records older than the
+  // createdByName stamp regain their creator's name on the next render.
   if (uid) requestUserTombstoneRefresh();
   return isAr ? 'غير معروف' : 'Unknown';
 }
@@ -111,11 +104,8 @@ function addRecord(array, record) {
   cleanRecord._deleted = false;
   if (!cleanRecord._created) cleanRecord._created = getMonotonicTime();
   if (!cleanRecord.createdBy && state.currentUser?.id) cleanRecord.createdBy = state.currentUser.id;
-  // Denormalize the creator's display name at creation time: user accounts
-  // are soft-deleted and stop syncing to clients, so this stamp is what keeps
-  // "Created by" readable forever (see resolveCreatorDisplayName). The server
-  // overrides it with the authoritative users-table name when the creator id
-  // resolves, so it cannot be spoofed in server mode.
+  // Stamp the creator's name at creation: deleted accounts stop syncing, so this keeps "Created by"
+  // readable (resolveCreatorDisplayName); the server overrides it with the users-table name.
   if (!cleanRecord.createdByName && cleanRecord.createdBy) {
     const _creatorName = (String(cleanRecord.createdBy) === String(state.currentUser?.id || '') && state.currentUser?.name)
       ? String(state.currentUser.name)
@@ -148,9 +138,8 @@ function addRecord(array, record) {
         return true;
       })
       .catch(async (e) => {
-        // A POST may commit and then lose its response. The automatic retry
-        // receives 409 even though the desired row exists. Confirm its content
-        // before accepting it; otherwise roll back as a real collision.
+        // A POST may commit and lose its answer: the retry's 409 is accepted only if the stored row
+        // matches; otherwise roll back as a real collision.
         if (e?.status === 409) {
           try {
             const existing = await apiGetEntity(collectionName, id);
@@ -201,9 +190,8 @@ function _localFundingMinor(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) throw new Error('Stored funding amount is invalid');
   if (parsed === 0) return 0;
-  // All local settlement math uses integer cents. Add a scale-aware epsilon
-  // before half-up rounding so values such as 1.005 do not become 100 cents
-  // because of binary floating-point representation.
+  // Local settlement math is integer cents: a scale-aware epsilon before half-up rounding keeps
+  // 1.005 from becoming 100 cents (binary floating point).
   const scaled = parsed * 100;
   return Math.floor(scaled + 0.5 + (Number.EPSILON * Math.max(1, Math.abs(scaled)) * 4));
 }
@@ -242,13 +230,10 @@ function _localLegacyDueMinor(ad) {
   return _localFundingMinor(lyd / rate);
 }
 
-// Legacy debt rows stored the promised amount in dueAmountToUseUSD/LYD instead
-// of dueAllocations. Driver ads identify that receipt via
-// linkedDeliveryReceiptId — or, for the oldest rows that predate that field,
-// via receiptId; In-Shop ads identify it via receiptId. Settlement and the ad
-// form both honor the receiptId fallback, so the balance readers must speak
-// for the same money. A zero-amount link remains provenance only and must
-// never become money.
+// Legacy debt rows kept the promise in dueAmountToUseUSD/LYD, not dueAllocations. Its receipt:
+// a Driver ad's linkedDeliveryReceiptId (the oldest rows: receiptId), an In-Shop ad's receiptId.
+// Settlement and the ad form honor the receiptId fallback, so the balance readers do too.
+// A zero-amount link is provenance only, never money.
 function isAdLegacyDueMirrorForReceipt(ad, receiptId) {
   const rid = String(receiptId || '');
   if (!ad || !rid) return false;
@@ -283,10 +268,8 @@ function _localAdCommittedMinor(ad, receiptId) {
   const dueMap = _localFundingMap(ad?.dueAllocations);
   const due = dueMap.get(rid) || 0;
   let legacyDue = 0;
-  // The scalar mirror is standalone money ONLY for rowless ads. Once due
-  // rows exist the writers keep dueAmountToUseUSD equal to their sum, so
-  // attributing it to the linked receipt again would count the same
-  // dollars on two receipts at once.
+  // The scalar mirror is standalone money ONLY for rowless ads: with due rows the writers keep it
+  // equal to their sum, and counting it again would put the same dollars on two receipts.
   if (isAdLegacyDueMirrorForReceipt(ad, rid) && due === 0 && dueMap.size === 0) {
     legacyDue = _localLegacyDueMinor(ad);
   }
@@ -325,10 +308,9 @@ function _localReceiptOutgoingMinor(receipt) {
   }, 0);
 }
 
-// Local/offline parity for the server settlement transaction. It converts only
-// explicit due money (allocation row or positive legacy dueAmount mirror); a
-// link by itself is provenance and never mints credit. Every plan is validated
-// before updateRecord changes the receipt or any ad.
+// Local parity for the server settlement transaction: converts only explicit due money (a row
+// or a positive legacy dueAmount mirror; a bare link never mints credit). Every plan is
+// validated before updateRecord changes the receipt or any ad.
 function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
   const rid = String(receiptId || '');
   const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
@@ -356,9 +338,8 @@ function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
     const due = _localFundingMap(ad.dueAllocations);
     let moved = due.get(rid) || 0;
     due.delete(rid);
-    // The scalar mirror converts as standalone money only for rowless ads;
-    // when due rows survive for other receipts the mirror is their sum and
-    // converting it here would mint the same dollars a second time.
+    // The mirror converts only for rowless ads: with due rows left for other receipts it is their
+    // sum, and converting it would mint the same dollars twice.
     if (moved <= 0 && (isDriverLink || isShopLink) && due.size === 0) moved = _localLegacyDueMinor(ad);
 
     const stopBaseline = ad.stopAllocationBaseline;
@@ -447,10 +428,9 @@ function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
       }
     }
 
-    // A stopped-at-zero or fully-refunded ad may have no live due row: only
-    // its frozen baseline contained the promise converted above. Align the
-    // current badge/provenance immediately when its live rows now fully cover
-    // the effective spend (including a zero-dollar effective spend).
+    // A stopped-at-zero or fully refunded ad may have no live due row (only its frozen baseline
+    // held the promise): align the badge/provenance once its live rows cover the effective
+    // spend, zero included.
     const livePaid = _localFundingMap(next.receiptAllocations);
     const liveDue = _localFundingMap(next.dueAllocations);
     const liveTarget = _localFundingMinor(next.spentUSD !== undefined && next.spentUSD !== null ? next.spentUSD : next.amountUSD);
@@ -487,9 +467,8 @@ function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
     plannedById.set(String(ad.id || ''), next);
   }
 
-  // Simulate the complete batch before changing either receipt or ads. The
-  // newly Paid receipt has one capacity: its resulting amountUSD, minus money
-  // already transferred out and every surviving paid/due ad commitment.
+  // Simulate the complete batch before changing anything: the newly Paid receipt's one capacity is
+  // its amountUSD minus transfers out and every surviving paid/due ad commitment.
   const capacity = _localFundingMinor(receipt.amountUSD);
   let committed = _localReceiptOutgoingMinor(receipt);
   for (const ad of state.ads || []) {
@@ -501,12 +480,9 @@ function planLocalReceiptPaidAdUpdates(receiptId, nextReceipt = null) {
   return plans;
 }
 
-// Local/offline parity for the server's REVERSE settlement (/unsettle): a
-// funded PAID receipt explicitly flipped to Not Paid migrates each linked
-// ad's paid rows for THIS receipt into its due pool — conserved to the cent,
-// other receipts' rows untouched, amount/spend/status/refund untouched. The
-// blocked cases throw the SAME detail strings the server refuses with, so the
-// caller localizes them through describe409 exactly like server mode.
+// Local parity for the server's /unsettle: a funded PAID receipt flipped to Not Paid moves each linked
+// ad's paid rows for THIS receipt into its due pool, to the cent (nothing else changes). Blocked cases
+// throw the server's own detail strings, localized through describe409 as in server mode.
 function planLocalReceiptDebtAdUpdates(receiptId, nextReceipt = null) {
   const rid = String(receiptId || '');
   const receipt = nextReceipt || (state.receipts || []).find(row => row && String(row.id) === rid);
@@ -621,8 +597,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
     for (const field of protectedFields) {
       if (sanitizedUpdates[field] !== undefined) delete sanitizedUpdates[field];
     }
-    // Users: only Admin can change access-control fields (role/permissions/subscriptions).
-    // Non-admin users may update their own profile fields (e.g., name/password/passkeys), but not privilege fields.
+    // Users: only an Admin changes role/permissions/subscriptions; others edit their own profile
+    // (name, password, passkeys), never privilege fields.
     if (collectionName === 'users' && state.currentUser && !isAdminRole(state.currentUser.role)) {
       const isSelf = String(state.currentUser.id || '') === String(id || '');
       if (!isSelf) {
@@ -635,11 +611,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
-    // A Not Paid -> Paid receipt is not an isolated row edit. Every linked ad
-    // must move from due/debt funding to paid funding in the SAME transaction,
-    // and the browser must install the whole authoritative result together.
-    // Keep one stable key for this updateRecord attempt so a network retry can
-    // safely replay the settlement instead of charging funding twice.
+    // Not Paid -> Paid moves every linked ad from due to paid funding in ONE transaction, installed
+    // together; one stable key per attempt lets a network retry replay it instead of charging twice.
     const _oldReceiptStatus = collectionName === 'receipts'
       ? String(old.status || '').trim().toLowerCase()
       : '';
@@ -739,13 +712,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
       }
     }
 
-    // Identity of the exact object this call optimistically wrote (stays null
-    // when the settle/convert guard below skips the optimistic write). Error
-    // paths may only roll the slot back while it still holds THIS object:
-    // live-sync deltas and chained-PATCH echoes install fresh objects in the
-    // same slot, and overwriting one of those with the stale open-time
-    // snapshot would clobber a newer committed copy that the sync watermark
-    // has already consumed.
+    // The object this call optimistically wrote (null when settle/convert skips that write). Errors roll
+    // the slot back only while it still holds THIS object: live sync and chained echoes install newer
+    // committed copies there, which the stale open-time snapshot would clobber.
     let _optimisticRecord = null;
     // The last SAVED copy behind this edit: a slot still holding a pending
     // PATCH's optimistic copy hands on that copy's own saved base.
@@ -791,11 +760,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const sendPatch = () => {
         // Queued behind a slow PATCH while this account signed out: never send it as the next one.
         if (serverSessionIdentityChanged(_patchIdentity)) return false;
-        // Use the baseline the caller actually saw when supplied (e.g. the modal
-        // snapshot the user edited), so a change committed by someone else in
-        // between produces a 409 conflict instead of silently overwriting it.
-        // For an edit queued behind an in-flight PATCH, read the record's CURRENT
-        // _lastModified (the prior PATCH's echo replaced it with the server value).
+        // The caller's own baseline when given (the modal snapshot edited), so someone else's change
+        // in between 409s instead of being overwritten. Queued behind an in-flight PATCH: the
+        // record's CURRENT _lastModified (that PATCH's echo replaced it).
         let expected;
         if (_queuedBehind) {
           const cur = array.find(x => x && x.id === id);
@@ -854,12 +821,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
           return true;
         })
         .catch(async (e) => {
-          // Only a REAL version conflict ("Conflict: ..." detail) means someone
-          // else changed the record; reload-and-retry is the right advice there.
-          // Every other 409 is a deliberate business-rule refusal (e.g. "A
-          // settled receipt's amount cannot be increased by editing") — telling
-          // the user it "changed on another device" sent them chasing phantom
-          // editors, and refreshing could never fix it. Name the real reason.
+          // Only a REAL version conflict ("Conflict: ...") means someone else changed the record (reload
+          // and retry). Any other 409 is a business-rule refusal: "changed on another device" sent users
+          // chasing phantom editors, so name the real reason.
           const _realConflict = e?.status === 409 &&
             (typeof isVersionConflict409 === 'function'
               ? isVersionConflict409(e)
@@ -929,13 +893,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
               // fallthrough to rollback
             }
           } else if (e?.status === 409) {
-            // Rule refusal: roll back the optimistic write and surface the
-            // server's actual reason (localized for the known rules).
-            // Restore only while the slot still holds this call's optimistic
-            // object — if live-sync (or a chained PATCH echo) installed a
-            // newer copy mid-flight, writing the stale open-time snapshot
-            // would clobber committed money state. Settle/convert made no
-            // optimistic write, so nothing needs restoring for them.
+            // Rule refusal: roll back and show the server's reason (localized when known). Restore only
+            // while the slot holds this call's optimistic object (a live-sync or echo copy is newer
+            // committed money state); settle/convert wrote nothing optimistic.
             const idx = array.findIndex(x => x && x.id === id);
             if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
               array[idx] = old;
@@ -954,10 +914,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
             return false;
           }
 
-          // Rollback on failure — same identity guard as the rule-refusal
-          // branch: never write the stale snapshot over a slot that live-sync
-          // or a chained echo replaced mid-flight, and settle/convert (which
-          // made no optimistic write) restores nothing.
+          // Rollback, with the rule-refusal branch's identity guard: never over a slot live sync or a
+          // chained echo replaced mid-flight; settle/convert (no optimistic write) restore nothing.
           const idx = array.findIndex(x => x && x.id === id);
           if (idx !== -1 && _optimisticRecord && array[idx] === _optimisticRecord) {
             array[idx] = old;
@@ -975,12 +933,9 @@ function updateRecord(array, id, updates, expectedLastModified) {
           return false;
         });
       };
-      // A queued edit whose predecessor FAILED is never sent: its payload was
-      // built on that failed optimistic copy, and after a conflict reload it
-      // would carry the fresh version and undo another device's change (fast
-      // stock +/- taps erasing a sale). A slot still holding our copy reloads;
-      // offline it falls back to the last SAVED copy, never to `old` (for a
-      // queued edit that is the failed tap's unsaved optimistic copy).
+      // A queued edit whose predecessor FAILED is never sent: built on that failed copy, after a conflict
+      // reload it would undo another device's change (fast stock taps erasing a sale). A slot still holding
+      // our copy reloads; offline it falls back to the last SAVED copy, never `old` (the failed tap's).
       const abandonQueued = async () => {
         if (_optimisticRecord && array.includes(_optimisticRecord)) {
           let fresh = _confirmedBase;
@@ -1007,9 +962,8 @@ function updateRecord(array, id, updates, expectedLastModified) {
       const cleanupPatchChain = () => {
         if (_patchChains.get(_patchChainKey) === _thisPatch) _patchChains.delete(_patchChainKey);
       };
-      // `finally()` creates a second rejecting Promise. Ignoring that derived
-      // Promise produced an unhandled rejection even when the caller correctly
-      // awaited/caught _thisPatch. Both branches here resolve after cleanup.
+      // Not finally(): its derived Promise rejected unhandled even when the caller caught
+      // _thisPatch. Both branches here resolve after cleanup.
       _thisPatch.then(cleanupPatchChain, cleanupPatchChain);
       return _thisPatch;
     } else if (isServerModeEnabled() && collectionName === 'users') {
@@ -1074,9 +1028,8 @@ function deleteRecord(array, id, opts) {
     addAuditLog('Delete', id, `Deleted ${getRecordType(array[index])}`);
     RenderQueue.schedule('deleteRecord');
 
-    // Cascade deletes collect their server pushes instead of firing them one
-    // by one, so the whole cascade can be sent as ONE all-or-nothing batch
-    // (see flushBatchDeletes). Local state above is already updated.
+    // Cascade deletes collect their server pushes into ONE all-or-nothing batch
+    // (flushBatchDeletes); local state above is already updated.
     if (opts && Array.isArray(opts.collectServerOps)) {
       if (isServerModeEnabled() && collectionName && collectionName !== 'users') {
         opts.collectServerOps.push({ collection: collectionName, id, old, array, record: _optimisticRecord });
@@ -1166,13 +1119,11 @@ async function flushBatchDeletes(ops) {
         markCollectionDirty(o.collection);
       });
       saveState();
-      showNotification(
-        state.language === 'ar' ? 'خطأ في الخادم' : 'Server Error',
-        state.language === 'ar'
-          ? `فشل الحذف على الخادم (${e?.message || 'خطأ'}) — تم التراجع عن الحذف بالكامل.`
-          : `Server delete failed (${e?.message || 'Error'}) — the whole delete was rolled back.`,
-        'error'
-      );
+      if (e?.status === 401) showNotification(..._sessionExpiredToast(), 'warning');
+      else {  // the rule's own reason (closed month, linked records), named by the record asked for
+        const [title, body] = _serverRefusalToast('delete', ops[ops.length - 1]?.collection, e);
+        showNotification(title, body + (state.language === 'ar' ? ' — تم التراجع عن الحذف بالكامل.' : ' — the whole delete was rolled back.'), 'error');
+      }
       render();
       return false;
     });
@@ -1183,12 +1134,8 @@ function getVisibleRecords(array) {
   return array.filter(item => item && !item._deleted);
 }
 
-// Safe CSV cell for EVERY user-derived field in any export. Two problems this
-// solves: (1) a value containing a comma, quote or newline used to shift every
-// later column (broken/misaligned CSV); (2) a value starting with = + - @ (or a
-// control char) executes as a FORMULA when the file is opened in Excel/Sheets
-// (CSV injection). We always quote + double internal quotes, and prefix a
-// dangerous leading char with an apostrophe so it is treated as text.
+// Safe CSV cell for every user-derived export field: always quoted (a comma, quote or newline shifted
+// later columns), and a leading = + - @ or control char gets an apostrophe (Excel/Sheets formula injection).
 function csvCell(value) {
   let s = (value === null || value === undefined) ? '' : String(value).replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');  // bidi controls reorder neighbouring cells
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
@@ -1427,21 +1374,14 @@ function enforceSecretFeaturesGate() {
 // RECEIPT USAGE / TRANSFER HELPERS
 // ==========================================
 
-// A TRANSFER_IN receipt is money MOVED from another receipt, not new money:
-// it must count for the target customer's usable balance, but must be EXCLUDED
-// from business-wide revenue/volume/collection aggregates (otherwise every
-// transferred dollar is counted twice — once in the source receipt and once
-// in the transfer receipt).
+// A TRANSFER_IN receipt is MOVED money: it counts in the target customer's balance but never in
+// business-wide revenue/volume/collection totals (each transferred dollar would count twice).
 function isTransferInReceipt(r) {
   return String(r?.receiptType || '') === 'TRANSFER_IN';
 }
 
-// receiptId -> ads that name it as a funding source, built in ONE pass.
-// getReceiptUsageStats used to re-scan every ad for every receipt card
-// (O(cards x ads)), which froze the Receipts screen on phones once the
-// business had a few thousand ads. The predicate below MUST stay in lockstep
-// with the .filter() inside getReceiptUsageStats, and the ads are visited in
-// array order so fundedAds keeps the same order (lastUsedAt depends on it).
+// receiptId -> the ads naming it as funding, in ONE pass (a per-card scan of every ad froze Receipts on
+// phones). The predicate MUST match getReceiptUsageStats' .filter(), in array order (lastUsedAt needs it).
 function buildReceiptUsageAdIndex(ads = state.ads) {
   const index = new Map();
   getVisibleRecords(Array.isArray(ads) ? ads : []).forEach(ad => {
@@ -1487,11 +1427,9 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
   // Use consistent ID for all comparisons
   const receiptId = String(receiptObj.id || '');
 
-  // Ads that reference this receipt as a funding source
-  // Include both regular receiptAllocations AND dueAllocations (for delivery receipts that became Paid)
-  // The index is only consulted for a real receipt id. An id-less record
-  // currently matches every ad that has no link at all; keeping it on the
-  // slow path preserves that (odd) result exactly.
+  // Ads funded from this receipt: receiptAllocations AND dueAllocations (delivery receipts that
+  // became Paid). The index serves real ids only: an id-less record keeps the slow path's (odd)
+  // match of every link-less ad.
   const fundedAds = (adsByReceiptId instanceof Map && receiptId)
     ? (adsByReceiptId.get(receiptId) || [])
     : getVisibleRecords(state.ads || []).filter(
@@ -1505,9 +1443,8 @@ function getReceiptUsageStats(receipt, adsByReceiptId = null) {
       )
     );
 
-  // Calculate used amount from both receiptAllocations and dueAllocations
-  // When a delivery receipt is marked Delivered, ads that used its due amount via dueAllocations
-  // should still count as using the receipt's funds
+  // Used = receiptAllocations + dueAllocations: after Delivered, ads drawing its due amount
+  // still use the receipt's funds.
   const usedUSD = fundedAds.reduce((sum, ad) => {
     // Check receiptAllocations first (normal paid receipt usage)
     const receiptAllocSum = Array.isArray(ad.receiptAllocations)
@@ -1629,12 +1566,9 @@ function getDeliveryReceiptDueUsage(receipt) {
     ? (Number(receiptObj.amountUSD) || 0)
     : debtUSD;
 
-  // Count only EXPLICIT commitments — an allocation row in either pool, or the legacy due
-  // mirror. Deliberately NOT getReceiptUsageStats.usedUSD: that function also carries a
-  // whole-ad fallback for pre-allocation records, charging an ad's ENTIRE spend against any
-  // receipt it merely REFERENCES. A driver-collected ad references its delivery receipt but
-  // is funded by the customer's cash, not by the receipt's credit — charging it here would
-  // destroy credit the customer genuinely holds and make the server 409 their next ad.
+  // Count only EXPLICIT commitments (rows in either pool, or the legacy due mirror), NOT
+  // getReceiptUsageStats.usedUSD: its whole-ad fallback charges an ad's spend to any receipt it merely
+  // REFERENCES, and a driver-collected ad is paid in cash, so that would destroy real customer credit.
   const receiptId = String(receiptObj.id || '');
   const fundedAds = [];
   let usedDueUSD = 0;
@@ -1673,10 +1607,8 @@ function getDeliveryReceiptDueUsage(receipt) {
     }
   }
 
-  // transferredUSD depends ONLY on receiptObj.transfers (same reduce as
-  // getReceiptUsageStats). Calling getReceiptUsageStats here executed a SECOND
-  // full ads scan per receipt just to read this array-local number — a real
-  // cost inside per-keystroke renders on phones.
+  // transferredUSD reads only receiptObj.transfers (getReceiptUsageStats' reduce): calling that
+  // here was a SECOND full ads scan per receipt in every keystroke render.
   const transfers = receiptObj.transfers || [];
   const transferredUSD = transfers.reduce((sum, t) => sum + (t.amountUSD || 0), 0) || 0;
   const remainingDueUSD = Math.max(
@@ -1715,11 +1647,8 @@ function getReceiptPaymentState(receipt) {
   return 'unknown';
 }
 
-// Delivery identity is independent of whether the customer has already paid.
-// Strong persisted markers come first; deliveryPersonId is only a fallback for
-// Bilingual wrappers for the raw server refusal toasts: known rule texts are
-// translated; anything unknown is still shown (never hidden), just under a
-// bilingual title and a human noun, never the internal collection name.
+// Bilingual wrappers for the raw server refusal toasts: known rules translated, anything else
+// still shown (never hidden) under a bilingual title and a human noun, never the collection name.
 const _SERVER_REFUSAL_AR = [
   ['Receipt type is server-controlled', 'نوع الوصل يحدده الخادم ولا يمكن تغييره.'],
   ['Receipt transfer fields are server-controlled', 'حقول تحويل الوصل يحددها الخادم.'],
@@ -1740,6 +1669,12 @@ const _SERVER_REFUSAL_AR = [
   [/^(Receipt number|serialNumber|\w+ReceiptNo) already exists/, 'رقم الوصل هذا مسجّل لوصل آخر. تأكد من الرقم ثم أعد المحاولة.', 'This receipt number is already used by another receipt. Check the number and try again.'],
   ['Final spend cannot be less than recorded company funding', 'المصروف النهائي لا يمكن أن يقل عن المبلغ الذي غطّته الشركة لهذا الإعلان. عدّل تغطية الشركة أولاً.'],
   ["Spent amount exceeds the ad's funding baseline", 'المبلغ المصروف أكبر من التمويل المسجّل لهذا الإعلان.'],
+  [/^Receipt (\S+ )?cannot be deleted while linked to .*/, 'هذا الوصل مرتبط بتمويل إعلان أو بتحويل، فلا يمكن حذفه. حرّر هذه الارتباطات أولاً.', 'This receipt is linked to ad funding or a transfer, so it cannot be deleted. Release those links first.'],
+  ['Customer cannot be deleted while linked records exist', 'لا يمكن حذف العميل لوجود وصولات أو إعلانات مرتبطة به.'],
+  ['At least one valid phone number is required', 'رقم هاتف صحيح واحد على الأقل مطلوب (من 7 إلى 15 رقماً).', 'At least one valid phone number is required (7 to 15 digits).'],
+  ['This phone number is already linked to another customer', 'رقم الهاتف هذا مسجّل لعميل آخر؛ ابحث عنه واستخدم العميل الموجود.'],
+  // A re-press of a pinned new form whose first Save went through (its answer was lost) but differs now
+  [/^(?:Order ID|ID|Record with this ID) already exists$/, 'حُفظ هذا السجل في الحفظ الأول. أغلق النموذج وافتحه من القائمة لتعديله.', 'This was already saved by your first Save. Close the form and open it from the list to change it.'],
   // Users: create / edit / delete
   ['This account has campaigns under review or approved', 'لهذا الحساب حملات قيد المراجعة أو معتمدة؛ قرّر فيها أو أوقفها أولاً.'],
   ['This account has payment requests waiting for confirmation', 'لهذا الحساب طلبات دفع تنتظر التأكيد؛ ألغِها أولاً.'],
@@ -1757,7 +1692,15 @@ const _SERVER_REFUSAL_AR = [
   ['Insufficient available receipt balance', 'رصيد الوصل المتاح لا يكفي.'],
   ['A Paid receipt cannot be changed to Not Paid with a normal', 'حدّث الصفحة ثم أعد المحاولة.', 'Refresh the page and try again.'],
   ["Paid receipt funding must exactly settle the customer's share", 'يجب أن يساوي تمويل الوصولات حصة العميل غير المدفوعة بالضبط.'],
-  ['Complete this imported Meta ad', 'أكمل العميل والدفع لإعلان Meta المستورد أولاً.']
+  ['Complete this imported Meta ad', 'أكمل العميل والدفع لإعلان Meta المستورد أولاً.'],
+  // Deliveries (a driver's screen): a status named in the Arabic goes through trStatus
+  [/^Delivery is already '(.+)'.*/, (m, s) => `حالة هذا التوصيل الآن: ${trStatus(s)}؛ حدّث القائمة.`],
+  [/^Cannot change (?:delivery )?status from '(.+?)' - this is a terminal state.*/, (m, s) => `حالة هذا التوصيل «${trStatus(s)}» نهائية ولا يمكن تغييرها؛ حدّث القائمة.`],
+  [/^Cannot change status from '(.+?)' to '(.+?)' - a delivery job cannot be reopened.*/, (m, a, b) => `لا يُنقل التوصيل من «${trStatus(a)}» إلى «${trStatus(b)}»: مهمة التوصيل لا يُعاد فتحها ولا ترجع للخلف.`],
+  ['Collected amount far exceeds the delivery debt', 'المبلغ المحصّل أكبر بكثير من دين التوصيل. تأكد من المبلغ (ربما أصفار زائدة) أو اطلب تأكيد المكتب.', 'The collected amount is far above the delivery debt. Check the amount (extra zeros?) or ask the office to confirm.'],
+  ['An accepted delivery job cannot move back', 'التوصيل المقبول لا يعود إلى «بحاجة توصيل»؛ ألغِه أو احذف المهمة.'],
+  ['A finished delivery job keeps its driver', 'التوصيل المنتهي يبقى مع سائقه ولا يُحوَّل إلى سائق آخر.'],
+  [/^(Assign an|deliveryPersonId must be an) active delivery user.*/, 'اختر سائق توصيل نشطاً.']
 ];
 function _serverRefusalText(raw) {
   raw = String(raw || '').trim();
@@ -1779,6 +1722,11 @@ function _serverRefusalNoun(collectionName) {
   const pair = nouns[String(collectionName || '')] || ['السجل', 'record'];
   return isAr ? pair[0] : pair[1];
 }
+// No answer (dropped connection, timeout); an app error raised while offline keeps its own words.
+function _isConnectionFailure(error) {
+  return !error?.status && (error?.name === 'AbortError' || error?.name === 'TypeError')
+    && typeof describeNetworkError === 'function' && !!describeNetworkError(error);
+}
 function _serverRefusalToast(action, collectionName, error) {
   const isAr = state.language === 'ar';
   const raw = String(error?.message || '').trim();
@@ -1788,6 +1736,12 @@ function _serverRefusalToast(action, collectionName, error) {
   const noun = _serverRefusalNoun(collectionName);
   const verbs = { save: ['فشل حفظ', 'Failed to save'], create: ['فشل إنشاء', 'Failed to create'], delete: ['فشل حذف', 'Failed to delete'] };
   const verb = (verbs[action] || verbs.save)[isAr ? 0 : 1];
+  if (_isConnectionFailure(error)) {  // the write may have committed: never "nothing was saved"
+    const del = action === 'delete';
+    return [isAr ? 'مشكلة في الاتصال' : 'Connection problem', `${verb} ${noun}: ${isAr
+      ? `لم يرد الخادم، فتعذّر تأكيد ${del ? 'الحذف' : 'الحفظ'} وربما تم. ${del ? 'راجع القائمة قبل المحاولة مرة أخرى.' : 'ما أدخلته ما زال في النموذج: راجع القائمة قبل إدخاله مرة أخرى.'}`
+      : `the server did not answer, so the ${del ? 'delete' : 'save'} could not be confirmed and may have gone through. ${del ? 'Check the list before trying again.' : 'What you entered is still in the form: check the list before entering it again.'}`}`];
+  }
   return [
     status > 399 && status < 500 ? (isAr ? 'غير مسموح' : 'Not allowed') : (isAr ? 'خطأ في الخادم' : 'Server Error'),  // a refusal names its rule, never "server error"
     `${verb} ${noun}: ${detail || (isAr ? 'خطأ' : 'Error')}${status >= 500 ? ` (${status})` : ''}`
@@ -1801,7 +1755,8 @@ function _sessionExpiredToast() {
   ];
 }
 
-// older records that predate statusDetail/receiptType.
+// Delivery identity is independent of payment: strong persisted markers first; deliveryPersonId
+// is only a fallback for older records that predate statusDetail/receiptType.
 function isDeliveryReceiptRecord(receipt) {
   if (!receipt || receipt._deleted) return false;
   const detail = receipt.statusDetail && typeof receipt.statusDetail === 'object'
@@ -1829,9 +1784,8 @@ function getReceiptDebtType(receipt) {
   const receiptType = String(receipt.receiptType || '').trim().toUpperCase();
   if (receiptType === 'TRANSFER_IN') return 'none';
   if (getReceiptPaymentState(receipt) !== 'not_paid') return 'none';
-  // Delivery cancellation intentionally leaves the original receipt payment
-  // label/history intact, but the debt is released and will never be collected.
-  // Do not keep that canceled mission in customer-debt totals or filters.
+  // A canceled delivery keeps its payment label/history, but its debt is released (never
+  // collected): keep it out of customer-debt totals and filters.
   const deliveryStatus = String(receipt.deliveryStatus || '').trim().toLowerCase();
   if (deliveryStatus === 'canceled' || deliveryStatus === 'cancelled') return 'none';
   return isDeliveryReceiptRecord(receipt) ? 'delivery' : 'shop';

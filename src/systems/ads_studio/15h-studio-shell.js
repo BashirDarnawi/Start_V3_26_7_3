@@ -15,7 +15,7 @@
 //             wallet (the classic Overview with the payment confirmations); a "Team desk" header
 //             button opens the classic review;
 //   Team desk: tab=review&section=requests|launch|settle|tickets|health|more.
-// Back (PLAN.md §5.1): builder step N -> N-1; a detail (&id=) -> its list; any other tab -> Home
+// Back (PLAN.md §5.1): builder step N -> N-1 (Home once the request is sent); a detail (&id=) -> its list; any other tab -> Home
 // (the desk: its Requests); Home -> leaves the studio: back to the app's screen it was opened from,
 // else to the studio's way out (adsStudioBackTarget), else no button. The browser history mirrors
 // that chain: every studio entry carries history.state.studioV2.chain (the keys from Home to itself).
@@ -279,9 +279,28 @@ function studioV2OnMe(me) {
     if (me) _studioV2.layout = null;
   }
   if (!_studioV2.shown) return;
+  // A first answer that comes late (it failed, or took longer than the wait) while the classic wizard
+  // holds the customer's work: classic is pinned for this visit, so the typed text and photos stay on
+  // screen; the new layout comes at the next entry (studioV2NoteVisit).
+  const pin = _studioV2.layout;
+  if (me && _studioV2.shown === 'classic' && !(pin && pin.uid === uid && pin.session === studioMeSession()) && studioV2ClassicWizardBusy()) {
+    _studioV2.layout = Object.freeze({ uid, session: studioMeSession(), ui: 'classic', staffDesk: 'classic', isStaff: me.isStaff, isAdmin: me.isAdmin });
+    return;
+  }
   const want = studioV2Wanted();
   if (want !== _studioV2.shown) studioV2Rerender();
   else if (want === 'classic' && studioV2Layout() && !studioV2ClassicTabKnown(_adsStudioActiveTab)) studioV2Rerender();
+}
+
+// The classic wizard (15c) holds the customer's own input: typed words, a photo, a later step, or a
+// saved request being edited. Its fresh empty draft (a ?tab=builder link opens one) holds nothing.
+function studioV2ClassicWizardBusy() {
+  try {
+    const d = _adsStudioActiveTab === 'builder' ? _adsStudioDraft : null;
+    if (!d) return false;
+    return !!_adsStudioEditingId || Number(_adsStudioWizardStep) > 1 || (Array.isArray(d.creativeImages) && d.creativeImages.length > 0)
+      || ['name', 'pageName', 'primaryText', 'headline', 'description', 'destination', 'notes', 'sourcePostRef'].some(key => String(d[key] || '').trim() !== '');
+  } catch (_) { return false; }
 }
 
 // A tab the classic layout can draw: its pinned tabs, plus the service tabs a later screen file
@@ -397,6 +416,8 @@ function studioV2Parent(route, frame) {
     return route.section === 'requests' ? null : studioV2Home('staff');
   }
   if (route.tab === 'home') return null;
+  // "Sent for review" (15l): the builder's step entries hold nothing any more; Back goes Home at once.
+  if (route.tab === 'builder' && typeof studioBuilderSentShown === 'function' && studioBuilderSentShown()) return studioV2Home('customer');
   if (route.tab === 'builder' && route.step > 1) return { ...route, step: route.step - 1 };
   if (route.id) return { ...route, id: '' };
   return studioV2Home('customer');

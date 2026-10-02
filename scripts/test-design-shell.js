@@ -31,6 +31,7 @@ const context = vm.createContext({
   getReceiptPaymentState: receipt => receipt.status === 'Paid' ? 'paid' : 'not_paid',
   appDateLocale: () => 'en-US',
   trStatus: value => value,
+  platformLabel: value => String(value || ''),
 });
 vm.runInContext(source, context);
 let passed = 0;

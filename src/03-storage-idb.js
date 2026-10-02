@@ -55,11 +55,9 @@ const LIMIT_CONSTANTS = {
 
 let db = null;
 
-// Business-data caches are isolated by workspace + authenticated user. Local
-// mode keeps the historical unscoped keys so existing single-device data is
-// preserved. Server mode activates a different scope only AFTER /api/auth/me
-// or login has identified the user, so pre-auth startup can never render the
-// previous user's cached customers, receipts or wallet rows.
+// Business-data caches are scoped by workspace + user. Local mode keeps the old unscoped keys (its
+// data stays); a server scope opens only AFTER /api/auth/me or login identified the user: startup
+// never renders the previous user's customers, receipts or wallet rows.
 let _collectionStorageScope = 'local';
 
 function _hashStorageScope(value) {
@@ -166,9 +164,8 @@ function initIndexedDB(onLateOpen) {
       done(null);
     };
 
-    // Another tab still holds a connection at an older schema version.
-    // Fall back to localStorage mode instead of hanging forever. Like the
-    // watchdog, this is inconclusive: the stored data itself is intact.
+    // Another tab holds an older schema version: fall back to localStorage mode instead of hanging
+    // forever. Inconclusive, like the watchdog: the stored data itself is intact.
     request.onblocked = () => {
       console.warn('IndexedDB open blocked by another tab');
       if (bootOpen) window.__albayanIdbOpenInconclusive = true;
@@ -390,6 +387,8 @@ async function saveCollectionToIndexedDB(collectionName, data, { force = false }
   // cannot redirect later chunks into a different user's namespace.
   const capturedScope = _collectionStorageScope;
   const dataKey = _scopedCollectionStorageName(name, capturedScope);
+  // A server cache never holds photo bytes (the server keeps them; Photos/Edit refetch): lean rows.
+  if (capturedScope !== 'local' && typeof leanServerMediaRows === 'function') data = leanServerMediaRows(name, data);
 
   try {
     const metaKey = getCollectionMetaKey(name, capturedScope);
@@ -426,10 +425,8 @@ async function saveCollectionToIndexedDB(collectionName, data, { force = false }
     const chunkCount = Math.ceil(recordCount / chunkSize);
     const updatedAt = Date.now();
 
-    // Build every chunk record + the meta record, then commit them together
-    // with the cleanup deletes in ONE atomic transaction. An interrupted save
-    // now rolls back entirely, leaving the previous consistent generation
-    // (chunks + meta) intact instead of a corrupt mix.
+    // Every chunk + the meta + the cleanup deletes commit in ONE transaction: an interrupted save
+    // rolls back whole, keeping the previous consistent generation, never a corrupt mix.
     const puts = [];
     for (let i = 0; i < chunkCount; i++) {
       const chunk = data.slice(i * chunkSize, (i + 1) * chunkSize);

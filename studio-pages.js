@@ -445,6 +445,10 @@ function renderStudioPagesBody(route) {
   // device is never overwritten by stale fields).
   const kept = _studioPg.editor;
   if (kept && !kept.sending && !(view.section === 'rules' && view.id === kept.for)) _studioPg.editor = null;
+  // A SENT page-link request goes the same way once its confirmation is off screen, so "Ask us to link
+  // a page" opens a new form (another page, the Instagram account); a draft or a send in flight stays.
+  const link = _studioPg.link;
+  if (link && link.result && !link.sending && !(view.section === 'pages' && view.id === 'link')) _studioPg.link = null;
   let body = '';
   if (!studioPgServer()) {
     body = `<section class="studio-pg-card" data-testid="studio-pg-offline"><p class="studio-pg-note">${studioEsc(studioPgText('Pages and replies need the connection to Albayan. Sign in to the online workspace.', 'الصفحات والردود تحتاج الاتصال بالبيان. سجّل الدخول إلى مساحة العمل عبر الإنترنت.'))}</p></section>`;
